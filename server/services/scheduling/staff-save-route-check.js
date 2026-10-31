@@ -115,6 +115,13 @@ function routeCheckAssignLive() {
   return typeof routeCheckAssignSavesLive === 'function' && routeCheckAssignSavesLive() === true;
 }
 
+// GATE_ROUTE_CHECK_BOOKING_SAVES: a customer-booked visit (self booking, customer reschedule,
+// voice agent booking, new-caller visit).
+function routeCheckBookingLive() {
+  const { routeCheckBookingSavesLive } = require('./arrival-route');
+  return typeof routeCheckBookingSavesLive === 'function' && routeCheckBookingSavesLive() === true;
+}
+
 /** Number an accepted estimate's visit inside the accept transaction. Never throws. */
 function placeAcceptedVisit(conn, { serviceId, visit } = {}) {
   return placeAutoSavedVisit(conn, { serviceId, visit, source: 'estimate_accept', live: routeCheckAcceptLive });
@@ -125,7 +132,13 @@ function placeAssignedVisit(conn, { serviceId, visit } = {}) {
   return placeAutoSavedVisit(conn, { serviceId, visit, source: 'dispatch_assign', live: routeCheckAssignLive });
 }
 
+/** Number a newly booked visit inside the booking transaction. Never throws. */
+function placeBookingSavedVisit(conn, { serviceId, visit, source } = {}) {
+  return placeAutoSavedVisit(conn, { serviceId, visit, source, live: routeCheckBookingLive });
+}
+
 module.exports = {
   routeCheckLive, routeCheckAutoLive, routeCheckAcceptLive, routeCheckAssignLive, routeCheckArrivalWindow, staffSaveRouteWarnings,
   placeStaffSavedVisit, placeAutoSavedVisit, placeAcceptedVisit, placeAssignedVisit,
+  routeCheckBookingLive, placeBookingSavedVisit,
 };

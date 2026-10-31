@@ -7184,7 +7184,8 @@ const EstimateConverter = {
             // every line). Same day, no time: never one slot for two programs. The
             // note is customer-visible, so it says it in plain words.
             if (sameTrip && !combinedCapacity) {
-              const own = await require('./scheduling/promoted-unit-line').ownLineTechnicianForPromotedUnit(database, { row: standaloneRow, unit, unitDate, reservedStart });
+              const quotedZip = estimate?.address ? (require('../utils/address-normalizer').parseRawAddress(estimate.address).zip || null) : null;
+              const own = await require('./scheduling/promoted-unit-line').ownLineTechnicianForPromotedUnit(database, { row: standaloneRow, unit, unitDate, reservedStart, quotedZip });
               if (own) {
                 delete standaloneRow.window_start;
                 delete standaloneRow.window_end;

@@ -83,8 +83,10 @@ async function invoke(handler, req) {
 function installTransaction(chains, { activeTimer } = {}) {
   const queue = [...chains];
   const activeTimers = makeChain({ first: activeTimer });
+  const audit = makeChain({ returning: [{ id: 'audit-1' }] });
   const trx = jest.fn((table) => {
     if (table === 'time_entries') return activeTimers;
+    if (table === 'audit_log') return audit;
     if (table === 'scheduled_services as s') return makeChain({ rows: [] });
     if (table === 'scheduled_services' || table === 'service_records' || table === 'review_incentive_payouts') return makeChain({ first: undefined });
     if (table === 'technician_capabilities') {
@@ -102,7 +104,7 @@ function installTransaction(chains, { activeTimer } = {}) {
   trx.raw = jest.fn(async () => undefined);
   trx.fn = { now: jest.fn(() => 'NOW') };
   db.transaction = jest.fn(async (callback) => callback(trx));
-  return { activeTimers, trx, remaining: () => queue };
+  return { activeTimers, audit, trx, remaining: () => queue };
 }
 
 const sensitiveFields = [
@@ -282,6 +284,47 @@ describe('admin timetracking technician data/auth boundaries', () => {
     }));
     expect(PushService.deactivateStaffUser).toHaveBeenCalledWith('tech-1', expect.any(Function));
     expect(disconnectStaffSockets).toHaveBeenCalledWith('tech-1', 'email_changed');
+  });
+
+  test('PUT refuses a pay rate that is not a number from 0 to 999999.99, before any write', async () => {
+    for (const payRate of ['abc', -1, 1000000, true]) {
+      const tx = installTransaction([]);
+      const result = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { payRate }, technicianId: 'admin-1' });
+      expect(result.statusCode).toBe(400);
+      expect(result.body.error).toBe('Pay rate must be a number between 0 and 999999.99');
+      expect(tx.trx).not.toHaveBeenCalled();
+    }
+  });
+
+  test('PUT audits a pay rate change with the old and new rate, in the same transaction', async () => {
+    const target = makeChain({ first: rawTechnician });
+    const write = makeChain();
+    const reread = makeChain({ first: { ...rawTechnician, pay_rate: '50.00' } });
+    const tx = installTransaction([target, write, reread]);
+
+    const result = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { payRate: '50.00' }, technicianId: 'admin-1' });
+
+    expect(result.statusCode).toBe(200);
+    expect(write.update).toHaveBeenCalledWith(expect.objectContaining({ pay_rate: '50.00' }));
+    expect(tx.audit.insert).toHaveBeenCalledTimes(1);
+    expect(tx.audit.insert).toHaveBeenCalledWith(expect.objectContaining({
+      actor_type: 'admin',
+      actor_id: 'admin-1',
+      action: 'payroll.pay_rate_changed',
+      resource_type: 'technicians',
+      resource_id: 'tech-1',
+      metadata: { technician_id: 'tech-1', old_pay_rate: 42.5, new_pay_rate: 50 },
+    }));
+  });
+
+  test('PUT writes no pay rate audit when the rate is absent or unchanged', async () => {
+    for (const body of [{ jobTitle: 'Lead' }, { payRate: '42.50' }, { payRate: 42.5 }]) {
+      const target = makeChain({ first: rawTechnician });
+      const tx = installTransaction([target, makeChain(), makeChain({ first: rawTechnician })]);
+      const result = await invoke(updateTechnician, { params: { id: 'tech-1' }, body, technicianId: 'admin-1' });
+      expect(result.statusCode).toBe(200);
+      expect(tx.audit.insert).not.toHaveBeenCalled();
+    }
   });
 
   test('PUT preserves the active-account email invariant', async () => {

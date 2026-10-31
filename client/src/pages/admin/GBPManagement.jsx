@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Badge,
   Button,
@@ -29,6 +29,15 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
+// Owner 2026-10-30 (audit RR-10/11/12, option A): the push to Google is
+// retired. It called Google's deprecated v4 locations API and would have
+// sent this page's stored snapshot, not the live listing.
+const GOOGLE_EDITS_NOTE =
+  "Edits here are saved in the portal only. To change the live listing, edit it in Google Business Profile.";
+// With the Places fallback the stored profile was never read, so these
+// editors start empty: a save would overwrite the stored values with blanks.
+const PROFILE_UNREAD_NOTE =
+  "The saved profile could not be loaded, so saving is off. Use Retry above.";
 const DAYS = [
   "monday",
   "tuesday",
@@ -69,13 +78,27 @@ const GBP_TAB_GROUPS = [
 // ══════════════════════════════════════════════════════════════
 export default function GBPManagement() {
   const [locations, setLocations] = useState([]);
-  const [selectedLoc, setSelectedLoc] = useState(null);
+  // The selection is an id: the shown location always comes from the latest
+  // read, so a save or sync refresh keeps the same location (with its fresh
+  // data) and falls back to the first one only when that id is gone.
+  const [selectedLocId, setSelectedLocId] = useState(null);
+  // Why the locations read failed ("" = it worked). `degraded` = the Google
+  // profile read failed and the list is the Places fallback.
+  const [locationsError, setLocationsError] = useState("");
+  const [degraded, setDegraded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [subTab, setSubTab] = useState("overview");
+  // History rows for the current filter. The Queue keeps its own pending
+  // rows (null until read), so a History filter never decides what the
+  // Queue shows. A failed read sets its error instead of an empty list.
   const [updates, setUpdates] = useState([]);
+  const [updatesError, setUpdatesError] = useState("");
+  const [pendingUpdates, setPendingUpdates] = useState(null);
+  const [pendingError, setPendingError] = useState("");
   const [updatesFilter, setUpdatesFilter] = useState("pending");
+  const updatesFilterRef = useRef(updatesFilter);
+  updatesFilterRef.current = updatesFilter;
   const [syncing, setSyncing] = useState(false);
-  const [pushing, setPushing] = useState(false);
   const [toast, setToast] = useState("");
 
   // Load locations
@@ -83,9 +106,9 @@ export default function GBPManagement() {
     try {
       const d = await adminFetch("/admin/gbp/locations");
       setLocations(d.locations || []);
-      if (d.locations?.length > 0 && !selectedLoc)
-        setSelectedLoc(d.locations[0]);
-    } catch {
+      setLocationsError("");
+      setDegraded(false);
+    } catch (err) {
       /* fallback to Places API data */
       try {
         const d = await adminFetch("/admin/reviews/gbp-locations");
@@ -96,32 +119,60 @@ export default function GBPManagement() {
           pendingUpdates: 0,
         }));
         setLocations(locs);
-        if (locs.length > 0) setSelectedLoc(locs[0]);
-      } catch {
-        /* ignore */
+        setLocationsError(err.message || "Google profile read failed");
+        setDegraded(true);
+      } catch (fallbackErr) {
+        // Both reads failed: keep any list already shown, and keep its
+        // degraded mark (a kept Places list still has no stored profile).
+        setLocationsError(fallbackErr.message || err.message || "Read failed");
       }
     }
     setLoading(false);
   }, []);
   const loadUpdates = useCallback(
     async (status) => {
+      const asked = status ?? updatesFilter;
       try {
         const d = await adminFetch(
           `/admin/gbp/updates?status=${status || updatesFilter}&limit=100`,
         );
-        setUpdates(d.updates || []);
-      } catch {
-        setUpdates([]);
+        if (asked === "pending") {
+          setPendingUpdates(d.updates || []);
+          setPendingError("");
+        }
+        // A reply for a filter the operator has since left is dropped.
+        if (asked === updatesFilterRef.current) {
+          setUpdates(d.updates || []);
+          setUpdatesError("");
+        }
+      } catch (e) {
+        const message = e.message || "Read failed";
+        if (asked === "pending") setPendingError(message);
+        if (asked === updatesFilterRef.current) setUpdatesError(message);
       }
     },
     [updatesFilter],
   );
+  // Approve, reject and sync change both lists: the Queue's pending rows and
+  // the History rows under the current filter.
+  const refreshUpdates = async () => {
+    await loadUpdates("pending");
+    if (updatesFilter !== "pending") await loadUpdates();
+  };
   useEffect(() => {
     loadLocations();
   }, [loadLocations]);
   useEffect(() => {
+    // The last filter's rows never stand in for this one's: History reads
+    // "Loading" (null) until this filter's reply lands.
+    setUpdates(null);
+    setUpdatesError("");
     loadUpdates(updatesFilter);
   }, [updatesFilter]);
+  // Entering the Queue always reads the pending rows fresh.
+  useEffect(() => {
+    if (subTab === "updates") loadUpdates("pending");
+  }, [subTab]);
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(""), 3500);
@@ -134,7 +185,7 @@ export default function GBPManagement() {
       });
       showToast(`Synced ${locId}: ${d.changesDetected} change(s) detected`);
       await loadLocations();
-      await loadUpdates();
+      await refreshUpdates();
     } catch (e) {
       showToast(`Sync failed: ${e.message}`);
     }
@@ -142,31 +193,27 @@ export default function GBPManagement() {
   };
   const handleSyncAll = async () => {
     setSyncing(true);
+    const failed = [];
     for (const loc of locations) {
       try {
         await adminFetch(`/admin/gbp/locations/${loc.id}/sync`, {
           method: "POST",
         });
       } catch {
-        /* skip */
+        failed.push(loc.name || loc.id);
       }
     }
-    showToast("All locations synced");
+    const synced = locations.length - failed.length;
+    showToast(
+      failed.length === 0
+        ? `All ${synced} locations synced`
+        : synced === 0
+          ? `Sync failed for every location: ${failed.join(", ")}`
+          : `Synced ${synced} of ${locations.length}. Failed: ${failed.join(", ")}`,
+    );
     await loadLocations();
-    await loadUpdates();
+    await refreshUpdates();
     setSyncing(false);
-  };
-  const handlePush = async (locId) => {
-    setPushing(true);
-    try {
-      const d = await adminFetch(`/admin/gbp/locations/${locId}/push`, {
-        method: "POST",
-      });
-      showToast(`Pushed to Google: ${d.updatedFields?.join(", ")}`);
-    } catch (e) {
-      showToast(`Push failed: ${e.message}`);
-    }
-    setPushing(false);
   };
   const handleApprove = async (updateId) => {
     try {
@@ -174,7 +221,7 @@ export default function GBPManagement() {
         method: "POST",
       });
       showToast("Update approved");
-      await loadUpdates();
+      await refreshUpdates();
       await loadLocations();
     } catch (e) {
       showToast(`Approve failed: ${e.message}`);
@@ -186,7 +233,7 @@ export default function GBPManagement() {
         method: "POST",
       });
       showToast("Update rejected");
-      await loadUpdates();
+      await refreshUpdates();
     } catch (e) {
       showToast(`Reject failed: ${e.message}`);
     }
@@ -198,12 +245,12 @@ export default function GBPManagement() {
         body: JSON.stringify({ ids }),
       });
       showToast(`${ids.length} update(s) rejected`);
-      await loadUpdates();
+      await refreshUpdates();
     } catch (e) {
       showToast(`Bulk reject failed: ${e.message}`);
     }
   };
-  const loc = selectedLoc;
+  const loc = locations.find((l) => l.id === selectedLocId) || locations[0];
   const gbp = loc?.gbp;
   const subTabs = [
     {
@@ -261,10 +308,10 @@ export default function GBPManagement() {
           <Button
             key={l.id}
             onClick={() => {
-              setSelectedLoc(l);
+              setSelectedLocId(l.id);
               setSubTab("overview");
             }}
-            variant={selectedLoc?.id === l.id ? "primary" : "secondary"}
+            variant={loc?.id === l.id ? "primary" : "secondary"}
             className="min-w-[170px] text-left flex-col items-start"
           >
             {" "}
@@ -282,7 +329,7 @@ export default function GBPManagement() {
               title={l.authError || ""}
               className={
                 "text-ui-body mt-[4px] " +
-                (selectedLoc?.id === l.id
+                (loc?.id === l.id
                   ? "text-white"
                   : l.authError
                     ? "text-alert-fg"
@@ -301,6 +348,21 @@ export default function GBPManagement() {
           {syncing ? "Syncing..." : "Sync All"}
         </Button>{" "}
       </div>
+      {locationsError && (
+        <Card
+          role="alert"
+          className="mb-3 flex flex-wrap items-center justify-between gap-[8px] p-[12px] text-ui-body text-alert-fg"
+        >
+          <span>
+            {degraded
+              ? `The Google profile read failed (${locationsError}). Showing Places data only: profile fields and pending counts are not loaded.`
+              : `Could not load locations: ${locationsError}`}
+          </span>
+          <Button onClick={loadLocations} variant="secondary">
+            Retry
+          </Button>
+        </Card>
+      )}
       {/* Sub-tabs: parent groups + leaf sub-row */}
       <div className="mb-2 flex flex-wrap justify-center gap-1">
         {GBP_TAB_GROUPS.map((g) => {
@@ -341,7 +403,7 @@ export default function GBPManagement() {
       )}
       {!loc ? (
         <Card className="mb-3 text-center p-[40px] text-ink-secondary">
-          No locations available
+          No locations to show
         </Card>
       ) : (
         <>
@@ -350,15 +412,14 @@ export default function GBPManagement() {
               loc={loc}
               gbp={gbp}
               onSync={() => handleSync(loc.id)}
-              onPush={() => handlePush(loc.id)}
               syncing={syncing}
-              pushing={pushing}
             />
           )}
           {subTab === "info" && (
             <BusinessInfoTab
               loc={loc}
               gbp={gbp}
+              unread={degraded}
               onSave={loadLocations}
               showToast={showToast}
             />
@@ -367,6 +428,7 @@ export default function GBPManagement() {
             <HoursTab
               loc={loc}
               gbp={gbp}
+              unread={degraded}
               onSave={loadLocations}
               showToast={showToast}
             />
@@ -375,6 +437,7 @@ export default function GBPManagement() {
             <ServicesTab
               loc={loc}
               gbp={gbp}
+              unread={degraded}
               onSave={loadLocations}
               showToast={showToast}
             />
@@ -382,7 +445,9 @@ export default function GBPManagement() {
           {subTab === "photos" && <PhotosTab loc={loc} gbp={gbp} />}
           {subTab === "updates" && (
             <UpdateQueueTab
-              updates={updates.filter((u) => u.status === "pending")}
+              updates={pendingUpdates}
+              error={pendingError}
+              onRetry={() => loadUpdates("pending")}
               locations={locations}
               onApprove={handleApprove}
               onReject={handleReject}
@@ -392,6 +457,7 @@ export default function GBPManagement() {
           {subTab === "history" && (
             <ChangeHistoryTab
               updates={updates}
+              error={updatesError}
               locations={locations}
               filter={updatesFilter}
               setFilter={setUpdatesFilter}
@@ -426,7 +492,7 @@ export default function GBPManagement() {
 // ══════════════════════════════════════════════════════════════
 // OVERVIEW TAB
 // ══════════════════════════════════════════════════════════════
-function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
+function OverviewTab({ loc, gbp, onSync, syncing }) {
   const info = gbp || {};
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,1fr)]">
@@ -553,19 +619,9 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
             >
               {syncing ? "Syncing from Google..." : "Sync from Google"}
             </Button>{" "}
-            <Button
-              onClick={onPush}
-              disabled={pushing || !loc.hasCredentials}
-              variant="primary"
-              className="w-full"
-            >
-              {pushing ? "Pushing..." : "Push to Google"}
-            </Button>
-            {!loc.hasCredentials && (
-              <div className="text-ui-body text-alert-fg text-center">
-                OAuth not configured — push disabled
-              </div>
-            )}
+            <div className="text-ui-body text-ink-secondary">
+              {GOOGLE_EDITS_NOTE}
+            </div>
             <a
               href={`https://business.google.com/dashboard/l/${loc.googlePlaceId}`}
               className={buttonStyles({
@@ -627,7 +683,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
 // ══════════════════════════════════════════════════════════════
 // BUSINESS INFO TAB — editable fields
 // ══════════════════════════════════════════════════════════════
-function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
+function BusinessInfoTab({ loc, gbp, unread, onSave, showToast }) {
   const [form, setForm] = useState({
     business_name: "",
     description: "",
@@ -762,15 +818,17 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
         </label>{" "}
         <div className="flex gap-[8px]">
           {" "}
-          <Button onClick={handleSave} disabled={saving} variant="primary">
+          <Button onClick={handleSave} disabled={saving || unread} variant="primary">
             {saving ? "Saving..." : "Save Changes"}
           </Button>{" "}
-          <Button
-            onClick={() => showToast("Push to Google to apply changes")}
-            variant="secondary"
-          >
-            Push to Google
-          </Button>{" "}
+          {unread && (
+            <span role="status" className="text-ui-body text-ink-secondary">
+              {PROFILE_UNREAD_NOTE}
+            </span>
+          )}
+        </div>{" "}
+        <div className="text-ui-body text-ink-secondary mt-[8px]">
+          {GOOGLE_EDITS_NOTE}
         </div>{" "}
       </Card>{" "}
     </div>
@@ -780,7 +838,7 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
 // ══════════════════════════════════════════════════════════════
 // HOURS TAB
 // ══════════════════════════════════════════════════════════════
-function HoursTab({ loc, gbp, onSave, showToast }) {
+function HoursTab({ loc, gbp, unread, onSave, showToast }) {
   const [hours, setHours] = useState({});
   const [specialHours, setSpecialHours] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -842,12 +900,12 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
         method: "PUT",
         body: JSON.stringify({ hours }),
       });
-      if (specialHours.length > 0) {
-        await adminFetch(`/admin/gbp/locations/${loc.id}/special-hours`, {
-          method: "PUT",
-          body: JSON.stringify({ specialHours }),
-        });
-      }
+      // Always saved, an empty list included, so removing the last entry
+      // sticks.
+      await adminFetch(`/admin/gbp/locations/${loc.id}/special-hours`, {
+        method: "PUT",
+        body: JSON.stringify({ specialHours }),
+      });
       showToast("Hours updated");
       onSave();
     } catch (e) {
@@ -953,7 +1011,12 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
           ))
         )}
       </Card>{" "}
-      <Button onClick={handleSave} disabled={saving} variant="primary">
+      {unread && (
+        <div role="status" className="text-ui-body text-ink-secondary mb-[8px]">
+          {PROFILE_UNREAD_NOTE}
+        </div>
+      )}
+      <Button onClick={handleSave} disabled={saving || unread} variant="primary">
         {saving ? "Saving..." : "Save Hours"}
       </Button>{" "}
     </div>
@@ -963,7 +1026,7 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
 // ══════════════════════════════════════════════════════════════
 // SERVICES TAB
 // ══════════════════════════════════════════════════════════════
-function ServicesTab({ loc, gbp, onSave, showToast }) {
+function ServicesTab({ loc, gbp, unread, onSave, showToast }) {
   const [services, setServices] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [newService, setNewService] = useState("");
@@ -1055,9 +1118,14 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
             ))}
           </div>
         )}
+        {unread && (
+          <div role="status" className="text-ui-body text-ink-secondary mt-[16px]">
+            {PROFILE_UNREAD_NOTE}
+          </div>
+        )}
         <Button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || unread}
           variant="primary"
           className="mt-[16px]"
         >
@@ -1169,6 +1237,8 @@ function PhotosTab({ loc, gbp }) {
 // ══════════════════════════════════════════════════════════════
 function UpdateQueueTab({
   updates,
+  error,
+  onRetry,
   locations,
   onApprove,
   onReject,
@@ -1192,7 +1262,7 @@ function UpdateQueueTab({
       <div className="flex justify-between items-center mb-[16px]">
         {" "}
         <div className="text-ui-body font-medium text-zinc-900">
-          Pending Updates ({updates.length})
+          Pending Updates{updates ? ` (${updates.length})` : ""}
         </div>
         {selectedIds.size > 0 && (
           <Button
@@ -1206,30 +1276,49 @@ function UpdateQueueTab({
           </Button>
         )}
       </div>
-      {updates.length === 0 ? (
-        <Card className="mb-3 text-center p-[40px] text-ink-secondary">
-          {" "}
-          <div className="text-[24px] mb-[8px]"></div>{" "}
-          <div className="text-ui-body">No pending updates</div>{" "}
-          <div className="text-ui-body mt-[4px]">
-            All changes have been reviewed
-          </div>{" "}
+      {error && (
+        <Card
+          role="alert"
+          className="mb-3 flex flex-wrap items-center justify-between gap-[8px] p-[12px] text-ui-body text-alert-fg"
+        >
+          <span>Could not load pending updates: {error}</span>
+          <Button onClick={onRetry} variant="secondary">
+            Retry
+          </Button>
         </Card>
+      )}
+      {!updates ? (
+        !error && (
+          <Card className="mb-3 text-center p-[40px] text-ink-secondary">
+            Loading pending updates...
+          </Card>
+        )
+      ) : updates.length === 0 ? (
+        !error && (
+          <Card className="mb-3 text-center p-[40px] text-ink-secondary">
+            {" "}
+            <div className="text-[24px] mb-[8px]"></div>{" "}
+            <div className="text-ui-body">No pending updates</div>{" "}
+            <div className="text-ui-body mt-[4px]">
+              All changes have been reviewed
+            </div>{" "}
+          </Card>
+        )
       ) : (
         <div className="grid gap-[8px]">
           {updates.map((u) => (
-            <Card key={u.id} className="p-5 flex items-start gap-[12px]">
+            <Card key={u.id} className="p-5 flex flex-wrap items-start gap-[12px]">
               {" "}
               <Checkbox
                 checked={selectedIds.has(u.id)}
                 onChange={() => toggleSel(u.id)}
                 className="mt-[4px] cursor-pointer"
               />{" "}
-              <div className="flex-[1]">
+              <div className="flex-[1] min-w-0">
                 {" "}
-                <div className="flex justify-between items-center mb-[6px]">
+                <div className="flex flex-wrap justify-between items-center gap-[6px] mb-[6px]">
                   {" "}
-                  <div className="flex items-center gap-[8px]">
+                  <div className="flex flex-wrap items-center gap-[8px]">
                     {" "}
                     <span className="text-ui-body font-medium text-zinc-900">
                       {fieldLabel(u.field_name)}
@@ -1263,7 +1352,7 @@ function UpdateQueueTab({
                   </div>{" "}
                 </div>{" "}
               </div>{" "}
-              <div className="flex flex-col gap-[6px]">
+              <div className="flex w-full gap-[6px] sm:w-auto sm:flex-col">
                 {" "}
                 <Button onClick={() => onApprove(u.id)} variant="primary">
                   Approve
@@ -1285,6 +1374,7 @@ function UpdateQueueTab({
 // ══════════════════════════════════════════════════════════════
 function ChangeHistoryTab({
   updates,
+  error,
   locations,
   filter,
   setFilter,
@@ -1333,6 +1423,17 @@ function ChangeHistoryTab({
           ))}
         </div>{" "}
       </div>{" "}
+      {error && (
+        <Card
+          role="alert"
+          className="mb-3 flex flex-wrap items-center justify-between gap-[8px] p-[12px] text-ui-body text-alert-fg"
+        >
+          <span>Could not load the change history: {error}</span>
+          <Button onClick={() => loadUpdates(filter)} variant="secondary">
+            Retry
+          </Button>
+        </Card>
+      )}
       <Table className="w-full">
         <THead>
           <TR>
@@ -1346,7 +1447,7 @@ function ChangeHistoryTab({
           </TR>
         </THead>
         <TBody>
-          {updates.map((u) => (
+          {(updates || []).map((u) => (
             <TR key={u.id}>
               <TD>{locName(u.location_id)}</TD>
               <TD className="text-zinc-900">{fieldLabel(u.field_name)}</TD>
@@ -1365,13 +1466,23 @@ function ChangeHistoryTab({
               </TD>
             </TR>
           ))}
-          {updates.length === 0 && (
+          {updates?.length === 0 && !error && (
             <TR>
               <TD
                 colSpan={6}
                 className="p-[30px] text-center text-ink-secondary"
               >
                 No changes found
+              </TD>
+            </TR>
+          )}
+          {!updates && !error && (
+            <TR>
+              <TD
+                colSpan={6}
+                className="p-[30px] text-center text-ink-secondary"
+              >
+                Loading changes...
               </TD>
             </TR>
           )}
@@ -1537,13 +1648,25 @@ function NotificationsTab({ showToast }) {
     enabled: true,
   });
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
+  // Save stays off until the saved preferences were read, so a failed read
+  // can never overwrite them with the defaults above.
+  const [readState, setReadState] = useState("loading"); // loading | loaded | failed
+  const [readError, setReadError] = useState("");
+  const loadPrefs = useCallback(() => {
+    setReadState("loading");
     adminFetch("/admin/gbp/notifications?email=admin@wavespestcontrol.com")
       .then((d) => {
         if (d.preferences) setPrefs(d.preferences);
+        setReadState("loaded");
       })
-      .catch(() => {});
+      .catch((e) => {
+        setReadError(e.message || "Read failed");
+        setReadState("failed");
+      });
   }, []);
+  useEffect(() => {
+    loadPrefs();
+  }, [loadPrefs]);
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -1594,6 +1717,17 @@ function NotificationsTab({ showToast }) {
         <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
           GBP Change Alerts
         </div>{" "}
+        {readState === "failed" && (
+          <div
+            role="alert"
+            className="mb-[16px] flex flex-wrap items-center justify-between gap-[8px] text-ui-body text-alert-fg"
+          >
+            <span>Could not load the saved preferences: {readError}</span>
+            <Button onClick={loadPrefs} variant="secondary">
+              Retry
+            </Button>
+          </div>
+        )}
         <label className="flex items-center gap-[10px] cursor-pointer text-ui-body text-zinc-900 mb-[16px]">
           {" "}
           <Checkbox
@@ -1644,8 +1778,16 @@ function NotificationsTab({ showToast }) {
             })}
           </div>{" "}
         </div>{" "}
-        <Button onClick={handleSave} disabled={saving} variant="primary">
-          {saving ? "Saving..." : "Save Preferences"}
+        <Button
+          onClick={handleSave}
+          disabled={saving || readState !== "loaded"}
+          variant="primary"
+        >
+          {saving
+            ? "Saving..."
+            : readState === "loading"
+              ? "Loading..."
+              : "Save Preferences"}
         </Button>{" "}
       </Card>{" "}
     </div>

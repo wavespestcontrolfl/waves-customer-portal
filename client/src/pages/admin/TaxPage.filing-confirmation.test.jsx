@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { FilingCalendarTab } from './TaxPage.jsx';
 
 const filings = [
-  { id: 'f-open', filingType: 'payroll_941', title: 'Form 941 — Q1 2099', periodLabel: 'Q1 2099', dueDate: '2099-04-30', status: 'upcoming', amountDue: 120.5, amountPaid: null, filedDate: null, paidDate: null, confirmationNumber: null, notes: 'Pay on EFTPS by 8 PM ET the day before the due date.' },
+  { id: 'f-open', sourceKey: null, filingType: 'payroll_941', title: 'Form 941 — Q1 2099', periodLabel: 'Q1 2099', dueDate: '2099-04-30', status: 'upcoming', amountDue: 120.5, amountPaid: null, filedDate: null, paidDate: null, confirmationNumber: null, notes: 'Pay on EFTPS by 8 PM ET the day before the due date.' },
   { id: 'f-done', filingType: 'payroll_941', title: 'Form 941 — Q4 2098', periodLabel: 'Q4 2098', dueDate: '2099-01-31', status: 'filed', amountDue: null, amountPaid: null, filedDate: '2099-01-20', paidDate: null, confirmationNumber: 'EFT-998877', notes: 'A pay run changed after this was marked done.' },
 ];
 let puts;
@@ -29,7 +29,7 @@ beforeEach(() => {
     return { ok: true, json: async () => ({ filings: seenInBank ? list.map(f => ({ ...f, bankSeenOn: '2099-04-28' })) : list }) };
   }));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { filings[0].sourceKey = null; cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 const markFiled = async () => {
   render(<FilingCalendarTab />);
@@ -72,6 +72,16 @@ it('sends no confirmation number when the prompt is left blank', async () => {
   await waitFor(() => expect(puts).toHaveLength(1));
   expect(puts[0].body.status).toBe('filed');
   expect(puts[0].body).not.toHaveProperty('confirmationNumber');
+});
+
+it('a payroll row requires the confirmation number: a blank answer sends nothing', async () => {
+  filings[0].sourceKey = 'payroll:941:2099-Q1';
+  const prompt = vi.spyOn(window, 'prompt').mockReturnValue('   ');
+  const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  await markFiled();
+  await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+  expect(prompt).toHaveBeenCalledWith('Confirmation number (required):', '');
+  expect(puts).toHaveLength(0);
 });
 
 it('cancelling the prompt aborts the status change', async () => {

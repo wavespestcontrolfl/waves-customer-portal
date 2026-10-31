@@ -44,6 +44,16 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
+
+// Technician scope for this module's hour-mode global overlap probes (findConflictingVisits).
+// With GATE_MULTI_TECH_CONFIRM on (occupancy.js techScopedConfirmActive, hour mode or capacity
+// mode), a row blocks only when it is unassigned or on this technician's route, so two
+// technicians can hold and commit the same hour; the probe ignores the id with the gate
+// off. Capacity mode keeps these probes tech-blind (they only run there for a legacy
+// version-1 hold), exactly as before.
+function hourProbeTechnicianId(technicianId) {
+  return capacityEnabled() || !technicianId ? null : technicianId;
+}
 const {
   pastCustomerLastStart, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
 } = require('./scheduling/customer-windows');
@@ -949,7 +959,11 @@ async function reserveSlot({
         exp: offerExp, policy: CAPACITY_OFFER_POLICY, arrivalGrace: offerArrivalGrace }, offerSig)) throw capacityError('invalid_offer');
       preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
         prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
-          service_type: profile.services.map(service => service.service).join(' ') },
+          // The offer's own words (estimate-slot-availability.js: label first), so the placed visit
+          // plans the same planning-minutes row at reserve as it did in the offer ("Quarterly Pest
+          // Control" is recurring; the bare key is not). Several services name no single row.
+          service_type: profile.services.map(service => service.label || service.service).join(' '),
+          ...(profile.services.length > 1 ? { combined_services: true } : {}) },
         windowStart, windowEnd: addMinutesToTime(windowStart, profile.durationMinutes), durationMinutes: profile.durationMinutes });
     }
 
@@ -1328,6 +1342,7 @@ async function reserveSlot({
           windowEnd,
           excludeServiceIds: [sameSlotHold.id],
           includeHolds: false,
+          technicianId: hourProbeTechnicianId(techId),
           // Travel gap (GATE_SLOT_TRAVEL_GAP): the same pin the fresh reserve
           // and commitReservation measure with — a refresh that skipped it
           // would hand back a hold the commit is guaranteed to reject. Same
@@ -1502,6 +1517,7 @@ async function reserveSlot({
         windowStart,
         windowEnd,
         includeHolds: false,
+        technicianId: hourProbeTechnicianId(techId),
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the hold's own pin, resolved
         // above; null → buffer-only, never a skipped check. Same
         // expected-minutes credit find-time/filterCollidingSlots resolved
@@ -2010,6 +2026,7 @@ async function commitReservation({
         windowEnd: probeWindowEnd,
         excludeServiceIds: [scheduledServiceId],
         includeHolds: !!row._lapsed,
+        technicianId: hourProbeTechnicianId(row.technician_id),
         // Travel gap: the pin reserveSlot stamped on the hold row, plus the
         // expected-minutes credit of the service ACTUALLY being scheduled
         // (owner ruling 2026-09-23). The accepted serviceProfile is
@@ -2261,7 +2278,7 @@ async function releaseExpiredReservations() {
             else qb.whereNull('scheduled_date');
           })
           .update({ reservation_expires_at: null, updated_at: now })
-          .returning(['id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes']);
+          .returning(['id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id']);
         const localCollisions = [];
         for (const row of rows) {
           if (!row.scheduled_date || !row.window_start) continue;
@@ -2282,6 +2299,7 @@ async function releaseExpiredReservations() {
             windowEnd: we,
             excludeServiceIds: [row.id],
             includeHolds: false,
+            technicianId: hourProbeTechnicianId(row.technician_id),
           });
           if (Array.isArray(clash) && clash.length) {
             localCollisions.push({ id: row.id, conflicts: clash.map((v) => v.id).slice(0, 5) });
@@ -2641,6 +2659,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       windowEnd,
       excludeServiceIds: [row.id],
       includeHolds: alreadyLapsed,
+      technicianId: hourProbeTechnicianId(row.technician_id),
       // Same expected-minutes credit find-time/filterCollidingSlots
       // resolved when this window was offered (owner ruling 2026-09-23).
       travel: {

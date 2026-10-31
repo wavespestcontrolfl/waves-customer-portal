@@ -11,7 +11,7 @@ function verdictTone(verdict, measured) {
 
 function QueryImpact({ tq }) {
   return (
-    <div key={tq.query} className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-13 text-zinc-600">
+    <div key={tq.query} className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-14 text-zinc-600">
       <span className="truncate font-medium text-zinc-800">“{tq.query}”</span>
       {tq.after_position != null || tq.before_position != null ? (
         <span className="tabular-nums">
@@ -28,7 +28,7 @@ function QueryImpact({ tq }) {
         </span>
       )}
       {tq.clicks != null && (
-        <span className="text-12 text-zinc-500">
+        <span className="text-14 text-zinc-500">
           {tq.clicks} clicks · {tq.impressions} impr
         </span>
       )}
@@ -46,7 +46,7 @@ function ImpactArticle({ it }) {
             href={it.page_url}
             target="_blank"
             rel="noreferrer"
-            className="mt-0.5 block truncate text-12 text-zinc-500 hover:text-zinc-700"
+            className="mt-0.5 block truncate text-14 text-zinc-500 hover:text-zinc-700"
           >
             {it.page_url}
           </a>
@@ -62,7 +62,7 @@ function ImpactArticle({ it }) {
         ),
       )}
 
-      <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-12 text-zinc-500">
+      <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-14 text-zinc-500">
         {it.bucket && <Tag>{it.bucket}</Tag>}
         <span>Live {formatDate(it.deployed_at)}</span>
         {it.latest_window && (
@@ -115,7 +115,7 @@ export default function ImpactTab({ impactData, impactLoading }) {
           ))}
         </div>
       )}
-      <p className="mt-3 text-12 leading-relaxed text-zinc-500">
+      <p className="mt-3 text-14 leading-relaxed text-zinc-500">
         Position before → after is the article’s target query in Search Console (impressions-weighted).
         “Control-adjusted lift” subtracts the movement of similar unoptimized pages, so it credits the article only with
         movement the publish caused — stricter than a raw before/after.

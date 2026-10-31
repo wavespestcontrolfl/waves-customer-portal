@@ -21,6 +21,25 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
     expect((await f.db('scheduled_services').where({ id: booked.id }).first()).route_order).toBe(1);
   });
 
+  // Owner 2026-10-30: the 2026-09-09 routine catalog policy (30 minutes, source 'owner_2026_09_09') wrote
+  // 30-minute rows and was switched off 2026-10-05. Under capacity mode the row keeps the one-hour promise.
+  test('the retired owner_2026_09_09 catalog policy no longer shortens a hold: the row is written at 60', async () => {
+    const policy = { version: 1, default_duration_minutes: 30, min_duration_minutes: 30, max_duration_minutes: 40,
+      source: 'owner_2026_09_09', previous_default_minutes: 60 };
+    const key = { service_key: 'pest_general_quarterly' };
+    const { scheduling_duration_policy: prior } = await f.db('services').where(key).first('scheduling_duration_policy');
+    await f.db('services').where(key).update({ scheduling_duration_policy: policy });
+    try {
+      // The offer the picker signs carries the catalog hour; a 30-minute offer no longer matches the profile.
+      const held = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0], 60) });
+      const booked = await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.ids.customer });
+      expect(booked).toMatchObject({ estimated_duration_minutes: 60, window_start: '10:00:00', window_end: '11:00:00',
+        reservation_expires_at: null });
+    } finally {
+      await f.db('services').where(key).update({ scheduling_duration_policy: prior });
+    }
+  });
+
   test.each([20, 90])('changed single-service allowance of %i minutes rejects prepare and live commit', async duration => {
     const held = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0]) });
     const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);

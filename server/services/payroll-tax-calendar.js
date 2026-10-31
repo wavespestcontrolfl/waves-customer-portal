@@ -156,6 +156,25 @@ function rollWith(holidaysOf, date) {
 const rollIrs = (date) => rollWith(legalHolidaysIrs, date);
 const rollFlorida = (date) => rollWith(legalHolidaysFlorida, date);
 
+// The business day before a due date: the nearest earlier day that is not a Saturday, Sunday
+// or holiday of the same set the due date rolls by (tax deadline bells: "start the payment today").
+function rollBackWith(holidaysOf, date) {
+  const cache = new Map();
+  const holidays = (year) => {
+    if (!cache.has(year)) cache.set(year, holidaysOf(year));
+    return cache.get(year);
+  };
+  let day = addDays(date, -1);
+  for (;;) {
+    const wd = weekday(day);
+    if (wd !== 0 && wd !== 6 && !holidays(Number(day.slice(0, 4))).has(day)) return day;
+    day = addDays(day, -1);
+  }
+}
+
+const previousBusinessDayIrs = (date) => rollBackWith(legalHolidaysIrs, date);
+const previousBusinessDayFlorida = (date) => rollBackWith(legalHolidaysFlorida, date);
+
 const dollars = (cents) => `${cents < 0 ? '-' : ''}${Math.floor(Math.abs(cents) / 100)}.${pad(Math.abs(cents) % 100)}`;
 const quarterOf = (month) => Math.ceil(month / 3);
 const quarterLabel = (year, q) => `Q${q} ${year}`;
@@ -250,7 +269,7 @@ function depositRow(t) {
     due_date: rollIrs(nextMonthDay(t.year, t.month, 15)),
     amount_due: dollars(t.tax),
     source_digest: digestOf(t.checks),
-    notes: 'Pay on EFTPS by 8 PM ET the day before the due date (or IRS Direct Pay). Withheld federal income tax plus both halves of Social Security and Medicare.',
+    notes: `Pay on EFTPS by 8 PM ET the day before the due date (or IRS Direct Pay: Reason for payment = Federal tax deposit; Apply payment to = 941; Tax period = Q${quarterOf(t.month)} ${t.year}). Withheld federal income tax plus both halves of Social Security and Medicare.`,
   };
 }
 
@@ -542,6 +561,8 @@ module.exports = {
   legalHolidaysFlorida,
   rollIrs,
   rollFlorida,
+  previousBusinessDayIrs,
+  previousBusinessDayFlorida,
   payrollObligations,
   withBalances,
   syncPayrollFilings,

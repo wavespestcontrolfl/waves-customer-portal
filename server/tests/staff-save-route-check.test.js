@@ -257,3 +257,77 @@ describe('placeAcceptedVisit / placeAssignedVisit (caller-chosen gates)', () => 
     expect(placeSpy).not.toHaveBeenCalled();
   });
 });
+
+// GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30, "ok go", Route Check
+// Everywhere follow-up): customer and phone bookings through the same
+// placement function, asked through the booking gate.
+describe('placeBookingSavedVisit (GATE_ROUTE_CHECK_BOOKING_SAVES)', () => {
+  const trx = { isTransaction: true };
+  const bookingOn = () => {
+    process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  };
+  afterEach(() => {
+    delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES;
+    delete process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES;
+    delete process.env.GATE_ROUTE_CHECK_ASSIGN_SAVES;
+    delete process.env.GATE_ROUTE_CHECK_BOOKING_SAVES;
+  });
+
+  test('the reader is read at call time, needs the arrival-window route check, and is independent of the other gates', () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    expect(arrivalRoute.routeCheckBookingSavesLive()).toBe(false);
+    process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
+    expect([arrivalRoute.routeCheckBookingSavesLive(), routeCheck.routeCheckBookingLive()]).toEqual([true, true]);
+    expect([arrivalRoute.routeCheckAcceptSavesLive(), arrivalRoute.routeCheckAssignSavesLive(), arrivalRoute.routeCheckAutoSavesLive()])
+      .toEqual([false, false, false]);
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    expect(arrivalRoute.routeCheckBookingSavesLive()).toBe(false);
+    delete process.env.GATE_ROUTE_CHECK_BOOKING_SAVES;
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    expect(routeCheck.routeCheckBookingLive()).toBe(false);
+  });
+
+  test('gate off: touches nothing, even with the auto, accept and assign gates on', async () => {
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES = 'true';
+    process.env.GATE_ROUTE_CHECK_ASSIGN_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    expect(await routeCheck.placeBookingSavedVisit(trx, { serviceId: 'svc-1', source: 'self_booking' })).toBeNull();
+    expect(placeSpy).not.toHaveBeenCalled();
+  });
+
+  test('gate on: one placement on the caller transaction with the caller source (row or id), cache roads only', async () => {
+    bookingOn();
+    expect(await routeCheck.placeBookingSavedVisit(trx, { visit: { id: 'svc-9' }, source: 'new_caller' })).toEqual([1]);
+    expect(await routeCheck.placeBookingSavedVisit(trx, { serviceId: 'svc-8', source: 'voice_relay' })).toEqual([1]);
+    expect(placeSpy).toHaveBeenCalledTimes(2);
+    expect(placeSpy).toHaveBeenNthCalledWith(1, trx, { serviceId: 'svc-9', staffSave: true, source: 'new_caller' });
+    expect(placeSpy).toHaveBeenNthCalledWith(2, trx, { serviceId: 'svc-8', staffSave: true, source: 'voice_relay' });
+    expect(occupancy.findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('the other helpers stay off when only the booking gate is on', async () => {
+    bookingOn();
+    expect(await routeCheck.placeAcceptedVisit(trx, { serviceId: 'svc-1' })).toBeNull();
+    expect(await routeCheck.placeAssignedVisit(trx, { serviceId: 'svc-1' })).toBeNull();
+    expect(await routeCheck.placeAutoSavedVisit(trx, { serviceId: 'svc-1' })).toBeNull();
+    expect(placeSpy).not.toHaveBeenCalled();
+  });
+
+  test('a throwing placement is one warning line and a null, never a throw', async () => {
+    bookingOn();
+    placeSpy.mockRejectedValueOnce(new Error('booking boom'));
+    expect(await routeCheck.placeBookingSavedVisit(trx, { serviceId: 'svc-1', source: 'self_booking' })).toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('(self_booking): booking boom'));
+  });
+
+  test('no connection or no visit id is a quiet no-op', async () => {
+    bookingOn();
+    expect(await routeCheck.placeBookingSavedVisit(null, { serviceId: 'svc-1' })).toBeNull();
+    expect(await routeCheck.placeBookingSavedVisit(trx)).toBeNull();
+    expect(placeSpy).not.toHaveBeenCalled();
+  });
+});

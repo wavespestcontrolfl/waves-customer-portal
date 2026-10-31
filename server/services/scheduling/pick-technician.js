@@ -24,8 +24,8 @@
  * fit and free (line-technician.pickLineTechnician), else nobody (step 2's list
  * still bounds who may be named). An unmapped line keeps steps 3 and 4.
  *
- * Active only when the tech-aware save scope is (GATE_MULTI_TECH_CONFIRM +
- * capacity mode, occupancy.techScopedConfirmActive). Otherwise `active` is
+ * Active only when the tech-aware save scope is (GATE_MULTI_TECH_CONFIRM, in
+ * hour or capacity mode, occupancy.techScopedConfirmActive). Otherwise `active` is
  * false and the caller keeps its own default, byte for byte.
  *
  * Reads only. The route estimate spends none of the shared Google allowance
@@ -166,7 +166,7 @@ async function pickByServiceLine(conn, techs, visit) {
  */
 async function pickTechnicianForVisit({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = DEFAULT_DURATION_MINUTES,
-  lat = null, lng = null, serviceType = null, serviceId = null, serviceKey = null, customerId = null, excludeServiceIds = [],
+  lat = null, lng = null, zip = null, serviceType = null, serviceId = null, serviceKey = null, customerId = null, excludeServiceIds = [],
   // Whose rows the availability probe skips. Default: the customer's own (a
   // fresh booking, where the caller's same-day guard owns same-customer
   // overlaps — parity with its save probe). A caller assigning an EXISTING
@@ -189,8 +189,10 @@ async function pickTechnicianForVisit({
   }
   if (!techs.length) return { active: true, technician: null, reason: 'none_assignable' };
 
+  // The visit's place (customer, map position) rides along for GATE_TERRITORY_ROUTING.
   const linePick = await pickByServiceLine(conn, techs, {
     serviceId, serviceKey, serviceType, date, windowStart, windowEnd, durationMinutes, excludeCustomerId, excludeServiceIds,
+    zip, customerId, lat, lng,
   });
   if (linePick) return linePick;
 

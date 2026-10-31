@@ -233,19 +233,40 @@ postgres('payroll pay runs', () => {
 
     it('lists blocked technicians with the reason and gives them no check', async () => {
       const ok = await readyTech('Sample Alpha');
-      const noW4 = await technician({ name: 'Sample NoW4' });
       const noRate = await technician({ name: 'Sample NoRate', pay_rate: null });
+      const underFloor = await readyTech('Sample UnderFloor', { pay_rate: '14.99' });
       await w4For(noRate);
       await approvedWeek(ok, W1);
-      await approvedWeek(noW4, W1);
       await approvedWeek(noRate, W1);
-      const { run } = (await draft(W1)).body;
-      expect(run.checks.map((c) => c.name)).toEqual(['Sample Alpha']);
-      expect(Object.fromEntries(run.blocked.map((b) => [b.name, b.reason]))).toEqual({
-        'Sample NoW4': 'No Form W-4 on file',
-        'Sample NoRate': 'No pay rate set',
+      await approvedWeek(underFloor, W3);
+      await approvedWeek(ok, W3);
+      const first = (await draft(W1)).body.run;
+      expect(first.checks.map((c) => c.name)).toEqual(['Sample Alpha']);
+      expect(Object.fromEntries(first.blocked.map((b) => [b.name, b.reason]))).toEqual({ 'Sample NoRate': 'No pay rate set' });
+      // Pay date Fri 2026-10-09: the floor is $15.00 (it was $14.00 until 29 Sep 2026).
+      const third = (await draft(W3)).body.run;
+      expect(third.checks.map((c) => c.name)).toEqual(['Sample Alpha']);
+      expect(Object.fromEntries(third.blocked.map((b) => [b.name, b.reason]))).toEqual({
+        'Sample UnderFloor': 'Hourly rate $14.99 is below the Florida minimum wage of $15.00 on 2026-10-09',
       });
-      expect(await count('payroll_checks')).toBe(1);
+      expect(await count('payroll_checks')).toBe(2);
+    });
+
+    it('does not block a technician with no W-4: withholds as single with no adjustments and stores no election', async () => {
+      const id = await technician({ name: 'Sample NoW4', pay_rate: '26.25' });
+      await approvedWeek(id, W1);
+      const { run } = (await draft(W1)).body;
+      expect(run.blocked).toEqual([]);
+      const check = byName(run, 'Sample NoW4');
+      // 40 hours at $26.25 = $1,050.00. IRS Pub. 15-T (2026) weekly wage bracket table, single, Step 2 box
+      // unchecked, row $1,050: $84 (whole dollars in the table, so the percentage method may differ by 50 cents).
+      expect(check).toMatchObject({ grossCents: 105000, w4Default: true });
+      expect(Math.abs(check.federalIncomeTaxCents - 8400)).toBeLessThanOrEqual(50);
+      expect((await trx('payroll_checks').where({ id: check.id }).first()).w4_election_id).toBeNull();
+      // A W-4 recorded later changes the review token: the draft goes stale by itself.
+      expect((await api('GET', `/runs/${run.id}`)).body.run.stale).toBe(false);
+      await w4For(id);
+      expect((await api('GET', `/runs/${run.id}`)).body.run.stale).toBe(true);
     });
 
     it('holds a technician whose week has an unreviewed automatic clock-out, only while GATE_SHIFT_CLOSE_REVIEW is on', async () => {
@@ -354,20 +375,21 @@ postgres('payroll pay runs', () => {
   describe('finalize', () => {
     it('is refused while a technician is blocked or waiting, and changes nothing', async () => {
       const ok = await readyTech('Sample Alpha');
-      const noW4 = await technician({ name: 'Sample NoW4' });
+      // A missing W-4 no longer blocks (IRS default); a missing pay rate still does.
+      const noRate = await readyTech('Sample NoRate', { pay_rate: null });
       const waiting = await readyTech('Sample Waiting');
       await approvedWeek(ok, W1);
-      await approvedWeek(noW4, W1);
+      await approvedWeek(noRate, W1);
       await workedDay(waiting, addDays(W1, 0));
       const { run } = (await draft(W1)).body;
       const refusal = await api('POST', `/runs/${run.id}/finalize`, { body: { token: run.token } });
       expect(refusal.status).toBe(409);
       expect(refusal.body.error).toMatch(/Sample Waiting: Timesheet for this week is not approved yet/);
-      expect(refusal.body.error).toMatch(/Sample NoW4: No Form W-4 on file/);
+      expect(refusal.body.error).toMatch(/Sample NoRate: No pay rate set/);
       expect((await trx('payroll_runs').where({ id: run.id }).first()).status).toBe('draft');
       expect(await trx('payroll_checks').where({ run_id: run.id, status: 'finalized' }).count('* as n').first()).toMatchObject({ n: '0' });
       // Fix both problems, and the same run finalizes.
-      await w4For(noW4);
+      await trx('technicians').where({ id: noRate }).update({ pay_rate: '22.00' });
       await trx('time_weekly_summary').insert({ technician_id: waiting, week_start: W1, week_end: addDays(W1, 6), status: 'approved', regular_minutes: 480 });
       await trx('time_entry_daily_summary').where({ technician_id: waiting }).del();
       await api('POST', `/runs/${run.id}/recompute`);
@@ -397,8 +419,8 @@ postgres('payroll pay runs', () => {
 
     it('refuses an empty run and a second finalize', async () => {
       const id = await readyTech('Sample Alpha');
-      const noW4 = await technician({ name: 'Sample NoW4' });
-      await approvedWeek(noW4, W1);
+      const noRate = await readyTech('Sample NoRate', { pay_rate: null });
+      await approvedWeek(noRate, W1);
       const { run: onlyBlocked } = (await draft(W1)).body;
       expect(onlyBlocked.checks).toEqual([]);
       expect((await api('POST', `/runs/${onlyBlocked.id}/finalize`, { body: { token: onlyBlocked.token } })).status).toBe(409);
@@ -546,6 +568,28 @@ postgres('payroll pay runs', () => {
       expect((await snapshotOf(runs[7])).futaCents).toBe(504);
       expect(byName(runs[8], 'Sample Beta').ytdGrossBeforeCents).toBe(8 * 88000);
       expect((await snapshotOf(runs[8])).futaCents).toBe(0);
+    });
+
+    it('counts only the same calendar year: a final 2026 check is not year to date for a 2027 pay date', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await draftAndFinalize(W1);
+      // Pay date Fri 2026-10-02 (week of W2): the earlier $880.00 check counts. Pay date Fri 2027-01-08: it does not.
+      expect((await payrollRuns.ytdBefore(trx, [id], '2026-10-02', W2)).get(id)).toEqual({ gross: 88000, unemployment: 88000 });
+      expect((await payrollRuns.ytdBefore(trx, [id], '2027-01-08', '2026-12-28')).get(id)).toEqual({ gross: 0, unemployment: 0 });
+    });
+
+    it('keeps year to date for a technician who left and came back (same technician id), not for a new record', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await approvedWeek(id, W2);
+      await draftAndFinalize(W1);
+      await trx('technicians').where({ id }).update({ employment_status: 'inactive' });
+      await trx('technicians').where({ id }).update({ employment_status: 'active' });
+      const sameRecord = (await draft(W2)).body.run;
+      expect(byName(sameRecord, 'Sample Alpha').ytdGrossBeforeCents).toBe(88000);
+      const fresh = await readyTech('Sample Alpha');
+      expect((await payrollRuns.ytdBefore(trx, [fresh], '2026-10-02', W2)).get(fresh)).toEqual({ gross: 0, unemployment: 0 });
     });
 
     it('refuses to finalize or void a run while a later final run exists', async () => {

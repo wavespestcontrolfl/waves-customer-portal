@@ -15,7 +15,7 @@
  */
 const logger = require('../logger');
 
-async function ownLineTechnicianForPromotedUnit(database, { row, unit, unitDate, reservedStart }) {
+async function ownLineTechnicianForPromotedUnit(database, { row, unit, unitDate, reservedStart, quotedZip = null }) {
   const lineTechnician = require('./line-technician');
   if (!lineTechnician.lineMapLive()) return null;
   try {
@@ -24,6 +24,10 @@ async function ownLineTechnicianForPromotedUnit(database, { row, unit, unitDate,
       serviceKey: unit.catalogServiceKey || null,
       serviceType: row.service_type,
       date: unitDate,
+      // The territory place (GATE_TERRITORY_ROUTING) is the quoted property: the reserved
+      // visit's service ZIP, else the ZIP typed in the estimate's address. Never the
+      // customer row: a multi-property estimate quotes another property.
+      zip: row.service_address_zip || (reservedStart && reservedStart.service_address_zip) || quotedZip || null,
     }));
     if (!pick.mapped) return null;
     const reservedTech = reservedStart.technician_id;

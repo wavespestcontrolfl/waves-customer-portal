@@ -11,6 +11,7 @@ const truckKit = require('../services/truck-kit');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // These reports feed the owner-only Costs workspace. The shared fleet
@@ -349,15 +350,15 @@ router.put('/schedules/:scheduleId', async (req, res, next) => {
 // GET /schedules/due — all due/overdue schedules
 router.get('/schedules/due', async (req, res, next) => {
   try {
-    const thirtyDaysFromNow = new Date();
-    thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+    // 30 ET calendar days out (the UTC clock ran a day ahead from 8 PM ET).
+    const thirtyDaysFromNow = etDateString(addETDays(new Date(), 30));
 
     const schedules = await db('maintenance_schedules')
       .join('equipment', 'maintenance_schedules.equipment_id', 'equipment.id')
       .where('maintenance_schedules.is_active', true)
       .where(function () {
         this.where('maintenance_schedules.is_overdue', true)
-          .orWhere('maintenance_schedules.next_due_at', '<=', thirtyDaysFromNow.toISOString().split('T')[0]);
+          .orWhere('maintenance_schedules.next_due_at', '<=', thirtyDaysFromNow);
       })
       .select(
         'maintenance_schedules.*',
@@ -504,7 +505,7 @@ router.post('/:id([0-9a-fA-F-]{36})/mileage', async (req, res, next) => {
 router.get('/mileage/summary', async (req, res, next) => {
   try {
     const { year } = req.query;
-    const targetYear = year || new Date().getFullYear();
+    const targetYear = year || etParts().year;
     const yearStart = `${targetYear}-01-01`;
     const yearEnd = `${targetYear}-12-31`;
 

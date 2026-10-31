@@ -36,6 +36,19 @@ describe('assertAdminAppointmentWindow', () => {
       .toEqual({ window_start: '16:00', window_end: '17:00' });
   });
 
+  test('the office default end is the one-hour promise in capacity mode too (owner 2026-10-30)', () => {
+    // Capacity mode used to write 30 here (the 2026-10-05 failure); only the PLAN uses minutes.
+    const open = { windowStart: '10:00' };
+    try {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      expect(assertAdminAppointmentWindow(open)).toEqual({ window_start: '10:00', window_end: '11:00' });
+      // A typed duration is unchanged in capacity mode.
+      expect(assertAdminAppointmentWindow({ ...open, durationMinutes: 45 })).toEqual({ window_start: '10:00', window_end: '10:45' });
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      expect(assertAdminAppointmentWindow(open)).toEqual({ window_start: '10:00', window_end: '11:00' });
+    } finally { delete process.env.GATE_SCHEDULING_CAPACITY; }
+  });
+
   function expect422(args, pattern) {
     let caught;
     try { assertAdminAppointmentWindow(args); } catch (err) { caught = err; }

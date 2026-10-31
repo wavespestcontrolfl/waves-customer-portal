@@ -18,8 +18,8 @@
  * (scheduling/occupancy.js — findConflictingVisits under the date-wide
  * advisory lock) exactly as routes/booking.js createSelfBooking does. It is
  * tech-blind unless the caller passes `technicianId` AND
- * techScopedConfirmActive() (GATE_MULTI_TECH_CONFIRM + capacity mode, off in
- * production): then only unassigned rows and that technician's own route
+ * techScopedConfirmActive() (GATE_MULTI_TECH_CONFIRM, hour or capacity mode,
+ * off in production): then only unassigned rows and that technician's own route
  * count. Callers pass the technician the row is SAVED with: the office bulk
  * edit, the Intelligence Bar create/move tools (and the create card's
  * preview pin), the completion follow-up write, the new-caller booking.
@@ -86,7 +86,9 @@ function assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes 
     }
   } else {
     const dur = Number.parseInt(durationMinutes, 10);
-    endMin = startMin + (Number.isInteger(dur) && dur > 0 ? dur : (capacityEnabled() ? 30 : DEFAULT_DURATION_MINUTES));
+    // The row keeps the one-hour promise in both modes (owner 2026-10-30): capacity mode used to
+    // write 30 here (the 2026-10-05 failure); only the PLAN uses minutes (planning-minutes.js).
+    endMin = startMin + (Number.isInteger(dur) && dur > 0 ? dur : DEFAULT_DURATION_MINUTES);
   }
   if (endMin <= startMin) {
     throw invalidWindow(`Appointment end must be after its start — got ${minutesToHHMM(startMin)}-${minutesToHHMM(endMin)}`);

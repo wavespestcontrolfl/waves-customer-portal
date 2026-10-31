@@ -8,7 +8,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const RouteOptimizer = require('../route-optimizer');
 const { loadTechStartPoint } = require('./tech-start-point');
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, multiTechConfirmLive } = require('../../config/feature-gates');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
@@ -16,6 +16,7 @@ const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServi
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
+const { placedVisitMinutes } = require('./planning-minutes');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 const warningDetail = require('./route-warning-detail');
 
@@ -291,6 +292,7 @@ async function loadArrivalRouteContext({
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
   routeOrderPinned,
   travel, preserveCapacity, blocks,
+  planningMinutes,
   vanDepartureMin,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
   home: startPoints ? await loadTechStartPoint(conn, techId) : RouteOptimizer.HQ };
@@ -433,20 +435,32 @@ function routeDriveMinutes(stops, origin, end = RouteOptimizer.HQ) {
  *  20-minute job in a 60-minute window 60 minutes beside its sibling —
  *  codex #4435 r3/r4 P1) — a genuinely long service is still covered: the
  *  chain's floor is the longest member's workDuration, which includes it.
- *  Exempt from owner planning minutes (planning-minutes.js): the caller's
- *  already-resolved allowance (booking funnel, estimate profile, re-service
- *  catalog) applies to THIS row; owner minutes apply only to the other
- *  stops already on the route. */
+ *  Exempt from owner planning minutes (planning-minutes.js) unless the table
+ *  applies to it (placedVisitMinutes, capacity mode, allowance of the legacy
+ *  hour or less): the caller's already-resolved allowance (booking funnel,
+ *  estimate profile, re-service catalog) otherwise applies to THIS row. With
+ *  `context.planningMinutes === false` (the night arrival search) it is always
+ *  exempt. */
 function buildPlacementTarget(context, windowStart, windowEnd, durationMinutes) {
   // A whole visit (loadArrivalRouteContext `unit`): its other members' work
   // is added to the tapped member's. Zero for every other target.
   const siblingWork = Number(context.target?.siblingWorkMinutes) || 0;
+  const allowance = context.prospective ? Number(durationMinutes)
+    : Math.max(workDuration({ ...context.target, planning_exempt: true }), Number(durationMinutes) || 0);
+  // Capacity mode plans the placed visit at the owner table too (owner
+  // 2026-10-30) — unless the caller turned planning minutes off for the whole
+  // call (the night arrival search) or the table does not apply (null).
+  const planned = context.planningMinutes === false ? null
+    : placedVisitMinutes(context.target, allowance, { preserveCapacity: context.preserveCapacity });
   return {
     ...context.target, window_start: windowStart, window_end: windowEnd,
     raw_estimate_minutes: (Number(context.target?.estimated_duration_minutes) || 0) + siblingWork,
-    planning_exempt: true,
-    estimated_duration_minutes: siblingWork + (context.prospective ? Number(durationMinutes)
-      : Math.max(workDuration({ ...context.target, planning_exempt: true }), Number(durationMinutes) || 0)),
+    // A planned visit reads the table through workDuration like every other
+    // stop (a window span is a promise, never work); preserveCapacity rides
+    // on it the way evaluateArrivalPlacement stamps the route's rows.
+    planning_exempt: planned == null,
+    ...(planned != null && context.preserveCapacity ? { preserveCapacity: true } : {}),
+    estimated_duration_minutes: siblingWork + (planned ?? allowance),
   };
 }
 
@@ -551,6 +565,21 @@ function laterStopTooTight(simulation, order, targetId, rangeForStop, margin, sk
   });
 }
 
+// Whether a day row is a FIXED block on the target technician's simulated route.
+// Capacity: unassigned rows only. Hour mode (legacy placement): every other
+// technician's stop and every live hold, the one-technician shared rule. Hour
+// mode with GATE_MULTI_TECH_CONFIRM on (owner 2026-10-30, same-hour technicians):
+// each technician's route is separate, so a fixed block is an unassigned row or a
+// live hold on the target technician; another technician's stops and holds are ignored.
+function rowIsFixedBlock(row, target, capacity) {
+  if (capacity) return row.technician_id == null;
+  if (multiTechConfirmLive()) {
+    return row.technician_id == null
+      || (row.technician_id === target.technician_id && row.reservation_expires_at != null);
+  }
+  return row.technician_id !== target.technician_id || row.reservation_expires_at != null;
+}
+
 /** Simulate every candidate order and certify the winner: least travel,
  *  ties broken by less waiting — skipping any order that overruns a return
  *  deadline (returnTooLate) or collides with a FIXED blocker (unassigned
@@ -574,9 +603,7 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
     // Capacity models the selected technician's route; unassigned work still
     // blocks it, including the drive home. Legacy placement keeps its shared
     // occupancy rule for other technicians and live holds.
-    const fixedRows = rows.filter(row => row.status !== 'completed'
-      && (capacity ? row.technician_id == null
-        : row.technician_id !== target.technician_id || row.reservation_expires_at != null));
+    const fixedRows = rows.filter(row => row.status !== 'completed' && rowIsFixedBlock(row, target, capacity));
     const fixed = capacity ? occupiedRows(fixedRows).map(row => {
       const range = effectiveWindowRange(row);
       // Unassigned work can start anywhere in its arrival promise. Add that
@@ -1407,6 +1434,18 @@ function routeCheckAssignSavesLive() {
   return gateEnvValue('GATE_ROUTE_CHECK_ASSIGN_SAVES') && arrivalWindowRoutingEnabled();
 }
 
+// GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30, "ok go", Route Check
+// Everywhere follow-up): a new or moved customer-booked visit gets its stop
+// number in the booking's own save (placeMovedVisit). Covers /book and the
+// re-service, inspection and commercial first-visit pages (createSelfBooking),
+// the customer reschedule page, the voice agent's booking and the new-caller
+// visit. Stop numbers only:
+// no message, no notification, no Google call. Needs the arrival-window route
+// check itself.
+function routeCheckBookingSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_BOOKING_SAVES') && arrivalWindowRoutingEnabled();
+}
+
 // A staff save's travel for `date`: on a road day, the road times the pickers
 // bought (cache only, never a purchase); otherwise null, the model.
 function staffSaveTravel(date) {
@@ -1535,3 +1574,4 @@ module.exports.routeCheckStaffSavesLive = routeCheckStaffSavesLive;
 module.exports.routeCheckAutoSavesLive = routeCheckAutoSavesLive;
 module.exports.routeCheckAcceptSavesLive = routeCheckAcceptSavesLive;
 module.exports.routeCheckAssignSavesLive = routeCheckAssignSavesLive;
+module.exports.routeCheckBookingSavesLive = routeCheckBookingSavesLive;

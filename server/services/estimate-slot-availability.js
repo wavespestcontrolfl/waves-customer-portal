@@ -1313,11 +1313,15 @@ async function heldVisitLines(serviceProfile) {
 
 // null = keep today's offers (gate not live, no asked line has a technician set,
 // or the map is unreadable: getting the customer on the calendar beats withholding times).
-async function lineOfferRankingFor(serviceProfile) {
+// The territory place is the ZIP typed in the QUOTED address only: a multi-property
+// estimate keeps the customer_id while quoting another property (see resolveEstimateCoords).
+async function lineOfferRankingFor(serviceProfile, estimate = null) {
   if (!lineMapOfferLive()) return null;
   try {
     const { lineOfferRanking } = require('./scheduling/line-technician');
-    return await lineOfferRanking(db, { lines: await heldVisitLines(serviceProfile) });
+    const { parseRawAddress } = require('../utils/address-normalizer');
+    const zip = estimate && estimate.address ? parseRawAddress(estimate.address).zip || null : null;
+    return await lineOfferRanking(db, { lines: await heldVisitLines(serviceProfile), place: zip ? { zip } : null });
   } catch (err) {
     logger.warn(`[estimate-slots] service-line map unreadable, offering today's list: ${err.message}`);
     return null;
@@ -1758,6 +1762,8 @@ async function filterCollidingSlots(slots, {
     const busy = {
       startMin,
       endMin: busyEndMin,
+      // Row's technician, read only by the tech-scoped branch below (GATE_MULTI_TECH_CONFIRM).
+      technicianId: row.technician_id,
       lat: row.lat ?? null,
       lng: row.lng ?? null,
       hold: row.reservation_expires_at != null && row.customer_id == null,
@@ -1802,11 +1808,17 @@ async function filterCollidingSlots(slots, {
     const techBusy = s.techId
       ? (byTechDate.get(`${s.techId}|${s.date}`) || [])
       : (allByDate.get(s.date) || []);
-    const committed = (allByDate.get(s.date) || []).filter((b) => !b.hold);
+    // GATE_MULTI_TECH_CONFIRM (hour mode): each technician's route is separate, so only
+    // rows that are unassigned or on this slot's technician count against it, holds
+    // included (reserveSlot's probes scope the same way). Gate off, or a slot with no
+    // technician: every live row that day, as before.
+    const dayRows = scopeToTechnician(allByDate.get(s.date) || [], s.techId);
+    const committed = dayRows.filter((b) => !b.hold);
     if (overlapsAny(committed, slotStart, slotEnd)) return false;
     if (overlapsAny(techBusy, slotStart, slotEnd)) return false;
     if (overlapsAny(zoneByDate.get(s.date) || [], slotStart, slotEnd)) return false;
-    // Travel gap is tech-blind (one field tech) — every live row that day.
+    // Travel gap is tech-blind (one field tech) — every live row that day; with
+    // GATE_MULTI_TECH_CONFIRM on, the slot technician's rows plus unassigned ones.
     // The candidate's own expected-minutes padding credit (owner ruling
     // 2026-09-23) applies when IT is the early side of the pair — e.g. a
     // packed-before-next-stop candidate; a slot with no known duration
@@ -1820,9 +1832,16 @@ async function filterCollidingSlots(slots, {
           ? Math.min(candidateExpectedMinutes, candidateWindow)
           : candidateWindow,
       },
-      allByDate.get(s.date) || [],
+      dayRows,
     );
   });
+}
+
+// Rows that count against a slot on `techId`'s route. Gate off, or a techless slot:
+// every row (the one-technician rule). Gate on: unassigned rows and that technician's own.
+function scopeToTechnician(rows, techId) {
+  if (!techId || !featureGates.multiTechConfirmLive()) return rows;
+  return rows.filter((b) => b.technicianId == null || String(b.technicianId) === String(techId));
 }
 
 function timeToMinutes(hhmm) {
@@ -1850,6 +1869,11 @@ function timeToMinutes(hhmm) {
 // would strip every ASAP window from a date whose only row is the customer's
 // own live hold and leave the reloaded picker unable to confirm it (Codex r1
 // P1). A committed visit of this estimate (customer_id set) still counts.
+// Whether `slot`'s date already has a stop that packs it (stopDatesInRange's set).
+function dateHasStop(stopDates, slot) {
+  return stopDates.has(slot.date) || (!!slot.techId && stopDates.has(`${slot.techId}|${slot.date}`));
+}
+
 async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
   if (!dateFrom || !dateTo) return new Set();
   try {
@@ -1867,10 +1891,18 @@ async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
           .whereNotNull('reservation_expires_at');
       });
     }
+    const dayOf = (d) => (typeof d === 'string' ? d.slice(0, 10) : new Date(d).toISOString().slice(0, 10));
+    if (featureGates.multiTechConfirmLive()) {
+      // GATE_MULTI_TECH_CONFIRM: a technician's stop packs only that technician's day. The set
+      // holds the date of every unassigned stop (blocks every technician) and a
+      // `<techId>|<date>` key per assigned stop; read it with dateHasStop().
+      const scoped = await query.distinct('scheduled_date', 'technician_id');
+      return new Set(scoped.map((r) => (r.technician_id ? `${r.technician_id}|${dayOf(r.scheduled_date)}` : dayOf(r.scheduled_date))));
+    }
     const rows = await query
       .distinct('scheduled_date')
       .pluck('scheduled_date');
-    return new Set(rows.map((d) => (typeof d === 'string' ? d.slice(0, 10) : new Date(d).toISOString().slice(0, 10))));
+    return new Set(rows.map(dayOf));
   } catch (err) {
     logger.warn(`[estimate-slots] stop-date lookup failed — ASAP windows left unfiltered: ${err.message}`);
     return new Set();
@@ -2065,7 +2097,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
 
   const serviceProfile = await resolveCatalogSlotProfile(estimate, userOpts);
   // LIVE line map: null with the gate off or shadow (no query), or no technician set for the held visit's line(s).
-  const lineRanking = await lineOfferRankingFor(serviceProfile);
+  const lineRanking = await lineOfferRankingFor(serviceProfile, estimate);
   const publicServiceProfile = {
     ...serviceProfile,
     services: serviceProfile.services.map((service) => {
@@ -2270,7 +2302,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       }))),
       stopDatesInRange(dateFrom, dateTo, estimateId),
     ]);
-    const asapRaw = applyLineOfferRule(asapLists.flat().filter((s) => !stopDates.has(s.date)), lineRanking);
+    const asapRaw = applyLineOfferRule(asapLists.flat().filter((s) => !dateHasStop(stopDates, s)), lineRanking);
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
     const filtered = applyOnePerHour(applyLineOfferRule(dedupeSlots(asap), lineRanking, { sameStart: true })).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
@@ -2386,7 +2418,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // A date with a committed stop offers ONLY the packed find-time ends — a
   // synthetic hourly ASAP window there is the exact hole-maker the bug
   // report describes (owner ruling 2026-09-23). An empty date is untouched.
-  const asapRaw = applyLineOfferRule(asapLists.flat().filter((s) => !stopDates.has(s.date)), lineRanking);
+  const asapRaw = applyLineOfferRule(asapLists.flat().filter((s) => !dateHasStop(stopDates, s)), lineRanking);
 
   const classifiedRaw = applyLineOfferRule((raw?.slots || [])
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes)), lineRanking);

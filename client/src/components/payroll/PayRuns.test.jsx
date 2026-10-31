@@ -123,11 +123,11 @@ describe('Pay runs section', () => {
   it('shows who is blocked or waiting with the reason, and keeps Finalize off', async () => {
     const detail = await startRun({
       waiting: [{ technicianId: 't2', name: 'Sample Waiting', reason: 'Timesheet for this week is not approved yet' }],
-      blocked: [{ technicianId: 't3', name: 'Sample NoW4', reason: 'No Form W-4 on file' }],
+      blocked: [{ technicianId: 't3', name: 'Sample NoRate', reason: 'No pay rate set' }],
     });
     const view = within(detail);
     expect(view.getByRole('list', { name: 'Waiting for approval' })).toHaveTextContent('Sample WaitingTimesheet for this week is not approved yet');
-    expect(view.getByRole('list', { name: 'Blocked' })).toHaveTextContent('Sample NoW4No Form W-4 on file');
+    expect(view.getByRole('list', { name: 'Blocked' })).toHaveTextContent('Sample NoRateNo pay rate set');
     expect(view.getByRole('button', { name: 'Finalize' })).toBeDisabled();
   });
 
@@ -311,6 +311,31 @@ describe('Finalized run', () => {
     fireEvent.click(printButton);
     expect(print).toHaveBeenCalledTimes(1);
     print.mockRestore();
+  });
+
+  it('says so on a check drafted with no W-4 on file (the IRS default)', async () => {
+    const detail = await startRun({ checks: [check({ w4Default: true }), check({ id: 'check-b', name: 'Sample Beta' })] });
+    const rows = within(detail).getByRole('table', { name: 'Paychecks' }).querySelectorAll('tbody tr');
+    expect(rows[0]).toHaveTextContent('No W-4 on file: withheld as single, no adjustments (IRS default)');
+    expect(rows[1]).not.toHaveTextContent('No W-4 on file');
+  });
+
+  it('says so on the stub only when the check had no W-4 election', async () => {
+    const detail = await openFinal();
+    fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+    expect(await within(await screen.findByRole('dialog')).findByLabelText('Pay stub')).not.toHaveTextContent('No W-4 on file');
+  });
+
+  it('shows the no-W-4 note on the stub when the stub says so', async () => {
+    STUB.w4Default = true;
+    try {
+      const detail = await openFinal();
+      fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+      const stub = await within(await screen.findByRole('dialog')).findByLabelText('Pay stub');
+      expect(stub).toHaveTextContent('No W-4 on file: withheld as single, no adjustments (IRS default)');
+    } finally {
+      delete STUB.w4Default;
+    }
   });
 
   it('downloads the CSV from the export route', async () => {

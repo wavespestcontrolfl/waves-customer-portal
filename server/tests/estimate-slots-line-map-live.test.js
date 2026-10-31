@@ -209,7 +209,19 @@ describe('lineOfferRankingFor', () => {
     lineTechnician.serviceLineFor.mockResolvedValue({ line: 'general', lineFrom: 'name' });
     lineTechnician.lineOfferRanking.mockResolvedValue(RANKING);
     await expect(lineOfferRankingFor({ services: [{ service: 'pest_control', label: 'Pest Control' }] })).resolves.toBe(RANKING);
-    expect(lineTechnician.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'] });
+    expect(lineTechnician.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'], place: null });
+  });
+
+  test('live: the ZIP typed in the quoted address is the territory place (GATE_TERRITORY_ROUTING)', async () => {
+    process.env[GATE] = 'live';
+    lineTechnician.serviceLineFor.mockResolvedValue({ line: 'general', lineFrom: 'name' });
+    lineTechnician.lineOfferRanking.mockResolvedValue(RANKING);
+    const profile = { services: [{ service: 'pest_control', label: 'Pest Control' }] };
+    await lineOfferRankingFor(profile, { address: '123 Palm Ave, Venice, FL 34293', customer_id: 'cust-1' });
+    expect(lineTechnician.lineOfferRanking).toHaveBeenLastCalledWith(db, { lines: ['general'], place: { zip: '34293' } });
+    // No ZIP in the quoted address: no place, never the customer's (another property may be quoted).
+    await lineOfferRankingFor(profile, { address: '123 Palm Ave', customer_id: 'cust-1' });
+    expect(lineTechnician.lineOfferRanking).toHaveBeenLastCalledWith(db, { lines: ['general'], place: null });
   });
 
   test('live but the map is unreadable: today\'s list (null)', async () => {

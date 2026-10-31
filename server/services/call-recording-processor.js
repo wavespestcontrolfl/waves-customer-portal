@@ -20560,6 +20560,11 @@ const CallRecordingProcessor = {
                       serviceKey: existing.service_key_snapshot || null,
                       serviceType: existing.service_type || serviceType,
                       date: callBookingDateOnly(existing.scheduled_date),
+                      // The reused visit's own property first (GATE_TERRITORY_ROUTING), the customer last.
+                      zip: existing.service_address_zip || null,
+                      lat: existing.lat ?? null,
+                      lng: existing.lng ?? null,
+                      customerId: existing.customer_id || null,
                     });
                     if (reuseLineTech) {
                       reuseCandidateTechId = reuseLineTech.id;
@@ -20581,6 +20586,7 @@ const CallRecordingProcessor = {
                         durationMinutes: existing.estimated_duration_minutes || callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                         lat: existing.lat ?? null,
                         lng: existing.lng ?? null,
+                        zip: existing.service_address_zip || null,
                         // The row's own service: a replay can extract a
                         // different one while the appointment stays as booked.
                         serviceType: existing.service_type || serviceType,
@@ -21077,8 +21083,8 @@ const CallRecordingProcessor = {
                 // resolved before the txn; if the FOR SHARE recheck below
                 // books unassigned instead, it re-fences the unassigned-day
                 // rung there (codex r1 P2).
-                // Two technicians (GATE_MULTI_TECH_CONFIRM + capacity mode,
-                // owner 2026-10-03): a FRESH call booking goes to the
+                // Two technicians (GATE_MULTI_TECH_CONFIRM, hour or capacity mode,
+                // owner 2026-10-03; hour mode owner 2026-10-30): a FRESH call booking goes to the
                 // technician who is free at this time and whose route that day
                 // is closest (scheduling/pick-technician.js), not to the one
                 // default technician. Nobody free → unassigned, and the
@@ -21099,6 +21105,11 @@ const CallRecordingProcessor = {
                   serviceKey: callBookingCatalogRow?.service_key || null,
                   serviceType,
                   date: scheduledDate,
+                  // The booked property first (GATE_TERRITORY_ROUTING), the customer last.
+                  zip: propertyLinkage.address?.zip || null,
+                  lat: propertyLinkage.lat ?? null,
+                  lng: propertyLinkage.lng ?? null,
+                  customerId,
                 });
                 if (bookingLineTech) {
                   bookingTechnicianId = bookingLineTech.id;
@@ -21114,6 +21125,7 @@ const CallRecordingProcessor = {
                   durationMinutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                   lat: propertyLinkage.lat ?? null,
                   lng: propertyLinkage.lng ?? null,
+                  zip: propertyLinkage.address?.zip || null,
                   serviceType,
                   serviceId: callBookingCatalogRow?.id || null,
                   customerId,

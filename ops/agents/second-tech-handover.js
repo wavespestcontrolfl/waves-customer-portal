@@ -15,7 +15,7 @@
 //   railway run --service Postgres -- railway run --service waves-customer-portal \
 //     node ops/agents/second-tech-handover.js \
 //     --from <technician uuid> [--to <technician uuid>] [--start YYYY-MM-DD] \
-//     [--lines general,rodent,mosquito] [--list] [--json]
+//     [--lines general,rodent,mosquito] [--zips 34293,34285] [--list] [--json]
 //   node ops/agents/second-tech-handover.js --list-techs     # id, role, work days only
 //   ... --to <hire> --start <day> --lines <...> --execute --plan <PLAN ID from the dry run>
 //   ... --rollback <file the execute wrote> [--out-dir <dir>]
@@ -27,6 +27,11 @@
 //            before it are never touched.
 //   --lines  subset of general,rodent,mosquito (default all three). Lawn / tree &
 //            shrub and termite / WDO are never movable here.
+//   --zips   territories by ZIP (owner 2026-10-30, build 6): only series whose service ZIP
+//            (the parent row's service_address_zip, else the customer's zip) is listed move,
+//            and --execute also makes --to the territory technician of every listed ZIP
+//            (territory_zips.technician_id), in the same transaction, with its own undo in
+//            the rollback file. Each ZIP must be a territory_zips row. Without --zips: today's run.
 //   --list   adds the series ids and visit ids that would change. Ids only.
 //   --json   machine-readable output (includes planId).
 //   --execute  write the plan the dry run printed (needs --to and --plan).
@@ -115,6 +120,7 @@ const {
 const { overlayRecurringTemplateOverrides } = require(path.join(root, 'services', 'recurring-template-overrides'));
 const { isEnabled } = require(path.join(root, 'config', 'feature-gates'));
 const { whereVisitRowLive } = require(path.join(root, 'services', 'customer-lifecycle-guard'));
+const { normalizeZip } = require(path.join(root, 'services', 'territory'));
 
 const MOVABLE_LINES = ['general', 'rodent', 'mosquito'];
 const OPEN_STATUSES = ['pending', 'confirmed', 'rescheduled'];
@@ -164,6 +170,10 @@ const VALUE_FLAGS = {
     const ok = lines.length && lines.every((l) => MOVABLE_LINES.includes(l));
     return ok ? { lines } : `--lines takes ${MOVABLE_LINES.join(', ')} only (lawn and termite are never handed over), got ${JSON.stringify(v)}`;
   },
+  '--zips': (v) => {
+    const zips = [...new Set(v.split(',').map((x) => x.trim()).filter(Boolean))].sort();
+    return zips.length && zips.every((z) => /^\d{5}$/.test(z)) ? { zips } : `--zips takes 5-digit ZIPs, comma-separated, got ${JSON.stringify(v)}`;
+  },
   '--plan': (v) => (PLAN_ID.test(v) ? { plan: v.toLowerCase() } : `--plan needs the 64-character PLAN ID the dry run printed, got ${JSON.stringify(v)}`),
   '--rollback': (v) => ({ rollback: v }),
   '--out-dir': (v) => ({ outDir: v }),
@@ -181,7 +191,7 @@ const ARG_RULES = [
 
 function parseArgs(argv) {
   const args = {
-    from: null, to: null, start: null, lines: [...MOVABLE_LINES], list: false, listTechs: false, json: false,
+    from: null, to: null, start: null, lines: [...MOVABLE_LINES], zips: null, list: false, listTechs: false, json: false,
     execute: false, plan: null, rollback: null, outDir: null,
   };
   const fail = (msg) => { console.error(msg); process.exit(2); };
@@ -257,12 +267,15 @@ function targetWorkDays(to) {
  * visit that moves (series id, visit id, visit date, from technician). Same plan, same
  * id; a different visit, date, target, start or line set gives a different one.
  */
-function planIdOf({ from, to, start, lines, retemplate, moves }) {
+function planIdOf({ from, to, start, lines, retemplate, moves, zips = null, territory = [] }) {
   const rows = [
     ...retemplate.map((seriesId) => [seriesId, '', '', from]),
     ...moves.map((m) => [m.series_id, m.visit_id, m.date, from]),
+    // --zips: each listed ZIP and the territory technician it has now (a change since the dry run changes the id).
+    ...territory.map((t) => [`zip:${t.zip}`, '', '', t.technician_id || '']),
   ].map((r) => JSON.stringify(r)).sort();
-  const body = JSON.stringify({ v: 1, from, to: to || null, start, lines: [...lines].sort(), rows });
+  // Without --zips the body is the same as before build 6, so a plan's id does not change.
+  const body = JSON.stringify({ v: 1, from, to: to || null, start, lines: [...lines].sort(), rows, ...(zips ? { zips: [...zips].sort() } : {}) });
   return crypto.createHash('sha256').update(body).digest('hex');
 }
 
@@ -281,7 +294,13 @@ function planIdOf({ from, to, start, lines, retemplate, moves }) {
  *   visits    [{ id, series_id, scheduled_date, status, track_state, technician_id, visit_id, group_status }]
  *             series_id = the parent's id (a parent row is its own series_id)
  */
-function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds, baitAddonSeriesIds }) {
+// --zips: the plan's ZIP fields, and the series rule (a series outside the list stays whole).
+const zipFields = (zips, territory) => (zips
+  ? { zips: [...zips].sort(), territory: territory.map((t) => ({ zip: t.zip, area: t.area || null, technician_id: t.technician_id || null })) }
+  : { zips: null, territory: [] });
+const outsideZips = (zips) => (p) => Array.isArray(zips) && !zips.includes(p.zip);
+
+function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds, baitAddonSeriesIds, zips, territory }) {
   const bySeries = new Map();
   for (const v of visits) {
     if (!bySeries.has(v.series_id)) bySeries.set(v.series_id, []);
@@ -302,6 +321,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     start,
     today,
     lines: [...lines],
+    ...zipFields(zips, territory),
     target_work_days: workDays.map((d) => WEEKDAYS[d]),
     target_work_days_source: workDaysSource,
     off_day_policy: 'weekend_customer_stays_whole',
@@ -330,6 +350,8 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
   const seriesStays = [
     ['no_line', (p) => !p.line],
     ['other_line', (p) => !lines.includes(p.line)],
+    // After the line rules, so `in_lines` below still counts every series of these lines.
+    ['outside_zips', outsideZips(zips)],
     ['termite_bait_customer', (p) => baitCustomers.has(p.customer_id)],
   ];
   // Why an in-scope visit stays where it is: the first rule it meets. None = it moves
@@ -406,7 +428,9 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
   }
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
-  plan.planId = planIdOf({ from, to: to ? to.id : null, start, lines, retemplate: plan.ids.retemplate, moves: plan.ids.moves });
+  plan.planId = planIdOf({
+    from, to: to ? to.id : null, start, lines, retemplate: plan.ids.retemplate, moves: plan.ids.moves, zips: plan.zips, territory: plan.territory,
+  });
   plan.series_note = 'retemplate = series whose technician template moves (future visits seed to the target); with_visits_to_move = series with at least one visit that changes now';
   return plan;
 }
@@ -428,6 +452,7 @@ async function loadParents(db) {
     .whereNull('recurring_parent_id')
     .select('id', 'status', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'technician_id',
       'recurring_technician_id', 'recurring_technician_override', 'recurring_ongoing',
+      ...(cols.service_address_zip ? ['service_address_zip'] : []),
       ...(cols.recurring_template_overrides ? ['recurring_template_overrides'] : []));
   return rows.map((p) => overlayRecurringTemplateOverrides(p, cols));
 }
@@ -477,7 +502,24 @@ async function loadBaitAddonSeriesIds(db, parentIds) {
 }
 
 /** Read everything the planner needs and plan. `db` is a knex handle (or transaction). Reads only. */
-async function planHandover(db, { from, to = null, start, today = etDateString(), lines = MOVABLE_LINES }) {
+/**
+ * --zips: the listed territory_zips rows (each must exist) and every parent's service ZIP
+ * (`p.zip`: its service_address_zip, else its customer's zip, 5 digits). No --zips: [] and no read.
+ */
+async function loadZipScope(db, zips, parents) {
+  if (!zips) return [];
+  const territory = await db('territory_zips').whereIn('zip', zips).select('zip', 'area', 'technician_id').orderBy('zip');
+  const missing = zips.filter((z) => !territory.some((t) => t.zip === z));
+  if (missing.length) throw new Error(`--zips: not a territory ZIP: ${missing.join(', ')}`);
+  const customerZip = new Map();
+  for (const ids of chunks([...new Set(parents.map((p) => p.customer_id).filter(Boolean))], 1000)) {
+    for (const r of await db('customers').whereIn('id', ids).select('id', 'zip')) customerZip.set(r.id, r.zip);
+  }
+  for (const p of parents) p.zip = normalizeZip(p.service_address_zip) || normalizeZip(customerZip.get(p.customer_id)) || null;
+  return territory;
+}
+
+async function planHandover(db, { from, to = null, start, today = etDateString(), lines = MOVABLE_LINES, zips }) {
   const fromRow = await loadTechnician(db, from);
   if (!fromRow) throw new Error('--from: no technician row with that id');
   let toRow = null;
@@ -502,13 +544,14 @@ async function planHandover(db, { from, to = null, start, today = etDateString()
     }
     p.line = cache.get(key);
   }
+  const territory = await loadZipScope(db, zips, parents);
   const parentIds = parents.map((p) => p.id);
   const visits = await loadVisits(db, parentIds, today);
   const liveSeriesIds = await loadLiveSeriesIds(db, parentIds, today);
   const baitAddonSeriesIds = await loadBaitAddonSeriesIds(db, parentIds);
   const plan = buildPlan({
     from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits,
-    liveSeriesIds, baitAddonSeriesIds,
+    liveSeriesIds, baitAddonSeriesIds, zips, territory,
   });
   // The overlay follows GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, as in the app.
   plan.template_overrides = isEnabled('editApptPriceServiceScope') ? 'applied' : 'not_applied_gate_off';
@@ -529,6 +572,10 @@ function printPlan(plan, { list }) {
   out.push(`  target:  ${plan.target}`);
   out.push(`  first solo day: ${plan.start}   (plan read on ${plan.today})`);
   out.push(`  lines:   ${plan.lines.join(', ')}`);
+  if (plan.zips) {
+    out.push(`  zips:    ${plan.zips.join(', ')}`);
+    out.push(`  territory: --execute makes the target the territory technician of these ${plan.territory.length} ZIPs (now: ${plan.territory.map((t) => `${t.zip}=${t.technician_id || 'none'}`).join(', ')})`);
+  }
   out.push(`  PLAN ID: ${plan.planId}`);
   const src = {
     assumed_mon_thu: 'ASSUMED Mon-Thu, because --to is not set',
@@ -556,7 +603,7 @@ function printPlan(plan, { list }) {
   out.push('  (a second handover run moves these customers and their dates; it is not built here.)');
   out.push('');
   out.push('Skipped, by reason (series / visits):');
-  const reasons = ['other_line', 'no_line', 'termite_bait_customer', 'off_day_customer', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
+  const reasons = ['other_line', 'no_line', 'outside_zips', 'termite_bait_customer', 'off_day_customer', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
   let any = false;
   for (const r of reasons) {
     const s = plan.skipped[r];
@@ -679,7 +726,7 @@ async function main() {
       }
       const today = etDateString();
       const start = args.start || defaultStart();
-      const plan = await planHandover(trx, { from: args.from, to: args.to, start, today, lines: args.lines });
+      const plan = await planHandover(trx, { from: args.from, to: args.to, start, today, lines: args.lines, zips: args.zips });
       if (args.json) {
         const copy = { ...plan, ids: args.list ? plan.ids : undefined };
         console.log(JSON.stringify(copy, null, 2));

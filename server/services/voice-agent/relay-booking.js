@@ -404,7 +404,7 @@ async function commitVoiceBooking({
       // a clash here is somebody ELSE's committed visit or live hold. The
       // offer came from the per-technician /book engine, so the probe is
       // scoped to the technician the row is written with (technicianId below):
-      // with GATE_MULTI_TECH_CONFIRM + capacity mode on, another technician's
+      // with GATE_MULTI_TECH_CONFIRM on (hour or capacity mode), another technician's
       // overlapping stop is not a clash, while an UNASSIGNED row still is;
       // gate off or no technician on the offer → tech-blind, as before.
       const clash = await findConflictingVisits({
@@ -489,6 +489,14 @@ async function commitVoiceBooking({
           `[voice-relay-booking] pending booking ${created.id} for customer ${customerId} created with NO `
           + 'outbound_booking_review card (no call_log row for this call) — it is invisible to the office confirm queue'
         );
+      }
+      // GATE_ROUTE_CHECK_BOOKING_SAVES: number the pending visit on its technician's
+      // day (stop numbers only: no message, no notification, no Google call), in
+      // this transaction, after the review card (the card can still roll the
+      // insert back). The row is never street-level held: this writer has no
+      // such state. Gate off: touches nothing. Never throws.
+      if (created) {
+        await require('../scheduling/staff-save-route-check').placeBookingSavedVisit(trx, { visit: created, source: 'voice_relay' });
       }
       return { status: 'ok', scheduledServiceId: created && created.id, callLogId };
     });

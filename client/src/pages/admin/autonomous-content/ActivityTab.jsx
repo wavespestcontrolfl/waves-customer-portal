@@ -30,7 +30,7 @@ function PipelineStatus({ selected }) {
         ok={!selected.run?.poll_pending_reason && remediation?.status !== "parked"}
         title="Pipeline status"
       >
-        <div className="grid gap-1 text-13 text-zinc-600">
+        <div className="grid gap-1 text-14 text-zinc-600">
           {selected.run?.poll_pending_reason && (
             <div>
               Auto-merge waiting on{" "}
@@ -132,7 +132,7 @@ function GateSummary({ selected }) {
       ok={{ alert: false, green: true }[selectedGate.tone]}
       title="Gate summary"
     >
-      <div className="grid gap-1 text-13 text-zinc-600">
+      <div className="grid gap-1 text-14 text-zinc-600">
         <div>
           Score:{" "}
           <span className="tabular-nums text-zinc-900">
@@ -198,7 +198,7 @@ function SeoCompletion({ seoCompletion }) {
             {seoFindings.slice(0, 6).map((finding) => (
               <div
                 key={`${finding.severity}-${finding.code}`}
-                className={cn("text-13 leading-snug", finding.severity === "P0" ? "text-[#B42318]" : "text-zinc-600")}
+                className={cn("text-14 leading-snug", finding.severity === "P0" ? "text-[#B42318]" : "text-zinc-600")}
               >
                 <span className="font-medium">
                   {finding.severity} {finding.code}
@@ -210,9 +210,9 @@ function SeoCompletion({ seoCompletion }) {
         )}
         {recommendedLinks.length > 0 && (
           <div className="grid gap-1.5">
-            <div className="text-12 uppercase tracking-label text-zinc-400">Recommended links</div>
+            <div className="text-14 uppercase tracking-label text-zinc-400">Recommended links</div>
             {recommendedLinks.slice(0, 6).map((link) => (
-              <div key={`${link.reason}-${link.url}`} className="text-13 leading-snug text-zinc-600">
+              <div key={`${link.reason}-${link.url}`} className="text-14 leading-snug text-zinc-600">
                 <span className="font-medium text-zinc-900">{link.url}</span>
                 <br />
                 Anchor: {link.anchorText || "—"} · Reason: {link.reason || "—"}
@@ -244,7 +244,7 @@ function ContentDetail({
           {draft.title || selected.target_keyword || "Untitled run"}
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
-          <Tag lifecycle>{ACTIVITY_STATUSES[selected.status] || selected.status}</Tag>
+          <Tag>{ACTIVITY_STATUSES[selected.status] || selected.status}</Tag>
           <Tag>{selected.action_type}</Tag>
           {run.shadow_mode && <Tag>shadow</Tag>}
           {isNamedCompetitor(selected) && <Tag tone="forest">Named competitor</Tag>}
@@ -283,7 +283,7 @@ function ContentDetail({
 
       {run.reviewer_notes && (
         <Section title="Run notes">
-          <div className="max-h-48 overflow-y-auto whitespace-pre-wrap text-13 leading-relaxed text-zinc-600">
+          <div className="max-h-48 overflow-y-auto whitespace-pre-wrap text-14 leading-relaxed text-zinc-600">
             {run.reviewer_notes}
           </div>
         </Section>
@@ -320,7 +320,7 @@ function ActivityRow({ item, selectedId, openContent }) {
           <div className="truncate text-14 font-medium text-zinc-900">
             {item.target_keyword || item.query || item.target_url || "Untitled"}
           </div>
-          {meta && <div className="mt-0.5 truncate text-12 text-zinc-500">{meta}</div>}
+          {meta && <div className="mt-0.5 truncate text-14 text-zinc-500">{meta}</div>}
         </div>
         {named && (
           <Tag tone="forest" className="shrink-0">
@@ -329,11 +329,11 @@ function ActivityRow({ item, selectedId, openContent }) {
         )}
       </div>
       <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-        <Tag lifecycle>{ACTIVITY_STATUSES[item.status] || item.status}</Tag>
+        <Tag>{ACTIVITY_STATUSES[item.status] || item.status}</Tag>
         <Tag>{item.action_type}</Tag>
         <Tag tone={gt.tone}>{gt.label}</Tag>
-        <span className="text-12 tabular-nums text-zinc-500">Score {item.final_score ?? item.score ?? "—"}</span>
-        <span className="ml-auto text-12 text-zinc-400">{formatDate(item.updated_at || item.completed_at)}</span>
+        <span className="text-14 tabular-nums text-zinc-500">Score {item.final_score ?? item.score ?? "—"}</span>
+        <span className="ml-auto text-14 text-zinc-400">{formatDate(item.updated_at || item.completed_at)}</span>
       </div>
     </RowCard>
   );
