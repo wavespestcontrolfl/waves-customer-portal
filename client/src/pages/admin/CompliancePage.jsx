@@ -493,7 +493,7 @@ function LicensesTab({ token }) {
       <TBody>{data?.technicians?.map((technician) => <TR key={technician.id}>
         <TD className="font-medium text-zinc-900">{technician.name}</TD>
         <TD data-label="License #" className="u-nums">{technician.license || "—"}</TD>
-        <TD data-label="Expiry" className="u-nums">{technician.licenseExpiry || "—"}</TD>
+        <TD data-label="Expiry" className="u-nums">{fmtDay(technician.licenseExpiry) || "—"}</TD>
         <TD data-label="Categories" className="text-ink-secondary">{Array.isArray(technician.licenseCategories) ? technician.licenseCategories.join(", ") : "—"}</TD>
         <TD data-label="Status"><StatusBadge status={technician.licenseStatus} /></TD>
         {trainingOn && <TD data-label="ID card and training"><TrainingCell technician={technician} /></TD>}
