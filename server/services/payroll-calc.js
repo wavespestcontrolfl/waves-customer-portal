@@ -116,6 +116,23 @@ const FUTA_BP = 60n;
 const STATE_AND_FUTA_WAGE_BASE_CENTS = 700000n;
 const FLORIDA_NEW_EMPLOYER_RATE_BP = 270;
 
+// Florida minimum wage, effective-dated (Fla. Const. art. X, s. 24(c), as amended 2020: $15.00 on
+// 30 Sep 2026; the 2027 rate is computed 30 Sep 2027 and takes effect 1 Jan 2028, so the table ends
+// 31 Dec 2027 until that rate is known). Kept apart from TAX_YEARS: the form figures read TAX_YEARS.
+const FLORIDA_MINIMUM_WAGE = [
+  { from: '2025-09-30', through: '2026-09-29', cents: 1400n },
+  { from: '2026-09-30', through: '2027-12-31', cents: 1500n },
+];
+
+// The floor in force on a YYYY-MM-DD date, in cents.
+function floridaMinimumWageCentsFor(day) {
+  const row = FLORIDA_MINIMUM_WAGE.find((r) => day >= r.from && day <= r.through);
+  if (!row) throw new Error(`No Florida minimum wage on file for ${day} yet`);
+  return row.cents;
+}
+
+const dollarsText = (cents) => `$${(Number(cents) / 100).toFixed(2)}`;
+
 const max0 = (n) => (n > 0n ? n : 0n);
 const min = (a, b) => (a < b ? a : b);
 
@@ -238,6 +255,13 @@ function computePaycheck({
   validateW4(w4);
   const rateCents = nonNegativeCents(hourlyRate, 'Hourly rate');
   if (rateCents === 0n) throw new Error('No pay rate set');
+  // The floor on the PAY DATE. It only rises, so a rate that clears it on the pay date also
+  // cleared it on every day of the work week before.
+  const day = validCalendarDate(payDate);
+  const floor = floridaMinimumWageCentsFor(day);
+  if (rateCents < floor) {
+    throw new Error(`Hourly rate ${dollarsText(rateCents)} is below the Florida minimum wage of ${dollarsText(floor)} on ${day}`);
+  }
   if (!Number.isInteger(reemploymentRateBp) || reemploymentRateBp < 0) {
     throw new Error('reemploymentRateBp must be a whole number of basis points');
   }
@@ -351,4 +375,4 @@ const RATES = {
   floridaNewEmployerBp: FLORIDA_NEW_EMPLOYER_RATE_BP,
 };
 
-module.exports = { computePaycheck, roundDiv, TAX_YEARS, PAY_PERIODS_PER_YEAR, RATES };
+module.exports = { computePaycheck, floridaMinimumWageCentsFor, roundDiv, TAX_YEARS, PAY_PERIODS_PER_YEAR, RATES };

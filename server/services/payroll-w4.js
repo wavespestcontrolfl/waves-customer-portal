@@ -130,7 +130,14 @@ const serializeHistoryRow = (row) => ({
 });
 
 // The election in force on payDate: the latest effective_on not after it; a
-// same-day correction (later created_at) wins. null when none applies yet.
+// same-day correction (later created_at) wins. null when none applies yet, and
+// null when the one in force is an exemption that has lapsed (see below). A null
+// is not a block: the pay run withholds as the IRS default (single, no
+// adjustments, Tax Topic 753).
+// IRS Tax Topic 753: a W-4 claiming exemption "is valid for only the calendar
+// year in which it's furnished", and with no new W-4 by February 15 the employer
+// withholds as single with no other entries. signed_on's year stands for the year
+// the form was furnished; pay dates after Feb 15 of the next year get null.
 async function currentW4For(technicianId, payDate, conn = db) {
   const day = validCalendarDate(payDate);
   if (!day) throw new Error('payDate must be a real YYYY-MM-DD date');
@@ -139,7 +146,10 @@ async function currentW4For(technicianId, payDate, conn = db) {
     .where('effective_on', '<=', day)
     .orderBy([{ column: 'effective_on', order: 'desc' }, { column: 'created_at', order: 'desc' }])
     .first(columns(conn));
-  return row ? serializeW4(row) : null;
+  if (!row) return null;
+  const election = serializeW4(row);
+  if (election.exempt && day > `${Number(election.signedOn.slice(0, 4)) + 1}-02-15`) return null;
+  return election;
 }
 
 async function listW4(technicianId, conn = db) {

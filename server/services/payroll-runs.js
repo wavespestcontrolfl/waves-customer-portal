@@ -211,14 +211,23 @@ const hoursText = (minutes) => (Math.round((Number(minutes) || 0) / 60 * 100) / 
 
 // ---- One paycheck, no database
 
+// IRS Tax Topic 753: an employee with no properly completed Form W-4 is withheld as single with no
+// entries in step 2, 3 or 4. It has no id: no election row stands behind it, and the check stores
+// w4_election_id null (the token changes to the real id once a W-4 is recorded).
+const electionOrIrsDefault = (election, payDate) => election || {
+  id: null, formYear: Number(String(payDate).slice(0, 4)), filingStatus: 'single', step2Checkbox: false, exempt: false,
+};
+
 /**
  * Works out one technician's check. Returns { check } (the row to insert, minus
  * run_id) or { blocked } with a plain reason. Never throws for a calculation
- * problem: the message of computePaycheck becomes the reason.
+ * problem: the message of computePaycheck becomes the reason. A null w4 (none on
+ * file, or a lapsed exemption) is withheld as the IRS default, not blocked.
  */
 function buildCheck({
-  tech, payDate, weekStart, w4, ytdGrossCents, ytdUnemploymentCents, unemploymentExempt,
+  tech, payDate, weekStart, w4: election, ytdGrossCents, ytdUnemploymentCents, unemploymentExempt,
 }) {
+  const w4 = electionOrIrsDefault(election, payDate);
   const withTimeOff = timeOffOn();
   const withLines = payLinesOn();
   const ptoMinutes = tech.pto_minutes || 0;
@@ -378,6 +387,8 @@ function serializeCheck(row) {
     futaCents: Number(row.futa_cents),
     flReemploymentCents: Number(row.fl_reemployment_cents),
     ytdGrossBeforeCents: Number(row.ytd_gross_before_cents),
+    // No W-4 election stood behind this check: withheld as single, no adjustments (the IRS default).
+    w4Default: row.w4_election_id == null,
     ...(timeOffOn() ? {
       ptoMinutes: Number(row.pto_minutes || 0),
       holidayMinutes: Number(row.holiday_minutes || 0),
@@ -997,6 +1008,7 @@ async function getStub(checkId, conn = db) {
     netCents: c.netCents,
     payMethod: c.payMethod,
     checkNumber: c.checkNumber,
+    w4Default: c.w4Default,
     ytd: {
       grossCents: Number(ytd.gross),
       federalIncomeTaxCents: Number(ytd.federal_income_tax),
@@ -1107,6 +1119,7 @@ module.exports = {
   resolvePayDate,
   centsText,
   buildCheck,
+  ytdBefore,
   tokenOf,
   checksToCsv,
   listRuns,
