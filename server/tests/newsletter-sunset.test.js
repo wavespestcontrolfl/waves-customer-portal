@@ -12,9 +12,10 @@
  *      targets exactly the reengagement_due tag, no social auto-share, and
  *      its copy carries the greeting token + team sign-off with no
  *      price/safety claims.
- *   3b. With the switch on (owner 2026-10-30, option A) the win-back queues
- *      itself for the next scheduler tick, a draft parked earlier queues
- *      too, and the "win-back waiting" alert resolves itself.
+ *   3b. With the switch on (owner 2026-10-30, option A) a win-back the job
+ *      stages queues itself for the next scheduler tick and the "win-back
+ *      waiting" alert resolves itself; a draft parked earlier (maybe edited)
+ *      stays parked and keeps the alert.
  *   4. A sunset ('inactive') subscriber who re-subscribes goes through the
  *      normal DOI resubscribe path AND gets the hygiene markers cleared —
  *      without this they'd be stuck invisible forever.
@@ -143,19 +144,18 @@ describe('win-back under GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A)'
     expect(q.insert.mock.calls[0][0]).not.toHaveProperty('scheduled_for');
   });
 
-  test('a win-back parked before the switch went on is queued too', async () => {
+  test('a win-back parked before the switch went on stays parked: it may have been edited', async () => {
     const q = chain({ first: { id: 'wb-old', status: 'draft' } });
     db.mockImplementation(() => q);
-    expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: false, openSendId: 'wb-old', queued: true });
-    expect(q.where).toHaveBeenCalledWith({ id: 'wb-old', status: 'draft' });
-    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', scheduled_for: expect.any(Date), proof_approved_at: expect.any(Date) }));
+    expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: false, openSendId: 'wb-old', parked: true });
+    expect(q.update).not.toHaveBeenCalled();
     expect(q.insert).not.toHaveBeenCalled();
   });
 
   test('a win-back already queued or sending is left alone', async () => {
     const q = chain({ first: { id: 'wb-old', status: 'sending' } });
     db.mockImplementation(() => q);
-    expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: false, openSendId: 'wb-old' });
+    expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: false, openSendId: 'wb-old', parked: false });
     expect(q.update).not.toHaveBeenCalled();
   });
 
@@ -170,6 +170,10 @@ describe('win-back under GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A)'
       expect(q.insert).not.toHaveBeenCalled();
       await syncAlert({ valveTripped: true, candidates: 300, sunsetCandidates: 0, activeCount: 600, cohortAwaiting: 0, autoSend: true }, new Date());
       expect(q.insert).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringContaining('Newsletter sunset paused') }));
+      // A draft parked before the switch still needs the owner.
+      q.insert.mockClear();
+      await syncAlert({ valveTripped: false, cohortAwaiting: 12, autoSend: true, winbackParked: true }, new Date());
+      expect(q.insert).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringContaining('Newsletter win-back waiting') }));
     } finally {
       delete db.schema;
       delete db.raw;

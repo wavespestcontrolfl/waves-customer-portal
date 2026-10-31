@@ -1261,11 +1261,14 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
     });
     if (!cancelled) return res.status(409).json({ error: 'scheduled send was already claimed; it was not cancelled' });
     // Roll the linked calendar row back to 'drafted' to match the send. With
-    // GATE_NEWSLETTER_AUTO_SEND on, Cancel schedule skips the week instead: a 'drafted'
-    // week gets a fresh proof from the 4:30 AM catch-up, and that proof would
-    // queue the issue again (owner 2026-10-30, option A).
+    // GATE_NEWSLETTER_AUTO_SEND on, or for an issue the switch queued
+    // (approved with no approving email) even if it is off now, Cancel
+    // schedule skips the week instead: a 'drafted' week gets a fresh proof
+    // from the 4:30 AM catch-up, and that proof would queue the issue again
+    // (owner 2026-10-30, option A).
+    const autoQueued = Boolean(send.proof_approved_at) && !send.proof_approval_email_id;
     await db('newsletter_calendar').where({ send_id: send.id }).update({
-      status: newsletterAutoSendLive() ? 'skipped' : 'drafted',
+      status: (autoQueued || newsletterAutoSendLive()) ? 'skipped' : 'drafted',
       updated_at: new Date(),
     });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();

@@ -33,15 +33,16 @@ const router = require('../routes/admin-newsletter');
 
 const SEND_UUID = '11111111-2222-4333-8444-555555555555';
 const updates = [];
+let scheduledSend;
 
 beforeEach(() => {
   updates.length = 0;
+  // Approved by an APPROVED reply (it carries the approving email id).
+  scheduledSend = { id: SEND_UUID, status: 'scheduled', proof_approved_at: new Date(), proof_approval_email_id: 'email-9', proof_refused_at: new Date() };
   db.mockImplementation((table) => {
     const q = {};
     ['where', 'whereIn', 'orderBy', 'limit', 'select', 'whereNull', 'whereNotNull'].forEach((m) => { q[m] = jest.fn(() => q); });
-    q.first = jest.fn(async () => (table === 'newsletter_sends'
-      ? { id: SEND_UUID, status: 'scheduled', proof_approved_at: new Date(), proof_approval_email_id: 'email-9', proof_refused_at: new Date() }
-      : undefined));
+    q.first = jest.fn(async () => (table === 'newsletter_sends' ? scheduledSend : undefined));
     q.update = jest.fn(async (patch) => { updates.push([table, patch]); return 1; });
     return q;
   });
@@ -72,6 +73,12 @@ test('cancel-schedule clears the refusal marker along with the other proof field
 
 test('with the auto-send switch on, Cancel schedule skips the week so the catch-up cannot queue it again', async () => {
   process.env.GATE_NEWSLETTER_AUTO_SEND = 'true';
+  await postCancel();
+  expect(updates.find(([table]) => table === 'newsletter_calendar')[1]).toMatchObject({ status: 'skipped' });
+});
+
+test('an issue the switch queued skips its week on cancel even with the switch off now', async () => {
+  scheduledSend = { ...scheduledSend, proof_approval_email_id: null };
   await postCancel();
   expect(updates.find(([table]) => table === 'newsletter_calendar')[1]).toMatchObject({ status: 'skipped' });
 });

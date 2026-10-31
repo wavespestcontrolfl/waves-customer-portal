@@ -310,17 +310,10 @@ async function ensureWinbackDraft(cohort, { autoSend = false } = {}) {
     .where({ newsletter_type: REENGAGEMENT_TYPE })
     .whereIn('status', ['draft', 'scheduled', 'sending'])
     .first('id', 'status');
-  if (open) {
-    // A win-back parked before the switch went on queues itself too, or the
-    // lane would wait on it forever (no new one is staged while it is open).
-    if (autoSend && cohort && open.status === 'draft') {
-      const queued = await db('newsletter_sends')
-        .where({ id: open.id, status: 'draft' })
-        .update({ ...autoQueued(), updated_at: new Date() });
-      return { created: false, openSendId: open.id, queued: Boolean(queued) };
-    }
-    return { created: false, openSendId: open.id };
-  }
+  // Only a win-back this job stages under the switch queues itself. A draft
+  // parked earlier may have been edited (copy, audience), so it stays parked
+  // for the owner, and its alert stays open.
+  if (open) return { created: false, openSendId: open.id, parked: open.status === 'draft' };
   if (!cohort) return { created: false, openSendId: null };
   const [row] = await db('newsletter_sends').insert(buildWinbackDraftRow({ queued: autoSend })).returning('id');
   return { created: true, openSendId: row?.id ?? row, queued: autoSend };
@@ -397,9 +390,10 @@ async function applySunset(ids, now) {
 async function syncAlert(summary, now) {
   if (!(await db.schema.hasTable('admin_alerts'))) return null;
 
-  // Under the auto-send switch the win-back queues itself: only the safety
-  // valve needs the owner.
-  const needsOwner = summary.valveTripped || (summary.cohortAwaiting > 0 && !summary.autoSend);
+  // Under the auto-send switch a win-back the job stages queues itself, so
+  // only the safety valve, or a draft parked before the switch, needs the owner.
+  const needsOwner = summary.valveTripped
+    || (summary.cohortAwaiting > 0 && (!summary.autoSend || summary.winbackParked));
   if (!needsOwner) {
     const resolved = await db('admin_alerts')
       .where({ type: ALERT_TYPE, status: 'open' })
@@ -504,6 +498,7 @@ async function runNewsletterSunset(now = new Date()) {
     draftCreated: draft.created,
     openSendId: draft.openSendId || null,
     winbackQueued: Boolean(draft.queued),
+    winbackParked: Boolean(draft.parked),
     autoSend,
   };
   await syncAlert(summary, now);
