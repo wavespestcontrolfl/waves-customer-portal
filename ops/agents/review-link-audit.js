@@ -116,9 +116,10 @@ function buildCandidates({ customers, visits, asks, taps, texts }) {
     activity: {
       visitsOn: (visitsBy.get(cu.id) || []).map((v) => v.on_day),
       // One request can deliver on both sides of a review: a text before it, the email or the
-      // follow-up after it. Each delivery counts on its own.
+      // follow-up after it. Each delivery counts on its own; the column and the audit log are two
+      // records of the same follow-up, so the log is only the fallback.
       asksAt: (asksBy.get(cu.id) || [])
-        .flatMap((a) => [a.sms_sent_at, a.sent_at, a.followup_delivered_at, a.followup_logged_at])
+        .flatMap((a) => [a.sms_sent_at, a.sent_at, a.followup_delivered_at || a.followup_logged_at])
         .filter(Boolean),
       taps: (tapsBy.get(cu.id) || []).flatMap((t) => [
         { at: t.redirected_at, locationId: t.google_location },

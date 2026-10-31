@@ -59,9 +59,11 @@ describe('review-link-audit rows', () => {
         ask('c1', { sms: '2026-10-10T15:00:00Z', email: '2026-10-21T15:00:00Z' }),
         // A follow-up delivered before review_requests.followup_delivered_at existed: audit log only.
         ask('c1', { sms: '2026-10-05T15:00:00Z', logged: '2026-10-23T15:00:00Z' }),
+        // A current follow-up is in both records: still one delivery.
+        ask('c1', { sms: '2026-10-01T15:00:00Z', followup: '2026-10-24T15:00:00Z', logged: '2026-10-24T15:00:02Z' }),
       ],
     });
-    expect(row).toMatchObject({ section: 'linked_ok', ownerId: 'c1', ownerAsksAfter: 3, ownerMarked: false });
+    expect(row).toMatchObject({ section: 'linked_ok', ownerId: 'c1', ownerAsksAfter: 4, ownerMarked: false });
   });
 
   test('the ask query drops no-link check-ins and reads audit-log follow-ups', async () => {
