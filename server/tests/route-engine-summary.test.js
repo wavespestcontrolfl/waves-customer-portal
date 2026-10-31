@@ -84,6 +84,38 @@ describe('summarizeRouteEngine', () => {
     expect(summarizeRouteEngine({ today, nights: 2, runs: [run('a', '2026-10-31', 'completed', null)], rows: [] }).cap).toBeNull();
     expect(summarizeRouteEngine({ today, nights: 2, runs: [run('a', '2026-10-31', 'completed', '{"maxChangesPerRun":8}')], rows: [] }).cap).toBe(8);
   });
+
+  test('a run still in progress reads as running, never failed', () => {
+    const out = summarizeRouteEngine({
+      today, nights: 3,
+      runs: [
+        run('a', '2026-10-29', 'running'),
+        run('b', '2026-10-30', 'failed'),
+        { ...run('c', '2026-10-30', 'running'), started_at: at('2026-10-30', '09:05') },
+        run('d', '2026-10-31', 'completed'),
+        { ...run('e', '2026-10-31', 'running'), started_at: at('2026-10-31', '09:05') },
+      ],
+      rows: [],
+    });
+    expect(out.nights.map((n) => n.status)).toEqual(['running', 'running', 'finished']);
+    expect(out.totals).toMatchObject({ runningNights: 2, failedNights: 0, finishedNights: 1 });
+  });
+
+  test('held then moved counts only a move on a LATER ET night', () => {
+    const out = summarizeRouteEngine({
+      today, nights: 3,
+      runs: [
+        run('a', '2026-10-29', 'completed'),
+        run('b', '2026-10-30', 'failed'),
+        { ...run('c', '2026-10-30', 'completed'), started_at: at('2026-10-30', '09:05') },
+      ],
+      rows: [
+        held('a', 's1', at('2026-10-29', '08:12')), changed('c', 's1', 4, at('2026-10-30', '09:07')),
+        held('b', 's2', at('2026-10-30', '08:12')), changed('c', 's2', 4, at('2026-10-30', '09:07')),
+      ],
+    });
+    expect(out.totals).toMatchObject({ heldVisits: 2, heldThenMoved: 1, movesMade: 2 });
+  });
 });
 
 describe('buildRouteEngineSummary', () => {

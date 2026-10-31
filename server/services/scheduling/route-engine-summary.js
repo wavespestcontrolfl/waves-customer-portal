@@ -22,7 +22,9 @@ const { NIGHT_TRIGGERS } = require('../auto-dispatch/catch-up');
 
 const DEFAULT_NIGHTS = 7;
 const HELD_CODE = 'MAX_CHANGES_REACHED';
-const STATUS_BY_RANK = ['no_run', 'failed', 'with_errors', 'finished'];
+// Best status per night, lowest to highest: a finished run beats one still
+// running, which beats one with errors, which beats a failed one.
+const STATUS_BY_RANK = ['no_run', 'failed', 'with_errors', 'running', 'finished'];
 
 function windowDates(today, nights) {
   const anchor = parseETDateTime(`${today}T12:00`);
@@ -31,8 +33,11 @@ function windowDates(today, nights) {
   return dates;
 }
 
+// 'running' is a run still in progress (the nightly run, or its catch-up),
+// never a failure: a run that dies is marked 'failed' by the stale-run sweep.
 function runRank(status) {
-  if (status === 'completed') return 3;
+  if (status === 'completed') return 4;
+  if (status === 'running') return 3;
   if (status === 'completed_with_errors') return 2;
   return 1;
 }
@@ -48,8 +53,12 @@ function timeOf(value) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-// Best run status per ET night: a finished run beats one with errors, which
-// beats a failed one. Also maps each run id to its night.
+// Earliest / latest ET night (YYYY-MM-DD strings sort as dates).
+function earlier(a, b) { return a === undefined || b < a ? b : a; }
+function later(a, b) { return a === undefined || b > a ? b : a; }
+
+// Best run status per ET night (see STATUS_BY_RANK). Also maps each run id to
+// its night.
 function indexRuns(runs, dates) {
   const best = new Map(dates.map((date) => [date, 0]));
   const nightOfRun = new Map();
@@ -78,22 +87,23 @@ function savingMinutes(row) {
 function tallyRows(rows, nightOfRun, dates) {
   const moves = new Map(dates.map((date) => [date, 0]));
   const heldByNight = new Map(dates.map((date) => [date, new Set()]));
-  const firstHeld = new Map(); // service id -> earliest held time
-  const lastChanged = new Map(); // service id -> latest changed time
+  // Compared by ET NIGHT, not clock time: a hold and a move in the same night
+  // (a cut-off run, then its catch-up) is not "moved on a later night".
+  const firstHeld = new Map(); // service id -> earliest night it was held
+  const lastChanged = new Map(); // service id -> latest night it was moved
   let minutes = null;
   for (const row of rows) {
     const date = nightOfRun.get(String(row.auto_dispatch_run_id));
     if (!date) continue;
-    const at = timeOf(row.created_at);
     const id = row.scheduled_service_id;
     if (row.action === 'changed') {
       moves.set(date, moves.get(date) + 1);
-      if (id) lastChanged.set(id, Math.max(lastChanged.get(id) || 0, at));
+      if (id) lastChanged.set(id, later(lastChanged.get(id), date));
       const saved = savingMinutes(row);
       if (saved !== null) minutes = (minutes || 0) + saved;
     } else if (row.reason_code === HELD_CODE && id) {
       heldByNight.get(date).add(id);
-      firstHeld.set(id, Math.min(firstHeld.get(id) ?? Infinity, at));
+      firstHeld.set(id, earlier(firstHeld.get(id), date));
     }
   }
   return { moves, heldByNight, firstHeld, lastChanged, minutes };
@@ -119,10 +129,11 @@ function summarizeRouteEngine({ runs = [], rows = [], today, nights = DEFAULT_NI
       finishedNights: count('finished'),
       withErrorsNights: count('with_errors'),
       failedNights: count('failed'),
+      runningNights: count('running'),
       noRunNights: count('no_run'),
       movesMade: nightList.reduce((sum, n) => sum + n.movesMade, 0),
       heldVisits: heldIds.length,
-      heldThenMoved: heldIds.filter((id) => (tally.lastChanged.get(id) || 0) > tally.firstHeld.get(id)).length,
+      heldThenMoved: heldIds.filter((id) => (tally.lastChanged.get(id) || '') > tally.firstHeld.get(id)).length,
       estDriveMinutesSaved: tally.minutes === null ? null : Math.round(tally.minutes),
     },
     cap: capFrom(runs, nightOfRun),
