@@ -68,7 +68,8 @@ function pct(n) {
 
 function formatRelative(iso) {
   if (!iso) return "—";
-  const diff = Date.now() - new Date(iso).getTime();
+  // A server clock a little ahead of the browser must not print "-2s ago".
+  const diff = Math.max(0, Date.now() - new Date(iso).getTime());
   if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
   if (diff < 3600_000) return `${Math.round(diff / 60_000)}m ago`;
   if (diff < 86400_000) return `${Math.round(diff / 3600_000)}h ago`;
@@ -77,6 +78,9 @@ function formatRelative(iso) {
 
 export default function ToolHealthPage() {
   const [data, setData] = useState(null);
+  // The window the shown snapshot covers (it can differ from `hours` after a
+  // window change whose load failed).
+  const [loadedHours, setLoadedHours] = useState(null);
   const [hours, setHours] = useState(24);
   const [err, setErr] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -91,6 +95,7 @@ export default function ToolHealthPage() {
       .then((d) => {
         if (request !== requestRef.current) return;
         setData(d);
+        setLoadedHours(hours);
         setErr(null);
       })
       .catch((e) => {
@@ -138,6 +143,10 @@ export default function ToolHealthPage() {
       ) : data ? (
         <ToolHealthContent
           data={data}
+          // A failed refresh keeps the last snapshot, marked as not current
+          // (health audit HE-04): its status and totals are not live.
+          stale={Boolean(err)}
+          staleWindow={loadedHours !== hours ? TOOL_HEALTH_WINDOWS.find((w) => w.key === loadedHours)?.label : null}
           adminUser={adminUser}
           expanded={expanded}
           setExpanded={setExpanded}
@@ -147,18 +156,24 @@ export default function ToolHealthPage() {
   );
 }
 
-function ToolHealthContent({ data, adminUser, expanded, setExpanded }) {
+function ToolHealthContent({ data, stale, staleWindow, adminUser, expanded, setExpanded }) {
   const { overallStatus, summary, agents, contexts, pdfRenderer, recentErrors, alerts } =
     data;
 
   return (
-    <div className="space-y-5">
+    <div className={cn("space-y-5", stale && "opacity-60")}>
       <Card className={overallStatus === "critical" ? "border-alert-fg" : undefined}>
         <CardHeader className="flex flex-wrap items-center justify-between gap-3">
           <CardTitle>Overall status</CardTitle>
-          <Badge tone={statusTone(overallStatus)} dot>
-            {statusLabel(overallStatus)}
-          </Badge>
+          {stale ? (
+            <Badge tone="neutral" dot>
+              Last known: {statusLabel(overallStatus)}
+            </Badge>
+          ) : (
+            <Badge tone={statusTone(overallStatus)} dot>
+              {statusLabel(overallStatus)}
+            </Badge>
+          )}
         </CardHeader>
         <CardBody>
           <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
@@ -336,7 +351,9 @@ function ToolHealthContent({ data, adminUser, expanded, setExpanded }) {
       </section>
 
       <p className="pb-5 text-center text-ui-caption text-ink-secondary">
-        Updated {formatRelative(data.generatedAt)} · auto-refreshes every 30s
+        {stale
+          ? `Not current: last successful update ${formatRelative(data.generatedAt)}${staleWindow ? ` (${staleWindow} window)` : ""}`
+          : `Updated ${formatRelative(data.generatedAt)} · auto-refreshes every 30s`}
       </p>
     </div>
   );

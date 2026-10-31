@@ -143,6 +143,26 @@ describe("ToolHealthPage foundation migration", () => {
     expect(errorRow).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("a failed refresh keeps the last snapshot, marked as not current", async () => {
+    mount();
+    expect(await screen.findByText(/auto-refreshes every 30s/)).toBeInTheDocument();
+    fetch.mockImplementation(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+    // useVisiblePageRefresh refreshes on window focus.
+    fireEvent(window, new Event("focus"));
+    expect(await screen.findByText("Failed to load: HTTP 503")).toBeInTheDocument();
+    expect(screen.getByText("Last known: Critical")).toBeInTheDocument();
+    expect(screen.getByText(/^Not current: last successful update \S+ ago$/)).toBeInTheDocument();
+    expect(screen.queryByText(/auto-refreshes every 30s/)).not.toBeInTheDocument();
+  });
+
+  it("a window whose first load fails names the window the snapshot covers", async () => {
+    mount();
+    await screen.findByText(/auto-refreshes every 30s/);
+    fetch.mockImplementation(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+    fireEvent.click(screen.getByRole("button", { name: "1h" }));
+    expect(await screen.findByText(/^Not current: last successful update \S+ ago \(24h window\)$/)).toBeInTheDocument();
+  });
+
   it("keeps the owner-only integrations link hidden for a technician profile", async () => {
     profileRole = "technician";
     mount();
