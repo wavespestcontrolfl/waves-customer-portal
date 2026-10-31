@@ -178,7 +178,7 @@ NEVER: send a generic template, promise pricing, book without availability check
     {
       type: 'custom',
       name: 'queue_for_adam',
-      description: `Queue the lead for Adam's personal review instead of auto-sending. Saves the draft response, sends Adam an SMS alert with the lead details and suggested reply, and sets an SLA timer. Use for high-value, complex, or sensitive leads where Adam should make the final call on the response.`,
+      description: `Queue the lead for Adam's personal review instead of auto-sending. Saves the draft response, alerts Adam in the admin portal with the lead details and suggested reply, and sets an SLA timer. Use for high-value, complex, or sensitive leads where Adam should make the final call on the response.`,
       input_schema: {
         type: 'object',
         properties: {

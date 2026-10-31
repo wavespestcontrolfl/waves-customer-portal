@@ -3,8 +3,13 @@
 // SMS handoff coverage belongs to the separate real canonical-pipeline suite.
 const { randomUUID } = require('node:crypto');
 const mockSend = jest.fn();
+const mockRaise = jest.fn();
 const mockMessage = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: mockSend }));
+jest.mock('../services/admin-alert-compose', () => ({
+  ...jest.requireActual('../services/admin-alert-compose'),
+  raiseAdminAlert: (...args) => mockRaise(...args),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: mockMessage }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
@@ -26,7 +31,6 @@ const SKIP = !process.env.DATABASE_URL;
   const leadId = randomUUID();
   const context = { customerId, leadId, sessionId: randomUUID(), toolUseId: randomUUID() };
   const input = { reason: 'QA review', draft_response: 'Synthetic draft', urgency: 'normal' };
-  const previousPhone = process.env.ADAM_PHONE;
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -43,16 +47,16 @@ const SKIP = !process.env.DATABASE_URL;
       })));
       await trx('leads').insert({ id: leadId, customer_id: customerId, first_name: 'QA', phone: '+19415550100' });
     });
-    process.env.ADAM_PHONE = '+19415550101';
   }, 30000);
 
   beforeEach(async () => {
     mockSend.mockReset();
+    mockRaise.mockReset();
     mockMessage.mockReset().mockResolvedValue({ sent: false, blocked: true, code: 'QA_BLOCKED' });
-    mockSend.mockImplementation(async () => {
-      // The alert must observe committed data from its separate DB connection.
+    mockRaise.mockImplementation(async () => {
+      // The bell must observe committed data from its separate DB connection.
       expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'draft_queued' }).first()).toBeTruthy();
-      return { success: true, sid: 'SM_qa_integrity' };
+      return { id: randomUUID(), deduped: false };
     });
     await db('customer_interactions').whereIn('customer_id', [customerId, foreignCustomerId]).del();
     await db('scheduled_services').where({ customer_id: customerId }).del();
@@ -65,8 +69,6 @@ const SKIP = !process.env.DATABASE_URL;
   });
 
   afterAll(async () => {
-    if (previousPhone === undefined) delete process.env.ADAM_PHONE;
-    else process.env.ADAM_PHONE = previousPhone;
     if (!db) return;
     try {
       await db.transaction(async trx => {
@@ -90,63 +92,59 @@ const SKIP = !process.env.DATABASE_URL;
     expect(results.every(result => result.queued)).toBe(true);
     expect(new Set(results.map(result => result.activityId)).size).toBe(1);
     expect(results.filter(result => result.replayed)).toHaveLength(5);
-    expect(results.find(result => !result.replayed).alertStatus).toBe('sent');
+    expect(results.find(result => !result.replayed).alertStatus).toBe('notified');
     expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'draft_queued' })).toHaveLength(1);
-    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    expect(mockSend).not.toHaveBeenCalled();
   }, 30000);
 
   test('distinct invocations remain distinct under concurrency', async () => {
     const results = await Promise.all([context, { ...context, toolUseId: randomUUID() }, { ...context, sessionId: randomUUID() }]
       .map(assigned => executeLeadTool('queue_for_adam', input, assigned)));
     expect(new Set(results.map(result => result.activityId)).size).toBe(3);
-    expect(results.every(result => result.alertStatus === 'sent')).toBe(true);
+    expect(results.every(result => result.alertStatus === 'notified')).toBe(true);
     expect(await db('lead_activities').where({ lead_id: leadId })).toHaveLength(3);
-    expect(mockSend).toHaveBeenCalledTimes(3);
+    expect(mockRaise).toHaveBeenCalledTimes(3);
   }, 30000);
 
   test('PostgreSQL insert rejection leaves no draft or alert, then retry succeeds', async () => {
     // PostgreSQL text rejects NUL; this exercises an actual failed statement.
     await expect(executeLeadTool('queue_for_adam', { ...input, reason: 'QA\u0000reject' }, context)).rejects.toThrow();
     expect(await db('lead_activities').where({ lead_id: leadId })).toHaveLength(0);
-    expect(mockSend).not.toHaveBeenCalled();
-    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, alertStatus: 'sent' });
-    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockRaise).not.toHaveBeenCalled();
+    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, alertStatus: 'notified' });
+    expect(mockRaise).toHaveBeenCalledTimes(1);
   });
 
   test('alert failure preserves the draft and retry records delivery before closing replay', async () => {
-    mockSend.mockRejectedValueOnce(new Error('QA provider unavailable'));
+    mockRaise.mockRejectedValueOnce(new Error('QA bell unavailable'));
     const first = await executeLeadTool('queue_for_adam', input, context);
     expect(first).toMatchObject({ queued: true, alertStatus: 'failed', failed: true, retryable: true });
-    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, activityId: first.activityId, alertStatus: 'sent' });
-    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'sent' });
+    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, activityId: first.activityId, alertStatus: 'notified' });
+    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'notified' });
     expect(await db('lead_activities').where({ lead_id: leadId })).toHaveLength(1);
-    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(mockRaise).toHaveBeenCalledTimes(2);
   });
 
-  test('an unconfigured owner alert remains retryable on the same committed draft', async () => {
-    const configuredPhone = process.env.ADAM_PHONE;
-    try {
-      delete process.env.ADAM_PHONE;
-      const first = await executeLeadTool('queue_for_adam', input, context);
-      expect(first).toMatchObject({ queued: true, failed: true, retryable: true, alertStatus: 'not_configured' });
-      expect(mockSend).not.toHaveBeenCalled();
-      process.env.ADAM_PHONE = configuredPhone;
-      expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({
-        queued: true, replayed: true, activityId: first.activityId, alertStatus: 'sent',
-      });
-      expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'draft_queued' })).toHaveLength(1);
-      expect(mockSend).toHaveBeenCalledTimes(1);
-    } finally { process.env.ADAM_PHONE = configuredPhone; }
+  test('an unwritten bell remains retryable on the same committed draft', async () => {
+    mockRaise.mockResolvedValueOnce(null);
+    const first = await executeLeadTool('queue_for_adam', input, context);
+    expect(first).toMatchObject({ queued: true, failed: true, retryable: true, alertStatus: 'failed' });
+    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({
+      queued: true, replayed: true, activityId: first.activityId, alertStatus: 'notified',
+    });
+    expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'draft_queued' })).toHaveLength(1);
+    expect(mockRaise).toHaveBeenCalledTimes(2);
   });
 
   test.each(['before_send', 'abandoned_claim'])('a retry recovers a process exit at %s', async crash => {
     const metadata = { sessionId: context.sessionId, toolUseId: context.toolUseId, draftResponse: input.draft_response, reason: input.reason };
     if (crash === 'abandoned_claim') Object.assign(metadata, { alertClaimToken: randomUUID(), alertLeaseUntil: new Date(Date.now() - 1000).toISOString() });
     await db('lead_activities').insert({ lead_id: leadId, activity_type: 'draft_queued', description: 'Synthetic abandoned draft', metadata: JSON.stringify(metadata) });
-    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'sent' });
-    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'notified' });
+    expect(mockRaise).toHaveBeenCalledTimes(1);
     const saved = await db('lead_activities').where({ lead_id: leadId }).first();
-    expect(saved.metadata.alertStatus).toBe('sent');
+    expect(saved.metadata.alertStatus).toBe('notified');
     expect(saved.metadata.alertClaimToken).toBeUndefined();
   });
 
@@ -157,7 +155,7 @@ const SKIP = !process.env.DATABASE_URL;
     await db('leads').where({ id: leadId }).update({ deleted_at: null, customer_id: foreignCustomerId });
     expect(await executeLeadTool('queue_for_adam', input, context)).toHaveProperty('error');
     expect(await db('lead_activities').where({ lead_id: leadId })).toHaveLength(0);
-    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockRaise).not.toHaveBeenCalled();
   });
 
   test.each(['queue_for_adam', 'update_lead_pipeline', 'flag_for_estimate', 'save_lead_response_report']
@@ -182,7 +180,7 @@ const SKIP = !process.env.DATABASE_URL;
       await holder.commit();
       expect(await pending).toHaveProperty('error');
       expect(await db('lead_activities').where({ lead_id: leadId })).toHaveLength(0);
-      expect(mockSend).not.toHaveBeenCalled();
+      expect(mockRaise).not.toHaveBeenCalled();
       expect(mockMessage).not.toHaveBeenCalled();
       expect(await db('lead_agent_responses').where({ lead_id: leadId })).toHaveLength(0);
       expect(await db('estimates').where({ customer_id: customerId, source: 'lead_agent' })).toHaveLength(0);

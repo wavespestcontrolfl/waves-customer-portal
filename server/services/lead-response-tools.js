@@ -84,6 +84,49 @@ function agentVisibleExtractedData(raw) {
   return visible;
 }
 
+// A held draft rings the Leads bell (owner 2026-10-31, "skip + fix"). It used to be a text
+// to ADAM_PHONE, which twilio.js turns into an internal alert that the bell policy drops:
+// every hold from Sep to Oct recorded 'suppressed' and reached no one. The agent's reason
+// and draft are its own long notes (codes, emails, street names), so they ride in `detail`,
+// redacted like every bell body.
+const HELD_DRAFT_WHY = 'The AI wrote a reply but held it for you; its draft and reason are in the full text.';
+const HELD_DRAFT_REPLY_WITHIN = { urgent: '15 minutes', normal: '1 hour', low: '4 hours' };
+
+async function ringHeldDraft(leadId, customer, metadata) {
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  const { fullName, fitAction, redactedWords } = require('./admin-alert-names');
+  const urgency = HELD_DRAFT_REPLY_WITHIN[metadata.urgency] ? metadata.urgency : 'normal';
+  const draft = redactedWords(metadata.draftResponse);
+  return raiseAdminAlert('lead', {
+    area: 'Leads',
+    action: fitAction('Leads', fullName(customer) || 'a new web lead', [(who) => `reply to ${who}`]),
+    why: HELD_DRAFT_WHY,
+    severity: 'needs-you',
+    link: `/admin/leads?lead=${leadId}`,
+    subject: { type: 'lead', id: String(leadId) },
+    doneWhen: 'lead_contacted',
+    who: 'person',
+  }, {
+    bell: true,
+    // One open row per lead: a replayed hold finds it; a hold after it was closed rings again.
+    dedupeKey: `lead-agent-hold:${leadId}`,
+    dedupeOpenOnly: true,
+    detail: [
+      `Why the AI held it: ${redactedWords(metadata.reason) || 'no reason given'}`,
+      draft ? `Its draft reply: "${draft}"` : 'The AI saved no draft.',
+      `The AI marked it ${urgency}: reply within ${HELD_DRAFT_REPLY_WITHIN[urgency]}.`,
+    ].join('\n'),
+    metadata: { leadId, hold: 'lead_agent' },
+  });
+}
+
+// raiseAdminAlert answers a row (a new one, or this lead's standing one), a policy skip
+// ({ id: null, suppressed: true }), or null when nothing was written.
+function heldDraftAlertStatus(result) {
+  if (result?.id) return 'notified';
+  return result?.suppressed ? 'suppressed' : 'failed';
+}
+
 async function executeLeadTool(toolName, input, context) {
   const subject = await resolveLeadSubject(input, context);
   if (subject.error) return subject;
@@ -571,27 +614,10 @@ async function executeLeadTool(toolName, input, context) {
       if (queued.error) return queued;
       if (!queued.alertClaimToken) return { queued: true, activityId: queued.id, replayed: true, alertStatus: queued.alertStatus,
         ...(queued.alertStatus === 'pending' ? { retryable: true, nextAllowedAt: queued.nextAllowedAt } : {}) };
-      const customer = queued.customer;
-      let alertStatus = 'not_configured';
-
-      // SMS Adam with the lead details + suggested reply
+      let alertStatus = 'failed';
       try {
-        const TwilioService = require('./twilio');
-        const slaLabel = { urgent: '15 min', normal: '1 hour', low: '4 hours' }[queued.metadata.urgency || 'normal'];
-        const adamMsg = `📋 Lead needs your reply (${slaLabel} SLA):\n` +
-          `${customer ? customer.first_name + ' ' + customer.last_name : 'Unknown'}\n` +
-          `📞 ${customer?.phone || 'N/A'}\n` +
-          `Reason: ${queued.metadata.reason}\n\n` +
-          `Suggested reply:\n"${(queued.metadata.draftResponse || '').substring(0, 200)}"`;
-
-        if (process.env.ADAM_PHONE) {
-          const alert = await TwilioService.sendSMS(process.env.ADAM_PHONE, adamMsg, { messageType: 'internal_alert' });
-          if (!alert?.success || alert.notificationUndelivered || alert.notificationError) alertStatus = 'failed';
-          else if (alert.notificationRedirected || alert.pushRouted) alertStatus = 'notified';
-          else if (alert.suppressed || alert.gateBlocked) alertStatus = 'suppressed';
-          else alertStatus = alert.sid ? 'sent' : 'failed';
-        }
-      } catch { alertStatus = 'failed'; }
+        alertStatus = heldDraftAlertStatus(await ringHeldDraft(context.leadId, queued.customer, queued.metadata));
+      } catch { /* stays 'failed': the draft is kept and a retry rings again */ }
 
       await db('lead_activities').where({ id: queued.id })
         .whereRaw("metadata->>'alertClaimToken' = ?", [queued.alertClaimToken])
@@ -600,7 +626,7 @@ async function executeLeadTool(toolName, input, context) {
       logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
       return { queued: true, activityId: queued.id, alertStatus, replayed: queued.replayed,
         reason: queued.metadata.reason, urgency: queued.metadata.urgency || 'normal',
-        ...(['failed', 'not_configured'].includes(alertStatus) ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}) };
+        ...(alertStatus === 'failed' ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}) };
     }
 
     // ── Pipeline & follow-up ────────────────────────────────────
