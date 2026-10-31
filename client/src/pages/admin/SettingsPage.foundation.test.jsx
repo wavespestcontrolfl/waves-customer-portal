@@ -311,12 +311,19 @@ describe("Settings audit fixes", () => {
     expect(requestedPaths().filter((p) => p !== "/health" && p !== "/admin/auth/me")).toEqual([]);
   });
 
-  it("a failed profile read counts as non-admin: General, no owner panel", async () => {
-    override({ "/admin/auth/me": () => response({ error: "Profile unavailable" }, 500) });
+  it("a failed profile read hides owner settings, says so, and retries", async () => {
+    let fail = true;
+    override({ "/admin/auth/me": () => (fail ? response({ error: "Profile unavailable" }, 500) : undefined) });
     mount("kpi-targets");
-    expect(await screen.findByText("Company info")).toBeInTheDocument();
+    expect(await screen.findByText("Could not load your account, so owner settings are hidden.")).toBeInTheDocument();
+    expect(screen.getByText("Company info")).toBeInTheDocument();
     await settle();
     expect(requestedPaths().some((p) => p.startsWith("/admin/kpi-targets"))).toBe(false);
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    // The owner's deep link opens once the profile loads.
+    expect(await screen.findByText("KPI targets", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load your account/)).not.toBeInTheDocument();
   });
 
   describe("in a browser outside Eastern time", () => {
@@ -471,6 +478,36 @@ describe("Settings audit fixes", () => {
     expect(requestedPaths().includes("/admin/schedule/blackout-dates/weekly")).toBe(false);
   });
 
+  it("a blocked day stays listed when the reload after it fails", async () => {
+    let reads = 0;
+    override({
+      "/admin/schedule/blackout-dates": (options) => {
+        if (options.method === "POST") {
+          return response({ success: true, blackout: { id: "day-2", date: "2026-12-31", reason: "Office closed" } });
+        }
+        reads += 1;
+        return reads === 1 ? undefined : response({ error: "Schedule read failed" }, 500);
+      },
+    });
+    mount("blackout-days");
+    await screen.findByText("Holiday");
+    fireEvent.change(screen.getByLabelText("Blackout date"), { target: { value: "2026-12-31" } });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Office closed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Block day" }));
+    expect(await screen.findByText("Could not refresh blackout days. Schedule read failed")).toBeInTheDocument();
+    expect(screen.getByText("Office closed")).toBeInTheDocument();
+    expect(screen.getByText("Holiday")).toBeInTheDocument();
+  });
+
+  it("a failed Link Library read shows its error, not \"0 links\"", async () => {
+    override({
+      "/admin/communications/link-library": (options) => (options.method ? undefined : response({ error: "Links read failed" }, 500)),
+    });
+    mount("link-library");
+    expect(await screen.findByText("Links read failed")).toBeInTheDocument();
+    expect(screen.queryByText(/0 links/)).not.toBeInTheDocument();
+  });
+
   it("an Unblock that lands while the list reloads stays unblocked", async () => {
     let stored = [{ id: "day-1", date: "2026-12-25", reason: "Holiday" }];
     let held = null;
@@ -497,7 +534,9 @@ describe("Settings audit fixes", () => {
     fireEvent.change(screen.getByLabelText("Blackout date"), { target: { value: "2026-12-31" } });
     fireEvent.click(screen.getByRole("button", { name: "Block day" }));
     await waitFor(() => expect(held).not.toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: "Unblock" }));
+    // Rows are in date order: the first Unblock is Dec 25 ("Holiday"); the
+    // new Dec 31 row is already listed from the POST reply.
+    fireEvent.click(screen.getAllByRole("button", { name: "Unblock" })[0]);
     expect(await screen.findByText("Office closed")).toBeInTheDocument();
     held.resolve();
     await settle();
