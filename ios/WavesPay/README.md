@@ -174,6 +174,8 @@ Web push cannot run in the app's web view, so staff alerts arrive as iPhone
 notifications (APNs). After sign-in the staff page posts
 `{ type: 'registerPush' }`; the app asks for notification permission once and
 answers with a `wavesadmin:pushtoken` window event (`{ token, environment }`).
+The token is registered even when permission is denied: iOS only hides the
+alerts, so allowing them later in iPhone Settings needs no new sign-up.
 The page registers the token under its own sign-in at
 `POST /api/admin/push/native-subscribe` (`client/src/native/wavesAdminPush.js`);
 the row names this app's bundle and APNs environment (Xcode installs use the

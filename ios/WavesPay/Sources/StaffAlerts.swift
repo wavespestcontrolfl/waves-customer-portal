@@ -26,14 +26,20 @@ final class StaffAlerts {
         didSet { flushPendingPage() }
     }
     private var pendingPage: URL?
+    // False after sign-out, so a permission answer that comes later does not
+    // register the install again.
+    private var signedIn = false
 
-    // iOS asks for permission once and remembers the answer; every later call
-    // just refreshes the token, which also tells the server the app is in use.
+    // iOS asks for permission once and remembers the answer. The token is
+    // registered either way (iOS issues it without permission and only hides
+    // the alerts), so alerts start as soon as the staff member allows them,
+    // even later in iPhone Settings. Every later call refreshes the token.
     func register() {
+        signedIn = true
         Task {
-            let center = UNUserNotificationCenter.current()
-            let granted = (try? await center.requestAuthorization(options: [.alert, .badge, .sound])) ?? false
-            if granted { UIApplication.shared.registerForRemoteNotifications() }
+            _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
+            guard signedIn else { return }
+            UIApplication.shared.registerForRemoteNotifications()
         }
     }
 
@@ -50,6 +56,7 @@ final class StaffAlerts {
     // reach the server to release the token (APNs then answers Unregistered
     // and the server deactivates the row); the next sign-in registers again.
     func signOut() {
+        signedIn = false
         UIApplication.shared.unregisterForRemoteNotifications()
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         setBadge(0)
