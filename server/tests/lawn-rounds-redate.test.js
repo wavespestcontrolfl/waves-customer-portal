@@ -290,7 +290,7 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
   const rows = new Map(visits.map((v) => [v.id, {
     id: v.id, d: v.date, ws: v.ws, we: v.we, dur: v.dur, tech: v.tech, term_id: v.termId || null, is_recurring: true,
     window_start: v.ws ? `${v.ws}:00` : null, window_end: v.we ? `${v.we}:00` : null, technician_id: v.tech, status: 'pending', customer_confirmed: false,
-    auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null,
+    estimated_duration_minutes: v.dur ?? null, auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null,
   }]));
   const state = { root: lawnRoot(parentPattern), terms };
   const live = () => [...rows.values()].sort((a, b) => a.d.localeCompare(b.d));
@@ -323,7 +323,7 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
     prepay: { normalizeCoverageCadence: (v) => v || null, inferCoverageCadence: () => 'quarterly' },
   };
   const termWindows = Object.fromEntries(terms.map((term) => [term.id, { start: '2026-01-01', end: '2027-12-31' }]));
-  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { ws: r.ws, we: r.we, tech: r.tech, termId: r.term_id, prepaid: !!r.term_id })), { terms: termWindows })), { rebooker });
+  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { ws: r.ws, we: r.we, dur: r.dur, tech: r.tech, termId: r.term_id, prepaid: !!r.term_id })), { terms: termWindows })), { rebooker });
   return { conn, deps, rebooker, reminders, log, rows, state, replan, fail };
 }
 
@@ -358,10 +358,10 @@ describe('applySeries', () => {
     expect([id, date, window, reason, initiatedBy]).toEqual(['v2', '2027-01-12', { start: '09:00', end: '10:00' }, 'admin', 'admin']);
     expect(options).toEqual({
       seriesPolicy: 'single', visitPolicy: 'single', suppressTechNotice: true, placeInRoute: true, beforeMove: expect.any(Function),
-      // The row write misses when a confirmation, staff lock or grouping lands after the read.
+      // The row write misses when a confirmation, staff lock, grouping or length edit lands after the read.
       expect: {
         scheduled_date: '2026-12-29', window_start: '09:00:00', window_end: '10:00:00', technician_id: TECH, status: 'pending',
-        customer_confirmed: false, auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null,
+        estimated_duration_minutes: 60, customer_confirmed: false, auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null,
       },
     });
     // The reminder is re-timed with no notification; no other message path exists on these fakes.
@@ -447,6 +447,23 @@ describe('applySeries', () => {
     const plan = await w.replan();
     w.rebooker.previewMoveConflicts.mockImplementation(async (id, date, win) => (date === '2027-02-23' && win.start === '09:00' ? [{ id: 'x' }] : []));
     expect(await applySeries(w.conn, w.deps, plan, w.replan)).toMatchObject({ status: 'skipped', why: 'series changed since the plan' });
+  });
+
+  test('a later visit edited while earlier moves run is not written over: the series stops there', async () => {
+    for (const edit of [{ ws: '13:00', window_start: '13:00:00' }, { we: '11:00', window_end: '11:00:00' }, { dur: 90, estimated_duration_minutes: 90 }, { tech: 'another-tech', technician_id: 'another-tech' }]) {
+      const w = world();
+      const move = w.rebooker.reschedule.getMockImplementation();
+      // The office edits v3 right after v2 moves.
+      w.rebooker.reschedule.mockImplementation(async (id, ...rest) => {
+        const result = await move(id, ...rest);
+        if (id === 'v2') Object.assign(w.rows.get('v3'), edit);
+        return result;
+      });
+      const out = await applySeries(w.conn, w.deps, await w.replan(), w.replan);
+      expect(out).toMatchObject({ status: 'error', why: 'visit v3 changed since the plan' });
+      expect(w.rebooker.reschedule.mock.calls.map((c) => c[0])).toEqual(['v2']);
+      expect(updates(w.log)).toEqual([]);
+    }
   });
 
   test('a series that changed since the plan is skipped with the reason', async () => {

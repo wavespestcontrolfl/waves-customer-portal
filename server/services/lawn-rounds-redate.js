@@ -275,7 +275,7 @@ async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new 
     moves: visits.filter((v) => v.kind === 'move'),
     heldReasons: held,
     held: held[0] || null,
-    signature: JSON.stringify([plan.anchor, visits.map((v) => [v.id, v.from, v.ws, v.tech, v.to, v.toWs || null])]),
+    signature: JSON.stringify([plan.anchor, visits.map((v) => [v.id, v.from, v.ws, v.we, v.dur, v.tech, v.to, v.toWs || null, v.toWe || null])]),
   };
 }
 
@@ -295,11 +295,14 @@ async function planAndReview(conn, series, opts, review) {
 // The stay rules are judged on a plain read, then again inside the move transaction (beforeMove: after the
 // rebooker's date and technician-day locks, before its row write), where a reminder sent meanwhile shows. The
 // `expect` pin covers what the rules read on the row itself (confirmation, staff lock, grouping, date, time,
-// technician, status): a change that commits after the recheck makes the row write miss, and nothing moves.
+// length, technician, status): a change that commits after the recheck makes the row write miss, and nothing moves.
 async function moveVisitToRound(conn, deps, row) {
+  // The visit must still be the planned snapshot (date, time, end, length, technician): a staff edit that lands while
+  // earlier visits of the series move is never written over. `expect` then pins that snapshot on the row write.
   const unchanged = async (dbh) => {
     const v = await readVisit(dbh, row.id);
-    if (!v || v.d !== row.from || stayReason(v, deps.nowMs)) throw new Error(`visit ${row.id} changed since the plan`);
+    if (!v || [v.d, v.ws, v.we, Number(v.dur), v.tech].join('|') !== [row.from, row.ws, row.we, row.dur, row.tech].join('|')
+      || stayReason(v, deps.nowMs)) throw new Error(`visit ${row.id} changed since the plan`);
     return v;
   };
   const v = await unchanged(conn);
@@ -314,6 +317,7 @@ async function moveVisitToRound(conn, deps, row) {
     beforeMove: unchanged,
     expect: {
       scheduled_date: v.d, window_start: v.window_start, window_end: v.window_end, technician_id: v.technician_id, status: v.status,
+      estimated_duration_minutes: v.estimated_duration_minutes ?? null,
       customer_confirmed: v.customer_confirmed ?? null,
       auto_dispatch_locked: v.auto_dispatch_locked ?? null,
       auto_dispatch_excluded: v.auto_dispatch_excluded ?? null,
