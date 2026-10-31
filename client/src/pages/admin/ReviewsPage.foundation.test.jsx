@@ -225,7 +225,7 @@ describe("Reviews workspace foundation", () => {
               name: "Marlow Pemberton",
               services: [],
               evidence: {
-                nameKind: "exact", role: "holder", dates: "fits", firstContactAt: "2025-10-24T04:00:00.000Z",
+                nameKind: "exact", role: "holder", dates: "fits", firstContactAt: "2025-10-24T04:00:00.000Z", contactAfterReview: false,
                 tap: false, recent: true, saidReviewed: false, alreadyLinkedHere: false,
               },
             },
@@ -234,7 +234,7 @@ describe("Reviews workspace foundation", () => {
               name: "Ottilie Pemberton",
               services: [],
               evidence: {
-                nameKind: "near", role: "holder", dates: "unknown", firstContactAt: null,
+                nameKind: "near", role: "holder", dates: "fits", firstContactAt: "2026-05-16T14:00:00.000Z", contactAfterReview: true,
                 tap: false, recent: false, saidReviewed: false, alreadyLinkedHere: false,
               },
             },
@@ -243,7 +243,7 @@ describe("Reviews workspace foundation", () => {
               name: "Gwen Pemberton",
               services: [],
               evidence: {
-                nameKind: "household", role: "holder", dates: "clash", firstContactAt: "2026-05-14T16:00:00.000Z",
+                nameKind: "household", role: "holder", dates: "clash", firstContactAt: "2026-05-14T16:00:00.000Z", contactAfterReview: true,
                 tap: true, recent: false, saidReviewed: true, alreadyLinkedHere: true,
               },
             },
@@ -286,7 +286,8 @@ describe("Reviews workspace foundation", () => {
     // A card without evidence (an older server) shows no evidence line.
     expect(screen.getAllByTestId("link-evidence").map((node) => node.textContent)).toEqual([
       "Same name | First contact Oct 24, 2025 | Visit or review text in the 14 days before",
-      "Close name, not the same | First contact unknown",
+      // Inside the matcher's 3-day allowance ("fits") the panel still says the contact came later.
+      "Close name, not the same | First contact May 16, 2026, after this review",
       'Same surname, different first name | First contact May 14, 2026, after this review | Tapped the review link within 3 hours | Texted "I left a review" | Already linked to another review on this profile',
     ]);
   });

@@ -1038,12 +1038,13 @@ describe('review incentives', () => {
       role: 'holder',
       dates: 'fits',
       firstContactAt: '2025-02-01T05:00:00.000Z',
+      contactAfterReview: false,
       tap: false,
       recent: true,
       saidReviewed: false,
       alreadyLinkedHere: true,
     });
-    expect(byId['customer-late']).toMatchObject({ nameKind: 'household', dates: 'clash', firstContactAt: '2026-10-05T14:00:00.000Z' });
+    expect(byId['customer-late']).toMatchObject({ nameKind: 'household', dates: 'clash', firstContactAt: '2026-10-05T14:00:00.000Z', contactAfterReview: true });
   });
 
   test('candidate search still answers when the evidence read fails', async () => {

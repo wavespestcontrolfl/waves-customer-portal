@@ -941,11 +941,14 @@ async function attachLinkEvidence(review, cards, conn) {
       if (!candidate) continue;
       const linkedProfiles = linked.filter((r) => String(r.customer_id) === String(card.id)).map((r) => r.location_id);
       const seen = describeCandidate(subject, { ...candidate, linkedProfiles });
+      const reviewedAt = review.review_created_at ? new Date(review.review_created_at).getTime() : NaN;
       card.evidence = seen && {
         nameKind: seen.nameKind,
         role: seen.role,
         dates: seen.dates,
         firstContactAt: seen.firstContactAt ? seen.firstContactAt.toISOString() : null,
+        // Plain chronology for the person matching: true even inside the matcher's 3-day allowance.
+        contactAfterReview: Boolean(seen.firstContactAt && Number.isFinite(reviewedAt) && seen.firstContactAt.getTime() > reviewedAt),
         tap: seen.activity.tap,
         recent: seen.activity.recent,
         saidReviewed: seen.activity.saidReviewed,

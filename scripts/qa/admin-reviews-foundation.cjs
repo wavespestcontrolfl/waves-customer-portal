@@ -206,11 +206,11 @@ async function main() {
             candidates: [
               {
                 id: "customer-17", name: "Taylor Example", city: "Sarasota", phone: "+19415550117", services: [],
-                evidence: { nameKind: "near", role: "holder", dates: "fits", firstContactAt: "2025-06-12T04:00:00.000Z", tap: true, recent: true, saidReviewed: true, alreadyLinkedHere: false },
+                evidence: { nameKind: "near", role: "holder", dates: "fits", firstContactAt: "2025-06-12T04:00:00.000Z", contactAfterReview: false, tap: true, recent: true, saidReviewed: true, alreadyLinkedHere: false },
               },
               {
                 id: "customer-18", name: "Jordan Example", city: "Sarasota", services: [],
-                evidence: { nameKind: "household", role: "holder", dates: "clash", firstContactAt: "2026-10-05T14:00:00.000Z", tap: false, recent: false, saidReviewed: false, alreadyLinkedHere: true },
+                evidence: { nameKind: "household", role: "holder", dates: "clash", firstContactAt: "2026-10-05T14:00:00.000Z", contactAfterReview: true, tap: false, recent: false, saidReviewed: false, alreadyLinkedHere: true },
               },
             ],
             likelyReviewers: [],

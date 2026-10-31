@@ -858,8 +858,7 @@ function linkEvidenceFacts(evidence) {
       year: "numeric",
       timeZone: "America/New_York",
     });
-    const after = evidence.dates === "clash" || evidence.dates === "clash_early";
-    facts.push(`First contact ${firstContact}${after ? ", after this review" : ""}`);
+    facts.push(`First contact ${firstContact}${evidence.contactAfterReview ? ", after this review" : ""}`);
   }
   if (evidence.tap) facts.push("Tapped the review link within 3 hours");
   if (evidence.recent) facts.push("Visit or review text in the 14 days before");
