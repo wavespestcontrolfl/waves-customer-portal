@@ -1324,6 +1324,16 @@ describe('a text-only bar send (round 13)', () => {
     expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
   });
 
+  test('an email the provider may have taken keeps the claim for review: never handed back, never retried', async () => {
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: false, error: 'socket hang up', deliveryOutcome: 'uncertain' });
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+      channels: ['email'], refusalOnly: true, adoptsQueuedInvoiceSend: false, expectedVersion: { emailDigest: 'digest-1' },
+    });
+    expect(result).toMatchObject({ ok: false, email: { ok: false, deliveryOutcome: 'uncertain' } });
+    expect(invoices.state()).toMatchObject({ status: 'sending' });
+    expect(invoices.state().send_claim_token).toBeTruthy();
+  });
+
   test('an email that fails is handed back, never rescued by a text; the page send passes no email pins', async () => {
     sendInvoiceEmail.mockResolvedValueOnce({ ok: false, code: 'email_content_changed', deliveryOutcome: 'not_sent' });
     const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {

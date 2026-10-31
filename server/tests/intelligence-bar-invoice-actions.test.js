@@ -1050,6 +1050,12 @@ describe('email card (GATE_IB_INVOICE_EMAIL, gap #20): one invoice email with at
     await expect(run()).resolves.toMatchObject({ failed: true, preview_changed: true, email: { status: 'not_sent' } });
   });
 
+  test('an email the provider may have taken is reported unknown, never not sent', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 400, json: { ok: false, sms: { ok: false, skipped: true }, email: { ok: false, deliveryOutcome: 'uncertain', error: 'socket hang up' } } });
+    const { run } = await confirmWith('send_invoice', emailInput(), '_verified_invoice_send_version');
+    await expect(run()).resolves.toMatchObject({ outcome_unknown: true, email: { status: 'unknown' } });
+  });
+
   test('the claim\'s live check judges the delivery choice for an email', async () => {
     Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, email: { ok: true } } });
     const { run } = await confirmWith('send_invoice', emailInput(), '_verified_invoice_send_version');

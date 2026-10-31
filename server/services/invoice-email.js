@@ -757,10 +757,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         return { ok: false, code: 'email_content_changed', deliveryOutcome: 'not_sent', recipient: recipientPayload,
           error: 'The invoice email changed after the card was shown; it was not sent' };
       }
-      // A bar send never falls back to SMTP: the card showed the template's email.
+      // A bar send never falls back to SMTP: the card showed the template's email. Its failure says whether the provider may
+      // have taken it (a timeout after the handoff began is 'uncertain'), so the send holds the claim for review and the bar
+      // reports it as unknown instead of inviting a second, duplicate send.
       if (barApproved || !canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);
-        return { ok: false, error: err.message, recipient: recipientPayload };
+        return { ok: false, error: err.message, recipient: recipientPayload,
+          ...(barApproved ? { deliveryOutcome: EmailTemplateLibrary.thrownSendDeliveryOutcome(err) } : {}) };
       }
       logger.warn(`[invoice-email] Template unavailable for ${invoice.invoice_number}; falling back to SMTP: ${err.message}`);
     }

@@ -19,8 +19,12 @@ jest.mock('../services/sendgrid-mail', () => ({
   newsletterGroupId: () => null,
   serviceGroupId: () => null,
   sendOne: jest.fn(),
+  isDefiniteRejection: jest.requireActual('../services/sendgrid-mail').isDefiniteRejection,
 }));
-jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(),
+  thrownSendDeliveryOutcome: jest.requireActual('../services/email-template-library').thrownSendDeliveryOutcome,
+}));
 jest.mock('../services/pdf/invoice-pdf', () => ({
   buildInvoicePDFBuffer: jest.fn(async () => Buffer.from('pdf-bytes')),
   buildReceiptPDFBuffer: jest.fn(),
@@ -157,8 +161,18 @@ describe('the bar send (expectedEmailDigest)', () => {
 
     mockDb(invoice());
     EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }));
-    await expect(sendInvoiceEmail('inv-1', barOptions())).resolves.toMatchObject({ ok: false, error: 'template not found' });
+    await expect(sendInvoiceEmail('inv-1', barOptions())).resolves.toMatchObject({ ok: false, error: 'template not found', deliveryOutcome: 'not_sent' });
     expect(require('../services/sendgrid-mail').sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a provider timeout after the handoff began is uncertain, never a plain failure; a definite rejection is not sent', async () => {
+    mockDb(invoice());
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('socket hang up'), { providerHandoffStarted: true }));
+    await expect(sendInvoiceEmail('inv-1', barOptions())).resolves.toMatchObject({ ok: false, deliveryOutcome: 'uncertain' });
+
+    mockDb(invoice());
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('Bad Request'), { providerHandoffStarted: true, status: 400 }));
+    await expect(sendInvoiceEmail('inv-1', barOptions())).resolves.toMatchObject({ ok: false, deliveryOutcome: 'not_sent' });
   });
 
   test('the address is read again at the handoff under the customer-comms lock: changed while preparing, or a busy lock, sends nothing', async () => {
