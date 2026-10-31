@@ -47,7 +47,7 @@ const EVENTS = {
   },
   probably_ours: {
     action: [(n) => `check Mercury for ${n}'s pay`, (n) => `check ${n}'s pay`],
-    why: (p) => `Mercury has a ${money(p.amountCents)} request to this person that is probably ours; check it.`,
+    why: (p) => `A ${money(p.amountCents)} request to this person in Mercury is probably ours; copy its id there and link it.`,
     doneWhen: 'payment_settled',
   },
   account_changed: {

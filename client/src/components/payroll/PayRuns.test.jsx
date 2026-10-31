@@ -485,6 +485,24 @@ describe('Mercury paychecks', () => {
     expect(screen.queryByText(/Approve it in the Mercury app/)).toBeNull();
   });
 
+  it('an unknown outcome can be linked to the Mercury request by its id', async () => {
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ id: 'pay-1', state: 'unknown', canSendAgain: 'confirm' }) }]], info({ canSend: false }));
+    fireEvent.click(view.getByRole('button', { name: 'Link the Mercury request for Sample Alpha' }));
+    const form = within(screen.getByRole('form', { name: 'Link request for Sample Alpha' }));
+    const save = form.getByRole('button', { name: 'Link request' });
+    expect(save).toBeDisabled();
+    fireEvent.change(form.getByLabelText('Mercury request id for Sample Alpha'), { target: { value: 'req-123' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0]).toMatchObject({ path: '/admin/payroll/payments/pay-1/link-request', method: 'POST', body: { requestId: 'req-123' } });
+    await screen.findByText('Linked the Mercury request for Sample Alpha.');
+  });
+
+  it('offers the link only for an unknown outcome', async () => {
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ id: 'pay-1', state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));
+    expect(view.queryByRole('button', { name: /Link the Mercury request/ })).toBeNull();
+  });
+
   it('shows the server message when an action is refused', async () => {
     writeReply = () => reply({ error: 'Confirm that nothing is waiting in Mercury first.' }, false, 409);
     const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));

@@ -116,6 +116,7 @@ function createClient({ fetchImpl = globalThis.fetch, env = process.env, timeout
     status: String(r.status || ''),
     amountCents: CENTS(r.amount),
     recipientId: r.recipientId == null ? null : String(r.recipientId),
+    accountId: r.accountId == null ? null : String(r.accountId),
     createdAt: r.createdAt || null,
     memo: typeof r.memo === 'string' ? r.memo : null,
   });

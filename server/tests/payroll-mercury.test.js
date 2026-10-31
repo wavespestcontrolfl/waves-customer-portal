@@ -54,6 +54,28 @@ describe('payment states', () => {
   });
 });
 
+describe('linking a Mercury request to an unknown payment', () => {
+  const payment = { recipient_id: 'rec-1', account_id: 'acct-1', amount_cents: '81240', created_at: '2026-11-02T14:00:00Z' };
+  const request = { recipientId: 'rec-1', accountId: 'acct-1', amountCents: 81240, createdAt: '2026-11-02T14:00:30Z', status: 'pendingApproval' };
+
+  test('a request of this attempt links, whatever its state', () => {
+    for (const status of ['pendingApproval', 'approved', 'rejected', 'cancelled']) expect(mercury.linkMismatch(payment, { ...request, status })).toBeNull();
+    // Up to 10 minutes before the attempt is allowed (clock slack).
+    expect(mercury.linkMismatch(payment, { ...request, createdAt: '2026-11-02T13:51:00Z' })).toBeNull();
+  });
+
+  test.each([
+    ['recipient', { recipientId: 'rec-2' }, /different recipient/],
+    ['account', { accountId: 'acct-2' }, /different Mercury account/],
+    ['amount (one cent)', { amountCents: 81241 }, /different amount/],
+    ['too early', { createdAt: '2026-11-02T13:49:00Z' }, /before this payment was tried/],
+    ['no date', { createdAt: null }, /before this payment was tried/],
+    ['a state it cannot link', { status: 'somethingNew' }, /state this page cannot link/],
+  ])('refuses a request with the wrong %s, in plain words', (_name, patch, words) => {
+    expect(mercury.linkMismatch(payment, { ...request, ...patch })).toMatch(words);
+  });
+});
+
 describe('bells follow the admin notification rules', () => {
   const payment = { id: '33333333-3333-4333-8333-333333333333', check_id: 'c1', amountCents: 123456, postedOn: '2026-12-01' };
   const names = ['Sample Employee', 'Alexandria Montgomery-Featherstonehaugh', 'Al'];
@@ -225,6 +247,7 @@ describe('the routes answer 404 until their gate is on, and make no Mercury call
     ['PUT', `/technicians/${ID}/mercury-recipient`, { recipientId: null }, 'status'],
     ['GET', `/runs/${ID}/send-preview`, undefined, 'status'],
     ['POST', `/checks/${ID}/paper`, { checkNumber: '1001' }, 'status'],
+    ['POST', `/payments/${ID}/link-request`, { requestId: 'req-1' }, 'status'],
     ['POST', `/runs/${ID}/send`, {}, 'pay'],
     ['POST', `/checks/${ID}/send-again`, {}, 'pay'],
   ];

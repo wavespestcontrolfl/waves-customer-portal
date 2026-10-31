@@ -548,6 +548,117 @@ postgres('payroll Mercury paychecks', () => {
     });
   });
 
+  describe('linking a Mercury request to an unknown payment', () => {
+    const link = (id, requestId, client) => mercury.linkRequest(id, { requestId }, ADMIN_ID, { client });
+    const unknownRow = async () => {
+      const { run, check } = await bankRun();
+      const client = fakeClient();
+      client.requestSendMoney.mockRejectedValueOnce(new MercuryError('unknown'));
+      await sendRun(run.id, client);
+      const row = (await payments(check('Sample Alpha').id))[0];
+      const request = (patch = {}) => ({
+        requestId: 'req-mine', status: 'pendingApproval', recipientId: row.recipient_id, accountId: row.account_id,
+        amountCents: Number(row.amount_cents), createdAt: new Date(new Date(row.created_at).getTime() + 60000).toISOString(), ...patch,
+      });
+      return { row, check: check('Sample Alpha'), request, run };
+    };
+
+    it.each([
+      ['pendingApproval', 'requested'], ['approved', 'approved'], ['rejected', 'rejected'], ['cancelled', 'cancelled'],
+    ])('a matching %s request is linked: state %s, the id saved, one audit event with ids only', async (status, state) => {
+      const { row, request } = await unknownRow();
+      const client = fakeClient();
+      client.getRequest.mockResolvedValue(request({ status }));
+      expect(await link(row.id, ' req-mine ', client)).toEqual({ paymentId: row.id, requestId: 'req-mine', state });
+      const after = await trx('payroll_payments').where({ id: row.id }).first();
+      expect(after).toMatchObject({ state, mercury_request_id: 'req-mine', error: null });
+      if (['rejected', 'cancelled'].includes(state)) expect(after.resolved_at).not.toBeNull();
+      const audits = await trx('audit_log').where({ action: 'payroll.mercury_request_linked', resource_id: row.id });
+      expect(audits).toHaveLength(1);
+      expect(audits[0].metadata).toEqual({ payment_id: row.id, request_id: 'req-mine' });
+      // Linking moves no money: it never asks Mercury for a payment.
+      expect(client.requestSendMoney).not.toHaveBeenCalled();
+    });
+
+    it('then the poller carries on from Mercury', async () => {
+      const { row, request } = await unknownRow();
+      const client = fakeClient();
+      client.getRequest.mockResolvedValue(request());
+      await link(row.id, 'req-mine', client);
+      client.getRequest.mockResolvedValue({ status: 'approved' });
+      await poll(client, new Date('2026-09-22T12:00:00Z'));
+      expect((await trx('payroll_payments').where({ id: row.id }).first()).state).toBe('approved');
+    });
+
+    it.each([
+      ['recipient', { recipientId: 'someone-else' }, /different recipient/],
+      ['account', { accountId: 'another-account' }, /different Mercury account/],
+      ['amount', { amountCents: 1 }, /different amount/],
+      ['time (made long before the attempt)', { createdAt: '2020-01-01T00:00:00Z' }, /before this payment was tried/],
+    ])('a request with the wrong %s is a 400 and nothing changes', async (_name, patch, words) => {
+      const { row, request } = await unknownRow();
+      const client = fakeClient();
+      client.getRequest.mockResolvedValue(request(patch));
+      await expect(link(row.id, 'req-mine', client)).rejects.toMatchObject({ status: 400, message: expect.stringMatching(words) });
+      expect(await trx('payroll_payments').where({ id: row.id }).first()).toMatchObject({ state: 'unknown', mercury_request_id: null });
+      expect(await trx('audit_log').where({ action: 'payroll.mercury_request_linked' })).toHaveLength(0);
+    });
+
+    it('a request already linked to another payment is refused, before Mercury is asked', async () => {
+      const { row, request } = await unknownRow();
+      const other = await bankTech('Sample Other');
+      await approvedWeek(other, W2);
+      const run2 = await finalizedRun(W2);
+      await sendRun(run2.id, fakeClient({ requestSendMoney: jest.fn(async () => ({ requestId: 'req-taken', status: 'pendingApproval' })) }));
+      const client = fakeClient();
+      client.getRequest.mockResolvedValue(request());
+      await expect(link(row.id, 'req-taken', client)).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/already linked/) });
+      expect(client.getRequest).not.toHaveBeenCalled();
+      expect((await trx('payroll_payments').where({ id: row.id }).first()).state).toBe('unknown');
+    });
+
+    it('a 404 from Mercury is a 400; an outage is a 502; a bad id is a 400 with no read', async () => {
+      const { row } = await unknownRow();
+      const client = fakeClient();
+      client.getRequest.mockRejectedValue(new MercuryError('not_found', { status: 404 }));
+      await expect(link(row.id, 'nope', client)).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/no request with that id/) });
+      client.getRequest.mockRejectedValue(new MercuryError('unknown'));
+      await expect(link(row.id, 'req-1', client)).rejects.toMatchObject({ status: 502 });
+      client.getRequest.mockClear();
+      await expect(link(row.id, 'has spaces', client)).rejects.toMatchObject({ status: 400 });
+      await expect(mercury.linkRequest(row.id, {}, ADMIN_ID, { client })).rejects.toMatchObject({ status: 400 });
+      expect(client.getRequest).not.toHaveBeenCalled();
+      expect((await trx('payroll_payments').where({ id: row.id }).first()).state).toBe('unknown');
+    });
+
+    it.each(['queued', 'requested', 'approved', 'sent', 'failed', 'rejected', 'cancelled', 'returned'])('a %s payment is refused', async (state) => {
+      const { row, request } = await unknownRow();
+      await setState(row.id, { state });
+      const client = fakeClient();
+      client.getRequest.mockResolvedValue(request());
+      await expect(link(row.id, 'req-mine', client)).rejects.toMatchObject({ status: 409 });
+      expect(client.getRequest).not.toHaveBeenCalled();
+    });
+
+    it('a payment that does not exist is 404; the status gate off is 404 and reads nothing', async () => {
+      const client = fakeClient();
+      await expect(link(randomUUID(), 'req-1', client)).rejects.toMatchObject({ status: 404 });
+      const { row } = await unknownRow();
+      delete process.env.GATE_PAYROLL_MERCURY_STATUS;
+      await expect(link(row.id, 'req-1', client)).rejects.toMatchObject({ status: 404 });
+      expect(client.getRequest).not.toHaveBeenCalled();
+    });
+
+    it('a linked payment can be settled afterwards: a rejected one allows Send again, and a void goes through', async () => {
+      const { row, request, run, check } = await unknownRow();
+      const client = fakeClient();
+      client.getRequest.mockResolvedValue(request({ status: 'rejected' }));
+      await link(row.id, 'req-mine', client);
+      expect((await mercury.sendAgain(check.id, {}, ADMIN_ID, { client: fakeClient() })).outcome).toBe('requested');
+      expect(run.id).toBeTruthy();
+    });
+  });
+
   describe('paid by paper check instead', () => {
     const paper = (checkId, number = '1001') => mercury.recordPaper(checkId, { checkNumber: number }, ADMIN_ID);
 

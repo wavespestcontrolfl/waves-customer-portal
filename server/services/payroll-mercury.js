@@ -433,6 +433,65 @@ async function sendAgain(checkId, input, actor, { client = createClient(), conn 
   return { checkId, paymentId: queued.id, attempt: Number(queued.attempt), outcome: outcome.state, ...(outcome.error ? { message: outcome.error } : {}) };
 }
 
+// ---- Link a Mercury request to an unknown payment
+
+const LINK_EARLY_SLACK_MS = 10 * 60 * 1000;
+const LINK_STATES = { pendingApproval: 'requested', approved: 'approved', rejected: 'rejected', cancelled: 'cancelled' };
+const linkSchema = Joi.object({
+  requestId: Joi.string().trim().pattern(/^[A-Za-z0-9_-]{1,64}$/).required()
+    .messages({ 'string.pattern.base': 'The Mercury request id looks wrong. Copy it again from Mercury.', 'any.required': 'Paste the Mercury request id' }),
+});
+
+// Why a Mercury request is not this attempt's, in plain words, or null when it is.
+function linkMismatch(payment, request) {
+  if (request.recipientId !== payment.recipient_id) return 'That request is to a different recipient.';
+  if (request.accountId !== payment.account_id) return 'That request is from a different Mercury account.';
+  if (request.amountCents !== Number(payment.amount_cents)) return 'That request is for a different amount.';
+  const made = request.createdAt ? new Date(request.createdAt).getTime() : NaN;
+  if (!Number.isFinite(made) || made < new Date(payment.created_at).getTime() - LINK_EARLY_SLACK_MS) return 'That request was made before this payment was tried.';
+  if (!LINK_STATES[request.status]) return 'Mercury shows that request in a state this page cannot link.';
+  return null;
+}
+
+/**
+ * Resolves an `unknown` payment by naming the Mercury request that is its own (for example one with no memo, which the
+ * poller cannot tell from a twin). Moves no money and sends nothing: it reads the request, checks it is this attempt's
+ * (same recipient, account and exact amount, made after the attempt), saves the request id and takes Mercury's state.
+ * Audit carries the payment id and request id only.
+ */
+async function linkRequest(paymentId, input, actor, { client = createClient(), conn = db } = {}) {
+  requireUuid(paymentId, 'Payment');
+  if (!mercuryStatusOn()) throw new PayrollError(404, 'Not found.');
+  const v = validate(linkSchema, input);
+  requireReady(client, { pay: false });
+  const actorId = actorOf(actor);
+  const result = await conn.transaction(async (trx) => {
+    await lockPayrollMutations(trx);
+    const payment = await trx('payroll_payments').where({ id: paymentId }).forUpdate().first();
+    if (!payment) throw new PayrollError(404, 'Payment not found.');
+    if (payment.state !== 'unknown') throw new PayrollError(409, 'Only a payment with an unknown outcome can be linked to a request.');
+    const taken = await trx('payroll_payments').where({ mercury_request_id: v.requestId }).whereNot({ id: paymentId }).first('id');
+    if (taken) throw new PayrollError(400, 'That request is already linked to another payment.');
+    let request;
+    try { request = await client.getRequest(v.requestId); } catch (err) {
+      if (err instanceof MercuryError && err.kind === 'not_found') throw new PayrollError(400, 'Mercury has no request with that id.');
+      throw await readFailure(err);
+    }
+    const mismatch = linkMismatch(payment, request);
+    if (mismatch) throw new PayrollError(400, mismatch);
+    const state = LINK_STATES[request.status];
+    const closed = state === 'rejected' || state === 'cancelled';
+    await trx('payroll_payments').where({ id: paymentId, state: 'unknown' }).update({
+      state, mercury_request_id: v.requestId, error: null, updated_at: trx.fn.now(),
+      ...(closed ? { resolved_at: trx.fn.now(), resolution: `Linked to a Mercury request that is ${state}` } : {}),
+    });
+    await audit(trx, actorId, 'payroll.mercury_request_linked', 'payroll_payments', paymentId, { payment_id: paymentId, request_id: v.requestId });
+    return { paymentId, requestId: v.requestId, state };
+  });
+  await alerts.closePaymentBells(paymentId, 'The Mercury request was linked');
+  return result;
+}
+
 // ---- Paid by paper check instead
 
 const paperSchema = Joi.object({
@@ -527,5 +586,5 @@ module.exports = {
   OPEN_STATES, BLOCKING_STATES, RETRY_STATES, KEY_STALE_DAYS,
   mercuryStatusOn, mercuryPayOn, approveBy, dayLabel, canSendAgainOf, failureText,
   viewForChecks, latestPayments, planSend, dispatch,
-  sendRun, sendPreview, sendAgain, recordPaper, assertNoOpenPayments, setMercuryRecipient,
+  sendRun, sendPreview, sendAgain, linkRequest, linkMismatch, recordPaper, assertNoOpenPayments, setMercuryRecipient,
 };

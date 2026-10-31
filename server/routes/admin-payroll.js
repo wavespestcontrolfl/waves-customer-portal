@@ -76,6 +76,8 @@
  *                                    Answers { results: [{ checkId, name, outcome, reason?, message? }], run }.
  * POST /checks/:id/send-again        (pay gate) { confirmNothingWaiting? } a new attempt after failed, rejected,
  *                                    cancelled or returned, or after unknown when the owner confirms.
+ * POST /payments/:id/link-request   (status gate, moves no money) { requestId } names the Mercury request that belongs
+ *                                    to a payment whose outcome is unknown; refused unless it matches the attempt.
  * POST /checks/:id/paper             (status gate) { checkNumber } paid by paper check instead.
  *
  * Admin only. Off answers 404 { enabled: false } on every route but /status,
@@ -254,6 +256,12 @@ router.post('/checks/:id/send-again', mercuryPayOnly, async (req, res) => {
   try {
     res.json({ result: await payrollMercury.sendAgain(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'send paycheck to Mercury again', err); }
+});
+
+router.post('/payments/:id/link-request', mercuryStatusOnly, async (req, res) => {
+  try {
+    res.json({ result: await payrollMercury.linkRequest(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'link Mercury request', err); }
 });
 
 router.post('/checks/:id/paper', mercuryStatusOnly, async (req, res) => {

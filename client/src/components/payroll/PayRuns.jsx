@@ -201,6 +201,7 @@ function MercuryCell({ call, check, onSaved }) {
   const payment = check.payment;
   const [mode, setMode] = useState(null);
   const [number, setNumber] = useState('');
+  const [requestId, setRequestId] = useState('');
   const [nothingWaiting, setNothingWaiting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -230,6 +231,7 @@ function MercuryCell({ call, check, onSaved }) {
     </p>}
     {mode === null && <div className="flex flex-wrap gap-2">
       {payment.canSendAgain && <Button variant="secondary" disabled={busy} onClick={() => setMode('again')} aria-label={`Send again for ${check.name}`}>Send again</Button>}
+      {payment.state === 'unknown' && <Button variant="secondary" disabled={busy} onClick={() => setMode('link')} aria-label={`Link the Mercury request for ${check.name}`}>Link the Mercury request</Button>}
       {payment.canPaper && <Button variant="secondary" disabled={busy} onClick={() => setMode('paper')} aria-label={`Paid by paper check instead for ${check.name}`}>Paid by paper check instead</Button>}
     </div>}
     {mode === 'again' && <div role="group" aria-label={`Confirm send again for ${check.name}`} className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
@@ -246,6 +248,17 @@ function MercuryCell({ call, check, onSaved }) {
         <Button variant="secondary" disabled={busy} onClick={() => setMode(null)}>Cancel</Button>
       </div>
     </div>}
+    {mode === 'link' && <form
+      aria-label={`Link request for ${check.name}`} className="grid gap-2"
+      onSubmit={event => { event.preventDefault(); run(`/payments/${payment.id}/link-request`, { requestId }, `Linked the Mercury request for ${check.name}.`); }}
+    >
+      <p className="m-0 text-ui-caption text-ink-secondary">Find the request in Mercury (Send money, approval requests), copy its id and paste it here. Nothing is sent.</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Input aria-label={`Mercury request id for ${check.name}`} className="w-72" maxLength={64} autoComplete="off" value={requestId} onChange={event => setRequestId(event.target.value)} />
+        <Button type="submit" disabled={busy || !requestId.trim()}>Link request</Button>
+        <Button type="button" variant="secondary" disabled={busy} onClick={() => setMode(null)}>Cancel</Button>
+      </div>
+    </form>}
     {mode === 'paper' && <form
       aria-label={`Paper check for ${check.name}`} className="flex flex-wrap items-center gap-2"
       onSubmit={event => { event.preventDefault(); run(`/checks/${check.id}/paper`, { checkNumber: number }, `Recorded a paper check for ${check.name}.`); }}
