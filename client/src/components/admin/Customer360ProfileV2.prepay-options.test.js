@@ -83,3 +83,36 @@ describe('inferAnnualPrepaySuggestedAmount cadence match', () => {
     expect(suggest({}, 'Pest Control - Every 3 Months', [{ serviceType: 'Pest Control', seriesTotal: 320 }])).toBe(320);
   });
 });
+
+// Legacy terms carry only planLabel, which ends in the billing suffix "Annual
+// Prepay"; that suffix is not a cadence (codex P1 on the A3 fix).
+describe('Annual Prepay suffix is not a cadence', () => {
+  const legacyTerm = (planLabel, prepayAmount) => ({ status: 'active', planLabel, prepayAmount });
+  const suggest = (term, label) => inferAnnualPrepaySuggestedAmount(
+    { annualPrepayTerms: [term] }, label, 'quarterly', null, [],
+  );
+
+  it('a planLabel-only term still supplies its amount to the quarterly default', () => {
+    expect(suggest(legacyTerm('Pest Control Annual Prepay', 480), 'Quarterly Pest Control')).toBe(480);
+  });
+
+  it('a planLabel-only active term also supplies its amount when it is the activeTerm', () => {
+    const term = legacyTerm('Pest Control Annual Prepay', 480);
+    expect(inferAnnualPrepaySuggestedAmount({}, 'Quarterly Pest Control', 'quarterly', term, [])).toBe(480);
+  });
+
+  it('keeps the cadence named before the suffix', () => {
+    const term = legacyTerm('Lawn Care - Every 3 Months Annual Prepay', 400);
+    expect(suggest(term, 'Lawn Care - Every 3 Months')).toBe(400);
+    expect(suggest(term, 'Lawn Care - Every 2 Months')).toBe(0);
+  });
+
+  it('the dropdown dedupe reads the stripped cadence for labels that carry the suffix', () => {
+    const options = deriveAnnualPrepayServiceOptions({}, null, [], [
+      { coverageServiceType: 'Lawn Care - Every 2 Months Annual Prepay' },
+      { coverageServiceType: 'Lawn Care - Every 3 Months Annual Prepay' },
+      { coverageServiceType: 'Lawn Care Annual Prepay' },
+    ]);
+    expect(options).toHaveLength(2);
+  });
+});

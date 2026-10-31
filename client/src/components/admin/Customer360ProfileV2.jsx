@@ -440,6 +440,14 @@ function annualPrepayLabelsMatch(left, right) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+// The cadence a label names, read WITHOUT the billing suffix: a legacy term's
+// planLabel "Pest Control Annual Prepay" names no cadence (the "Annual" is the
+// product), but the raw text would infer annual. Every cadence comparison for
+// dropdown dedupe and amount lookup reads labels through here.
+function annualPrepayLabelServiceCadence(label) {
+  return inferAnnualPrepayCadenceFromLabel(String(label || "").replace(/\s+Annual Prepay$/i, ""));
+}
+
 // Amount lookup match: the same service label match, plus cadence. When the
 // selected label names a cadence, a candidate whose own label names a different
 // one must not supply the amount (two plans of one service, different cadences,
@@ -447,8 +455,8 @@ function annualPrepayLabelsMatch(left, right) {
 // matches, so the single-plan case is unchanged (sweep #3960 A3, codex P1).
 function annualPrepayAmountLabelsMatch(candidateLabel, serviceType) {
   if (!annualPrepayLabelsMatch(candidateLabel, serviceType)) return false;
-  const wanted = inferAnnualPrepayCadenceFromLabel(serviceType);
-  const candidate = inferAnnualPrepayCadenceFromLabel(candidateLabel);
+  const wanted = annualPrepayLabelServiceCadence(serviceType);
+  const candidate = annualPrepayLabelServiceCadence(candidateLabel);
   return !wanted || !candidate || wanted === candidate;
 }
 
@@ -506,7 +514,7 @@ export function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, pr
     const text = String(label || "").trim();
     if (!text) return;
     const key = normalizeAnnualPrepayLabelKey(text);
-    const cadence = inferAnnualPrepayCadenceFromLabel(text);
+    const cadence = annualPrepayLabelServiceCadence(text);
     if (!key || annualPrepayOptionIsDuplicate(seen, key, cadence)) return;
     seen.push({ key, cadence });
     options.push({ value: text, label: text, source });
