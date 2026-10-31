@@ -5639,9 +5639,6 @@ async function createSelfBooking(payload = {}) {
               windowStart: slot_start,
               windowEnd: extendedEnd,
               excludeServiceIds: [seriesParentRow.id],
-              // The parent's own technician (GATE_MULTI_TECH_CONFIRM scopes the probe to that
-              // route plus unassigned rows; gate off or unassigned = tech-blind, as before).
-              technicianId: seriesParentRow.technician_id || null,
               // Travel gap (GATE_SLOT_TRAVEL_GAP): the extended window must
               // clear the same drive + buffer the offered one did — an
               // extension can eat the gap without overlapping the next stop
@@ -5650,6 +5647,9 @@ async function createSelfBooking(payload = {}) {
                 lat: bookingLat,
                 lng: bookingLng,
               },
+              // The parent's own technician (GATE_MULTI_TECH_CONFIRM scopes the probe to that
+              // route plus unassigned rows; gate off or unassigned = tech-blind, as before).
+              technicianId: seriesParentRow.technician_id || null,
             });
             if (extensionClashes.length === 0) {
               await trx('scheduled_services')
