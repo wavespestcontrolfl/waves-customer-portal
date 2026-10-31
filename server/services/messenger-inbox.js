@@ -100,24 +100,26 @@ async function writeCursor(at) {
 
 // ── reading from Facebook ─────────────────────────────────────
 
-// Conversations changed since `since`, newest first from Facebook, returned
-// oldest first so the cursor can move forward one conversation at a time.
-async function listChangedConversations({ token, pageId }, since) {
+// Conversations changed at or after `since`, oldest first. The boundary is
+// inclusive: a conversation that shares the cursor's time is read again, and the
+// message dedupe keys make that replay write nothing twice. `complete` is false
+// when the page cap stopped the walk with more (older) conversations left.
+async function listChangedConversations({ token, pageId }, since, maxPages) {
   const changed = [];
   let next = `${GRAPH}/${pageId}/conversations?${new URLSearchParams({
     platform: 'messenger', fields: 'updated_time,unread_count,message_count,participants', limit: String(CONVERSATION_PAGE),
   })}`;
-  for (let page = 0; next && page < MAX_CONVERSATION_PAGES; page += 1) {
+  for (let page = 0; next && page < maxPages; page += 1) {
     const json = await graph(next, { token });
     for (const conv of json.data || []) {
       const updated = new Date(conv.updated_time);
       if (Number.isNaN(updated.getTime())) continue;
-      if (updated <= since) return changed.reverse();
+      if (updated < since) return { changed: changed.reverse(), complete: true };
       changed.push({ ...conv, updatedAt: updated });
     }
     next = json.paging?.next || null;
   }
-  return changed.reverse();
+  return { changed: changed.reverse(), complete: !next };
 }
 
 function bodyOf(msg) {
@@ -128,13 +130,15 @@ function bodyOf(msg) {
   return '[Attachment]';
 }
 
-// A conversation's messages from `from` on, oldest first.
-async function readMessages({ token }, conversationId, from) {
+// A conversation's messages from `from` on, oldest first. Throws when the page
+// cap stops the walk with older messages still unread: a partial read must not
+// count as done.
+async function readMessages({ token }, conversationId, from, maxPages) {
   const all = [];
   let next = `${GRAPH}/${conversationId}/messages?${new URLSearchParams({
     fields: 'id,message,from,created_time,attachments', limit: String(MESSAGE_PAGE),
   })}`;
-  for (let page = 0; next && page < MAX_MESSAGE_PAGES; page += 1) {
+  for (let page = 0; next && page < maxPages; page += 1) {
     const json = await graph(next, { token });
     let reachedOlder = false;
     for (const msg of json.data || []) {
@@ -143,9 +147,10 @@ async function readMessages({ token }, conversationId, from) {
       if (createdAt < from) { reachedOlder = true; continue; }
       all.push({ ...msg, createdAt });
     }
-    if (reachedOlder) break;
+    if (reachedOlder) return all.sort((a, b) => a.createdAt - b.createdAt);
     next = json.paging?.next || null;
   }
+  if (next) throw new Error(`Messenger conversation has more than ${maxPages} pages of messages`);
   return all.sort((a, b) => a.createdAt - b.createdAt);
 }
 
@@ -165,15 +170,6 @@ async function findThread(psid, pageId) {
     .where({ contact_external_id: `messenger:${psid}`, channel: CHANNEL, our_endpoint_id: `messenger:${pageId}` })
     .orderByRaw('customer_id IS NULL')
     .first();
-}
-
-async function threadState(conversationId) {
-  const row = await db('messages').where({ conversation_id: conversationId })
-    .select(
-      db.raw("MAX(created_at) FILTER (WHERE direction = 'inbound') AS last_in"),
-      db.raw("MAX(created_at) FILTER (WHERE direction = 'outbound') AS last_out"),
-    ).first();
-  return { lastIn: row?.last_in ? new Date(row.last_in) : null, lastOut: row?.last_out ? new Date(row.last_out) : null };
 }
 
 async function closeBell(conversationId) {
@@ -235,10 +231,28 @@ async function ensureThread(contact, pageId) {
   return thread;
 }
 
+// The bell follows the PERSISTED thread, so a run that stored the messages but
+// failed before the bell is finished by the next run, and a replay changes nothing:
+// the latest customer message not yet read and newer than any reply rings (the
+// same message is the same dedupe version, so it never rings twice); a reply newer
+// than the latest customer message closes it (closing is idempotent). A first-run
+// import is stored read unless Facebook showed the conversation unread, so only
+// those ring.
+async function reconcileBell(thread) {
+  const latestIn = await db('messages').where({ conversation_id: thread.id, direction: 'inbound' })
+    .orderBy('created_at', 'desc').first('body', 'twilio_sid', 'created_at', 'is_read');
+  const latestOut = await db('messages').where({ conversation_id: thread.id, direction: 'outbound' })
+    .max({ at: 'created_at' }).first();
+  const answered = latestOut?.at && (!latestIn || new Date(latestOut.at) >= new Date(latestIn.created_at));
+  if (answered) return closeBell(thread.id);
+  if (latestIn && latestIn.is_read !== true) return ringBell(thread, { body: latestIn.body, key: latestIn.twilio_sid });
+  return null;
+}
+
 // One conversation: read it, store what is new, then settle its bell.
-async function importConversation(config, conv, { since, firstRun }) {
+async function importConversation(config, conv, { since, firstRun, limits }) {
   const { pageId } = config;
-  const messages = await readMessages(config, conv.id, new Date(since.getTime() - MESSAGE_OVERLAP_MS));
+  const messages = await readMessages(config, conv.id, new Date(since.getTime() - MESSAGE_OVERLAP_MS), limits.messagePages);
   if (!messages.length) return { inserted: 0 };
   const contact = contactOf(conv, messages, pageId);
   if (!contact) return { inserted: 0, skipped: 'no_contact' };
@@ -246,68 +260,66 @@ async function importConversation(config, conv, { since, firstRun }) {
   const keys = messages.map((m) => messageKey(m.id));
   const known = new Set((await db('messages').where({ channel: CHANNEL }).whereIn('twilio_sid', keys).select('twilio_sid')).map((r) => r.twilio_sid));
   const fresh = messages.filter((m, i) => !known.has(keys[i]));
-  if (!fresh.length) return { inserted: 0 };
-
-  const thread = await ensureThread(contact, pageId);
+  const thread = fresh.length ? await ensureThread(contact, pageId) : await findThread(contact.psid, pageId);
+  if (!thread) return { inserted: 0 };
 
   // First run: what Facebook already shows as read stays read here.
   const importRead = firstRun && !(Number(conv.unread_count) > 0);
-  let newInbound = null;
-  let newOutbound = false;
   for (const msg of fresh) {
     const outbound = String(msg.from?.id) === pageId;
-    const key = messageKey(msg.id);
-    const body = bodyOf(msg);
     await appendMessage({
       conversationId: thread.id,
       channel: CHANNEL,
       direction: outbound ? 'outbound' : 'inbound',
       authorType: outbound ? 'admin' : 'customer',
-      body,
-      twilioSid: key,
+      body: bodyOf(msg),
+      twilioSid: messageKey(msg.id),
       createdAt: msg.createdAt,
       isRead: outbound || importRead,
       metadata: { graph_mid: msg.id, source: 'facebook' },
     });
-    if (outbound) newOutbound = true;
-    else newInbound = { body, key };
   }
-
-  const { lastIn, lastOut } = await threadState(thread.id);
-  const unanswered = lastIn && (!lastOut || lastIn > lastOut);
-  if (newInbound && unanswered && (!firstRun || Number(conv.unread_count) > 0)) {
-    await ringBell(thread, newInbound);
-  } else if (newOutbound && !unanswered) {
-    await closeBell(thread.id);
-  }
+  await reconcileBell(thread);
   return { inserted: fresh.length };
 }
 
-async function pollMessenger({ now = new Date() } = {}) {
+/**
+ * One poll. The cursor moves only through update-time groups in which every
+ * conversation succeeded, so a failed conversation (or one sharing its time) is
+ * read again next run; the boundary is inclusive and replays are deduped by key.
+ * A page or message cap that stops the walk early leaves the cursor where it was.
+ */
+async function pollMessenger({ now = new Date(), limits: override } = {}) {
   if (!messengerInboxLive()) return { skipped: 'gate_off' };
   const config = pageConfig();
   if (!config) return { skipped: 'not_configured' };
+  const limits = { conversationPages: MAX_CONVERSATION_PAGES, messagePages: MAX_MESSAGE_PAGES, ...override };
 
   const cursor = await readCursor();
   const firstRun = !cursor;
   const since = cursor || new Date(now.getTime() - FIRST_RUN_DAYS * 24 * 60 * 60 * 1000);
-  const changed = await listChangedConversations(config, since);
+  const { changed, complete } = await listChangedConversations(config, since, limits.conversationPages);
 
   let inserted = 0;
   let failed = 0;
   let advanced = null;
-  for (const conv of changed) {
+  for (let i = 0; i < changed.length; i += 1) {
+    const conv = changed[i];
     try {
-      inserted += (await importConversation(config, conv, { since, firstRun })).inserted;
-      // The cursor never passes a conversation that failed: the next run reads it again.
-      if (!failed) advanced = conv.updatedAt;
+      inserted += (await importConversation(config, conv, { since, firstRun, limits })).inserted;
     } catch (err) {
       failed += 1;
       logger.warn(`[messenger-inbox] conversation not imported: ${err.message}`);
     }
+    const groupEnds = !changed[i + 1] || changed[i + 1].updatedAt.getTime() !== conv.updatedAt.getTime();
+    if (groupEnds && !failed) advanced = conv.updatedAt;
   }
-  if (advanced) await writeCursor(advanced);
-  else if (firstRun && !changed.length) await writeCursor(now);
+  if (complete && advanced) await writeCursor(advanced);
+  else if (complete && firstRun && !changed.length) await writeCursor(now);
+  if (!complete) {
+    logger.warn(`[messenger-inbox] conversation list stopped at ${limits.conversationPages} page(s) with more left; the cursor stays`);
+    throw new Error('Messenger poll stopped at its page cap with conversations left; the cursor stays');
+  }
   if (failed) throw new Error(`Messenger poll left ${failed} conversation(s) unread; the cursor stays before them`);
   if (inserted) logger.info(`[messenger-inbox] stored ${inserted} new message(s) from ${changed.length} changed conversation(s)`);
   return { conversations: changed.length, inserted, firstRun };
@@ -374,18 +386,21 @@ async function loadThread(req, id) {
   return threadsQuery(req).where('c.id', id).select(...THREAD_COLUMNS).first();
 }
 
-async function getThread(req, id, now = new Date()) {
+async function getThread(req, id, now = new Date(), { limit = THREAD_MESSAGE_LIMIT } = {}) {
   const row = await loadThread(req, id);
   if (!row) return null;
   const messages = await db('messages as m')
     .leftJoin('technicians as t', 't.id', 'm.admin_user_id')
     .where('m.conversation_id', row.id)
-    .orderBy('m.created_at', 'asc')
-    .limit(THREAD_MESSAGE_LIMIT)
+    .orderBy('m.created_at', 'desc')
+    .limit(limit + 1)
     .select('m.id', 'm.direction', 'm.body', 'm.created_at', 'm.author_type', 't.name as staff_name');
+  // The newest `limit` messages, oldest first for display.
+  const hasOlder = messages.length > limit;
   return {
     thread: threadRow(row, now),
-    messages: messages.map((m) => ({
+    hasOlder,
+    messages: messages.slice(0, limit).reverse().map((m) => ({
       id: m.id,
       direction: m.direction,
       body: m.body || '',

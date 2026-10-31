@@ -62,7 +62,10 @@ function MessageBubble({ message }) {
   );
 }
 
-function ReplyBox({ canReply, onSend }) {
+// threadId: the thread whose detail is on screen (never the one just clicked).
+// ready: false while the clicked thread is still loading, so a draft written for
+// one thread cannot be sent to another.
+function ReplyBox({ threadId, canReply, ready, onSend }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -87,12 +90,12 @@ function ReplyBox({ canReply, onSend }) {
 
   const trimmed = text.trim();
   const send = async () => {
-    if (!trimmed || inFlight.current) return;
+    if (!ready || !trimmed || inFlight.current) return;
     inFlight.current = true;
     setSending(true);
     setError("");
     try {
-      await onSend(trimmed);
+      await onSend(threadId, trimmed);
       setText("");
     } catch (err) {
       setError(isRateLimitError(err) ? SLOW_DOWN
@@ -111,16 +114,16 @@ function ReplyBox({ canReply, onSend }) {
         value={text}
         maxLength={REPLY_MAX}
         onChange={(e) => setText(e.target.value)}
-        disabled={sending}
+        disabled={sending || !ready}
         aria-label="Reply on Facebook"
         placeholder="Write a reply"
       />
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="button" density="comfortable" variant="primary" disabled={sending || !trimmed} onClick={send}>
+        <Button type="button" density="comfortable" variant="primary" disabled={sending || !ready || !trimmed} onClick={send}>
           {sending ? "Sending…" : "Send"}
         </Button>
         <span className="text-14 text-ink-secondary">
-          {sending ? "Sending to Facebook. Wait for it to finish." : !trimmed ? "Type a reply to send it." : "Sends on Facebook as the page."}
+          {!ready ? "Loading the thread you picked. Wait for it to open." : sending ? "Sending to Facebook. Wait for it to finish." : !trimmed ? "Type a reply to send it." : "Sends on Facebook as the page."}
         </span>
       </div>
       {error && (
@@ -154,17 +157,22 @@ export default function MessengerTabV2({ onCount }) {
     if (threads) onCount?.(threads.filter((t) => !t.answered).length);
   }, [threads, onCount]);
 
+  // The thread the person last picked. A response for any other thread is stale and ignored.
+  const picked = useRef(selectedId);
   const openThread = useCallback(async (id) => {
+    picked.current = id;
     setSelectedId(id);
     setDetailError("");
     try {
       const d = await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}`);
+      if (picked.current !== id) return;
       setDetail(d);
       if (d.thread?.unread > 0) {
         await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}/read`, { method: "POST" });
         setThreads((prev) => prev && prev.map((t) => (t.id === id ? { ...t, unread: 0 } : t)));
       }
     } catch (err) {
+      if (picked.current !== id) return;
       setDetail(null);
       setDetailError(isRateLimitError(err) ? SLOW_DOWN : "Could not open this thread.");
     }
@@ -173,13 +181,16 @@ export default function MessengerTabV2({ onCount }) {
   // A thread named in the page link opens once, when the tab first renders.
   useEffect(() => { if (selectedId) openThread(selectedId); }, []);
 
-  const send = async (text) => {
-    await adminFetch(`/admin/messenger/threads/${encodeURIComponent(selectedId)}/reply`, {
+  // Posts to the thread whose detail is displayed, then refreshes it if it is still the picked one.
+  const send = async (threadId, text) => {
+    await adminFetch(`/admin/messenger/threads/${encodeURIComponent(threadId)}/reply`, {
       method: "POST",
       body: JSON.stringify({ text }),
     });
-    await Promise.all([openThread(selectedId), loadThreads()]);
+    await Promise.all([picked.current === threadId ? openThread(threadId) : null, loadThreads()]);
   };
+
+  const displayed = detail?.thread?.id || null;
 
   return (
     <div className="p-4 md:p-6 space-y-4">
@@ -226,7 +237,10 @@ export default function MessengerTabV2({ onCount }) {
                 <div className="space-y-2 max-h-[50vh] overflow-y-auto">
                   {detail.messages.map((m) => <MessageBubble key={m.id} message={m} />)}
                 </div>
-                <ReplyBox key={detail.thread.id} canReply={detail.thread.canReply} onSend={send} />
+                {detail.hasOlder && (
+                  <p className="text-14 text-ink-secondary mt-2" data-testid="messenger-has-older">Showing the latest 500 messages.</p>
+                )}
+                <ReplyBox key={detail.thread.id} threadId={detail.thread.id} canReply={detail.thread.canReply} ready={displayed === selectedId} onSend={send} />
               </div>
             )}
           </CardBody>

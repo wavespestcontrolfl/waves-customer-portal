@@ -141,4 +141,72 @@ describe("Messenger tab", () => {
     expect(link).toHaveAttribute("target", "_blank");
     expect(screen.queryByLabelText("Reply on Facebook")).not.toBeInTheDocument();
   });
+  it("switching threads: Send stays disabled and posts nothing until the picked thread has loaded, and the draft goes only to the thread it is shown for", async () => {
+    let releaseLate;
+    adminFetch.mockImplementation(async (url, options = {}) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads };
+      if (url === "/admin/messenger/threads/t-late") return new Promise((resolve) => { releaseLate = () => resolve(detailFor(late)); });
+      if (url.endsWith("/read")) return { updated: 0 };
+      if (url.endsWith("/reply")) return { sent: true, options };
+      return detailFor(threads.find((t) => url.endsWith(t.id)));
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    fireEvent.change(await screen.findByLabelText("Reply on Facebook"), { target: { value: "Meant for Pat" } });
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+
+    // Pick Kim: her thread is still loading, Pat's detail and draft are still on screen.
+    fireEvent.click(screen.getByTestId("messenger-thread-t-late"));
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    expect(screen.getByLabelText("Reply on Facebook")).toBeDisabled();
+    expect(screen.getByText("Loading the thread you picked. Wait for it to open.")).toBeInTheDocument();
+    fireEvent.click(send);
+    expect(adminFetch.mock.calls.some(([url]) => url.endsWith("/reply"))).toBe(false);
+
+    // Kim's thread arrives: it is outside the window, so there is no composer at all for it.
+    releaseLate();
+    expect(await screen.findByTestId("messenger-outside-window")).toBeInTheDocument();
+    expect(adminFetch.mock.calls.some(([url]) => url.endsWith("/reply"))).toBe(false);
+  });
+
+  it("ignores a thread response that arrives after another thread was picked", async () => {
+    let releaseOpen;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads };
+      if (url === "/admin/messenger/threads/t-open") return new Promise((resolve) => { releaseOpen = () => resolve(detailFor(open)); });
+      if (url.endsWith("/read")) return { updated: 0 };
+      return detailFor(threads.find((t) => url.endsWith(t.id)));
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    fireEvent.click(screen.getByTestId("messenger-thread-t-done"));
+    const detail = await screen.findByTestId("messenger-detail");
+    expect(within(detail).getByText("Lee Example")).toBeInTheDocument();
+    // Pat's slow answer lands now and must not replace Lee's thread or its read mark.
+    releaseOpen();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(within(screen.getByTestId("messenger-detail")).getByText("Lee Example")).toBeInTheDocument();
+    expect(adminFetch.mock.calls.some(([url]) => url === "/admin/messenger/threads/t-open/read")).toBe(false);
+  });
+
+  it("posts the reply to the thread that is displayed", async () => {
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-done"));
+    fireEvent.change(await screen.findByLabelText("Reply on Facebook"), { target: { value: "Glad to help" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/messenger/threads/t-done/reply", { method: "POST", body: JSON.stringify({ text: "Glad to help" }) }));
+    expect(adminFetch.mock.calls.filter(([url]) => url.endsWith("/reply"))).toHaveLength(1);
+  });
+
+  it("says when older messages are not shown", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads };
+      if (url.endsWith("/read")) return { updated: 0 };
+      return { ...detailFor(open), hasOlder: true };
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    expect(await screen.findByText("Showing the latest 500 messages.")).toBeInTheDocument();
+  });
 });

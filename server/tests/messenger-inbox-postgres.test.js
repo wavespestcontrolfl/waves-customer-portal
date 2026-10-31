@@ -72,8 +72,12 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
         if (fb.failMessagesFor === id) return json({ error: { code: 2 } }, 500);
         const conv = fb.conversations.find((c) => c.id === id);
         const newestFirst = [...conv.messages].sort((a, b) => b.at - a.at);
+        const size = fb.messagePageSize || newestFirst.length || 1;
+        const at = Number(url.searchParams.get('__page') || 0);
+        const more = (at + 1) * size < newestFirst.length;
         return json({
-          data: newestFirst.map((m) => ({
+          ...(more ? { paging: { next: `https://graph.facebook.com/v25.0/${id}/messages?__page=${at + 1}&access_token=${url.searchParams.get('access_token')}` } } : {}),
+          data: newestFirst.slice(at * size, (at + 1) * size).map((m) => ({
             id: m.id, message: m.text, created_time: m.at.toISOString(),
             from: m.fromPage ? { id: PAGE, name: 'Waves Pest Control' } : { id: conv.psid, name: conv.name },
             ...(m.files ? { attachments: { data: m.files.map((mime_type) => ({ id: 'att', mime_type })) } } : {}),
@@ -190,21 +194,30 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(bell.metadata).toMatchObject({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'customer_answered', conversationId: (await threadOf('a')).id });
     });
 
-    test('a second poll with nothing new reads no messages; resetting the cursor re-reads everything and stores nothing twice', async () => {
+    test('a second poll re-reads only the conversation at the cursor and changes nothing; resetting the cursor re-reads everything and stores nothing twice', async () => {
       conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'Hello there', at: ago(3) }] });
+      conversation('z', { name: 'Kim Sample', unread: 0, messages: [{ fromPage: false, text: 'Older one', at: ago(30) }] });
       await messenger.pollMessenger();
+      const [first] = await bellsOf('a');
+      await db('notifications').where({ id: first.id }).update({ read_at: new Date() });
+
       fb.calls.length = 0;
-      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 0, inserted: 0, firstRun: false });
-      expect(fb.calls.some((c) => c.endsWith('/messages'))).toBe(false);
+      // The boundary is inclusive: the newest conversation is read again, the older one is not.
+      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 1, inserted: 0, firstRun: false });
+      expect(fb.calls.filter((c) => c.endsWith('/messages'))).toHaveLength(1);
+      expect(await messagesOf('a')).toHaveLength(1);
+      // The same message is the same bell version: no second ring.
+      const [again] = await bellsOf('a');
+      expect(again.id).toBe(first.id);
+      expect(again.read_at).not.toBeNull();
 
       await resetCursor();
-      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 1, inserted: 0 });
+      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 2, inserted: 0 });
       expect(await messagesOf('a')).toHaveLength(1);
-      const bells = await bellsOf('a');
-      expect(bells).toHaveLength(1);
+      expect(await bellsOf('a')).toHaveLength(1);
     });
 
-    test('pages through conversations and stops at the cursor', async () => {
+    test('pages through conversations and reads back to the cursor', async () => {
       installFacebook(1);
       for (const [key, hours] of [['a', 10], ['b', 20], ['c', 30]]) {
         conversation(key, { name: `Pat Synthetic ${key}`, unread: 1, messages: [{ fromPage: false, text: `hello ${key}`, at: ago(hours) }] });
@@ -214,9 +227,112 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
 
       fb.calls.length = 0;
       conversation('d', { name: 'Pat Synthetic d', messages: [{ fromPage: false, text: 'new one', at: ago(1) }] });
-      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 1, inserted: 1 });
-      // The newest page holds the new conversation and the next page's first row is at the cursor: two list calls, not four.
-      expect(fb.calls.filter((c) => c.endsWith('/conversations'))).toHaveLength(2);
+      // The new conversation plus the one at the cursor; the page after them is older and stops the walk.
+      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 2, inserted: 1 });
+      expect(fb.calls.filter((c) => c.endsWith('/conversations'))).toHaveLength(3);
+    });
+
+    test('two conversations sharing an update time: the one that fails is read again, never skipped by the cursor', async () => {
+      const when = ago(6);
+      conversation('z', { name: 'Lee Example', unread: 1, messages: [{ fromPage: false, text: 'older group', at: ago(20) }] });
+      conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'same time a', at: when }] });
+      const b = conversation('b', { name: 'Kim Sample', unread: 1, messages: [{ fromPage: false, text: 'same time b', at: when }] });
+      fb.failMessagesFor = b.id;
+      await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
+      // The cursor stops at the older group: never at or past the shared time.
+      expect(new Date(await cursor()).getTime()).toBe(fb.conversations.find((c) => c.psid === psid('z')).updated.getTime());
+      expect(await threadOf('b')).toBeUndefined();
+
+      fb.failMessagesFor = null;
+      expect(await messenger.pollMessenger()).toMatchObject({ inserted: 1 });
+      expect((await messagesOf('b')).map((m) => m.body)).toEqual(['same time b']);
+      expect(await messagesOf('a')).toHaveLength(1);
+      expect(new Date(await cursor()).getTime()).toBe(when.getTime());
+
+      // Replaying the whole group at the cursor writes nothing twice.
+      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 2, inserted: 0 });
+      expect(await messagesOf('a')).toHaveLength(1);
+      expect(await messagesOf('b')).toHaveLength(1);
+    });
+
+    test('a bell that failed after the messages were stored is finished by the next poll, and a replay does not ring twice', async () => {
+      const compose = require('../services/admin-alert-compose');
+      const conv = conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'Please call me', at: ago(2) }] });
+      const spy = jest.spyOn(compose, 'raiseAdminAlert').mockRejectedValueOnce(new Error('bell write failed'));
+      try {
+        await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
+        expect(await messagesOf('a')).toHaveLength(1);
+        expect(await bellsOf('a')).toHaveLength(0);
+        expect(await cursor()).toBeUndefined();
+
+        // Run 2 stores nothing new and still rings.
+        expect(await messenger.pollMessenger()).toMatchObject({ inserted: 0 });
+        expect(spy).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
+      const bells = await bellsOf('a');
+      expect(bells).toHaveLength(1);
+      expect(bells[0].done_at).toBeNull();
+      await db('notifications').where({ id: bells[0].id }).update({ read_at: new Date() });
+      // The same message again is the same version: no ring.
+      await resetCursor();
+      await messenger.pollMessenger();
+      expect((await bellsOf('a'))[0].read_at).not.toBeNull();
+
+      // A reply stored whose close failed is closed by the next poll.
+      conv.messages.push({ id: mid('a', 1), fromPage: true, text: 'Calling now', at: ago(1) });
+      conv.updated = ago(1);
+      const close = jest.spyOn(require('../services/notification-service'), 'markAdminDone').mockRejectedValueOnce(new Error('close failed'));
+      try {
+        await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
+        expect((await bellsOf('a'))[0].done_at).toBeNull();
+        await messenger.pollMessenger();
+      } finally {
+        close.mockRestore();
+      }
+      expect((await bellsOf('a'))[0]).toMatchObject({ done_by: 'messenger-inbox', resolution: 'Answered in Messenger' });
+      // Closing again is a no-op.
+      await resetCursor();
+      await messenger.pollMessenger();
+      expect(await bellsOf('a')).toHaveLength(1);
+    });
+
+    test('a conversation list that hits its page cap leaves the cursor alone and fails the job; so does a message cap', async () => {
+      installFacebook(1);
+      for (const [key, hours] of [['a', 10], ['b', 20], ['c', 30]]) {
+        conversation(key, { name: `Pat Synthetic ${key}`, unread: 1, messages: [{ fromPage: false, text: `hello ${key}`, at: ago(hours) }] });
+      }
+      await expect(messenger.pollMessenger({ limits: { conversationPages: 2 } })).rejects.toThrow(/page cap/);
+      expect(await cursor()).toBeUndefined();
+      expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('stopped at 2 page(s)'));
+      // A poll with room finishes the job and stores each message once.
+      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 3 });
+      expect(await cursor()).toBeDefined();
+      expect(await db('messages').whereIn('conversation_id', db('conversations').where({ our_endpoint_id: `messenger:${PAGE}` }).select('id'))).toHaveLength(3);
+
+      // A conversation with more message pages than the cap counts as failed.
+      await wipe();
+      installFacebook(25);
+      fb.messagePageSize = 1;
+      conversation('m', { name: 'Kim Sample', unread: 1, messages: [0, 1, 2].map((n) => ({ fromPage: false, text: `msg ${n}`, at: ago(5 - n) })) });
+      await expect(messenger.pollMessenger({ limits: { messagePages: 2 } })).rejects.toThrow(/left 1 conversation/);
+      expect(await cursor()).toBeUndefined();
+      expect(await threadOf('m')).toBeUndefined();
+      expect(await messenger.pollMessenger()).toMatchObject({ inserted: 3 });
+    });
+
+    test('no paging link is ever stored', async () => {
+      installFacebook(1);
+      conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'hello', at: ago(2) }] });
+      conversation('b', { name: 'Kim Sample', unread: 1, messages: [{ fromPage: false, text: 'hello', at: ago(3) }] });
+      await messenger.pollMessenger();
+      const stored = JSON.stringify([
+        await db('system_settings').where({ key: 'messenger_inbox_cursor' }),
+        await db('messages').whereIn('conversation_id', db('conversations').where({ our_endpoint_id: `messenger:${PAGE}` }).select('id')),
+      ]);
+      expect(stored).not.toContain('access_token');
+      expect(stored).not.toContain('graph.facebook.com');
     });
 
     test('a new customer message rings that thread once, each later message re-rings the same row, and a Facebook-side reply closes it', async () => {
@@ -275,7 +391,7 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(new Date(await cursor()).getTime()).toBe(fb.conversations.find((c) => c.id !== broken.id).updated.getTime());
 
       fb.failMessagesFor = null;
-      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 1, inserted: 1 });
+      expect(await messenger.pollMessenger()).toMatchObject({ conversations: 2, inserted: 1 });
       expect(await threadOf('b')).toBeTruthy();
     });
 
@@ -330,6 +446,20 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(detail.messages).toEqual([expect.objectContaining({ direction: 'inbound', body: 'Can someone call me about wasps?', author: { type: 'customer', name: 'Pat Synthetic' } })]);
       expect((await get('/threads/not-a-uuid')).status).toBe(404);
       expect((await get(`/threads/${randomUUID()}`)).status).toBe(404);
+    });
+
+    test('a long thread shows its newest messages, oldest first, and says older ones exist', async () => {
+      conversation('long', { name: 'Pat Synthetic', unread: 0, messages: [0, 1, 2, 3, 4].map((n) => ({ fromPage: n % 2 === 1, text: `msg ${n}`, at: ago(10 - n) })) });
+      await messenger.pollMessenger();
+      const { id } = await threadOf('long');
+      const req = { techRole: 'admin', technicianId: null };
+      const capped = await messenger.getThread(req, id, new Date(), { limit: 3 });
+      expect(capped.hasOlder).toBe(true);
+      expect(capped.messages.map((m) => m.body)).toEqual(['msg 2', 'msg 3', 'msg 4']);
+      const exact = await messenger.getThread(req, id, new Date(), { limit: 5 });
+      expect(exact.hasOlder).toBe(false);
+      expect(exact.messages.map((m) => m.body)).toEqual(['msg 0', 'msg 1', 'msg 2', 'msg 3', 'msg 4']);
+      expect((await (await get(`/threads/${id}`)).json()).hasOlder).toBe(false);
     });
 
     test('opening a thread marks its customer messages read', async () => {
