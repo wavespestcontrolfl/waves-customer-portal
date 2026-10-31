@@ -1,5 +1,6 @@
 /**
- * Owner planning minutes (2026-09-25): how long a stop is expected to keep
+ * Owner planning minutes (2026-09-25; recurring pest and lawn 35 minutes
+ * from 2026-10-30): how long a stop is expected to keep
  * the technician on site, for every route simulation — the booking picker,
  * the nightly reorder pass and the route-quality measurements all read it
  * through route-reorder-window-fit.js's workDuration, so the two sides of
@@ -10,9 +11,18 @@
  * name (tree & shrub, mosquito, bed bug, fumigation, general and combined
  * pest+lawn rows) return null and keep the legacy window/estimate rule.
  *
- * It plans the stops ALREADY on a route. The visit being placed keeps the
- * allowance its caller resolved (booking funnel, estimate profile, re-service
- * catalog) — arrival-route.js marks it `planning_exempt`.
+ * It plans the stops ALREADY on a route, and (placedVisitMinutes, owner
+ * 2026-10-30) the visit being placed when the table names its service and its
+ * caller's allowance is the legacy hour or less, so an offer and the stops
+ * behind it read one set of minutes. A placed visit the table does not name,
+ * or one whose allowance is above the hour (add-on minutes, dead-rodent
+ * attic, pest + termite), keeps the allowance its caller resolved (booking
+ * funnel, estimate profile, re-service catalog) — arrival-route.js marks it
+ * `planning_exempt`, and does so for every visit when planningMinutes is
+ * false (the night arrival search). These are PLAN minutes only: every row
+ * written keeps its one-hour window and estimate (owner 2026-09-25: "a
+ * one-hour arrival window is a promise about when the truck arrives, not how
+ * long the work takes").
  *
  * Live on the persisted `preserveCapacity` path too, not just the live gate:
  * a reservation_policy_version===2 hold accepted while GATE_SCHEDULING_CAPACITY
@@ -26,8 +36,10 @@ const { capacityEnabled } = require('./policy');
 
 const PLANNING_MINUTES = Object.freeze({
   oneTimePest: 45,
-  recurringPest: 25,
-  recurringLawn: 20,
+  // Owner 2026-10-30: truck GPS parked median 32.6 min (2026-08-27..10-25),
+  // app taps 50.6, drive 21.9 per stop. Was 25 and 20 (2026-09-25).
+  recurringPest: 35,
+  recurringLawn: 35,
   reService: 15,
   assessment: 30,
   rodentTermite: 30,
@@ -80,4 +92,21 @@ function plannedWorkMinutes(stop) {
   return planned == null ? null : Math.max(planned, deliberateEstimate(stop));
 }
 
-module.exports = { PLANNING_MINUTES, plannedWorkMinutes };
+/** Planned minutes for the visit BEING PLACED, or null to keep its caller's
+ *  allowance. The table applies when it names the visit's service and the
+ *  allowance is the legacy hour or less — the same line deliberateEstimate
+ *  draws for the stops on the route, so a visit never plans differently
+ *  placed than it does once placed. A longer allowance is real work (add-on
+ *  minutes, dead-rodent attic 90, pest + termite 120) and never shrinks.
+ *  `combined_services` (find-time.js) marks a prospective visit that holds
+ *  several services under one joined label, which names no single table row.
+ *  Live only in capacity mode, or on the persisted `preserveCapacity` path. */
+function placedVisitMinutes(target, allowanceMinutes, { preserveCapacity = false } = {}) {
+  if (!target || target.combined_services === true) return null;
+  if (!capacityEnabled() && !preserveCapacity) return null;
+  const allowance = Number(allowanceMinutes);
+  if (!(allowance > 0) || allowance > LEGACY_DEFAULT_MINUTES) return null;
+  return tableMinutes(target);
+}
+
+module.exports = { PLANNING_MINUTES, plannedWorkMinutes, placedVisitMinutes };
