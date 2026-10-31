@@ -44,34 +44,35 @@ struct PaymentSheet: View {
     }
 }
 
+// The waiting screens use the amount screen's frame and glass card, so the
+// logo stays put while the sheet moves between steps.
 struct LoadingView: View {
     let title: String
     var detail: String? = nil
 
     var body: some View {
-        VStack(spacing: 28) {
-            Spacer()
-            WavesLogo(height: 128)
-            ProgressView()
-                .controlSize(.large)
-                .tint(Brand.ink)
-            VStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(Brand.ink)
-                if let detail {
-                    Text(detail)
-                        .font(.system(size: 16))
-                        .foregroundStyle(Brand.body)
+        SheetLayout {
+            GlassCard {
+                VStack(spacing: 18) {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(Brand.ink)
+                    VStack(spacing: 6) {
+                        Text(title)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(Brand.ink)
+                        if let detail {
+                            Text(detail)
+                                .font(.system(size: 16))
+                                .foregroundStyle(Brand.body)
+                        }
+                    }
+                    .multilineTextAlignment(.center)
                 }
             }
-            .multilineTextAlignment(.center)
-            Spacer()
-            Spacer()
+        } actions: {
+            EmptyView()
         }
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(WavesScene())
     }
 }
 
