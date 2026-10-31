@@ -12,6 +12,7 @@ import { formatETDateTime } from "../../lib/timezone";
 const FACEBOOK_INBOX_URL = "https://business.facebook.com/latest/inbox/all";
 const REPLY_MAX = 2000;
 const WINDOW_NOTE = "Facebook allows a reply for 24 hours after the customer's last message.";
+const REFRESH_MS = 60 * 1000;
 const SLOW_DOWN = "You're going too fast — try again in a few seconds.";
 
 function formatWhen(value) {
@@ -138,55 +139,131 @@ function ReplyBox({ threadId, canReply, ready, onSend }) {
 // onCount(n): how many threads wait for an answer, so the tab label follows
 // the list as replies go out.
 export default function MessengerTabV2({ onCount }) {
-  const [threads, setThreads] = useState(null);
+  // list: the loaded threads, whether older ones exist, and the server's count of threads
+  // waiting for an answer (the whole inbox, not just the loaded page).
+  const [list, setList] = useState(null);
   const [loadError, setLoadError] = useState("");
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [selectedId, setSelectedId] = useState(threadFromHash);
   const [detail, setDetail] = useState(null);
   const [detailError, setDetailError] = useState("");
+  const listSeq = useRef(0);
+  const olderLoaded = useRef(false);
+  const threads = list ? list.items : null;
 
+  // Reloads the newest page. When older pages were loaded, they stay below the fresh page.
   const loadThreads = useCallback(() => {
-    setLoadError("");
+    listSeq.current += 1;
+    const seq = listSeq.current;
     return adminFetch("/admin/messenger/threads")
-      .then((d) => setThreads(d.threads || []))
-      .catch((err) => setLoadError(isRateLimitError(err) ? SLOW_DOWN : "Failed to load."));
+      .then((d) => {
+        if (seq !== listSeq.current) return;
+        setLoadError("");
+        const fresh = d.threads || [];
+        setList((prev) => {
+          if (!prev || !olderLoaded.current || !fresh.length) return { items: fresh, hasMore: Boolean(d.hasMore), unanswered: Number(d.unanswered) || 0 };
+          const tail = fresh[fresh.length - 1].lastMessageAt;
+          const kept = prev.items.filter((t) => t.lastMessageAt < tail && !fresh.some((f) => f.id === t.id));
+          return { items: [...fresh, ...kept], hasMore: prev.hasMore, unanswered: Number(d.unanswered) || 0 };
+        });
+      })
+      .catch((err) => {
+        if (seq === listSeq.current) setLoadError(isRateLimitError(err) ? SLOW_DOWN : "Failed to load.");
+      });
   }, []);
+
+  const showOlder = async () => {
+    const last = list?.items[list.items.length - 1];
+    if (!last || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const d = await adminFetch(`/admin/messenger/threads?before=${encodeURIComponent(last.lastMessageAt)}&beforeId=${encodeURIComponent(last.id)}`);
+      olderLoaded.current = true;
+      setList((prev) => ({
+        items: [...prev.items, ...(d.threads || []).filter((t) => !prev.items.some((x) => x.id === t.id))],
+        hasMore: Boolean(d.hasMore),
+        unanswered: Number(d.unanswered) || 0,
+      }));
+    } catch (err) {
+      setLoadError(isRateLimitError(err) ? SLOW_DOWN : "Failed to load older threads.");
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
 
   useEffect(() => { loadThreads(); }, [loadThreads]);
 
   useEffect(() => {
-    if (threads) onCount?.(threads.filter((t) => !t.answered).length);
-  }, [threads, onCount]);
+    if (list) onCount?.(list.unanswered);
+  }, [list, onCount]);
 
-  // The thread the person last picked. A response for any other thread is stale and ignored.
+  // The thread the person last picked. A response for any other thread is stale and ignored,
+  // and so is an older response for the same thread (detailSeq).
   const picked = useRef(selectedId);
-  const openThread = useCallback(async (id) => {
-    picked.current = id;
-    setSelectedId(id);
-    setDetailError("");
+  const detailSeq = useRef(0);
+  const sending = useRef(0);
+  const opening = useRef(0);
+  const loadDetail = useCallback(async (id, { refresh = false } = {}) => {
+    // A refresh waits out a send and a thread the person is still opening.
+    if (refresh && (picked.current !== id || sending.current > 0 || opening.current > 0)) return;
+    if (!refresh) {
+      picked.current = id;
+      setSelectedId(id);
+      setDetailError("");
+    }
+    detailSeq.current += 1;
+    const seq = detailSeq.current;
+    const current = () => picked.current === id && seq === detailSeq.current;
+    if (!refresh) opening.current += 1;
     try {
       const d = await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}`);
-      if (picked.current !== id) return;
+      if (!current()) return;
       setDetail(d);
       if (d.thread?.unread > 0) {
         await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}/read`, { method: "POST" });
-        setThreads((prev) => prev && prev.map((t) => (t.id === id ? { ...t, unread: 0 } : t)));
+        setList((prev) => prev && { ...prev, items: prev.items.map((t) => (t.id === id ? { ...t, unread: 0 } : t)) });
       }
     } catch (err) {
-      if (picked.current !== id) return;
+      if (refresh || !current()) return;
       setDetail(null);
       setDetailError(isRateLimitError(err) ? SLOW_DOWN : "Could not open this thread.");
+    } finally {
+      if (!refresh) opening.current -= 1;
     }
   }, []);
+  const openThread = loadDetail;
 
   // A thread named in the page link opens once, when the tab first renders.
   useEffect(() => { if (selectedId) openThread(selectedId); }, []);
 
+  // While the tab is open and visible, the list and the open thread refresh every minute, and
+  // once when the page comes back into view. A refresh never touches the draft or the selection.
+  useEffect(() => {
+    const visible = () => document.visibilityState === "visible";
+    const refresh = () => {
+      if (!visible()) return;
+      loadThreads();
+      if (picked.current) loadDetail(picked.current, { refresh: true });
+    };
+    const timer = setInterval(refresh, REFRESH_MS);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [loadThreads, loadDetail]);
+
   // Posts to the thread whose detail is displayed, then refreshes it if it is still the picked one.
   const send = async (threadId, text) => {
-    await adminFetch(`/admin/messenger/threads/${encodeURIComponent(threadId)}/reply`, {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    });
+    sending.current += 1;
+    try {
+      await adminFetch(`/admin/messenger/threads/${encodeURIComponent(threadId)}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      });
+    } finally {
+      sending.current -= 1;
+    }
     await Promise.all([picked.current === threadId ? openThread(threadId) : null, loadThreads()]);
   };
 
@@ -217,6 +294,13 @@ export default function MessengerTabV2({ onCount }) {
                 {threads.map((t) => (
                   <ThreadRow key={t.id} thread={t} selected={t.id === selectedId} onOpen={openThread} />
                 ))}
+                {list.hasMore && (
+                  <div className="p-3 border-t border-zinc-200">
+                    <Button type="button" density="comfortable" variant="secondary" disabled={loadingOlder} onClick={showOlder}>
+                      {loadingOlder ? "Loading…" : "Show older"}
+                    </Button>
+                  </div>
+                )}
               </div>
             ) : null}
           </CardBody>

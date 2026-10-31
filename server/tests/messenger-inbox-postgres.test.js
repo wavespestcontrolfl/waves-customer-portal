@@ -109,6 +109,7 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
     if (keys.length) await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [keys]).del();
     await db('conversations').where({ our_endpoint_id: `messenger:${PAGE}` }).del();
     await resetCursor();
+    await db('system_settings').where({ key: 'messenger_inbox_bootstrap_done' }).del();
   }
 
   beforeAll(async () => {
@@ -395,6 +396,45 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(await threadOf('b')).toBeTruthy();
     });
 
+    test('a partial first import is not finished: the retry reads the failed thread back the full window under the first-run policy, then incremental polls resume', async () => {
+      const days = (n) => ago(n * 24);
+      conversation('a', { name: 'Pat Synthetic', unread: 0, messages: [{ fromPage: false, text: 'recent and read', at: days(2) }] });
+      const old = conversation('old', {
+        name: 'Kim Sample', unread: 0,
+        messages: [{ fromPage: false, text: 'five months ago', at: days(150) }, { fromPage: true, text: 'we replied then', at: days(149) }, { fromPage: false, text: 'last week', at: days(7) }],
+      });
+      fb.failMessagesFor = old.id;
+      await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
+      expect(await db('system_settings').where({ key: 'messenger_inbox_bootstrap_done' }).first()).toBeUndefined();
+      expect(await threadOf('old')).toBeUndefined();
+
+      // Run 2: the cursor from run 1 is progress only; the failed thread comes in whole, read, with no bell.
+      fb.failMessagesFor = null;
+      expect(await messenger.pollMessenger()).toMatchObject({ firstRun: true });
+      const rows = await messagesOf('old');
+      expect(rows.map((m) => m.body)).toEqual(['five months ago', 'we replied then', 'last week']);
+      expect(rows.filter((m) => m.direction === 'inbound').every((m) => m.is_read)).toBe(true);
+      expect(await bellsOf('old')).toHaveLength(0);
+      expect(await db('system_settings').where({ key: 'messenger_inbox_bootstrap_done' }).first()).toBeTruthy();
+
+      // Run 3 is a normal incremental poll: it starts at the cursor and a new message is unread and rings.
+      old.messages.push({ id: mid('old', 9), fromPage: false, text: 'new today', at: ago(1) });
+      old.updated = ago(1);
+      expect(await messenger.pollMessenger()).toMatchObject({ firstRun: false, inserted: 1 });
+      expect((await bellsOf('old'))).toHaveLength(1);
+    });
+
+    test('the first-run policy still rings a Facebook-unread thread on the retry', async () => {
+      conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'call me', at: ago(40) }] });
+      const bad = conversation('bad', { name: 'Kim Sample', unread: 2, messages: [{ fromPage: false, text: 'waiting since august', at: ago(24 * 100) }] });
+      fb.failMessagesFor = bad.id;
+      await expect(messenger.pollMessenger()).rejects.toThrow();
+      fb.failMessagesFor = null;
+      await messenger.pollMessenger();
+      expect((await messagesOf('bad'))[0].is_read).toBe(false);
+      expect(await bellsOf('bad')).toHaveLength(1);
+    });
+
     test('a linked customer thread keeps its customer and takes new messages', async () => {
       const conv = conversation('a', { name: 'Pat Synthetic', unread: 0, messages: [{ fromPage: false, text: 'hi', at: ago(50) }] });
       await messenger.pollMessenger();
@@ -432,7 +472,9 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(summary).toMatchObject({ enabled: true });
       expect(summary.unanswered).toBeGreaterThanOrEqual(2);
 
-      const { threads } = await (await get('/threads')).json();
+      const { threads, unanswered, hasMore } = await (await get('/threads')).json();
+      expect(hasMore).toBe(false);
+      expect(unanswered).toBe(summary.unanswered);
       const mine = threads.filter((t) => ['Pat Synthetic', 'Kim Sample', 'Lee Example'].includes(t.name));
       expect(mine.map((t) => t.name)).toEqual(['Pat Synthetic', 'Lee Example', 'Kim Sample']);
       const open = mine.find((t) => t.name === 'Pat Synthetic');
@@ -460,6 +502,47 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(exact.hasOlder).toBe(false);
       expect(exact.messages.map((m) => m.body)).toEqual(['msg 0', 'msg 1', 'msg 2', 'msg 3', 'msg 4']);
       expect((await (await get(`/threads/${id}`)).json()).hasOlder).toBe(false);
+    });
+
+    test('the list is paged by keyset; the unanswered total stays the server total when the list is capped', async () => {
+      for (const [key, hours, fromPage] of [['p1', 1, false], ['p2', 2, false], ['p3', 3, true], ['p4', 4, false]]) {
+        conversation(key, { name: `Pat Synthetic ${key}`, unread: 0, messages: [{ fromPage, text: `hello ${key}`, at: ago(hours) }] });
+      }
+      await messenger.pollMessenger();
+      const req = { techRole: 'admin', technicianId: null };
+      const first = await messenger.listThreads(req, new Date(), { limit: 2 });
+      expect(first.threads.map((t) => t.name)).toEqual(['Pat Synthetic p1', 'Pat Synthetic p2']);
+      expect(first.hasMore).toBe(true);
+      // Three threads wait for an answer; the capped page shows two of them but the total is three.
+      expect(first.unanswered).toBeGreaterThanOrEqual(3);
+      const last = first.threads[1];
+      const next = await messenger.listThreads(req, new Date(), { limit: 2, before: last.lastMessageAt, beforeId: last.id });
+      expect(next.threads.map((t) => t.name)).toEqual(['Pat Synthetic p3', 'Pat Synthetic p4']);
+      expect(next.hasMore).toBe(false);
+      expect(next.unanswered).toBe(first.unanswered);
+
+      // Over HTTP: the keyset parameters reach the same page.
+      const page = await (await get(`/threads?before=${encodeURIComponent(last.lastMessageAt)}&beforeId=${last.id}`)).json();
+      expect(page.threads.slice(0, 2).map((t) => t.name)).toEqual(['Pat Synthetic p3', 'Pat Synthetic p4']);
+      expect(page.unanswered).toBe(first.unanswered);
+    });
+
+    test('two threads with the same last-message time are split by id across pages without a repeat or a gap', async () => {
+      const when = ago(2);
+      for (const key of ['t1', 't2', 't3']) conversation(key, { name: `Lee Example ${key}`, unread: 0, messages: [{ fromPage: false, text: key, at: when }] });
+      await messenger.pollMessenger();
+      const req = { techRole: 'admin', technicianId: null };
+      const seen = [];
+      let cursorArgs = {};
+      for (let i = 0; i < 5; i += 1) {
+        const page = await messenger.listThreads(req, new Date(), { limit: 1, ...cursorArgs });
+        seen.push(...page.threads.map((t) => t.name));
+        if (!page.hasMore) break;
+        const tail = page.threads[0];
+        cursorArgs = { before: tail.lastMessageAt, beforeId: tail.id };
+      }
+      expect([...seen].sort()).toEqual(['Lee Example t1', 'Lee Example t2', 'Lee Example t3']);
+      expect(new Set(seen).size).toBe(3);
     });
 
     test('opening a thread marks its customer messages read', async () => {

@@ -17,6 +17,8 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { messengerInboxLive } = require('../config/feature-gates');
 const messenger = require('../services/messenger-inbox');
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 function requireLive(req, res, next) {
@@ -34,10 +36,23 @@ router.get('/summary', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/messenger/threads -> { enabled, threads: [{ id, name, lastMessageAt, lastInboundAt, snippet, unread, answered, canReply }] }
+// GET /api/admin/messenger/threads[?before=<lastMessageAt ISO>&beforeId=<thread id>]
+//   -> { enabled, threads: [{ id, name, lastMessageAt, lastInboundAt, snippet, unread, answered, canReply }], hasMore, unanswered }
+// `unanswered` is the total across every thread (the same count as /summary), not the page.
 router.get('/threads', requireLive, async (req, res, next) => {
   try {
-    res.json({ enabled: true, threads: await messenger.listThreads(req) });
+    const { before, beforeId } = req.query;
+    if (before !== undefined && (typeof before !== 'string' || Number.isNaN(new Date(before).getTime()))) {
+      return res.status(400).json({ error: 'before must be a timestamp' });
+    }
+    if (beforeId !== undefined && !(typeof beforeId === 'string' && UUID_RE.test(beforeId))) {
+      return res.status(400).json({ error: 'beforeId must be a thread id' });
+    }
+    const page = await messenger.listThreads(req, new Date(), {
+      ...(before ? { before: new Date(before).toISOString() } : {}),
+      ...(before && beforeId ? { beforeId } : {}),
+    });
+    res.json({ enabled: true, ...page });
   } catch (err) { next(err); }
 });
 

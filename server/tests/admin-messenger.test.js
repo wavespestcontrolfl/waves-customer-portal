@@ -93,16 +93,29 @@ describe('admin messenger routes', () => {
     process.env.GATE_MESSENGER_INBOX = 'true';
     const thread = { id: ID, name: 'Pat Synthetic', lastMessageAt: '2026-10-31T15:00:00.000Z', lastInboundAt: '2026-10-31T15:00:00.000Z', snippet: 'Hello', unread: 1, answered: false, canReply: true };
     mockService.summary.mockResolvedValue({ unanswered: 2 });
-    mockService.listThreads.mockResolvedValue([thread]);
+    mockService.listThreads.mockResolvedValue({ threads: [thread], hasMore: true, unanswered: 7 });
     mockService.getThread.mockResolvedValueOnce({ thread, messages: [{ id: 'm1', direction: 'inbound', body: 'Hello', createdAt: thread.lastMessageAt, author: { type: 'customer', name: 'Pat Synthetic' } }] });
     mockService.getThread.mockResolvedValueOnce(null);
     await withServer(async (base) => {
       expect(await (await fetch(`${base}/summary`, { headers: auth('admin') })).json()).toEqual({ enabled: true, unanswered: 2 });
-      expect(await (await fetch(`${base}/threads`, { headers: auth('admin') })).json()).toEqual({ enabled: true, threads: [thread] });
+      expect(await (await fetch(`${base}/threads`, { headers: auth('admin') })).json()).toEqual({ enabled: true, threads: [thread], hasMore: true, unanswered: 7 });
       const one = await (await fetch(`${base}/threads/${ID}`, { headers: auth('admin') })).json();
       expect(one).toMatchObject({ enabled: true, thread: { id: ID, canReply: true }, messages: [{ id: 'm1', direction: 'inbound', body: 'Hello' }] });
       expect((await fetch(`${base}/threads/${ID}`, { headers: auth('admin') })).status).toBe(404);
     });
+  });
+
+  test('list passes the keyset to the service and refuses a bad one', async () => {
+    process.env.GATE_MESSENGER_INBOX = 'true';
+    mockService.listThreads.mockResolvedValue({ threads: [], hasMore: false, unanswered: 0 });
+    await withServer(async (base) => {
+      const before = '2026-10-31T15:00:00.000Z';
+      expect((await fetch(`${base}/threads?before=${encodeURIComponent(before)}&beforeId=${ID}`, { headers: auth('admin') })).status).toBe(200);
+      expect(mockService.listThreads.mock.calls[0][2]).toEqual({ before, beforeId: ID });
+      expect((await fetch(`${base}/threads?before=yesterday`, { headers: auth('admin') })).status).toBe(400);
+      expect((await fetch(`${base}/threads?before=${encodeURIComponent(before)}&beforeId=nope`, { headers: auth('admin') })).status).toBe(400);
+    });
+    expect(mockService.listThreads).toHaveBeenCalledTimes(1);
   });
 
   test('reply refuses an empty or over-long text before calling Facebook', async () => {

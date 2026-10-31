@@ -28,6 +28,9 @@ const { findOrCreateThread, appendMessage } = require('./conversations');
 const CHANNEL = 'facebook_messenger';
 const GRAPH = 'https://graph.facebook.com/v25.0';
 const CURSOR_KEY = 'messenger_inbox_cursor';
+// Set once a first import has finished with nothing failed and no cap hit. Until then every
+// poll reads back the full first-run window and keeps the first-run read and ring policy.
+const BOOTSTRAP_KEY = 'messenger_inbox_bootstrap_done';
 const FIRST_RUN_DAYS = 183;
 const REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 // A conversation's messages are read back to the cursor less this overlap; the
@@ -92,10 +95,16 @@ async function readCursor() {
   return at && !Number.isNaN(at.getTime()) ? at : null;
 }
 
-async function writeCursor(at) {
-  const value = at.toISOString();
-  await db('system_settings').insert({ key: CURSOR_KEY, value, category: 'messenger' })
+async function writeSetting(key, value) {
+  await db('system_settings').insert({ key, value, category: 'messenger' })
     .onConflict('key').merge({ value, updated_at: db.fn.now() });
+}
+
+const writeCursor = (at) => writeSetting(CURSOR_KEY, at.toISOString());
+
+async function bootstrapDone() {
+  const row = await db('system_settings').where({ key: BOOTSTRAP_KEY }).first('value');
+  return Boolean(row?.value);
 }
 
 // ── reading from Facebook ─────────────────────────────────────
@@ -283,6 +292,19 @@ async function importConversation(config, conv, { since, firstRun, limits }) {
   return { inserted: fresh.length };
 }
 
+// Cursor, bootstrap flag and failure signal after a poll. A capped list or a failed conversation
+// is an error for job health; the bootstrap flag is set only by a first run that finished clean.
+async function settlePoll({ complete, failed, firstRun, advanced, empty, now, pageLimit }) {
+  if (complete && advanced) await writeCursor(advanced);
+  else if (complete && firstRun && empty && !failed) await writeCursor(now);
+  if (!complete) {
+    logger.warn(`[messenger-inbox] conversation list stopped at ${pageLimit} page(s) with more left; the cursor stays`);
+    throw new Error('Messenger poll stopped at its page cap with conversations left; the cursor stays');
+  }
+  if (failed) throw new Error(`Messenger poll left ${failed} conversation(s) unread; the cursor stays before them`);
+  if (firstRun) await writeSetting(BOOTSTRAP_KEY, now.toISOString());
+}
+
 /**
  * One poll. The cursor moves only through update-time groups in which every
  * conversation succeeded, so a failed conversation (or one sharing its time) is
@@ -295,8 +317,10 @@ async function pollMessenger({ now = new Date(), limits: override } = {}) {
   if (!config) return { skipped: 'not_configured' };
   const limits = { conversationPages: MAX_CONVERSATION_PAGES, messagePages: MAX_MESSAGE_PAGES, ...override };
 
-  const cursor = await readCursor();
-  const firstRun = !cursor;
+  // Until the first import has finished clean, the cursor is only progress: every poll reads back
+  // the whole first-run window under the first-run policy (stored messages dedupe).
+  const firstRun = !(await bootstrapDone());
+  const cursor = firstRun ? null : await readCursor();
   const since = cursor || new Date(now.getTime() - FIRST_RUN_DAYS * 24 * 60 * 60 * 1000);
   const { changed, complete } = await listChangedConversations(config, since, limits.conversationPages);
 
@@ -314,13 +338,7 @@ async function pollMessenger({ now = new Date(), limits: override } = {}) {
     const groupEnds = !changed[i + 1] || changed[i + 1].updatedAt.getTime() !== conv.updatedAt.getTime();
     if (groupEnds && !failed) advanced = conv.updatedAt;
   }
-  if (complete && advanced) await writeCursor(advanced);
-  else if (complete && firstRun && !changed.length) await writeCursor(now);
-  if (!complete) {
-    logger.warn(`[messenger-inbox] conversation list stopped at ${limits.conversationPages} page(s) with more left; the cursor stays`);
-    throw new Error('Messenger poll stopped at its page cap with conversations left; the cursor stays');
-  }
-  if (failed) throw new Error(`Messenger poll left ${failed} conversation(s) unread; the cursor stays before them`);
+  await settlePoll({ complete, failed, firstRun, advanced, empty: !changed.length, now, pageLimit: limits.conversationPages });
   if (inserted) logger.info(`[messenger-inbox] stored ${inserted} new message(s) from ${changed.length} changed conversation(s)`);
   return { conversations: changed.length, inserted, firstRun };
 }
@@ -370,15 +388,38 @@ function threadRow(row, now) {
 
 const THREAD_COLUMNS = ['c.id', 'c.contact_label', 'c.contact_external_id', 's.last_in', 's.last_out', 's.unread', 's.snippet'];
 
-async function summary(req) {
-  const rows = await threadsQuery(req).select(...THREAD_COLUMNS);
-  return { unanswered: rows.filter((r) => !isAnswered(r)).length };
+// Threads waiting for an answer: the latest customer message is newer than any reply.
+// One definition for the tab count, whatever page of the list is on screen.
+const UNANSWERED_SQL = 's.last_in IS NOT NULL AND (s.last_out IS NULL OR s.last_in > s.last_out)';
+const SORT_KEY_SQL = "date_trunc('milliseconds', GREATEST(s.last_in, s.last_out))";
+
+async function countUnanswered(req) {
+  const row = await threadsQuery(req).whereRaw(UNANSWERED_SQL).count({ n: '*' }).first();
+  return Number(row?.n || 0);
 }
 
-async function listThreads(req, now = new Date()) {
-  const rows = await threadsQuery(req).select(...THREAD_COLUMNS)
-    .orderByRaw('GREATEST(s.last_in, s.last_out) DESC NULLS LAST').limit(LIST_LIMIT);
-  return rows.map((r) => threadRow(r, now));
+async function summary(req) {
+  return { unanswered: await countUnanswered(req) };
+}
+
+/**
+ * One page of threads, newest activity first. `before` (ISO of the last row's
+ * lastMessageAt) plus `beforeId` (its id) is the keyset for the next page.
+ * `unanswered` is the total across all threads, not the page.
+ */
+async function listThreads(req, now = new Date(), { limit = LIST_LIMIT, before = null, beforeId = null } = {}) {
+  let query = threadsQuery(req).select(...THREAD_COLUMNS).whereRaw('GREATEST(s.last_in, s.last_out) IS NOT NULL');
+  if (before) {
+    query = beforeId
+      ? query.whereRaw(`(${SORT_KEY_SQL} < ?::timestamptz OR (${SORT_KEY_SQL} = ?::timestamptz AND c.id < ?))`, [before, before, beforeId])
+      : query.whereRaw(`${SORT_KEY_SQL} < ?::timestamptz`, [before]);
+  }
+  const rows = await query.orderByRaw(`${SORT_KEY_SQL} DESC, c.id DESC`).limit(limit + 1);
+  return {
+    threads: rows.slice(0, limit).map((r) => threadRow(r, now)),
+    hasMore: rows.length > limit,
+    unanswered: await countUnanswered(req),
+  };
 }
 
 async function loadThread(req, id) {
