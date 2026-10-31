@@ -101,9 +101,11 @@ function ReplyBox({ threadId, canReply, ready, onSend }) {
     } catch (err) {
       setError(isRateLimitError(err) ? SLOW_DOWN
         : err?.status === 409 ? WINDOW_NOTE
-          // 504, or no answer reached the browser (a dropped connection): the reply may have gone out.
-          : err?.status === 504 || !err?.status ? "Facebook did not confirm this reply. Check the thread in Facebook before you send it again."
-            : "Facebook did not accept the reply. Nothing was sent.");
+          // Refused only when our server said so (502 send_failed). Any other 5xx (a gateway error),
+          // a 504, or no answer at all (a dropped connection): the reply may have gone out.
+          : err?.status === 502 && err?.details?.error === "send_failed" ? "Facebook did not accept the reply. Nothing was sent."
+            : !err?.status || err.status >= 500 ? "Facebook did not confirm this reply. Check the thread in Facebook before you send it again."
+              : "Facebook did not accept the reply. Nothing was sent.");
     } finally {
       inFlight.current = false;
       setSending(false);
