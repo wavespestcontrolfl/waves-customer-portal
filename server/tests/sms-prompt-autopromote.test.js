@@ -91,3 +91,21 @@ describe('distillation parsing', () => {
     expect(prompt.length).toBeLessThan(4200);
   });
 });
+
+describe('rollback thresholds meet at the boundary (float quotients)', () => {
+  const { riseMeets } = require('../services/sms-prompt-autopromote');
+  const rate = (n, d) => n / d;
+  test('an opt-out rise from 1 to 3 in 100 meets the 2-point threshold', () => {
+    expect(rate(3, 100) - rate(1, 100)).toBeLessThan(0.02);
+    expect(riseMeets(rate(3, 100) - rate(1, 100), 0.02)).toBe(true);
+  });
+  test('a confusion or unsafe rise from 20% to 30% meets the 10-point threshold', () => {
+    expect(riseMeets(rate(30, 100) - rate(20, 100), 0.1)).toBe(true);
+    expect(riseMeets(rate(3, 10) - rate(2, 10), 0.1)).toBe(true);
+  });
+  test('a rise below the threshold, or no rise, does not', () => {
+    expect(riseMeets(rate(2, 100) - rate(1, 100), 0.02)).toBe(false);
+    expect(riseMeets(0.0999, 0.1)).toBe(false);
+    expect(riseMeets(null, 0.05)).toBe(false);
+  });
+});

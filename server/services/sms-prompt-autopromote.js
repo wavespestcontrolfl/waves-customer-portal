@@ -82,6 +82,10 @@ const EVENTS = 'sms_prompt_patch_events';
 const ALERT_LINK = '/admin/agents?tab=shadow';
 
 const rate = (n, d) => (d > 0 ? n / d : null);
+// A rise compared with its rollback threshold: rates are float quotients, so 3/100 - 1/100 is 0.0199999…; a rise
+// that meets the threshold must count as meeting it.
+const RISE_TOLERANCE = 1e-9;
+const riseMeets = (rise, threshold) => rise !== null && rise >= threshold - RISE_TOLERANCE;
 
 const mean = (arr) => (arr.length ? arr.reduce((a, x) => a + x, 0) / arr.length : null);
 
@@ -647,7 +651,7 @@ async function liveJudgeCheck({ dbi, patch, now, voicePin }) {
   if (live.judged < LIVE_MIN_JUDGED || prior.judged < LIVE_MIN_JUDGED) return null;
   const rise = rate(live.unsafe, live.judged) - rate(prior.unsafe, prior.judged);
   const detail = { live, prior, rise: Number(rise.toFixed(3)) };
-  return live.unsafe >= LIVE_MIN_UNSAFE && rise >= LIVE_UNSAFE_RISE ? { reason: 'live_unsafe_rise', detail } : null;
+  return live.unsafe >= LIVE_MIN_UNSAFE && riseMeets(rise, LIVE_UNSAFE_RISE) ? { reason: 'live_unsafe_rise', detail } : null;
 }
 
 const outcomeCohort = (dbi, version, from, to) => dbi({ o: 'sms_reply_outcomes' })
@@ -680,8 +684,8 @@ async function outcomeCheck({ dbi, patch, now, voicePin }) {
   const confusionRise = rate(live.confused, live.total) - rate(prior.confused, prior.total);
   const optOutRise = rate(live.optedOut, live.total) - rate(prior.optedOut, prior.total);
   const detail = { live, prior, confusionRise: Number(confusionRise.toFixed(3)), optOutRise: Number(optOutRise.toFixed(3)) };
-  if (confusionRise >= CONFUSION_RISE) return { reason: 'reply_confusion_rise', detail };
-  return live.optedOut >= OPTOUT_MIN && optOutRise >= OPTOUT_RISE ? { reason: 'reply_optout_rise', detail } : null;
+  if (riseMeets(confusionRise, CONFUSION_RISE)) return { reason: 'reply_confusion_rise', detail };
+  return live.optedOut >= OPTOUT_MIN && riseMeets(optOutRise, OPTOUT_RISE) ? { reason: 'reply_optout_rise', detail } : null;
 }
 
 // Sealed-exam runs of the live (patched) version on the two live legs, each against its own
@@ -711,7 +715,7 @@ async function examCheck({ dbi, patch }) {
     if (cohort.paired < MIN_PAIRED_ITEMS) continue;
     const regressed = Boolean(sig.significant && sig.direction === 'regressed');
     const rise = cohort.liveUnsafe >= LIVE_MIN_UNSAFE ? (cohort.liveUnsafe - cohort.baseUnsafe) / cohort.paired : null;
-    if (regressed || (rise !== null && rise >= EXAM_UNSAFE_RISE)) {
+    if (regressed || riseMeets(rise, EXAM_UNSAFE_RISE)) {
       return { reason: 'exam_regression', detail: { runId: r.id, leg: r.provider_leg, pairedItems: cohort.paired, rise: rise === null ? null : Number(rise.toFixed(3)) } };
     }
   }
@@ -810,6 +814,7 @@ module.exports = {
   runAutopromoteTick,
   decidePromotion,
   examRunsMismatch,
+  riseMeets,
   distillRule,
   ELIGIBLE_FAILURE_MODES,
   ROLLBACK_PHRASES,
