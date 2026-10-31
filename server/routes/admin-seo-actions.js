@@ -22,7 +22,8 @@ router.get('/', async (req, res) => {
     if (type) query = query.where('action_type', type);
     if (domain) query = query.where('domain', domain);
     if (approval_status) query = query.where('approval_status', approval_status);
-    if (execution_status) query = query.where('execution_status', execution_status);
+    // Comma-separated: Progress lists every not-done state (queued,manual_required,…) in one read.
+    if (execution_status) query = query.whereIn('execution_status', String(execution_status).split(','));
 
     const actions = await query;
     res.json(actions);

@@ -171,3 +171,36 @@ describe('admin seo actions routes — owner-only approve guard', () => {
     });
   });
 });
+
+describe('admin seo actions routes — list filters', () => {
+  test('a comma-separated execution_status lists every named state; a single value still works', async () => {
+    const calls = [];
+    const query = {
+      orderBy: jest.fn(() => query),
+      limit: jest.fn(() => query),
+      offset: jest.fn(() => query),
+      where: jest.fn((...args) => { calls.push(['where', ...args]); return query; }),
+      whereIn: jest.fn((...args) => { calls.push(['whereIn', ...args]); return query; }),
+      then: (resolve) => resolve([{ id: 'action-1', execution_status: 'queued' }]),
+    };
+    db.mockImplementation(() => query);
+
+    await withServer(async (baseUrl) => {
+      const progress = await fetch(
+        `${baseUrl}/admin/seo/actions?domain=example.test&approval_status=approved&execution_status=queued,manual_required,failed`,
+        { headers: { Authorization: 'Bearer admin' } },
+      );
+      expect(progress.status).toBe(200);
+      expect(await progress.json()).toEqual([{ id: 'action-1', execution_status: 'queued' }]);
+      expect(calls).toContainEqual(['where', 'approval_status', 'approved']);
+      expect(calls).toContainEqual(['whereIn', 'execution_status', ['queued', 'manual_required', 'failed']]);
+
+      calls.length = 0;
+      const done = await fetch(`${baseUrl}/admin/seo/actions?execution_status=done`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(done.status).toBe(200);
+      expect(calls).toContainEqual(['whereIn', 'execution_status', ['done']]);
+    });
+  });
+});
