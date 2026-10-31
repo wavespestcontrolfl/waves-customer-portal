@@ -8,15 +8,23 @@
 // waveguardExtendExisting.
 let mockExtendExistingGate = false;
 let mockExtendPickGate = false;
+let mockLawnRoundsGate = false;
 let mockAutoTierGate = false;
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (gate) => {
     if (gate === 'waveguardExtendExisting') return mockExtendExistingGate;
     if (gate === 'waveguardExtendPick') return mockExtendPickGate;
+    if (gate === 'lawn9xRounds') return mockLawnRoundsGate;
     if (gate === 'autoWaveguardTierEnroll') return mockAutoTierGate;
     return false;
   },
 }));
+// The tick list's margin re-prices the setup estimate on today's engine: the
+// translator and the engine are stubbed (only that path loads them).
+jest.mock('../routes/property-lookup-v2', () => ({ translateV2CallToV1Input: jest.fn() }));
+jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }));
+const { translateV2CallToV1Input: mockTranslate } = require('../routes/property-lookup-v2');
+const { generateEstimate: mockGenerate } = require('../services/pricing-engine');
 
 const {
   computeMembershipContext,
@@ -2925,6 +2933,9 @@ describe('staff-picked tier extension (option B)', () => {
   afterEach(() => {
     mockExtendExistingGate = false;
     mockExtendPickGate = false;
+    mockLawnRoundsGate = false;
+    mockTranslate.mockReset();
+    mockGenerate.mockReset();
   });
 
   // Pest + lawn on the account (Silver); the estimate adds mosquito (Gold).
@@ -3083,6 +3094,45 @@ describe('staff-picked tier extension (option B)', () => {
       scheduledRows: silverRows().map((row) => ({ ...stamped(row), source_estimate_id: null })),
     }), { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
     expect(unknown.services.map((svc) => svc.marginPct)).toEqual([null, null]);
+  });
+
+  test("pest and lawn margins re-price the setup estimate on today's engine at the plan the customer has now", async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
+    const primaryKey = normalizedStampedStreet('123 Main St', null, 'Venice', '34285');
+    const stamped = (row) => ({
+      ...row, source_estimate_id: 'est-setup', service_address_line1: '123 Main St', service_address_city: 'Venice', service_address_zip: '34285',
+    });
+    const profile = { homeSqFt: 2000, measuredTurfSf: 6800 };
+    const database = fakeDb({
+      scheduledRows: silverRows().map(stamped),
+      catalogRows: [
+        ...['s1', 's2', 's3'].map((id) => ({ id, frequency: 'bimonthly', visits_per_year: 6 })),
+        { id: 'l1', frequency: 'every_6_weeks', visits_per_year: 9 },
+      ],
+      // The setup estimate quoted pest quarterly; the customer now has it every other month.
+      marginEstimate: { estimate_data: { engineRequest: { profile, options: { pestFreq: 4, lawnFreq: 9 } } } },
+    });
+    mockTranslate.mockImplementation((_profile, codes, options) => ({ codes, options }));
+    mockGenerate.mockImplementation((input) => ({
+      lineItems: input.codes[0] === 'PEST'
+        ? [{ service: 'pest_control', perApp: 140, margin: 0.6 }]
+        : [{ service: 'lawn_care', perApp: 100, margin: 0.3, costs: { annualAdmin: 51, annualCallbackReserve: 63 } }],
+    }));
+    const scope = { groupedEstimate: false, perPropertyStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey } };
+    const offer = await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
+    expect(mockTranslate).toHaveBeenCalledWith(profile, ['PEST'], { pestFreq: 6, lawnFreq: 9 });
+    expect(mockTranslate).toHaveBeenCalledWith(profile, ['LAWN'], { pestFreq: 4, lawnFreq: 9 });
+    // Pest: $140 x 0.4 = $56.00 against $113.33 = 50.6%. Lawn 9x books a
+    // 42-day series while the rounds gate is off, so its $114 of yearly costs
+    // spread over ~8.7 visits: $70.00 + $114 x (42/365 - 1/9) = $70.45 against
+    // $75.56 = 6.8%.
+    expect(offer.services.map((svc) => [svc.key, svc.marginPct])).toEqual([['lawn_care', 6.8], ['pest_control', 50.6]]);
+    // Nine rounds book 9 visits a year: no spread.
+    mockLawnRoundsGate = true;
+    const rounds = await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
+    expect(rounds.services.find((svc) => svc.key === 'lawn_care').marginPct).toBe(7.4);
   });
 
   test('the save and the tick list share one property scope', () => {

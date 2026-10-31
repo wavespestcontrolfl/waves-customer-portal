@@ -1970,12 +1970,37 @@ function membershipScopeArgs({ groupedEstimate = false, perPropertyStreetScope =
   return { ...scope, freezeExtensionPlan: !!perPropertyStreetScope };
 }
 
+// The families the tick list prices on TODAY's engine: the estimate tool's
+// service code and the option that carries the plan's visits a year.
+const TODAY_ENGINE_PLANS = {
+  pest_control: { code: 'PEST', visitsOption: 'pestFreq' },
+  lawn_care: { code: 'LAWN', visitsOption: 'lawnFreq' },
+};
+
+// Planned cost per visit of an engine line: its list per-visit price x
+// (1 - its list margin). A 9x lawn plan books a 42-day series while
+// GATE_LAWN_9X_ROUNDS is off (about 8.7 visits a year, not the 9 the engine
+// prices), so the line's yearly admin and callback reserve spread over those
+// visits. null when the line carries no price or margin.
+function plannedVisitCost(line, visits, key) {
+  const margin = Number(line?.margin);
+  const listPerVisit = Number(line?.perApp) > 0 ? Number(line.perApp) : Number(line?.annual) / visits;
+  if (!(listPerVisit > 0) || !Number.isFinite(margin)) return null;
+  const yearly = key === 'lawn_care' && visits === 9 && !isEnabled('lawn9xRounds')
+    ? (Number(line.costs?.annualAdmin) || 0) + (Number(line.costs?.annualCallbackReserve) || 0)
+    : 0;
+  return listPerVisit * (1 - margin) + yearly * (42 / 365 - 1 / 9);
+}
+
 // Estimated margin (percent, one decimal) at the new price for one offered
-// family: the per-visit cost the pricing engine stated on the estimate that
-// set the family up (that line's list per-visit price × (1 − its list
-// margin)). null when the frozen rows trace to no single creating estimate
-// or that estimate's engine line carries no margin — the tool shows none.
-async function offeredFamilyMarginPct(database, service) {
+// family, from the estimate that set the family up. Pest and lawn re-price
+// that estimate's saved property inputs on TODAY's engine (live pricing
+// config) at the plan the customer has now (visitsPerYear); any other family,
+// or a setup estimate without saved inputs, reads that estimate's own engine
+// line. null when the frozen rows trace to no single setup estimate or the
+// line carries no margin — the tool then shows none. The caller has synced
+// the pricing config.
+async function offeredFamilyMarginPct(database, service, visitsPerYear) {
   const rowIds = Array.isArray(service?.rowIds) ? service.rowIds : [];
   if (!rowIds.length || !(Number(service.newPerVisit) > 0)) return null;
   // Children of a recurring series may carry no estimate stamp; their root does.
@@ -1990,16 +2015,23 @@ async function offeredFamilyMarginPct(database, service) {
     .map((row) => row.source_estimate_id || parentEstimate.get(String(row.recurring_parent_id)))
     .filter(Boolean).map(String));
   if (estimateIds.size !== 1) return null;
-  const estimate = await database('estimates').where({ id: [...estimateIds][0] }).first('estimate_data');
-  const estData = estimate ? parseEstimateData(estimate) : null;
-  const line = (estData?.engineResult?.lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
-  const margin = Number(line?.margin);
-  const visits = estimateVisitsFor(estData, service.key);
-  const listPerVisit = Number(line?.perApp) > 0
-    ? Number(line.perApp)
-    : (Number(line?.annual) > 0 && visits > 0 ? Number(line.annual) / visits : 0);
-  if (!(listPerVisit > 0) || !Number.isFinite(margin)) return null;
-  return Math.round((1 - (listPerVisit * (1 - margin)) / Number(service.newPerVisit)) * 1000) / 10;
+  // A missing row parses to {} (parseEstimateData), which has no line.
+  const estData = parseEstimateData(await database('estimates').where({ id: [...estimateIds][0] }).first('estimate_data'));
+  const plan = TODAY_ENGINE_PLANS[service.key];
+  const request = estData?.engineRequest;
+  const today = plan && request?.profile && visitsPerYear > 0;
+  let lineItems = estData?.engineResult?.lineItems;
+  if (today) {
+    // Lazy-require the route adapter (service -> route load order), as the save's replay does.
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const { generateEstimate } = require('./pricing-engine');
+    lineItems = generateEstimate(translateV2CallToV1Input(
+      request.profile, [plan.code], { ...request.options, [plan.visitsOption]: visitsPerYear },
+    )).lineItems;
+  }
+  const line = (lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
+  const cost = plannedVisitCost(line, today ? visitsPerYear : estimateVisitsFor(estData, service.key), service.key);
+  return cost === null ? null : Math.round((1 - cost / Number(service.newPerVisit)) * 1000) / 10;
 }
 
 // The estimate tool's tick list (GATE_WAVEGUARD_EXTEND_PICK, owner
@@ -2018,11 +2050,13 @@ async function currentServiceTierOffer(database, { customerId, estData, groupedE
     extensionPick: { ticked: Object.keys(SERVICE_LABEL), unticked: [] },
   });
   if (!ctx?.upgrade || !ctx.existingServices?.length) return null;
+  // The plan each family has now (visits a year), for the margin's engine run.
+  const visitsByKey = new Map((ctx.currentServices || []).map((svc) => [svc.key, Number(svc.visitsPerYear)]));
   const services = [];
   for (const svc of ctx.existingServices) {
     let marginPct = null;
     try {
-      marginPct = await offeredFamilyMarginPct(database, svc);
+      marginPct = await offeredFamilyMarginPct(database, svc, visitsByKey.get(svc.key));
     } catch (err) {
       logger.warn(`[membership-context] tick-list margin skipped for ${svc.key}: ${err.message}`);
     }
