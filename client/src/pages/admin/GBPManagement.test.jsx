@@ -181,6 +181,15 @@ describe("Google profile workspace", () => {
     expect(await screen.findByRole("button", { name: "Save Services" })).toBeDisabled();
     expect(screen.getByText(/The saved profile could not be loaded, so saving is off/)).toBeInTheDocument();
     expect(calls.some((c) => c.method === "PUT")).toBe(false);
+
+    // A Retry where both reads fail keeps the Places list, so saves stay off.
+    routes["GET /admin/reviews/gbp-locations"] = () => response({ error: "down" }, 503);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(calls.filter((c) => c.path === "/admin/reviews/gbp-locations")).toHaveLength(2),
+    );
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Showing Places data only"));
+    expect(screen.getByRole("button", { name: "Save Services" })).toBeDisabled();
   });
 
   it("Sync All reports the locations that failed", async () => {

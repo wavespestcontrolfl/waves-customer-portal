@@ -122,9 +122,9 @@ export default function GBPManagement() {
         setLocationsError(err.message || "Google profile read failed");
         setDegraded(true);
       } catch (fallbackErr) {
-        // Both reads failed: keep any list already shown and say so.
+        // Both reads failed: keep any list already shown, and keep its
+        // degraded mark (a kept Places list still has no stored profile).
         setLocationsError(fallbackErr.message || err.message || "Read failed");
-        setDegraded(false);
       }
     }
     setLoading(false);
