@@ -1,6 +1,7 @@
 // sendTemplate `cc`: one message copied to extra addresses (the invoice Send's CC).
+const mockMarkerDb = jest.fn();
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../models/marker-db', () => () => jest.fn());
+jest.mock('../models/marker-db', () => () => mockMarkerDb);
 jest.mock('../services/sendgrid-mail', () => ({
   newsletterGroupId: jest.fn(() => 101),
   serviceGroupId: jest.fn(() => 202),
@@ -68,6 +69,12 @@ const payload = { first_name: 'Sam', estimate_url: 'https://example.com/e', expi
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // The provider-handoff phase marker (its own connection): one row updated.
+  mockMarkerDb.mockImplementation(() => {
+    const marker = chain();
+    marker.update = jest.fn(async () => 1);
+    return marker;
+  });
 });
 
 describe('sendTemplate cc', () => {
@@ -98,7 +105,7 @@ describe('sendTemplate cc', () => {
     }));
   });
 
-  test('a send without a CC is unchanged: no snapshot, no category, an empty cc list', async () => {
+  test('a send without a CC is unchanged: no snapshot, no category, no cc key', async () => {
     const queued = { id: 'msg-2', status: 'queued', send_attempt_token: 'tok' };
     const queueInsert = chain({ returning: [queued] });
     setDbQueues({
