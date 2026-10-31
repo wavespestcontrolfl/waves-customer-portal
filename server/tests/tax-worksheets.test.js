@@ -233,12 +233,14 @@ describe('1099 list', () => {
     const r = ws.build1099List(2026, [
       zelle({ expense_id: 'z1', amount: 1200, bank_original: 'Zelle money sent to Pat Example Conf# AB12CD' }),
       zelle({ expense_id: 'z2', amount: 900, bank_original: 'Zelle money sent to PAT EXAMPLE' }),
+      // a reference code or date after the name is not part of it
+      zelle({ expense_id: 'z3', amount: 50, bank_original: 'Zelle payment to Pat Example JPM99999999 10/12' }),
       row({ expense_id: 'v1', amount: 100, vendor_name: 'Pat Example', bank_text: 'Pat Example' }),
     ]);
     expect(r.payees.map((p) => [p.key, p.name, p.total, p.count, p.unresolved, p.needs_1099])).toEqual([
-      ['pat example', 'Pat Example', 2200, 3, false, true],
+      ['pat example', 'Pat Example', 2250, 4, false, true],
     ]);
-    expect(r.payees[0].payments.map((p) => [p.expense_id, p.channel])).toEqual([['z1', 'zelle'], ['z2', 'zelle'], ['v1', 'unknown']]);
+    expect(r.payees[0].payments.map((p) => [p.expense_id, p.channel])).toEqual([['z1', 'zelle'], ['z2', 'zelle'], ['z3', 'zelle'], ['v1', 'unknown']]);
   });
 
   test('a typed vendor name is never overridden; wording that names no one stays unresolved, one line each', () => {
@@ -254,6 +256,25 @@ describe('1099 list', () => {
       ['unresolved:u1', true],
       ['unresolved:u2', true],
     ]);
+  });
+
+  test('raw bank descriptors that name an action, not a person, never add up as one payee', () => {
+    const generic = (id, vendor, original, amount = 100) => row({ expense_id: id, amount, vendor_name: vendor, description: vendor, bank_text: vendor, bank_original: original });
+    const r = ws.build1099List(2026, [
+      // two different people paid by PayPal transfer: together they would cross $2,000
+      generic('p1', 'PayPal', 'PAYPAL INST XFER 240101 WEB ID: PAYPALSI77', 1200),
+      generic('p2', 'PayPal', 'PAYPAL INST XFER 250315 WEB ID: PAYPALSI77', 900),
+      generic('v1', 'Venmo', 'VENMO 1030 PAYMENT 250101'),
+      generic('c1', 'Cash App', 'CASH APP*CASH OUT'),
+      generic('o1', 'Online Transfer', 'ONLINE TRANSFER TO CHK ...1234'),
+      // only Zelle's own wording is read: other apps report on a 1099-K
+      generic('p3', 'PayPal', 'PAYPAL *PAT EXAMPLE'),
+      // a Zelle phrase with no name (phone number only) names no one
+      generic('z9', 'Zelle', 'Zelle money sent to 9415550100'),
+    ]);
+    expect(r.payees.every((p) => p.unresolved && p.count === 1)).toBe(true);
+    expect(r.payees.some((p) => p.needs_1099)).toBe(false);
+    expect(r.payees).toHaveLength(7);
   });
 
   test('2025 payments use the $600 threshold', () => {
@@ -309,10 +330,12 @@ describe('form1099List', () => {
   test('lists the year, counts payment-app debits still in the Inbox, adds the notes', async () => {
     tables['expenses as e'] = () => [
       { expense_id: 'a', expense_date: '2026-02-03', amount: '2500.00', payment_method: 'ach', vendor_name: 'Zelle money sent to Pat Example', description: 'x', line: '11', category: 'Contract Labor', bank_text: 'Zelle money sent to Pat Example' },
+      // a feed row: the cleaned name is just "Zelle", the bank's wording names the payee
+      { expense_id: 'b', expense_date: '2026-02-10', amount: '100.00', payment_method: 'ach', vendor_name: 'Zelle', description: 'Zelle', line: '11', category: 'Contract Labor', bank_text: 'Zelle', bank_original: 'Zelle money sent to Pat Example' },
     ];
     tables.bank_transactions = () => ({ count: 3, total: '410.50' });
     const r = await ws.form1099List('2026');
-    expect(r.payees).toEqual([expect.objectContaining({ name: 'Pat Example', total: 2500, needs_1099: true })]);
+    expect(r.payees).toEqual([expect.objectContaining({ name: 'Pat Example', total: 2600, count: 2, needs_1099: true })]);
     expect(r.payees[0].payments[0]).toMatchObject({ date: '2026-02-03', channel: 'zelle', line: '11' });
     expect(r.inbox_pending).toEqual({ count: 3, total: 410.5 });
     expect(r.notes.some((n) => n.includes('1099-MISC'))).toBe(true);

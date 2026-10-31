@@ -223,8 +223,9 @@ function paymentChannel(paymentMethod, text) {
 // The payee inside a bank text: "Zelle money sent to Pat Example" gives
 // "Pat Example". A check or a Wise transfer does not name the person paid:
 // such a payment is never added to anyone else's and is marked unresolved.
+const ZELLE_TO = /\bzelle\b(?:\s+money)?(?:\s+sent)?(?:\s+payment)?\s+to\s+(.+)/i;
 const PAYEE_PATTERNS = [
-  /\bzelle\b(?:\s+money)?(?:\s+sent)?(?:\s+payment)?\s+to\s+(.+)/i,
+  ZELLE_TO,
   /\bvenmo\b(?:\s+payment)?(?:\s+to)?\s+(.+)/i,
   /cash\s*app\*?\s*(?:to\s+)?(.+)/i,
   /\bpaypal\s*\*\s*(.+)/i,
@@ -245,16 +246,27 @@ function payeeOf(text) {
 }
 const payeeKey = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+// The bank's original wording (Plaid keeps it in original_description) names
+// a payee only through Zelle's explicit recipient phrase: "Zelle money sent
+// to Pat Example". Zelle files no 1099-K, so those are the payments this list
+// is for. Words with a digit (reference codes, dates) are dropped. Every other
+// raw descriptor ("PAYPAL INST XFER ...", "VENMO 1030 PAYMENT ...",
+// "CASH APP*CASH OUT") names an action, not a person: payeeOf's looser rules
+// would read it as a name and add up everyone paid that way.
+function zelleRecipientOf(text) {
+  const m = ZELLE_TO.exec(String(text || '').replace(/\s+/g, ' ').trim());
+  if (!m) return null;
+  const name = tidy(m[1]).split(' ').filter((word) => !/\d/.test(word)).join(' ');
+  return /[a-z]/i.test(name) && !GENERIC_NAME.test(name) ? { name, identified: true } : null;
+}
+
 // The expense's own name first: a vendor the operator typed (or a bank text
 // that already names someone) is never overridden. When it names no one (a
-// bank feed's cleaned name is often just "Zelle"), the bank's original
-// wording, which Plaid keeps in original_description, may name the payee.
-// If neither does, the payment stays unresolved on its own line.
+// bank feed's cleaned name is often just "Zelle"), the bank's original Zelle
+// wording may. If neither does, the payment stays unresolved on its own line.
 function payeeOfRow(r) {
   const own = payeeOf(r.vendor_name || r.description || r.bank_text);
-  if (own.identified || !r.bank_original) return own;
-  const bank = payeeOf(r.bank_original);
-  return bank.identified ? bank : own;
+  return own.identified ? own : (zelleRecipientOf(r.bank_original) || own);
 }
 
 // rows: { expense_id, date, amount, payment_method, vendor_name, description, bank_text, bank_original, line, category }
