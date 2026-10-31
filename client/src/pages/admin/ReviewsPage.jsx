@@ -1175,7 +1175,7 @@ function ReviewIncentivesPanel() {
     try {
       await adminFetch(`/admin/reviews/${review.id}/name-match/dismiss`, {
         method: "POST",
-        body: JSON.stringify({ customerId: review.suggestedCustomerId }),
+        body: JSON.stringify({ customerId: review.suggestedCustomerId, result: review.nameMatchResult }),
       });
       if (activeRepairId === review.id) setActiveRepairId(null);
       load();

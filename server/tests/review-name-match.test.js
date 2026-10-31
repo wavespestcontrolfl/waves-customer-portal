@@ -153,11 +153,12 @@ describe('runReviewNameMatch', () => {
 });
 
 describe('dismissNameMatch', () => {
-  test('rules the shown customer out and clears the decision', async () => {
+  test('rules the shown customer out and clears the decision, only on the decision and link state shown', async () => {
     const conn = fakeConn([]);
-    await expect(dismissNameMatch({ reviewId: 'r1', customerId: 'c1', conn })).resolves.toEqual({ dismissed: true });
+    await expect(dismissNameMatch({ reviewId: 'r1', customerId: 'c1', result: 'pause', conn })).resolves.toEqual({ dismissed: true });
     expect(conn.updates).toEqual([{
-      wheres: [['eq', { id: 'r1', name_match_customer_id: 'c1' }], ['notNull', 'name_match_result']],
+      // Still unlinked: a suggestion someone matched meanwhile is not dismissed by a stale page.
+      wheres: [['eq', { id: 'r1', name_match_customer_id: 'c1', name_match_result: 'pause' }], ['null', 'customer_id']],
       patch: expect.objectContaining({
         // Appended to the list: earlier dismissals stay.
         name_match_dismissed_customer_ids: { raw: 'array_append(name_match_dismissed_customer_ids, ?::uuid)', bindings: ['c1'] },
@@ -166,13 +167,20 @@ describe('dismissNameMatch', () => {
     }]);
   });
 
-  test('answers 409 when the decision moved since the page loaded, 400 without ids', async () => {
+  test('Keep link on a dispute applies only while the review is still linked to that customer', async () => {
+    const conn = fakeConn([]);
+    await dismissNameMatch({ reviewId: 'r3', customerId: 'c3', result: 'disputed', conn });
+    expect(conn.updates[0].wheres).toEqual([['eq', { id: 'r3', name_match_customer_id: 'c3', name_match_result: 'disputed' }], ['eq', { customer_id: 'c3' }]]);
+  });
+
+  test('answers 409 when the decision or link moved since the page loaded, 400 without ids or the shown result', async () => {
     const conn = jest.fn(() => {
-      const q = { where: () => q, whereNotNull: () => q, update: async () => 0 };
+      const q = { where: () => q, whereNull: () => q, update: async () => 0 };
       return q;
     });
     conn.raw = () => ({});
-    await expect(dismissNameMatch({ reviewId: 'r1', customerId: 'c1', conn })).rejects.toMatchObject({ statusCode: 409 });
-    await expect(dismissNameMatch({ reviewId: 'r1', conn })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(dismissNameMatch({ reviewId: 'r1', customerId: 'c1', result: 'pause', conn })).rejects.toMatchObject({ statusCode: 409 });
+    await expect(dismissNameMatch({ reviewId: 'r1', customerId: 'c1', conn })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(dismissNameMatch({ reviewId: 'r1', result: 'pause', conn })).rejects.toMatchObject({ statusCode: 400 });
   });
 });

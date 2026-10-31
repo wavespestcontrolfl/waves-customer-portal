@@ -119,18 +119,22 @@ async function runReviewNameMatch({ conn = db, mode = reviewNameMatchMode(), now
   return { mode, reviews: decisions.length, counts, changed: changes.length, written };
 }
 
+const DISMISSABLE = new Set([...NAMES_A_CUSTOMER, 'disputed']);
+
 // Reviews > Dismiss: a person rules the suggested customer out for this review (or keeps a disputed
 // link). The decision clears at once and the matcher never names that customer for this review
-// again. Conditional on the decision the person saw: a pass that moved it since gets a 409.
-async function dismissNameMatch({ reviewId, customerId, conn = db } = {}) {
-  if (!reviewId || !customerId) {
-    const err = new Error('reviewId and customerId required');
+// again. Conditional on the decision AND the link state the person saw: a suggestion matched by
+// someone else meanwhile, or a decision a pass moved, gets a 409.
+async function dismissNameMatch({ reviewId, customerId, result, conn = db } = {}) {
+  if (!reviewId || !customerId || !DISMISSABLE.has(result)) {
+    const err = new Error('reviewId, customerId and the shown result required');
     err.statusCode = 400;
     throw err;
   }
-  const updated = await conn('google_reviews')
-    .where({ id: reviewId, name_match_customer_id: customerId })
-    .whereNotNull('name_match_result')
+  const query = conn('google_reviews').where({ id: reviewId, name_match_customer_id: customerId, name_match_result: result });
+  if (result === 'disputed') query.where({ customer_id: customerId });
+  else query.whereNull('customer_id');
+  const updated = await query
     .update({
       name_match_dismissed_customer_ids: conn.raw('array_append(name_match_dismissed_customer_ids, ?::uuid)', [customerId]),
       name_match_dismissed_at: new Date(),

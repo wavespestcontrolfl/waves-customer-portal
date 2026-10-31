@@ -328,6 +328,7 @@ describe("Reviews workspace foundation", () => {
             starRating: 5,
             suggestedCustomerId: "customer-dana",
             suggestedCustomerName: "Dana Fenwick",
+            nameMatchResult: "pause",
           }],
         });
       }
@@ -360,7 +361,7 @@ describe("Reviews workspace foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Not this customer" }));
     await waitFor(() => expect(posts.at(-1)).toEqual({
       path: "/api/admin/reviews/review-pause/name-match/dismiss",
-      body: { customerId: "customer-dana" },
+      body: { customerId: "customer-dana", result: "pause" },
     }));
   });
 });

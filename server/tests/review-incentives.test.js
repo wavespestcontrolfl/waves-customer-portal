@@ -479,9 +479,9 @@ describe('review incentives', () => {
       days: 30,
     });
 
-    expect(queue.items.map((item) => [item.id, item.reason, item.suggestedCustomerId, item.suggestedCustomerName, item.customerName])).toEqual([
-      ['review-pause', 'name_match_pause', 'customer-dana', 'Dana Fenwick', null],
-      ['review-disputed', 'name_match_disputed', 'customer-gwen', 'Gwen Harlowe', 'Gwen Harlowe'],
+    expect(queue.items.map((item) => [item.id, item.reason, item.nameMatchResult, item.suggestedCustomerId, item.suggestedCustomerName, item.customerName])).toEqual([
+      ['review-pause', 'name_match_pause', 'pause', 'customer-dana', 'Dana Fenwick', null],
+      ['review-disputed', 'name_match_disputed', 'disputed', 'customer-gwen', 'Gwen Harlowe', 'Gwen Harlowe'],
     ]);
   });
 

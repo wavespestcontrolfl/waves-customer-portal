@@ -656,6 +656,8 @@ async function nameMatchQueueItem(review, conn) {
     ...serializeAttributionQueueItem(review, review.customer_id ? suggested : null, NAME_MATCH_REASONS[review.name_match_result]),
     suggestedCustomerId: review.name_match_customer_id,
     suggestedCustomerName: customerName(suggested),
+    // Sent back with Not this customer / Keep link so the dismissal applies only to what was shown.
+    nameMatchResult: review.name_match_result,
   };
 }
 
