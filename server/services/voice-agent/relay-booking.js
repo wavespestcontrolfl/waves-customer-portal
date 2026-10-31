@@ -490,6 +490,14 @@ async function commitVoiceBooking({
           + 'outbound_booking_review card (no call_log row for this call) — it is invisible to the office confirm queue'
         );
       }
+      // GATE_ROUTE_CHECK_BOOKING_SAVES: number the pending visit on its technician's
+      // day (stop numbers only: no message, no notification, no Google call), in
+      // this transaction, after the review card (the card can still roll the
+      // insert back). The row is never street-level held: this writer has no
+      // such state. Gate off: touches nothing. Never throws.
+      if (created) {
+        await require('../scheduling/staff-save-route-check').placeBookingSavedVisit(trx, { visit: created, source: 'voice_relay' });
+      }
       return { status: 'ok', scheduledServiceId: created && created.id, callLogId };
     });
   } catch (err) {

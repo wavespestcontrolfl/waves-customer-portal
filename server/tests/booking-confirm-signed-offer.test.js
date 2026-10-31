@@ -965,6 +965,98 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     }
   });
 
+  // GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30): with capacity mode off, the primary visit is numbered by the
+  // dispatcher's placement in the same transaction, right after the insert. A stub on the package follow-up (the next
+  // statement) stops the flow after the placement, so each case also proves the booking went on past it.
+  describe('GATE_ROUTE_CHECK_BOOKING_SAVES: the primary visit gets its stop number', () => {
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const GATES = ['GATE_ROUTE_CHECK_BOOKING_SAVES', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY', 'GATE_BOOK_CAPACITY_COMMIT'];
+    let savedEnv;
+    let placeSpy;
+    let followUpSpy;
+    let laneSpy;
+    beforeEach(() => {
+      savedEnv = Object.fromEntries(GATES.map(name => [name, process.env[name]]));
+      GATES.forEach(name => { delete process.env[name]; });
+      returnScheduledInsert = true;
+      placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue([1]);
+      followUpSpy = jest.spyOn(require('../services/package-followup-booking'), 'ensurePackageFollowUpVisit')
+        .mockImplementation(async () => { throw new Error(SENTINEL); });
+      // The callback lane's open-callback read (re-service / inspection) is not under test here.
+      laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+    });
+    afterEach(() => {
+      placeSpy.mockRestore();
+      followUpSpy.mockRestore();
+      laneSpy.mockRestore();
+      GATES.forEach(name => {
+        if (savedEnv[name] === undefined) delete process.env[name];
+        else process.env[name] = savedEnv[name];
+      });
+    });
+    const gateOn = () => {
+      process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    };
+    const stopsAfterPlacement = async (payload) => {
+      await expect(createSelfBooking(payload)).rejects.toThrow(SENTINEL);
+      expect(followUpSpy).toHaveBeenCalledTimes(1);
+    };
+
+    test.each([
+      ['/book', 'self_booking', () => confirmPayload(mintSlotOfferField(offerPayload()))],
+      ['the re-service page', 'reservice', () => callbackPayload()],
+      ['the inspection page', 'inspection', () => callbackPayload({ callbackVisit: { ...callbackPayload().callbackVisit, isCallback: false } })],
+    ])('gate on, capacity off: %s places the new visit once, on the booking transaction, with source %s', async (_name, source, payload) => {
+      gateOn();
+      await stopsAfterPlacement(payload());
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy).toHaveBeenCalledWith(expect.any(Function), { serviceId: 'scheduled-1', staffSave: true, source });
+      // Placed before the package follow-up books visit 2: the primary visit only.
+      expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(followUpSpy.mock.invocationCallOrder[0]);
+    });
+
+    test.each([
+      ['/book', undefined, 'self_booking'],
+      ['the re-service page', { serviceKey: 'pest_re_service' }, 'reservice'],
+      ['the inspection page', { serviceKey: 'lawn_inspection', isCallback: false }, 'inspection'],
+      ['the commercial first-visit page', { isCallback: false, dedupeLane: false, estimateGuard: { estimateId: 'est-1' } }, 'commercial_first_visit'],
+    ])('the placement source names the page: %s', (_name, callbackVisit, source) => {
+      expect(require('../routes/booking')._internals.bookingPlacementSource(callbackVisit)).toBe(source);
+    });
+
+    test('gate off: the placement is never called', async () => {
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+      await stopsAfterPlacement(confirmPayload(mintSlotOfferField(offerPayload())));
+      expect(placeSpy).not.toHaveBeenCalled();
+    });
+
+    test('a placement that throws is one logged line and the booking goes on', async () => {
+      gateOn();
+      placeSpy.mockRejectedValueOnce(new Error('route boom'));
+      await stopsAfterPlacement(confirmPayload(mintSlotOfferField(offerPayload())));
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('(self_booking): route boom'));
+    });
+
+    test('a visit the capacity check numbered is not placed a second time', async () => {
+      gateOn();
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+      const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue({ options: { prospective: { lat: LAT, lng: LNG } } });
+      const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity').mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
+      const persistSpy = jest.spyOn(arrivalRoute, 'persistArrivalOrder').mockResolvedValue(undefined);
+      const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+      try {
+        await stopsAfterPlacement(confirmPayload(mintSlotOfferField(offerPayload())));
+        expect(persistSpy).toHaveBeenCalledTimes(1);
+        expect(placeSpy).not.toHaveBeenCalled();
+      } finally {
+        prepareSpy.mockRestore(); verifySpy.mockRestore(); persistSpy.mockRestore(); conflictSpy.mockRestore();
+      }
+    });
+  });
+
   test('the production booking contract rejects an infeasible whole-route re-check as SLOT_TAKEN', async () => {
     const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
     const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
