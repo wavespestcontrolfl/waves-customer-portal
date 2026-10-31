@@ -536,9 +536,11 @@ async function sendReply(req, id, text, { now = new Date() } = {}) {
     logger.error(`[messenger-inbox] reply sent but not stored: ${safeError(err)}`);
   }
   try {
-    await closeBell(row.id);
+    // Settle the bell from what is stored, never a blind close: a customer message that
+    // landed after this reply keeps (or rings) its bell.
+    await reconcileBell(row);
   } catch (err) {
-    logger.warn(`[messenger-inbox] bell not closed after reply: ${safeError(err)}`);
+    logger.warn(`[messenger-inbox] bell not settled after reply: ${safeError(err)}`);
   }
   return { ok: true, message: message ? { id: message.id, createdAt: iso(message.created_at) } : null };
 }

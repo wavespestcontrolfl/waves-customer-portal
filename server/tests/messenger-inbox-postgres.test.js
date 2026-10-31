@@ -597,6 +597,24 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect((await messagesOf('open')).filter((m) => m.direction === 'outbound')).toHaveLength(1);
     });
 
+    test('a reply does not close a bell raised for a customer message newer than the reply', async () => {
+      await seed();
+      const open = (await (await get('/threads')).json()).threads.find((t) => t.name === 'Pat Synthetic');
+      const [first] = await messagesOf('open');
+      // A customer message stored for a moment after the reply goes out.
+      await db('messages').insert({
+        conversation_id: open.id, channel: 'facebook_messenger', direction: 'inbound', author_type: 'customer',
+        body: 'Also the side gate', twilio_sid: messenger.messageKey(`m_later_${RUN}`), is_read: false,
+        media: '[]', metadata: JSON.stringify({ graph_mid: `m_later_${RUN}` }),
+        created_at: new Date(Date.now() + 60 * 1000), updated_at: new Date(),
+      });
+      expect(first).toBeTruthy();
+      const res = await post(`/threads/${open.id}/reply`, { text: 'We can call you at 3.' });
+      expect(res.status).toBe(200);
+      const [bell] = await bellsOf('open');
+      expect(bell.done_at).toBeNull();
+    });
+
     test('a reply past 24 hours is 409 outside_window: nothing goes to Facebook and nothing is stored', async () => {
       await seed();
       const late = (await (await get('/threads')).json()).threads.find((t) => t.name === 'Kim Sample');

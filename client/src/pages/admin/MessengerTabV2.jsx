@@ -164,8 +164,11 @@ export default function MessengerTabV2({ onCount }) {
         const fresh = d.threads || [];
         setList((prev) => {
           if (!prev || !olderLoaded.current || !fresh.length) return { items: fresh, hasMore: Boolean(d.hasMore), unanswered: Number(d.unanswered) || 0 };
-          const tail = fresh[fresh.length - 1].lastMessageAt;
-          const kept = prev.items.filter((t) => t.lastMessageAt < tail && !fresh.some((f) => f.id === t.id));
+          // Older rows sit after the fresh page's last row in the server's order: newest time first,
+          // then the higher id (the keyset is time, then id).
+          const tail = fresh[fresh.length - 1];
+          const afterTail = (t) => t.lastMessageAt < tail.lastMessageAt || (t.lastMessageAt === tail.lastMessageAt && t.id < tail.id);
+          const kept = prev.items.filter((t) => afterTail(t) && !fresh.some((f) => f.id === t.id));
           return { items: [...fresh, ...kept], hasMore: prev.hasMore, unanswered: Number(d.unanswered) || 0 };
         });
       })

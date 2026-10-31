@@ -348,6 +348,21 @@ describe("Messenger tab", () => {
       expect(onCount).toHaveBeenLastCalledWith(42);
     });
 
+    it("keeps an older thread that ties the first page's last time, when its id sorts after it", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const tie = { ...older, id: "t-0tie", name: "Lee Example", lastMessageAt: open.lastMessageAt };
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads: [open], hasMore: true, unanswered: 1 };
+        if (url.startsWith("/admin/messenger/threads?before=")) return { enabled: true, threads: [tie], hasMore: false, unanswered: 1 };
+        return {};
+      });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByRole("button", { name: "Show older" }));
+      await screen.findByTestId("messenger-thread-t-0tie");
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 1000); });
+      expect(screen.getByTestId("messenger-thread-t-0tie")).toBeInTheDocument();
+    });
+
     it("keeps loaded older threads below a refreshed first page", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       adminFetch.mockImplementation(async (url) => {
