@@ -344,7 +344,7 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     ({ promoter } = await engine.resolvePromoter(referrer.id));
   } catch (err) {
     // Another account's promoter holds the referrer's phone: staff must link
-    // it first (routes/referrals.js answers the same case with 409).
+    // it first (routes/referrals-v2.js answers the same case with 409).
     if (isPromoterPhoneCollision(err)) {
       throw inboundError(409, 'REFERRER_PHONE_IN_USE', "The referrer's phone belongs to another account's referral enrollment");
     }
