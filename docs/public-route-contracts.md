@@ -5082,9 +5082,10 @@ that matches several. With the gate on, a phone that matches 2 to 10 rows
 links the lead and draft estimate to ONE of them instead of inserting a new
 `customers` row, but only when every matched row is live (active, not
 deleted) and all rows plus the typed contact are one person at one premise:
-names compatible (`namesCompatible`), the same parsed street key, equal units
-(both empty counts; a non-empty unit the parser cannot read, such as
-"Floor 3", fails closed), and equal 5-digit ZIPs, or, when either ZIP is blank,
+names compatible (`namesCompatible`), the same parsed street key, equal unit
+lines (both empty counts; every token counts, so "Bldg C Apt 2" and
+"Bldg C Apt 3" differ, and only the words Apt, Unit, Suite, # and No that
+label a unit number are ignored), and equal 5-digit ZIPs, or, when either ZIP is blank,
 equal non-empty cities (`resolveSamePersonCluster`, `customer-dedupe.js`).
 The chosen row is the one the nightly duplicate sweep would keep
 (`pickWinner` with the sweep's business weighting). Any mismatch, an

@@ -67,9 +67,26 @@ describe('resolveSamePersonCluster', () => {
     expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Floor 2' })).toBeNull();
   });
 
-  test('an identical unreadable unit still fails closed', async () => {
-    const rows = [row('a', { address_line2: 'Floor 3' }), row('b', { address_line2: 'Floor 3' })];
-    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Floor 3' })).toBeNull();
+  test('the same unit text on every row and the typed address resolves (Floor 3)', async () => {
+    const rows = [row('a', { address_line2: 'Floor 3' }), row('b', { address_line2: 'floor 3' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Floor 3' })).not.toBeNull();
+  });
+
+  // Pre-push audit P1 (round 2): unitFromLine2 keeps only the first unit token,
+  // so compound units must compare every token.
+  test('compound units compare every token (Bldg C Apt 2 vs Bldg C Apt 3)', async () => {
+    const rows = [row('a', { address_line2: 'Bldg C Apt 3' }), row('b', { address_line2: 'Bldg C Apt 3' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Bldg C Apt 2' })).toBeNull();
+  });
+
+  test('a longer unit line never matches its prefix (Bldg C Annex vs Bldg C)', async () => {
+    const rows = [row('a', { address_line2: 'Bldg C' }), row('b', { address_line2: 'Bldg C' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Bldg C Annex' })).toBeNull();
+  });
+
+  test('the same compound unit everywhere resolves', async () => {
+    const rows = [row('a', { address_line2: 'Bldg C, Apt 2' }), row('b', { address_line2: 'bldg c apt 2' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Bldg C Unit 2' })).not.toBeNull();
   });
 
   test('no ZIP and no city on a row is not a locality match', async () => {

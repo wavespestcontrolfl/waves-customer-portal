@@ -302,16 +302,19 @@ function isLiveRow(row) {
 // addressCompat is permissive on purpose (a missing unit or locality is not a
 // conflict, and two identical unparseable lines match). Linking a public
 // quote needs POSITIVE agreement instead: both street lines parse to the same
-// key, the units are equal (both empty counts; an unreadable unit fails), and the ZIPs are equal or,
+// key, the whole unit lines are equal (both empty counts), and the ZIPs are equal or,
 // when either ZIP is blank, both cities are present and equal.
-// The row's unit for the strict test: '' for none, or undefined when a
-// non-empty address_line2 is not a unit the parser can read ("Floor 3",
-// "Bldg C Annex"), which fails closed rather than reading as no unit.
+// The row's unit for the strict test, from the WHOLE unit line: every token
+// counts ("Bldg C Apt 2" and "Bldg C Apt 3" differ; "Floor 2" and "Floor 3"
+// differ), and only the words that merely label a unit number drop, so
+// "Apt 2", "Unit 2", "#2" and "2" are equal. unitFromLine2 keeps the first
+// token only, which is enough for addressCompat's conflict test but not for
+// a positive match. A unit embedded in line1 joins in front ('' = no unit).
+const UNIT_LABEL_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite', 'no']);
 function strictUnit(streetKey, line2) {
-  const raw = String(line2 || '').trim();
-  const fromLine2 = raw ? unitFromLine2(raw) : null;
-  if (raw && !fromLine2) return undefined;
-  return streetKey.unit || fromLine2 || '';
+  const line2Text = String(line2 || '').toLowerCase().replace(/[.,#]/g, ' ').replace(/-/g, '')
+    .split(/\s+/).filter((w) => w && !UNIT_LABEL_WORDS.has(w)).join(' ');
+  return [streetKey.unit, line2Text].filter(Boolean).join(' ');
 }
 
 function samePremiseStrict(a, b) {
@@ -319,9 +322,7 @@ function samePremiseStrict(a, b) {
   const ak = normalizeStreetKey(a.address_line1);
   const bk = normalizeStreetKey(b.address_line1);
   if (!ak || !bk || ak.key !== bk.key) return false;
-  const au = strictUnit(ak, a.address_line2);
-  const bu = strictUnit(bk, b.address_line2);
-  if (au === undefined || bu === undefined || au !== bu) return false;
+  if (strictUnit(ak, a.address_line2) !== strictUnit(bk, b.address_line2)) return false;
   const az = String(a.zip || '').slice(0, 5);
   const bz = String(b.zip || '').slice(0, 5);
   if (az && bz) return az === bz;
