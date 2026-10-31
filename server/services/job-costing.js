@@ -389,7 +389,8 @@ function isStampedZeroVisit(svc) {
 //      estimated_price on a covered visit and stamps the discounted share in prepaid_amount, and a covered
 //      visit can also carry estimated_price 0 (the stamped-zero rule below);
 //   4. the explicit visit price, then an unpriced consultation or a callback is $0 (today's order), then its
-//      linked invoice's service money;
+//      linked invoice's service money, $0 included (a fully discounted or fees-only invoice is still the
+//      visit's billing; null = no linked invoice);
 //   5. a stamped zero is $0; the monthly_rate fallback runs only when nothing recorded is being kept.
 // Pure (no I/O): ownRevenue = { prepayShare, invoiceTotal } is loaded by loadOwnRevenueSources.
 function deriveRevenueFromOwnSources({
@@ -408,8 +409,7 @@ function deriveRevenueFromOwnSources({
   if (visitPrice != null) return visitPrice;
   if (isConsultationServiceType(serviceType) || isCallbackVisit(svc, rec)) return 0;
 
-  const invoiceMoney = positiveMoney(ownRevenue.invoiceTotal);
-  if (invoiceMoney != null) return invoiceMoney;
+  if (ownRevenue.invoiceTotal != null) return ownRevenue.invoiceTotal;
   if (isStampedZeroVisit(svc)) return 0;
   return (keepRecordedRevenue ? null : positiveMoney(customer?.monthly_rate)) ?? 0;
 }
@@ -475,12 +475,12 @@ function invoiceServiceRevenue(invoice) {
   return Math.max(0, round2(subtotal - (Number(invoice.discount_amount) || 0) - feeNet));
 }
 
-// The newest non-void invoice written for this visit's service record: its service money. A prepay invoice
-// bills the whole term, not this visit (its share comes from loadPrepayVisitShare), so it is skipped whether
-// the invoice names the term (annual_prepay_term_id) or only the term names the invoice (prepay_invoice_id,
-// the legacy shape 20260808040000_backfill_self_referential_prepay_credits.js documents).
+// The newest non-void invoice written for this visit's service record: its service money (null = none). A
+// prepay invoice bills the whole term, not this visit (its share comes from loadPrepayVisitShare), so it is
+// skipped whether the invoice names the term (annual_prepay_term_id) or only the term names the invoice
+// (prepay_invoice_id, the legacy shape 20260808040000_backfill_self_referential_prepay_credits.js documents).
 async function loadLinkedInvoiceTotal(db, svc, record) {
-  if (!record?.id) return 0;
+  if (!record?.id) return null;
   try {
     const termInvoiceIds = (await db('annual_prepay_terms')
       .where({ customer_id: svc.customer_id })
@@ -495,10 +495,10 @@ async function loadLinkedInvoiceTotal(db, svc, record) {
       .whereNotIn('id', termInvoiceIds)
       .orderBy('created_at', 'desc')
       .first('line_items', 'subtotal', 'discount_amount');
-    return invoice ? invoiceServiceRevenue(invoice) : 0;
+    return invoice ? invoiceServiceRevenue(invoice) : null;
   } catch (err) {
     logger.debug(`[job-costing] linked invoice error: ${err.message}`);
-    return 0;
+    return null;
   }
 }
 
@@ -506,10 +506,10 @@ async function loadLinkedInvoiceTotal(db, svc, record) {
 // wins (kept, or not recomputed) never reaches them, so it skips the queries.
 async function loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue = false, recomputeRevenue = false } = {}) {
   const recordedWins = Number(record?.revenue) > 0 && (keepRecordedRevenue || !recomputeRevenue);
-  if (recordedWins) return { prepayShare: 0, invoiceTotal: 0 };
+  if (recordedWins) return { prepayShare: 0, invoiceTotal: null };
   const prepayShare = await loadPrepayVisitShare(db, svc);
   // The invoice is read only when neither the prepay share nor the visit's own price comes first.
-  const invoiceTotal = prepayShare > 0 || Number(svc.estimated_price) > 0 ? 0 : await loadLinkedInvoiceTotal(db, svc, record);
+  const invoiceTotal = prepayShare > 0 || Number(svc.estimated_price) > 0 ? null : await loadLinkedInvoiceTotal(db, svc, record);
   return { prepayShare, invoiceTotal };
 }
 

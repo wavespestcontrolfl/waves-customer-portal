@@ -398,6 +398,17 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       expect((await run({ subtotal: '199.00', discount_amount: '0.00', line_items: [service, fee] })).revenue).toBe(100);
     });
 
+    test('a linked invoice that bills $0 of service is the visit\'s revenue, even without keepRecordedRevenue', async () => {
+      const tables = (invoices) => ({ ...withSvc(unpriced), ...withRecord({ revenue: 0 }), invoices });
+      const service = { description: 'Quarterly Pest Control Service', amount: 100 };
+      const fullyDiscounted = { service_record_id: 'rec-1', status: 'paid', subtotal: '100.00', discount_amount: '100.00', line_items: [service] };
+      const feesOnly = { service_record_id: 'rec-1', status: 'paid', line_items: [{ description: 'One-time setup fee', amount: 99 }] };
+      expect((await cost(fakeDb(tables([fullyDiscounted])))).revenue).toBe(0);
+      expect((await cost(fakeDb(tables([feesOnly])))).revenue).toBe(0);
+      // No linked invoice at all: today's monthly_rate fallback.
+      expect((await cost(fakeDb(tables([])))).revenue).toBe(99);
+    });
+
     test('monthly_rate is never used under keepRecordedRevenue, and is the old fallback without it', async () => {
       const tables = { ...withSvc(unpriced), ...withRecord({ revenue: 0 }) };
       expect((await cost(fakeDb(tables), KEEP)).revenue).toBe(0);
