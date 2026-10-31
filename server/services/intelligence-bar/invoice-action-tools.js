@@ -355,7 +355,8 @@ async function deliverableEmail(invoice, cc) {
   if (queued) return queuedSendRefusal(invoice.id, queued);
   const built = await require('../invoice-email').sendInvoiceEmail(invoice.id, { previewOnly: true, ...(cc ? { cc } : {}) });
   if (!built?.ok || !built.email) return emailBuildRefusal(built, at);
-  const to = String(built.recipient?.email || '').toLowerCase();
+  // The sender's own normal form (trimmed, lower case): the email leg compares the address it resolves in the same form.
+  const to = String(built.recipient?.email || '').trim().toLowerCase();
   if (cc && !built.cc.includes(cc)) return refusal('The CC is the same address the email goes to.', 'invalid_cc', at);
   const { subject, text: body, contentHash, digest: emailDigest } = built.email;
   return {
