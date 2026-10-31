@@ -191,6 +191,16 @@ async function main() {
         )
           body = {
             items: url.searchParams.get("days") === "90" ? [{
+              // The review matcher's open decision (review-name-match.js), listed first.
+              id: "review-paused",
+              reviewerName: "Taylor Exampel",
+              reason: "name_match_pause",
+              starRating: 5,
+              reviewText: "Great visit.",
+              locationId: "sarasota",
+              suggestedCustomerId: "customer-17",
+              suggestedCustomerName: "Taylor Example",
+            }, {
               id: "review-unmatched",
               reviewerName: "Taylor Exampel",
               reason: "missing_customer",
@@ -392,7 +402,9 @@ async function main() {
         page.waitForResponse((res) => res.url().endsWith("/attribution-queue?days=90")),
         page.getByRole("combobox").selectOption("90"),
       ]);
-      await page.getByRole("button", { name: "Match", exact: true }).click();
+      await page.getByText("Possibly Taylor Example: close name", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "Not this customer", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Match", exact: true }).first().click();
       await page.getByTestId("link-evidence").first().waitFor();
       assert.deepEqual(
         await page.getByTestId("link-evidence").allTextContents(),
