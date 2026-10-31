@@ -45,8 +45,12 @@ final class StaffAlerts {
         UNUserNotificationCenter.current().setBadgeCount(max(0, count)) { _ in }
     }
 
-    // Sign-out: the next person on this iPhone sees none of these alerts.
-    func clearShown() {
+    // Sign-out: the next person on this iPhone sees none of these alerts. The
+    // install stops getting notifications at once, even when the page cannot
+    // reach the server to release the token (APNs then answers Unregistered
+    // and the server deactivates the row); the next sign-in registers again.
+    func signOut() {
+        UIApplication.shared.unregisterForRemoteNotifications()
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         setBadge(0)
     }

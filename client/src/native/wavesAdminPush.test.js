@@ -76,7 +76,7 @@ describe('setInAppBadge', () => {
 });
 
 describe('releaseInAppPush (sign-out)', () => {
-  it('waits for a sign-up still in flight, then releases the token with the sign-in that registered it', async () => {
+  it('stops alerts on the iPhone, waits for a sign-up in flight, then releases the token under the sign-in', async () => {
     const postMessage = installApp();
     localStorage.setItem('waves_admin_token', 'staff-jwt');
     let finishSignUp;
@@ -86,7 +86,7 @@ describe('releaseInAppPush (sign-out)', () => {
 
     const released = releaseInAppPush();
     localStorage.removeItem('waves_admin_token'); // sign-out goes on at once
-    expect(postMessage).toHaveBeenCalledWith({ type: 'clearAlerts' });
+    expect(postMessage).toHaveBeenCalledWith({ type: 'signOut' });
     expect(adminFetch).toHaveBeenCalledTimes(1); // only the sign-up so far
 
     finishSignUp({ ok: true });
@@ -96,7 +96,27 @@ describe('releaseInAppPush (sign-out)', () => {
       body: { token: TOKEN },
       headers: { Authorization: 'Bearer staff-jwt' },
     });
+    expect(localStorage.getItem('waves_admin_push_token')).toBeNull();
     cleanup();
+  });
+
+  it('releases the stored token after a page reload, and retries a failed release', async () => {
+    vi.useFakeTimers();
+    try {
+      installApp();
+      // A reload: this page never saw the token event, but the token is stored.
+      localStorage.setItem('waves_admin_push_token', TOKEN);
+      localStorage.setItem('waves_admin_token', 'staff-jwt');
+      adminFetch.mockResolvedValueOnce({ ok: false, status: 503 }).mockResolvedValueOnce({ ok: true });
+
+      const released = releaseInAppPush();
+      await vi.advanceTimersByTimeAsync(2000);
+      await released;
+      expect(adminFetch).toHaveBeenCalledTimes(2);
+      expect(adminFetch).toHaveBeenLastCalledWith('/admin/push/native-unsubscribe', expect.objectContaining({ body: { token: TOKEN } }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('ignores a token that arrives after sign-out', async () => {
@@ -108,11 +128,11 @@ describe('releaseInAppPush (sign-out)', () => {
     cleanup();
   });
 
-  it('only clears shown alerts when this iPhone never signed up, and does nothing in a browser', async () => {
+  it('only stops alerts on the iPhone when it never signed up, and does nothing in a browser', async () => {
     await releaseInAppPush();
     const postMessage = installApp();
     await releaseInAppPush();
-    expect(postMessage).toHaveBeenCalledWith({ type: 'clearAlerts' });
+    expect(postMessage).toHaveBeenCalledWith({ type: 'signOut' });
     expect(adminFetch).not.toHaveBeenCalled();
   });
 });

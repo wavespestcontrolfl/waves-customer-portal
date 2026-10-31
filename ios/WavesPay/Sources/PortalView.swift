@@ -26,7 +26,8 @@ import WebKit
 //   window.dispatchEvent(new CustomEvent('wavesadmin:pushtoken', { detail }))
 // detail = { token, environment: 'sandbox' | 'production' }, which the page
 // registers under its own sign-in. { type: 'badge', count } sets the icon badge;
-// { type: 'clearAlerts' } (sign-out) clears shown alerts and the badge.
+// { type: 'signOut' } clears shown alerts and the badge and stops this
+// install's notifications until the next sign-in registers again.
 //
 // The page side of this contract is client/src/lib/tapToPay.js and
 // client/src/native/wavesAdminPush.js.
@@ -143,7 +144,7 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         case "prepareReader": prepareReader(from: sender)
         case "registerPush": registerPush(from: sender)
         case "badge": StaffAlerts.shared.setBadge((body["count"] as? Int) ?? 0)
-        case "clearAlerts": StaffAlerts.shared.clearShown()
+        case "signOut": StaffAlerts.shared.signOut()
         default: break
         }
     }
