@@ -323,7 +323,7 @@ function sendChannel(input) {
   const hasCc = rawCc != null && rawCc !== '';
   if (hasCc && channel !== 'email') return refusal('A CC goes with an email only: ask for the email (channel email).', 'cc_needs_email');
   if (channel === 'email' && !invoiceEmailLive()) {
-    return refusal('Emailing invoices from the bar is switched off. The bar can text it, or use the Invoices page Send.', 'gate_off');
+    return refusal('Emailing invoices from the bar is switched off, so the bar can\'t email it from here. It can send the invoice by text.', 'gate_off');
   }
   const cc = hasCc && typeof rawCc === 'string' ? rawCc.trim().toLowerCase() : null;
   if (hasCc && !(cc && EMAIL_LIKE.test(cc))) return refusal('The CC must be one email address.', 'invalid_cc');
