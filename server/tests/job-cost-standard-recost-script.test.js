@@ -1,5 +1,8 @@
 // server/scripts/job-cost-standard-recost.js: needs GATE_JOB_COST_STANDARD_MINUTES (dry run too); a dry run
 // rolls every visit back; --write commits; the report names service types, never customers.
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { run, parseArgs } = require('../scripts/job-cost-standard-recost');
 
 const RECORDS = {
@@ -7,6 +10,7 @@ const RECORDS = {
   b: { revenue: '0.00', material_cost: '0.00', labor_cost: '35.00', drive_cost: '6.00', gross_profit: '-41.00' },
   c: null, // no service record
 };
+const JOB_COSTS = { a: { scheduled_service_id: 'a', labor_cost: '40.00', drive_cost: '6.00' } };
 const RESULTS = {
   a: { service_type: 'Lawn Care Service', revenue: 100, products_cost: 5, labor_cost: 11.67, drive_cost: 11.67, gross_profit: 71.66 },
   b: { service_type: 'Lawn Care Service', revenue: 89, products_cost: 0, labor_cost: 11.67, drive_cost: 11.67, gross_profit: 65.66 },
@@ -19,8 +23,9 @@ function fakeConn(ids) {
   const conn = () => list;
   conn.trxs = trxs;
   conn.transaction = async () => {
-    const trx = () => {
-      const chain = { where: (w) => { chain.id = w.scheduled_service_id; return chain; }, orderBy: () => chain, first: () => Promise.resolve(RECORDS[chain.id]) };
+    const trx = (table) => {
+      const rows = table === 'job_costs' ? JOB_COSTS : RECORDS;
+      const chain = { where: (w) => { chain.id = w.scheduled_service_id; return chain; }, orderBy: () => chain, first: () => Promise.resolve(rows[chain.id]) };
       return chain;
     };
     trx.commit = jest.fn().mockResolvedValue();
@@ -65,13 +70,36 @@ describe('job-cost-standard-recost script', () => {
     expect(text).toMatch(/1 without a service record/);
   });
 
-  test('--write commits each visit', async () => {
+  test('--write keeps each visit\'s figures before its commit, then commits it', async () => {
     const conn = fakeConn(['a', 'b']);
-    await run([...ARGS, '--write'], { conn, log: jest.fn(), gateOn: () => true, calculateJobCost: calc() });
+    const keepBefore = jest.fn();
+    const snapshot = path.join(os.tmpdir(), `recost-snapshot-${process.pid}-${Date.now()}.jsonl`);
+    await run([...ARGS, '--write', '--snapshot', snapshot], { conn, log: jest.fn(), gateOn: () => true, calculateJobCost: calc(), keepBefore });
     for (const trx of conn.trxs) {
       expect(trx.commit).toHaveBeenCalledTimes(1);
       expect(trx.rollback).not.toHaveBeenCalled();
     }
+    expect(keepBefore).toHaveBeenNthCalledWith(1, {
+      scheduled_service_id: 'a',
+      service_record: { revenue: '100.00', material_cost: '5.00', labor_cost: '40.00', drive_cost: '6.00', gross_profit: '49.00' },
+      job_cost: JOB_COSTS.a,
+    });
+    expect(keepBefore).toHaveBeenNthCalledWith(2, expect.objectContaining({ scheduled_service_id: 'b', job_cost: null }));
+    expect(keepBefore.mock.invocationCallOrder[0]).toBeLessThan(conn.trxs[0].commit.mock.invocationCallOrder[0]);
+  });
+
+  test('--write is refused without a new snapshot file, before any visit is costed', async () => {
+    const conn = fakeConn(['a']);
+    const deps = { conn, log: jest.fn(), gateOn: () => true, calculateJobCost: calc() };
+    await expect(run([...ARGS, '--write'], deps)).rejects.toThrow('--write needs --snapshot');
+    const existing = path.join(os.tmpdir(), `recost-snapshot-existing-${process.pid}-${Date.now()}.jsonl`);
+    fs.writeFileSync(existing, '');
+    try {
+      await expect(run([...ARGS, '--write', '--snapshot', existing], deps)).rejects.toThrow('already exists');
+    } finally {
+      fs.unlinkSync(existing);
+    }
+    expect(conn.trxs).toHaveLength(0);
   });
 
   test('a failed visit is rolled back and makes the run fail', async () => {

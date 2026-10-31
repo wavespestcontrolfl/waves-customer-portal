@@ -5,7 +5,8 @@
 // visit's own sources. Prints, for every service type, the visits and the revenue / material / labor / drive /
 // margin figures now on the service records ("before") and as re-costed ("after").
 //
-//   GATE_JOB_COST_STANDARD_MINUTES=true node server/scripts/job-cost-standard-recost.js --from 2026-08-01 --to 2026-10-30 [--write]
+//   GATE_JOB_COST_STANDARD_MINUTES=true node server/scripts/job-cost-standard-recost.js --from 2026-08-01 --to 2026-10-30 \
+//     [--write --snapshot before-recost.jsonl]
 //
 // Dry run by default: every visit is re-costed inside its own transaction that is ROLLED BACK, so nothing
 // is written. Every write under calculateJobCost (job_costs, service_records, the ad-attribution sync) uses the
@@ -14,18 +15,28 @@
 // off a re-cost would price the visits the old way, so the script refuses. Revenue is never re-derived over a
 // recorded amount above $0 (keepRecordedRevenue); a recorded $0 falls to the visit's own price, prepay share or
 // invoice. At most 400 days per run, inclusive. No customer names are printed.
+//
+// --write needs --snapshot <new file>: before each visit commits, the script appends one JSON line with the
+// visit's service record figures and its job_costs row as they were, so the re-cost can be undone. The file
+// must not exist yet; keep every snapshot file (the first one holds the original figures).
 require('dotenv').config();
+const fs = require('fs');
 
 const MAX_DAYS = 400;
 const DAY_MS = 86400000;
 const FIELDS = ['revenue', 'material', 'labor', 'drive', 'margin'];
+// The service record figures job costing writes, kept in the snapshot. Financial fields only: no notes.
+const SNAPSHOT_RECORD_FIELDS = [
+  'id', 'revenue', 'material_cost', 'labor_hours', 'labor_cost', 'drive_cost', 'total_job_cost', 'gross_profit',
+  'gross_margin_pct', 'revenue_per_man_hour', 'vehicle_fixed_cost',
+];
 
 function parseArgs(argv) {
-  const opts = { from: null, to: null, write: false };
+  const opts = { from: null, to: null, write: false, snapshot: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--write') opts.write = true;
-    else if (arg === '--from' || arg === '--to') { opts[arg.slice(2)] = argv[i + 1]; i += 1; }
+    else if (arg === '--from' || arg === '--to' || arg === '--snapshot') { opts[arg.slice(2)] = argv[i + 1]; i += 1; }
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return opts;
@@ -81,14 +92,32 @@ function formatBucket(label, bucket) {
   return [`  ${label}: ${bucket.visits} visit(s)`, line('before', bucket.before), line('after ', bucket.after)].join('\n');
 }
 
-// One visit, one transaction: committed with --write, rolled back otherwise.
-async function recostVisit(conn, id, { write, calculateJobCost }) {
+function snapshotRecord(record) {
+  if (!record) return null;
+  return Object.fromEntries(SNAPSHOT_RECORD_FIELDS.filter((f) => f in record).map((f) => [f, record[f]]));
+}
+
+// --write refuses to run without a new snapshot file, before any visit is costed.
+function checkSnapshot(opts) {
+  if (!opts.write) return;
+  if (!opts.snapshot) throw new Error('--write needs --snapshot <new file>: the figures before the re-cost, for an undo');
+  if (fs.existsSync(opts.snapshot)) throw new Error(`${opts.snapshot} already exists: name a new file and keep the old one`);
+}
+
+// One visit, one transaction: committed with --write (after its snapshot line is kept), rolled back otherwise.
+async function recostVisit(conn, id, { write, calculateJobCost, keepBefore }) {
   const trx = await conn.transaction();
   try {
     const record = await trx('service_records').where({ scheduled_service_id: id }).orderBy('created_at', 'desc').first();
+    const jobCost = write ? await trx('job_costs').where({ scheduled_service_id: id }).first() : null;
     const res = await calculateJobCost(id, trx, { keepRecordedRevenue: true });
     if (res.staleSkipped) throw new Error('costing inputs moved during the re-cost; visit skipped');
-    if (write) await trx.commit(); else await trx.rollback();
+    if (write) {
+      keepBefore({ scheduled_service_id: id, service_record: snapshotRecord(record), job_cost: jobCost || null });
+      await trx.commit();
+    } else {
+      await trx.rollback();
+    }
     return { record, res };
   } catch (err) {
     await trx.rollback().catch(() => {});
@@ -103,6 +132,7 @@ async function recostVisit(conn, id, { write, calculateJobCost }) {
 async function run(argv, deps = {}) {
   const opts = parseArgs(argv);
   const days = checkRange(opts.from, opts.to);
+  checkSnapshot(opts);
   const log = deps.log || console.log;
   const gateOn = deps.gateOn || (() => require('../config/feature-gates').jobCostStandardMinutesLive());
   if (!gateOn()) {
@@ -110,6 +140,9 @@ async function run(argv, deps = {}) {
   }
   const conn = deps.conn || require('../models/db');
   const calculateJobCost = deps.calculateJobCost || require('../services/job-costing').calculateJobCost;
+  let kept = 0;
+  const writeLine = deps.keepBefore || ((row) => fs.appendFileSync(opts.snapshot, `${JSON.stringify(row)}\n`));
+  const keepBefore = (row) => { writeLine(row); kept += 1; };
   const ids = await conn('scheduled_services').where({ status: 'completed' })
     .where('scheduled_date', '>=', opts.from).where('scheduled_date', '<=', opts.to)
     .orderBy('scheduled_date').pluck('id');
@@ -119,7 +152,7 @@ async function run(argv, deps = {}) {
   let noRecord = 0;
   for (const id of ids) {
     try {
-      const { record, res } = await recostVisit(conn, id, { write: opts.write, calculateJobCost });
+      const { record, res } = await recostVisit(conn, id, { write: opts.write, calculateJobCost, keepBefore });
       if (!record) { noRecord += 1; continue; }
       const serviceType = res.service_type || 'unknown';
       types[serviceType] = types[serviceType] || emptyBucket();
@@ -137,11 +170,12 @@ async function run(argv, deps = {}) {
   for (const [label, bucket] of Object.entries(types).sort(([a], [b]) => a.localeCompare(b))) log(formatBucket(label, bucket));
   log(formatBucket('ALL SERVICE TYPES', totals));
   log(`${noRecord} without a service record (not counted); ${failed} failed.`);
+  if (opts.write) log(`Figures before the re-cost: ${opts.snapshot} (${kept} visit(s)). Keep this file for an undo.`);
   if (failed) throw new Error(`${failed} visit(s) failed`);
   return { visits: ids.length, counted: totals.visits, noRecord, failed, types, totals };
 }
 
-module.exports = { run, parseArgs, checkRange, beforeFigures, afterFigures, MAX_DAYS };
+module.exports = { run, parseArgs, checkRange, beforeFigures, afterFigures, snapshotRecord, MAX_DAYS };
 
 if (require.main === module) {
   run(process.argv.slice(2))
