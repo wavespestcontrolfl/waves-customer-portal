@@ -18,6 +18,7 @@
 		A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5879EC992F1DFD981D2C3E75 /* Brand.swift */; };
 		ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8F12848DEA3C5874AD613B3 /* PortalView.swift */; };
 		AC3A5837C1092E9D149FB407 /* TerminalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F257791252A99A45F5501281 /* TerminalManager.swift */; };
+		D99E615FC3F554C7F4A69C6B /* StaffAlerts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B697676CF8667C3A3F9C626B /* StaffAlerts.swift */; };
 		E3D72235F0CE1767D22C1AA5 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F12D9BA969C35A97B98616 /* Keychain.swift */; };
 		F8EAA6884B0B6828AE6CF933 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5B9CD87D59328DCBC2F6C369 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -29,6 +30,7 @@
 		78F12D9BA969C35A97B98616 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		7D1C0BACE518171B312F5B32 /* CollectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectView.swift; sourceTree = "<group>"; };
 		95C2F50AD33493B67A02D814 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		B697676CF8667C3A3F9C626B /* StaffAlerts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaffAlerts.swift; sourceTree = "<group>"; };
 		C8F12848DEA3C5874AD613B3 /* PortalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalView.swift; sourceTree = "<group>"; };
 		CAA9FEDF1B265FBD0000DBBE /* WavesPayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WavesPayApp.swift; sourceTree = "<group>"; };
 		F257791252A99A45F5501281 /* TerminalManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalManager.swift; sourceTree = "<group>"; };
@@ -70,6 +72,7 @@
 				FEA410CF31BCB27C5D972663 /* LoginView.swift */,
 				C8F12848DEA3C5874AD613B3 /* PortalView.swift */,
 				F66184170B2FD174561E1F62 /* RootView.swift */,
+				B697676CF8667C3A3F9C626B /* StaffAlerts.swift */,
 				F257791252A99A45F5501281 /* TerminalManager.swift */,
 				CAA9FEDF1B265FBD0000DBBE /* WavesPayApp.swift */,
 			);
@@ -178,6 +181,7 @@
 				A1F14D26FC2B1C817A01C6BA /* LoginView.swift in Sources */,
 				ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */,
 				5B4CE5DF257AE388559CE024 /* RootView.swift in Sources */,
+				D99E615FC3F554C7F4A69C6B /* StaffAlerts.swift in Sources */,
 				AC3A5837C1092E9D149FB407 /* TerminalManager.swift in Sources */,
 				0F177742641723078AB6BCA4 /* WavesPayApp.swift in Sources */,
 			);
@@ -259,7 +263,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/WavesPay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.7;
@@ -267,7 +271,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wavespestcontrol.wavespay;
 				PRODUCT_NAME = WavesPay;
 				SDKROOT = iphoneos;
@@ -341,7 +345,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/WavesPay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.7;
@@ -349,7 +353,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wavespestcontrol.wavespay;
 				PRODUCT_NAME = WavesPay;
 				SDKROOT = iphoneos;

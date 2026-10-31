@@ -1,3 +1,5 @@
+import { releaseInAppPush } from '../native/wavesAdminPush';
+
 // Staff data saved on the device for offline use (the technician's last
 // route, routeSnapshot.js). It carries customer names, addresses and access
 // notes, so EVERY path that ends a staff session must call
@@ -20,6 +22,8 @@ export const ASK_RECENTS_KEY = 'admin_ib_recents';
 const ASK_PROMPT_KEY_PREFIXES = [ASK_RECENTS_KEY, 'ib.recents.', 'ib.favorites.'];
 
 export function clearStaffDeviceData() {
+  // Waves Admin (the iOS staff app): this iPhone stops getting staff alerts.
+  void releaseInAppPush();
   for (const key of [TECH_ROUTE_SNAPSHOT_KEY, STAFF_OFFLINE_PASS_KEY]) {
     try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
   }

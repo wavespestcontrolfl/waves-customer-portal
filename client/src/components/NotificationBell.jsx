@@ -6,6 +6,7 @@ import { useBiometricLock } from './BiometricGate';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 import { isNativeApp, nativePushConnectionState, requestNativePushPermission } from '../native/nativePush.js';
 import { isWavesAdminApp } from '../native/platform';
+import { setInAppBadge } from '../native/wavesAdminPush';
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { captureNativeBadgeUpdate } from '../native/nativeBadge';
 import { UNREAD_CHANGED_EVENT } from '../hooks/useUnreadConversations';
@@ -43,6 +44,8 @@ function staffRoleFromToken() {
 // ordering; without a stamp the seq write is skipped and ordering
 // advances on the next stamped call. Never rejects; fire-and-forget.
 async function syncAppBadge(count, at) {
+  // Waves Admin (the iOS staff app) sets its own icon badge.
+  if (setInAppBadge(count)) return;
   if (typeof navigator === 'undefined' || !('setAppBadge' in navigator)) return;
   const apply = async () => {
     try {

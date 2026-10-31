@@ -12,5 +12,11 @@
     -->
     <key>com.apple.developer.proximity-reader.payment.acceptance</key>
     <true/>
+    <!--
+      Staff alerts (APNs). Xcode development installs use the sandbox; a
+      distribution profile sets production when the build is exported.
+    -->
+    <key>aps-environment</key>
+    <string>development</string>
 </dict>
 </plist>

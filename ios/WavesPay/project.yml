@@ -40,8 +40,8 @@ targets:
       path: Resources/Info.plist
       properties:
         CFBundleDisplayName: Waves Admin
-        CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "4"
+        CFBundleShortVersionString: "1.4"
+        CFBundleVersion: "5"
         LSRequiresIPhoneOS: true
         UILaunchScreen:
           UIColorName: ""
@@ -79,8 +79,8 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Resources/WavesPay.entitlements
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
-        CURRENT_PROJECT_VERSION: 4
-        MARKETING_VERSION: "1.3"
+        CURRENT_PROJECT_VERSION: 5
+        MARKETING_VERSION: "1.4"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
     dependencies:
