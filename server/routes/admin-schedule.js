@@ -978,7 +978,7 @@ function shouldRewritePendingRecurringRows(before, after) {
   // that visit. Its date is then no cadence change, so the series keeps its round anchor and its pending children
   // (the planner, the probe excludes and the write all ask this one function). A pattern or interval change still rewrites.
   const keys = ['date', 'pattern', 'nth', 'weekday', 'intervalDays', 'skipWeekends', 'weekendShift'];
-  return keys.slice(Number(roundsRowMoveIsOneOff(before, after.scheduled_date))).some((key) => prev[key] !== next[key]);
+  return (roundsRowMoveIsOneOff(before, after.scheduled_date) ? keys.slice(1) : keys).some((key) => prev[key] !== next[key]);
 }
 
 // ADMIN_OCCUPANCY_EXCLUDE_STATUSES (which statuses do NOT occupy a slot
