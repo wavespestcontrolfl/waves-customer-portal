@@ -178,8 +178,12 @@ The page registers the token under its own sign-in at
 `POST /api/admin/push/native-subscribe` (`client/src/native/wavesAdminPush.js`);
 the row names this app's bundle and APNs environment (Xcode installs use the
 sandbox), and `server/services/apns.js` sends to the matching topic and host.
-The page sets the icon badge with `{ type: 'badge', count }`, and a tap on an
-alert opens its portal page.
+The page sets the icon badge with `{ type: 'badge', count }`. A tap on an
+alert opens its portal page: the app sends a cancelable `wavesadmin:openlink`
+event (`{ url }`) to the main view, and a signed-in staff page takes it and
+navigates itself, so its unsaved-changes prompt and the field visit lock still
+apply. With no such page (a cold start, the sign-in page) the app loads the
+link directly. Only the main view registers; a portal popup shares its sign-in.
 
 ## Security notes
 

@@ -19,7 +19,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { prepareInAppReader } from "../lib/tapToPay";
-import { registerInAppPush, releaseInAppPush } from "../native/wavesAdminPush";
+import { onInAppAlertTap, registerInAppPush, releaseInAppPush } from "../native/wavesAdminPush";
 import { cn } from "./ui/cn";
 import { Button } from "./ui";
 import {
@@ -161,6 +161,13 @@ export default function AdminLayoutV2() {
       stopPush();
     };
   }, [sessionReady, user?.role]);
+
+  // Waves Admin: a tapped alert opens its page through the router, so the
+  // unsaved-changes prompt and the field visit lock still apply.
+  useEffect(() => onInAppAlertTap((path) => {
+    if (fieldBusy || !confirmLeaveIfGuarded()) return;
+    navigate(path);
+  }), [navigate, fieldBusy]);
 
   // Role scoping on deep links: the sidebar/More page hide adminOnly
   // destinations from non-admin roles, but a typed URL bypasses nav.

@@ -319,6 +319,58 @@ describe("AdminLayoutV2", () => {
     }
   });
 
+  it("inside Waves Admin, a tapped alert opens its page through the router, behind the draft guard and the field lock", async () => {
+    window.webkit = { messageHandlers: { wavesAdmin: { postMessage: vi.fn() } } };
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    function AlertChild() {
+      const { setNavigationBusy } = useTechNavigationLock();
+      const [open, setOpen] = React.useState(false);
+      React.useEffect(() => {
+        if (!open) return undefined;
+        return registerLeaveGuard(() => window.confirm("Discard the open draft?"));
+      }, [open]);
+      return <>
+        <button type="button" onClick={() => setOpen(true)}>Open draft</button>
+        <button type="button" onClick={() => setNavigationBusy(true)}>Start contact</button>
+        <button type="button" onClick={() => setNavigationBusy(false)}>Finish contact</button>
+      </>;
+    }
+    function AlertTarget() {
+      const location = useLocation();
+      return <output data-testid="alert-target">{`${location.pathname}${location.search}${location.hash}`}</output>;
+    }
+    // The app's dispatch: a page that takes the link cancels the event.
+    const tapAlert = () => window.dispatchEvent(new CustomEvent("wavesadmin:openlink", {
+      detail: { url: `${window.location.origin}/admin/customers?id=fixture#notes` }, cancelable: true,
+    }));
+    try {
+      render(<TechNavigationLock><MemoryRouter initialEntries={["/admin/today"]}><Routes>
+        <Route element={<AdminLayoutV2 />}>
+          <Route path="/admin/today" element={<AlertChild />} />
+          <Route path="/admin/customers" element={<AlertTarget />} />
+        </Route>
+      </Routes></MemoryRouter></TechNavigationLock>);
+      await screen.findByRole("button", { name: "Open draft" });
+
+      // An open draft: the person declines, and the page stays.
+      fireEvent.click(screen.getByRole("button", { name: "Open draft" }));
+      expect(tapAlert()).toBe(false);
+      expect(confirmSpy).toHaveBeenCalledOnce();
+      // A visit action in flight: the tap is held without asking.
+      fireEvent.click(screen.getByRole("button", { name: "Start contact" }));
+      expect(tapAlert()).toBe(false);
+      expect(confirmSpy).toHaveBeenCalledOnce();
+      expect(screen.queryByTestId("alert-target")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Finish contact" }));
+      confirmSpy.mockReturnValue(true);
+      tapAlert();
+      expect(await screen.findByTestId("alert-target")).toHaveTextContent("/admin/customers?id=fixture#notes");
+    } finally {
+      delete window.webkit;
+    }
+  });
+
   it("no longer owns the Safari bookmark identity (moved to AdminSafariShell in App)", async () => {
     // Regression pin: the manifest/title swap lives in useAdminBookmarkMeta,
     // mounted app-wide so /admin/login (outside this layout) is covered. A

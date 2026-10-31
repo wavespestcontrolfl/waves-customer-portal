@@ -27,7 +27,10 @@ import WebKit
 // detail = { token, environment: 'sandbox' | 'production' }, which the page
 // registers under its own sign-in. { type: 'badge', count } sets the icon badge;
 // { type: 'signOut' } clears shown alerts and the badge and stops this
-// install's notifications until the next sign-in registers again.
+// install's notifications until the next sign-in registers again. Only the
+// main view registers; a portal popup shares its sign-in. A tapped alert
+// reaches the main view's page as a cancelable 'wavesadmin:openlink' event
+// (detail = { url }); a staff page cancels it and opens the link itself.
 //
 // The page side of this contract is client/src/lib/tapToPay.js and
 // client/src/native/wavesAdminPush.js.
@@ -90,9 +93,9 @@ struct PortalView: UIViewRepresentable {
         coordinator.webView = webView
         app.portal = coordinator
         webView.load(URLRequest(url: Portal.startURL))
-        // A tapped alert opens its page here; one that launched the app was
-        // held until now and replaces the start page.
-        StaffAlerts.shared.openPage = { [weak webView] url in webView?.load(URLRequest(url: url)) }
+        // A tapped alert opens its page; one that launched the app was held
+        // until now and replaces the start page.
+        StaffAlerts.shared.openPage = { [weak coordinator] url in coordinator?.openAlertPage(url) }
         return webView
     }
 
@@ -112,8 +115,6 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     private weak var requester: WKWebView?
     // The page that last asked to prepare the reader; it fetches the tokens.
     private weak var readerPage: WKWebView?
-    // The page that last asked for staff alerts; it registers the device token.
-    private weak var alertsPage: WKWebView?
     private var paymentController: UIViewController?
     private weak var popup: UIViewController?
     private var offlineView: UIView?
@@ -198,13 +199,34 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     ])
 
     private func registerPush(from page: WKWebView) {
-        alertsPage = page
+        // A popup's sign-up would replace the main view's sign-up id.
+        guard page === webView else { return }
         StaffAlerts.shared.onToken = { [weak self] token in self?.deliverPushToken(token) }
         StaffAlerts.shared.register()
     }
 
+    // A signed-in staff page navigates to the alert's page itself, so its
+    // unsaved-changes prompt and the field visit lock still apply. When no
+    // page takes the link (the app just launched, the sign-in page) the web
+    // view loads it directly.
+    func openAlertPage(_ url: URL) {
+        guard let page = webView, let current = page.url, Portal.isPortal(current) else {
+            webView?.load(URLRequest(url: url))
+            return
+        }
+        page.callAsyncJavaScript(
+            "return window.dispatchEvent(new CustomEvent(name, { detail, cancelable: true }));",
+            arguments: ["name": "wavesadmin:openlink", "detail": ["url": url.absoluteString]],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            if case .success(let notTaken as Bool) = result, !notTaken { return }
+            self?.webView?.load(URLRequest(url: url))
+        }
+    }
+
     private func deliverPushToken(_ token: String) {
-        guard let page = alertsPage ?? webView, let url = page.url, Portal.isPortal(url) else { return }
+        guard let page = webView, let url = page.url, Portal.isPortal(url) else { return }
         page.callAsyncJavaScript(
             "window.dispatchEvent(new CustomEvent(name, { detail }));",
             arguments: [

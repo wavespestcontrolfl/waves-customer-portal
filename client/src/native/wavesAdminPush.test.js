@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../lib/adminFetch', () => ({ adminFetch: vi.fn(async () => ({ ok: true, status: 200 })) }));
 
 import { adminFetch } from '../lib/adminFetch';
-import { registerInAppPush, releaseInAppPush, setInAppBadge } from './wavesAdminPush';
+import { onInAppAlertTap, registerInAppPush, releaseInAppPush, setInAppBadge } from './wavesAdminPush';
 
 const TOKEN = 'ab'.repeat(32);
 const SIGN_UP_KEY = 'waves_admin_push_signup';
@@ -68,6 +68,30 @@ describe('registerInAppPush', () => {
     answer({ token: TOKEN, environment: 'sandbox' });
     await Promise.resolve();
     expect(adminFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps one sign-up id for the whole sign-in, so a release matches whichever sign-up landed', async () => {
+    vi.useFakeTimers();
+    installApp();
+    localStorage.setItem('waves_admin_token', 'staff-jwt');
+    // iOS hands over the token again; that second sign-up cannot reach the server.
+    adminFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockRejectedValueOnce(new TypeError('offline'));
+    const cleanup = registerInAppPush();
+    answer({ token: TOKEN, environment: 'sandbox' });
+    answer({ token: TOKEN, environment: 'sandbox' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(adminFetch).toHaveBeenCalledTimes(2);
+    const [[, first], [, second]] = adminFetch.mock.calls;
+    expect(second.body.reg).toBe(first.body.reg);
+
+    const released = releaseInAppPush();
+    await vi.advanceTimersByTimeAsync(5000);
+    await released;
+    expect(adminFetch).toHaveBeenLastCalledWith('/admin/push/native-unsubscribe',
+      expect.objectContaining({ body: { token: TOKEN, reg: first.body.reg } }));
+    cleanup();
   });
 
   it('retries a failed sign-up when the connection comes back, and stops on a refusal', async () => {
@@ -151,6 +175,32 @@ describe('releaseInAppPush (sign-out)', () => {
     await releaseInAppPush();
     expect(postMessage).toHaveBeenCalledWith({ type: 'signOut' });
     expect(adminFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('onInAppAlertTap', () => {
+  const tap = (url) => window.dispatchEvent(new CustomEvent('wavesadmin:openlink', { detail: { url }, cancelable: true }));
+
+  it('takes a tapped portal link (so the app does not load it) and opens its path', () => {
+    installApp();
+    const open = vi.fn();
+    const cleanup = onInAppAlertTap(open);
+    expect(tap(`${window.location.origin}/admin/communications?thread=7#latest`)).toBe(false);
+    expect(open).toHaveBeenCalledWith('/admin/communications?thread=7#latest');
+
+    tap('https://example.com/admin/communications');
+    expect(open).toHaveBeenCalledOnce();
+    cleanup();
+    expect(tap(`${window.location.origin}/admin/today`)).toBe(true);
+  });
+
+  it('does nothing in a browser', () => {
+    delete window.webkit;
+    const open = vi.fn();
+    const cleanup = onInAppAlertTap(open);
+    expect(tap(`${window.location.origin}/admin/today`)).toBe(true);
+    expect(open).not.toHaveBeenCalled();
+    cleanup();
   });
 });
 

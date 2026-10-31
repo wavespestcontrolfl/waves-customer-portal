@@ -9,14 +9,21 @@
 // Sign-out releases the token again (releaseInAppPush), and the app stops
 // this install's notifications until the next sign-in registers again.
 //
-// Each sign-up carries its own id (`reg`). A release names the sign-up it
-// ends, so a late release can never switch off a newer sign-up of the same
-// token (the server matches both in one update).
+// Each sign-in's sign-up carries its own id (`reg`), kept for every token
+// event of that sign-in. A release names it, so a late release can never
+// switch off a later sign-in's sign-up of the same token (the server matches
+// both in one update).
+//
+// A tapped alert, while a staff page is open, arrives as a cancelable
+// 'wavesadmin:openlink' window event (detail = { url }). The page cancels it
+// (so the app does not load the link itself) and navigates, so its
+// unsaved-changes prompt and the field visit lock still apply.
 
 import { adminFetch } from '../lib/adminFetch';
 import { isWavesAdminApp } from './platform';
 
 const TOKEN_EVENT = 'wavesadmin:pushtoken';
+const OPEN_EVENT = 'wavesadmin:openlink';
 // This iPhone's sign-up ({ token, reg }). Stored, so a sign-out after a page
 // reload still releases it.
 const SIGN_UP_KEY = 'waves_admin_push_signup';
@@ -60,10 +67,12 @@ function retryDelay(attempt) {
 export function registerInAppPush() {
   if (!isWavesAdminApp()) return () => {};
   const mine = ++epoch;
+  // One id for this sign-in: a second token event reuses it, so a release
+  // names whichever sign-up reached the server.
+  const reg = newSignUpId();
   const onToken = (event) => {
     const { token, environment } = event?.detail || {};
     if (mine !== epoch || !token) return;
-    const reg = newSignUpId();
     try { localStorage.setItem(SIGN_UP_KEY, JSON.stringify({ token, reg })); } catch { /* storage unavailable */ }
     // Retried while this sign-in lasts: an offline launch registers once the
     // connection is back. A refusal (expired sign-in, bad input) stops.
@@ -117,6 +126,24 @@ export function releaseInAppPush() {
   };
   lastStep = lastStep.then(release, release);
   return lastStep;
+}
+
+// Calls open(path) for a tapped alert's portal page. Returns a cleanup.
+export function onInAppAlertTap(open) {
+  if (!isWavesAdminApp()) return () => {};
+  const onOpen = (event) => {
+    event.preventDefault();
+    let target;
+    try {
+      target = new URL(event?.detail?.url, window.location.origin);
+    } catch {
+      return;
+    }
+    if (target.origin !== window.location.origin) return;
+    open(`${target.pathname}${target.search}${target.hash}`);
+  };
+  window.addEventListener(OPEN_EVENT, onOpen);
+  return () => window.removeEventListener(OPEN_EVENT, onOpen);
 }
 
 // True when the app took the count, so the caller skips the Badging API.
