@@ -85,13 +85,15 @@ function saysReviewed(body) {
 // Stricter: a sentence that states as a done fact that the customer left a review ("I left you a
 // review", "I have already posted a review", "Just posted my review!", "Review posted.", "My review
 // was submitted"). saysReviewed only adds weight near a review that exists; this one stops review
-// asks by itself, for good (review-click-guard.js), so a question, a plan, a condition, a promise or
-// a request never counts ("can you send the link so I can get my review posted?", "I will let you
-// know when I have left a review", "I'll confirm once I've left a review", "after my review is
-// posted"). The claim must open its sentence, after courtesy words at most ("Thanks so much, I left
-// a review"), so a wish, a doubt or a guess around it never counts ("I wish I had left a review", "I
-// thought I had left one", "not sure if I left a review"); only helper words may stand between the
-// subject and the verb ("I have already left").
+// asks by itself, for good (review-click-guard.js). The rule:
+// - The claim opens its sentence, after courtesy words at most ("Thanks so much, I left a review"),
+//   so a wish, a doubt or a guess around it never counts ("I wish I had left a review", "I thought I
+//   had left one", "not sure if I left a review"). Only helper words may stand between the subject
+//   and the verb ("I have already left").
+// - The claim itself holds no question, plan, condition or promise ("I'll confirm once I've left a
+//   review" opens with no claim; "Already left a review?" is asked). A question or a plan after it
+//   leaves it a done fact ("I left a review, can you see it?", "...and will recommend you").
+// - A negation anywhere in the sentence undoes it ("My review is done but not posted yet").
 // A closed list: no word here can open a doubt or a wish ("not sure", "I wish", "maybe").
 const DONE_LEAD_WORDS = '(hi|hello|hey|there|guys|thanks|thank you|thank u|thx|ty|so much|again|for asking|for the reminder|ok|okay|yes|yep|yeah|sure|great|perfect|awesome|fyi|btw|also|and|so|but)';
 const DONE_HELPER_WORDS = '(have|has|had|already|just|also|actually|finally|recently|literally|both|each|went and|went ahead and|gone ahead and)';
@@ -100,16 +102,18 @@ const DONE_REVIEW_RE = new RegExp(`^\\s*(${DONE_LEAD_WORDS}\\b[\\s,:-]*)*(`
   + '|(my|our|the) review\\b[^.!?]{0,10}\\b(is|was|has been)\\b[^.!?]{0,8}\\b(posted|done|submitted)\\b'
   + '|((just|already|also)\\s+)*(left|posted|submitted)\\b[^.!?]{0,25}\\breview\\b'
   + '|review\\s+(posted|done|submitted|left)\\b)', 'i');
-// On the sentence with apostrophes dropped ("I'll" reads "Ill"). A present-tense review inside a time
-// clause is a future one: "after I've posted", "before my review is done".
-const NOT_A_DONE_FACT_RE = /\?|\b(will|ill|would|could|can|should|going to|gonna|plan|planning|try|trying|when|whenever|once|until|till|unless|as soon as|if|let (you|u) know|so (i|we) can|need to|want to|how|where)\b|\b(after|before)\s+(ive|weve|i have|we have|(my|our|the) review (is|has been))\b/i;
-// "we'll", "you'll": dropping the apostrophe would make "well" and "youll".
-const CONTRACTED_FUTURE_RE = /['’]ll\b/i;
+// Read on the claim alone. A present-tense review inside a time clause is a future one: "after I've
+// posted", "before my review is done".
+const NOT_A_DONE_FACT_RE = /\b(will|ill|would|could|can|should|going to|gonna|plan|planning|try|trying|when|whenever|once|until|till|unless|as soon as|if|let (you|u) know|so (i|we) can|need to|want to|how|where)\b|\b(after|before)\s+(ive|weve|i have|we have|(my|our|the) review (is|has been))\b/i;
 function saidLeftReview(body) {
   return String(body || '').split(/(?<=[.!?\n])/).some((sentence) => {
-    const plain = sentence.replace(/[’']/g, ''); // "I've" -> "Ive"
-    return DONE_REVIEW_RE.test(plain) && !NOT_A_DONE_FACT_RE.test(plain) && !CONTRACTED_FUTURE_RE.test(sentence)
-      && saysReviewed(sentence);
+    // "I'll" -> "I will" first (dropping the apostrophe would make "we'll" read "well"), then
+    // "I've" -> "Ive".
+    const plain = sentence.replace(/['’]ll\b/gi, ' will').replace(/[’']/g, '');
+    const claim = DONE_REVIEW_RE.exec(plain);
+    if (!claim) return false;
+    const asked = /^[^a-z0-9]*\?/i.test(plain.slice(claim[0].length));
+    return !asked && !NOT_A_DONE_FACT_RE.test(claim[0]) && saysReviewed(sentence);
   });
 }
 

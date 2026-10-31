@@ -176,6 +176,10 @@ describe('saidLeftReview: a done-fact statement, strict enough to stop review as
     'Ok we left a review for the tech',
     'Thanks for the reminder but I already left a review',
     'Already left a review!',
+    // A question or a plan after the claim leaves it a done fact.
+    'I already left a review, can you see it?',
+    'I left a review yesterday and will recommend you',
+    'I’ve left a review and I’ll tell my neighbors',
   ])('counts %s', (text) => expect(saidLeftReview(text)).toBe(true));
 
   test.each([
@@ -201,6 +205,10 @@ describe('saidLeftReview: a done-fact statement, strict enough to stop review as
     'Not sure if I left a review',
     'I don’t think I left a review yet',
     'Pretty sure we left a review',
+    // The claim asked as a question; a negation after the claim.
+    'Already left a review?',
+    'I left a review?',
+    'My review is done but not posted yet',
   ])('never counts %s', (text) => expect(saidLeftReview(text)).toBe(false));
 });
 
