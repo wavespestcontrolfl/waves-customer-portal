@@ -302,6 +302,20 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(await bellsOf('a')).toHaveLength(1);
     });
 
+    test('a bell write that answers null fails the import, and the next poll rings it', async () => {
+      const compose = require('../services/admin-alert-compose');
+      conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'Please call me', at: ago(2) }] });
+      const spy = jest.spyOn(compose, 'raiseAdminAlert').mockResolvedValueOnce(null);
+      try {
+        await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
+        expect(await bellsOf('a')).toHaveLength(0);
+        expect(await messenger.pollMessenger()).toMatchObject({ inserted: 0 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await bellsOf('a')).toHaveLength(1);
+    });
+
     test('a conversation list that hits its page cap leaves the cursor alone and fails the job; so does a message cap', async () => {
       installFacebook(1);
       for (const [key, hours] of [['a', 10], ['b', 20], ['c', 30]]) {

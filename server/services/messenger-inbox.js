@@ -207,7 +207,7 @@ async function ringBell(thread, latestInbound) {
   const words = redactedWords(latestInbound.body);
   const quoted = whyWithQuote({ lead: 'Facebook: ', quote: words });
   const why = words && !/^\[/.test(words) && !breaksAlertRules(quoted) ? quoted : 'New Facebook message; open the thread to read it.';
-  await raiseAdminAlert('alert', {
+  const raised = await raiseAdminAlert('alert', {
     area: 'Comms',
     action: fitAction('Comms', name, [(n) => `reply to ${n} on Facebook`, (n) => `reply to ${n}`]),
     why,
@@ -229,6 +229,9 @@ async function ringBell(thread, latestInbound) {
     detail: words ? words.slice(0, 1000) : undefined,
     metadata: { conversationId: thread.id },
   });
+  // notifyAdmin answers null when the bell write failed (a withheld bell answers { suppressed }).
+  // Fail the import so the cursor holds and the next poll rings it again.
+  if (!raised) throw new Error('Messenger bell not written');
 }
 
 // ── the poll ──────────────────────────────────────────────────
