@@ -1650,11 +1650,11 @@ const PLAUSIBLE_VISIT = {
   floors: [{ amount: 640, unit: 'fl_oz' }, { amount: 100, unit: 'lb' }, { amount: 50, unit: 'each' }],
 };
 
-// True when deductedAmount (in the product's inventory unit) is over that ceiling. A unit with no known dimension and
-// too little history has no ceiling. Read only on the overdraw path, so a completion that stays in stock pays nothing.
-async function exceedsPlausibleVisit(trx, { productId, inventoryUnit, deductedAmount }) {
+// The ceiling for one product, in its inventory unit: 20 times its own median usage over the last year with enough history,
+// else the floor by unit dimension. 0 means no ceiling (a unit with no known dimension and too little history).
+async function plausibleCeilingFor(database, { productId, inventoryUnit }) {
   const since = new Date(Date.now() - PLAUSIBLE_VISIT.historyDays * 24 * 60 * 60 * 1000);
-  const prior = await trx('product_inventory_movements')
+  const prior = await database('product_inventory_movements')
     .where({ product_id: productId, movement_type: 'usage' })
     .where('created_at', '>=', since)
     .select('quantity', 'unit');
@@ -1663,24 +1663,39 @@ async function exceedsPlausibleVisit(trx, { productId, inventoryUnit, deductedAm
     .sort((x, y) => x - y);
   const median = (history[(history.length - 1) >> 1] + history[history.length >> 1]) / 2;
   const floor = Math.max(0, ...PLAUSIBLE_VISIT.floors.map((f) => convertInventoryQuantity(f.amount, f.unit, inventoryUnit) ?? 0));
-  const ceiling = history.length >= PLAUSIBLE_VISIT.minHistory ? PLAUSIBLE_VISIT.medianMultiple * median : floor;
+  return history.length >= PLAUSIBLE_VISIT.minHistory ? PLAUSIBLE_VISIT.medianMultiple * median : floor;
+}
+
+// The key a frozen ceiling is stored under: one per product and inventory unit.
+const ceilingKey = (productId, inventoryUnit) => `${canonicalProductId(productId)}|${inventoryUnit}`;
+
+// True when deductedAmount (in the product's inventory unit) is over the product's ceiling. Inside a completion the
+// ceiling comes from `ceilings`, the map frozen by freezeCompletionCeilings before the first write: a line saved earlier
+// in the same visit adds usage history, and a recomputed ceiling would judge the next line against a different number.
+// Only a caller with no frozen map (a direct call) reads the history, once, here.
+async function exceedsPlausibleVisit(database, { productId, inventoryUnit, deductedAmount, ceilings = null }) {
+  const key = ceilingKey(productId, inventoryUnit);
+  const ceiling = ceilings?.has(key) ? ceilings.get(key) : await plausibleCeilingFor(database, { productId, inventoryUnit });
   return ceiling > 0 && deductedAmount > ceiling;
 }
 
-// A technician's completion is refused, before any write, when a submitted line is over the plausibility ceiling
-// (owner "dont block" applies to the office: an admin entry is deliberate and keeps the advisory path in
-// deductProductInventory). The line would otherwise reach service_products, the FDACS ledger, usage, limits and the
-// customer report. Returns the 422 body for the first offending line, else null.
+// A technician's completion is refused, before any service write, when a submitted line is over its product's ceiling
+// (the office keeps the advisory path in deductProductInventory: an admin entry is deliberate, so the line is recorded, stock
+// is left alone and the office is alerted). The line would otherwise reach service_products, the FDACS ledger, usage, limits
+// and the customer report.
 const IMPLAUSIBLE_PRODUCT_AMOUNT = 'IMPLAUSIBLE_PRODUCT_AMOUNT';
 
-async function implausibleLineOf(database, submitted, catalogRow) {
+// The line's amount in its product's inventory unit, or null when there is nothing to judge.
+function plausibleLineAmount(submitted, catalogRow) {
   const amount = submitted.totalAmount != null && submitted.totalAmount !== '' ? Number(submitted.totalAmount) : null;
   const amountUnit = baseQuantityUnit(submitted.amountUnit || submitted.rateUnit || null);
   if (!catalogRow || !amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) return null;
   const inventoryUnit = catalogRow.inventory_unit || amountUnit;
   const deductedAmount = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
-  if (deductedAmount == null) return null;
-  if (!await exceedsPlausibleVisit(database, { productId: catalogRow.id, inventoryUnit, deductedAmount })) return null;
+  return deductedAmount == null ? null : { amount, amountUnit, inventoryUnit, deductedAmount };
+}
+
+function implausibleRefusal(catalogRow, { amount, amountUnit }) {
   return {
     error: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${catalogRow.name} is far more than one visit uses. Check the amount and submit again.`,
     code: IMPLAUSIBLE_PRODUCT_AMOUNT,
@@ -1691,21 +1706,33 @@ async function implausibleLineOf(database, submitted, catalogRow) {
   };
 }
 
-async function technicianImplausibleProduct(database, { actor, products, skip = false }) {
-  if (skip || actor?.techRole === 'admin' || !Array.isArray(products)) return null;
+// Freezes the ceiling of every product line (admin and technician alike) ONCE, before the first write, and refuses a
+// technician's line over it. The returned map is the only source of a ceiling for the rest of the completion
+// (deductProductInventory): a line saved earlier in the visit adds usage history, so a recomputed ceiling would move
+// under a later line of the same product (a host row and an add-on row). `skip` is a replay, a resume or a packet effects
+// phase: nothing is judged and nothing is read.
+async function freezeCompletionCeilings(database, { actor, products, skip = false }) {
+  const ceilings = new Map();
+  if (skip || !Array.isArray(products)) return { ceilings, refusal: null };
   const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
-  if (!lines.length) return null;
   const ids = [...new Set(lines.map((p) => canonicalProductId(p.productId)).filter((id) => UUID_SHAPE.test(id)))];
   const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
   const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
+  let refusal = null;
   for (const line of lines) {
-    const refusal = await implausibleLineOf(database, line, rowById.get(canonicalProductId(line.productId)));
-    if (refusal) return refusal;
+    const catalogRow = rowById.get(canonicalProductId(line.productId));
+    const judged = plausibleLineAmount(line, catalogRow);
+    if (!judged) continue;
+    const key = ceilingKey(catalogRow.id, judged.inventoryUnit);
+    if (!ceilings.has(key)) ceilings.set(key, await plausibleCeilingFor(database, { productId: catalogRow.id, inventoryUnit: judged.inventoryUnit }));
+    const ceiling = ceilings.get(key);
+    if (!refusal && actor?.techRole !== 'admin' && ceiling > 0 && judged.deductedAmount > ceiling) refusal = implausibleRefusal(catalogRow, judged);
   }
-  return null;
+  return { ceilings, refusal };
 }
 
 async function deductProductInventory(trx, {
+  plausibleCeilings,
   product,
   productInput,
   serviceProduct,
@@ -1780,7 +1807,7 @@ async function deductProductInventory(trx, {
   }
   // Owner "dont block": the completion still succeeds, but an amount no visit uses moves no stock and no cost. The
   // office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
-  if (insufficient && await exceedsPlausibleVisit(trx, { productId: inventoryProduct.id, inventoryUnit, deductedAmount })) {
+  if (insufficient && await exceedsPlausibleVisit(trx, { productId: inventoryProduct.id, inventoryUnit, deductedAmount, ceilings: plausibleCeilings })) {
     return {
       ...snapshot,
       status: 'not_deducted_implausible',
@@ -5093,7 +5120,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // never judged: its own committed usage can change the product's history and move the ceiling under it. The claim is
     // released as failed, as for the other refusals above, so a corrected resubmit is not blocked. Admin keeps the
     // advisory path in deductProductInventory.
-    const implausibleProduct = await technicianImplausibleProduct(db, {
+    const { ceilings: plausibleCeilings, refusal: implausibleProduct } = await freezeCompletionCeilings(db, {
       actor: completionInput.actor, products, skip: claim.action !== 'proceed',
     });
     if (implausibleProduct) {
@@ -8557,6 +8584,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
 
             const deduction = await deductProductInventory(trx, {
+              plausibleCeilings,
               product,
               productInput: p,
               serviceProduct,
@@ -16298,6 +16326,6 @@ module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
 module.exports.isPestStockAdvisoryCompletion = isPestStockAdvisoryCompletion;
 module.exports.isLawnTsStockAdvisoryCompletion = isLawnTsStockAdvisoryCompletion;
 module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
-module.exports.technicianImplausibleProduct = technicianImplausibleProduct;
+module.exports.freezeCompletionCeilings = freezeCompletionCeilings;
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

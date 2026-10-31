@@ -173,8 +173,8 @@ postgres('technician implausible product amount', () => {
       const retry = await complete(f, { role: 'technician', totalAmount: 100, key });
       expect(retry.status).toBe(200);
       expect(retry.body).toMatchObject({ replayed: true, serviceRecordId: first.body.serviceRecordId });
-      const { technicianImplausibleProduct } = require('../services/complete-scheduled-service');
-      expect(await technicianImplausibleProduct(mockPg, { actor: { techRole: 'technician' }, products: bodyFor(f, 100).products })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
+      const { freezeCompletionCeilings } = require('../services/complete-scheduled-service');
+      expect((await freezeCompletionCeilings(mockPg, { actor: { techRole: 'technician' }, products: bodyFor(f, 100).products })).refusal).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
       expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1 });
     } finally { await cleanup(f); }
   });
