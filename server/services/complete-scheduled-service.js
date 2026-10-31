@@ -1679,12 +1679,14 @@ const IMPLAUSIBLE_PRODUCT_AMOUNT = 'IMPLAUSIBLE_PRODUCT_AMOUNT';
 // The ONE parse of a submitted product amount. An absent or empty amount is "no amount" (null); a number or a plain
 // decimal string is that number; anything else ("99999junk", "1e3", a boolean, an object, a negative) is invalid (NaN).
 // parseFloat/Number on the raw value would each read it differently, and a sink that read "99999junk" as 99,999 would
-// store a number the preflight never judged.
-const PLAIN_DECIMAL = /^(\d+\.?\d*|\.\d+)$/;
+// store a number the preflight never judged. The pattern has no overlapping quantifiers (the fraction needs its dot)
+// and the string is length-capped first, so a long digit run fails in linear time.
+const PLAIN_DECIMAL = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
+const MAX_AMOUNT_CHARS = 32;
 function strictProductAmount(raw) {
   if (raw == null || raw === '') return null;
   if (typeof raw === 'number') return Number.isFinite(raw) && raw >= 0 ? raw : NaN;
-  if (typeof raw === 'string' && PLAIN_DECIMAL.test(raw.trim())) return Number(raw.trim());
+  if (typeof raw === 'string' && raw.length <= MAX_AMOUNT_CHARS && PLAIN_DECIMAL.test(raw.trim())) return Number(raw.trim());
   return NaN;
 }
 

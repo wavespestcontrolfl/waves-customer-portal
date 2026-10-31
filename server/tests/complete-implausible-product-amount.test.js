@@ -227,6 +227,7 @@ describe('a malformed amount is refused with a 400 for every role, and the parse
     ['an object', { v: 1 }],
     ['words', 'lots'],
     ['whitespace and junk', ' 12 lb'],
+    ['an over-long digit run', '1'.repeat(33)],
   ])('%s', async (_name, totalAmount) => {
     for (const actor of [tech, admin]) {
       const products = [{ productId: CELSIUS, totalAmount, amountUnit: 'lb' }];
@@ -240,6 +241,14 @@ describe('a malformed amount is refused with a 400 for every role, and the parse
     const products = [{ productId: CELSIUS, totalAmount: ' 12.5 ', amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: '.5', amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 3, amountUnit: 'lb' }];
     expect(await vet({ actor: tech, products })).toBeNull();
     expect(products.map((p) => p.totalAmount)).toEqual([12.5, 0.5, 3]);
+  });
+
+  test('a long digit run ending in junk is refused quickly, not after quadratic backtracking', async () => {
+    const products = [{ productId: CELSIUS, totalAmount: `${'1'.repeat(100000)}x`, amountUnit: 'lb' }];
+    const started = Date.now();
+    const out = await vet({ actor: tech, products });
+    expect(out).toMatchObject({ status: 400, body: { code: 'INVALID_PRODUCT_AMOUNT' } });
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   test('empty and absent amounts behave as today: not judged, not changed', async () => {
