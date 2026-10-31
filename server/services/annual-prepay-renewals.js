@@ -7124,7 +7124,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
     const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
     const { splitTerminalCompletionInvoice, COMPLETION_TERMINAL_INVOICE_STATUSES } = require('./completion-invoice-candidate');
-    const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('./completion-charge-verdict');
+    const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('./completion-charge-verdict');
     const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
     // Real columns only: the payer is resolved by the payer authority
     // (scheduled_services.payer_id → self-pay override → customers.payer_id,
@@ -7390,7 +7390,10 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // charges a priced bill ('invoice' — gate off — or 'auto_charge') for
       // an Auto-Pay-active customer; the route gates every rail on
       // customerAutopayActive.
-      const perApplicationCharge = perApplicationBilling && autopayActive && prediction.kind === 'auto_charge';
+      // Like the route, the per-application rail skips a visit from a won
+      // Bill-by-invoice proposal (bill-by-invoice.js).
+      const perApplicationCharge = autopayActive && prediction.kind === 'auto_charge'
+        && await resolvePerApplicationCharge({ svc: svcLike, perApplicationBilling, conn, strict: true });
       const apptLaneCharge = appt.apptCardOneTimeCharge && autopayActive && ['invoice', 'auto_charge'].includes(prediction.kind);
       const extendedCharge = ext.extendedChargeCandidate && prediction.kind === 'auto_charge';
       let autopayLaneCharges = perApplicationCharge || apptLaneCharge || extendedCharge;

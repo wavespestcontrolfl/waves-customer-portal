@@ -109,6 +109,7 @@ const {
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
+const { billByInvoiceDemotedPrediction } = require('../services/completion-charge-verdict');
 const { isAlwaysFreeServiceType, isConsultationServiceType } = require('../services/no-cost-visit-types');
 const SeriesPriceGuards = require('../services/series-price-guards');
 const DiscountEngine = require('../services/discount-engine');
@@ -5976,6 +5977,10 @@ function unbilledVisitAlert({ hasChargeableMethod, prediction, willMint = null }
 async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, completionContext = null, checkoutInvoice = null }) {
   const customerId = svc?.customer_id;
   const achStatus = svc?.ach_status;
+  // Auto Pay never collects a visit from a won Bill-by-invoice proposal
+  // (owner 2026-10-30, bill-by-invoice.js): a promised charge reads as an
+  // invoice on both feeds, before anything below reads the prediction.
+  billingLane.prediction = await billByInvoiceDemotedPrediction(billingLane.prediction, svc, db);
   // ONE canonical per-visit collection verdict (owner decision — narrow +
   // fail closed): is this visit's own charge entangled with another
   // invoice's state — a same-day sibling's combined first-application

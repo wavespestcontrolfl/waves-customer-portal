@@ -324,7 +324,12 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
       if (terminalReason) return { state: terminalReason, invoiceId: invoice.id };
       const customer = await database('customers').where({ id: visit.customer_id }).first();
       const method = await getChargeableAutopayMethod(customer, database, { rethrow: true });
-      if (method && await customerOnAutopay(customer, { db: database, failClosed: true })) {
+      // A bill from a won Bill-by-invoice proposal stays open on its Net term
+      // (owner 2026-10-30, bill-by-invoice.js): Auto Pay never collects it, so
+      // it lands like a customer with no method. A failed read throws into the
+      // catch below: a retry, nothing charged.
+      if (method && await customerOnAutopay(customer, { db: database, failClosed: true })
+        && !await require('./bill-by-invoice').billByInvoiceInvoice(database, invoice)) {
         await require('./stripe').chargeInvoiceWithSavedCard(invoice.id, method.id, {
           requireAutopayForCustomerId: customer.id, requireVisitCompletionPacketId: packet.id,
           refuseWhenDunningStopped: true,

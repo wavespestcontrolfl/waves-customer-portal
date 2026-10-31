@@ -2371,7 +2371,7 @@ describe('completion route wiring (source contracts)', () => {
     // for non-backfill completions. Invoice minting is untouched
     // (shouldInvoice runs earlier), so a backfill invoice still mints, open
     // and uncharged, for operator collection.
-    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationBilling \|\| apptCardOneTimeCharge \|\| extendedChargeCandidate\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
+    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationCharge \|\| apptCardOneTimeCharge \|\| extendedChargeCandidate\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
     // autoChargedReceiptPending starts false and is only ever set inside the
     // gated rail — no charge, no combined receipt claim.
     expect(source).toMatch(/let autoChargedReceiptPending = false;/);
@@ -2821,7 +2821,7 @@ describe('completion route wiring (source contracts)', () => {
       'if (!isBackfillCompletion\n      && invoice?.id && !alreadyPaid && !invoice.payer_id',
       // completion saved-card / ACH auto-charge (per-application OR the
       // appointment-card one-time lane — one shared rail, one backfill gate)
-      'if (!isBackfillCompletion\n      && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed',
+      'if (!isBackfillCompletion\n      && (perApplicationCharge || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed',
       // appointment-card one-time lane derivation (read-only, but its
       // backfill-skip log reads isBackfillCompletion so it must sit after
       // the re-derivation too)

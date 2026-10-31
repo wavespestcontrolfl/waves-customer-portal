@@ -1394,8 +1394,11 @@ async function resumeDunningPausedByWithdrawal(trx, invoiceId) {
     let onAutopay = false;
     try {
       const customer = await trx('customers').where({ id: pausedByWithdrawal.customer_id }).first();
+      // A bill from a won Bill-by-invoice proposal is never collected by Auto
+      // Pay (owner 2026-10-30, bill-by-invoice.js), so it resumes its reminders.
       onAutopay = customer
         ? await require('./autopay-eligibility').customerOnAutopay(customer, { db: trx, failClosed: true })
+          && !await require('./bill-by-invoice').billByInvoiceInvoice(trx, { id: invoiceId })
         : true;
     } catch { onAutopay = true; }
     await trx('invoice_followup_sequences').where({ id: pausedByWithdrawal.id })
