@@ -21124,6 +21124,7 @@ const CallRecordingProcessor = {
                   durationMinutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                   lat: propertyLinkage.lat ?? null,
                   lng: propertyLinkage.lng ?? null,
+                  zip: propertyLinkage.address?.zip || null,
                   serviceType,
                   serviceId: callBookingCatalogRow?.id || null,
                   customerId,

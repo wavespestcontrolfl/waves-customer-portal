@@ -54,7 +54,7 @@ async function assignableTechnicians(conn, { day, serviceId, serviceKey, service
  */
 async function resolveOfficeAutoTechnician({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = 60,
-  serviceId, serviceKey, serviceType, customerId, lat, lng,
+  serviceId, serviceKey, serviceType, customerId, lat, lng, zip = null,
 } = {}) {
   try {
     const day = dateOnlyString(date);
@@ -67,7 +67,7 @@ async function resolveOfficeAutoTechnician({
     if (lineMapLive()) {
       const line = await pickLineTechnician(conn, {
         serviceId, serviceKey, serviceType, date: day, windowStart, windowEnd, durationMinutes,
-        customerId, lat, lng, excludeCustomerId: customerId, candidateIds: techs.map((t) => t.id),
+        zip, customerId, lat, lng, excludeCustomerId: customerId, candidateIds: techs.map((t) => t.id),
         checkFree: require('./pick-technician').pickTechnicianActive(),
       });
       if (line.mapped) return line.technicianId ? assigned(line.technicianId, line.reason === 'home' ? 'line_home' : 'line_gap') : unassigned('line_none');
@@ -79,7 +79,7 @@ async function resolveOfficeAutoTechnician({
     // The catalog identity rides along: the pick reads the line (and capability) catalog
     // first, as step 1 did; by name alone a lawn catalog row such as "Top Dress" reads general.
     const pick = await picker.pickTechnicianForVisit({
-      conn, date: day, windowStart, windowEnd, durationMinutes, lat, lng, serviceType, serviceId, serviceKey, customerId,
+      conn, date: day, windowStart, windowEnd, durationMinutes, lat, lng, zip, serviceType, serviceId, serviceKey, customerId,
     });
     if (!pick.active) return unassigned('several_assignable');
     const pickedId = pick.technician?.id || null;

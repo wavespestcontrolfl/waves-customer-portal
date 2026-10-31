@@ -9086,6 +9086,9 @@ async function scheduleCreateHandler(req, res, next) {
           date: scheduledDate, windowStart, windowEnd, durationMinutes: duration,
           serviceId: serviceId || null, serviceKey: serviceRecord?.service_key, serviceType,
           customerId, lat: bookingProperty?.lat ?? customer?.latitude ?? null, lng: bookingProperty?.lng ?? customer?.longitude ?? null,
+          // The selected property's ZIP leads the territory pick (GATE_TERRITORY_ROUTING): a
+          // secondary property with no pin must not read as the main one's coordinates.
+          zip: bookingProperty?.service_address_zip || null,
         });
         resolvedTechId = auto.technicianId;
         autoAssign = auto.result === 'assigned'
