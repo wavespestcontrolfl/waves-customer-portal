@@ -108,17 +108,28 @@ function draftRow(over = {}) {
 
 // Minimal knex stand-in: where/whereNull filter, update reports rows touched
 // (and supports .returning), insert returns the new row.
-function fakeSocialDb(rows) {
+function fakeSocialDb(rows, runs = []) {
   db.mockImplementation((table) => {
-    let matches = table === 'social_media_posts' ? rows.slice() : [];
+    let matches = table === 'social_media_posts' ? rows.slice()
+      : table === 'social_content_studio_runs' ? runs.slice() : [];
+    let selected = null;
     const q = {
+      rows: () => matches,
+      selectedColumn: () => selected,
+      modify(fn) { fn(q); return q; },
+      whereNotNull(col) { matches = matches.filter((r) => r[col] != null); return q; },
+      whereNotIn(col, sub) {
+        const ids = sub.rows().map((r) => r[sub.selectedColumn()]);
+        matches = matches.filter((r) => !ids.includes(r[col]));
+        return q;
+      },
       where(a, b) {
         const cond = typeof a === 'object' ? a : { [a]: b };
         matches = matches.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
         return q;
       },
       whereNull(col) { matches = matches.filter((r) => r[col] == null); return q; },
-      select() { return q; },
+      select(col) { selected = col; return q; },
       orderBy() { return q; },
       limit() { return q; },
       first: () => Promise.resolve(matches[0]),
@@ -218,6 +229,25 @@ describe('GET /social-drafts (SOC-01)', () => {
     ]);
     const r = await callRoute('get', '/social-drafts');
     expect(r.payload).toEqual({ drafts: [{ id: ID, title: 'Synthetic campaign', channels: ['facebook', 'gbp'] }] });
+  });
+});
+
+describe('autonomous-run drafts stay out of the Calendar (SOC-01)', () => {
+  const RUN_POST = '9c1d2e3f-aaaa-bbbb-cccc-ddddeeeeffff';
+  const runs = [{ id: 'run-1', social_media_post_id: RUN_POST }, { id: 'run-2', social_media_post_id: null }];
+
+  test('a draft an autonomous run saved is not listed', async () => {
+    fakeSocialDb([draftRow(), draftRow({ id: RUN_POST, title: 'Run draft' })], runs);
+    const r = await callRoute('get', '/social-drafts');
+    expect(r.payload.drafts.map((d) => d.id)).toEqual([ID]);
+  });
+
+  test('scheduling an autonomous run draft is a 409 and leaves it untouched', async () => {
+    const rows = [draftRow({ id: RUN_POST })];
+    fakeSocialDb(rows, runs);
+    const r = await callRoute('post', '/schedule-social', { body: { postId: RUN_POST, scheduledFor: '2026-11-02T14:00:00.000Z' } });
+    expect(r.statusCode).toBe(409);
+    expect(rows[0]).toMatchObject({ status: 'draft', scheduled_for: null });
   });
 });
 

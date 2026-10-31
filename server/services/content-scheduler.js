@@ -59,6 +59,17 @@ function httpUrlOrNull(value) {
 // waits at status 'draft' with no time until the Calendar gives it one.
 const SAVED_DRAFT = { source_type: 'campaign_builder', status: 'draft', publish_status: 'pending' };
 
+// An autonomous Studio run also saves its draft through saveCampaignDraft
+// (social_content_studio_runs.social_media_post_id), but that draft posts only
+// through its own guarded approval (approveAutonomousRun: review liveness,
+// milestone, season and location checks, one shared claim). Never list or
+// schedule it here, or an approval could post it a second time.
+function notAutonomousRunDraft(query) {
+  return query.whereNotIn('id', db('social_content_studio_runs')
+    .whereNotNull('social_media_post_id')
+    .select('social_media_post_id'));
+}
+
 // Pre-publish, platforms_posted holds the REQUESTED channel list (strings, or
 // {platform} objects once publishToAll has written results).
 function storedChannels(platformsPosted) {
@@ -534,6 +545,7 @@ const ContentScheduler = {
     const rows = await db('social_media_posts')
       .where(SAVED_DRAFT)
       .whereNull('scheduled_for')
+      .modify(notAutonomousRunDraft)
       .orderBy('created_at', 'desc')
       .limit(100)
       .select('id', 'title', 'platforms_posted');
@@ -551,6 +563,7 @@ const ContentScheduler = {
     const [post] = await db('social_media_posts')
       .where({ id: postId, ...SAVED_DRAFT })
       .whereNull('scheduled_for')
+      .modify(notAutonomousRunDraft)
       .update({ scheduled_for: scheduledAt, status: 'scheduled' })
       .returning('*');
     if (!post) throw scheduleConflict('This draft is no longer available to schedule. Reload and pick again.');
