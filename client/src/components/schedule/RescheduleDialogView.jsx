@@ -33,6 +33,8 @@ export default function RescheduleDialogView({
   reasons,
   loading,
   options,
+  optionsError = false,
+  onRetryOptions,
   windowFor,
   handleReschedule,
   showManual,
@@ -92,7 +94,14 @@ export default function RescheduleDialogView({
             </CardBody></Card>
           )}
           <h3 className="text-18 font-medium">Suggested dates (on route)</h3>
-          {loading ? <ActionFeedback>Finding best dates...</ActionFeedback> : (
+          {loading ? <ActionFeedback>Finding best dates...</ActionFeedback> : optionsError ? (
+            <div role="alert" className="space-y-2">
+              <p className="text-ui-body">Could not load suggested dates. You can try again, or pick a custom date and time below.</p>
+              {onRetryOptions && <Button variant="secondary" onClick={onRetryOptions}>Try again</Button>}
+            </div>
+          ) : options.length === 0 ? (
+            <p className="text-ui-body text-ink-secondary">No suggested dates on route. Pick a custom date and time below.</p>
+          ) : (
             <div className="space-y-2">
               {options.map((option, index) => (
                 <Card key={index}><CardBody className="flex flex-wrap items-center justify-between gap-3">

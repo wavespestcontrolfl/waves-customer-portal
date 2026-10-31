@@ -457,6 +457,8 @@ router.get('/customers', async (req, res, next) => {
           'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
           'c.email', 'c.phone', 'c.address_line1 as address'
         )
+        // An archived customer (often a merged duplicate with the same name) is not offered.
+        .whereNull('c.deleted_at')
         .where(function () {
           this.whereNotNull('ctp.id')
             .orWhereNotNull('c.waveguard_tier')

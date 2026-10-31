@@ -84,6 +84,17 @@ function minutesToHHMM(min) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+// A month-grid drop changes only the date, so the visit keeps its stored
+// span. The month feed's `duration` falls back to 30 when
+// estimated_duration_minutes is null, so a 09:00-10:30 visit would land as
+// 09:00-09:30; the stored window wins over that fallback.
+function monthMoveDurationMinutes(svc) {
+  const start = parseHHMM(svc?.windowStart);
+  const end = parseHHMM(svc?.windowEnd);
+  if (start != null && end != null && end > start) return end - start;
+  return svc?.duration || 30;
+}
+
 
 // ─── VIEW MODE SELECTOR ──────────────────────────────────────────
 
@@ -454,7 +465,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
     if (!fromDate || fromDate === toDate) return;
 
     const startMin = parseHHMM(svc.windowStart);
-    const dur = svc.duration || 30;
+    const dur = monthMoveDurationMinutes(svc);
     // A windowless visit stays windowless on a date-only drop (newWindow
     // null) — synthesizing a window here would invent a booking time the
     // operator never chose.
@@ -631,7 +642,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
         serviceId={pending?.svc?.id}
         toWindow={pending?.newWindow}
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
-        durationMinutes={pending?.svc?.duration || 30}
+        durationMinutes={pending?.svc ? monthMoveDurationMinutes(pending.svc) : undefined}
         technicianId={pending?.svc?.technicianId || pending?.svc?.technician_id || undefined}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}

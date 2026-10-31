@@ -131,7 +131,11 @@ export default function DocumentActionBar({
         }
       `}</style>
       <div className="doc-action-bar-buttons">
-        {pdfUrl ? (
+        {/* An installed app built before the Filesystem/Share plugins
+            (2026-07-07) cannot save the file, and the bare link would cover
+            the app with the PDF and no way back: no Download there, as with
+            the receipt download in PortalPage. */}
+        {pdfUrl && (!isNativeApp() || canSaveNative()) ? (
           <a
             data-glass-accent=""
             data-glass-size="primary"
@@ -139,9 +143,7 @@ export default function DocumentActionBar({
             download
             onClick={(e) => {
               // In the Capacitor shell an <a download> dead-ends the webview —
-              // route through the native share sheet (F-046). canSaveNative:
-              // old installed binaries run this JS without the plugins — leave
-              // their legacy tap behavior alone.
+              // route through the native share sheet (F-046).
               if (canSaveNative()) {
                 e.preventDefault();
                 saveUrlNative(pdfUrl, pdfFileName)

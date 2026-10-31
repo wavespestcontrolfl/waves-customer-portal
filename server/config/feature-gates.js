@@ -435,6 +435,8 @@
  *   GATE_DICTATION_MONEY_NORMALIZE=true (owner 2026-10-21, after "sixty-one thirty-three" came back as 6133, $60.33 and $61.33: the staff mic's transcript is read for dollar amounts. In a money context only (a $ or a word like price, charge, rate, a month), the server SUGGESTS (never rewrites; the transcript is returned exactly as heard) "$61.33" for "sixty-one thirty-three", "61 33" or "sixty one dollars and thirty three cents" and "$105" for "a hundred and five"; a run-together "$6133" is kept as typed and flagged ambiguous, so the Intelligence Bar asks with answer buttons between $61.33 and $6,133. Phone numbers, street numbers, times, dates, ZIPs, invoice numbers and quantities with units are never touched. Strict opt-in: exactly 'true' in every environment, read at call time via dictationMoneyNormalizeLive(). Ships DARK; off = the transcript is returned as before. Sends nothing to a customer.)
  *   GATE_SERVICE_SHEET_PRICE_SCOPE=true (owner 2026-10-26 "Build it as shown", bug 4 of the 10-24 price audit: the service-line sheet (MobileServiceEditModal, phone checkout and the Dispatch checkout's service line) asks "This appointment only / This and following appointments" when a recurring-series visit's price is edited, the same choice Edit appointment offers, and posts it as priceServiceScope. Needs GATE_EDIT_APPT_PRICE_SERVICE_SCOPE too: /series-summary answers canScopeSheetPrice:true only when both are on. Strict opt-in, read at module load via isEnabled('serviceSheetPriceScope'); off = the sheet asks nothing and posts no scope, exactly as before. Kill switch: delete the variable.)
  *   GATE_TAX_DEADLINE_BELLS=true (owner 2026-10-30, "All tax deadlines ring": the 8:23 AM ET tax deadline job raises each reminder as an admin bell (category tax, owner Settings override still wins) in place of the text to the owner phone, which the bell policy had silenced since 2026-09-01 while the job still marked the row reminded. Payroll rows ring 14 days before, 3 days before, the business day before and each morning after a missed date until marked; other rows (sales tax, estimated tax) ring once, 14 days before. A bell closes when its row is marked filed or paid. Read at call time via taxDeadlineBellsLive(), strict 'true', dark by default; off = the text and the reminded marks are exactly as before. Sends nothing to a customer. Rollback = unset.)
+ *   GATE_PAYROLL_MERCURY_STATUS=true (basic payroll option A, owner plan 2026-10-30: Waves works out each W-2 paycheck and Mercury sends it only after the owner approves it in the Mercury app. Needs GATE_PAYROLL. This is the read-only half: the 15-minute poller that reads each payment's approval request and transaction from Mercury, the recipient check when a Mercury recipient id is saved on a technician, the warnings before a send, and the payment chips on the pay run. Needs the env MERCURY_API_TOKEN (a custom token with read scopes and Send Money with Approval) and MERCURY_ACCOUNT_ID; MERCURY_API_BASE defaults to https://api.mercury.com/api/v1. The token, account number, routing number and any Mercury answer are never logged or stored. Read at call time via payrollMercuryStatusLive(), strict 'true', dark by default; off = no Mercury call at all and every payroll output and route is byte for byte today's; rollback = unset. Sends nothing to a customer or staff member.)
+ *   GATE_PAYROLL_MERCURY_PAY=true (basic payroll option A, owner plan 2026-10-30. Needs GATE_PAYROLL and GATE_PAYROLL_MERCURY_STATUS. Turns on Send to Mercury and Send again on a finalized pay run: for each bank-transfer paycheck with a Mercury recipient id the portal asks Mercury for an APPROVAL REQUEST (POST request-send-money); no money moves until a different Mercury user approves it in the Mercury app, and the portal never calls Mercury's direct send. A request is never sent twice by code: a lost answer becomes an 'unknown' payment the owner resolves. Read at call time via payrollMercuryPayLive(), strict 'true', dark by default; off = no request is ever made; rollback = unset (existing payment rows stay and still block a void).)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3300,6 +3302,12 @@ const gates = {
   // taxDeadlineBellsLive(). Kill switch: unset GATE_TAX_DEADLINE_BELLS.
   taxDeadlineBells: process.env.GATE_TAX_DEADLINE_BELLS === 'true',
 
+  // Payroll Mercury paychecks (owner plan A, 2026-10-30): the read-only Mercury link (poller, recipient check,
+  // warnings, chips) and, separately, the Send and Send again actions. OFF in every environment; read at call
+  // time via payrollMercuryStatusLive() and payrollMercuryPayLive(). Kill switches: unset the gate.
+  payrollMercuryStatus: process.env.GATE_PAYROLL_MERCURY_STATUS === 'true',
+  payrollMercuryPay: process.env.GATE_PAYROLL_MERCURY_PAY === 'true',
+
   // Payroll layer 3a (owner 2026-10-25): the line-by-line figures for Form 941,
   // RT-6, Form 940 and W-2/W-3 in the Payroll tab. OFF in every environment;
   // read at call time via payrollFormFiguresLive(). Kill switch: unset
@@ -3696,6 +3704,16 @@ const gates = {
   // browser, so it must never auto-run in dev). The admin "run now" endpoint is
   // requireAdmin-only and unaffected by this gate. Double-gated behind cronJobs.
   priceScanWeekly: process.env.GATE_PRICE_SCAN === 'true',
+
+  // Weekly SiteOne deals bell (owner 2026-10-31, plan A): Monday 8:00 AM ET the
+  // portal reads the last 7 days of the contact@ Gmail sync, keeps the SiteOne
+  // and product-maker mail that looks like a deal (promo, flyer, early order,
+  // rebate, price increase, price match), and rings ONE admin bell listing each
+  // deal with its deadline and the catalog products it names. Plain rules over
+  // rows already in the database: no model call, no paid API, no network, sends
+  // nothing to anyone. Strict opt-in (`=== 'true'`) checked by the cron in
+  // scheduler.js; double-gated behind cronJobs. Dark by default; kill = unset.
+  siteOneDealsDigest: process.env.GATE_SITEONE_DEALS_DIGEST === 'true',
 
   // Card-Present Surcharge (Tap to Pay) — adds the 2.9% credit-card surcharge to
   // in-person card_present charges, mirroring the online flow. Card-present
@@ -8506,6 +8524,19 @@ function taxDeadlineBellsLive() {
   return process.env.GATE_TAX_DEADLINE_BELLS === 'true';
 }
 
+// GATE_PAYROLL_MERCURY_STATUS read at CALL time — strict 'true' only, so an unset variable is off. Gates every
+// Mercury read for payroll (services/payroll-mercury.js, payroll-mercury-poller.js, mercury-client.js) and the
+// payment fields on the pay run. Off = no Mercury call at all and no output gains a key.
+function payrollMercuryStatusLive() {
+  return process.env.GATE_PAYROLL_MERCURY_STATUS === 'true';
+}
+
+// GATE_PAYROLL_MERCURY_PAY read at CALL time — strict 'true' only, and only while the status gate is also on.
+// Gates the Send to Mercury and Send again actions. Off = no request to Mercury is ever made.
+function payrollMercuryPayLive() {
+  return process.env.GATE_PAYROLL_MERCURY_PAY === 'true' && payrollMercuryStatusLive();
+}
+
 // GATE_PAYROLL_FORM_FIGURES read at CALL time — strict 'true' only, so an unset
 // variable is off. Gates GET /api/admin/payroll/forms (services/payroll-form-
 // figures.js) and the Tax forms section of the Payroll tab. Off = the route
@@ -9044,6 +9075,10 @@ module.exports.payrollLive = payrollLive;
 module.exports.payrollTaxCalendarLive = payrollTaxCalendarLive;
 // GATE_TAX_DEADLINE_BELLS reader, on its own line so gate PRs never conflict.
 module.exports.taxDeadlineBellsLive = taxDeadlineBellsLive;
+// GATE_PAYROLL_MERCURY_STATUS reader, on its own line so gate PRs never conflict.
+module.exports.payrollMercuryStatusLive = payrollMercuryStatusLive;
+// GATE_PAYROLL_MERCURY_PAY reader, on its own line so gate PRs never conflict.
+module.exports.payrollMercuryPayLive = payrollMercuryPayLive;
 // GATE_PAYROLL_FORM_FIGURES reader, on its own line so gate PRs never conflict.
 module.exports.payrollFormFiguresLive = payrollFormFiguresLive;
 // GATE_PAYROLL_TIME_OFF reader, on its own line so gate PRs never conflict.

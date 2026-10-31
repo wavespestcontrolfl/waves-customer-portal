@@ -170,6 +170,40 @@ describe('automation runner rendering', () => {
     expect(rendered.text).toContain('Hi Taylor, thanks for your interest in Waves.');
     expect(rendered.text).toContain('Unsubscribe: <%asm_group_unsubscribe_raw_url%>');
   });
+
+  // Sweep #4616 B2: a lead form can carry markup in the name field and a
+  // stranger's address in the email field. The HTML email must show that
+  // markup as inert text; the plain-text part shows it as typed.
+  test('escapes form-typed names in the HTML body and keeps the text body as typed', () => {
+    const rendered = renderAutomationStepContent({
+      template: { asm_group: 'service' },
+      htmlBody: '<p>Hi {{first_name}} {{last_name}} ({{email}})</p>',
+      textBody: 'Hi {{first_name}} {{last_name}} ({{email}})',
+      customer: {
+        first_name: '<a href="https://evil.example">Claim',
+        last_name: 'prize</a>',
+        email: 'x"onmouseover="y@example.com',
+      },
+      asmGroupId: 202,
+    });
+
+    expect(rendered.html).not.toContain('href="https://evil.example"');
+    expect(rendered.html).toContain('Hi &lt;a href=&quot;https://evil.example&quot;&gt;Claim prize&lt;/a&gt; (x&quot;onmouseover=&quot;y@example.com)');
+    expect(rendered.text).toBe('Hi <a href="https://evil.example">Claim prize</a> (x"onmouseover="y@example.com)');
+  });
+
+  test('a name holding $& or $\' is inserted as typed, not as replace() syntax', () => {
+    const rendered = renderAutomationStepContent({
+      template: { asm_group: 'service' },
+      htmlBody: '<p>Hi {{first_name}}, welcome.</p>',
+      textBody: 'Hi {{first_name}}, welcome.',
+      customer: { first_name: "A$&B$'", email: 'a@example.com' },
+      asmGroupId: 202,
+    });
+
+    expect(rendered.text).toBe("Hi A$&B$', welcome.");
+    expect(rendered.html).toContain('Hi A$&amp;B$&#39;, welcome.');
+  });
 });
 
 describe('automation runner suppression guardrails', () => {

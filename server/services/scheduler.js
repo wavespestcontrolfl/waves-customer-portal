@@ -1040,6 +1040,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN at :11 — the Mercury paycheck status poller (owner plan A, 2026-10-30). READ-ONLY toward Mercury:
+  // it moves each open payroll payment on from Mercury's answers and rings the payroll bells; it never makes or
+  // repeats a payment request. Gates (GATE_PAYROLL and GATE_PAYROLL_MERCURY_STATUS) read per tick, so a flip
+  // needs no restart; off = no Mercury call at all. Sends nothing to a customer or staff member.
+  cron.schedule('11,26,41,56 * * * *', async () => {
+    const gates = require('../config/feature-gates');
+    if (!(typeof gates.payrollLive === 'function' && gates.payrollLive())) return;
+    if (!(typeof gates.payrollMercuryStatusLive === 'function' && gates.payrollMercuryStatusLive())) return;
+    try {
+      await runExclusive('payroll-mercury-poll', () => require('./payroll-mercury-poller').pollPayments());
+    } catch (err) {
+      logger.error(`[payroll-mercury-poller] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
@@ -1924,6 +1939,28 @@ function initScheduledJobs() {
       await runExclusive('price-scan-weekly', runPriceScanBody);
     } catch (err) {
       logger.error(`Weekly price scan failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SITEONE DEALS BELL (gated: cronJobs AND siteOneDealsDigest)
+  // Reads the last 7 days of contact@ mail (the emails table), keeps SiteOne and
+  // product-maker deal mail, rings ONE admin bell. Plain rules, no model call and
+  // no paid API. Monday 8:00am ET.
+  // =========================================================================
+  cron.schedule('0 8 * * 1', async () => {
+    if (!isEnabled('siteOneDealsDigest')) return;
+    logger.info('Running: Weekly SiteOne deals digest');
+    try {
+      // runExclusive: a deploy overlap must not run the scan twice (the bell
+      // dedupes on the ET week either way).
+      await runExclusive('siteone-deals-digest', async () => {
+        const { runSiteOneDealsDigest } = require('./procurement/siteone-deals-digest');
+        const result = await runSiteOneDealsDigest();
+        logger.info(`[siteone-deals] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly SiteOne deals digest failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
