@@ -39,6 +39,7 @@
 
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { untrackAppLinks } = require('./messaging/email-link-policy');
 
 const API_BASE = 'https://api.sendgrid.com/v3';
 
@@ -286,7 +287,9 @@ async function sendOne({
     subject,
     content: [
       ...(sendText ? [{ type: 'text/plain', value: sendText }] : []),
-      ...(sendHtml ? [{ type: 'text/html', value: sendHtml }] : []),
+      // Customer-page links skip the click rewrite so the app can open them
+      // (messaging/email-link-policy.js); every other link stays tracked.
+      ...(sendHtml ? [{ type: 'text/html', value: untrackAppLinks(sendHtml) }] : []),
     ],
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
