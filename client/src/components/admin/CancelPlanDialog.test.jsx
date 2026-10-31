@@ -146,6 +146,30 @@ describe('CancelPlanDialog', () => {
     expect(screen.queryByRole('button', { name: /^Cancel the whole plan/ })).not.toBeInTheDocument();
   });
 
+  it('shows the per-visit prices and the series template that visits added later bill from', async () => {
+    stubFetch((path) => (path.endsWith('/cancel-plan/preview')
+      ? response(previewBody({
+        impact: {
+          ...previewBody().impact,
+          perAppChanges: [{ id: 'v1', family: 'pest_control', label: 'Pest Control', before: 115.2, after: 128 }],
+          templateChanges: [{ rootId: 'root-1', family: 'pest_control', label: 'Pest Control', field: 'estimated_price', source: 'own', before: 115.2, after: 128 }],
+        },
+      }))
+      : response({})));
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText('the whole plan');
+    expect(screen.getByText('Visit prices')).toBeInTheDocument();
+    expect(screen.getByText('Future visits added later')).toBeInTheDocument();
+    expect(screen.getAllByText('Pest Control $115.20 → $128.00')).toHaveLength(2);
+  });
+
+  it('shows no future-visit line when the server sends no template change', async () => {
+    stubFetch((path) => (path.endsWith('/cancel-plan/preview') ? response(previewBody()) : response({})));
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText('the whole plan');
+    expect(screen.queryByText('Future visits added later')).not.toBeInTheDocument();
+  });
+
   it('a processed run with follow-up errors is "Partially done", never "Done."', async () => {
     stubFetch((path) => {
       if (path.endsWith('/cancel-plan/preview')) return response(previewBody({}));
