@@ -14,6 +14,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { closeRequestAlertsOnResolve } = require('../services/portal-inbox');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { convertHeicToJpeg, MAX_HEIC_BYTES } = require('../services/heic-to-jpeg');
 
@@ -206,6 +207,10 @@ router.patch('/:id', async (req, res, next) => {
       const current = await db('service_requests').where({ id: req.params.id }).first();
       return res.json({ request: current, statusChanged: false });
     }
+
+    // GATE_PORTAL_INBOX: the writer that won the move to resolved also closes
+    // this request's open admin bell alerts (a no-op while the gate is off).
+    await closeRequestAlertsOnResolve(updated, statusChanged, { technicianId: req.technicianId, role: req.techRole });
 
     // measurement_review rows (the estimate "does the lawn size look off?"
     // flow) are office-only by contract — the customer is NEVER auto-messaged
