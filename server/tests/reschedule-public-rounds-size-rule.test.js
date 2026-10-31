@@ -8,6 +8,8 @@
 const mockDb = jest.fn();
 mockDb.raw = (sql) => sql;
 jest.mock('../models/db', () => mockDb);
+// The commit limiter (10 a minute) would throttle this file's many commits.
+jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlookBounded: jest.fn().mockResolvedValue(null),
 }));
@@ -133,5 +135,71 @@ describe('POST /:token — lawn rounds size rule', () => {
     await post(row);
     expect(mockReschedule).not.toHaveBeenCalled();
     expect(mockRescheduleSeries).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The page's single-versus-series decision was made on the unlocked read. A series re-anchor can change a
+// date exception's cadence date while the date and window the expect fence pins stay put, so BOTH commit
+// paths (and a missed visit) judge the disclosed rule again on the LOCKED row, inside the mover's guard.
+describe('POST /:token — the size rule is re-judged on the locked row', () => {
+  // The mocked mover runs the route's moveGuard against a transaction that answers the locked row read.
+  const moverWith = (locked) => jest.fn(async (...args) => {
+    const trx = () => ({ where: () => ({ forUpdate: () => ({ first: async () => locked }) }) });
+    await args[5].moveGuard({ trx, nextVisit: null });
+    // The guard passed: stop here (SLOT_TAKEN), before the post-commit effects this file does not wire.
+    throw stop();
+  });
+  const guardPassed = async (res, mover) => {
+    expect(mover).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('SLOT_TAKEN');
+  };
+  const lockedFor = (row, over = {}) => ({
+    scheduled_date: row.scheduled_date, window_start: row.window_start, office_move_approved_for: null,
+    recurring_pattern: 'lawn_rounds_9', recurring_interval_days: null, service_id: null, is_recurring: true,
+    recurring_parent_id: null, is_callback: false, followup_included: false, date_exception: false, date_exception_cadence_date: null, ...over,
+  });
+  const MOVED_CADENCE = { date_exception: true, date_exception_cadence_date: '2000-01-01' };
+  const scopeChanged = async (res) => { expect(res.status).toBe(409); expect((await res.json()).code).toBe('SCOPE_CHANGED'); };
+
+  test('single path: a cadence date changed between the preflight and the lock -> SCOPE_CHANGED; unchanged commits', async () => {
+    const row = roundsRow();
+    wireSvc(row);
+    mockReschedule.mockImplementation(moverWith(lockedFor(row, MOVED_CADENCE)));
+    await scopeChanged(await post(row, { disclosed_rounds_one_off: termsFor(row) }));
+    mockReschedule.mockClear();
+    const unchanged = moverWith(lockedFor(row));
+    mockReschedule.mockImplementation(unchanged);
+    await guardPassed(await post(row, { disclosed_rounds_one_off: termsFor(row) }), unchanged);
+  });
+
+  test('series path: the same race -> SCOPE_CHANGED; unchanged commits', async () => {
+    const row = roundsRow({ scheduled_date: FAR_VISIT_DATE });
+    wireSvc(row);
+    mockRescheduleSeries.mockImplementation(moverWith(lockedFor(row, MOVED_CADENCE)));
+    await scopeChanged(await post(row, { disclosed_rounds_one_off: termsFor(row) }));
+    mockRescheduleSeries.mockClear();
+    const unchanged = moverWith(lockedFor(row));
+    mockRescheduleSeries.mockImplementation(unchanged);
+    await guardPassed(await post(row, { disclosed_rounds_one_off: termsFor(row) }), unchanged);
+  });
+
+  test('missed visit: the locked-row check still runs (it comes before the missed exemption)', async () => {
+    const past = etDateString(addETDays(new Date(), -2));
+    const row = roundsRow({ status: 'pending', scheduled_date: past });
+    wireSvc(row);
+    mockRescheduleSeries.mockImplementation(moverWith(lockedFor(row, MOVED_CADENCE)));
+    await scopeChanged(await post(row, { disclosed_rounds_one_off: termsFor(row) }));
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reschedule-public.js'), 'utf8');
+    const recheck = src.slice(src.indexOf('const officeApprovalRecheck = async'));
+    expect(recheck.indexOf('roundsOneOffMismatch(locked, req.body)')).toBeLessThan(recheck.indexOf('if (elig.missed) return;'));
+  });
+
+  test('a non-rounds series visit is unaffected: no disclosure asked for, the guard passes', async () => {
+    const row = roundsRow({ recurring_pattern: 'custom' });
+    wireSvc(row);
+    const mover = moverWith(lockedFor(row, { recurring_pattern: 'custom', ...MOVED_CADENCE }));
+    mockRescheduleSeries.mockImplementation(mover);
+    await guardPassed(await post(row), mover);
   });
 });

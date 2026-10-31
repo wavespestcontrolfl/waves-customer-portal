@@ -1163,7 +1163,7 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     expect(src.slice(seriesIdx, singleIdx)).toMatch(/moveGuard: async \(ctx\) => \{\s*await officeApprovalRecheck\(ctx\);/);
     const guardIdx = src.indexOf('const officeApprovalRecheck = async ({ trx }) => {');
     expect(guardIdx).toBeGreaterThan(-1);
-    const guard = src.slice(guardIdx, guardIdx + 700);
+    const guard = src.slice(guardIdx, guardIdx + 1800);
     expect(guard).toMatch(/if \(elig\.missed\) return;/);
     expect(guard).toMatch(/\.forUpdate\(\)\s*\.first\('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',/);
     expect(guard).toMatch(/visitInsideMoveNoticeWindow\(locked\)/);

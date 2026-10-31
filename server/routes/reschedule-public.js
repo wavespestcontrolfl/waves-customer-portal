@@ -1164,10 +1164,19 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
     };
     const officeApprovalRecheck = async ({ trx }) => {
-      if (elig.missed) return;
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
         .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',
-          'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+          'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',
+          'date_exception', 'date_exception_cadence_date');
+      // The size rule the page disclosed, judged again on the locked row for EVERY commit (a missed visit
+      // too): a series re-anchor can change the regular date while the date and window the expect fence
+      // pins stay put, and the single-versus-series decision was made on the unlocked read.
+      if (roundsOneOffMismatch(locked, req.body)) {
+        throw Object.assign(new Error('The scheduling details for your plan just updated — please review the latest options.'), {
+          statusCode: 409, isOperational: true, code: 'SCOPE_CHANGED',
+        });
+      }
+      if (elig.missed) return;
       if (visitInsideMoveNoticeWindow(locked)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
