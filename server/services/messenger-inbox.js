@@ -201,7 +201,10 @@ async function ringBell(thread, latestInbound) {
     why,
     severity: 'needs-you',
     link: `/admin/communications#tab=messenger&thread=${thread.id}`,
-    subject: { type: 'customer', id: String(thread.id) },
+    // The customer the thread is linked to; an unlinked Facebook contact has no customer and
+    // compose has no thread subject type, so the thread id stands in (nothing reads a customer
+    // subject off a messenger-thread bell).
+    subject: { type: 'customer', id: String(thread.customer_id || thread.id) },
     doneWhen: 'customer_answered',
     who: 'person',
   }, {
