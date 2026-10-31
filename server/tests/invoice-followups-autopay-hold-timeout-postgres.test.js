@@ -21,7 +21,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mo
 
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDaysAtWallClock } = require('../utils/datetime-et');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -536,7 +536,8 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       await held();
       const now = new Date();
       await sweep({ now });
-      await sweep({ now: new Date(now.getTime() + 24 * 3600000) });
+      // Not now + 24 h: on the day the clocks go back (25 hours) that still falls on the same ET date.
+      await sweep({ now: addETDaysAtWallClock(now, 1) });
       expect(await shadowRows()).toHaveLength(2);
     });
   });
