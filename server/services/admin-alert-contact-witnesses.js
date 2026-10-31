@@ -33,6 +33,10 @@
  *     (by customer id, never by phone) within 24 hours after the text
  *     (sms-staff-action-answers.js, the one definition the Messages reader shares). Loaded
  *     only when the caller asks (`staffActions`).
+ *   - an email a person sent to a portal chat's customer (customer items only): a Gmail SENT
+ *     row after the bell, in ANY thread, that resolveEmailCustomerLink links to that customer
+ *     (the same linkage as the email reply above, but not tied to one thread). Read only for
+ *     rows whose To/Cc/Bcc carries the customer's own address.
  * read_at is never evidence. Read-only: nothing here writes, locks or sends.
  *
  * Each item is judged only by events AFTER its own anchor: the text, call or
@@ -48,7 +52,7 @@ const { phoneIdentitySql } = require('./sms-response-policy');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
+const { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
 const staffActionDef = require('./sms-staff-action-answers');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -143,6 +147,8 @@ const SUBJECT_OF = {
     return email ? { anchor: asDate(email.received_at), customerId: email.customer_id ? String(email.customer_id) : null, phones: [], email } : null;
   },
   lead: ({ refs }) => ({ anchor: null, customerId: null, phones: [refs.phone] }),
+  // A portal chat hand-off: the customer alone (identify adds the customer's own phone), at the bell's anchor.
+  customer: () => ({ anchor: null, customerId: null, phones: [] }),
 };
 
 // An item that cannot be identified is dropped: unknown, never judged.
@@ -344,10 +350,39 @@ async function attachEmailReplies(conn, idents, bundles) {
   }
 }
 
+// An email a person sent to a portal chat's customer after the bell, in any thread: a Gmail SENT row
+// that resolveEmailCustomerLink links to the customer. Bounded: only rows after the earliest anchor whose
+// To/Cc/Bcc text holds one of these customers' own addresses are read (a prefilter; the link decides).
+async function attachCustomerEmailSends(conn, idents, bundles) {
+  const owners = idents.filter((i) => i.item.kind === 'customer' && i.customerId);
+  if (!owners.length) return;
+  const people = await conn('customers').whereIn('id', unique(owners.map((i) => i.customerId))).whereNull('deleted_at').whereNotNull('email')
+    .select('id', 'email');
+  const addressOf = new Map(people.map((p) => [String(p.id), new Set(extractEmailAddresses(p.email))]));
+  const addresses = unique([...addressOf.values()].flatMap((set) => [...set]));
+  if (!addresses.length) return;
+  const since = new Date(Math.min(...owners.map((i) => i.anchor.getTime())));
+  const recipientText = "LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address))";
+  const sent = await conn('emails as er').whereRaw(personSentFilter('er')).where('er.received_at', '>', since)
+    .whereRaw(`EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(${recipientText}, a.addr) > 0)`, [addresses])
+    .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at');
+  for (const row of sent) {
+    const at = asDate(row.received_at);
+    const recipients = new Set(extractEmailAddresses([row.to_address, row.cc_address, row.bcc_address].filter(Boolean).join(',')));
+    const named = owners.filter((o) => at && at.getTime() > o.anchor.getTime() && [...(addressOf.get(o.customerId) || [])].some((a) => recipients.has(a)));
+    if (!named.length) continue;
+    const linked = await resolveEmailCustomerLink(conn, row);
+    for (const owner of named.filter((o) => String(linked) === o.customerId)) {
+      const bundle = bundles.get(String(owner.item.id));
+      bundle.replyAt = later(bundle.replyAt, at);
+    }
+  }
+}
+
 /**
- * @param {Array<{id, kind: 'sms'|'voice'|'email'|'lead', bellAt: Date|null, refs: object}>} items
+ * @param {Array<{id, kind: 'sms'|'voice'|'email'|'lead'|'customer', bellAt: Date|null, refs: object}>} items
  *   refs by kind: sms {sid, customerId}; voice {callLogId, customerId, phone};
- *   email {emailId, customerId}; lead {customerId, phone}.
+ *   email {emailId, customerId}; lead {customerId, phone}; customer {customerId} (anchor = bellAt).
  * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>, visitRan?: boolean, staffActions?: boolean}} deps
  * @returns {Promise<Map<string, object>>} notification id -> bundle
  *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt, visitRanAt,
@@ -416,6 +451,7 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false,
     bundles.set(String(item.id), bundle);
   }
   await attachEmailReplies(conn, idents, bundles);
+  await attachCustomerEmailSends(conn, idents, bundles);
   return bundles;
 }
 

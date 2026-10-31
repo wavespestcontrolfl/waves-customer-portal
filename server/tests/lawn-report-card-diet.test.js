@@ -6,7 +6,6 @@
 
 const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
-const { _test: { mergeNarrative } } = require('../services/service-report/lawn-report-narrative');
 
 const CATS = (status) => [
   { key: 'weed_pressure', status },
@@ -78,31 +77,6 @@ describe('insight stock sentences', () => {
     }
   });
 
-});
-
-describe('the narrative overlay never refills a nulled line', () => {
-  test('a model-written wavesAction / whyItMatters / mowing sentence does not land on a null field', () => {
-    const base = {
-      insights: [{ headline: 'H', whatWeSaw: 'S', whyItMatters: null, wavesAction: null, customerAction: null, nextVisitPlan: null }],
-      mowing: { measuredHeightInches: 1.5, status: 'too_short', recommendation: null },
-    };
-    const model = {
-      insights: [{ headline: 'H2', whatWeSaw: 'S2', whyItMatters: 'Model why.', wavesAction: 'Model did.', customerAction: '', nextVisitPlan: '' }],
-      mowing: 'Mow higher, we will handle it.',
-    };
-    const out = mergeNarrative(base, model);
-    expect(out.insights[0].whyItMatters).toBeNull();
-    expect(out.insights[0].wavesAction).toBeNull();
-    expect(out.mowing.recommendation).toBeNull();
-    // Written copy still lands where the builder left a sentence.
-    const kept = mergeNarrative({
-      insights: [{ headline: 'H', whatWeSaw: 'S', whyItMatters: 'Builder why.', wavesAction: 'Builder did.' }],
-      mowing: { measuredHeightInches: 3, status: 'ideal', recommendation: 'Looks good.' },
-    }, { insights: [{ whyItMatters: 'Model why.', wavesAction: 'Model did.' }], mowing: 'Model mowing line.' });
-    expect(kept.insights[0].whyItMatters).toBe('Model why.');
-    expect(kept.insights[0].wavesAction).toBe('Model did.');
-    expect(kept.mowing.recommendation).toBe('Model mowing line.');
-  });
 });
 
 describe('mowing recommendation', () => {

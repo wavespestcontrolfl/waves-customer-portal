@@ -87,7 +87,7 @@ describe('only a visit that resolved v13 gets a program line', () => {
 });
 
 describe('qualifier wording', () => {
-  test('no line and no qualifier names a soil test (owner 2026-10-05: Waves runs no soil tests)', () => {
+  test('no line and no qualifier names a soil test (owner 2026-10-31: soil tests run only on triggers, never in a program line)', () => {
     for (const month of MONTHS) expect(PROGRAM_LINES_V13[month].line).not.toMatch(SOIL_TEST);
     for (const q of QUALIFIERS) expect(q).not.toMatch(SOIL_TEST);
   });

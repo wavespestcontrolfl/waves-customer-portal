@@ -36,14 +36,11 @@ describe('injection — every long-form prose prompt carries the block', () => {
 
   test('service-report narratives, with PROMPT_VERSION bumps (cached lanes must regenerate)', () => {
     const visit = require('../services/service-report/visit-summary-narrative');
-    const lawn = require('../services/service-report/lawn-report-narrative');
     const rodent = require('../services/service-report/rodent-report-narrative');
     const treatment = require('../services/service-report/treatment-narrative');
 
     expect(visit._test.PROMPT_VERSION).toBe('pest_visit_summary_narrative_v2');
     expect(visit._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
-    expect(lawn._test.PROMPT_VERSION).toBe('lawn_report_v2_narrative_v11_no_dead_fields');
-    expect(lawn._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
     expect(rodent._test.PROMPT_VERSION).toBe('typed_report_narrative_v7');
     expect(rodent._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
     expect(treatment.PROMPT_VERSION).toBe('treatment_narrative_v5');

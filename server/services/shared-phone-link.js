@@ -1,5 +1,5 @@
-// GATE_SMS_SHARED_PHONE_LINK (owner 2026-10-10, "link text"): two or more
-// customer rows share one phone. An inbound text attaches to an account ONLY
+// Shared-phone text link (owner 2026-10-10, "link text"; always on since the
+// gate was removed 2026-10-31): two or more customer rows share one phone. An inbound text attaches to an account ONLY
 // when staff marked exactly one of them customers.sms_primary_for_shared_phone.
 // No mark, or more than one, leaves the text unlinked. There is deliberately
 // no recency guess (codex #6268 r1): the linked account feeds the reschedule
@@ -8,11 +8,6 @@
 // webhook (twilio-webhook.js) and the contact-correction queue's locked match
 // (contact-correction-queue.js), so a correction from a marked sender is not
 // linked by one and dropped by the other (codex #6268 r3).
-const { gateEnvValue } = require('../config/feature-gates');
-
-function sharedPhoneLinkEnabled() {
-  return gateEnvValue('GATE_SMS_SHARED_PHONE_LINK');
-}
 
 /**
  * The marked rows for a phone key (last 10 digits), read with their own
@@ -36,4 +31,4 @@ async function pickMarkedCustomerForPhone(knex, key) {
 // operator's Confirm must cover, since it is not in the card's params.
 const SHARED_PHONE_MARK_CLEAR_DISCLOSURE = 'if this customer is the marked texting account for a phone that another account shares, a changed number clears that mark and texts from the shared phone go unlinked until staff mark an account again';
 
-module.exports = { sharedPhoneLinkEnabled, pickMarkedCustomerForPhone, SHARED_PHONE_MARK_CLEAR_DISCLOSURE };
+module.exports = { pickMarkedCustomerForPhone, SHARED_PHONE_MARK_CLEAR_DISCLOSURE };

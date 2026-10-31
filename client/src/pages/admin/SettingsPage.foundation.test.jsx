@@ -620,6 +620,45 @@ describe("Settings audit fixes", () => {
     expect(screen.getByRole("button", { name: "Sat closed weekly" })).toBeInTheDocument();
   });
 
+  it("a double-clicked Unblock sends one DELETE and shows no false error", async () => {
+    const del = deferred();
+    let deletes = 0;
+    override({
+      "/admin/schedule/blackout-dates/day-1": () => {
+        deletes += 1;
+        // A second DELETE of the same day is a 404 on the real route.
+        return deletes === 1 ? del.promise.then(() => response({ success: true })) : response({ error: "Not found" }, 404);
+      },
+    });
+    mount("blackout-days");
+    await screen.findByText("Holiday");
+    const unblock = screen.getByRole("button", { name: "Unblock" });
+    fireEvent.click(unblock);
+    fireEvent.click(unblock);
+    del.resolve();
+    await waitFor(() => expect(screen.queryByText("Holiday")).not.toBeInTheDocument());
+    await settle();
+    expect(deletes).toBe(1);
+    expect(screen.queryByText("Not found")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    // Both fixtures are connected, so each card's button reads "Reconnect":
+    // Google's card renders first, LinkedIn's second.
+    ["Google", "/admin/settings/google/auth-url?location=bradenton", 0],
+    ["LinkedIn", "/admin/settings/linkedin/auth-url", 1],
+  ])("a failed %s connect shows its error in the card, not a browser alert", async (_label, path, index) => {
+    const alertSpy = vi.fn();
+    vi.stubGlobal("alert", alertSpy);
+    override({ [path]: () => response({ error: "Auth service unavailable" }, 500) });
+    mount("integrations");
+    const buttons = await screen.findAllByRole("button", { name: "Reconnect" });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[index]);
+    expect((await screen.findByText("Connect failed: Auth service unavailable")).closest('[role="alert"]')).not.toBeNull();
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
   it("a link removed while an older reload is out stays removed", async () => {
     const manual = (id, name) => ({ id, key: id, name, url: `https://example.invalid/${id}`, source: "manual", category: "website" });
     let links = [manual("manual-1", "First link"), manual("manual-2", "Second link")];

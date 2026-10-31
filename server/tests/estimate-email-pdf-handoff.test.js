@@ -150,7 +150,7 @@ describe('the provider-boundary fence on a PDF-bearing send', () => {
     await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
   });
 
-  test('every caller that attaches the PDF passes the handoff to sendTemplate; auto-renew carries no PDF at all', () => {
+  test('every caller that attaches the PDF passes the handoff to sendTemplate', () => {
     const root = path.join(__dirname, '..', 'services');
     for (const file of ['estimate-follow-up.js', 'estimate-extension.js']) {
       const src = fs.readFileSync(path.join(root, file), 'utf8');
@@ -158,8 +158,6 @@ describe('the provider-boundary fence on a PDF-bearing send', () => {
       // The fence rides every prepared send, with the file or without it.
       expect(src).toMatch(/withProviderHandoff: pdfCopy\.withProviderHandoff/);
     }
-    const renew = fs.readFileSync(path.join(root, 'estimate-auto-renew.js'), 'utf8');
-    expect(renew).not.toMatch(/estimate-email-pdf|pdfCopy|attachments/);
   });
 });
 

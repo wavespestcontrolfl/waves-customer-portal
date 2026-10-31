@@ -281,6 +281,22 @@ describe('Twilio failure alerts', () => {
     expect(releaseCalls()).toHaveLength(0);
   });
 
+  test('a bell-policy silence confirms the window instead of releasing it', async () => {
+    // The admin chose to mute this bell: nothing failed, so the next failure to
+    // the same number must stay a duplicate rather than re-run the alert.
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true });
+
+    await alertTwilioFailure({
+      channel: 'sms',
+      direction: 'outbound',
+      status: 'failed',
+      to: '+19415550009',
+    });
+
+    expect(confirmCalls()).toHaveLength(1);
+    expect(releaseCalls()).toHaveLength(0);
+  });
+
   test('releases the claimed window when notification dispatch throws', async () => {
     triggerNotification.mockRejectedValueOnce(new Error('bell down'));
 

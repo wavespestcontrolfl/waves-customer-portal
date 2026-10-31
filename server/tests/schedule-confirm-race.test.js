@@ -159,5 +159,24 @@ describe('customer appointment reschedule race guard', () => {
     expect(title).toContain('Pat Customer');
     expect(body).toContain('Afternoon please');
     expect(options.metadata.scheduledServiceId).toBe('svc-1');
+    // The dispatch page reads ?appointment= + ?date= (nothing reads ?serviceId=).
+    expect(options.link).toBe('/admin/dispatch?tab=schedule&date=2026-07-20&appointment=svc-1');
+  });
+
+  test('the alert link keeps the day when pg hands back a DATE as a local-midnight Date', async () => {
+    db.mockReturnValueOnce(readChain({ ...service, scheduled_date: new Date(2026, 6, 20) }))
+      .mockReturnValueOnce(updateChain(1)).mockReturnValueOnce(insertChain());
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/schedule/svc-1/reschedule`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ notes: 'Afternoon please' }),
+      });
+      expect(response.status).toBe(200);
+    });
+
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-07-20&appointment=svc-1');
   });
 });
