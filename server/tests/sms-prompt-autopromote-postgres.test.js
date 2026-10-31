@@ -559,6 +559,84 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(runner).toHaveBeenCalledTimes(2);
     });
 
+    // A runner that behaves like runSealedExam where it matters here: a new run while another is
+    // 'running' throws RUN_IN_PROGRESS, onRunCreated fires right after the row exists, and a resume
+    // by id finishes the run. interruptBaseline: the first baseline run dies after its row is made.
+    const crashRunner = ({ items, interruptBaseline = false, interruptCandidate = false, linkBaseline = true }) => {
+      const calls = [];
+      let baselineInterrupted = !interruptBaseline;
+      let candidateInterrupted = !interruptCandidate;
+      const runner = jest.fn(async (args) => {
+        calls.push(args);
+        if (args.runId) {
+          await trx('sms_sealed_eval_runs').where({ id: args.runId }).update({ status: 'complete', finished_at: NOW, items_judged: items.length });
+          return { runId: args.runId, status: 'complete' };
+        }
+        if (await trx('sms_sealed_eval_runs').where({ status: 'running' }).first()) {
+          throw Object.assign(new Error('a sealed-eval run is already in progress'), { code: 'RUN_IN_PROGRESS' });
+        }
+        if (!args.promptPatch) {
+          const run = await insertRun({ items, version: drafter.currentPromptVersion(), status: baselineInterrupted ? 'complete' : 'running', over: { triggered_by: args.triggeredBy, finished_at: baselineInterrupted ? NOW : null } });
+          if (!baselineInterrupted) {
+            baselineInterrupted = true;
+            if (linkBaseline && args.onRunCreated) await args.onRunCreated(run);
+            throw new Error('process exited mid-run');
+          }
+          return { runId: run.id, status: 'complete' };
+        }
+        const version = patchLib.stampPatchVersion(baseVersion(), args.promptPatch.tag);
+        const run = await insertRun({ items, version, patchId: args.promptPatch.id, baselineId: args.baselineRunId, overall: 7, actions: 6.5, status: candidateInterrupted ? 'complete' : 'running', over: { triggered_by: args.triggeredBy, finished_at: candidateInterrupted ? NOW : null } });
+        if (!candidateInterrupted) {
+          candidateInterrupted = true;
+          throw new Error('process exited mid-run');
+        }
+        return { runId: run.id, status: 'complete' };
+      });
+      return { runner, calls };
+    };
+
+    test('a baseline sitting that dies mid-run is resumed by the next tick, with the nightly sweep never involved (not a RUN_IN_PROGRESS loop)', async () => {
+      const items = await seedItems();
+      const patch = await insertPatch();
+      const { runner, calls } = crashRunner({ items, interruptBaseline: true });
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ failed: 'exam_error' });
+      const stranded = await trx('sms_sealed_eval_runs').where({ status: 'running' }).first();
+      expect(stranded).toBeTruthy();
+      // The association was saved when the run was created, before the run died.
+      expect((await rowOf(patch.id)).baseline_run_id).toBe(stranded.id);
+      const out = await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough, notify: jest.fn() });
+      expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
+      // The second sitting resumed the stranded run by id; no second baseline was created.
+      expect(calls[1]).toEqual(expect.objectContaining({ runId: stranded.id }));
+      expect(await trx('sms_sealed_eval_runs').whereNull('prompt_patch_id').count('* as n').first()).toMatchObject({ n: '1' });
+      expect((await rowOf(patch.id)).baseline_run_id).toBe(stranded.id);
+    });
+
+    test('a baseline run whose id never reached the patch (died between the two writes) is found by its trigger tag and resumed', async () => {
+      const items = await seedItems();
+      const patch = await insertPatch();
+      const { runner, calls } = crashRunner({ items, interruptBaseline: true, linkBaseline: false });
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ failed: 'exam_error' });
+      const stranded = await trx('sms_sealed_eval_runs').where({ status: 'running' }).first();
+      expect((await rowOf(patch.id)).baseline_run_id).toBeNull();
+      const out = await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough, notify: jest.fn() });
+      expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
+      expect(calls[1]).toEqual(expect.objectContaining({ runId: stranded.id }));
+      expect(await trx('sms_sealed_eval_runs').whereNull('prompt_patch_id').count('* as n').first()).toMatchObject({ n: '1' });
+    });
+
+    test('a candidate sitting that dies mid-run is resumed too: its run row carries the patch id from creation', async () => {
+      const items = await seedItems();
+      const patch = await insertPatch();
+      const { runner, calls } = crashRunner({ items, interruptCandidate: true });
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ failed: 'exam_error' });
+      const stranded = await trx('sms_sealed_eval_runs').where({ status: 'running' }).first();
+      expect(stranded.prompt_patch_id).toBe(patch.id);
+      const out = await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough, notify: jest.fn() });
+      expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
+      expect(calls[calls.length - 1]).toEqual(expect.objectContaining({ runId: stranded.id }));
+    });
+
     test('a candidate written for an older base identity is rejected before any exam is paid for', async () => {
       const patch = await insertPatch({ over: { base_version: 'house_voice_v12_real_answers24_n' } });
       const runner = jest.fn();

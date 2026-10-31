@@ -39,6 +39,7 @@ const envNum = (name, def) => {
 };
 
 const DAY_MS = 24 * 3600 * 1000;
+const BASELINE_TRIGGER = 'auto:autopromote-baseline'; // triggered_by on the loop's own baseline sittings
 const EXAM_LEG = 'anthropic'; // the live primary SMS drafting provider (EXAM_LEG_ROUTES comment)
 const LOCK_NAME = 'sms-sealed-eval'; // the sealed exam's own processing lock
 
@@ -326,13 +327,30 @@ async function recordFailedSitting({ dbi, patch, now, stage, runId, failed }) {
 }
 
 // The baseline for a candidate: a fresh complete run of the live prompt, else sit one, resuming
-// a baseline an earlier failed sitting left behind. { baseline } | { skipped } | { failed }.
+// a baseline an earlier failed or interrupted sitting left behind. { baseline } | { skipped } | { failed }.
+// The run's id is saved on the patch the moment the run row exists, before any paid item is processed:
+// a process that exits mid-baseline leaves the association, and the next tick resumes that run. Without
+// it the next tick would try a new run, get RUN_IN_PROGRESS for the stranded row, and wait for the
+// separately gated nightly sweep. A run row made but not yet linked (the gap between the two writes) is
+// found by its trigger tag: the loop's own baseline sitting, still running or failed, no patch on it.
 async function obtainBaseline({ dbi, patch, runner, lock, now }) {
   const fresh = await findFreshBaseline({ dbi, now });
   if (fresh) return { baseline: fresh };
-  const prior = patch.baseline_run_id ? await dbi('sms_sealed_eval_runs').where({ id: patch.baseline_run_id }).first() : null;
+  let prior = patch.baseline_run_id ? await dbi('sms_sealed_eval_runs').where({ id: patch.baseline_run_id }).first() : null;
+  if (!prior) {
+    prior = await dbi('sms_sealed_eval_runs')
+      .where({ triggered_by: BASELINE_TRIGGER, provider_leg: EXAM_LEG })
+      .whereIn('status', ['running', 'failed'])
+      .whereNull('prompt_patch_id')
+      .orderBy('started_at', 'desc')
+      .first();
+  }
   const resume = prior && prior.status !== 'complete' && !prior.prompt_patch_id;
-  const sat = await sitExam({ dbi, runner, lock, args: resume ? { runId: prior.id } : { triggeredBy: 'auto:autopromote-baseline' } });
+  if (resume && patch.baseline_run_id !== prior.id) await dbi(PATCHES).where({ id: patch.id }).update({ baseline_run_id: prior.id, updated_at: now });
+  const onRunCreated = async (run) => {
+    await dbi(PATCHES).where({ id: patch.id }).update({ baseline_run_id: run.id, updated_at: now });
+  };
+  const sat = await sitExam({ dbi, runner, lock, args: resume ? { runId: prior.id } : { triggeredBy: BASELINE_TRIGGER, onRunCreated } });
   if (sat.run) return { baseline: sat.run };
   if (sat.failed) await recordFailedSitting({ dbi, patch, now, stage: 'baseline', runId: sat.runId || (resume ? prior.id : null), failed: sat.failed });
   return sat;
