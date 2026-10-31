@@ -374,3 +374,31 @@ describe("Project photo caption dirty signal", () => {
     expect(onDirtyChange).toHaveBeenLastCalledWith("photo-1", false);
   });
 });
+
+// Operations audit OP-05: a deep link opens its report by id even when the
+// capped directory lists do not hold it, and a missing one says so.
+describe("Reports deep link outside the loaded lists", () => {
+  function listWithout(detailFixture) {
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const path = String(url).replace(/^\/api/, "");
+      if (path.startsWith("/admin/projects?")) return response({ projects: [] });
+      return detailFixture(path, url, options);
+    }));
+  }
+
+  it("opens a report the lists did not return", async () => {
+    listWithout((_path, url, options) => response(fixtureFor(url, options)));
+    mount();
+    expect(await screen.findByText("Customer report preview")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith("/api/admin/projects/project-1", expect.anything());
+    expect(screen.getByText("No reports match these filters.")).toBeInTheDocument();
+  });
+
+  it("says the report is not found instead of showing only the list", async () => {
+    listWithout((path, url, options) => (path.startsWith("/admin/projects/missing-1")
+      ? response({ error: "Project not found" }, 404)
+      : response(fixtureFor(url, options))));
+    mount("/admin/projects?projectId=missing-1");
+    expect(await screen.findByText("Project not found")).toBeInTheDocument();
+  });
+});

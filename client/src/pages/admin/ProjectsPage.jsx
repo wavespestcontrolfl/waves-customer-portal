@@ -1352,6 +1352,9 @@ export default function ProjectsPage() {
     loadProjects();
   }, [loadProjects]);
 
+  // A deep link opens its report by id even when the capped directory lists
+  // (500 general + 500 WDO) do not hold it: ProjectDetail loads the report
+  // itself and shows its own error when the id is missing or not reachable.
   useEffect(() => {
     if (!initialProjectId) {
       setSelectedId(null);
@@ -1360,7 +1363,7 @@ export default function ProjectsPage() {
     const match = projects.find(
       (project) => String(project.id) === String(initialProjectId),
     );
-    setSelectedId(match?.id || null);
+    setSelectedId(match?.id ?? initialProjectId);
   }, [initialProjectId, projects]);
 
   const selectProject = useCallback(
@@ -1396,7 +1399,6 @@ export default function ProjectsPage() {
   const wdoProjects = projects.filter((p) => p.project_type === WDO_TYPE);
   const showRegularProjects = filterType !== WDO_TYPE;
   const showWdoProjects = !filterType || filterType === WDO_TYPE;
-  const selected = projects.find((p) => p.id === selectedId);
 
   return (
     <div className="max-w-[1300px] mx-auto text-ink-primary">
@@ -1444,14 +1446,14 @@ export default function ProjectsPage() {
           // column, and when a project is open show only the detail (full width)
           // so its title/photos aren't squished into a sliver. The detail's
           // close (X) returns to the list.
-          gridTemplateColumns: !isMobile && selected ? "1fr 1.4fr" : "1fr",
+          gridTemplateColumns: !isMobile && selectedId ? "1fr 1.4fr" : "1fr",
           gap: 16,
         }}
       >
         {/* List — hidden on mobile while a detail is open */}
         <div
           style={{
-            display: isMobile && selected ? "none" : "flex",
+            display: isMobile && selectedId ? "none" : "flex",
             flexDirection: "column",
             gap: 8,
           }}
@@ -1485,10 +1487,10 @@ export default function ProjectsPage() {
         {/* Detail — keyed by project id so switching projects remounts the
             panel: stale edit state or an in-flight load for project A can
             never render onto (or save over) project B. */}
-        {selected && (
+        {selectedId && (
           <ProjectDetail
-            key={selected.id}
-            projectId={selected.id}
+            key={String(selectedId)}
+            projectId={selectedId}
             typesRegistry={typesRegistry}
             onClose={closeProject}
             onChanged={loadProjects}
