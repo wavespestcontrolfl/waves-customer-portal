@@ -633,24 +633,29 @@ async function planSeriesTemplates(dbh, rows, ctx) {
   return out;
 }
 
-// Write the approved template rows in the caller's transaction. Each root is
-// re-read FOR UPDATE and the CURRENT value of the field is compared with the
-// approved `before`: a mismatch throws and aborts the whole wind-down (tier
-// demote included), exactly like the per-application row CAS.
-async function applySeriesTemplates(trx, templateRows) {
+// Write the approved plan's template rows in the caller's transaction. Each
+// root is re-read FOR UPDATE and must still yield EXACTLY its approved rows
+// (field, source, before, after): a changed price, or an override or marker
+// written since the re-plan (which changes WHICH value the scheduler reads),
+// throws and aborts the whole wind-down (tier demote included), exactly like
+// the per-application row CAS.
+async function applySeriesTemplates(trx, plan) {
+  const approved = plan.templateRows || [];
+  if (!approved.length) return;
+  const reprice = (rate) => repriceAtTier(rate, plan.discountBefore, plan.discountAfter);
+  const repricedIds = new Set((plan.perAppRows || []).map((r) => String(r.id)));
+  const rowKey = (r) => `${r.field}:${r.source}:${r.before}:${r.after}`;
   const byRoot = new Map();
-  for (const r of templateRows || []) byRoot.set(String(r.rootId), [...(byRoot.get(String(r.rootId)) || []), r]);
+  for (const r of approved) byRoot.set(String(r.rootId), [...(byRoot.get(String(r.rootId)) || []), r]);
   for (const [rootId, rows] of byRoot) {
     const root = await trx('scheduled_services').where({ id: rows[0].rootId }).forUpdate()
       .first('id', 'recurring_template_overrides', 'estimated_price', 'primary_line_price');
-    const overrides = readTemplateOverrides(root?.recurring_template_overrides);
-    for (const r of rows) {
-      const current = r.source === 'own' ? root?.[r.field] : overrides[r.field];
-      if (!root || !(Number(current) === r.before)) {
-        throw new Error(`series template CAS failed for root ${rootId} (${r.field}) — price changed since the approved preview`);
-      }
-      overrides[r.field] = r.after;
+    const live = root ? templateRowsForRoot(root, rows[0].family, repricedIds, reprice) : [];
+    if (live.map(rowKey).sort().join('|') !== rows.map(rowKey).sort().join('|')) {
+      throw new Error(`series template CAS failed for root ${rootId} — template changed since the approved preview`);
     }
+    const overrides = readTemplateOverrides(root.recurring_template_overrides);
+    for (const r of rows) overrides[r.field] = r.after;
     await trx('scheduled_services').where({ id: rows[0].rootId })
       .update({ recurring_template_overrides: JSON.stringify(overrides), updated_at: new Date() });
   }
@@ -779,7 +784,7 @@ async function applyScopedWindDown(customerId, entryPlan, {
       }
       // Visits the scheduler adds later price off the series template: the
       // approved plan's template rows, each compare-and-set under row lock.
-      await applySeriesTemplates(trx, plan.templateRows);
+      await applySeriesTemplates(trx, plan);
     }
     const update = { updated_at: new Date(), waveguard_tier: plan.tierAfter, waveguard_tier_source: 'cancellation_scoped' };
     if (plan.monthlyLane) update.monthly_rate = plan.scalarAfter;

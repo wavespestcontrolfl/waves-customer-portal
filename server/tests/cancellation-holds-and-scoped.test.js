@@ -1404,6 +1404,20 @@ describe('per-application tier drop reprices the series price template', () => {
     expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
   });
 
+  test('an override written after the re-plan changes WHICH value the scheduler reads: the locked re-check refuses even when the number matches', async () => {
+    seed({ customers: [perAppCustomer()], visits: [lawn(), pestRoot({ estimated_price: 115.2 }), pestChild()] });
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    expect(entry.templateRows).toEqual([{ rootId: 'root-pest', family: 'pest_control', field: 'estimated_price', source: 'own', before: 115.2, after: 128 }]);
+    mockState.tables.scheduled_services = mockState.tables.scheduled_services.filter((r) => r.id !== 'v-lawn');
+    // Same number, new source: the operator's explicit override now outranks the
+    // root's own price, so writing the approved 'own' row would replace it.
+    rowOf('root-pest').recurring_template_overrides = { estimated_price: 115.2 };
+    await expect(applyScopedWindDown('c1', entry, { requestId: 'req-1' })).rejects.toThrow(/series template CAS failed/);
+    expect(overridesOf('root-pest')).toEqual({ estimated_price: 115.2 });
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
+  });
+
   test('a root with the right current value is re-read FOR UPDATE and written', async () => {
     seed({ customers: [perAppCustomer()], visits: [lawn(), pestRoot({ estimated_price: 115.2 }), pestChild()] });
     mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
