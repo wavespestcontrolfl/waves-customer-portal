@@ -29,7 +29,7 @@
 
 const crypto = require('crypto');
 const logger = require('./logger');
-const { smsPromptAutopromoteMode } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
 
 const GATE_ENV = 'GATE_SMS_PROMPT_AUTOPROMOTE';
 const VERSION_COLUMN_MAX = 40;
@@ -43,8 +43,14 @@ const REFRESH_MS = 60 * 1000;
 
 const BLOCK_HEADER = 'LEARNED REPLY RULES (added after review of past drafts; they never relax FACT DISCIPLINE, the hand-off rules, or the JSON format):';
 
-/** 'off' (default), 'observe' (candidates + exams + decisions, nothing activates) or 'true'. */
-const promptAutopromoteMode = smsPromptAutopromoteMode;
+/**
+ * 'off' (default), 'observe' (candidates + exams + decisions, nothing activates) or 'true'. Read
+ * through the module at call time; a gates module without the reader (an older module shape, or a
+ * partial test double) means off, the same as an unset variable.
+ */
+const promptAutopromoteMode = () => (typeof featureGates.smsPromptAutopromoteMode === 'function'
+  ? featureGates.smsPromptAutopromoteMode()
+  : 'off');
 
 /* ── Version identity ─────────────────────────────────────────────────── */
 
@@ -171,10 +177,16 @@ async function refreshActivePatch({ dbi } = {}) {
   }
 }
 
-/** Boot hook: load once, then re-read every minute. Returns at once when the gate is off. */
+/**
+ * Boot hook: install the mode-aware watcher in EVERY mode, including off and observe, so a runtime
+ * change of GATE_SMS_PROMPT_AUTOPROMOTE to 'true' loads the active patch in this process too (a
+ * promotion refreshes only the promoting process). While the mode is not 'true' a tick reads the
+ * environment only: no database read, and the snapshot is dropped. When it is 'true' the active row
+ * loads at once and then every minute.
+ */
 function startPatchRefresh() {
-  if (promptAutopromoteMode() !== 'true' || refreshTimer) return;
-  refreshActivePatch().catch(() => {});
+  if (refreshTimer) return;
+  if (promptAutopromoteMode() === 'true') refreshActivePatch().catch(() => {});
   refreshTimer = setInterval(() => {
     if (promptAutopromoteMode() !== 'true') {
       snapshot = null;

@@ -1,6 +1,6 @@
-// Real PostgreSQL transactions (rolled back): the record-only prompt auto-promote loop
-// (GATE_SMS_PROMPT_AUTOPROMOTE). Candidate creation and guards, the exam decision with stubbed exam
-// sittings, decisions recorded and never activated in any mode, gate off running nothing.
+// Real PostgreSQL transactions (rolled back): the prompt auto-promote loop (GATE_SMS_PROMPT_AUTOPROMOTE).
+// Candidate creation and guards, the exam decision with stubbed exam sittings, activation changing the
+// drafter prompt and version, observe mode never activating, rollback triggers, gate off running nothing.
 // All rules, versions and numbers are synthetic; no customer text exists here.
 const SKIP = !process.env.DATABASE_URL;
 let mockConnection;
@@ -13,12 +13,15 @@ jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ mocked: true })));
 
+const { randomUUID } = require('node:crypto');
 const patchLib = require('../services/sms-prompt-patch');
 const drafter = require('../services/sms-shadow-drafter');
 const sealed = require('../services/sms-sealed-eval');
 const auto = require('../services/sms-prompt-autopromote');
+const { composeAdminAlert } = require('../services/admin-alert-compose');
 const patchesMigration = require('../models/migrations/20261026200000_sms_prompt_patches');
 const eventsMigration = require('../models/migrations/20261026200100_sms_prompt_patch_events');
+const outcomesMigration = require('../models/migrations/20261024130000_sms_reply_outcomes');
 
 jest.setTimeout(60000);
 
@@ -26,9 +29,9 @@ const GOOD_RULE = 'When the facts do not list an arrival window, say you will co
 const SECOND_RULE = 'When the facts do not name a technician, do not say who is coming to the visit.';
 const DAY = 24 * 3600 * 1000;
 const NOW = new Date('2026-10-26T15:00:00Z');
-const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE_SMS_EDIT_LEARNING', 'GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_OFFERS_SCHEDULER'];
+const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE_SMS_EDIT_LEARNING', 'GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_JUDGE_V2', 'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_OFFERS_SCHEDULER'];
 
-(SKIP ? describe.skip : describe)('SMS prompt auto-promote, record-only', () => {
+(SKIP ? describe.skip : describe)('SMS prompt auto-promote', () => {
   let database;
   let trx;
   const savedEnv = {};
@@ -138,6 +141,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
     mockConnection = trx;
     await patchesMigration.up(trx);
     await eventsMigration.up(trx);
+    await outcomesMigration.up(trx);
   });
   afterEach(async () => {
     await trx.rollback();
@@ -160,14 +164,16 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       const args = { dbi: boom, now: NOW, lock, runner };
       expect(await auto.createCandidate(args)).toEqual({ skipped: 'gate_off' });
       expect(await auto.examineCandidate(args)).toEqual({ skipped: 'gate_off' });
+      expect(await auto.runRollbackMonitor(args)).toEqual({ skipped: 'gate_off' });
       expect(await auto.runAutopromoteTick(args)).toEqual({ skipped: 'gate_off' });
+      expect(await auto.promoteCandidate({ ...args, patchId: randomUUID() })).toEqual({ skipped: 'not_live_mode' });
       expect(lock).not.toHaveBeenCalled();
       expect(runner).not.toHaveBeenCalled();
     });
 
     test('an unknown value is off too', async () => {
       setMode('on');
-      expect(await auto.examineCandidate({ dbi: trx, now: NOW })).toEqual({ skipped: 'gate_off' });
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW })).toEqual({ skipped: 'gate_off' });
       expect(await auto.createCandidate({ dbi: trx, now: NOW })).toEqual({ skipped: 'gate_off' });
     });
   });
@@ -394,25 +400,35 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(notify).not.toHaveBeenCalled();
     });
 
-    test('mode true records the same decision and never activates either: no active row, no live block, no bell', async () => {
+    test('mode true: a candidate that clears the bar is activated, the drafter prompt and version change, one bell rings', async () => {
       const items = await seedItems();
       const patch = await insertPatch();
       const plainPrompt = drafter.buildSystemPromptWithProfile('').system;
       const { runner } = stubRunner({ items });
       const notify = jest.fn();
       const out = await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify });
-      expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
-      expect(await rowOf(patch.id)).toMatchObject({ status: 'candidate', would_promote: true, decision_reason: 'bar_met', activated_at: null });
-      expect(await eventsOf(patch.id)).toEqual(['exam_started', 'would_promote']);
-      expect(await trx('sms_prompt_patches').where({ status: 'active' }).first()).toBeUndefined();
-      expect(patchLib.getActivePatch()).toBeNull();
-      expect(drafter.buildSystemPromptWithProfile('').system).toBe(plainPrompt);
-      expect(drafter.currentPromptVersion()).toBe(baseVersion());
-      expect(notify).not.toHaveBeenCalled();
-      // The held decision is not re-examined while fresh.
-      runner.mockClear();
-      expect(await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 2 * DAY), runner, lock: lockThrough })).toEqual({ skipped: 'decided' });
-      expect(runner).not.toHaveBeenCalled();
+      expect(out).toMatchObject({ promoted: patch.id, patchNo: patch.patch_no });
+
+      const row = await rowOf(patch.id);
+      const version = `${baseVersion()}+${patch.version_tag}`;
+      expect(row).toMatchObject({ status: 'active', active_version: version, prior_version: baseVersion(), would_promote: true });
+      expect(await eventsOf(patch.id)).toEqual(['exam_started', 'would_promote', 'promoted']);
+
+      // The live drafter now carries the block and the tag; removing the block gives back today's prompt.
+      expect(patchLib.getActivePatch()).toMatchObject({ id: patch.id, patchNo: patch.patch_no });
+      const live = drafter.buildSystemPromptWithProfile('');
+      expect(live.system).toContain(patch.patch_text);
+      expect(live.system.replace(patch.patch_text, '')).toBe(plainPrompt);
+      expect(live.promptPatchVersion).toBe(version);
+      expect(drafter.currentPromptVersion()).toBe(version);
+
+      // One bell, and it obeys the admin notification rules (composeAdminAlert throws on a violation).
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [category, spec, opts] = notify.mock.calls[0];
+      expect(category).toBe('agents');
+      expect(() => composeAdminAlert(spec)).not.toThrow();
+      expect(spec).toMatchObject({ severity: 'needs-you', who: 'person', subject: { type: 'check', id: `sms-prompt-rule-${patch.patch_no}` } });
+      expect(opts).toMatchObject({ dedupeKey: `sms-prompt-patch:${patch.id}:promoted`, bellDefault: true });
     });
 
     test('fewer paired items than the minimum cannot promote (a big pool where most items were not graded)', async () => {
@@ -488,7 +504,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(calls[0].promptPatch).toBeUndefined();
       expect((await rowOf(patch.id)).exam_attempts).toBe(0);
       const out = await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough });
-      expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
+      expect(out).toMatchObject({ promoted: patch.id });
       expect(calls).toHaveLength(2);
       expect(calls[1].promptPatch.id).toBe(patch.id);
     });
@@ -596,6 +612,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
     };
 
     test('a baseline sitting that dies mid-run is resumed by the next tick, with the nightly sweep never involved (not a RUN_IN_PROGRESS loop)', async () => {
+      setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
       const items = await seedItems();
       const patch = await insertPatch();
       const { runner, calls } = crashRunner({ items, interruptBaseline: true });
@@ -613,6 +630,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
     });
 
     test('a baseline run whose id never reached the patch (died between the two writes) is found by its trigger tag and resumed', async () => {
+      setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
       const items = await seedItems();
       const patch = await insertPatch();
       const { runner, calls } = crashRunner({ items, interruptBaseline: true, linkBaseline: false });
@@ -626,6 +644,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
     });
 
     test('a candidate sitting that dies mid-run is resumed too: its run row carries the patch id from creation', async () => {
+      setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
       const items = await seedItems();
       const patch = await insertPatch();
       const { runner, calls } = crashRunner({ items, interruptCandidate: true });
@@ -642,6 +661,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       const onlyRunning = () => trx('sms_sealed_eval_runs').where({ status: 'running' });
 
       test('a failed baseline from before a prompt change is never resumed: a current baseline is created and the candidate is decided', async () => {
+        setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
         const items = await seedItems();
         const patch = await insertPatch();
         const old = await insertRun({ items, version: `${OLD_BASE}_old`, status: 'failed', over: { triggered_by: 'auto:autopromote-baseline' } });
@@ -658,6 +678,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       });
 
       test('a running baseline from before a prompt change is settled under the exam lock, then a current baseline is created', async () => {
+        setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
         const items = await seedItems();
         const patch = await insertPatch();
         const old = await insertRun({ items, version: `${OLD_BASE}_old`, status: 'running', over: { triggered_by: 'auto:autopromote-baseline', finished_at: null } });
@@ -671,6 +692,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       });
 
       test('a candidate run stranded when the base changed is settled before the patch is rejected, so a later candidate can run', async () => {
+        setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
         const items = await seedItems();
         const patch = await insertPatch({ over: { base_version: OLD_BASE } });
         const stranded = await insertRun({ items, version: `${OLD_BASE}_a`, patchId: patch.id, status: 'running', over: { triggered_by: 'auto:autopromote', finished_at: null } });
@@ -721,7 +743,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       });
       const runner = jest.fn();
       const out = await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() });
-      expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
+      expect(out).toMatchObject({ promoted: patch.id });
       expect(runner).not.toHaveBeenCalled();
     });
 
@@ -733,8 +755,25 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         items, version: patchLib.stampPatchVersion(baseVersion(), patch.version_tag), patchId: patch.id, baselineId: baseline.id, overall: 7, actions: 7,
       });
       const runner = jest.fn();
-      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ decided: 'would_promote', patchId: patch.id });
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toMatchObject({ promoted: patch.id });
       expect(runner).not.toHaveBeenCalled();
+    });
+
+    test('a decision recorded in observe mode is acted on after the flip to true, while it is fresh', async () => {
+      setMode('observe');
+      const items = await seedItems();
+      const patch = await insertPatch({ over: { mode_at_creation: 'observe' } });
+      const { runner } = stubRunner({ items });
+      await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough });
+      expect((await rowOf(patch.id)).status).toBe('candidate');
+      runner.mockClear();
+
+      setMode('true');
+      const notify = jest.fn();
+      const out = await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 2 * DAY), runner, lock: lockThrough, notify });
+      expect(out).toMatchObject({ promoted: patch.id });
+      expect(runner).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledTimes(1);
     });
 
     test('a decision left unacted for two weeks expires so the loop can move on', async () => {
@@ -744,6 +783,399 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       await auto.examineCandidate({ dbi: trx, now: NOW, runner: stubRunner({ items }).runner, lock: lockThrough });
       const out = await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 15 * DAY), runner: jest.fn(), lock: lockThrough });
       expect(out).toEqual({ rejected: patch.id, reason: 'decision_expired' });
+    });
+  });
+
+  describe('promote', () => {
+    // The finished exam behind a decision (what examineCandidate records on the candidate).
+    const withExam = async (patch, runOver = {}) => {
+      const run = await insertRun({ items: [], version: patchLib.stampPatchVersion(patch.base_version, patch.version_tag), patchId: patch.id, over: runOver });
+      await trx('sms_prompt_patches').where({ id: patch.id }).update({ exam_run_id: run.id });
+      return rowOf(patch.id);
+    };
+    const decided = async (over = {}, runOver = {}, rules) => withExam(await insertPatch({ rules, over: { decided_at: NOW, would_promote: true, ...over } }), runOver);
+
+    test('retires the previous active patch; one active at a time; the prior version is recorded for the monitor', async () => {
+      const previous = await activate(await insertPatch({ rules: [GOOD_RULE] }));
+      const next = await decided({ parent_patch_id: previous.id }, {}, [GOOD_RULE, SECOND_RULE]);
+      const notify = jest.fn();
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: next.id, now: NOW, notify })).toMatchObject({ promoted: next.id });
+      expect(await rowOf(previous.id)).toMatchObject({ status: 'retired', retired_reason: 'superseded' });
+      expect(await rowOf(next.id)).toMatchObject({ status: 'active', prior_version: previous.active_version });
+      expect((await trx('sms_prompt_patches').where({ status: 'active' })).map((r) => r.id)).toEqual([next.id]);
+      expect(patchLib.getActivePatch().patchNo).toBe(next.patch_no);
+      expect(notify).toHaveBeenCalledTimes(1);
+    });
+
+    test('refuses a candidate whose parent is no longer the active patch, or whose base version moved', async () => {
+      await activate(await insertPatch({ rules: [SECOND_RULE], status: 'candidate' }));
+      const stale = await decided();
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: stale.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: stale.id, reason: 'stale_parent' });
+      await trx('sms_prompt_patches').where({ status: 'active' }).update({ status: 'retired' });
+
+      const moved = await decided({ base_version: 'house_voice_v12_real_answers24_n' });
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: moved.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: moved.id, reason: 'base_changed' });
+      expect(patchLib.getActivePatch()).toBeNull();
+    });
+
+    test('refuses a decision whose exam no longer matches the live model or voice profile (re-propose, never activate stale evidence)', async () => {
+      const otherModel = await decided({}, { model: 'some-older-model' });
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: otherModel.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: otherModel.id, reason: 'exam_model_changed' });
+      const otherProfile = await decided({}, { voice_profile_version: 987 });
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: otherProfile.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: otherProfile.id, reason: 'exam_profile_changed' });
+      const noExam = await insertPatch({ over: { decided_at: NOW, would_promote: true } });
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: noExam.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: noExam.id, reason: 'exam_missing' });
+      expect(patchLib.getActivePatch()).toBeNull();
+    });
+
+    test('observe mode and a non-candidate cannot be promoted', async () => {
+      const patch = await decided();
+      setMode('observe');
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: patch.id, now: NOW })).toEqual({ skipped: 'not_live_mode' });
+      setMode('true');
+      await trx('sms_prompt_patches').where({ id: patch.id }).update({ status: 'rejected' });
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: patch.id, now: NOW })).toEqual({ skipped: 'not_candidate' });
+    });
+
+    test('a bell failure never undoes the promotion', async () => {
+      const patch = await decided();
+      const out = await auto.promoteCandidate({ dbi: trx, patchId: patch.id, now: NOW, notify: jest.fn().mockRejectedValue(Object.assign(new Error('x'), { code: 'BOOM' })) });
+      expect(out.promoted).toBe(patch.id);
+      expect((await rowOf(patch.id)).status).toBe('active');
+    });
+  });
+
+  describe('rollback monitor', () => {
+    // judged drafts for a version: n judged, `unsafe` of them draft_unsafe, created at `at`.
+    const judged = async (version, n, unsafe, at, judgeVersion = null, profile = null) => {
+      for (let i = 0; i < n; i += 1) {
+        const [draft] = await trx('message_drafts').insert({
+          prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at,
+          ...(profile == null ? {} : { intended_actions: JSON.stringify({ voice_profile_version: profile }) }),
+        }).returning('id');
+        await trx('shadow_draft_judgments').insert({
+          draft_id: draft.id, verdict: i < unsafe ? 'draft_unsafe' : 'equivalent', scores: JSON.stringify({ safety: 8, voice: 8, actions: 8, overall: 8 }), judge_version: judgeVersion,
+        });
+      }
+    };
+    // Reply outcomes hang off the AI draft behind each reply; the draft carries the voice profile.
+    const replies = async (version, n, { confused = 0, optedOut = 0 } = {}, at, source = 'ai_approved', profile = null) => {
+      for (let i = 0; i < n; i += 1) {
+        const [draft] = await trx('message_drafts').insert({
+          prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at,
+          ...(profile == null ? {} : { intended_actions: JSON.stringify({ voice_profile_version: profile }) }),
+        }).returning('id');
+        await trx('sms_reply_outcomes').insert({
+          reply_sms_log_id: randomUUID(), phone_last10: '9415550000', reply_source: source, reply_at: at, prompt_version: version, draft_id: draft.id, status: 'computed',
+          confused: i < confused, opted_out: i >= n - optedOut, silent: false,
+        });
+      }
+    };
+    const before = new Date(NOW.getTime() - 10 * DAY);
+    const after = new Date(NOW.getTime() - 2 * DAY);
+    let active;
+    beforeEach(async () => {
+      active = await activate(await insertPatch());
+      await refreshSnapshot();
+    });
+    const refreshSnapshot = () => patchLib.refreshActivePatch({ dbi: trx });
+
+    test('live judge: unsafe rate up 10 points with enough drafts rolls back, restores the parent, clears the snapshot, rings once', async () => {
+      await judged(active.prior_version, 40, 2, before); // 5%
+      await judged(active.active_version, 25, 5, after); // 20%
+      expect(patchLib.getActivePatch()).not.toBeNull();
+      const notify = jest.fn();
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify });
+      expect(out).toEqual({ rolledBack: active.id, patchNo: active.patch_no });
+      expect(await rowOf(active.id)).toMatchObject({ status: 'retired', retired_reason: 'live_unsafe_rise' });
+      expect((await rowOf(active.id)).decision_detail.rollback).toMatchObject({ live: { judged: 25, unsafe: 5 }, prior: { judged: 40, unsafe: 2 } });
+      expect(await eventsOf(active.id)).toContain('rolled_back');
+      expect(patchLib.getActivePatch()).toBeNull();
+      expect(drafter.currentPromptVersion()).toBe(baseVersion());
+      expect(drafter.buildSystemPromptWithProfile('').system).not.toContain('LEARNED REPLY RULES');
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [, spec, opts] = notify.mock.calls[0];
+      expect(() => composeAdminAlert(spec)).not.toThrow();
+      expect(spec.why).toContain('more live drafts were judged unsafe');
+      expect(opts).toMatchObject({ dedupeKey: `sms-prompt-patch:${active.id}:rolled_back`, bellDefault: true });
+    });
+
+    test('a voice-profile change between the prior and patched drafts does not retire a healthy patch; same-profile cohorts still do', async () => {
+      // Prior drafts ran under profile 1 (5% unsafe); the patched drafts under profile 2 (20% unsafe). The patch is
+      // unchanged across profiles: the rise belongs to the new profile. Profile 2 is the effective one now.
+      await judged(active.prior_version, 40, 2, before, null, 1);
+      await judged(active.active_version, 25, 5, after, null, 2);
+      await replies(active.prior_version, 40, { confused: 2 }, before, 'ai_approved', 1);
+      await replies(active.active_version, 40, { confused: 20 }, after, 'ai_approved', 2);
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 })).toEqual({ checked: active.id });
+      // Too few prior drafts under the effective profile: skipped, not compared.
+      await judged(active.prior_version, 10, 0, before, null, 2);
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 })).toEqual({ checked: active.id });
+      // With a real prior cohort under the same profile, the same rise is the patch's and rolls back.
+      await judged(active.prior_version, 30, 2, before, null, 2);
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).retired_reason).toBe('live_unsafe_rise');
+    });
+
+    test('the same profile rule holds for reply outcomes', async () => {
+      await replies(active.prior_version, 40, { confused: 2 }, before, 'ai_approved', 1);
+      await replies(active.active_version, 40, { confused: 20 }, after, 'ai_approved', 2);
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 })).toEqual({ checked: active.id });
+      await replies(active.prior_version, 40, { confused: 2 }, before, 'ai_approved', 2);
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).retired_reason).toBe('reply_confusion_rise');
+    });
+
+    test('live judge with GATE_SMS_JUDGE_V2 on: only the stricter judge counts, as in graduation', async () => {
+      process.env.GATE_SMS_JUDGE_V2 = 'true';
+      // The old judge passed every prior draft; the strict judge finds 20% unsafe on both sides. Mixed
+      // together, the prior group would read 6.7% and the unchanged live group a 13-point rise.
+      await judged(active.prior_version, 60, 0, before);
+      await judged(active.prior_version, 30, 6, before, 'j2'); // 20%
+      await judged(active.active_version, 30, 6, after, 'j2'); // 20%
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      await judged(active.active_version, 10, 8, after, 'j2'); // 35% on 40: a real rise on one ruler
+      expect((await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).rolledBack).toBe(active.id);
+    });
+
+    test('too small a sample does nothing, however bad the rate', async () => {
+      await judged(active.prior_version, 40, 2, before);
+      await judged(active.active_version, 19, 19, after); // under the 20 judged minimum
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      expect((await rowOf(active.id)).status).toBe('active');
+    });
+
+    test('a rise under 10 points is not a rollback', async () => {
+      await judged(active.prior_version, 40, 4, before); // 10%
+      await judged(active.active_version, 40, 6, after); // 15%
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+    });
+
+    test('backfill and other versions never count toward the live groups', async () => {
+      await judged(active.prior_version, 40, 2, before);
+      await judged('house_voice_v6_backfill', 30, 30, after);
+      await judged(baseVersion(), 30, 30, after);
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+    });
+
+    test('reply outcomes: confusion up 10 points over a real sample rolls back', async () => {
+      await replies(active.prior_version, 60, { confused: 6 }, before); // 10%
+      await replies(active.active_version, 40, { confused: 12 }, after); // 30%
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out).toEqual({ rolledBack: active.id, patchNo: active.patch_no });
+      expect((await rowOf(active.id)).retired_reason).toBe('reply_confusion_rise');
+    });
+
+    test('reply outcomes: opt-outs up 2 points (two or more) roll back; staff and gratitude replies do not count', async () => {
+      await replies(active.prior_version, 60, { optedOut: 0 }, before);
+      await replies(active.active_version, 40, { optedOut: 0 }, after);
+      await replies(active.active_version, 30, { optedOut: 30, confused: 30 }, after, 'manual');
+      await replies(active.active_version, 30, { optedOut: 30, confused: 30 }, after, 'ai_gratitude');
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      await replies(active.active_version, 10, { optedOut: 3 }, after);
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).retired_reason).toBe('reply_optout_rise');
+    });
+
+    test('sealed exam on the live version: a significant regression, or an unsafe rise of 5 points, rolls back', async () => {
+      const items = await seedItems();
+      const baseline = await insertRun({ items, version: baseVersion(), unsafe: 1 });
+      await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 1 }); // flat: fine
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      // finalizeRun compared it with its baseline (one judge ruler): McNemar not significant, the unsafe rate up 12 points.
+      const flatSig = JSON.stringify({ significant: false, direction: 'regressed', pairedItems: 24, newlyUnsafe: 3, newlySafe: 0, pValue: 0.25 });
+      // Each leg is compared with a baseline from its own leg and model.
+      const openaiLeg = { provider_leg: 'openai', model: sealed.EXAM_LEG_ROUTES.openai.model };
+      const openaiBaseline = await insertRun({ items, version: baseVersion(), unsafe: 1, over: openaiLeg });
+      const bad = await insertRun({ items, version: active.active_version, baselineId: openaiBaseline.id, unsafe: 4, over: { ...openaiLeg, significance: flatSig } });
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(active.id);
+      const row = await rowOf(active.id);
+      expect(row.retired_reason).toBe('exam_regression');
+      expect(row.decision_detail.rollback).toMatchObject({ runId: bad.id, leg: 'openai' });
+    });
+
+    test('a live-version run finalizeRun could not compare with its baseline (different judge rulers) is not compared here either', async () => {
+      const items = await seedItems();
+      const baseline = await insertRun({ items, version: baseVersion(), unsafe: 0 });
+      await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 12 }); // no significance: rulers differ
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+    });
+
+    test('a significant McNemar regression rolls back only on a real sample (6 newly unsafe pairs are p=0.03 on a tiny exam)', async () => {
+      const small = await seedItems(10);
+      const smallBase = await insertRun({ items: small, version: baseVersion() });
+      const significance = (pairedItems) => JSON.stringify({ significant: true, direction: 'regressed', pairedItems, newlyUnsafe: 6, newlySafe: 0, pValue: 0.03125 });
+      await insertRun({ items: small, version: active.active_version, baselineId: smallBase.id, over: { significance: significance(10) } });
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      await trx('sms_sealed_eval_runs').where({ prompt_version: active.active_version }).del();
+
+      const items = await seedItems(24);
+      const base = await insertRun({ items, version: baseVersion() });
+      const run = await insertRun({ items, version: active.active_version, baselineId: base.id, over: { significance: significance(24) } });
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).decision_detail.rollback).toMatchObject({ runId: run.id });
+    });
+
+    describe('exam rollback compares the items both runs graded', () => {
+      const flatSig = JSON.stringify({ significant: false, direction: 'regressed', pairedItems: 24, newlyUnsafe: 3, newlySafe: 0, pValue: 0.25 });
+
+      test('two runs that share almost no items cannot retire a patch, however many items each graded (the pool changed)', async () => {
+        const shared = await seedItems(24);
+        const fresh = await seedItems(21);
+        const baseline = await insertRun({ items: shared, version: baseVersion(), unsafe: 0 });
+        // 24 graded items, 5 unsafe, but only 3 items in common with the baseline.
+        await insertRun({ items: [...fresh, ...shared.slice(0, 3)], version: active.active_version, baselineId: baseline.id, unsafe: 5, over: { significance: flatSig } });
+        expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      });
+
+      test('unsafe items outside the shared cohort do not count; unsafe items inside it do', async () => {
+        const shared = await seedItems(24);
+        const fresh = await seedItems(5);
+        const baseline = await insertRun({ items: shared, version: baseVersion(), unsafe: 0 });
+        // Five unsafe items, all on items the baseline never saw: 17% over the whole run, 0% over the cohort.
+        await insertRun({ items: [...fresh, ...shared], version: active.active_version, baselineId: baseline.id, unsafe: 5, over: { significance: flatSig } });
+        expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+        // The same five unsafe, now on shared items: a 21-point rise over the cohort.
+        await trx('sms_sealed_eval_runs').where({ prompt_version: active.active_version }).del();
+        await insertRun({ items: shared, version: active.active_version, baselineId: baseline.id, unsafe: 5, over: { significance: flatSig } });
+        const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+        expect(out.rolledBack).toBe(active.id);
+        expect((await rowOf(active.id)).decision_detail.rollback).toMatchObject({ pairedItems: 24, rise: 0.208 });
+      });
+    });
+
+    describe('exam runs are compared only under one identity (the same rule decidePromotion applies)', () => {
+      const regressedSig = JSON.stringify({ significant: true, direction: 'regressed', pairedItems: 24, newlyUnsafe: 6, newlySafe: 0, pValue: 0.03 });
+      const regression = async (baselineOver = {}, runOver = {}) => {
+        const items = await seedItems(24);
+        const baseline = await insertRun({ items, version: baseVersion(), unsafe: 0, over: baselineOver });
+        await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 6, over: { significance: regressedSig, ...runOver } });
+      };
+      const monitor = () => auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+
+      test('an explicit baseline from another drafter model cannot retire the patch', async () => {
+        await regression({ model: 'claude-other-drafter-model' });
+        expect(await monitor()).toEqual({ checked: active.id });
+      });
+
+      test('another provider leg, another voice profile or another base identity is not comparable either', async () => {
+        await regression({ provider_leg: 'openai', model: sealed.EXAM_LEG_ROUTES.openai.model }, { });
+        expect(await monitor()).toEqual({ checked: active.id });
+        await trx('sms_sealed_eval_runs').del();
+        await regression({ voice_profile_version: 987 });
+        expect(await monitor()).toEqual({ checked: active.id });
+        await trx('sms_sealed_eval_runs').del();
+        const items = await seedItems(24);
+        const baseline = await insertRun({ items, version: `${baseVersion()}Q`, unsafe: 0 });
+        await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 6, over: { significance: regressedSig } });
+        expect(await monitor()).toEqual({ checked: active.id });
+      });
+
+      test('a mixed or different judge ruler is not comparable', async () => {
+        await regression();
+        await trx('sms_sealed_eval_results').whereIn('run_id', trx('sms_sealed_eval_runs').where({ prompt_version: active.active_version }).select('id'))
+          .update({ scores: JSON.stringify({ safety: 8, voice: 8, overall: 6, actions: 6, judge_version: 'j2' }) });
+        expect(await monitor()).toEqual({ checked: active.id });
+      });
+
+      test('the same identity with the same regression still retires the patch', async () => {
+        await regression();
+        const out = await monitor();
+        expect(out.rolledBack).toBe(active.id);
+        expect((await rowOf(active.id)).retired_reason).toBe('exam_regression');
+      });
+    });
+
+    test('live cohorts under different drafter models are not compared: the rise belongs to the model swap', async () => {
+      const draftsOn = async (version, n, unsafe, at, model) => {
+        for (let i = 0; i < n; i += 1) {
+          const [draft] = await trx('message_drafts').insert({ prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at, model }).returning('id');
+          await trx('shadow_draft_judgments').insert({
+            draft_id: draft.id, verdict: i < unsafe ? 'draft_unsafe' : 'equivalent', scores: JSON.stringify({ safety: 8, voice: 8, actions: 8, overall: 8 }),
+          });
+        }
+      };
+      await draftsOn(active.prior_version, 40, 2, before, 'model-old');
+      await draftsOn(active.active_version, 25, 5, after, 'model-new');
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      // The same model on both sides: the same rise is the patch's.
+      await draftsOn(active.prior_version, 40, 2, before, 'model-new');
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(active.id);
+    });
+
+    test('a tiny exam never trips the unsafe-rate rollback (the promotion bar needed 20 items; so does the rollback)', async () => {
+      const items = await seedItems(10);
+      const baseline = await insertRun({ items, version: baseVersion(), unsafe: 0 });
+      await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 5 }); // 50% on 10 items
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+    });
+
+    test('an exam INFRASTRUCTURE failure (a failed run) is not a patch failure', async () => {
+      const items = await seedItems();
+      await insertRun({ items, version: active.active_version, status: 'failed', unsafe: 20 });
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+    });
+
+    test('rolling back a stacked patch puts its parent back; a parent retired for another reason stays retired', async () => {
+      await trx('sms_prompt_patches').where({ id: active.id }).update({ status: 'retired', retired_reason: 'superseded' });
+      const child = await activate(await insertPatch({ rules: [GOOD_RULE, SECOND_RULE], over: { parent_patch_id: active.id } }), { prior_version: active.active_version });
+      await refreshSnapshot();
+      await judged(child.prior_version, 40, 1, before);
+      await judged(child.active_version, 30, 10, after);
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(child.id);
+      expect(await rowOf(active.id)).toMatchObject({ status: 'active', retired_reason: null });
+      expect(await eventsOf(active.id)).toContain('restored_parent');
+      expect(patchLib.getActivePatch().patchNo).toBe(active.patch_no);
+      expect(drafter.currentPromptVersion()).toBe(active.active_version);
+    });
+
+    test('a restored parent keeps its original activation, so its monitor windows and baseline still exist (a 45-day-old parent is still watched)', async () => {
+      const originallyActivated = new Date(NOW.getTime() - 45 * DAY);
+      await trx('sms_prompt_patches').where({ id: active.id }).update({ status: 'retired', retired_reason: 'superseded', activated_at: originallyActivated });
+      const child = await activate(await insertPatch({ rules: [GOOD_RULE, SECOND_RULE], over: { parent_patch_id: active.id } }), { prior_version: active.active_version, activated_at: new Date(NOW.getTime() - 3 * DAY) });
+      await refreshSnapshot();
+      await judged(active.prior_version, 40, 2, new Date(NOW.getTime() - 60 * DAY)); // the parent's own baseline, long before the child
+      await judged(child.prior_version, 40, 1, before);
+      await judged(child.active_version, 30, 10, after);
+      expect((await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).rolledBack).toBe(child.id);
+      const restored = await rowOf(active.id);
+      expect(restored.status).toBe('active');
+      expect(new Date(restored.activated_at).getTime()).toBe(originallyActivated.getTime());
+      // The restored parent now drafts badly: its baseline (60 days back) is still inside ITS window.
+      await judged(active.active_version, 30, 12, new Date(NOW.getTime() - 3600_000));
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).retired_reason).toBe('live_unsafe_rise');
+    });
+
+    test('a base identity change retires the active patch (no parent restored, one bell) even with no bad numbers', async () => {
+      await trx('sms_prompt_patches').where({ id: active.id }).update({ status: 'retired', retired_reason: 'superseded' });
+      const child = await activate(await insertPatch({ rules: [GOOD_RULE, SECOND_RULE], over: { parent_patch_id: active.id } }));
+      await refreshSnapshot();
+      process.env.GATE_SMS_AGENT_COMPLAINTS = 'true'; // a category gate flip moves the base identity
+      const notify = jest.fn();
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify });
+      expect(out).toEqual({ rolledBack: child.id, patchNo: child.patch_no });
+      expect(await rowOf(child.id)).toMatchObject({ status: 'retired', retired_reason: 'base_changed' });
+      expect((await rowOf(active.id)).status).toBe('retired');
+      expect(await eventsOf(active.id)).not.toContain('restored_parent');
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(patchLib.getActivePatch()).toBeNull();
+    });
+
+    test('no active patch, or the gate in observe mode, checks nothing', async () => {
+      setMode('observe');
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW })).toEqual({ skipped: 'gate_off' });
+      setMode('true');
+      await trx('sms_prompt_patches').update({ status: 'retired' });
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW })).toEqual({ skipped: 'no_active_patch' });
     });
   });
 });

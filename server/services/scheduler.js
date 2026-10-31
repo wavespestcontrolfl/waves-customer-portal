@@ -988,8 +988,10 @@ function initScheduledJobs() {
 
   // SMS prompt patches (GATE_SMS_PROMPT_AUTOPROMOTE): the drafter's snapshot of the active patch
   // loads here, BEFORE the cronJobs early return below, so a process with crons disabled still
-  // drafts with the live patch (and its version tag).
-  if (isEnabled('smsPromptAutopromote')) require('./sms-prompt-patch').startPatchRefresh();
+  // drafts with the live patch (and its version tag). The watcher starts in every mode: it reads
+  // the environment only (no database read) until the mode is 'true', so a runtime flip from off
+  // or observe to 'true' reaches this process too.
+  require('./sms-prompt-patch').startPatchRefresh();
 
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
@@ -3988,12 +3990,13 @@ function initScheduledJobs() {
 
   // =========================================================================
   // SMS prompt auto-promote (GATE_SMS_PROMPT_AUTOPROMOTE, owner 2026-09-27 and
-  // 2026-10-24: the texting AI improves with no human approval step). Record-only:
-  // unset = off, 'observe' or 'true' = candidates, exams and decisions are recorded
-  // and nothing activates. Off returns before any lock is taken.
+  // 2026-10-24: the texting AI improves with no human approval step). The gate has
+  // modes: unset = off, 'observe' = candidates, exams and decisions only,
+  // 'true' = activation and rollback. Off returns before any lock is taken.
   //   - DAILY 6:12AM ET: make a candidate rule from the newest eligible pathology
   //     proposal, then examine it. Exam runs spend real LLM calls, so a candidate
   //     exam starts at most once a week (the interval is in the service).
+  //   - DAILY 6:42AM ET: rollback monitor (database reads only).
   // =========================================================================
 
   cron.schedule('12 6 * * *', async () => {
@@ -4003,6 +4006,16 @@ function initScheduledJobs() {
       await runExclusive('sms-prompt-autopromote', () => require('./sms-prompt-autopromote').runAutopromoteTick());
     } catch (err) {
       logger.error(`SMS prompt auto-promote tick failed (code ${err?.code || err?.name || 'unknown'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  cron.schedule('42 6 * * *', async () => {
+    if (!isEnabled('smsPromptAutopromote')) return;
+    logger.info('Running: SMS prompt rollback monitor');
+    try {
+      await runExclusive('sms-prompt-rollback', () => require('./sms-prompt-autopromote').runRollbackMonitor());
+    } catch (err) {
+      logger.error(`SMS prompt rollback monitor failed (code ${err?.code || err?.name || 'unknown'})`);
     }
   }, { timezone: 'America/New_York' });
 

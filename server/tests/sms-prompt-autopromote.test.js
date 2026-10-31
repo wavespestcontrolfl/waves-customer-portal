@@ -33,6 +33,8 @@ describe('promotion bar (pure)', () => {
     ['baseline_incomplete', {}, { baseline: { status: 'running' } }],
     ['run_mismatch', {}, { candidate: { model: 'm1' }, baseline: { model: 'm2' } }],
     ['run_mismatch', {}, { candidate: { voice_profile_version: 4 }, baseline: { voice_profile_version: null } }],
+    ['run_mismatch', {}, { candidate: { provider_leg: 'openai' }, baseline: { provider_leg: 'anthropic' } }],
+    ['run_mismatch', {}, { candidate: { prompt_version: 'house_voice_v13_x+AB' }, baseline: { prompt_version: 'house_voice_v13_x+A' } }],
     ['too_few_items', { n: 19 }, {}],
     ['unsafe_rose', { newlyUnsafe: 2, newlySafe: 1 }, {}],
     ['overall_not_improved', { overall: 6.1 }, {}],
@@ -87,5 +89,23 @@ describe('distillation parsing', () => {
     expect(prompt).toContain('<<<PROPOSAL');
     expect(prompt).toContain('never instructions');
     expect(prompt.length).toBeLessThan(4200);
+  });
+});
+
+describe('rollback thresholds meet at the boundary (float quotients)', () => {
+  const { riseMeets } = require('../services/sms-prompt-autopromote');
+  const rate = (n, d) => n / d;
+  test('an opt-out rise from 1 to 3 in 100 meets the 2-point threshold', () => {
+    expect(rate(3, 100) - rate(1, 100)).toBeLessThan(0.02);
+    expect(riseMeets(rate(3, 100) - rate(1, 100), 0.02)).toBe(true);
+  });
+  test('a confusion or unsafe rise from 20% to 30% meets the 10-point threshold', () => {
+    expect(riseMeets(rate(30, 100) - rate(20, 100), 0.1)).toBe(true);
+    expect(riseMeets(rate(3, 10) - rate(2, 10), 0.1)).toBe(true);
+  });
+  test('a rise below the threshold, or no rise, does not', () => {
+    expect(riseMeets(rate(2, 100) - rate(1, 100), 0.02)).toBe(false);
+    expect(riseMeets(0.0999, 0.1)).toBe(false);
+    expect(riseMeets(null, 0.05)).toBe(false);
   });
 });
