@@ -664,6 +664,57 @@ describe('review incentives', () => {
     });
   });
 
+  describe('the "already reviewed" mark commits with the relink (RR-07)', () => {
+    const rows = () => ({
+      customers: [{ id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true, has_left_google_review: false }],
+      technicians: [{ id: 'tech-1', name: 'Tech One', active: true }],
+      service_records: [{ id: 'service-1', customer_id: 'customer-1', technician_id: 'tech-1', service_date: '2026-05-27' }],
+      google_reviews: [{
+        id: 'google-1', customer_id: null, reviewer_name: 'Customer One', star_rating: 4,
+        review_created_at: '2026-05-29T16:00:00.000Z', location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+      }],
+    });
+    // The relink transaction gets its own handle, so a write made through it
+    // is told apart from one made on the bare connection after commit.
+    function withTrxLog(conn, { failCustomerMark = false } = {}) {
+      const viaTrx = [];
+      conn.transaction = async (fn) => {
+        const trx = jest.fn((table) => {
+          const q = conn(table);
+          const update = q.update.bind(q);
+          q.update = async (patch) => {
+            if (failCustomerMark && q.table === 'customers' && patch.has_left_google_review === true) throw new Error('db hiccup');
+            viaTrx.push([q.table, patch]);
+            return update(patch);
+          };
+          return q;
+        });
+        trx.fn = conn.fn;
+        return fn(trx);
+      };
+      return viaTrx;
+    }
+    const attribute = (conn) => ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-1', customerId: 'customer-1', serviceRecordId: 'service-1', adminId: 'admin-1',
+    }, { conn, policy });
+
+    test('the mark is written inside the relink transaction', async () => {
+      const conn = createDbMock(rows());
+      const viaTrx = withTrxLog(conn);
+      await attribute(conn);
+      expect(viaTrx).toContainEqual(['customers', expect.objectContaining({ has_left_google_review: true })]);
+      expect(conn.__state.rows.activity_log.map((r) => r.action)).toContain('review_manual_marked');
+    });
+
+    test('a failed mark fails the attribution instead of reporting success', async () => {
+      const conn = createDbMock(rows());
+      withTrxLog(conn, { failCustomerMark: true });
+      await expect(attribute(conn)).rejects.toThrow('db hiccup');
+      expect(conn.__state.rows.activity_log.map((r) => r.action)).not.toContain('review_manual_marked');
+    });
+  });
+
   test('manual attribution of a previously-unmatched 5-star review also emits review.linked_5star (codex P2: the sync sites miss this attribution moment)', async () => {
     const conn = createDbMock({
       customers: [{ id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true }],
