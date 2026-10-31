@@ -3311,10 +3311,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
     if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
-    // A technician's over-ceiling amount is refused here, before the claim and every write (admin keeps the advisory path).
-    // The effects phase of a saved packet runs after its records committed, so it never re-checks.
-    const implausibleProduct = await technicianImplausibleProduct(db, { actor: completionInput.actor, products, skip: packetEffects });
-    if (implausibleProduct) return ({ status: 422, body: implausibleProduct });
     const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -5091,6 +5087,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
     await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
     // ... and a completed visit records an application for EVERY chemical add-on it carries (they are invoiced from the visit).
     await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
+
+    // A technician's amount no visit uses is refused on a FRESH completion only, before the first service write
+    // (service_products, inventory, FDACS ledger, cost, report). A same-key replay or resume of a committed completion is
+    // never judged: its own committed usage can change the product's history and move the ceiling under it. The claim is
+    // released as failed, as for the other refusals above, so a corrected resubmit is not blocked. Admin keeps the
+    // advisory path in deductProductInventory.
+    const implausibleProduct = await technicianImplausibleProduct(db, {
+      actor: completionInput.actor, products, skip: claim.action !== 'proceed',
+    });
+    if (implausibleProduct) {
+      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(implausibleProduct.code), db);
+      return ({ status: 422, body: implausibleProduct });
+    }
 
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.

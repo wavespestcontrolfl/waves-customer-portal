@@ -1,7 +1,7 @@
-// A technician's completion with a product amount no visit uses is refused (422, IMPLAUSIBLE_PRODUCT_AMOUNT) before the
-// claim and every write: no service_products row, no inventory move, no FDACS ledger row, no cost. The office (admin)
-// keeps the advisory path in deductProductInventory (pest-stock-advisory.test.js): the line is recorded and stock is
-// left alone. PostgreSQL-free: the db is a recording fake.
+// A technician's completion with a product amount no visit uses is refused (422, IMPLAUSIBLE_PRODUCT_AMOUNT) on a fresh
+// completion only, after the idempotency claim and before the first service write (the claim is marked failed). The office
+// (admin) keeps the advisory path in deductProductInventory (pest-stock-advisory.test.js). PostgreSQL-free: the db is a
+// recording fake; the end-to-end proofs are in complete-implausible-product-amount-postgres.test.js.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const mockCalls = [];
@@ -26,7 +26,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-const { completeScheduledService, technicianImplausibleProduct } = require('../services/complete-scheduled-service');
+const { technicianImplausibleProduct } = require('../services/complete-scheduled-service');
 
 const CELSIUS = '11111111-1111-4111-8111-111111111111';
 const catalog = { id: CELSIUS, name: 'Celsius WG', inventory_unit: 'lb' };
@@ -76,30 +76,11 @@ describe('technicianImplausibleProduct', () => {
   });
 });
 
-describe('POST /complete by a technician with an over-ceiling amount', () => {
-  test('answers 422 and writes nothing', async () => {
-    const result = await completeScheduledService({
-      serviceId: 'visit-1',
-      actor: tech,
-      body: { visitOutcome: 'completed', products: line(406, 'lb') },
-    });
-    expect(result.status).toBe(422);
-    expect(result.body).toMatchObject({
-      code: 'IMPLAUSIBLE_PRODUCT_AMOUNT',
-      error: '406 lb of Celsius WG is far more than one visit uses. Check the amount and submit again.',
-    });
-    expect(mockCalls.filter((c) => c.write)).toEqual([]);
-    const touched = new Set(mockCalls.map((c) => c.table));
-    for (const table of ['service_products', 'service_records', 'fdacs_application_ledger', 'scheduled_services']) {
-      expect(touched.has(table)).toBe(false);
-    }
-  });
-
-  test('a saved packet\'s effects phase never re-checks (its records already committed)', async () => {
-    mockTables.scheduled_services = [];
-    await completeScheduledService({
-      serviceId: 'visit-1', actor: tech, body: { visitOutcome: 'completed', products: line(406, 'lb') },
-    }, { phase: 'effects', itemId: 'item-1' }).catch(() => {});
-    expect(mockCalls.some((c) => c.table === 'products_catalog' && c.op === 'whereIn')).toBe(false);
+describe('replay and resume', () => {
+  test('skip (a replay, a resume or a packet effects phase) judges nothing and reads nothing', async () => {
+    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(406), skip: true })).toBeNull();
+    expect(mockCalls).toEqual([]);
   });
 });
+// The end-to-end proofs (422 before any write with the claim released, admin advisory path, under-ceiling unchanged, an
+// identical retry replaying after its own usage moved the ceiling) are in complete-implausible-product-amount-postgres.test.js.
