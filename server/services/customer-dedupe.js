@@ -318,11 +318,14 @@ function strictPremise(row) {
   const { street, unit: inlineUnit } = splitStreetLineUnit(String(row.address_line1 || ''));
   const streetKey = normalizeStreetKey(street);
   if (!streetKey || streetKey.unit) return null;
-  const keyOf = (unitText) => (String(unitText || '').trim() ? unitLineValueKey(normalizeUnitLine(unitText)) : '');
-  const inlineKey = keyOf(inlineUnit);
-  const line2Key = keyOf(row.address_line2);
-  const unit = inlineKey && line2Key && inlineKey !== line2Key ? `${inlineKey} ${line2Key}` : (inlineKey || line2Key);
-  return { street: streetKey.key, unit };
+  const keyOf = (unitText) => unitLineValueKey(normalizeUnitLine(unitText));
+  // Join the unit fragments BEFORE keying (Codex #7249 r4 P2): "Bldg C" inline
+  // plus "Apt 2" on line 2 must key like a typed "Bldg C Apt 2"; keyed apart,
+  // the lone "Apt 2" lost its dwelling designator. The same unit given in
+  // both places counts once.
+  const parts = [inlineUnit, row.address_line2].map((s) => String(s || '').trim()).filter(Boolean);
+  const fragments = parts.length === 2 && keyOf(parts[0]) === keyOf(parts[1]) ? [parts[0]] : parts;
+  return { street: streetKey.key, unit: fragments.length ? keyOf(fragments.join(' ')) : '' };
 }
 
 function samePremiseStrict(a, b) {

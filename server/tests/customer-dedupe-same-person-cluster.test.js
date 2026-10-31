@@ -85,6 +85,18 @@ describe('resolveSamePersonCluster', () => {
     expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: '#2' })).not.toBeNull();
   });
 
+  // Codex #7249 r4 P2: unit fragments join before keying.
+  test('an inline building plus a line-2 apartment equals the same compound unit typed on line 2', async () => {
+    const stored = { address_line1: '123 Sample St Bldg C', address_line2: 'Apt 2' };
+    const rows = [row('a', stored), row('b', stored)];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Bldg C Apt 2' })).not.toBeNull();
+  });
+
+  test('the same unit inline and on line 2 counts once', async () => {
+    const rows = [row('a', { address_line1: '123 Sample St Apt 2', address_line2: 'Apt 2' }), row('b', { address_line2: 'Unit 2' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: '#2' })).not.toBeNull();
+  });
+
   test('Building and Bldg are one designator (Building 2 vs Bldg 2)', async () => {
     const rows = [row('a', { address_line2: 'Building 2' }), row('b', { address_line2: 'Bldg 2' })];
     expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Bldg 2' })).not.toBeNull();
