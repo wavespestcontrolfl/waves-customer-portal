@@ -174,6 +174,12 @@ struct Receipt {
     let currency: String
     let customerName: String?
     let card: String?        // "Visa •••• 4242 · Credit"
+    // The amount screen's invoice lines, and the amount due before any card
+    // surcharge, so the Paid screen can list the same rows.
+    var invoiceNumber: String? = nil
+    var items: [API.ValidatedHandoff.Item] = []
+    var adjustments: [API.ValidatedHandoff.Adjustment] = []
+    var amountDueCents: Int? = nil
 }
 
 // One-shot holders for values that need to survive across views during a

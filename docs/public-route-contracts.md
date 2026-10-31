@@ -5997,7 +5997,19 @@ technician a card-present session for debt now owed by AP. `/handoff` refuses
 to mint one for the same reason, and `/payment-intent` refuses with
 `409 { code: 'invoice_withdrawn_from_customer' }` — including a re-read under
 the invoice row lock at the final bind, so a Bill-To change committing during
-the mint is caught).
+the mint is caught). RESPONSE (2026-10-31, Waves Admin pay screens): beside
+`invoice_id`, `customer_name`, `amount_cents`, `currency`, `authToken` and the
+surcharge fields, a successful burn returns what the customer pays for:
+`invoice_number`, `items` (`{ description, amount_cents }`, the invoice's
+visible service lines via `visibleInvoiceLines` / `invoiceLineParts`) and
+`adjustments` (`{ label, amount_cents }`: discount, commercial tax, deposit paid
+at acceptance, account credit applied, paid so far, via `invoiceTotalsFacts`) —
+the rows the invoice PDF prints, down to the amount due. When items plus
+adjustments do not add up to the handoff amount, every item carries
+`amount_cents: null` and `adjustments` is empty (names only), so the screen
+never shows prices that disagree with the charge; a failure building them
+returns empty lists, never an error, because the jti is already burned. No
+contact field, address, note or other invoice rides this reply.
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).

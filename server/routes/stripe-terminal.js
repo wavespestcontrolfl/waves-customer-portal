@@ -103,6 +103,38 @@ const HANDOFF_TTL_SECONDS = 60;
 const HANDOFF_ISS = 'waves-portal';
 const HANDOFF_AUD = 'waves-pay-ios';
 
+// What the customer pays for, as the Waves Admin amount and Paid screens list
+// it: the invoice number, its service lines and the totals rows the invoice
+// PDF prints, down to the amount due. When those rows do not add up to the
+// amount due (legacy data), the lines go without prices, so the screen never
+// shows numbers that disagree with the charge. /validate-handoff has already
+// burned the jti, so a failure here returns no lines instead of throwing.
+function terminalInvoiceLines(invoice, customer, amountDueCents) {
+  const invoice_number = invoice.invoice_number || null;
+  try {
+    const { visibleInvoiceLines, invoiceLineParts, invoiceTotalsFacts } = require('../services/pdf/invoice-pdf');
+    const cents = (dollars) => Math.round((Number(dollars) || 0) * 100);
+    const items = visibleInvoiceLines(invoice.line_items).map((line) => {
+      const { description, qty, amount } = invoiceLineParts(line);
+      return { description: qty === 1 ? description : `${description} × ${qty}`, amount_cents: cents(amount) };
+    });
+    const f = invoiceTotalsFacts(invoice, customer);
+    const adjustments = [
+      f.discount > 0 ? { label: f.discountLabel, amount_cents: -cents(f.discount) } : null,
+      f.showTax ? { label: f.taxLabel, amount_cents: cents(f.tax) } : null,
+      f.depositCredit > 0 ? { label: 'Deposit paid at acceptance', amount_cents: -cents(f.depositCredit) } : null,
+      f.creditApplied > 0 ? { label: 'Account credit applied', amount_cents: -cents(f.creditApplied) } : null,
+      f.amountPaid > 0 ? { label: 'Paid so far', amount_cents: -cents(f.amountPaid) } : null,
+    ].filter(Boolean);
+    const sum = [...items, ...adjustments].reduce((total, row) => total + row.amount_cents, 0);
+    if (sum === amountDueCents) return { invoice_number, items, adjustments };
+    return { invoice_number, items: items.map(({ description }) => ({ description, amount_cents: null })), adjustments: [] };
+  } catch (err) {
+    logger.warn(`[stripe-terminal] invoice lines failed for ${invoice.id}: ${err.message}`);
+    return { invoice_number, items: [], adjustments: [] };
+  }
+}
+
 function handoffStaffSessionMatches(claims, tech) {
   const claimedVersion = claims?.staff_token_version;
   const currentVersion = Number(tech?.auth_token_version);
@@ -725,6 +757,8 @@ router.post('/validate-handoff', async (req, res) => {
       // Both zero/equal-to-base when the feature is off.
       surcharge_cents: surchargeCents,
       credit_total_cents: baseCents + surchargeCents,
+      // What the customer pays for, shown on the amount and Paid screens.
+      ...terminalInvoiceLines(invoice, customer, baseCents),
     });
   } catch (err) {
     logger.error(`[stripe-terminal] validate-handoff failed: ${err.message}`);
@@ -1291,4 +1325,5 @@ module.exports._test = {
   technicianMayCollectInvoiceLocked,
   terminalChargeFenceResponse,
   terminalHandoffNeedsReissue,
+  terminalInvoiceLines,
 };

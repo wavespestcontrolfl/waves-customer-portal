@@ -246,13 +246,17 @@ final class TokenProvider: NSObject, ConnectionTokenProvider {
 // MARK: - Receipt from the confirmed charge
 
 extension Receipt {
-    init(_ pi: PaymentIntent, fallbackId: String, customerName: String?) {
+    init(_ pi: PaymentIntent, fallbackId: String, handoff: API.ValidatedHandoff) {
         self.init(
             paymentIntentId: pi.stripeId ?? fallbackId,
             amountCents: Int(pi.amount),
             currency: pi.currency,
-            customerName: customerName,
-            card: pi.charges.first?.paymentMethodDetails?.cardPresent.map(Self.cardLine)
+            customerName: handoff.customer_name,
+            card: pi.charges.first?.paymentMethodDetails?.cardPresent.map(Self.cardLine),
+            invoiceNumber: handoff.invoice_number,
+            items: handoff.items ?? [],
+            adjustments: handoff.adjustments ?? [],
+            amountDueCents: handoff.amount_cents
         )
     }
 
