@@ -39,8 +39,11 @@ const stoppedResults = { rows: [] };
 // maps service_record id -> scheduled_service_id. Every queried visit counts
 // as completed unless listed in `unperformed`. `visitQueries` records each
 // scheduled_services whereIn(ids); `dbError` makes that query reject.
+// `visitSources` maps visit id -> source_estimate_id; `estimates` are the
+// estimates rows; `estimatesError` makes the estimates read reject.
 const mockVisitState = {
   unperformed: new Set(), visitQueries: [], dbError: null, invoiceDocs: {}, recordVisits: {},
+  visitSources: {}, estimates: [], estimatesError: null,
 };
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
@@ -65,7 +68,11 @@ jest.mock('../models/db', () => {
         rows = ids.map((id) => ({ id, scheduled_service_id: mockVisitState.recordVisits[String(id)] || null }));
       } else if (table === 'scheduled_services') {
         if (mockVisitState.dbError) return Promise.reject(mockVisitState.dbError).then(onOk, onErr);
-        rows = ids.filter((id) => !mockVisitState.unperformed.has(String(id))).map((id) => ({ id }));
+        rows = ids.filter((id) => !mockVisitState.unperformed.has(String(id)))
+          .map((id) => ({ id, source_estimate_id: mockVisitState.visitSources[String(id)] || null }));
+      } else if (table === 'estimates') {
+        if (mockVisitState.estimatesError) return Promise.reject(mockVisitState.estimatesError).then(onOk, onErr);
+        rows = mockVisitState.estimates.filter((row) => ids.map(String).includes(String(row.id)));
       } else {
         rows = stoppedResults.rows;
       }
@@ -107,6 +114,9 @@ describe('completion balance sweep', () => {
     mockVisitState.dbError = null;
     mockVisitState.invoiceDocs = {};
     mockVisitState.recordVisits = {};
+    mockVisitState.visitSources = {};
+    mockVisitState.estimates = [];
+    mockVisitState.estimatesError = null;
     mockCharge.mockImplementation(async () => ({ status: 'paid' }));
   });
 
@@ -335,6 +345,40 @@ describe('completion balance sweep', () => {
     const result = await runCompletionBalanceSweep(baseArgs);
     expect(result.charged).toBe(2);
     expect(mockVisitState.visitQueries).toEqual([['svc-shared']]);
+  });
+
+  test('a bill from a won Bill-by-invoice proposal stays on its pay link; a card-paid visit is still collected', async () => {
+    // Owner 2026-10-30 (bill-by-invoice.js): the agreement bills that visit by invoice on its Net term.
+    const proposal = {
+      enabled: true,
+      title: 'Bayview Office Proposal',
+      buildings: [{ name: 'Main building', lineItems: [{ description: 'Quarterly pest', quantity: 1, unitPrice: 300, frequency: 'quarterly', taxable: true, amount: 300 }] }],
+      commercialTerms: { paymentTerms: 'net30' },
+    };
+    openBalanceResults.rows = [
+      { id: 'bbi-1', invoice_number: 'INV-3', subtotal: '300.00', total: '300.00', scheduled_service_id: 'svc-bbi', service_date: null },
+      { id: 'card-1', invoice_number: 'INV-4', subtotal: '80.00', total: '80.00', scheduled_service_id: 'svc-card', service_date: null },
+    ];
+    mockVisitState.visitSources = { 'svc-bbi': 'est-bbi', 'svc-card': 'est-card' };
+    mockVisitState.estimates = [
+      { id: 'est-bbi', status: 'accepted', bill_by_invoice: true, estimate_data: { proposal } },
+      { id: 'est-card', status: 'accepted', bill_by_invoice: false, estimate_data: { proposal } },
+    ];
+    const result = await runCompletionBalanceSweep(baseArgs);
+    expect(mockCharge).toHaveBeenCalledTimes(1);
+    expect(mockCharge.mock.calls[0][0]).toBe('card-1');
+    expect(result).toMatchObject({ charged: 1, skipped: 1 });
+  });
+
+  test('an unreadable proposal stops the sweep before any charge', async () => {
+    openBalanceResults.rows = [
+      { id: 'bbi-1', invoice_number: 'INV-3', subtotal: '300.00', total: '300.00', scheduled_service_id: 'svc-bbi', service_date: null },
+    ];
+    mockVisitState.visitSources = { 'svc-bbi': 'est-bbi' };
+    mockVisitState.estimatesError = new Error('estimates read failed');
+    const result = await runCompletionBalanceSweep(baseArgs);
+    expect(mockCharge).not.toHaveBeenCalled();
+    expect(result.charged).toBe(0);
   });
 
   test('a visit lookup failure stops the sweep before any charge', async () => {

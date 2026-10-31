@@ -386,13 +386,13 @@ async function assertProposalTermsMatchPayer({ trx, customerId, proposal }) {
 // The due date of a visit invoice billed from an accepted invoice-mode commercial proposal: the base date plus the
 // agreement's Net term (net15 / net30 / net60, payer.js's shared PAYMENT_TERM_NET_DAYS map, never a parse). The win
 // makes no invoice (owner 2026-10-30, option A), so the visit invoices keep the agreement's terms. Null when the visit's
-// estimate is not such a proposal, or its term is none or due on receipt: the caller keeps its own due date.
+// estimate is not such a proposal, or its term is none or due on receipt: the caller keeps its own due date. These are
+// the visits Auto Pay never collects (bill-by-invoice.js).
 async function proposalTermsDueDate(conn, sourceEstimateId, baseDate) {
   if (!conn || !sourceEstimateId || !baseDate) return null;
   const estimate = await conn('estimates').where({ id: sourceEstimateId }).first('status', 'bill_by_invoice', 'estimate_data');
-  if (!estimate || estimate.status !== 'accepted' || estimate.bill_by_invoice !== true) return null;
-  const proposal = require('./estimate-proposal').normalizeProposal(estimate);
-  if (proposal.enabled !== true || proposal.synthesized === true) return null;
+  const proposal = require('./bill-by-invoice').billByInvoiceProposal(estimate);
+  if (!proposal) return null;
   const days = require('./payer').PAYMENT_TERM_NET_DAYS[proposal.commercialTerms?.paymentTerms] || 0;
   if (!(days > 0)) return null;
   // The base is already a calendar date (YYYY-MM-DD): whole days are added to its own fields, no clock or zone involved.

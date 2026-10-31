@@ -625,6 +625,16 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
   } catch { /* gate module unavailable in some test harnesses */ }
   inputs.completionAutopayChargeEnabled = completionAutopayChargeEnabled;
+  // Auto Pay never collects a visit from a won Bill-by-invoice proposal
+  // (owner 2026-10-30, bill-by-invoice.js). Read only when Auto Pay could
+  // charge; a failed read counts as Bill by invoice (the sheet never
+  // promises a charge completion refuses).
+  inputs.billByInvoice = false;
+  if (inputs.autopayActive === true && visit.source_estimate_id) {
+    const billByInvoiceProbe = await probe('estimates (bill by invoice)', unavailable,
+      () => require('./bill-by-invoice').billByInvoiceVisit(knex, visit));
+    inputs.billByInvoice = billByInvoiceProbe.error ? true : billByInvoiceProbe.value === true;
+  }
 
   // Effective bill-to payer — same COALESCE the schedule feed uses
   // (routes/admin-schedule.js effectiveBillToSql): a visit-level payer wins,
@@ -688,7 +698,9 @@ function deriveBillingExpectation(inputs) {
     duesCollectedThisMonth: inputs.duesCollectedThisMonth === true,
     completionAutopayChargeEnabled: inputs.completionAutopayChargeEnabled === true,
   });
-  return { ...prediction, why: prediction.kind, ruleSource: 'lane', laneSource: lane.source };
+  // A Bill-by-invoice visit is billed by invoice, never by Auto Pay (inputs.billByInvoice).
+  const shown = inputs.billByInvoice === true && prediction.kind === 'auto_charge' ? { ...prediction, kind: 'invoice' } : prediction;
+  return { ...shown, why: shown.kind, ruleSource: 'lane', laneSource: lane.source };
 }
 
 // The application fact of a visit with chemical area add-ons (Codex round 8 on #6135): done only when EVERY

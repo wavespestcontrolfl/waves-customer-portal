@@ -41,6 +41,9 @@
  * minted ahead of its visit (estimate accept, setup fee) is collected by that
  * visit's own completion charge or stays on its pay link and dunning.
  *
+ * A bill on a visit from a won Bill-by-invoice proposal is never swept (owner
+ * 2026-10-30, bill-by-invoice.js): it bills by invoice on its Net term.
+ *
  * Invoices whose follow-up sequence an admin explicitly STOPPED, and every
  * invoice of a customer with an active collections collection_hold (dispute
  * raised on a collections call), are skipped:
@@ -76,6 +79,7 @@ const { logAutopay } = require('./autopay-log');
 const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { invoiceHasPositiveSetupFeeLine } = require('./estimate-first-application-invoice');
 const { acceptedEstimateIdFromNotes } = require('./setup-fee-alert-reconcile');
+const { billByInvoiceEstimateIds } = require('./bill-by-invoice');
 
 const { collectionHoldInvoiceIds, isCollectionHoldRefusal } = require('./collections/collection-hold');
 
@@ -106,6 +110,9 @@ async function dunningStoppedInvoiceIds(invoiceIds, { database = db } = {}) {
 //   - An unlinked bill is collectible only when its service_date is before
 //     today (ET) and it is neither an estimate-acceptance bill (setup fee or
 //     first application, any "accepted estimate #" stamp) nor a setup fee.
+//   - A bill on a visit from a won Bill-by-invoice proposal is never
+//     collectible here (owner 2026-10-30): it stays on its pay link and
+//     reminders until its Net term.
 // Returns Map(invoice id -> { visitId, ownVisit }) of collectible invoices.
 async function performedWorkPlan(invoiceIds, { database = db, today = etDateString() } = {}) {
   const plan = new Map();
@@ -130,8 +137,13 @@ async function performedWorkPlan(invoiceIds, { database = db, today = etDateStri
   const visitIds = [...new Set(docs.map(visitOf).filter(Boolean))];
   const completed = new Set();
   if (visitIds.length) {
-    const rows = await database('scheduled_services').whereIn('id', visitIds).where({ status: 'completed' }).select('id');
-    for (const row of rows) completed.add(String(row.id));
+    const rows = await database('scheduled_services').whereIn('id', visitIds).where({ status: 'completed' })
+      .select('id', 'source_estimate_id');
+    const billByInvoice = await billByInvoiceEstimateIds(database, rows.map((row) => row.source_estimate_id));
+    for (const row of rows) {
+      if (row.source_estimate_id && billByInvoice.has(String(row.source_estimate_id))) continue;
+      completed.add(String(row.id));
+    }
   }
 
   for (const doc of docs) {

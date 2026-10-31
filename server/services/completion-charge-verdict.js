@@ -8,8 +8,10 @@
  *     (GATE_APPT_CARD_COMPLETION_CHARGE) — consent row, hold exclusion, frozen
  *     accepted_amount cap;
  *   - resolveExtendedLane: the extended Auto Pay lane
- *     (GATE_COMPLETION_AUTOPAY_CHARGE) — admission, hold exclusion, PRE-CREDIT
- *     anchor and over-cap;
+ *     (GATE_COMPLETION_AUTOPAY_CHARGE) — admission, hold exclusion, Bill by
+ *     invoice, PRE-CREDIT anchor and over-cap;
+ *   - resolvePerApplicationCharge: the per-application Auto Pay lane — billing
+ *     mode, Bill by invoice;
  *   - resolveCompletionChargeCap: the above-quote hard cap — accepted per-visit
  *     amount, setup-fee allowance provenance, cap ceiling.
  *
@@ -30,9 +32,24 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { completionInvoiceAmount, hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { billByInvoiceVisit } = require('./bill-by-invoice');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
+
+// A visit from a won Bill-by-invoice proposal bills by invoice on its Net
+// term (owner 2026-10-30, bill-by-invoice.js): it closes every Auto Pay lane.
+// An unreadable agreement closes the lane too; `strict` propagates the
+// failure instead.
+async function billByInvoiceClosesLane({ svc, conn, strict, lane }) {
+  try {
+    return await billByInvoiceVisit(conn, svc);
+  } catch (e) {
+    if (strict) throw e;
+    logger.warn(`[dispatch] ${lane} Bill-by-invoice check failed for visit ${svc?.id} — no Auto Pay charge: ${e.message}`);
+    return true;
+  }
+}
 
 async function resolveAppointmentCardLane({
   svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, annualPrepayBilling, explicitMembershipLane,
@@ -141,10 +158,13 @@ async function resolveExtendedLane({
   // could exceed a frozen accepted_amount we couldn't read. The money
   // boundary additionally excludes any consent row under the visit lock
   // (requireNoAppointmentCardLane on the charge below).
-  const extendedChargeCandidate = extendedAutopayCharge && visitPerformed
+  let extendedChargeCandidate = extendedAutopayCharge && visitPerformed
     && !apptCardLaneUnresolved && !extendedHoldExcluded
     && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)
     && !!invoice?.id && !alreadyPaid && !invoice.payer_id && customerAutopayActive;
+  if (extendedChargeCandidate && await billByInvoiceClosesLane({ svc, conn, strict, lane: 'extended-lane' })) {
+    extendedChargeCandidate = false;
+  }
   let extendedLaneAnchor = null;
   let extendedLaneOverCap = false;
   if (extendedChargeCandidate) {
@@ -369,4 +389,26 @@ async function resolveCompletionChargeCap({
   return { acceptedPerVisit, invoiceSubtotal, netInvoiceSubtotal, setupFeeAllowance, capCeiling, verdict };
 }
 
-module.exports = { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap };
+// The per-application Auto Pay lane (owner ruling 2026-07-09): the
+// customer's billing mode, except a Bill-by-invoice visit.
+async function resolvePerApplicationCharge({ svc, perApplicationBilling, conn = db, strict = false }) {
+  return !!perApplicationBilling && !await billByInvoiceClosesLane({ svc, conn, strict, lane: 'per-application' });
+}
+
+// A sheet's charge promise for a visit (predictCompletionBilling, the
+// attached-invoice label): Auto Pay never collects a Bill-by-invoice visit,
+// so its 'auto_charge' reads 'invoice', same amount. Read only when a charge
+// is promised; an unreadable agreement demotes too (never promise a charge
+// completion refuses).
+async function billByInvoiceDemotedPrediction(prediction, svc, conn = db) {
+  if (prediction?.kind !== 'auto_charge') return prediction;
+  return await billByInvoiceClosesLane({ svc, conn, strict: false, lane: 'sheet' }) ? { ...prediction, kind: 'invoice' } : prediction;
+}
+
+module.exports = {
+  resolveAppointmentCardLane,
+  resolveExtendedLane,
+  resolvePerApplicationCharge,
+  resolveCompletionChargeCap,
+  billByInvoiceDemotedPrediction,
+};
