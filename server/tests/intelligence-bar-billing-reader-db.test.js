@@ -27,7 +27,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(addETDays(REFERENCE, offset));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let CP; let V; let U; let U2; let L; let M; let N; let T; let R2; let TIED; let VISIT;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let CP; let V; let U; let U2; let L; let M; let N; let T; let P; let R2; let TIED; let VISIT;
   const inv = {};
   const tokens = [];
 
@@ -168,6 +168,18 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const prepayInvoice = await invoice('t_prepay', T, { total: 600, status: 'paid', paid_at: REFERENCE });
     const [term] = await db('annual_prepay_terms').insert({ customer_id: T, prepay_invoice_id: prepayInvoice.id, status: 'active', term_start: day(-30), term_end: day(335), prepay_amount: 600 }).returning('id');
     inv.prepayTermId = term.id || term;
+    // Annual prepays charged after the first visit: the year's draft carries the approval day as its due date until
+    // the release dates it, so a year still waiting is not overdue; one whose charge failed after the visit (pay link
+    // sent) is.
+    P = await customer(`Afterfirst${run}`, `Visit${run}`);
+    for (const [key, status, invoiceStatus] of [['p_waiting', 'awaiting_first_visit', 'draft'], ['p_failed', 'delivered_fallback', 'sent']]) {
+      const year = await invoice(key, P, { total: 368, status: invoiceStatus, due_date: day(-3) });
+      const estimateId = uid();
+      await db('estimates').insert({ id: estimateId, customer_id: P, status: 'accepted',
+        estimate_data: json({ prepayAutoChargeJob: { invoice_id: year.id, status, deferred_to_first_visit: true } }) });
+      await db('annual_prepay_terms').insert({ customer_id: P, source_estimate_id: estimateId, prepay_invoice_id: year.id, status: 'payment_pending',
+        term_start: day(30), term_end: day(395), prepay_amount: 368 });
+    }
     // Conflicting tender evidence: the invoice says bank, its processing payments row says card. And sibling rows that
     // would crowd this invoice's own payment out of a limited history.
     R2 = await customer(`Mixed${run}`, `Tender${run}`);
@@ -940,6 +952,17 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const list = await withBrokenColumn('collections_flags', 'released_at', () => read('get_customer_invoices', { customer_id: A, limit: 50 }));
     expect(list.error).toBeUndefined();
     expect(by(list, 'credited')).toMatchObject({ collectible: true, balance_due: 100, dispute_hold: null });
+  });
+
+  test('a year charged after its first visit is not overdue while it waits: the row, the summary, the overdue filter and the detail', async () => {
+    const list = await read('get_customer_invoices', { customer_id: P });
+    expect(by(list, 'p_waiting')).toMatchObject({ collectible: true, balance_due: 368, overdue: false });
+    expect(by(list, 'p_failed')).toMatchObject({ collectible: true, balance_due: 368, overdue: true });
+    expect(list.account_summary.overdue_count).toBe(1);
+    const filtered = await read('get_customer_invoices', { customer_id: P, status: 'overdue' });
+    expect(filtered.invoices.map((row) => row.id)).toEqual([inv.p_failed.id]);
+    expect((await read('get_invoice_detail', { invoice_id: inv.p_waiting.id })).invoice).toMatchObject({ overdue: false });
+    expect((await read('get_invoice_detail', { invoice_id: inv.p_failed.id })).invoice).toMatchObject({ overdue: true });
   });
 
   test('annual prepay linkage resolves through the term\'s prepay_invoice_id when the invoice has no term id of its own', async () => {
