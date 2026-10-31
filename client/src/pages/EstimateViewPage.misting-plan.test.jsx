@@ -71,7 +71,9 @@ async function renderPage(data) {
   stubStorage();
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => data })));
   render(<EstimateViewPage />);
-  await screen.findByRole('heading', { level: 1 });
+  // The loading skeleton already renders an h1 (Header with no first name): wait for the loaded hero, which names the
+  // fixture's customer, so the assertions read the estimate and never the skeleton.
+  await screen.findByRole('heading', { level: 1, name: /Dana/ });
 }
 const text = () => document.body.textContent;
 
