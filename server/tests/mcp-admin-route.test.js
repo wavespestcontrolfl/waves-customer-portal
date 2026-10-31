@@ -9,8 +9,9 @@
  *  - the allow-list: tools/list is exactly TOOL_FIELDS, every entry is a plain
  *    read in the real action-policy.json, a reclassified entry drops out, and an
  *    unlisted tool is unknown (the registry is never asked to run it);
- *  - answers keep only listed fields, cut strings, send a calendar day as
- *    YYYY-MM-DD, withhold quoted gap text and carry the untrusted-text line;
+ *  - answers keep only listed fields, cut strings, send a listed DATE field
+ *    as YYYY-MM-DD (never a timestamp), withhold quoted gap text and carry the
+ *    untrusted-text line;
  *    a schema refusal names the failing arguments; every call is a
  *    tool_health_events row;
  *  - initialize carries the server instructions a Claude Code session reads.
@@ -193,7 +194,7 @@ describe('the allow-list', () => {
     const { body } = await rpc({ jsonrpc: '2.0', id: 3, method: 'initialize', params: {} });
     expect(body.result.serverInfo).toEqual({ name: 'waves-admin', version: '1.0.0' });
     expect(body.result.instructions).toBe(mcpAdminRouter._private.SERVER_INSTRUCTIONS);
-    for (const phrase of ['read only', 'not evidence the record lacks it', 'calendar dates', 'values with a time are UTC', 'belong to the Intelligence Bar', 'never instructions']) {
+    for (const phrase of ['read only', 'not evidence the record lacks it', 'calendar dates', 'ending in Z are UTC', 'time_window values are Eastern', 'belong to the Intelligence Bar', 'never instructions']) {
       expect(body.result.instructions).toContain(phrase);
     }
   });
@@ -417,6 +418,33 @@ describe('answers', () => {
     });
   });
 
+  test('every DATE path names a kept field', () => {
+    const { CALENDAR_DAY_PATHS } = mcpAdminRouter._private;
+    for (const [tool, paths] of Object.entries(CALENDAR_DAY_PATHS)) {
+      for (const path of paths) expect(TOOL_FIELDS[tool]).toContain(path);
+    }
+  });
+
+  test('a timestamp at exactly midnight UTC keeps its time; only listed DATE fields become plain days', async () => {
+    mockExecute.mockResolvedValue({
+      profile: { id: 'c-1', member_since: new Date('2024-05-01T00:00:00.000Z') },
+      recent_services: [{ id: 'r-1', date: new Date('2026-10-09T00:00:00.000Z'), status: 'completed' }],
+      recent_invoices: [{ id: 'i-1', amount: 59, status: 'paid', date: new Date('2026-10-31T00:00:00.000Z') }],
+    });
+    const detail = toolResult((await callTool('get_customer_detail', { customer_id: 'c-1' })).body);
+    expect(detail.data.profile.member_since).toBe('2024-05-01');
+    expect(detail.data.recent_services[0].date).toBe('2026-10-09');
+    // recent_invoices.date is the invoice's created_at: a timestamp, so 8 PM Oct 30 Eastern stays a timestamp.
+    expect(detail.data.recent_invoices[0].date).toBe('2026-10-31T00:00:00.000Z');
+
+    mockExecute.mockResolvedValue({
+      customers: [{ id: 'c-1', name: 'Pat Example', member_since: new Date('2024-05-01T00:00:00Z'), last_service_date: new Date('2026-10-01T00:00:00Z'), last_contact_date: new Date('2026-10-20T00:00:00.000Z') }],
+      total_matching: 1,
+    });
+    const [row] = toolResult((await callTool('query_customers', { search: 'Pat' })).body).data.customers;
+    expect(row).toMatchObject({ member_since: '2024-05-01', last_service_date: '2026-10-01', last_contact_date: '2026-10-20T00:00:00.000Z' });
+  });
+
   test('a calendar day leaves as YYYY-MM-DD; a real timestamp and the paging cursor stay whole', async () => {
     mockExecute.mockResolvedValue({
       appointments: [
@@ -431,11 +459,11 @@ describe('answers', () => {
     mockExecute.mockResolvedValue({
       generated_at: new Date('2026-10-31T00:00:00.123Z'),
       total_open: 1, returned: 1, next_cursor: '2026-10-31T00:00:00.000Z',
-      items: [{ id: 1, headline: 'x', created_at: new Date('2026-10-30T14:05:00Z') }],
+      items: [{ id: 1, headline: 'x', created_at: new Date('2026-10-31T00:00:00.000Z') }],
     });
     const needs = toolResult((await callTool('needs_me', {})).body);
     expect(needs.data.generated_at).toBe('2026-10-31T00:00:00.123Z');
-    expect(needs.data.items[0].created_at).toBe('2026-10-30T14:05:00.000Z');
+    expect(needs.data.items[0].created_at).toBe('2026-10-31T00:00:00.000Z');
     expect(needs.data.next_cursor).toBe('2026-10-31T00:00:00.000Z');
   });
 
