@@ -17,6 +17,7 @@ const {
   scoreCandidate,
   decideReviewLink,
   saysReviewed,
+  saidLeftReview,
 } = require('../services/review-link-evidence');
 
 const REVIEW_AT = '2026-10-20T18:00:00.000Z';
@@ -152,6 +153,28 @@ describe('activity around the review', () => {
     expect(saysReviewed('I left no review')).toBe(false);
     expect(saysReviewed('Left a review, not sure it went through')).toBe(true);
   });
+});
+
+describe('saidLeftReview: a done-fact statement, strict enough to stop review asks alone', () => {
+  test.each([
+    'Just left you a 5 star review!',
+    'I left you a review',
+    'I\u2019ve posted my review on Google',
+    'Review posted. Thank you!',
+    'My review was submitted this morning',
+    'Thanks! We left a review for the tech.',
+  ])('counts %s', (text) => expect(saidLeftReview(text)).toBe(true));
+
+  test.each([
+    'Can you send me the link so I can get my review posted?',
+    'I will let you know when I have left a review.',
+    'I have not left a review yet',
+    'I didn\u2019t leave a review',
+    'I left no review',
+    'When I left the review it asked me to sign in',
+    'Did you review the estimate?',
+    'I gave you guys 5 stars',
+  ])('never counts %s', (text) => expect(saidLeftReview(text)).toBe(false));
 });
 
 describe('decideReviewLink', () => {

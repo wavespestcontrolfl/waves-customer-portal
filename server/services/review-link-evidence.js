@@ -82,6 +82,20 @@ function saysReviewed(body) {
   return Boolean(claim) && !NEGATION_RE.test(claim[0]) && !NOT_REVIEWED_RE.test(text);
 }
 
+// Stricter: a sentence that states as a done fact that the customer left a review ("I left you a
+// review", "Just posted my review!", "Review posted.", "My review was submitted"). saysReviewed only adds
+// weight near a review that exists; this one stops review asks by itself (review-click-guard.js),
+// so a question, a plan, a condition or a request never counts ("can you send the link so I can get
+// my review posted?", "I will let you know when I have left a review").
+const DONE_REVIEW_RE = /\b(i|we|ive|weve)\b[^.!?]{0,12}\b(left|posted|wrote|submitted|gave)\b[^.!?]{0,25}\breview\b|\b(my|our|the) review\b[^.!?]{0,10}\b(is|was|has been)\b[^.!?]{0,8}\b(posted|done|submitted)\b|^\s*(just\s+)?(left|posted|submitted)\b[^.!?]{0,25}\breview\b|^\s*review\s+(posted|done|submitted|left)\b/i;
+const NOT_A_DONE_FACT_RE = /\?|\b(will|would|could|can|should|going to|gonna|plan|planning|try|trying|when|if|let (you|u) know|so (i|we) can|need to|want to|how|where)\b/i;
+function saidLeftReview(body) {
+  return String(body || '').split(/(?<=[.!?\n])/).some((sentence) => {
+    const plain = sentence.replace(/[’']/g, ''); // "I've" -> "Ive"
+    return DONE_REVIEW_RE.test(plain) && !NOT_A_DONE_FACT_RE.test(plain) && saysReviewed(sentence);
+  });
+}
+
 // Digits stay: dropping them would turn a handle ("Pemberton2") into a real surname.
 function nameTokens(value) {
   return foldNameLetters(value)
@@ -347,6 +361,7 @@ module.exports = {
   scoreCandidate,
   decideReviewLink,
   saysReviewed,
+  saidLeftReview,
   COMMON_SURNAMES,
   PORTAL_ERA_START,
 };

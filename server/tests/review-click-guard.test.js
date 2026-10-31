@@ -166,5 +166,10 @@ describe('probable reviewer', () => {
     expect(await guard.probableReviewer('cust-1', notYet)).toBe(false);
     const ours = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'outbound', message_body: 'Thanks, we saw you left a review!' }] });
     expect(await guard.probableReviewer('cust-1', ours)).toBe(false);
+    // A question or a plan never stops asks for good.
+    const asking = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'inbound', message_body: 'Can you send me the link so I can get my review posted?' }] });
+    expect(await guard.probableReviewer('cust-1', asking)).toBe(false);
+    const planning = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'inbound', message_body: 'I will let you know when I have left a review.' }] });
+    expect(await guard.probableReviewer('cust-1', planning)).toBe(false);
   });
 });

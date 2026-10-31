@@ -35,7 +35,7 @@
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
 const { reviewProbableReviewerGuardLive } = require('../config/feature-gates');
-const { saysReviewed } = require('./review-link-evidence');
+const { saidLeftReview } = require('./review-link-evidence');
 
 // A date-only visit column is that ET calendar day, so the fallback anchor is
 // ET midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
@@ -120,7 +120,7 @@ async function probableReviewer(customerId, database = db) {
     .where({ customer_id: customerId, direction: 'inbound' })
     .whereILike('message_body', '%review%')
     .select('message_body');
-  return texts.some((t) => saysReviewed(t.message_body));
+  return texts.some((t) => saidLeftReview(t.message_body));
 }
 
 // Operator-initiated asks with no visit and no cadence (Quick Links, admin,
