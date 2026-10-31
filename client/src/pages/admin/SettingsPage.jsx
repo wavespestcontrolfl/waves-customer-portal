@@ -596,16 +596,28 @@ function deepMergeConfig(base = {}, override = {}) {
 
 function VisitTimelineSettingsCard() {
   const [config, setConfig] = useState(null);
+  // A failed read, kept apart from save results so a retry that works leaves
+  // no stale error under the card. "Try again" bumps loadAttempt.
+  const [loadError, setLoadError] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   // { text, error }: an explicit flag, so a server refusal ("Admin access
   // required", "Request failed (422)") never renders as a success.
   const [message, setMessage] = useState(null);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoadError(null);
     adminFetch("/admin/settings/visit-timeline")
-      .then((data) => setConfig(data.config || data.defaults))
-      .catch((err) => setMessage({ text: `Could not load Visit Timeline settings. ${err.message}`, error: true }));
-  }, []);
+      .then((data) => {
+        if (cancelled) return;
+        // A reply with no settings is a failed read, not an endless "Loading".
+        if (!data?.config && !data?.defaults) throw new Error("The reply had no settings.");
+        setConfig(data.config || data.defaults);
+      })
+      .catch((err) => { if (!cancelled) setLoadError(err.message || "Request failed."); });
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
 
   const update = (patch) => setConfig((current) => ({ ...(current || {}), ...patch }));
 
@@ -632,6 +644,8 @@ function VisitTimelineSettingsCard() {
     setMessage(null);
     try {
       const data = await adminFetch("/admin/settings/visit-timeline/reset", { method: "POST" });
+      // A reply with no settings is an error; it must not blank the card into "Loading".
+      if (!data?.config) throw new Error("The reply had no settings.");
       setConfig(data.config);
       setMessage({ text: "Visit Timeline settings restored to defaults.", error: false });
     } catch (err) {
@@ -641,9 +655,11 @@ function VisitTimelineSettingsCard() {
     }
   };
 
-  // A failed load shows its error, not an endless "Loading".
+  // A failed load says so, with a retry; never an endless "Loading".
   if (!config) {
-    return <ActionFeedback error={message?.error} className="min-h-20">{message?.text || "Loading Visit Timeline settings..."}</ActionFeedback>;
+    return loadError
+      ? <ActionFeedback error onRetry={() => setLoadAttempt((n) => n + 1)} className="min-h-20">Could not load Visit Timeline settings. {loadError}</ActionFeedback>
+      : <ActionFeedback className="min-h-20">Loading Visit Timeline settings...</ActionFeedback>;
   }
 
   return (
@@ -1646,6 +1662,9 @@ function DayStartTab() {
 function ServiceCoverageSettingsTab() {
   const [config, setConfig] = useState(null);
   const [defaults, setDefaults] = useState(null);
+  // As in VisitTimelineSettingsCard: a failed read stays apart from save results.
+  const [loadError, setLoadError] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [serviceLine, setServiceLine] = useState("pest");
   const [saving, setSaving] = useState(false);
   // { text, error }, like VisitTimelineSettingsCard: never infer a failure
@@ -1653,13 +1672,18 @@ function ServiceCoverageSettingsTab() {
   const [message, setMessage] = useState(null);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoadError(null);
     adminFetch("/admin/settings/service-coverage")
       .then((data) => {
+        if (cancelled) return;
+        if (!data?.config && !data?.defaults) throw new Error("The reply had no settings.");
         setConfig(data.config || data.defaults);
         setDefaults(data.defaults || data.config);
       })
-      .catch((err) => setMessage({ text: `Could not load Service Coverage settings. ${err.message}`, error: true }));
-  }, []);
+      .catch((err) => { if (!cancelled) setLoadError(err.message || "Request failed."); });
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
 
   const update = (patch) => setConfig((current) => deepMergeConfig(current || defaults || {}, patch));
   const currentIntroKey = serviceLine === "default" ? "default" : serviceLine;
@@ -1699,9 +1723,19 @@ function ServiceCoverageSettingsTab() {
     }
   };
 
-  // A failed load shows its error, not an endless "Loading".
+  // A failed load says so, with a retry; never an endless "Loading". Visit
+  // Timeline has its own read, so it shows whatever happens here. It is the
+  // first child in both returns, so React keeps it, unsaved edits included,
+  // when this card finishes loading.
   if (!config) {
-    return <ActionFeedback error={message?.error} className="min-h-20">{message?.text || "Loading Service Coverage settings..."}</ActionFeedback>;
+    return (
+      <div className="space-y-5">
+        <VisitTimelineSettingsCard />
+        {loadError
+          ? <ActionFeedback error onRetry={() => setLoadAttempt((n) => n + 1)} className="min-h-20">Could not load Service Coverage settings. {loadError}</ActionFeedback>
+          : <ActionFeedback className="min-h-20">Loading Service Coverage settings...</ActionFeedback>}
+      </div>
+    );
   }
 
   return (
