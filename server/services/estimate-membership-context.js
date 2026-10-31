@@ -1998,9 +1998,9 @@ function plannedVisitCost(line, visits, fortyTwoDaySeries) {
 // config) at the plan the customer has now (visitsPerYear); any other family,
 // a setup estimate without saved inputs, or an unknown current plan reads
 // that estimate's own engine line. null when the frozen rows trace to no
-// single setup estimate, the engine has no price for the current plan (pest
-// 3x a year would price as quarterly), or the line carries no margin — the
-// tool then shows none. The caller has synced the pricing config.
+// single setup estimate, today's engine prices a different plan than the
+// customer has, or the line carries no margin — the tool then shows none.
+// The caller has synced the pricing config.
 async function offeredFamilyMarginPct(database, service, visitsPerYear) {
   const rowIds = Array.isArray(service?.rowIds) ? service.rowIds : [];
   if (!rowIds.length || !(Number(service.newPerVisit) > 0)) return null;
@@ -2032,19 +2032,23 @@ async function offeredFamilyMarginPct(database, service, visitsPerYear) {
   const estData = parseEstimateData(await database('estimates').where({ id: [...estimateIds][0] }).first('estimate_data'));
   const plan = TODAY_ENGINE_PLANS[service.key];
   const request = estData?.engineRequest;
-  let lineItems = estData?.engineResult?.lineItems;
+  const lineFor = (lineItems) => (lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
+  let line = lineFor(estData?.engineResult?.lineItems);
   let visits = estimateVisitsFor(estData, service.key);
   if (plan && request?.profile && visitsPerYear > 0) {
     // Lazy-require the route adapter (service -> route load order), as the save's replay does.
-    const { translateV2CallToV1Input, V1_VISIT_PLANS } = require('../routes/property-lookup-v2');
-    if (!V1_VISIT_PLANS[plan.code][visitsPerYear]) return null;
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
     const { generateEstimate } = require('./pricing-engine');
-    lineItems = generateEstimate(translateV2CallToV1Input(
+    line = lineFor(generateEstimate(translateV2CallToV1Input(
       request.profile, [plan.code], { ...request.options, [plan.visitsOption]: visitsPerYear },
-    )).lineItems;
+    )).lineItems);
+    // The engine sells fewer plans than customers hold and prices any other
+    // count as a default plan (pest 3x as quarterly; lawn 4x, and 6x while
+    // that tier is hidden, as 9x). Its line states the visits it priced (pest
+    // visitsPerYear, lawn frequency): a different plan gives no margin.
+    if (Number(line?.visitsPerYear ?? line?.frequency) !== visitsPerYear) return null;
     visits = visitsPerYear;
   }
-  const line = (lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
   const cost = plannedVisitCost(line, visits, fortyTwoDaySeries);
   return cost === null ? null : Math.round((1 - cost / Number(service.newPerVisit)) * 1000) / 10;
 }
