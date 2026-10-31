@@ -163,6 +163,25 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       expect((await row(ask.id)).status).toBe('open');
     });
 
+    test('a thrown-out cancel does not count: a dismissed cancel card, or a call turned voicemail', async () => {
+      const first = await canceledLead();
+      await trx('triage_items').where({ id: first.cancel.id }).update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.' });
+      const second = await canceledLead();
+      await trx('call_log').where({ id: second.cancelCall }).update({ processing_status: 'voicemail' });
+      const third = await canceledLead();
+      await trx('call_log').where({ id: third.cancelCall }).update({ answered_by: 'voicemail' });
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
+      for (const lead of [first, second, third]) expect((await row(lead.ask.id)).status).toBe('open');
+      expect(await _test.cancelStands(trx, first.cancelCall)).toBe(false);
+    });
+
+    test('a resolved cancel card still counts (the office handled the cancel)', async () => {
+      const { cancel, ask } = await canceledLead();
+      await trx('triage_items').where({ id: cancel.id }).update({ status: 'resolved' });
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 1 });
+      expect((await row(ask.id)).status).toBe('dismissed');
+    });
+
     test('gate off: nothing is read or written', async () => {
       const { ask } = await canceledLead();
       delete process.env[GATE];
@@ -179,11 +198,20 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       });
     });
 
-    test('a later processed call hides it; a later voicemail does not', async () => {
+    test('a later real conversation hides it; later voicemails and spam do not, even when marked processed', async () => {
       const { customerId } = await canceledLead();
       await call(customerId, '2026-10-30T12:00:00Z', { processing_status: 'voicemail' });
+      await call(customerId, '2026-10-30T12:10:00Z', { answered_by: 'voicemail' });
+      await call(customerId, '2026-10-30T12:20:00Z', { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) });
+      await call(customerId, '2026-10-30T12:30:00Z', { ai_extraction_enriched: JSON.stringify({ spam_verdict: { spam_kind: 'robocall' } }) });
       expect(await latestCancelCall(customerId, { now: NOW })).not.toBeNull();
       await call(customerId, '2026-10-30T13:00:00Z');
+      expect(await latestCancelCall(customerId, { now: NOW })).toBeNull();
+    });
+
+    test('a dismissed cancel card shows nothing', async () => {
+      const { customerId, cancel } = await canceledLead();
+      await trx('triage_items').where({ id: cancel.id }).update({ status: 'dismissed' });
       expect(await latestCancelCall(customerId, { now: NOW })).toBeNull();
     });
 

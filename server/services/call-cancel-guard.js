@@ -14,7 +14,9 @@
  *     conversation in the last 14 days, when that call filed a cancel card. A warning only; the save always goes through.
  *
  * Never texts, emails or touches a visit. Fails closed: any visit that is not completed or cancelled (or has no status)
- * keeps every card open, and a card a person claimed (in_progress) is never touched.
+ * keeps every card open, a card a person claimed (in_progress) is never touched, and a cancel counts only from a card
+ * that was not dismissed, on a call that is still a real conversation (a transcript rejected as a hallucination turns
+ * its call into a voicemail and dismisses its cards, so its cancel no longer counts).
  */
 
 const db = require('../models/db');
@@ -22,6 +24,7 @@ const logger = require('./logger');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { formatETDayDate, formatETTime } = require('../utils/datetime-et');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { parseExtraction, isRealConversation } = require('./call-held-visits');
 
 const CANCEL_REASON = 'cancellation_request';
 // The cards that ask the office to BOOK this call's visit. existing_appointment_* and booking_* cards answer to a visit
@@ -34,6 +37,9 @@ const NOTICE_WINDOW_DAYS = 14;
 const SCAN_LIMIT = 200;
 const MAX_DISMISSALS_PER_RUN = 50;
 const CLOSED_VISIT_STATUSES = ['completed', 'cancelled'];
+// A dismissed cancel card was thrown out (a rejected transcript, or a person who judged it not a cancel).
+const COUNTED_CANCEL_CARD_STATUSES = ['open', 'in_progress', 'resolved'];
+const NOTICE_SCAN_LIMIT = 20;
 const DAY_MS = 86400 * 1000;
 
 const live = () => require('../config/feature-gates').callCancelGuardLive();
@@ -46,6 +52,19 @@ async function hasLiveVisit(conn, customerId) {
     .where((qb) => qb.whereNull('status').orWhereNotIn('status', CLOSED_VISIT_STATUSES))
     .first('id');
   return Boolean(row);
+}
+
+const realConversation = (call) => isRealConversation(call, parseExtraction(call.ai_extraction_enriched) || {});
+
+// The cancel still stands: the call is still a real conversation and its cancel card was not dismissed.
+async function cancelStands(conn, callId) {
+  const call = await conn('call_log').where({ id: callId }).first('processing_status', 'answered_by', 'ai_extraction_enriched');
+  if (!call || call.processing_status !== 'processed' || !realConversation(call)) return false;
+  const card = await conn('triage_items')
+    .where({ call_log_id: callId, reason_code: CANCEL_REASON })
+    .whereIn('status', COUNTED_CANCEL_CARD_STATUSES)
+    .first('id');
+  return Boolean(card);
 }
 
 function cancelNote(cancel) {
@@ -62,6 +81,8 @@ async function runCallCancelGuardSweep({ now = new Date() } = {}) {
   const cancels = await db('triage_items as t')
     .join('call_log as c', 'c.id', 't.call_log_id')
     .where('t.reason_code', CANCEL_REASON)
+    .whereIn('t.status', COUNTED_CANCEL_CARD_STATUSES)
+    .where('c.processing_status', 'processed')
     .where('c.created_at', '>=', new Date(now.getTime() - LOOKBACK_DAYS * DAY_MS))
     .whereNotNull('c.customer_id')
     .modify((qb) => whereNotSandboxCall(qb, 'c.source'))
@@ -71,6 +92,7 @@ async function runCallCancelGuardSweep({ now = new Date() } = {}) {
   let dismissed = 0;
   for (const cancel of cancels) {
     if (dismissed >= MAX_DISMISSALS_PER_RUN) break;
+    if (!(await cancelStands(db, cancel.call_id))) continue;
     if (await hasLiveVisit(db, cancel.customer_id)) continue;
     const cancelAt = new Date(cancel.created_at);
     const cards = await db('triage_items as t')
@@ -86,8 +108,11 @@ async function runCallCancelGuardSweep({ now = new Date() } = {}) {
     for (const card of cards) {
       if (dismissed >= MAX_DISMISSALS_PER_RUN) break;
       await db.transaction(async (trx) => {
-        await lockTriageCall(trx, card.call_log_id);
-        // A visit booked since the read above means a person is working this customer: leave the card.
+        // Both calls, in one fixed order: the card's call (the write) and the cancel call (its evidence, which a
+        // transcript rejection changes under the same lock).
+        for (const id of [card.call_log_id, cancel.call_id].map(String).sort()) await lockTriageCall(trx, id);
+        // The cancel was thrown out, or a visit was booked, since the reads above: leave the card.
+        if (!(await cancelStands(trx, cancel.call_id))) return;
         if (await hasLiveVisit(trx, cancel.customer_id)) return;
         const stamp = new Date();
         const n = await trx('triage_items').where({ id: card.id, status: 'open' }).update({
@@ -105,20 +130,24 @@ async function runCallCancelGuardSweep({ now = new Date() } = {}) {
 }
 
 /**
- * The customer's latest real conversation in the last 14 days, when that call filed a cancel card; else null.
- * A later conversation (inbound or outbound) hides it: the cancel is no longer the customer's latest word.
+ * The customer's latest real conversation in the last 14 days, when that call filed a cancel card that still stands;
+ * else null. Voicemails and spam are skipped, even ones marked processed. A later real conversation (inbound or
+ * outbound) hides it: the cancel is no longer the customer's latest word.
  * @returns {Promise<null|{callId:string, at:string, summary:string|null}>}
  */
 async function latestCancelCall(customerId, { now = new Date() } = {}) {
-  const latest = await db('call_log')
+  const recent = await db('call_log')
     .where({ customer_id: customerId, processing_status: 'processed' })
     .where('created_at', '>=', new Date(now.getTime() - NOTICE_WINDOW_DAYS * DAY_MS))
     .modify((qb) => whereNotSandboxCall(qb))
     .orderBy('created_at', 'desc')
-    .first('id', 'created_at');
+    .limit(NOTICE_SCAN_LIMIT)
+    .select('id', 'created_at', 'processing_status', 'answered_by', 'ai_extraction_enriched');
+  const latest = recent.find(realConversation);
   if (!latest) return null;
   const card = await db('triage_items')
     .where({ call_log_id: latest.id, reason_code: CANCEL_REASON })
+    .whereIn('status', COUNTED_CANCEL_CARD_STATUSES)
     .orderBy('created_at', 'desc')
     .first('summary');
   if (!card) return null;
@@ -128,5 +157,5 @@ async function latestCancelCall(customerId, { now = new Date() } = {}) {
 module.exports = {
   runCallCancelGuardSweep,
   latestCancelCall,
-  _test: { BOOKING_ASK_REASONS, DISMISS_RULE, cancelNote, hasLiveVisit },
+  _test: { BOOKING_ASK_REASONS, DISMISS_RULE, cancelNote, hasLiveVisit, cancelStands },
 };
