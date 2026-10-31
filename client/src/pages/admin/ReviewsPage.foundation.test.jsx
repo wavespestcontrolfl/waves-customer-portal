@@ -59,6 +59,48 @@ describe("Reviews workspace foundation", () => {
     expect(screen.getByText("Sarasota", { selector: "span" })).toBeInTheDocument();
   });
 
+  it("a search refresh keeps the search focused and an unsaved reply; a failed one keeps the list", async () => {
+    const fetch = vi.fn(async (url) => {
+      if (String(url).includes("search=Ta")) {
+        return response({ error: "Synthetic refresh failure" }, 503);
+      }
+      return response({
+        reviews: [{
+          id: "review-1",
+          reviewerName: "Taylor Example",
+          reviewText: "Synthetic review evidence",
+          starRating: 5,
+          locationId: "sarasota",
+        }],
+        locations: [],
+        stats: { totalReviews: 1, avgRating: 5, unresponded: 1, responded: 0 },
+      });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<ReviewsPage />);
+    const reply = await screen.findByPlaceholderText("Write your reply...");
+    fireEvent.change(reply, { target: { value: "Thanks, Taylor!" } });
+
+    const searchBox = screen.getByPlaceholderText("Search reviews...");
+    searchBox.focus();
+    fireEvent.change(searchBox, { target: { value: "T" } });
+    await waitFor(() =>
+      expect(fetch.mock.calls.some(([u]) => String(u).includes("search=T"))).toBe(true),
+    );
+    await screen.findByText("1 review");
+    expect(document.activeElement).toBe(searchBox);
+    expect(searchBox).toHaveValue("T");
+    expect(screen.getByPlaceholderText("Write your reply...")).toHaveValue("Thanks, Taylor!");
+
+    fireEvent.change(searchBox, { target: { value: "Ta" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not refresh reviews: Synthetic refresh failure",
+    );
+    expect(screen.getByText("Synthetic review evidence")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Write your reply...")).toHaveValue("Thanks, Taylor!");
+    expect(document.activeElement).toBe(searchBox);
+  });
+
   it("keeps the grouped Reviews, Outreach, Incentives, and GBP workspaces reachable", async () => {
     const fetch = vi.fn(async () =>
       response({

@@ -640,6 +640,9 @@ export default function ReviewVelocityEngine() {
   const [activityLog, setActivityLog] = useState([]);
   const [activityError, setActivityError] = useState("");
   const [analytics, setAnalytics] = useState(null);
+  // A failed read must not look like a measured zero: the dashboard shows
+  // "—" (or the last numbers loaded) beside this message and a Retry.
+  const [analyticsError, setAnalyticsError] = useState("");
   // GATE_REVIEW_SEQUENCES && GATE_CRON_JOBS as the candidates response reports
   // them; null until known.
   const [sequencesEnabled, setSequencesEnabled] = useState(null);
@@ -675,10 +678,20 @@ export default function ReviewVelocityEngine() {
         }
       });
   }, []);
+  const analyticsRequest = useRef(0);
   const loadAnalytics = useCallback(() => {
+    const request = ++analyticsRequest.current;
     return adminFetch("/admin/reviews/outreach-analytics?days=90")
-      .then((d) => setAnalytics(d))
-      .catch(() => {});
+      .then((d) => {
+        if (request !== analyticsRequest.current) return;
+        setAnalyticsError("");
+        setAnalytics(d);
+      })
+      .catch((error) => {
+        if (request === analyticsRequest.current) {
+          setAnalyticsError(error?.message || "Analytics could not be loaded.");
+        }
+      });
   }, []);
 
   // Load real outreach candidates + analytics + activity from the API.
@@ -996,6 +1009,8 @@ export default function ReviewVelocityEngine() {
           queue={queue}
           activityLog={activityLog}
           analytics={analytics}
+          analyticsError={analyticsError}
+          onRetryAnalytics={loadAnalytics}
           setPage={setPage}
         />
       )}
@@ -1071,12 +1086,16 @@ function Dashboard({
   queue,
   activityLog,
   analytics,
+  analyticsError,
+  onRetryAnalytics,
   setPage,
 }) {
   // Real funnel from /outreach-analytics (audit O1) — no longer derived from the
   // candidate pool (which structurally never contains a reviewed customer, so
   // the old "Reviewed" / "Conversion" tiles were permanently zero).
   const f = analytics?.funnel || {};
+  // No analytics loaded (still loading, or the read failed): "—", never 0.
+  const shown = (value) => (analytics ? value : "—");
   const reviewsLanded = (analytics?.googleByLocation || []).reduce(
     (s, r) => s + (Number(r.reviews) || 0),
     0,
@@ -1094,13 +1113,15 @@ function Dashboard({
     },
     {
       label: "Reviews Landed",
-      value: reviewsLanded,
+      value: shown(reviewsLanded),
       desc: "Google reviews in last 90d",
     },
     {
       label: "Click→Google",
       value: f.conversionRate != null ? `${f.conversionRate}%` : "—",
-      desc: `${f.reviewed ?? 0} of ${f.sent ?? 0} asks converted`,
+      desc: analytics
+        ? `${f.reviewed ?? 0} of ${f.sent ?? 0} asks converted`
+        : "asks converted",
     },
   ];
   // Digital business cards carry a passive review QR (/l kind='card');
@@ -1118,20 +1139,20 @@ function Dashboard({
   const funnelStages = [
     {
       label: "Sent",
-      value: f.sent ?? 0,
+      value: shown(f.sent ?? 0),
     },
     {
       label: "Opened",
-      value: f.opened ?? 0,
+      value: shown(f.opened ?? 0),
       rate: f.openRate,
     },
     {
       label: "Rated",
-      value: f.rated ?? 0,
+      value: shown(f.rated ?? 0),
     },
     {
       label: "Click→Google",
-      value: f.reviewed ?? 0,
+      value: shown(f.reviewed ?? 0),
       rate: f.conversionRate,
     },
   ];
@@ -1142,6 +1163,18 @@ function Dashboard({
     .slice(0, 5);
   return (
     <div>
+      {analyticsError && (
+        <Card
+          role="alert"
+          className="mb-[14px] flex flex-wrap items-center justify-between gap-[8px] p-[12px] text-ui-body text-alert-fg"
+        >
+          <span>
+            Outreach numbers could not be loaded: {analyticsError}.
+            {analytics ? " Showing the last numbers loaded." : ""}
+          </span>
+          <Btn onClick={onRetryAnalytics}>Retry</Btn>
+        </Card>
+      )}
       {/* KPIs */}
       <div className="mb-[20px]">
         {" "}
@@ -1176,7 +1209,7 @@ function Dashboard({
           {/* Funnel bars */}
           <Card className="p-[16px]">
             {funnelStages.map((s, i) => {
-              const top = funnelStages[0].value || 0;
+              const top = Number(funnelStages[0].value) || 0;
               const pct = top > 0 ? Math.round((s.value / top) * 100) : 0;
               return (
                 <div
@@ -1214,7 +1247,7 @@ function Dashboard({
             <SectionLabel>By Channel</SectionLabel>
             {byChannel.length === 0 ? (
               <div className="text-ui-body text-zinc-900 mb-[10px]">
-                No sends yet
+                {analytics ? "No sends yet" : "Unavailable"}
               </div>
             ) : (
               <div className="flex gap-[8px] flex-wrap mb-[12px]">
@@ -1239,7 +1272,9 @@ function Dashboard({
             )}
             <SectionLabel>Top Templates</SectionLabel>
             {byTemplate.length === 0 ? (
-              <div className="text-ui-body text-zinc-900">No sends yet</div>
+              <div className="text-ui-body text-zinc-900">
+                {analytics ? "No sends yet" : "Unavailable"}
+              </div>
             ) : (
               byTemplate.map((t) => (
                 <div
@@ -1258,7 +1293,7 @@ function Dashboard({
               <div className="text-ui-body text-zinc-900">
                 Active cadences:{" "}
                 <span className="font-medium text-zinc-900">
-                  {analytics?.activeSequences ?? 0}
+                  {shown(analytics?.activeSequences ?? 0)}
                 </span>
               </div>
               <div className="text-ui-body text-zinc-900">
@@ -1296,7 +1331,7 @@ function Dashboard({
             const locRow = (analytics?.byLocation || []).find(
               (r) => r.locationId === loc.id,
             );
-            const locReviewed = gbpRow?.reviews ?? 0;
+            const locReviewed = shown(gbpRow?.reviews ?? 0);
             const locSent = locRow?.sent ?? 0;
             const locConverted = locRow?.reviewed ?? 0;
             const locQueue = locCusts.filter(
@@ -1325,7 +1360,7 @@ function Dashboard({
                       l: "Reviewed",
                     },
                     {
-                      v: locSent,
+                      v: shown(locSent),
                       l: "Asked",
                     },
                     {
@@ -1333,7 +1368,7 @@ function Dashboard({
                       l: "In Queue",
                     },
                     {
-                      v: `${locSent > 0 ? Math.round((locConverted / locSent) * 100) : 0}%`,
+                      v: shown(`${locSent > 0 ? Math.round((locConverted / locSent) * 100) : 0}%`),
                       l: "Conv Rate",
                     },
                   ].map((s) => (
@@ -1372,7 +1407,13 @@ function Dashboard({
         <div className="text-ui-body font-medium mb-[10px]">
           Review Velocity
         </div>{" "}
-        <VelocityChart velocity={analytics?.velocity || []} />
+        {analytics ? (
+          <VelocityChart velocity={analytics.velocity || []} />
+        ) : (
+          <Card className="p-[20px] text-ui-body text-zinc-900 text-center">
+            Unavailable
+          </Card>
+        )}
       </div>
       {/* Recent Activity */}
       <div>
