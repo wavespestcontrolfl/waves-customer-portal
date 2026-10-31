@@ -440,6 +440,26 @@ function annualPrepayLabelsMatch(left, right) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+// The cadence a label names, read WITHOUT the billing suffix: a legacy term's
+// planLabel "Pest Control Annual Prepay" names no cadence (the "Annual" is the
+// product), but the raw text would infer annual. Every cadence comparison for
+// dropdown dedupe and amount lookup reads labels through here.
+function annualPrepayLabelServiceCadence(label) {
+  return inferAnnualPrepayCadenceFromLabel(String(label || "").replace(/\s+Annual Prepay$/i, ""));
+}
+
+// Amount lookup match: the same service label match, plus cadence. When the
+// selected label names a cadence, a candidate whose own label names a different
+// one must not supply the amount (two plans of one service, different cadences,
+// different totals). A candidate or selection that names no cadence still
+// matches, so the single-plan case is unchanged (sweep #3960 A3, codex P1).
+function annualPrepayAmountLabelsMatch(candidateLabel, serviceType) {
+  if (!annualPrepayLabelsMatch(candidateLabel, serviceType)) return false;
+  const wanted = annualPrepayLabelServiceCadence(serviceType);
+  const candidate = annualPrepayLabelServiceCadence(candidateLabel);
+  return !wanted || !candidate || wanted === candidate;
+}
+
 function formatAnnualPrepayServiceLabel(baseLabel, cadence) {
   const base = String(baseLabel || "").trim();
   if (!base) return "";
@@ -476,15 +496,27 @@ function inferAnnualPrepayServiceBase(customer, activeTerm = null, prepaidPlans 
   return "Pest Control";
 }
 
-function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPlans = [], annualPrepayTerms = []) {
-  const seen = new Set();
+// Dropdown dedupe: the label key ignores cadence words, so the inferred cadence
+// joins it. "Lawn Care - Every 2 Months" and "Lawn Care - Every 3 Months" are
+// two plans; true duplicates (same service, same cadence) still merge, and a
+// label that names no cadence merges into any same-service option (sweep #3960 A3).
+function annualPrepayOptionIsDuplicate(seen, key, cadence) {
+  const sameService = seen.filter((entry) => entry.key === key);
+  if (!sameService.length) return false;
+  if (!cadence) return true;
+  return sameService.some((entry) => entry.cadence === cadence);
+}
+
+export function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPlans = [], annualPrepayTerms = []) {
+  const seen = [];
   const options = [];
   const push = (label, source = "saved") => {
     const text = String(label || "").trim();
     if (!text) return;
     const key = normalizeAnnualPrepayLabelKey(text);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
+    const cadence = annualPrepayLabelServiceCadence(text);
+    if (!key || annualPrepayOptionIsDuplicate(seen, key, cadence)) return;
+    seen.push({ key, cadence });
     options.push({ value: text, label: text, source });
   };
 
@@ -554,8 +586,8 @@ function annualPrepayRenewalDefault(term) {
   return noticed > 0 && untaxed ? noticed : base;
 }
 
-function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
-  const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayLabelsMatch(
+export function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
+  const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayAmountLabelsMatch(
     activeTerm.coverageServiceType || activeTerm.planLabel || "",
     serviceType,
   )
@@ -567,16 +599,16 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
   const activeTermMatch = Array.isArray(customer?.annualPrepayTerms)
     ? customer.annualPrepayTerms.find((term) => {
       const termLabel = term?.coverageServiceType || term?.planLabel || "";
-      return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayLabelsMatch(termLabel, serviceType);
+      return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayAmountLabelsMatch(termLabel, serviceType);
     })
     : null;
   const activeTermMatchBase = annualPrepayRenewalDefault(activeTermMatch);
   if (activeTermMatchBase > 0) return activeTermMatchBase;
 
   const matchingPlan = Array.isArray(prepaidPlans) && prepaidPlans.length > 0
-    ? prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
+    ? prepaidPlans.find((plan) => annualPrepayAmountLabelsMatch(plan?.serviceType, serviceType))
     : Array.isArray(customer?.prepaidPlans)
-      ? customer.prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
+      ? customer.prepaidPlans.find((plan) => annualPrepayAmountLabelsMatch(plan?.serviceType, serviceType))
       : null;
   if (matchingPlan?.seriesTotal > 0) return Number(matchingPlan.seriesTotal);
 
@@ -4109,9 +4141,10 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
     } else if (estimateSuggestionMatchesService(estimateSuggestion, nextServiceType, nextCoverageCadence, nextVisitCount)) {
       amountFromEstimateRef.current = true;
       setAmount(Number(estimateSuggestion.amount).toFixed(2));
-    } else if (amountFromEstimateRef.current) {
-      // The standing amount was the estimate's quoted year for a DIFFERENT
-      // service or schedule — clear rather than silently record it here.
+    } else {
+      // An untouched amount is always one this form suggested (the previous
+      // plan's total, or the estimate's quoted year) for a DIFFERENT service
+      // or schedule — clear rather than silently record it here.
       amountFromEstimateRef.current = false;
       setAmount("");
     }
@@ -4541,7 +4574,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
       activeTerm,
       prepaidPlans,
     );
-    if (nextSuggested > 0) setAmount(nextSuggested.toFixed(2));
+    // Untouched means the amount is this form's own suggestion for the previous
+    // plan, so a plan with no suggestion clears it rather than keeping that total.
+    setAmount(nextSuggested > 0 ? nextSuggested.toFixed(2) : "");
   };
 
   const handleServiceTypeChange = (value) => {
@@ -10407,10 +10442,12 @@ function useCustomerPayer({
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
   useEffect(() => {
+    // /admin/payers is requireAdmin: a non-admin's request is always refused.
+    if (!isAdmin) return;
     adminFetch("/admin/payers")
       .then((r) => setPayers(Array.isArray(r?.payers) ? r.payers : []))
       .catch(() => setPayers([]));
-  }, []);
+  }, [isAdmin]);
   const savePayer = async (payerId) => {
     setPayerSaving(true);
     setProfileActionErr("");

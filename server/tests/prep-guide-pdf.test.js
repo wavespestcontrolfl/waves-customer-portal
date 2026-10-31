@@ -7,6 +7,7 @@
 const { PassThrough } = require('stream');
 const PDFDocument = require('pdfkit');
 const { renderPrepGuidePdf } = require('../services/pdf/prep-guide-pdf');
+const { WAVES_ADDRESS_LINE } = require('../constants/business');
 
 function fakeRes() {
   const stream = new PassThrough();
@@ -54,6 +55,7 @@ const BASE = {
 
 describe('prep-guide-pdf list blocks + inline links', () => {
   test('streams a well-formed PDF for a mix of block types incl. list', async () => {
+    const { calls } = spyOnText();
     const buf = await renderToBuffer({
       ...BASE,
       blocks: [
@@ -67,6 +69,10 @@ describe('prep-guide-pdf list blocks + inline links', () => {
     expect(Buffer.isBuffer(buf)).toBe(true);
     expect(buf.slice(0, 5).toString('latin1')).toBe('%PDF-');
     expect(buf.length).toBeGreaterThan(500);
+    // Masthead + footer print the Luxe Ave office; ComCenters asked (2026-09-29) that Waves stop using 9040 Town Center Pkwy.
+    const drawn = calls.map(String).join('\n');
+    expect(drawn).toContain(WAVES_ADDRESS_LINE);
+    expect(drawn).not.toContain('Town Center');
   });
 
   test('renders safe markdown links as "label (url)" text', async () => {

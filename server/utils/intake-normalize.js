@@ -106,7 +106,7 @@ function normalizeZip(value) {
  * @param {Object} before  - existing customer row (needs phone + line_type)
  */
 // The shared-phone texting mark (customers.sms_primary_for_shared_phone,
-// GATE_SMS_SHARED_PHONE_LINK) was chosen for ONE number. Any writer that
+// owner 2026-10-10 "link text") was chosen for ONE number. Any writer that
 // changes the number's last-10-digit identity drops the mark unless the same
 // write sets it for the new number (updates carries the column). A stale mark
 // on a number that is, or later becomes, shared would route the other

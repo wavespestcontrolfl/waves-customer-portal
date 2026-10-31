@@ -219,6 +219,29 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     expect(isActivePlanCustomer).not.toHaveBeenCalled();
   });
 
+  test('a declined estimate is never reconciled either — every document shows the quote the customer turned down (10-30 audit F5)', async () => {
+    // The fallback PDF (estimate-proposal-billing) already freezes declined;
+    // the public data path and the browser document must agree with it.
+    isActivePlanCustomer.mockResolvedValue(false);
+    const estimate = estimateRow(frozenEstData(), { status: 'declined' });
+    const before = estimate.estimate_data;
+
+    await reconcileFrozenMembershipSnapshot(estimate);
+
+    expect(estimate.estimate_data).toBe(before);
+    expect(estimate.onetime_total).toBe(127.5);
+    expect(isActivePlanCustomer).not.toHaveBeenCalled();
+    expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
+  });
+
+  test('a sent estimate still reconciles (the declined rule does not widen)', async () => {
+    isActivePlanCustomer.mockResolvedValue(false);
+    const estimate = estimateRow(frozenEstData(), { status: 'sent' });
+
+    expect(await reconcileFrozenMembershipSnapshot(estimate)).toEqual({ ok: true });
+    expect(estimate.onetime_total).toBe(150);
+  });
+
   test('no linked customer means nothing to re-verify — untouched', async () => {
     const estimate = estimateRow(frozenEstData(), { customer_id: null });
     const before = estimate.estimate_data;

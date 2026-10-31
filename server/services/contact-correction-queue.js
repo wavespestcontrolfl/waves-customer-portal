@@ -235,8 +235,7 @@ async function attachReservationBody(jobId, body, { knex = db } = {}) {
 
 /**
  * The sender's one account: a single non-deleted phone match, or — when more
- * than one row shares the number and GATE_SMS_SHARED_PHONE_LINK is on — the
- * one row staff marked primary (services/shared-phone-link.js, the same rule
+ * than one row shares the number — the one row staff marked primary (services/shared-phone-link.js, the same rule
  * as the route's matcher, codex #6268 r3). Null = unlinked, fail closed.
  */
 async function resolveSenderCustomerId(trx, senderKey) {
@@ -247,11 +246,8 @@ async function resolveSenderCustomerId(trx, senderKey) {
     .select('id');
   if (matches.length === 1) return matches[0].id;
   if (matches.length > 1) {
-    const link = require('./shared-phone-link');
-    if (link.sharedPhoneLinkEnabled()) {
-      const picked = await link.pickMarkedCustomerForPhone(trx, senderKey);
-      if (picked.customer) return picked.customer.id;
-    }
+    const picked = await require('./shared-phone-link').pickMarkedCustomerForPhone(trx, senderKey);
+    if (picked.customer) return picked.customer.id;
   }
   return null;
 }
@@ -399,8 +395,7 @@ async function staleLinkageRefusal(knex, job, smsLog) {
       .limit(2)
       .select('id');
     if (live.length < 2) return null;
-    const link = require('./shared-phone-link');
-    const picked = link.sharedPhoneLinkEnabled() ? await link.pickMarkedCustomerForPhone(knex, senderKey) : { customer: null };
+    const picked = await require('./shared-phone-link').pickMarkedCustomerForPhone(knex, senderKey);
     return picked.customer && String(picked.customer.id) === String(job.customer_id) ? null : 'stale_link_mismatch';
   } catch (err) {
     // Knex formats bindings into a failed query's message, which would put

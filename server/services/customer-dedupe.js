@@ -4469,7 +4469,14 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
     for (const candidate of group.candidates) {
       if (onlyPair && String(candidate.loser.id) !== String(onlyPair.loserId)) continue;
       if (candidate.tier !== 'green') {
-        results.skipped.push({ loserId: candidate.loser.id, tier: candidate.tier, reasons: candidate.reasons });
+        // Say why a pair stays for review (owner 2026-10-31: the sweep merged
+        // 3 pairs in 3 months and logged nothing about the rest, so a pair
+        // stuck yellow on a packed street line looked like a working merge).
+        // Ids, tier, reasons and both rows' intake sources only, never names:
+        // enough to see a stuck pair and which intake path made the extra row.
+        // A non-green pair always has reasons; a missing source prints null.
+        logger.info(`[customer-dedupe] auto-merge left ${candidate.loser.id} -> ${group.winner.id} for review: tier=${candidate.tier} reasons=${candidate.reasons.join(',')} sources=${group.winner.lead_source}/${candidate.loser.lead_source}`);
+        results.skipped.push({ loserId: candidate.loser.id, winnerId: group.winner.id, tier: candidate.tier, reasons: candidate.reasons });
         continue;
       }
       try {
@@ -4530,6 +4537,20 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
   return results;
 }
 
+
+// One short reason count for the sweep's log line ("address_conflict:3,
+// name_conflict:1"): the first token of every skipped pair's reasons
+// ("merge_failed: <message>" counts as merge_failed). Pure.
+function summarizeSweepSkips(skipped = []) {
+  const counts = new Map();
+  for (const entry of skipped || []) {
+    for (const reason of entry?.reasons || []) {
+      const key = String(reason).split(':')[0].trim() || 'unknown';
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  return [...counts.entries()].map(([key, n]) => `${key}:${n}`).join(',');
+}
 
 // ---------------------------------------------------------------------------
 // Red-pair auto-dismiss sweep (cron entry point — caller owns the gate)
@@ -7638,3 +7659,5 @@ module.exports = {
     resetFkCache: () => { fkColumnsCache = null; },
   },
 };
+// The sweep's reason count, read by the scheduler's log line. Own line: a shared export block conflicts between PRs.
+module.exports.summarizeSweepSkips = summarizeSweepSkips;

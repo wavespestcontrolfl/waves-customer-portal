@@ -345,7 +345,7 @@ describe('codex r1 — required emissions keep ringing', () => {
       'credential', 'customer', 'call_pipeline_drift',
       'social_compliance_rejected', 'content', 'stale_visit_sweep',
       'wdo_report_attention', 'email_digest', 'eval_regression',
-      'service-prefs', 'email_alert', 'email_rescue', 'email_rescue_review',
+      'service-prefs', 'email_alert', 'email_rescue', 'email_rescue_review', 'payroll',
     ];
     for (const cat of emittedSuppressible) {
       expect(bellPolicy.OVERRIDABLE_CATEGORY_SET.has(cat)).toBe(true);

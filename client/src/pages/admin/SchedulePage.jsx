@@ -6976,6 +6976,10 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
         ) : (
           <div style={{ color: D.muted }}>{sprayCheck.window === "not_today" ? "Judged on the visit day — open the card that morning." : sprayCheck.coordsSource === "none" ? "No property pin on file — no forecast, every product unknown." : "No forecast right now."}</div>
         )}
+        {sprayCheck?.heatSafety?.text && (
+          // Tech safety line (owner 2026-10-31): a warning beside the weather, never a verdict, hold or chip.
+          <div data-testid="job-card-heat-safety" style={{ marginTop: 6, color: "#B45309", fontWeight: sprayCheck.heatSafety.level === "extreme" ? 600 : 500 }}>{sprayCheck.heatSafety.text}</div>
+        )}
         {products.length > 0 && (
           <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
             {products.map((p) => (
@@ -9253,14 +9257,27 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   const [manualDate, setManualDate] = useState("");
   const [manualTime, setManualTime] = useState("08:00");
 
-  useEffect(() => {
-    adminFetch(`/admin/dispatch/${service.id}/reschedule-options`)
+  // A failed load must read as a failure, not as "no suggestions": the
+  // dialog shows Retry and points at the custom date picker.
+  const [optionsError, setOptionsError] = useState(false);
+  const loadOptions = useCallback(() => {
+    setLoading(true);
+    setOptionsError(false);
+    return adminFetch(`/admin/dispatch/${service.id}/reschedule-options`)
       .then((d) => {
         setOptions(d.options || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setOptions([]);
+        setOptionsError(true);
+        setLoading(false);
+      });
   }, [service.id]);
+
+  useEffect(() => {
+    loadOptions();
+  }, [loadOptions]);
 
   const notifyCustomer = notificationType === "sms";
 
@@ -9509,6 +9526,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       reasons={REASONS}
       loading={loading}
       options={options}
+      optionsError={optionsError}
+      onRetryOptions={loadOptions}
       windowFor={windowFor}
       handleReschedule={handleReschedule}
       showManual={showManual}

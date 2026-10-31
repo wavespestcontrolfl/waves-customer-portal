@@ -527,10 +527,12 @@ describe('admin communications SMS route', () => {
     sendCustomerMessage.mockResolvedValue({
       sent: false,
       blocked: true,
-      code: 'EMOJI_FOR_CUSTOMER',
-      reason: 'Body contains emoji "👍" but audience="lead" forbids it. Customer/lead-facing messages must be emoji-free.',
+      // An SMS send can no longer be blocked for emoji (the voice validator
+      // passes every SMS), so the fixture uses a block an SMS can still get.
+      code: 'SMS_OPTED_OUT',
+      reason: 'Recipient has opted out of SMS (sms_enabled=false on notification_prefs)',
       segmentCount: 1,
-      encoding: 'UCS_2',
+      encoding: 'GSM_7',
     });
 
     await withServer(async (baseUrl) => {
@@ -542,15 +544,15 @@ describe('admin communications SMS route', () => {
         },
         body: JSON.stringify({
           to: '+15551234567',
-          body: 'Sounds good 👍',
+          body: 'Sounds good',
           messageType: 'manual',
         }),
       });
       const body = await res.json();
 
       expect(res.status).toBe(422);
-      expect(body.error).toBe('Body contains emoji "👍" but audience="lead" forbids it. Customer/lead-facing messages must be emoji-free.');
-      expect(body.code).toBe('EMOJI_FOR_CUSTOMER');
+      expect(body.error).toBe('Recipient has opted out of SMS (sms_enabled=false on notification_prefs)');
+      expect(body.code).toBe('SMS_OPTED_OUT');
     });
   // The first test here to reach the send route: it pays the handler's cold
   // module load (4 to 5 s on a CI runner), which the 5 s default does not cover.

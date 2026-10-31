@@ -26,3 +26,15 @@ it('exposes each sortable header as a button and reflects the sort through aria-
   // The other sortable columns stay 'none' while Customer owns the sort.
   expect(screen.getByRole('button', { name: 'Service' }).closest('th')).toHaveAttribute('aria-sort', 'none');
 });
+
+it('opens an appointment from a focusable button, once (schedule audit S8)', async () => {
+  const onEdit = vi.fn();
+  render(<ScheduleListView onEdit={onEdit} />);
+  await screen.findByText('Synthetic Alpha');
+  const open = screen.getByRole('button', { name: /^Open appointment: Synthetic Alpha/ });
+  open.focus();
+  expect(open).toHaveFocus();
+  fireEvent.click(open);
+  expect(onEdit).toHaveBeenCalledTimes(1);
+  expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'qa-0' }));
+});

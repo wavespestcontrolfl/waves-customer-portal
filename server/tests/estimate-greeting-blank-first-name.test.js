@@ -62,7 +62,6 @@ describe('greeting sites route through the shared helper', () => {
     'services/estimate-follow-up.js': 5,
     'services/estimate-engagement-engine.js': 1,
     'services/estimate-extension.js': 2,
-    'services/estimate-auto-renew.js': 1,
   };
 
   test.each(Object.entries(files))('%s uses estimateGreetingFirstName and never splits customer_name', (rel, count) => {

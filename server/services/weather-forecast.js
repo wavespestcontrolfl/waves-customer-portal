@@ -123,6 +123,9 @@ async function readOpenMeteoHours(latNum, lngNum, timeoutMs, fromMs = Math.floor
       shortForecast: null,
       temperatureF: Number.isFinite(row.temperature_f_exact) ? row.temperature_f_exact : null,
       windMph: Number.isFinite(row.wind_mph_exact) ? row.wind_mph_exact : null,
+      // The shared forecast module's ready 16-point label ("N" .. "NNW"); null until a row carries it.
+      windDirection: typeof row.wind_dir === 'string' && row.wind_dir ? row.wind_dir : null,
+      relativeHumidity: Number.isFinite(row.humidity_pct) ? row.humidity_pct : null,
       source: 'open-meteo',
     });
   }
@@ -422,6 +425,10 @@ async function nwsHourly(latNum, lngNum, deadlineAt) {
       // the conservative number for a max-wind label limit.
       temperatureF: Number.isFinite(p?.temperature) ? p.temperature : null,
       windMph: parseWindMph(p?.windSpeed),
+      // The compass label NWS gives ("E", "ENE") and the relative humidity (%): the card names the wind's
+      // direction, and the tech heat line needs the humidity.
+      windDirection: typeof p?.windDirection === 'string' && p.windDirection.trim() ? p.windDirection.trim() : null,
+      relativeHumidity: Number.isFinite(p?.relativeHumidity?.value) ? p.relativeHumidity.value : null,
     }));
 
   return hours.length === 0 ? null : hours;

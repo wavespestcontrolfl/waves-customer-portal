@@ -3636,8 +3636,6 @@ of these overall numbers, so they can still move when only the light did:
   +N overall points" (`ReportViewPage.jsx`, only when `reportV2` is absent);
 - the portal's "N pts since first visit" and "+N pts improvement" overall deltas
   (`PortalPage.jsx`; the overall score includes color);
-- the legacy narrative's `trendDirection` (`lawn-report-narrative.js`; env-gated and
-  bypassed, since the lawn v6 copy is always live);
 - the report-assistant answer "Current lawn health is N% overall. Breakdown: ..."
   (`report-assistant.js` `answerTrend`): current scores only, no comparison;
 - the staff and technician screens (Intelligence Bar, `LawnVisitReview`).
@@ -3881,7 +3879,7 @@ delivery time. Deliberate suppression is terminal. Push-only retries reuse the
 message tag without renotification; provider acceptance followed by a crash
 before receipt persistence remains ambiguous and can repeat a provider handoff.
 
-`GATE_SMS_SHARED_PHONE_LINK` (dark; owner 2026-10-10 "link text"): the inbound SMS matcher (`findSingleCustomerByPhone`) links a sender phone that two or more non-deleted customer rows share ONLY to the one row staff marked `customers.sms_primary_for_shared_phone` (admin `PUT /api/admin/customers/:id` field `smsPrimaryForSharedPhone`, audited as a sensitive field); no mark, or more than one mark, keeps today's behaviour (unlinked, unknown-sender path). The contact-correction queue's locked match applies the same rule. No recency or any other guess, ever: the linked customer feeds the reschedule-reply and draft paths. Any writer that changes a marked row's phone identity (last 10 digits) clears the mark unless that write sets it for the new number. A mark-linked text joins the customer's unified-inbox thread as that one message; the number's earlier unknown-contact thread is never promoted into the marked account. Gate off = byte-identical to before. Sends nothing.
+Shared-phone text link (always on; owner 2026-10-10 "link text", gate removed 2026-10-31): the inbound SMS matcher (`findSingleCustomerByPhone`) links a sender phone that two or more non-deleted customer rows share ONLY to the one row staff marked `customers.sms_primary_for_shared_phone` (admin `PUT /api/admin/customers/:id` field `smsPrimaryForSharedPhone`, audited as a sensitive field); no mark, or more than one mark, leaves the text unlinked (unknown-sender path). The contact-correction queue's locked match applies the same rule. No recency or any other guess, ever: the linked customer feeds the reschedule-reply and draft paths. Any writer that changes a marked row's phone identity (last 10 digits) clears the mark unless that write sets it for the new number. A mark-linked text joins the customer's unified-inbox thread as that one message; the number's earlier unknown-contact thread is never promoted into the marked account. Sends nothing.
 
 Lead CALL / TEXT preference (owner 2026-10-14; always on): on `POST /api/webhooks/twilio/sms`, a sender in lead intake (`lead_intake_status` set, not `estimate_drafted`, re-read under a row lock) whose whole text is a bare CALL or TEXT (`parseCallTextReply`) gets one note on their newest lead (`lead_activities`). The text is not consumed: it takes the ordinary inbox path and the `sms_reply` bell title for that text leads with "Wants a call:" or "Prefers text:". Stores no preference, sends nothing and leaves `lead_intake_status` alone. `classifyServiceIntent` returns no service for a bare CALL / TEXT reply (no paid model call).
 
@@ -6161,7 +6159,11 @@ no PII, no request-derived content. **Both 404 behind GATE_UNIVERSAL_LINKS**;
 AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
 also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
-API/PDF responses must never be claimed by the app).
+API/PDF responses must never be claimed by the app. It also excludes the
+browser-only pages (`/card`, `/careers`, `/newsletter`, the roots Android's
+allowlist leaves out) and the exact marketing-redirect paths (`/quote`, bare
+`/estimate`, `/estimate/<service>`), so those open in Safari; `/estimate/<token>`
+stays claimed).
 `/.well-known/security.txt` (RFC 9116 vulnerability-disclosure contact — static
 plain text, no auth, no PII, not gated; `Expires` is computed per request 180
 days ahead so it never goes stale; cached 1 day).
@@ -6883,7 +6885,24 @@ or an SMS-delivered token whose signed `channel` claim is `smsChannelFor`
 of this exact phone — never a bare public-form
 submission; otherwise it always gets its own separate prospect profile and
 never sees another customer's visit data, reschedule URL, or booking
-(Codex pre-push P1, 2026-09-24). The free-text note rides
+(Codex pre-push P1, 2026-09-24). Exception, DARK behind `GATE_INSPECTION_REUSE_LEAD_SHELL` (strict
+`'true'`, read at call time; off = the rule above holds with no exception):
+an unverified lead whose linked customer is provably its OWN untouched intake
+profile (`leadOwnIntakeShell`: active, `new_lead`, created at most 10 minutes
+before the lead, this lead the first live lead on it, no billing, visit,
+login or merge history, the same full phone identity and email as the lead,
+no other lead's consultation provenance naming it, the primary AND only live
+profile of its own account, a complete stored street, city and ZIP, and the
+same unit as the booked address by the shared normalizer's
+`unitLineValueKey`, so a stored building with no apartment never absorbs an
+"Apt 4" booking) books onto that profile instead of a new prospect, with an outright
+`consultation_prospect` provenance row and no write to the profile; a profile
+filed under another household's account (a last-ten phone suffix match), a
+partial address, a stored street that affirmatively differs from the booked
+address, a busy comms fence, or an unsettled location keeps the separate
+prospect. The web form mints that profile from the same typed contact
+seconds before the lead row, so the reuse exposes nothing the submitter did
+not type. The free-text note rides
 `scheduled_services.internal_notes` (never `notes`, which is customer/tech
 visible) via a best-effort post-commit update. `SLOT_TAKEN` 409 mirrors
 reservice-public's shape (fresh `availability` attached). Office alert:

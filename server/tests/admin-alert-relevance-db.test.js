@@ -7,7 +7,8 @@
  * witnesses as SQL: the Messages reader, a person's text and call, a visit, a
  * quote, a person's email reply), and the two rules with their own gates
  * (GATE_VOICEMAIL_VISIT_UNDERWAY: a visit that ran after a voicemail;
- * GATE_LEAD_CONTACTED_CLOSE: the lead_contacted Leads bells), and
+ * GATE_LEAD_CONTACTED_CLOSE: the lead_contacted Leads bells;
+ * GATE_PORTAL_CHAT_ANSWERED_CLOSE: a portal chat hand-off bell answered by a person), and
  * GATE_SMS_STAFF_ACTION_ANSWERS (a visit a person booked, or a payment a person
  * recorded, answers a text: the alert witness and the Messages reader). The rules
  * themselves are covered by admin-alert-relevance.test.js.
@@ -33,6 +34,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     delete process.env.GATE_VOICEMAIL_VISIT_UNDERWAY;
     delete process.env.GATE_LEAD_CONTACTED_CLOSE;
     delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS;
+    delete process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE;
   });
   afterAll(async () => {
     if (made.notifications.length) await db('audit_log').where({ resource_type: 'notification' }).whereIn('resource_id', made.notifications).del();
@@ -875,6 +877,70 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
         expect(await state(cases[kind].afterRefresh)).toEqual(['relevance', reasons[kind]]);
       }
       expect(await state(never)).toEqual(['relevance', 'Lead was contacted']);
+    }, 30000);
+
+    test('portal chat hand-off bells (GATE_PORTAL_CHAT_ANSWERED_CLOSE): a person\'s text, call or Gmail send to that customer AFTER the bell (or its re-ring) closes it; contact before, a send to someone else, the email-change bell, and the gate off do not', async () => {
+      const now = new Date();
+      const bellAt = mins(now, -300);
+      const rungAt = mins(now, -120);
+      let phoneN = 8501;
+      const chat = async ({ over = {}, key = null } = {}) => {
+        const phone = `+1555555${phoneN += 1}`;
+        const customer = await customerWith(phone, { email: `chat${phoneN}-${Date.now()}@example.invalid` });
+        const id = sid('ESC');
+        const row = await bell({ category: 'alert', link: `/admin/customers?customerId=${customer.id}`, created_at: bellAt,
+          metadata: { dedupeKey: key ? key(id, customer) : `portal-chat-escalation:${id}`, doneWhen: 'customer_answered', customerId: customer.id, escalationId: id, conversationId: id, ...over } });
+        return { customer, phone, row };
+      };
+      const gmailSend = (c, at, to = null) => insert('emails', { gmail_id: sid('GM'), gmail_thread_id: sid('TH'), from_address: 'office@waves.example.invalid',
+        to_address: to || c.customer.email, cc_address: '', bcc_address: '', label_ids: JSON.stringify(['SENT']), received_at: at });
+      const texted = await chat();
+      const called = await chat({ over: { topic: 'complaint' } });
+      const addService = await chat({ over: { topic: 'add_service' } });
+      const emailed = await chat();
+      const emailedBefore = await chat();
+      const emailedElsewhere = await chat();
+      const textedBefore = await chat();
+      const reRung = await chat({ over: { rungAt: rungAt.toISOString() } });
+      const emailChange = await chat({ over: { doneWhen: 'email_changed' }, key: (id, c) => `portal-chat-email-change:${id}:${c.email}` });
+      const untouched = await chat();
+      await staffText(texted.customer, texted.phone, mins(bellAt, 20));
+      await staffCall(called.customer, called.phone, mins(bellAt, 20));
+      await staffCall(addService.customer, addService.phone, mins(bellAt, 20));
+      await gmailSend(emailed, mins(bellAt, 20));
+      await gmailSend(emailedBefore, mins(bellAt, -20));
+      await gmailSend(emailedElsewhere, mins(bellAt, 20), 'someone-else@example.invalid');
+      await staffText(textedBefore.customer, textedBefore.phone, mins(bellAt, -20));
+      await staffText(reRung.customer, reRung.phone, mins(bellAt, 20)); // between the first ring and the re-ring
+      await staffText(emailChange.customer, emailChange.phone, mins(bellAt, 20));
+      const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
+      const all = [texted, called, addService, emailed, emailedBefore, emailedElsewhere, textedBefore, reRung, emailChange, untouched];
+
+      // The new gate off (the contact gate true): not judged, and the add-a-service chat keeps only its estimate rule.
+      gate('true');
+      await sweep();
+      for (const c of all) expect(await state(c)).toBeNull();
+
+      gate('true');
+      process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'shadow';
+      await sweep();
+      for (const c of all) expect(await state(c)).toBeNull();
+      expect((await wouldClose(texted.row.id))[0].metadata).toMatchObject({ class: 'portal_chat_answered', reason: 'Answered by text' });
+      expect((await wouldClose(addService.row.id))[0].metadata).toMatchObject({ class: 'portal_chat_add_service', reason: 'A person called back' });
+      expect(await wouldClose(emailChange.row.id)).toHaveLength(0);
+
+      process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';
+      await sweep();
+      expect(await state(texted)).toEqual(['relevance', 'Answered by text']);
+      expect(await state(called)).toEqual(['relevance', 'A person called back']);
+      expect(await state(addService)).toEqual(['relevance', 'A person called back']);
+      expect(await state(emailed)).toEqual(['relevance', 'Answered by email']);
+      for (const open of [emailedBefore, emailedElsewhere, textedBefore, reRung, emailChange, untouched]) expect(await state(open)).toBeNull();
+
+      // Rollback: the gate off puts back, unread, what it closed.
+      delete process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE;
+      await sweep();
+      for (const c of all) expect(await state(c)).toBeNull();
     }, 30000);
 
     describe('a staff action answers a text (GATE_SMS_STAFF_ACTION_ANSWERS)', () => {

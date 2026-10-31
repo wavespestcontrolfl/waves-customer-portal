@@ -3,10 +3,12 @@ describe('bill-payment-error-alerts', () => {
   let triggerNotification;
   let dbMock;
   let customerRow;
+  let mergeFn;
+  let insertFn;
 
   beforeEach(() => {
     jest.resetModules();
-    returningRows = [{ id: 'alert-1', occurrence_count: 1 }];
+    returningRows = [{ id: 'alert-1', occurrence_count: 1, should_notify: true }];
     triggerNotification = jest.fn().mockResolvedValue({ bellWritten: true });
     customerRow = {
       id: 'cust_123',
@@ -24,15 +26,11 @@ describe('bill-payment-error-alerts', () => {
         return customerQuery;
       }
       if (table === 'bill_payment_error_alerts') {
-        return {
-          insert: jest.fn(() => ({
-            onConflict: jest.fn(() => ({
-              merge: jest.fn(() => ({
-                returning: jest.fn().mockResolvedValue(returningRows),
-              })),
-            })),
-          })),
-        };
+        mergeFn = jest.fn(() => ({
+          returning: jest.fn().mockResolvedValue(returningRows),
+        }));
+        insertFn = jest.fn(() => ({ onConflict: jest.fn(() => ({ merge: mergeFn })) }));
+        return { insert: insertFn };
       }
       throw new Error(`Unexpected table ${table}`);
     });
@@ -78,8 +76,8 @@ describe('bill-payment-error-alerts', () => {
     }));
   });
 
-  test('suppresses duplicate notifications after the dedupe row already exists', async () => {
-    returningRows = [{ id: 'alert-1', occurrence_count: 2 }];
+  test('suppresses a repeat inside 24 hours of the last bell (the upsert returns should_notify false)', async () => {
+    returningRows = [{ id: 'alert-1', occurrence_count: 2, should_notify: false }];
     const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
 
     const result = await alertBillPaymentError({
@@ -96,6 +94,29 @@ describe('bill-payment-error-alerts', () => {
 
     expect(result).toEqual({ notified: false, duplicate: true, alertId: 'alert-1' });
     expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a repeat re-notifies once the last bell is over 24 hours old, and the upsert says when', async () => {
+    // The statement itself decides: it re-stamps notified_at only for a row
+    // whose last bell is older than 24 h, and returns whether it did.
+    returningRows = [{ id: 'alert-1', occurrence_count: 5, should_notify: true }];
+    const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
+
+    const result = await alertBillPaymentError({
+      invoice: { id: 'inv_123', invoice_number: 'WPC-2026-0100', customer_id: 'cust_123', total: '125.50' },
+      phase: 'update_amount',
+      methodCategory: 'us_bank_account',
+      message: 'Could not update payment total',
+    });
+
+    expect(result).toEqual({ notified: true, alertId: 'alert-1' });
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+
+    const [{ notified_at: insertStamp }] = insertFn.mock.calls[0];
+    expect(insertStamp).toBe('now()'); // the DB clock, so a fresh insert reads as notified
+    const mergeArg = mergeFn.mock.calls[0][0];
+    expect(mergeArg.notified_at.raw).toMatch(/notified_at IS NULL/);
+    expect(mergeArg.notified_at.raw).toMatch(/notified_at < now\(\) - interval '24 hours'\s+THEN now\(\) ELSE bill_payment_error_alerts\.notified_at END/);
   });
 
   test('suppresses client Stripe.js form-validation errors without writing a row or notifying', async () => {
