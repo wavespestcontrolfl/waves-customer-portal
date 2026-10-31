@@ -9401,7 +9401,8 @@ function initScheduledJobs() {
 
   // EVERY 10 MIN — a caller who CANCELED on a call while nothing is booked for them (GATE_CALL_CANCEL_GUARD, checked each
   // tick): dismisses the same customer's open "time unclear" booking cards from the 14 days before that call, each with a
-  // note naming the cancel call; the cancel card stays open. Never texts, emails or changes a visit. See
+  // note naming the cancel call; the cancel card stays open. Never texts, emails or changes a visit. Not part of the
+  // nightly triage auto-resolve: the card must close minutes after the cancel, before the office books. See
   // server/services/call-cancel-guard.js.
   cron.schedule('4,14,24,34,44,54 * * * *', async () => {
     if (!require('../config/feature-gates').callCancelGuardLive()) return;

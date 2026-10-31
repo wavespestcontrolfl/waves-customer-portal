@@ -14,6 +14,11 @@
  *   - latestCancelCall (New Appointment notice, GET /admin/schedule/cancel-call-notice): the customer's latest real
  *     conversation in the last 14 days, when that call filed a cancel card. A warning only; the save always goes through.
  *
+ * Why its own 10-minute job and not a rule in triage-auto-resolve.js: that sweep runs once a night (3:20 AM ET) to drain
+ * the backlog. On 10-30 the office booked the canceled caller 4 hours after her cancel, so the stale card has to close
+ * within minutes, not the next night. The writes follow the same contract as every card writer: the per-call advisory
+ * lock and review_status sync from utils/triage-locks.js (the call-prepay-choice sweep is the same shape).
+ *
  * Never texts, emails or touches a visit. Fails closed: any visit that is not completed or cancelled (or has no status)
  * keeps every card open, a card a person claimed (in_progress) is never touched, and a cancel counts only from a card
  * that was not dismissed, on a call that is still a real conversation (a transcript rejected as a hallucination turns
