@@ -476,15 +476,27 @@ function inferAnnualPrepayServiceBase(customer, activeTerm = null, prepaidPlans 
   return "Pest Control";
 }
 
-function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPlans = [], annualPrepayTerms = []) {
-  const seen = new Set();
+// Dropdown dedupe: the label key ignores cadence words, so the inferred cadence
+// joins it. "Lawn Care - Every 2 Months" and "Lawn Care - Every 3 Months" are
+// two plans; true duplicates (same service, same cadence) still merge, and a
+// label that names no cadence merges into any same-service option (sweep #3960 A3).
+function annualPrepayOptionIsDuplicate(seen, key, cadence) {
+  const sameService = seen.filter((entry) => entry.key === key);
+  if (!sameService.length) return false;
+  if (!cadence) return true;
+  return sameService.some((entry) => entry.cadence === cadence);
+}
+
+export function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPlans = [], annualPrepayTerms = []) {
+  const seen = [];
   const options = [];
   const push = (label, source = "saved") => {
     const text = String(label || "").trim();
     if (!text) return;
     const key = normalizeAnnualPrepayLabelKey(text);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
+    const cadence = inferAnnualPrepayCadenceFromLabel(text);
+    if (!key || annualPrepayOptionIsDuplicate(seen, key, cadence)) return;
+    seen.push({ key, cadence });
     options.push({ value: text, label: text, source });
   };
 
