@@ -227,11 +227,11 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
       const d = await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}`);
       if (!current()) return;
       setDetail(d);
-      if (d.thread?.unread > 0) {
-        // Read only up to the newest message on screen: one that arrives meanwhile stays unread.
-        const newest = d.messages?.[d.messages.length - 1]?.createdAt;
-        if (newest) await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({ readBefore: newest }) });
-        if (newest) setList((prev) => prev && { ...prev, items: prev.items.map((t) => (t.id === id ? { ...t, unread: 0 } : t)) });
+      // Read only up to the newest message on screen: one that arrives meanwhile stays unread.
+      const newest = d.thread?.unread > 0 ? d.messages?.[d.messages.length - 1]?.createdAt : null;
+      if (newest) {
+        await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({ readBefore: newest }) });
+        setList((prev) => prev && { ...prev, items: prev.items.map((t) => (t.id === id ? { ...t, unread: 0 } : t)) });
       }
     } catch (err) {
       if (refresh || !current()) return;
