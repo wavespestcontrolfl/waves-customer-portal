@@ -233,22 +233,38 @@ function pairedMeanDeltas(candidateResults, baselineResults, keys) {
 }
 
 /**
+ * THE rule for whether two sealed-exam runs may be compared, used by the promotion bar and by the
+ * rollback monitor so they cannot drift apart. null = comparable, else { reason, detail }. Both runs
+ * must be complete and share: the provider leg, the drafter model, the effective voice profile, the
+ * base prompt identity (the patch tag is the one thing allowed to differ) and one judge ruler (a
+ * stricter judge on one side, or a run that mixes rulers after a resume, reads as a change in the
+ * drafter). A manual exam may name any complete baseline, so none of this can be assumed.
+ */
+function examRunsMismatch({ run, baselineRun, runResults, baselineResults }) {
+  const { judgeRulerOf } = require('./sms-sealed-eval');
+  if (!run || run.status !== 'complete') return { reason: 'exam_incomplete', detail: {} };
+  if (!baselineRun || baselineRun.status !== 'complete') return { reason: 'baseline_incomplete', detail: {} };
+  const sameIdentity = (field) => (run[field] ?? null) === (baselineRun[field] ?? null);
+  const baseIdentity = (r) => { const { base, tags } = patchLib.splitPromptVersion(r.prompt_version); return `${base}+${tags}`; };
+  if (!['provider_leg', 'model', 'voice_profile_version'].every(sameIdentity) || baseIdentity(run) !== baseIdentity(baselineRun)) {
+    return { reason: 'run_mismatch', detail: {} };
+  }
+  const candidateRuler = judgeRulerOf(runResults);
+  const baselineRuler = judgeRulerOf(baselineResults);
+  if (candidateRuler.includes('+') || candidateRuler !== baselineRuler) return { reason: 'judge_mismatch', detail: { candidateRuler, baselineRuler } };
+  return null;
+}
+
+/**
  * The promotion bar, pure. Promote only when: both runs completed, the paired item count reaches
  * MIN_PAIRED_ITEMS, unsafe verdicts did not rise (net of improvements, which also rules out a
  * McNemar regression), and the overall and actions score means each improve by their margin.
  */
 function decidePromotion({ candidateRun, baselineRun, candidateResults, baselineResults }) {
-  const { computeSignificance, judgeRulerOf } = require('./sms-sealed-eval');
+  const { computeSignificance } = require('./sms-sealed-eval');
   const reject = (reason, detail) => ({ promote: false, reason, detail: detail || {} });
-  if (!candidateRun || candidateRun.status !== 'complete') return reject('exam_incomplete');
-  if (!baselineRun || baselineRun.status !== 'complete') return reject('baseline_incomplete');
-  // One model and one voice profile on both sides: a resumed run can keep an older profile.
-  if (candidateRun.model !== baselineRun.model || (candidateRun.voice_profile_version ?? null) !== (baselineRun.voice_profile_version ?? null)) return reject('run_mismatch');
-  // One judge ruler on both runs, the same rule finalizeRun applies before it computes significance: a
-  // stricter judge on one side (or a run that mixes rulers after a resume) reads as a change in the drafter.
-  const candidateRuler = judgeRulerOf(candidateResults);
-  const baselineRuler = judgeRulerOf(baselineResults);
-  if (candidateRuler.includes('+') || candidateRuler !== baselineRuler) return reject('judge_mismatch', { candidateRuler, baselineRuler });
+  const mismatch = examRunsMismatch({ run: candidateRun, baselineRun, runResults: candidateResults, baselineResults });
+  if (mismatch) return reject(mismatch.reason, mismatch.detail);
   const sig = computeSignificance({ candidateResults, baselineResults });
   const deltas = pairedMeanDeltas(candidateResults, baselineResults, ['overall', 'actions']);
   const detail = {
@@ -583,19 +599,37 @@ const ROLLBACK_PHRASES = Object.freeze({
   base_changed: 'the SMS prompt changed underneath it',
 });
 
+// A live cohort has one IDENTITY, and the prior and patched cohorts are compared only when they
+// share it: the voice profile (graduation's pin) and the drafter model stamped on the draft. A profile
+// or model change leaves the base identity unchanged, and its own effect on unsafe or confusion rates
+// must never be charged to the patch. The model is the one most of the patched cohort drafted with.
+const DRAFT_MODEL_SQL = "COALESCE(md.model, '__none__') = ?";
+
+function liveIdentityFilter(q, { voicePin, model }) {
+  q.whereRaw(DRAFT_VOICE_PROFILE_SQL, [voiceProfileKey(voicePin)]);
+  if (model !== undefined) q.whereRaw(DRAFT_MODEL_SQL, [model]);
+  return q;
+}
+
+async function modalDraftModel(cohort) {
+  const row = await cohort.clone().select(cohort.client.raw("COALESCE(md.model, '__none__') AS m")).count('* as n').groupBy('m').orderBy('n', 'desc').first();
+  return row ? row.m : null;
+}
+
 // Both groups are read with the ruler graduation reads (sms-graduation.js): with GATE_SMS_JUDGE_V2 on,
 // only the stricter judge's rows count, so a prior group graded by the old judge never reads as a rise.
-async function liveJudgeStats(dbi, version, from, to, voicePin) {
-  const row = await dbi({ j: 'shadow_draft_judgments' })
-    .join({ md: 'message_drafts' }, 'md.id', 'j.draft_id')
-    .where('md.prompt_version', version)
-    .whereRaw(DRAFT_VOICE_PROFILE_SQL, [voiceProfileKey(voicePin)])
-    .whereNotNull('j.scores')
-    .modify((q) => { if (smsJudgeV2Live()) q.where('j.judge_version', 'j2'); })
-    .where('md.created_at', '>=', from)
-    .where('md.created_at', '<', to)
-    .select(dbi.raw('COUNT(*)::int as judged'))
-    .select(dbi.raw("COUNT(*) FILTER (WHERE j.verdict = 'draft_unsafe')::int as unsafe"))
+const liveJudgeCohort = (dbi, version, from, to) => dbi({ j: 'shadow_draft_judgments' })
+  .join({ md: 'message_drafts' }, 'md.id', 'j.draft_id')
+  .where('md.prompt_version', version)
+  .whereNotNull('j.scores')
+  .modify((q) => { if (smsJudgeV2Live()) q.where('j.judge_version', 'j2'); })
+  .where('md.created_at', '>=', from)
+  .where('md.created_at', '<', to);
+
+async function liveJudgeStats(cohort, identity) {
+  const row = await liveIdentityFilter(cohort.clone(), identity)
+    .select(cohort.client.raw('COUNT(*)::int as judged'))
+    .select(cohort.client.raw("COUNT(*) FILTER (WHERE j.verdict = 'draft_unsafe')::int as unsafe"))
     .first();
   return { judged: row.judged, unsafe: row.unsafe };
 }
@@ -603,25 +637,31 @@ async function liveJudgeStats(dbi, version, from, to, voicePin) {
 async function liveJudgeCheck({ dbi, patch, now, voicePin }) {
   if (!patch.prior_version || !patch.active_version) return null;
   const since = new Date(patch.activated_at);
-  const prior = await liveJudgeStats(dbi, patch.prior_version, new Date(since.getTime() - BASELINE_LOOKBACK_DAYS * DAY_MS), since, voicePin);
-  const live = await liveJudgeStats(dbi, patch.active_version, since, new Date(now.getTime() + DAY_MS), voicePin);
+  const priorCohort = liveJudgeCohort(dbi, patch.prior_version, new Date(since.getTime() - BASELINE_LOOKBACK_DAYS * DAY_MS), since);
+  const liveCohort = liveJudgeCohort(dbi, patch.active_version, since, new Date(now.getTime() + DAY_MS));
+  const model = await modalDraftModel(liveIdentityFilter(liveCohort.clone(), { voicePin }));
+  if (model === null) return null;
+  const identity = { voicePin, model };
+  const prior = await liveJudgeStats(priorCohort, identity);
+  const live = await liveJudgeStats(liveCohort, identity);
   if (live.judged < LIVE_MIN_JUDGED || prior.judged < LIVE_MIN_JUDGED) return null;
   const rise = rate(live.unsafe, live.judged) - rate(prior.unsafe, prior.judged);
   const detail = { live, prior, rise: Number(rise.toFixed(3)) };
   return live.unsafe >= LIVE_MIN_UNSAFE && rise >= LIVE_UNSAFE_RISE ? { reason: 'live_unsafe_rise', detail } : null;
 }
 
-async function outcomeStats(dbi, version, from, to, voicePin) {
-  const row = await dbi({ o: 'sms_reply_outcomes' })
-    .join({ md: 'message_drafts' }, 'md.id', 'o.draft_id')
-    .where({ 'o.status': 'computed', 'o.prompt_version': version })
-    .whereIn('o.reply_source', AI_REPLY_SOURCES)
-    .whereRaw(DRAFT_VOICE_PROFILE_SQL, [voiceProfileKey(voicePin)])
-    .where('o.reply_at', '>=', from)
-    .where('o.reply_at', '<', to)
-    .select(dbi.raw('COUNT(*)::int as total'))
-    .select(dbi.raw('COUNT(*) FILTER (WHERE o.confused)::int as confused'))
-    .select(dbi.raw('COUNT(*) FILTER (WHERE o.opted_out)::int as opted_out'))
+const outcomeCohort = (dbi, version, from, to) => dbi({ o: 'sms_reply_outcomes' })
+  .join({ md: 'message_drafts' }, 'md.id', 'o.draft_id')
+  .where({ 'o.status': 'computed', 'o.prompt_version': version })
+  .whereIn('o.reply_source', AI_REPLY_SOURCES)
+  .where('o.reply_at', '>=', from)
+  .where('o.reply_at', '<', to);
+
+async function outcomeStats(cohort, identity) {
+  const row = await liveIdentityFilter(cohort.clone(), identity)
+    .select(cohort.client.raw('COUNT(*)::int as total'))
+    .select(cohort.client.raw('COUNT(*) FILTER (WHERE o.confused)::int as confused'))
+    .select(cohort.client.raw('COUNT(*) FILTER (WHERE o.opted_out)::int as opted_out'))
     .first();
   return { total: row.total, confused: row.confused, optedOut: row.opted_out };
 }
@@ -629,8 +669,13 @@ async function outcomeStats(dbi, version, from, to, voicePin) {
 async function outcomeCheck({ dbi, patch, now, voicePin }) {
   if (!patch.prior_version || !patch.active_version) return null;
   const since = new Date(patch.activated_at);
-  const prior = await outcomeStats(dbi, patch.prior_version, new Date(since.getTime() - BASELINE_LOOKBACK_DAYS * DAY_MS), since, voicePin);
-  const live = await outcomeStats(dbi, patch.active_version, since, new Date(now.getTime() + DAY_MS), voicePin);
+  const priorCohort = outcomeCohort(dbi, patch.prior_version, new Date(since.getTime() - BASELINE_LOOKBACK_DAYS * DAY_MS), since);
+  const liveCohort = outcomeCohort(dbi, patch.active_version, since, new Date(now.getTime() + DAY_MS));
+  const model = await modalDraftModel(liveIdentityFilter(liveCohort.clone(), { voicePin }));
+  if (model === null) return null;
+  const identity = { voicePin, model };
+  const prior = await outcomeStats(priorCohort, identity);
+  const live = await outcomeStats(liveCohort, identity);
   if (live.total < OUTCOME_MIN_REPLIES || prior.total < OUTCOME_MIN_REPLIES) return null;
   const confusionRise = rate(live.confused, live.total) - rate(prior.confused, prior.total);
   const optOutRise = rate(live.optedOut, live.total) - rate(prior.optedOut, prior.total);
@@ -649,17 +694,20 @@ async function examCheck({ dbi, patch }) {
   const runs = await dbi('sms_sealed_eval_runs')
     .where({ prompt_version: patch.active_version, status: 'complete' })
     .whereNotNull('baseline_run_id')
-    .whereIn('provider_leg', LIVE_EXAM_LEGS)
-    .select('id', 'provider_leg', 'significance', 'baseline_run_id', 'voice_profile_version');
+    .whereIn('provider_leg', LIVE_EXAM_LEGS);
   for (const r of runs) {
     const sig = parseScores(r.significance);
     if (!sig) continue;
+    const baseRun = await dbi('sms_sealed_eval_runs').where({ id: r.baseline_run_id }).first();
+    const results = await dbi('sms_sealed_eval_results')
+      .whereIn('run_id', [r.id, r.baseline_run_id]).whereNotNull('verdict').select('run_id', 'item_id', 'verdict', 'scores');
+    const runResults = results.filter((x) => x.run_id === r.id);
+    const baselineResults = results.filter((x) => x.run_id === r.baseline_run_id);
+    // The same comparability rule the promotion bar applies: a manual exam may name any baseline.
+    if (examRunsMismatch({ run: r, baselineRun: baseRun, runResults, baselineResults })) continue;
     // Both rules read the items BOTH runs graded: whole-run totals would move when the exam pool
     // changed between the two runs, and could retire a healthy patch over items it never faced.
-    // A run graded under another voice profile than its baseline differs by more than the patch.
-    const baseRun = await dbi('sms_sealed_eval_runs').where({ id: r.baseline_run_id }).first('voice_profile_version');
-    if (!baseRun || (baseRun.voice_profile_version ?? null) !== (r.voice_profile_version ?? null)) continue;
-    const cohort = await pairedUnsafeCohort(dbi, r.id, r.baseline_run_id);
+    const cohort = pairedUnsafeCohort(runResults, baselineResults);
     if (cohort.paired < MIN_PAIRED_ITEMS) continue;
     const regressed = Boolean(sig.significant && sig.direction === 'regressed');
     const rise = cohort.liveUnsafe >= LIVE_MIN_UNSAFE ? (cohort.liveUnsafe - cohort.baseUnsafe) / cohort.paired : null;
@@ -672,18 +720,14 @@ async function examCheck({ dbi, patch }) {
 
 // The graded items a run and its baseline share (an 'ungradable' sentinel is no judgment, as in
 // computeSignificance), and how many of those each judged unsafe.
-async function pairedUnsafeCohort(dbi, runId, baselineRunId) {
-  const rows = await dbi('sms_sealed_eval_results')
-    .whereIn('run_id', [runId, baselineRunId])
-    .whereNotNull('verdict')
-    .whereNot('verdict', 'ungradable')
-    .select('run_id', 'item_id', 'verdict');
-  const base = new Map(rows.filter((x) => x.run_id === baselineRunId).map((x) => [String(x.item_id), x.verdict]));
+function pairedUnsafeCohort(runResults, baselineResults) {
+  const graded = (rows) => rows.filter((x) => x.verdict && x.verdict !== 'ungradable');
+  const base = new Map(graded(baselineResults).map((x) => [String(x.item_id), x.verdict]));
   let paired = 0;
   let liveUnsafe = 0;
   let baseUnsafe = 0;
-  for (const x of rows) {
-    if (x.run_id !== runId || !base.has(String(x.item_id))) continue;
+  for (const x of graded(runResults)) {
+    if (!base.has(String(x.item_id))) continue;
     paired += 1;
     if (x.verdict === 'draft_unsafe') liveUnsafe += 1;
     if (base.get(String(x.item_id)) === 'draft_unsafe') baseUnsafe += 1;
@@ -765,6 +809,7 @@ module.exports = {
   runRollbackMonitor,
   runAutopromoteTick,
   decidePromotion,
+  examRunsMismatch,
   distillRule,
   ELIGIBLE_FAILURE_MODES,
   ROLLBACK_PHRASES,

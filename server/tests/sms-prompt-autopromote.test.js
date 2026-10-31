@@ -33,6 +33,8 @@ describe('promotion bar (pure)', () => {
     ['baseline_incomplete', {}, { baseline: { status: 'running' } }],
     ['run_mismatch', {}, { candidate: { model: 'm1' }, baseline: { model: 'm2' } }],
     ['run_mismatch', {}, { candidate: { voice_profile_version: 4 }, baseline: { voice_profile_version: null } }],
+    ['run_mismatch', {}, { candidate: { provider_leg: 'openai' }, baseline: { provider_leg: 'anthropic' } }],
+    ['run_mismatch', {}, { candidate: { prompt_version: 'house_voice_v13_x+AB' }, baseline: { prompt_version: 'house_voice_v13_x+A' } }],
     ['too_few_items', { n: 19 }, {}],
     ['unsafe_rose', { newlyUnsafe: 2, newlySafe: 1 }, {}],
     ['overall_not_improved', { overall: 6.1 }, {}],

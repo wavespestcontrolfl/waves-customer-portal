@@ -987,7 +987,10 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
       // finalizeRun compared it with its baseline (one judge ruler): McNemar not significant, the unsafe rate up 12 points.
       const flatSig = JSON.stringify({ significant: false, direction: 'regressed', pairedItems: 24, newlyUnsafe: 3, newlySafe: 0, pValue: 0.25 });
-      const bad = await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 4, over: { provider_leg: 'openai', model: sealed.EXAM_LEG_ROUTES.openai.model, significance: flatSig } });
+      // Each leg is compared with a baseline from its own leg and model.
+      const openaiLeg = { provider_leg: 'openai', model: sealed.EXAM_LEG_ROUTES.openai.model };
+      const openaiBaseline = await insertRun({ items, version: baseVersion(), unsafe: 1, over: openaiLeg });
+      const bad = await insertRun({ items, version: active.active_version, baselineId: openaiBaseline.id, unsafe: 4, over: { ...openaiLeg, significance: flatSig } });
       const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
       expect(out.rolledBack).toBe(active.id);
       const row = await rowOf(active.id);
@@ -1044,6 +1047,66 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         expect(out.rolledBack).toBe(active.id);
         expect((await rowOf(active.id)).decision_detail.rollback).toMatchObject({ pairedItems: 24, rise: 0.208 });
       });
+    });
+
+    describe('exam runs are compared only under one identity (the same rule decidePromotion applies)', () => {
+      const regressedSig = JSON.stringify({ significant: true, direction: 'regressed', pairedItems: 24, newlyUnsafe: 6, newlySafe: 0, pValue: 0.03 });
+      const regression = async (baselineOver = {}, runOver = {}) => {
+        const items = await seedItems(24);
+        const baseline = await insertRun({ items, version: baseVersion(), unsafe: 0, over: baselineOver });
+        await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 6, over: { significance: regressedSig, ...runOver } });
+      };
+      const monitor = () => auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+
+      test('an explicit baseline from another drafter model cannot retire the patch', async () => {
+        await regression({ model: 'claude-other-drafter-model' });
+        expect(await monitor()).toEqual({ checked: active.id });
+      });
+
+      test('another provider leg, another voice profile or another base identity is not comparable either', async () => {
+        await regression({ provider_leg: 'openai', model: sealed.EXAM_LEG_ROUTES.openai.model }, { });
+        expect(await monitor()).toEqual({ checked: active.id });
+        await trx('sms_sealed_eval_runs').del();
+        await regression({ voice_profile_version: 987 });
+        expect(await monitor()).toEqual({ checked: active.id });
+        await trx('sms_sealed_eval_runs').del();
+        const items = await seedItems(24);
+        const baseline = await insertRun({ items, version: `${baseVersion()}Q`, unsafe: 0 });
+        await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 6, over: { significance: regressedSig } });
+        expect(await monitor()).toEqual({ checked: active.id });
+      });
+
+      test('a mixed or different judge ruler is not comparable', async () => {
+        await regression();
+        await trx('sms_sealed_eval_results').whereIn('run_id', trx('sms_sealed_eval_runs').where({ prompt_version: active.active_version }).select('id'))
+          .update({ scores: JSON.stringify({ safety: 8, voice: 8, overall: 6, actions: 6, judge_version: 'j2' }) });
+        expect(await monitor()).toEqual({ checked: active.id });
+      });
+
+      test('the same identity with the same regression still retires the patch', async () => {
+        await regression();
+        const out = await monitor();
+        expect(out.rolledBack).toBe(active.id);
+        expect((await rowOf(active.id)).retired_reason).toBe('exam_regression');
+      });
+    });
+
+    test('live cohorts under different drafter models are not compared: the rise belongs to the model swap', async () => {
+      const draftsOn = async (version, n, unsafe, at, model) => {
+        for (let i = 0; i < n; i += 1) {
+          const [draft] = await trx('message_drafts').insert({ prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at, model }).returning('id');
+          await trx('shadow_draft_judgments').insert({
+            draft_id: draft.id, verdict: i < unsafe ? 'draft_unsafe' : 'equivalent', scores: JSON.stringify({ safety: 8, voice: 8, actions: 8, overall: 8 }),
+          });
+        }
+      };
+      await draftsOn(active.prior_version, 40, 2, before, 'model-old');
+      await draftsOn(active.active_version, 25, 5, after, 'model-new');
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      // The same model on both sides: the same rise is the patch's.
+      await draftsOn(active.prior_version, 40, 2, before, 'model-new');
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(active.id);
     });
 
     test('a tiny exam never trips the unsafe-rate rollback (the promotion bar needed 20 items; so does the rollback)', async () => {
