@@ -760,6 +760,16 @@ function backfillTimeOnSiteMinutes(timeOnSite) {
 // the backfill policy strips exactly what the helper fabricates — no more.
 const BACKFILL_INFERRED_START_FIELDS = ['actual_start_time', 'check_in_time', 'arrived_at'];
 
+// The tech's real arrival instant on the pre-update scheduled_services row, or
+// null. The pre-update row carries only stamps a person or the check-in flow
+// wrote (the completion's own inferred start is built later), so the weather
+// capture can read it as the start of the visit's wind record.
+function realArrivalInstant(service = {}) {
+  return BACKFILL_INFERRED_START_FIELDS
+    .map((field) => finiteDate(service?.[field]))
+    .find(Boolean) || null;
+}
+
 // The end fields the completion path stamps with the closeout instant: on the
 // scheduled_services row via buildCompletionLifecycleUpdates, and on the
 // service_records report row via buildServiceRecordCompletionTimingFields
@@ -6167,6 +6177,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             fetchApplicationConditions({
               latitude: svc.customer_latitude,
               longitude: svc.customer_longitude,
+              arrivedAt: realArrivalInstant(svc),
             }).catch(() => null),
             capturePestRainOutlook({ svc }),
           ]).then(([captured, rainOutlook]) => {
