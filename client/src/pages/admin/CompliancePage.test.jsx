@@ -195,6 +195,9 @@ describe('CompliancePage Staff authentication', () => {
     renderCompliance('/admin/compliance?tab=licenses');
 
     await screen.findByText('Fixture technician');
+    // The table shows the expiry like every other date on the page; the
+    // dialog still edits the YYYY-MM-DD value.
+    expect(screen.getByText('2/1/2027')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     expect(screen.getByRole('dialog', { name: 'Edit license' })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('License #'), { target: { value: 'NEW-2' } });
