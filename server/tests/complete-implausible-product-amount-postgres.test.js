@@ -69,7 +69,7 @@ const postgres = SKIP ? describe.skip : describe;
 let mockPg;
 jest.setTimeout(90000);
 
-async function seedPestVisit() {
+async function seedPestVisit({ addOnKey = null, productName = null, category = 'herbicide' } = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), productId: randomUUID(),
     serviceKey: `fixture_pest_${randomUUID().slice(0, 8)}` };
@@ -77,11 +77,12 @@ async function seedPestVisit() {
     email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false });
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `Fixture General Pest Control ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
-  await mockPg('products_catalog').insert({ id: f.productId, name: `Fixture Celsius WG ${f.serviceKey}`, category: 'herbicide', active: true,
+  await mockPg('products_catalog').insert({ id: f.productId, name: productName || `Fixture Celsius WG ${f.serviceKey}`, category, active: true,
     inventory_on_hand: 500, inventory_unit: 'lb' });
   await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId,
     service_type: `Fixture General Pest Control ${f.serviceKey}`, scheduled_date: etDateString(), window_start: '09:00', window_end: '10:00', status: 'confirmed',
-    estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false });
+    estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false,
+    ...(addOnKey ? { service_key_snapshot: addOnKey } : {}) });
   return f;
 }
 
@@ -184,6 +185,46 @@ postgres('technician implausible product amount', () => {
       const row = await mockPg('service_products as sp').join('service_records as sr', 'sr.id', 'sp.service_record_id').where('sr.customer_id', f.customerId).first('sp.product_id');
       expect(row.product_id).toBe(f.productId);
       expect(await writesFor(f)).toMatchObject({ serviceProducts: 1, allMovements: 1, stock: 495 });
+    } finally { await cleanup(f); }
+  });
+
+  // A chemical area add-on visit: the add-on tags are resolved from the product lines at intake, and again under the row lock
+  // (the visit_identity_changed recheck), so both must see the same id spelling.
+  const addOnLine = (f, productId) => ({ productId, name: 'Topchoice Granular Insecticide', totalAmount: 2, amountUnit: 'lb',
+    rate: 2, rateUnit: 'lb', areaValue: 1000, areaUnit: 'sqft', applicationMethod: 'granular_broadcast' });
+
+  test('a chemical add-on line with an upper-case, padded product id completes and is recorded under the canonical id', async () => {
+    const f = await seedPestVisit({ addOnKey: 'area_addon_fire_ant_yard', category: 'insecticide', productName: `Topchoice Granular Insecticide ${randomUUID().slice(0, 8)}` });
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const out = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'technician', technicianId: f.techId, technician: null },
+        body: { ...bodyFor(f, 1), products: [addOnLine(f, `  ${f.productId.toUpperCase()} `)] } });
+      expect(out.status).toBe(200);
+      const row = await mockPg('service_products as sp').join('service_records as sr', 'sr.id', 'sp.service_record_id').where('sr.customer_id', f.customerId)
+        .first('sp.product_id', 'sp.area_addon_key');
+      expect(row).toMatchObject({ product_id: f.productId, area_addon_key: 'area_addon_fire_ant_yard' });
+      expect(await writesFor(f)).toMatchObject({ serviceProducts: 1, allMovements: 1, stock: 498 });
+    } finally { await cleanup(f); }
+  });
+
+  test('the request hash is taken over the ids as submitted: an identical retry replays, and the stored hash is the one an older build stored', async () => {
+    const f = await seedPestVisit();
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const { hashCompletionRequest } = require('../services/completion-attempts');
+      const body = { ...bodyFor(f, 1), products: [{ productId: ` ${f.productId.toUpperCase()}`, name: 'Celsius WG', totalAmount: 3, amountUnit: 'lb' }] };
+      const key = randomUUID();
+      const send = () => completeScheduledService({ serviceId: f.serviceId, idempotencyKey: key,
+        actor: { techRole: 'technician', technicianId: f.techId, technician: null }, body: structuredClone(body) });
+      const submittedHash = hashCompletionRequest(structuredClone(body));
+      const first = await send();
+      expect(first.status).toBe(200);
+      const attempt = await mockPg('service_completion_attempts').where({ service_id: f.serviceId, idempotency_key: key }).first();
+      expect(attempt.request_hash).toBe(submittedHash);
+      const retry = await send();
+      expect(retry.status).toBe(200);
+      expect(retry.body).toMatchObject({ replayed: true, serviceRecordId: first.body.serviceRecordId });
     } finally { await cleanup(f); }
   });
 

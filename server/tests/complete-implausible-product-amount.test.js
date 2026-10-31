@@ -28,9 +28,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-const { vetProductAmounts, exceedsVisitLimit } = require('../services/complete-scheduled-service');
+const { vetProductAmounts, exceedsVisitLimit, canonicalizeProductLines } = require('../services/complete-scheduled-service');
 
-const vet = async (args) => (await vetProductAmounts(require('../models/db'), args));
+// vetProductAmounts assumes canonical ids: completeScheduledService canonicalizes the lines at intake, before anything reads them.
+const vet = async (args) => { canonicalizeProductLines(args.products); return vetProductAmounts(require('../models/db'), args); };
 const refusalBody = async (args) => (await vet(args))?.body ?? null;
 const historyReads = () => mockCalls.filter((c) => c.table === 'product_inventory_movements');
 
@@ -143,12 +144,14 @@ describe('one product\'s lines are judged together, under one canonical id', () 
     expect(out.body.error).toBe('20000 lb of Celsius WG is far more than one visit uses. Check the amount and submit again.');
   });
 
-  test('every line carries the canonical id afterwards, for a technician and an admin alike', async () => {
-    for (const actor of [tech, admin]) {
-      const products = variants(6, 10);
-      await vet({ actor, products });
-      expect(products.map((p) => p.productId)).toEqual(Array(6).fill(CELSIUS));
-    }
+  test('intake makes every line\'s id canonical in place, and hands back the ids as submitted only when something changed', () => {
+    const products = variants(6, 10);
+    const submitted = canonicalizeProductLines(products);
+    expect(products.map((p) => p.productId)).toEqual(Array(6).fill(CELSIUS));
+    expect(submitted).toEqual(variants(6, 10).map((p) => p.productId));
+    expect(canonicalizeProductLines(products)).toBeNull(); // already canonical: the hash body is the body
+    expect(canonicalizeProductLines([{ name: 'no id' }, null, { productId: '' }])).toBeNull();
+    expect(canonicalizeProductLines(null)).toBeNull();
   });
 
   test('an admin with the same 200 lines is not refused (the advisory path decides on stock)', async () => {

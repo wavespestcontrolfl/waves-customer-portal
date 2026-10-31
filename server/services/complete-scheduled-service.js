@@ -1746,15 +1746,13 @@ function firstProductOverVisitLimit(lines, rowById) {
   return null;
 }
 
-// Vets every submitted product line before the first write. Each line's productId is made canonical (trim, lower case:
-// the form the catalog lookup and the de-duplication compare) and written back, so spellings of one id are one product
-// everywhere downstream. A malformed amount is a 400 for any role. A technician whose lines for one product add up to
+// Vets every submitted product line before the first write. The ids are already canonical (canonicalizeProductLines ran at
+// intake), so spellings of one id are one product here and everywhere downstream. A malformed amount is a 400 for any role. A technician whose lines for one product add up to
 // more than its visit limit gets a 422 naming the product and the total (an admin's keeps the advisory path in
 // deductProductInventory). Returns { status, body } or null. One catalog read, no history read. `skip` is a replay, a
 // resume or a packet effects phase: nothing is judged or changed.
 async function vetProductAmounts(database, { actor, products, skip = false }) {
   if (skip || !Array.isArray(products)) return null;
-  for (const p of products) if (p?.productId) p.productId = canonicalProductId(p.productId);
   const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
   const ids = [...new Set(lines.map((p) => p.productId).filter((id) => UUID_SHAPE.test(id)))];
   const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
@@ -2126,6 +2124,29 @@ const HARD_COUNT_LIMIT_LABELS = {
 const FINDING_LIMIT_LABELS = { ...HARD_COUNT_LIMIT_LABELS, [areaAddOnGovernedRate.LIMIT_TYPE]: 'governed add-on rate', [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: 'governed add-on product', [areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: 'governed add-on rate check' };
 const MAX_RAW_SUBMITTED_PRODUCTS = 200;
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// INTAKE: makes every product line's productId canonical (trim, lower case: the form the catalog lookup, the de-duplication and
+// the add-on tag keys compare) ONCE, before anything reads the ids, so spellings of one id are one product everywhere
+// downstream. The lines are written in place. Returns the ids as submitted when any changed (the idempotency hash keeps
+// hashing those, so a retry, and an attempt recorded before this change, still match), else null.
+function canonicalizeProductLines(products) {
+  if (!Array.isArray(products)) return null;
+  const submitted = products.map((p) => p?.productId);
+  let changed = false;
+  for (const p of products) {
+    if (!p?.productId) continue;
+    const canonical = canonicalProductId(p.productId);
+    changed = changed || canonical !== p.productId;
+    p.productId = canonical;
+  }
+  return changed ? submitted : null;
+}
+
+// The request body as it was submitted, for the idempotency hash: the product lines carry their ids as submitted.
+function bodyAsSubmitted(body, submittedIds) {
+  if (!submittedIds || !Array.isArray(body?.products)) return body;
+  return { ...body, products: body.products.map((p, i) => (p && typeof p === 'object' && submittedIds[i] ? { ...p, productId: submittedIds[i] } : p)) };
+}
 
 // An oversized products array is refused up front (a 400), before anything reads it.
 function rawProductsTooManyPayload(products) {
@@ -3371,6 +3392,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
     if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
+    const productIdsAsSubmitted = canonicalizeProductLines(products);
     const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -4904,7 +4926,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             idempotencyKey,
             // Both packet phases hash what the effects resume will present.
             requestHash: CompletionAttempts.hashCompletionRequest(packetContext
-              ? CompletionAttempts.withoutPhotoBytes(completionInput.body) : completionInput.body),
+              ? CompletionAttempts.withoutPhotoBytes(bodyAsSubmitted(completionInput.body, productIdsAsSubmitted))
+              : bodyAsSubmitted(completionInput.body, productIdsAsSubmitted)),
           }, lockTrx);
           if (packetEffects && ['resume', 'replay'].includes(attemptClaim.action)
               && (attemptClaim.serviceRecordId || attemptClaim.payload?.serviceRecordId) !== ownedItem.service_record_id) {
@@ -16360,6 +16383,7 @@ module.exports.isPestStockAdvisoryCompletion = isPestStockAdvisoryCompletion;
 module.exports.isLawnTsStockAdvisoryCompletion = isLawnTsStockAdvisoryCompletion;
 module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
 module.exports.vetProductAmounts = vetProductAmounts;
+module.exports.canonicalizeProductLines = canonicalizeProductLines;
 module.exports.exceedsVisitLimit = exceedsVisitLimit;
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;
