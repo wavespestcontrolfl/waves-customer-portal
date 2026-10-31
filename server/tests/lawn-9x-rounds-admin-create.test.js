@@ -458,6 +458,11 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
         ? { ...row }
         : (table === 'customers' ? { id: 'cust-1', waveguard_tier: 'Bronze', monthly_rate: 46.33, ...customerExtra } : undefined));
       if (table === 'scheduled_services') {
+        // The visit has no child rows yet: it is becoming a NEW series (lawn-area-days newSeriesAreaAnchor).
+        const firstRow = c.first;
+        c.first = jest.fn(async (...args) => (c.where.mock.calls.some(([w]) => w && typeof w === 'object' && 'recurring_parent_id' in w)
+          ? undefined
+          : firstRow(...args)));
         c.insert = jest.fn((data) => {
           spawned.push(data);
           return { returning: jest.fn().mockResolvedValue([{ ...row, ...data, id: `new-${spawned.length}` }]) };

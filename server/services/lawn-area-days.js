@@ -25,10 +25,12 @@
  * whose city reads "Bradenton" in Lakewood Ranch ZIPs. No area -> null: the
  * series keeps its own anchor (the behavior before this module).
  *
- * The anchor is STAMPED on the series parent at creation
- * (recurring_round_anchor_date), so a later config edit does not move an
- * existing series. Only rows whose pattern is lawn_rounds_9 reach this module,
- * and those exist only behind GATE_LAWN_9X_ROUNDS (or the one-time re-date).
+ * A series takes its area only at creation (a parent with no child rows and no
+ * stored anchor), and the anchor is STAMPED on the parent then
+ * (recurring_round_anchor_date). An existing series never adopts an area later,
+ * so a config edit moves no existing series. Only rows whose pattern is
+ * lawn_rounds_9 reach this module, and those exist only behind
+ * GATE_LAWN_9X_ROUNDS (or the one-time re-date).
  */
 
 const logger = require('./logger');
@@ -234,12 +236,17 @@ async function lawnAreaRoundAnchor(conn, parentRow) {
 }
 
 // The anchor a NEW series is born with: the area anchor when the pattern is
-// lawn_rounds_9 and the parent has no stored recurring_round_anchor_date, else
-// null. Every creator and its planner call this one helper so the plan and the
-// write agree.
+// lawn_rounds_9 and the series is new (the parent stores no
+// recurring_round_anchor_date and has no child rows yet), else null. A series
+// created outside every area has no stored anchor either, so the child rows tell
+// it apart: it keeps its own anchor when a later config edit covers its address.
+// A failed child read counts as an existing series. Every creator and its
+// planner call this one helper so the plan and the write agree.
 async function newSeriesAreaAnchor(conn, parentRow, pattern) {
   if (pattern !== LAWN_ROUNDS_9 || dateOnly(parentRow?.recurring_round_anchor_date)) return null;
-  return lawnAreaRoundAnchor(conn, parentRow);
+  const existing = !!parentRow?.id && await inSavepoint(conn, (dbh) => dbh('scheduled_services')
+    .where({ recurring_parent_id: parentRow.id }).first('id')).catch(() => true);
+  return existing ? null : lawnAreaRoundAnchor(conn, parentRow);
 }
 
 module.exports = {
