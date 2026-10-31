@@ -186,7 +186,6 @@
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
  *   GATE_SMS_GRATITUDE_REPLIES=true (allow the delayed gratitude-only auto-reply lane; independent of GATE_SMS_AUTO_SEND)
  *   SMS_GRATITUDE_ACTIVATED_AT=<ISO timestamp with offset> (strict live-webhook cutoff for gratitude replies)
- *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
@@ -409,6 +408,7 @@
  *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
  *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). The appointment-page entry ALSO needs GATE_APPOINTMENT_PAGE (it rides that router). The Waves app entry — POST /api/schedule/:id/prep-photos and the prepPhotos field on GET /api/schedule/next — needs only this gate; flipping it opens both entry points. Off = the generic 404 on both POST routes: the anonymous appointment-page route answers it before any body parse (visitPrepPreParserGuard, mounted ahead of the shared parsers in index.js); the authenticated app route answers it after the schedule router's normal authentication and shared parsers (a logged-in route exposes nothing to an anonymous probe), before its own limiter and multipart parse. Neither GET payload carries a prepPhotos key. Surfaces when on: the appointment-page box, the app's Send photos button, the tech Visit Brief's Customer flagged block, the stop chip, and the office feed item. Sends nothing to a customer.)
  *   GATE_VISIT_PREP_TECH_ALERTS=true (PR 6, customer-visit-photos scope doc §5.4 item 4: the assigned field technician gets a tech-home card plus a one-line push — "A customer sent photos for a visit on your route" — when a customer submits visit prep photos. Strict opt-in, read at call time via visitPrepTechAlertsLive() in server/services/visit-prep-tech-alert.js. ALSO requires GATE_VISIT_PREP_PHOTOS live (nothing to alert about otherwise). Deliberately its OWN gate rather than GATE_TECH_VISIT_NOTIFICATIONS — that gate is off in production, and this can be the first tech visit card to go live; it reuses that mechanism's card/push plumbing (tech_notifications + PushService.sendToAdminUser) without depending on its gate. Recipient = the visit's CURRENT assigned technician, re-read fresh at send time — never the pre-lock row. No technician, or a non-assignable one → no card. Never fired for a duplicate-only resubmit. Sends nothing to a customer.)
+ *   GATE_EMAIL_APP_LINKS=true (customer emails: anchors to customer pages on the portal host skip SendGrid's click rewrite (clicktracking=off) so iOS universal links / Android App Links open them in the Waves app - services/messaging/email-link-policy.js untrackAppLinks via sendOne. Strict opt-in, read at call time via emailAppLinksLive(). Off = every link tracked as before #7229. Keep OFF until the app lands on the tapped page: device test 2026-10-31 opened the iPhone app on Home for /?tab=billing and /book.)
  *   GATE_SMS_LINK_WRAP=true (every portal link in an outbound customer/lead SMS becomes a tracked /l/<code> short link stamped to the text it went out in, so clicks show for ALL texts including manual ones typed with a full link — services/messaging/sms-link-wrap.js, wired at the sendCustomerMessage choke point before countSegments. Strict opt-in, read at call time via smsLinkWrapLive(). Customer/lead SMS only, never internal or MMS bodies, never non-portal hosts or links already /l/; any shortener error keeps the original link and logs a warn — never blocks a send. Dark = every body byte-identical to today.)
  *   GATE_OUTLINK_TRACKING=true (prep guides: every link to an OUTSIDE site — Amazon, Chewy, Elanco, Bravecto, ... — in the prep email and the public /prep/:token page is rewritten at RENDER time to /go/<code> on the portal host, which logs the click (template key, prep visit, customer, sha256 ip hash, UA; bots skipped) and 302s to the exact original URL. Destinations are pre-registered outbound_links rows keyed by a hash of the URL — the route never reads a URL from the request, so it is not an open redirect — and are never tagged or altered. Own-site, portal, mailto and tel links are untouched; the prep PDF keeps direct links; template content is never edited. Strict opt-in, read at call time via outlinkTrackingLive(). The /go route itself stays live in every state so links already sent keep working after the gate is turned off. Off = byte-identical to today. Sends nothing to a customer.)
  *   GATE_VISIT_PREP_PEST_READ=true (PR 5 — automatic pest read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPestReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS live (the tech facts block is the only place a read is shown). Triggered from services/visit-prep.js's createVisitPrepSubmission — the ONE place a submission is created — fire-and-forget AFTER the submission's own transaction commits, never on the request path. A submission whose visit is a pest-only service (pest-production-calibration.js isPestOnlyServiceType — never a WDO inspection or assessment; a grouped stop counts if ANY live member at the same physical stop is), runs the same photo-id-v2 identifyPestV2 the app's Photo ID route calls and stores the result in pest_identifications with source='visit_prep', mode='internal' (already an allowed mode — no migration on that table). Lawn / tree & shrub / anything else resolves straight to read_status='unsupported', no engine call. VISIT_PREP_READ_DAILY_CAP (default 40) is this feature's OWN cap, separate from Photo ID's; a capped or failed read never blocks the submission — the technician still gets the photos, just with read_status='failed'. See docs in services/visit-prep-pest-read.js.)
@@ -524,6 +524,9 @@ const gates = {
   // SMS portal-link wrap. Registered for logGateStatus only; the choke point
   // reads smsLinkWrapLive() at call time below so a flip needs no redeploy.
   smsLinkWrap: process.env.GATE_SMS_LINK_WRAP === 'true',
+  // Customer-email links that skip SendGrid's click rewrite (dark). Registered
+  // for logGateStatus only; email-link-policy.js reads emailAppLinksLive().
+  emailAppLinks: process.env.GATE_EMAIL_APP_LINKS === 'true',
   // Prep-guide outside-link click tracking (dark). Registered for
   // logGateStatus only; services/outlink-tracking.js reads
   // outlinkTrackingLive() at call time below.
@@ -1718,9 +1721,6 @@ const gates = {
   // so prod requires explicit opt-in per house pattern.
   smsPathologyLedger: isProd ? process.env.GATE_SMS_PATHOLOGY_LEDGER === 'true' : true,
 
-  // AI Blog Writer — generates content via Anthropic API
-  aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
-
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
   cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : process.env.GATE_CRON_JOBS !== 'false',
 
@@ -1934,9 +1934,12 @@ const gates = {
   hermesWorker: isProd ? process.env.GATE_HERMES_WORKER === 'true' : true,
 
   // Link Prospect Outreach — master switch for the outreach lane: serves outreach
-  // prospects to the worker (claim) AND arms the M3b approval-gated send valve
-  // (link-prospect-outreach.js). Default OFF everywhere; even when ON, a send still
-  // requires an operator's explicit, authenticated approval click — never auto-send.
+  // prospects to the worker (claim) AND arms the M3b send valve
+  // (link-prospect-outreach.js). Default OFF everywhere. When ON, a manual send needs
+  // an operator's explicit, authenticated approval click, AND the nightly
+  // link-authority run auto-sends (mode 'auto', seo/link-authority-bridge.js
+  // dispatchAutoSends) every drafted prospect whose placement holds an AUTO_OUTREACH
+  // grant (a lint-clean, commitment-free draft). ON is not approval-only (sweep #3960 A5).
   linkProspectOutreach: process.env.GATE_LINK_OUTREACH === 'true',
 
   // Outreach Drafter — in-process cron that claims outreach prospects, drafts a
@@ -2971,8 +2974,8 @@ const gates = {
   // UNREGISTERED_AFFILIATE_LINK and the lane is fully dark. Raw affiliate
   // URLs never pass regardless (DISALLOWED_EXTERNAL_LINK), and channel
   // stripping (newsletter/social) runs regardless of this flag. OFF in
-  // EVERY environment unless set to EXACTLY 'true' (policy flag, same
-  // posture as GATE_NAMED_COMPETITOR_AUTOPUBLISH — '1'/'on' stay dark);
+  // EVERY environment unless set to EXACTLY 'true' (policy flag — '1'/'on'
+  // stay dark; unlike GATE_NAMED_COMPETITOR_AUTOPUBLISH, unset is OFF);
   // content-guardrails reads process.env.GATE_AFFILIATE_LINKS === 'true' at
   // CALL time (the reserviceReportCopy pattern) so flips and tests take
   // effect immediately; kill switch = unset GATE_AFFILIATE_LINKS.
@@ -3865,10 +3868,13 @@ const gates = {
   // every payload and the chips disappear.
   bookingRainChips: process.env.GATE_BOOKING_RAIN_CHIPS === 'true',
 
-  // Admin bell policy — the shared admin bell rings ONLY for new leads,
-  // inbound SMS, voicemail callbacks, accepted estimates, and money failures
-  // (payment failures, billing exceptions, disputes, refund failures, PCI
-  // events) plus twilio_failure; everything else is silenced at the
+  // Admin bell policy — the shared admin bell rings ONLY for a customer reaching
+  // out on any channel (new lead, text, email, voicemail, missed call, reschedule
+  // note), accepted estimates, and failed customer payments (payment_failed; with
+  // GATE_CUSTOMER_ALERTS_RING also bill_payment_error) — owner rulings 2026-08-28
+  // and 2026-09-11; the allowlists live in services/notification-bell-policy.js.
+  // Everything else (disputes, refund failures, PCI events and twilio_failure
+  // included) is silenced at the
   // NotificationService chokepoint with a per-category owner override in
   // Settings → Notifications, and the live dashboard-alert overlay stops
   // merging into the bell (the dashboard banner is untouched). Changes what
@@ -7556,6 +7562,13 @@ function smsLinkWrapLive() {
   return process.env.GATE_SMS_LINK_WRAP === 'true';
 }
 
+// GATE_EMAIL_APP_LINKS read at CALL time - strict `=== 'true'`. The canonical
+// reader for services/messaging/email-link-policy.js. Off = every email link
+// goes through SendGrid's click tracking, as before #7229.
+function emailAppLinksLive() {
+  return process.env.GATE_EMAIL_APP_LINKS === 'true';
+}
+
 // GATE_VISIT_PREP_PEST_READ read at CALL time — strict `=== 'true'`, own
 // switch INSIDE the visit-prep gate (scope doc §5.6: "the read adapter has
 // its own switch inside the gate so the pipe can go live before the
@@ -8058,6 +8071,10 @@ const RETIRED = new Set([
   'GATE_EMAIL_GLASS',
   'GATE_REPORT_GLASS',
   'GATE_PORTAL_GLASS',
+  // Read by nothing: the AI blog lane runs on GATE_AUTONOMOUS_CONTENT + the
+  // GATE_BLOG_* sub-gates, so flipping this from the bar changed nothing
+  // (weekly sweep #6341 B1).
+  'GATE_AI_BLOG_WRITER',
 ]);
 const INVERTED_GATE_RE = /_(OFF|DISABLE|DISABLED|KILL_SWITCH)$/;
 let gateCatalogCache = null;
@@ -8718,6 +8735,7 @@ module.exports.ibDeleteCustomerLive = ibDeleteCustomerLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
+module.exports.emailAppLinksLive = emailAppLinksLive;
 module.exports.homeLineLive = homeLineLive;
 // Exported on its own line (not in the shared list above) so concurrent
 // gate PRs appending to that one-line list never conflict with this one.

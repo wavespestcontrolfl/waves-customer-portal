@@ -60,12 +60,6 @@ final class AppState: ObservableObject {
         Keychain.delete(key: "techName")
     }
 
-    // Used only by LoginView, which no screen shows any more.
-    func signIn(token: String, techName: String) {
-        Keychain.write(key: "authToken", value: token)
-        Keychain.write(key: "techName", value: techName)
-    }
-
     // A wavespay:// link opened the app (Safari's Tap to Pay button).
     func handleIncomingURL(_ url: URL) {
         guard Self.handoffToken(from: url) != nil else { return }
