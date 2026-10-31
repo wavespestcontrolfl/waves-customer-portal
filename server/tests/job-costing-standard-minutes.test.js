@@ -339,6 +339,28 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       expect((await run({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '90.00' }, { covered: false })).revenue).toBe(100);
     });
 
+    test('a paid prepay share wins over a recorded amount; a callback never takes one', async () => {
+      const term = { id: 'term-1', customer_id: 'cust-1', prepay_amount: '1080.00', coverage_visit_count: 12, covered: true };
+      const run = (svcPatch, recordPatch) => cost(fakeDb({
+        ...withSvc({ estimated_price: 100, annual_prepay_term_id: 'term-1', prepaid_method: 'annual_prepay_invoice', prepaid_amount: '90.00', ...svcPatch }),
+        ...withRecord(recordPatch),
+        annual_prepay_terms: [term],
+      }), KEEP);
+      // The old fallback wrote today's monthly rate ($43) on the covered visit: its stamped share replaces it.
+      expect((await run({}, { revenue: '43.00' })).revenue).toBe(90);
+      // The full estimated_price written earlier is replaced by the discounted share too.
+      expect((await run({}, { revenue: '100.00' })).revenue).toBe(90);
+      // A callback linked to the term keeps today's rules: its recorded amount.
+      expect((await run({ is_callback: true }, { revenue: '43.00' })).revenue).toBe(43);
+      // Not covered (refunded or void): the recorded amount stays.
+      const uncovered = cost(fakeDb({
+        ...withSvc({ annual_prepay_term_id: 'term-1', prepaid_method: 'annual_prepay_invoice', prepaid_amount: '90.00' }),
+        ...withRecord({ revenue: '43.00' }),
+        annual_prepay_terms: [{ ...term, covered: false }],
+      }), KEEP);
+      expect((await uncovered).revenue).toBe(43);
+    });
+
     test('only a term the canonical paid-coverage query returns gives a share', async () => {
       const tables = (covered) => ({
         ...withSvc({ ...unpriced, annual_prepay_term_id: 'term-1' }),

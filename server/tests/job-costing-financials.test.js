@@ -235,6 +235,12 @@ describe('computeServiceRecordFinancials', () => {
     expect(fin.labor_hours).toBe(0.5);
   });
 
+  test('a margin past the decimal(5,2) columns is stored at -999.99, not a failed write', () => {
+    const fin = computeServiceRecordFinancials({ revenue: 1, laborHours: 0.42, laborCost: 14.58, driveCost: 11.67 });
+    expect(fin.gross_profit).toBe(-25.25);
+    expect(fin.gross_margin_pct).toBe(-999.99);
+  });
+
   test('margin and rpmh are null (not 0) when revenue/labor are absent', () => {
     const fin = computeServiceRecordFinancials({
       revenue: 0,
