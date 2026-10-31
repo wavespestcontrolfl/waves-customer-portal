@@ -51,6 +51,10 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       const url = new URL(rawUrl);
       fb.calls.push(`${init.method || 'GET'} ${url.pathname}`);
       const json = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+      if (fb.unreadableOnce && (init.method || 'GET') === 'GET' && url.pathname.endsWith('/conversations')) {
+        fb.unreadableOnce = false;
+        return { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } };
+      }
       if (init.method === 'POST') {
         sends.push(JSON.parse(init.body));
         if (fb.sendThrows) throw new TypeError('fetch failed');
@@ -303,6 +307,16 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       await resetCursor();
       await messenger.pollMessenger();
       expect(await bellsOf('a')).toHaveLength(1);
+    });
+
+    test('an unreadable conversation list fails the poll and does not finish the first import', async () => {
+      conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'Please call me', at: ago(2) }] });
+      fb.unreadableOnce = true;
+      await expect(messenger.pollMessenger()).rejects.toThrow();
+      expect(await messagesOf('a')).toHaveLength(0);
+      expect(await db('system_settings').where({ key: 'messenger_inbox_bootstrap_done' }).first()).toBeUndefined();
+      await messenger.pollMessenger();
+      expect(await messagesOf('a')).toHaveLength(1);
     });
 
     test('a bell write that answers null fails the import, and the next poll rings it', async () => {

@@ -78,11 +78,18 @@ async function graph(urlOrPath, { token, params = {}, method = 'GET', body } = {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
   });
-  const json = await res.json().catch(() => ({}));
+  let json = {};
+  let readable = true;
+  try { json = await res.json(); } catch { readable = false; }
   if (!res.ok) {
     throw Object.assign(new Error(`Facebook Graph request failed (HTTP ${res.status}, code ${json?.error?.code ?? 'none'})`), {
       status: res.status, fbCode: json?.error?.code ?? null,
     });
+  }
+  // A success whose body cannot be read is not an empty answer: an empty list here would let a
+  // first import mark itself finished with nothing read. `unreadable` lets a send call it unconfirmed.
+  if (!readable || !json || typeof json !== 'object') {
+    throw Object.assign(new Error(`Facebook Graph answer unreadable (HTTP ${res.status})`), { status: res.status, fbCode: null, unreadable: true });
   }
   return json;
 }
@@ -543,7 +550,7 @@ async function sendReply(req, id, text, { now = new Date() } = {}) {
     logger.warn(`[messenger-inbox] reply not sent: ${safeError(err)}`);
     // No HTTP answer (a timeout or a dropped connection): Facebook may have delivered it, so the
     // staff member must check before sending again. An HTTP error is a refusal: nothing went out.
-    if (!err?.status) return { ok: false, status: 504, error: 'send_uncertain' };
+    if (!err?.status || err.unreadable) return { ok: false, status: 504, error: 'send_uncertain' };
     return { ok: false, status: 502, error: 'send_failed' };
   }
   const mid = sent?.message_id;
