@@ -44,7 +44,7 @@ describeDb('territory read-out (Postgres)', () => {
     await expect(territoryReadout(db, { today: '2099-01-05', ahead: '2099-02-02', back: '2098-12-08' })).resolves.toEqual([]);
   });
 
-  test('counts booked and done stops per technician and area: siblings once, never a hold or a reschedule placeholder', async () => {
+  test('counts booked and done stops per technician and area: siblings once in one area, never a hold or a reschedule placeholder', async () => {
     const { randomUUID } = require('node:crypto');
     const trx = await db.transaction();
     try {
@@ -54,9 +54,10 @@ describeDb('territory read-out (Postgres)', () => {
         id: techId, name: `Readout ${techId.slice(0, 8)}`, email: `${techId}@example.invalid`,
         password_hash: 'synthetic-not-a-login-hash', role: 'technician', active: true, employment_status: 'active', field_dispatchable: true,
       });
+      // The customer's own ZIP is in Bradenton West; the serviced property is in Venice.
       await trx('customers').insert({
         id: customerId, first_name: 'Synthetic', last_name: 'Fixture', email: `${customerId}@example.invalid`,
-        phone: '+19415550101', address_line1: '100 Fixture Way', city: 'Venice', state: 'FL', zip: '34293',
+        phone: '+19415550101', address_line1: '100 Fixture Way', city: 'Bradenton', state: 'FL', zip: '34209',
       });
       const visit = (date, status, extra = {}) => ({
         id: randomUUID(), customer_id: customerId, technician_id: techId, scheduled_date: date, status,
@@ -64,17 +65,22 @@ describeDb('territory read-out (Postgres)', () => {
       });
       await trx('scheduled_services').insert([
         visit('2099-01-06', 'confirmed'),
-        // A sibling service at the same slot (pest + mosquito): the same stop.
-        visit('2099-01-06', 'confirmed', { service_type: 'Mosquito Control' }),
+        // A sibling service at the same slot (pest + mosquito) with no service ZIP stamped: the same
+        // stop, in the stamped sibling's area, not the customer's.
+        visit('2099-01-06', 'confirmed', { service_type: 'Mosquito Control', service_address_zip: null }),
         visit('2098-12-20', 'completed'),
+        // No service ZIP on any row of the stop: the customer's ZIP places it.
+        visit('2098-12-21', 'completed', { service_address_zip: null }),
         // An estimate hold: no customer yet, an expiry. Not a stop.
         visit('2099-01-07', 'pending', { customer_id: null, reservation_expires_at: '2099-01-01T12:00:00Z' }),
         // A customer-portal reschedule request's placeholder at the old slot. Not a stop.
         visit('2099-01-08', 'rescheduled'),
       ]);
       const rows = await territoryReadout(trx, { today: '2099-01-05', ahead: '2099-02-02', back: '2098-12-08' });
+      const name = `Readout ${techId.slice(0, 8)}`;
       expect(rows.filter((row) => row.technicianId === techId)).toEqual([
-        { technicianId: techId, technicianName: `Readout ${techId.slice(0, 8)}`, area: 'venice', areaLabel: 'Venice', booked: 1, done: 1 },
+        { technicianId: techId, technicianName: name, area: 'bradenton_west', areaLabel: 'Bradenton West', booked: 0, done: 1 },
+        { technicianId: techId, technicianName: name, area: 'venice', areaLabel: 'Venice', booked: 1, done: 1 },
       ]);
     } finally {
       await trx.rollback();

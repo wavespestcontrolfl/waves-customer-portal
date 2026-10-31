@@ -107,8 +107,8 @@ async function territoryTechnicianFor(conn, place = {}) {
 /**
  * Territories by ZIP, build 3 (GATE_TERRITORY_READOUT): stops per technician and area, booked
  * in [today, ahead) (pending / confirmed) and done in [back, today) (completed). A stop is one
- * customer at one appointment slot (sibling service rows count once).
- * The area is the visit's service ZIP, else its customer's ZIP, through territory_zips; a ZIP
+ * customer at one appointment slot (sibling service rows count once, in one area).
+ * The area is a sibling's service ZIP, else the customer's ZIP, through territory_zips; a ZIP
  * outside the table reads area null. An unclaimed estimate hold is not a stop. Dates are
  * YYYY-MM-DD Eastern. Reads only.
  * Rows: [{ technicianId, technicianName, area, areaLabel, booked, done }].
@@ -116,25 +116,40 @@ async function territoryTechnicianFor(conn, place = {}) {
 async function territoryReadout(conn, { today, ahead, back }) {
   const db = conn || defaultDb;
   const result = await db.raw(`
-    SELECT ss.technician_id, t.name AS technician_name, tz.area,
-      -- A stop is the repo's sibling identity (stops-ahead.js): one customer at one appointment
-      -- slot, so a pest + mosquito visit counts once. A 'rescheduled' row is the customer-portal
-      -- request's placeholder at the old slot (the schedule day feed drops it too): not a stop.
-      COUNT(DISTINCT (ss.customer_id, ss.scheduled_date, ss.window_start))
-        FILTER (WHERE ss.scheduled_date >= ?::date AND ss.status IN ('pending', 'confirmed'))::int AS booked,
-      COUNT(DISTINCT (ss.customer_id, ss.scheduled_date, ss.window_start))
-        FILTER (WHERE ss.scheduled_date < ?::date AND ss.status = 'completed')::int AS done
-    FROM scheduled_services ss
-    LEFT JOIN customers c ON c.id = ss.customer_id
-    LEFT JOIN technicians t ON t.id = ss.technician_id
-    LEFT JOIN territory_zips tz ON tz.zip = LEFT(COALESCE(NULLIF(TRIM(ss.service_address_zip), ''), TRIM(c.zip)), 5)
-    WHERE ss.scheduled_date >= ?::date AND ss.scheduled_date < ?::date
-      -- An unclaimed estimate hold (slot-reservation: no customer yet, an expiry) is not a stop.
-      AND NOT (ss.customer_id IS NULL AND ss.reservation_expires_at IS NOT NULL)
-    GROUP BY ss.technician_id, t.name, tz.area
-    ORDER BY t.name NULLS LAST, tz.area NULLS LAST`, [today, today, back, ahead]);
+    WITH bounds AS (SELECT ?::date AS back, ?::date AS today, ?::date AS ahead),
+    visit AS (
+      -- Rows that count: pending / confirmed from today on, completed before today. A 'rescheduled'
+      -- row is the customer-portal request's placeholder at the old slot (the schedule day feed
+      -- drops it too), and an unclaimed estimate hold (slot-reservation: no customer yet, an
+      -- expiry) is not a stop.
+      SELECT ss.technician_id, ss.customer_id, ss.scheduled_date, ss.window_start,
+        ss.scheduled_date >= b.today AS booked,
+        NULLIF(TRIM(ss.service_address_zip), '') AS stamped_zip, NULLIF(TRIM(c.zip), '') AS customer_zip
+      FROM scheduled_services ss
+      CROSS JOIN bounds b
+      LEFT JOIN customers c ON c.id = ss.customer_id
+      WHERE ss.scheduled_date >= b.back AND ss.scheduled_date < b.ahead
+        AND NOT (ss.customer_id IS NULL AND ss.reservation_expires_at IS NOT NULL)
+        AND CASE WHEN ss.scheduled_date >= b.today THEN ss.status IN ('pending', 'confirmed') ELSE ss.status = 'completed' END
+    ),
+    stop AS (
+      -- A stop is the repo's sibling identity (stops-ahead.js): one technician's customer at one
+      -- appointment slot, so a pest + mosquito visit counts once, in one area. A sibling's stamped
+      -- service ZIP wins over the customer's: add-a-line, dispatch follow-up and same-trip rows
+      -- leave it blank beside a stamped sibling, and the customer's ZIP can be another property.
+      SELECT technician_id, booked, LEFT(COALESCE(MIN(stamped_zip), MIN(customer_zip)), 5) AS zip
+      FROM visit
+      GROUP BY technician_id, customer_id, scheduled_date, window_start, booked
+    )
+    SELECT s.technician_id, t.name AS technician_name, tz.area,
+      COUNT(*) FILTER (WHERE s.booked)::int AS booked,
+      COUNT(*) FILTER (WHERE NOT s.booked)::int AS done
+    FROM stop s
+    LEFT JOIN technicians t ON t.id = s.technician_id
+    LEFT JOIN territory_zips tz ON tz.zip = s.zip
+    GROUP BY s.technician_id, t.name, tz.area
+    ORDER BY t.name NULLS LAST, tz.area NULLS LAST`, [back, today, ahead]);
   return (result.rows || [])
-    .filter((row) => row.booked > 0 || row.done > 0)
     .map((row) => ({
       technicianId: row.technician_id || null,
       technicianName: row.technician_name || null,
