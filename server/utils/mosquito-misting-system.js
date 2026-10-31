@@ -133,6 +133,35 @@ function isMistingSystemIdentity(value) {
   return MISTING_SYSTEM_KEY_PATTERN.test(raw) || MISTING_SYSTEM_PLAN_NAME_PATTERN.test(raw);
 }
 
+// The customer-safe facts of a priced misting plan line, picked off the engine line (nozzles, risers, tier label, the refill
+// solution's price and expected count). The refill LABEL is a solution name only (no brand names), and nothing cost-bearing
+// (productCost, hardwareCost, margins, labor, pricingKnobs) is read. The mapper stamps this on the recurring plan row and the
+// public estimate route reads it; both pick the fields through here so the shape cannot drift.
+const MISTING_REFILL_SOLUTION_LABELS = Object.freeze({
+  standard: 'Standard solution',
+  natural: 'Natural solution',
+  premium: 'Premium solution',
+});
+function mistingCustomerFacts(line) {
+  if (!line || typeof line !== 'object') return null;
+  const whole = (value) => {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  };
+  const refill = line.refill && typeof line.refill === 'object' ? line.refill : null;
+  const perFill = refill ? Number(refill.perFill) : NaN;
+  const solution = refill ? String(refill.solution || '').trim().toLowerCase() : '';
+  const refillsPerYear = refill ? whole(refill.refillsPerYear) : null;
+  return {
+    tierLabel: typeof line.tierLabel === 'string' && line.tierLabel.trim() ? line.tierLabel.trim() : null,
+    nozzles: whole(line.nozzles),
+    risers: whole(line.risers),
+    refill: Number.isFinite(perFill) && perFill > 0 && MISTING_REFILL_SOLUTION_LABELS[solution]
+      ? { solution, label: MISTING_REFILL_SOLUTION_LABELS[solution], perFill, refillsPerYear }
+      : null,
+  };
+}
+
 // The misting SYSTEM identity of a proposal line or program (estimate-proposal.js keeps it through normalization, so the gate and
 // the acceptance-pending refusals can still see a priced misting row once staff authors a proposal). Key fields are matched by
 // key shape (`mosquito_misting`, `mosquito_misting_installation`, ...) EXCEPT the free design visit `mosquito_misting_system`,
@@ -253,6 +282,7 @@ module.exports = {
   isMistingSystemIdentity,
   isMistingSelection,
   mistingProposalIdentity,
+  mistingCustomerFacts,
   MISTING_SYSTEM_NAME_PATTERN,
   isMistingSystemService,
   isMistingDesignConsultation,

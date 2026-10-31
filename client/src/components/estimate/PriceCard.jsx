@@ -5,6 +5,7 @@ import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glas
 import { copyAllowedInScope, serviceGuaranteeScope } from '@estimate-copy-claims';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
+import { mistingRefillLine } from '../../lib/mistingPlanText';
 import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
 
 /**
@@ -27,6 +28,12 @@ const SERVICE_INCLUSIONS = {
     'Targeted barrier application in mosquito resting zones',
     'Standing-water and breeding-pressure observations',
     'Weather-aware treatment timing',
+  ],
+  // The misting SYSTEM plan (owner 2026-10-30, item C): its own service, never the barrier list above.
+  mosquito_misting: [
+    'Every month, we check the tank, the timer, the tubing and the spray from each nozzle.',
+    'Every third visit, we clean every nozzle and replace the filter.',
+    'Only Waves technicians refill the tank, and the cabinet stays locked.',
   ],
   tree_shrub: [
     'Ornamental inspection during service visits',
@@ -79,6 +86,8 @@ function normalizedTier(value) {
 
 function serviceKey(row = {}) {
   const raw = String(row.service || row.key || row.label || '').toLowerCase();
+  // The misting system plan carries 'mosquito' in its key and label but is not the barrier program.
+  if (/mosquito[\s_-]*misting|misting[\s_-]+(?:systems?|service[\s_-]+plans?)/.test(raw)) return 'mosquito_misting';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
@@ -261,7 +270,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null, commercialInteriorSelected = null, noGuarantee = false, guaranteeScope: guaranteeScopeProp = null, monthlyAverageLine = null, monthlyAverageContext = null }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null, commercialInteriorSelected = null, noGuarantee = false, guaranteeScope: guaranteeScopeProp = null, monthlyAverageLine = null, monthlyAverageContext = null, refill = null }) {
   // The estimate's guarantee scope; older callers pass the noGuarantee boolean.
   const inclusionScope = guaranteeScopeProp || (noGuarantee ? 'none' : 'all');
   if (!frequency) return null;
@@ -726,6 +735,14 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
             || wording?.dayLine
             || DEFAULT_WORDING.dayLine
           ).replace('{amount}', fmtMoney(dayPrice))}
+        </div>
+      ) : null}
+
+      {/* The misting plan's refill line (owner 2026-10-30, item D): the refill price is billed per fill, beside the plan, so it
+          states itself under the price. Null for every other service, so their cards are unchanged. */}
+      {mistingRefillLine(refill) ? (
+        <div data-testid="misting-refill-line" style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, lineHeight: 1.5 }}>
+          {mistingRefillLine(refill)}
         </div>
       ) : null}
 
