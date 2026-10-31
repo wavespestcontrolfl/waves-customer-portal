@@ -427,6 +427,19 @@ const loadCheckRows = (conn, runId, { lock = false } = {}) => {
   return query.select(checkColumns(conn));
 };
 
+// "Paid by paper check instead" (payroll-mercury.js) is saved as a payment row, and the check row stays frozen. The
+// stub, a technician's own list and the CSV say how the check was paid, so that paper check wins over bank transfer.
+// Not behind a gate: a paper check recorded while the gate was on stays true after it is turned off.
+async function withPaperPayments(conn, rows) {
+  const bank = rows.filter((row) => row.pay_method === 'bank_transfer').map((row) => row.id);
+  if (!bank.length) return rows;
+  const latest = await require('./payroll-mercury').latestPayments(conn, bank);
+  return rows.map((row) => {
+    const payment = latest.get(row.id);
+    return payment && payment.state === 'paper' ? { ...row, pay_method: 'check', check_number: payment.check_number } : row;
+  });
+}
+
 // Technicians with worked time in the week, approved or not. Same test as the
 // timesheet approval screen, so "waiting" matches what the office sees there.
 async function workedTechnicianIds(conn, start, end) {
@@ -981,7 +994,8 @@ async function getStub(checkId, conn = db) {
       conn.raw('COALESCE(SUM(additional_medicare_cents), 0) AS additional_medicare'),
       conn.raw('COALESCE(SUM(net_cents), 0) AS net'),
     );
-  const c = serializeCheck(check);
+  const [paid] = await withPaperPayments(conn, [check]);
+  const c = serializeCheck(paid);
   // Gate on, or a check that stored pay line figures (drafted while it was on).
   const withLines = 'reviewBonusCents' in c;
   const withheld = c.federalIncomeTaxCents + c.socialSecurityCents + c.medicareCents + c.additionalMedicareCents;
@@ -1054,7 +1068,7 @@ async function listOwnChecks(technicianId, conn = db) {
       conn.raw("to_char(c.week_start, 'YYYY-MM-DD') as week_start"),
       conn.raw("to_char(c.pay_date, 'YYYY-MM-DD') as pay_date"),
     ]);
-  return rows.map((row) => {
+  return (await withPaperPayments(conn, rows)).map((row) => {
     const c = serializeCheck(row);
     return {
       id: c.id,
@@ -1123,7 +1137,7 @@ async function exportCsv(runId, conn = db) {
   requireUuid(runId, 'Pay run');
   const run = await loadRun(conn, runId);
   if (run.status === 'voided') throw new PayrollError(409, 'This pay run was voided.');
-  const rows = await loadCheckRows(conn, runId);
+  const rows = await withPaperPayments(conn, await loadCheckRows(conn, runId));
   return { filename: `pay-run-${run.week_start}.csv`, csv: checksToCsv(rows) };
 }
 

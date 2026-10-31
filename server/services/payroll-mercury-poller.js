@@ -207,7 +207,12 @@ async function stepUnknown(row, ctx) {
     } catch (err) {
       if (!(err && err.code === '23505')) throw err;
     }
-    if (changed) await afterChange(row, result, resolveNow(patch, ctx.now), ctx.conn);
+    if (changed) {
+      // The request is found, so the "unknown" and "probably ours" bells are out of date. They close first, so a
+      // rejected or cancelled bell raised next stays open (linkRequest does the same).
+      await alerts.closePaymentBells(row.id, 'The request was found in Mercury', { conn: ctx.conn });
+      await afterChange(row, result, resolveNow(patch, ctx.now), ctx.conn);
+    }
   } else {
     changed = await applyPatch(ctx.conn, row, {}, ctx.now);
     if (match.kind === 'probably_ours') await alerts.raisePaymentAlert('probably_ours', row, { conn: ctx.conn });

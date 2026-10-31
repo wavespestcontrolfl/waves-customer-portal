@@ -672,6 +672,24 @@ postgres('payroll Mercury paychecks', () => {
       expect(await trx('payroll_checks').where({ id: check('Sample Alpha').id }).first()).toEqual(before);
     });
 
+    it('the stubs, the technician\'s list and the CSV show the paper check; the frozen check row keeps bank transfer', async () => {
+      const { run, check } = await bankRun();
+      const id = check('Sample Alpha').id;
+      const { technician_id: techId } = await trx('payroll_checks').where({ id }).first('technician_id');
+      const csvLine = async () => (await payrollRuns.exportCsv(run.id)).csv.split('\n')[1];
+      await sendRun(run.id, fakeClient());
+      await setState((await payments(id))[0].id, { state: 'failed' });
+      // A failed Mercury attempt is not a paper check: still bank transfer.
+      expect(await payrollRuns.getStub(id)).toMatchObject({ payMethod: 'bank_transfer', checkNumber: null });
+      expect(await csvLine()).toContain(',Bank transfer,');
+      await paper(id, '1001');
+      expect(await payrollRuns.getStub(id)).toMatchObject({ payMethod: 'check', checkNumber: '1001' });
+      expect(await payrollRuns.getOwnStub(techId, id)).toMatchObject({ payMethod: 'check', checkNumber: '1001' });
+      expect((await payrollRuns.listOwnChecks(techId)).find((c) => c.id === id)).toMatchObject({ payMethod: 'check' });
+      expect(await csvLine()).toContain(',Paper check,1001');
+      expect(await trx('payroll_checks').where({ id }).first('pay_method', 'check_number')).toEqual({ pay_method: 'bank_transfer', check_number: null });
+    });
+
     it.each(['queued', 'requested', 'unknown', 'approved', 'sent'])('is refused while a payment is %s', async (state) => {
       const { run, check } = await bankRun();
       await sendRun(run.id, fakeClient());
@@ -926,6 +944,25 @@ postgres('payroll Mercury paychecks', () => {
         await poll(fakeClient(), NOW);
         expect((await ctx.row()).state).toBe('unknown');
         expect(bells).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['pendingApproval', 'requested', []],
+        ['rejected', 'rejected', ['rejected']],
+      ])('a found %s request closes the "unknown" and "probably ours" bells; only a new bell stays open', async (status, state, events) => {
+        const ctx = await unknownPayment();
+        const client = fakeClient();
+        const request = { requestId: 'req-found', recipientId: ctx.recipient, amountCents: ctx.check.netCents, createdAt: new Date(NOW.getTime() - 39 * 60 * 1000).toISOString() };
+        const openKeys = async () => (await trx('notifications').where({ recipient_type: 'admin', category: 'payroll' })
+          .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
+          .select(trx.raw("metadata->>'dedupeKey' as key"))).map((r) => r.key).sort();
+        client.listRequests.mockResolvedValue([{ ...request, status: 'pendingApproval', memo: null }]);
+        await poll(client, NOW);
+        expect(await openKeys()).toEqual([`payroll-pay:${ctx.id}:probably_ours`, `payroll-pay:${ctx.id}:unknown`]);
+        client.listRequests.mockResolvedValue([{ ...request, status, memo: `waves-pay:${ctx.id}` }]);
+        await poll(client, new Date(NOW.getTime() + 15 * 60 * 1000));
+        expect(await ctx.row()).toMatchObject({ state, mercury_request_id: 'req-found' });
+        expect(await openKeys()).toEqual(events.map((event) => `payroll-pay:${ctx.id}:${event}`));
       });
     });
 
