@@ -67,7 +67,7 @@ const {
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
-const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive } = require('../config/feature-gates');
+const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive, payrollMercuryStatusLive } = require('../config/feature-gates');
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
 } = require('./payroll-pay-lines');
@@ -107,6 +107,10 @@ const timeOffOn = () => typeof payrollTimeOffLive === 'function' && payrollTimeO
 // GATE_PAYROLL_BANK_MATCH, read at call time, with the same guard. On, a finalized check carries
 // its bank status; off, no response gains a key.
 const bankMatchOn = () => typeof payrollBankMatchLive === 'function' && payrollBankMatchLive();
+
+// GATE_PAYROLL_MERCURY_STATUS, read at call time, with the same guard. On, a finalized run carries each check's Mercury
+// payment and a summary for the Send button; off, no response gains a key.
+const mercuryStatusOn = () => typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive();
 
 // payroll_checks time-off columns, read and written only with the gate on.
 const TIME_OFF_MINUTE_COLUMNS = ['pto_minutes', 'holiday_minutes'];
@@ -423,6 +427,19 @@ const loadCheckRows = (conn, runId, { lock = false } = {}) => {
   return query.select(checkColumns(conn));
 };
 
+// "Paid by paper check instead" (payroll-mercury.js) is saved as a payment row, and the check row stays frozen. The
+// stub, a technician's own list and the CSV say how the check was paid, so that paper check wins over bank transfer.
+// Not behind a gate: a paper check recorded while the gate was on stays true after it is turned off.
+async function withPaperPayments(conn, rows) {
+  const bank = rows.filter((row) => row.pay_method === 'bank_transfer').map((row) => row.id);
+  if (!bank.length) return rows;
+  const latest = await require('./payroll-mercury').latestPayments(conn, bank);
+  return rows.map((row) => {
+    const payment = latest.get(row.id);
+    return payment && payment.state === 'paper' ? { ...row, pay_method: 'check', check_number: payment.check_number } : row;
+  });
+}
+
 // Technicians with worked time in the week, approved or not. Same test as the
 // timesheet approval screen, so "waiting" matches what the office sees there.
 async function workedTechnicianIds(conn, start, end) {
@@ -686,6 +703,8 @@ async function runView(conn, runId, { evaluation = null } = {}) {
   const run = await loadRun(conn, runId);
   const rows = await loadCheckRows(conn, runId);
   const bank = bankMatchOn() && run.status === 'finalized' && rows.length ? await bankStatusByCheck(conn, rows) : null;
+  const mercury = mercuryStatusOn() && run.status === 'finalized' && rows.length
+    ? await require('./payroll-mercury').viewForChecks(conn, run, rows) : null;
   const view = {
     id: run.id,
     weekStart: run.week_start,
@@ -696,7 +715,12 @@ async function runView(conn, runId, { evaluation = null } = {}) {
     finalizedAt: iso(run.finalized_at),
     voidedAt: iso(run.voided_at),
     voidReason: run.void_reason || null,
-    checks: rows.map((row) => (bank ? { ...serializeCheck(row), bank: bank.get(row.id) } : serializeCheck(row))),
+    checks: rows.map((row) => ({
+      ...serializeCheck(row),
+      ...(bank ? { bank: bank.get(row.id) } : {}),
+      ...(mercury ? { payment: mercury.byCheck.get(row.id) } : {}),
+    })),
+    ...(mercury ? { mercury: mercury.summary } : {}),
     blocked: [],
     waiting: [],
     stale: false,
@@ -904,6 +928,8 @@ async function voidRun(runId, input, actor, conn = db) {
     if (run.status === 'finalized' && await laterFinalCheckExists(trx, run, rows.map((row) => row.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first.');
     }
+    // Money may be on its way through Mercury: not behind a gate, so turning the gates off never lets a void through.
+    await require('./payroll-mercury').assertNoOpenPayments(trx, rows.map((row) => row.id));
     await trx('payroll_checks').where({ run_id: runId }).whereIn('status', ['draft', 'finalized']).update({ status: 'voided' });
     // Not behind the gate: a line a finalized run paid must reopen even if the gate was turned off since.
     await reopenLinesOfRun(trx, runId);
@@ -968,7 +994,8 @@ async function getStub(checkId, conn = db) {
       conn.raw('COALESCE(SUM(additional_medicare_cents), 0) AS additional_medicare'),
       conn.raw('COALESCE(SUM(net_cents), 0) AS net'),
     );
-  const c = serializeCheck(check);
+  const [paid] = await withPaperPayments(conn, [check]);
+  const c = serializeCheck(paid);
   // Gate on, or a check that stored pay line figures (drafted while it was on).
   const withLines = 'reviewBonusCents' in c;
   const withheld = c.federalIncomeTaxCents + c.socialSecurityCents + c.medicareCents + c.additionalMedicareCents;
@@ -1041,7 +1068,7 @@ async function listOwnChecks(technicianId, conn = db) {
       conn.raw("to_char(c.week_start, 'YYYY-MM-DD') as week_start"),
       conn.raw("to_char(c.pay_date, 'YYYY-MM-DD') as pay_date"),
     ]);
-  return rows.map((row) => {
+  return (await withPaperPayments(conn, rows)).map((row) => {
     const c = serializeCheck(row);
     return {
       id: c.id,
@@ -1110,7 +1137,7 @@ async function exportCsv(runId, conn = db) {
   requireUuid(runId, 'Pay run');
   const run = await loadRun(conn, runId);
   if (run.status === 'voided') throw new PayrollError(409, 'This pay run was voided.');
-  const rows = await loadCheckRows(conn, runId);
+  const rows = await withPaperPayments(conn, await loadCheckRows(conn, runId));
   return { filename: `pay-run-${run.week_start}.csv`, csv: checksToCsv(rows) };
 }
 

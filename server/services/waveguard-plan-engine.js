@@ -1937,7 +1937,11 @@ function summarizeTurfProfileCompleteness(profile) {
     { key: 'ordinance_zone', label: 'Ordinance zone', fallbackKeys: ['municipality', 'county'] },
     { key: 'lawn_sqft', label: 'Treatable turf sq ft' },
     { key: 'irrigation_status', label: 'Irrigation status', fallbackKeys: ['irrigation_type'] },
-    { key: 'soil_test_date', label: 'Soil test date' },
+    // soil_test_date is deliberately NOT required (owner 2026-10-31): Waves
+    // soil-tests a lawn only when it hits a trigger, once, so most profiles
+    // never carry a test date and requiring it put a turf_profile_incomplete
+    // warning on nearly every lawn plan. The field stays editable in the turf
+    // profile and is filled when a triggered test comes back.
     // soil_k_ppm is deliberately NOT required: the owner retired its capture
     // from the completion sheet (2026-08-07) and no client surface submits
     // it, so requiring it would leave a turf_profile_incomplete warning

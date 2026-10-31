@@ -36,15 +36,6 @@ module.exports = [
     channels_expected: ['sms'],
   },
   {
-    event_key: 'estimate.auto_renewed',
-    name: 'Estimate auto-renewed',
-    audience: 'lead',
-    description: 'Waves extended an estimate expiration date automatically.',
-    fires_when: 'Immediately after an eligible estimate is extended',
-    source: 'server/services/estimate-auto-renew.js',
-    channels_expected: ['email', 'sms'],
-  },
-  {
     event_key: 'invoice.sent',
     name: 'Invoice sent',
     audience: 'customer',

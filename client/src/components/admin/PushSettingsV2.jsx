@@ -91,6 +91,7 @@ const BELL_CATEGORY_LABELS = {
   email_digest: "Email digest",
   token_alert: "Token alerts",
   tax: "Tax",
+  payroll: "Payroll payments (Mercury)",
   payout: "Payout deposits",
   call_pipeline_drift: "Call pipeline drift",
   social_compliance_rejected: "Social compliance rejections",

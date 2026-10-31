@@ -3,7 +3,7 @@
 // Best / Soonest, parts of the day, the Date field searches, tech pick.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import OpenTimesBox, { addsPhrase, openTimesRows } from './OpenTimesBox';
+import OpenTimesBox, { addsPhrase, openTimesRows, arrivesAtWindowEnd, END_OF_WINDOW_TAG } from './OpenTimesBox';
 import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning } from './AvailabilityStrip';
 
 afterEach(cleanup);
@@ -242,5 +242,44 @@ describe('the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE)', () => {
     render(<OpenTimesBox availability={answer(google, { roadLimit: NOTE })} currentDate="2035-01-01" currentStart="09:00" onPick={() => {}} />);
     expect(screen.queryByText('~ = straight-line estimate, not a road time.')).toBeNull();
     expect(screen.queryByTestId('road-limit-note')).toBeNull();
+  });
+});
+
+// Route-dispatcher audit D (owner 2026-10-31 "ok go"): an hour the van reaches more than 90 minutes after it
+// starts carries a word tag, with the arrival as its title; the row keeps its one number (owner ruling #6655).
+describe('end-of-window tag', () => {
+  const LATE_DAYS = [
+    day('2035-01-01', [
+      hour('2035-01-01', '12:00', 4, { estimatedArrival: '13:55' }),
+      hour('2035-01-01', '09:00', 6, { estimatedArrival: '10:30' }),
+    ]),
+    day('2035-01-02', [hour('2035-01-02', '10:00', 3, { estimatedArrival: '10:20' })]),
+  ];
+
+  it('arrivesAtWindowEnd: more than 90 minutes after the hour; exactly 90, earlier or no arrival is not', () => {
+    expect(arrivesAtWindowEnd({ start: '12:00', estimatedArrival: '13:55' })).toBe(true);
+    expect(arrivesAtWindowEnd({ start: '12:00', estimatedArrival: '13:31' })).toBe(true);
+    expect(arrivesAtWindowEnd({ start: '12:00', estimatedArrival: '13:30' })).toBe(false);
+    expect(arrivesAtWindowEnd({ start: '12:00', estimatedArrival: '12:40' })).toBe(false);
+    expect(arrivesAtWindowEnd({ start: '12:00' })).toBe(false);
+    expect(arrivesAtWindowEnd(null)).toBe(false);
+  });
+
+  it('all dates: the tag sits by the hour, titled with the arrival, and the row keeps one number', () => {
+    render(<OpenTimesBox availability={answer(LATE_DAYS)} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    const tags = screen.getAllByTestId('end-of-window-tag');
+    expect(tags).toHaveLength(1);
+    expect(tags[0].textContent).toBe(END_OF_WINDOW_TAG);
+    expect(tags[0].getAttribute('title')).toBe('Arrives about 1:55 PM');
+    expect(rowTexts()).toEqual(['Tue Jan 2Fixture Tech10 AMadds ~3 min', `Mon Jan 1Fixture Tech12 PM${END_OF_WINDOW_TAG}adds ~4 min`]);
+  });
+
+  it('one day: every hour that reaches its stop late in the window is tagged, and only those', () => {
+    render(<OpenTimesBox availability={answer(LATE_DAYS)} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    const mon = screen.getAllByTestId('open-time-row').find((row) => row.textContent.startsWith('Mon Jan 1'));
+    fireEvent.click(mon);
+    const rows = screen.getAllByTestId('open-time-row');
+    const tagged = rows.filter((row) => within(row).queryByTestId('end-of-window-tag'));
+    expect(tagged.map((row) => row.textContent)).toEqual([`12 PM${END_OF_WINDOW_TAG}Fixture Techadds ~4 min`]);
   });
 });

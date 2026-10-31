@@ -19,6 +19,27 @@ function parseConditionsObject(raw) {
   }
 }
 
+// Wind record proof for the DACS export, read off the visit's saved weather
+// (service_records.conditions): the model reading's instant as an ET wall time
+// "YYYY-MM-DD h:mm AM/PM" (the capture time when the record predates
+// reading_at), and the wind direction label. Null when the visit has no saved
+// weather or a field is missing; never a guess.
+function etReadingLabel(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return null;
+  const p = etParts(date);
+  const two = (n) => String(n).padStart(2, '0');
+  return `${p.year}-${two(p.month)}-${two(p.day)} ${p.hour % 12 || 12}:${two(p.minute)} ${p.hour < 12 ? 'AM' : 'PM'}`;
+}
+
+function windRecordFields(rawConditions) {
+  const conditions = parseConditionsObject(rawConditions);
+  return {
+    windReadingTime: etReadingLabel(conditions?.reading_at) || etReadingLabel(conditions?.captured_at),
+    windDirection: conditions?.wind_dir || null,
+  };
+}
+
 function finiteOrNull(value) {
   if (value == null || value === '') return null;
   const n = Number(value);
@@ -492,6 +513,8 @@ const ComplianceService = {
       .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
       .leftJoin('customers as c', 'pah.customer_id', 'c.id')
       .leftJoin('technicians as t', 'pah.technician_id', 't.id')
+      // The visit's saved weather, for the wind record columns.
+      .leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
       .where('pah.application_date', '>=', start)
       .where('pah.application_date', '<=', end)
       // Retracted rows (recap deselection corrections) never reach the
@@ -501,7 +524,8 @@ const ComplianceService = {
         'pah.*',
         'pc.name as product_name',
         'c.first_name', 'c.last_name', 'c.address_line1', 'c.city', 'c.state', 'c.zip',
-        't.name as tech_name', 't.fl_applicator_license as tech_license'
+        't.name as tech_name', 't.fl_applicator_license as tech_license',
+        'sr.conditions as sr_conditions'
       )
       .orderBy('pah.application_date', 'asc');
 
@@ -537,6 +561,8 @@ const ComplianceService = {
         weatherConditions: r.weather_conditions,
         windSpeedMph: r.wind_speed_mph,
         soilTempF: r.soil_temp_f,
+        // Wind record proof, appended after the fields above for the same reason.
+        ...windRecordFields(r.sr_conditions),
       })),
     };
   },
@@ -554,6 +580,7 @@ const ComplianceService = {
       // Appended columns only — existing column order is a compatibility
       // surface for anything scripting against the CSV.
       'Application Site', 'Weather Conditions', 'Wind Speed (mph)', 'Soil Temp (F)',
+      'Wind Reading Time (ET)', 'Wind Direction',
     ];
 
     const escape = (val) => {
@@ -572,6 +599,7 @@ const ComplianceService = {
         a.applicationRate, a.rateUnit, a.quantityApplied, a.quantityUnit,
         a.areaTreated, a.applicationMethod, a.targetPest, a.restrictedUse,
         a.applicationSite, a.weatherConditions, a.windSpeedMph, a.soilTempF,
+        a.windReadingTime, a.windDirection,
       ].map(escape).join(','));
     }
 

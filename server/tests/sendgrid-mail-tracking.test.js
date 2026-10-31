@@ -67,6 +67,7 @@ describe('SendGrid security-email tracking controls', () => {
 describe('customer-page email links skip the SendGrid click rewrite', () => {
   const originalApiKey = process.env.SENDGRID_API_KEY;
   const originalPortal = process.env.PUBLIC_PORTAL_URL;
+  const originalGate = process.env.GATE_EMAIL_APP_LINKS;
   const portal = 'https://portal.wavespestcontrol.com';
   const untracked = [
     `<a href="${portal}/l/wpc-2026-0042-0507-k3j9abcd2x">Pay invoice</a>`,
@@ -94,6 +95,7 @@ describe('customer-page email links skip the SendGrid click rewrite', () => {
     jest.resetModules();
     process.env.SENDGRID_API_KEY = 'SG.test-key';
     process.env.PUBLIC_PORTAL_URL = portal;
+    process.env.GATE_EMAIL_APP_LINKS = 'true';
     global.fetch = jest.fn(async () => ({
       ok: true,
       headers: { get: jest.fn(() => 'msg-1') },
@@ -106,6 +108,17 @@ describe('customer-page email links skip the SendGrid click rewrite', () => {
     else process.env.SENDGRID_API_KEY = originalApiKey;
     if (originalPortal === undefined) delete process.env.PUBLIC_PORTAL_URL;
     else process.env.PUBLIC_PORTAL_URL = originalPortal;
+    if (originalGate === undefined) delete process.env.GATE_EMAIL_APP_LINKS;
+    else process.env.GATE_EMAIL_APP_LINKS = originalGate;
+  });
+
+  // Regression: with the iPhone app landing on Home (device test 2026-10-31),
+  // the gate keeps every email link tracked until it is turned on.
+  test('GATE_EMAIL_APP_LINKS off leaves every anchor as written', () => {
+    delete process.env.GATE_EMAIL_APP_LINKS;
+    const { untrackAppLinks } = require('../services/messaging/email-link-policy');
+    const html = [...untracked, ...tracked].join('\n');
+    expect(untrackAppLinks(html)).toBe(html);
   });
 
   test('only portal customer-page anchors get clicktracking=off, ahead of href', () => {

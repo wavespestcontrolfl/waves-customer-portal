@@ -120,7 +120,7 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
 // column set), so a spouse or tenant texting from a saved service-contact
 // number reaches the visit too. None, or more than one, = no relay: a shared
 // number is never guessed, even when the webhook matched one customer by the
-// primary phone alone (or picked one under GATE_SMS_SHARED_PHONE_LINK).
+// primary phone alone (or picked the one shared-phone account staff marked).
 async function customerForPhone(conn, phone) {
   const key = customerPhoneLookupKey(phone);
   if (!key) return null;

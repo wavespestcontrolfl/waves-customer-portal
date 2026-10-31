@@ -43,6 +43,7 @@ import { trackAdminPageView } from "../../lib/adminUsage";
 afterEach(cleanup);
 beforeEach(() => {
   trackAdminPageView.mockClear();
+  localStorage.clear();
 });
 
 function renderHub(entry = "/admin/lawn-assessments") {
@@ -124,3 +125,49 @@ describe("AssessmentsHubPage usage reporting", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+// Lead Magnets reads requireAdmin endpoints, so a signed-in non-admin gets the
+// Field tab only (tech portal gaps audit, fix 1).
+describe("AssessmentsHubPage tabs by staff role", () => {
+  const signIn = (role) =>
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role }));
+
+  it.each(["technician", "csr"])(
+    "opens Field with no Leads tab for a %s on the bare menu link",
+    async (role) => {
+      signIn(role);
+      renderHub();
+
+      expect(await screen.findByText("Field workspace")).toBeInTheDocument();
+      expect(
+        screen.queryByText("Lead magnets workspace"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Leads" }),
+      ).not.toBeInTheDocument();
+      expect(trackAdminPageView).toHaveBeenCalledWith({
+        pathname: "/admin/lawn-assessments",
+        search: "?tab=field",
+        authoritative: true,
+      });
+    },
+  );
+
+  it("keeps a technician on Field when a link asks for Leads", async () => {
+    signIn("technician");
+    renderHub("/admin/lawn-assessments?tab=funnel");
+
+    expect(await screen.findByText("Field workspace")).toBeInTheDocument();
+    expect(screen.queryByText("Lead magnets workspace")).not.toBeInTheDocument();
+  });
+
+  it("keeps Leads as the default with both tabs for an admin", () => {
+    signIn("admin");
+    renderHub();
+
+    expect(screen.getByText("Lead magnets workspace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Leads" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Field" })).toBeInTheDocument();
+  });
+});
+

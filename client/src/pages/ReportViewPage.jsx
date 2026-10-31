@@ -3303,6 +3303,29 @@ function ToolLabel({ full, short }) {
   );
 }
 
+// Download PDF on the report pages. In the app the file goes to the share
+// sheet: an <a download> dead-ends the webview (F-046). An app built before
+// the Filesystem/Share plugins (2026-07-07) cannot save it, and the bare link
+// would cover the app with the PDF and no way back, so it gets no link.
+function ReportPdfLink({ pdfUrl, fileName, onTap, children, ...anchorProps }) {
+  if (isNativeApp() && !canSaveNative()) return null;
+  return (
+    <a
+      {...anchorProps}
+      href={pdfUrl}
+      download
+      onClick={(e) => {
+        onTap?.();
+        if (canSaveNative()) {
+          e.preventDefault();
+          saveUrlNative(pdfUrl, fileName)
+            .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
+        }
+      }}
+    >{children}</a>
+  );
+}
+
 function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Report.pdf' }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
@@ -3322,24 +3345,13 @@ function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Rep
       <div className="section-eyebrow">Report Tools</div>
       <div className="report-action-buttons">
         {pdfUrl
-          ? <a
+          ? <ReportPdfLink
               data-glass-accent=""
-              href={pdfUrl}
-              download
-              onClick={(e) => {
-                trackReportEvent(token, 'pdf_downloaded');
-                // In the Capacitor shell an <a download> dead-ends the
-                // webview — route through the native share sheet (F-046).
-                // canSaveNative: old installed binaries run this JS without
-                // the plugins — leave their legacy tap behavior alone.
-                if (canSaveNative()) {
-                  e.preventDefault();
-                  saveUrlNative(pdfUrl, fileName)
-                    .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
-                }
-              }}
+              pdfUrl={pdfUrl}
+              fileName={fileName}
+              onTap={() => trackReportEvent(token, 'pdf_downloaded')}
               style={actionButtonStyle('primary')}
-            ><Download size={16} /> <ToolLabel full="Download PDF" short="PDF" /></a>
+            ><Download size={16} /> <ToolLabel full="Download PDF" short="PDF" /></ReportPdfLink>
           : <button data-glass-accent="" type="button" disabled style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }}><Download size={16} /> <ToolLabel full="Download PDF" short="PDF" /></button>}
         <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? <ToolLabel full="Link copied" short="Copied" /> : 'Share'}</button>
         {/* window.print() is a no-op in the Capacitor webview — hide the
@@ -6559,21 +6571,12 @@ function LegacyReport({ data, token, glass = false }) {
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
           {data.notes && <p style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
-          <a
-            href={pdfUrl}
-            download
+          <ReportPdfLink
+            pdfUrl={pdfUrl}
+            fileName={reportPdfDownloadName(data)}
             data-glass-accent={glass ? '' : undefined}
-            onClick={(e) => {
-              // Capacitor webview: <a download> dead-ends — share sheet
-              // instead (old binaries without the plugins keep legacy taps).
-              if (canSaveNative()) {
-                e.preventDefault();
-                saveUrlNative(pdfUrl, reportPdfDownloadName(data))
-                  .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
-              }
-            }}
             style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
-          ><Download size={16} /> Download PDF</a>
+          ><Download size={16} /> Download PDF</ReportPdfLink>
           {/* Owner ask 2026-09-28: legacy (pre-v1) reports carry the Products
               & Safety link too; they never mount the v1 footer. */}
           <p style={{ fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>

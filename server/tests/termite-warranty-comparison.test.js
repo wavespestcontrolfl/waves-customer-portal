@@ -15,6 +15,8 @@ const {
   buildTermiteComparisonData,
 } = require('../services/termite-warranty-comparison');
 const { renderTermiteComparisonPdf } = require('../services/pdf/termite-comparison-pdf');
+const PDFDocument = require('pdfkit');
+const { WAVES_ADDRESS_LINE } = require('../constants/business');
 
 const PROFILE = { homeSqFt: 2000, stories: 1, lotSqFt: 8000 };
 
@@ -254,13 +256,22 @@ describe('crossover copy', () => {
 describe('PDF renders', () => {
   test('a real buffer, with and without bond options', async () => {
     const data = buildTermiteComparisonData(termiteInputs());
+    const drawn = [];
+    const realText = PDFDocument.prototype.text;
+    const textSpy = jest.spyOn(PDFDocument.prototype, 'text').mockImplementation(function captureText(str, ...rest) {
+      drawn.push(String(str));
+      return realText.call(this, str, ...rest);
+    });
     const pdf = await renderTermiteComparisonPdf({
       ...data,
       address: '123 Example Way, Bradenton, FL',
       estimateUrl: 'https://portal.wavespestcontrol.com/estimate/test-token',
-    });
+    }).finally(() => textSpy.mockRestore());
     expect(Buffer.isBuffer(pdf)).toBe(true);
     expect(pdf.slice(0, 5).toString()).toBe('%PDF-');
+    // Masthead + footer print the Luxe Ave office, never the dropped 9040 Town Center Pkwy line.
+    expect(drawn.join('\n')).toContain(WAVES_ADDRESS_LINE);
+    expect(drawn.join('\n')).not.toContain('Town Center');
 
     const noBonds = await renderTermiteComparisonPdf({
       ...data,

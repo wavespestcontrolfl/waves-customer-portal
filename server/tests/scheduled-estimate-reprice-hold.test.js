@@ -52,6 +52,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
   logGateStatus: jest.fn(),
   gateEnvValue: jest.fn(() => undefined),
+  smsPromptAutopromoteMode: jest.fn(() => 'off'),
 }));
 jest.mock('../routes/admin-estimates', () => ({ sendEstimateNow: jest.fn() }));
 jest.mock('../services/admin-estimate-persistence', () => ({ sweepWedgedPendingInvalidations: jest.fn(async () => undefined) }));

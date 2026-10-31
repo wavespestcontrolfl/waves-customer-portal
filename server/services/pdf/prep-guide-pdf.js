@@ -21,6 +21,7 @@ const {
   drawFieldSectionHeading,
 } = require('./field-pdf');
 const {
+  WAVES_ADDRESS_LINE,
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
 } = require('../../constants/business');
@@ -62,14 +63,10 @@ const L = 40;
 const W = PAGE_W - 80;
 const CONTENT_BOTTOM = FIELD_PDF_LAYOUT.contentBottom;
 
-// Guides are GLOBAL customer documents → headquarters contact line
-// (2026-07-11 publishing rule, same as service-details-pdf).
-const GUIDE_ADDRESS_LINE = '9040 Town Center Pkwy, Lakewood Ranch, FL 34202';
-
 function footer(doc) {
   drawFieldFooter(doc, {
     tagline: 'Service preparation guide',
-    detail: `${GUIDE_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}`,
+    detail: `${WAVES_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}`,
   });
 }
 
@@ -85,7 +82,7 @@ function headerBar(doc, title) {
   drawFieldMasthead(doc, {
     title,
     eyebrow: 'Service preparation',
-    addressLine: GUIDE_ADDRESS_LINE,
+    addressLine: WAVES_ADDRESS_LINE,
   });
   doc.y = Math.max(152, doc.y);
 }

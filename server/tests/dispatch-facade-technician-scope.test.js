@@ -15,10 +15,10 @@ const db = require('../models/db');
 const { requireTechOrAdmin } = require('../middleware/admin-auth');
 const router = require('../routes/dispatch');
 
-function chain() {
+function chain(rows = []) {
   const q = {};
   for (const m of ['leftJoin', 'select', 'orderByRaw', 'orderBy', 'where', 'whereIn', 'whereNotIn', 'modify']) q[m] = jest.fn(() => q);
-  q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+  q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return q;
 }
 
@@ -56,4 +56,17 @@ test.each([['GET', '/routes'], ['POST', '/routes/reoptimize'], ['GET', '/insight
     expect((await fetch(`${base}${path}`, { method })).status).toBe(403);
   });
   expect(db).not.toHaveBeenCalled();
+});
+
+test('GET /jobs?status=scheduled leaves out rescheduled placeholders and no-shows (Scores)', async () => {
+  mockRole = 'admin';
+  q = chain(['confirmed', 'pending', 'rescheduled', 'no_show', 'completed', 'cancelled', 'skipped']
+    .map((status, i) => ({ id: `svc-${i}`, status, service_type: 'General Pest', scheduled_date: '2026-10-30' })));
+  db.mockImplementation(() => q);
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/jobs?date=2026-10-30&status=scheduled`);
+    expect(res.status).toBe(200);
+    const jobs = await res.json();
+    expect(jobs.map((j) => j.id).sort()).toEqual(['svc-0', 'svc-1']);
+  });
 });

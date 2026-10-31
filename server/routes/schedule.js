@@ -24,6 +24,7 @@ function portalRowQualifiesForWaveGuard(row) {
   return portalRowWaveGuardFamily(row) !== null;
 }
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
 
 // Add-to-calendar link for a visit row, or null. The eligibility verdict is
@@ -655,7 +656,9 @@ router.post('/:id/reschedule', async (req, res, next) => {
           (notes ? `\nNotes: ${notes}` : ''),
         {
           icon: '📅',
-          link: `/admin/schedule?serviceId=${encodeURIComponent(service.id)}`,
+          // The dispatch page opens the visit's detail sheet from ?appointment=
+          // on ?date= (nothing reads ?serviceId=).
+          link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(dateOnlyStamp(service.scheduled_date))}&appointment=${encodeURIComponent(service.id)}`,
           metadata: {
             scheduledServiceId: service.id,
             customerId: req.customerId,

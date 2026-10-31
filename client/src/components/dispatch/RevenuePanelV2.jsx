@@ -6,7 +6,7 @@
 //   - same breakdown display
 // Colors collapse: alert-fg reserved for "<55" (at-risk) only. Score bar + score
 // text are zinc-900 (or alert when at-risk). No amber tier.
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Button, Card, CardBody, cn } from '../ui';
 
 const authHeader = () => ({ Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` });
@@ -21,8 +21,12 @@ export default function RevenuePanelV2({ date }) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  // Latest-wins: a slow response for the previous day must not replace the
+  // scores of the day now selected.
+  const loadSeqRef = useRef(0);
 
   async function load() {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setError(false);
     try {
@@ -30,9 +34,14 @@ export default function RevenuePanelV2({ date }) {
       // A 401/500 body is not a job list — say so instead of rendering the empty state.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (seq !== loadSeqRef.current) return;
       const sorted = (Array.isArray(data) ? data : []).sort((a, b) => (b.job_score || 0) - (a.job_score || 0));
       setJobs(sorted);
-    } catch { setJobs([]); setError(true); }
+    } catch {
+      if (seq !== loadSeqRef.current) return;
+      setJobs([]);
+      setError(true);
+    }
     setLoading(false);
   }
 

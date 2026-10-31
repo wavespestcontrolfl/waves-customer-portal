@@ -7,7 +7,8 @@
  *    404s without ANDROID_ASSETLINKS_SHA256 — so the gate can flip before the
  *    Android fingerprints are known without serving a half-empty file.
  *  - AASA excludes /admin/*, /tech/*, /api/* (customer-only shell; PDFs and
- *    webhooks must never be claimed by the app).
+ *    webhooks must never be claimed by the app), and the browser-only pages
+ *    and exact marketing-redirect paths (they open in Safari).
  *  - assetlinks fingerprints are normalized to uppercase (Play Console copies
  *    are uppercase; verifiers compare case-sensitively).
  *  - Content-Type must be application/json for both (Apple's CDN and
@@ -87,6 +88,32 @@ describe('apple-app-site-association', () => {
       expect(idx).toBeLessThan(catchAllIdx); // components match in order
     }
     expect(body.webcredentials.apps).toEqual(['TEAM123456.com.wavespestcontrol.portal']);
+  });
+
+  // Regression: the catch-all claimed /quote, bare /estimate, /estimate/<service>
+  // (301s to the marketing site) and the browser-only pages, so the app opened
+  // just to hand the link to Safari (/newsletter left it on a blank page).
+  test('leaves browser-only and marketing-redirect pages to Safari, keeps customer pages', async () => {
+    process.env.APNS_TEAM_ID = 'TEAM123456';
+    const { components } = (await (await aasa()).json()).applinks.details[0];
+    // Apple's order: the first component whose pattern matches decides.
+    const claimed = (pathname) => {
+      const hit = components.find((c) => new RegExp(
+        `^${c['/'].replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
+        c.caseSensitive === false ? 'i' : '',
+      ).test(pathname));
+      return Boolean(hit && !hit.exclude);
+    };
+    const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
+    const { BROWSER_ONLY_PATH_ROOTS } = require('../services/messaging/email-link-policy');
+    const toSafari = [
+      ...Object.keys(ESTIMATE_MARKETING_REDIRECTS).flatMap((p) => [p, `${p}/`]),
+      ...BROWSER_ONLY_PATH_ROOTS.flatMap((root) => [root, `${root}/x1`]),
+      '/Quote', '/estimate/Mosquito/', '/newsletter/archive/12', '/card/abc123', '/careers/interview/tok',
+    ];
+    expect(toSafari.filter(claimed)).toEqual([]);
+    const inApp = ['/', '/l/Ab12', '/estimate/9f8e7d6c5b4a', '/pay/tok', '/receipt/tok', '/report/tok', '/quotes', '/cards'];
+    expect(inApp.filter((p) => !claimed(p))).toEqual([]);
   });
 
   test('APPLE_TEAM_ID overrides APNS_TEAM_ID', async () => {

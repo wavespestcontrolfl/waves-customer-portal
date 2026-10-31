@@ -94,7 +94,7 @@ const DIRECTIONS = ['up', 'down', 'flat', 'unknown'];
 const METRICS = ['weed_suppression', 'color_health', 'stress_damage', 'turf_density'];
 
 // W5: 8 points for a category (single-category photo scores swing more with
-// 1-3 photos), 4 for the overall (lawn-report-narrative.js trendDirection).
+// 1-3 photos), 4 for the overall (the band the removed lawn-report-narrative.js trendDirection used).
 const CATEGORY_BAND = 8;
 const OVERALL_BAND = 4;
 
