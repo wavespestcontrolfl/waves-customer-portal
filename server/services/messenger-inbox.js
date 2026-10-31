@@ -336,9 +336,10 @@ async function importConversation(config, conv, { since, firstRun, limits, page 
     .select('id', 'twilio_sid', 'created_at')).map((r) => [r.twilio_sid, r]));
   const fresh = messages.filter((m, i) => !stored.has(keys[i]));
   // Facebook's created_time is the delivered order. A portal reply is stored when its send began,
-  // so a customer message sent meanwhile would sort after it; move stored times to Facebook's.
+  // so a customer message sent meanwhile would sort after it; move stored times to Facebook's, by any
+  // amount (an imported message already carries Facebook's time, so only a portal reply ever moves, once).
   const moved = messages.map((m, i) => ({ row: stored.get(keys[i]), at: new Date(m.createdAt) }))
-    .filter(({ row, at }) => row && Math.abs(new Date(row.created_at) - at) > 1000);
+    .filter(({ row, at }) => row && new Date(row.created_at).getTime() !== at.getTime());
   for (const { row, at } of moved) await db('messages').where({ id: row.id }).update({ created_at: at, updated_at: new Date() });
   const thread = fresh.length ? await ensureThread(contact, pageId) : await findThread(contact.psid, pageId);
   if (!thread) return { inserted: 0 };
