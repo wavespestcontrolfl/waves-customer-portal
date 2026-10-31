@@ -32,7 +32,7 @@
 import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, Badge, Button, Card, Switch, cn } from "../../components/ui";
+import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, Badge, Button, Card, Switch, UiSurface, cn } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -80,8 +80,10 @@ export default function EmailAutomationsPanelV2() {
     }
   };
 
+  // UiSurface supplies the documented comfortable density (14px controls,
+  // badges and switches) to this panel and to the dialogs it portals.
   return (
-    <div className="space-y-4">
+    <UiSurface density="comfortable" className="space-y-4">
       {" "}
       <div className="flex items-center justify-between">
         {" "}
@@ -90,42 +92,42 @@ export default function EmailAutomationsPanelV2() {
           <h2 className="text-18 font-medium text-zinc-900">
             Automations
           </h2>{" "}
-          <p className="text-12 text-ink-secondary mt-0.5">
+          <p className="text-14 text-ink-secondary mt-0.5">
             Transactional email sequences sent via SendGrid. Each template has
             one or more steps; the runner ticks every minute and fires steps per
             their delay. Unsubscribe / bounce / spam events cancel active
             enrollments automatically.
           </p>{" "}
         </div>
-        {toast && <span className="text-11 text-ink-secondary">{toast}</span>}
+        {toast && <span className="text-14 text-ink-secondary">{toast}</span>}
       </div>
       {loading ? (
-        <div className="text-13 text-ink-secondary p-6 text-center">
+        <div className="text-14 text-ink-secondary p-6 text-center">
           Loading…
         </div>
       ) : (
         <Card className="p-0 overflow-hidden">
           {" "}
           <div className="overflow-x-auto">
-          <table className="w-full text-13">
+          <table className="w-full text-14">
             {" "}
             <thead className="bg-zinc-50 border-b border-hairline border-zinc-200">
               {" "}
               <tr>
                 {" "}
-                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">
+                <th className="px-4 py-2 text-left text-14 uppercase tracking-label text-ink-tertiary font-medium">
                   Name
                 </th>{" "}
-                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">
+                <th className="px-4 py-2 text-left text-14 uppercase tracking-label text-ink-tertiary font-medium">
                   Group
                 </th>{" "}
-                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">
+                <th className="px-4 py-2 text-left text-14 uppercase tracking-label text-ink-tertiary font-medium">
                   Steps
                 </th>{" "}
-                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">
+                <th className="px-4 py-2 text-left text-14 uppercase tracking-label text-ink-tertiary font-medium">
                   Active
                 </th>{" "}
-                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">
+                <th className="px-4 py-2 text-left text-14 uppercase tracking-label text-ink-tertiary font-medium">
                   Enabled
                 </th>{" "}
                 <th className="px-4 py-2"></th>{" "}
@@ -145,7 +147,7 @@ export default function EmailAutomationsPanelV2() {
                       <div className="text-14 font-medium text-zinc-900">
                         {t.name}
                       </div>{" "}
-                      <div className="text-11 text-ink-tertiary">
+                      <div className="text-14 text-ink-tertiary">
                         {t.description}
                       </div>{" "}
                     </td>{" "}
@@ -219,7 +221,7 @@ export default function EmailAutomationsPanelV2() {
           onSent={load}
         />
       )}
-    </div>
+    </UiSurface>
   );
 }
 
@@ -409,7 +411,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
             <h3 className="text-16 font-medium text-zinc-900">
               Send "{template.name}"
             </h3>{" "}
-            <p className="text-12 text-ink-secondary mt-0.5">
+            <p className="text-14 text-ink-secondary mt-0.5">
               Enrolls the customer in this sequence — step 1 sends on its
               configured delay. Customers need an email on file.
             </p>{" "}
@@ -436,7 +438,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
                   onClick={() => setMode(m.key)}
                   aria-current={active ? "page" : undefined}
                   className={
-                    "h-8 px-3 rounded-sm border-hairline text-11 font-medium uppercase tracking-label u-focus-ring " +
+                    "h-8 px-3 rounded-sm border-hairline text-14 font-medium uppercase tracking-label u-focus-ring " +
                     (active
                       ? "bg-zinc-900 text-white border-zinc-900"
                       : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50")
@@ -450,13 +452,13 @@ function SendAutomationModal({ template, onClose, onSent }) {
           {mode === "segment" && (
             <>
               <div>
-                <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+                <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
                   Who
                 </label>
                 <select
                   value={scope}
                   onChange={(e) => setScope(e.target.value)}
-                  className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+                  className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-14 text-zinc-900"
                 >
                   {SEGMENT_SCOPE_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>{o.label}</option>
@@ -464,13 +466,13 @@ function SendAutomationModal({ template, onClose, onSent }) {
                 </select>
               </div>
               <div>
-                <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+                <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
                   Location
                 </label>
                 <select
                   value={locationId}
                   onChange={(e) => setLocationId(e.target.value)}
-                  className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+                  className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-14 text-zinc-900"
                 >
                   {SEGMENT_LOCATION_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>{o.label}</option>
@@ -478,18 +480,18 @@ function SendAutomationModal({ template, onClose, onSent }) {
                 </select>
               </div>
               {preview && !preview.overCap && preview.count > 0 && (
-                <div className="text-13 text-zinc-900 border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
+                <div className="text-14 text-zinc-900 border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
                   <span className="u-nums font-medium">{preview.count}</span>{" "}
                   customers will be enrolled. Emails drain at ~50/minute.
                 </div>
               )}
               {preview && !preview.overCap && preview.count === 0 && (
-                <div className="text-12 text-ink-secondary">
+                <div className="text-14 text-ink-secondary">
                   No customers match this segment — nothing to send.
                 </div>
               )}
               {preview && preview.overCap && (
-                <div className="text-12 text-alert-fg">
+                <div className="text-14 text-alert-fg">
                   {preview.count} customers exceeds the {preview.cap}-customer
                   cap for one send — narrow the segment.
                 </div>
@@ -502,7 +504,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
                 <div className="text-14 font-medium text-zinc-900 truncate">
                   {customerName(selected)}
                 </div>
-                <div className="text-12 text-ink-secondary truncate">
+                <div className="text-14 text-ink-secondary truncate">
                   {selected.email || "No email on file"}
                 </div>
               </div>
@@ -524,15 +526,15 @@ function SendAutomationModal({ template, onClose, onSent }) {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search customer by name…"
-                className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+                className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-14 text-zinc-900"
               />
               {searching && (
-                <div className="text-12 text-ink-secondary">Searching…</div>
+                <div className="text-14 text-ink-secondary">Searching…</div>
               )}
               {!searching &&
                 search.trim().length >= 2 &&
                 results.length === 0 && (
-                  <div className="text-12 text-ink-secondary">
+                  <div className="text-14 text-ink-secondary">
                     No customers found.
                   </div>
                 )}
@@ -548,10 +550,10 @@ function SendAutomationModal({ template, onClose, onSent }) {
                       }}
                       className="w-full text-left px-3 py-2 hover:bg-zinc-50"
                     >
-                      <div className="text-13 font-medium text-zinc-900">
+                      <div className="text-14 font-medium text-zinc-900">
                         {customerName(c)}
                       </div>
-                      <div className="text-12 text-ink-secondary">
+                      <div className="text-14 text-ink-secondary">
                         {c.email || "No email"}
                       </div>
                     </button>
@@ -563,7 +565,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
           {result && (
             <div
               className={cn(
-                "text-12",
+                "text-14",
                 result.ok ? "text-zinc-900" : "text-alert-fg",
               )}
             >
@@ -611,22 +613,38 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
   const [template, setTemplate] = useState(null);
   const [steps, setSteps] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [toast, setToast] = useState("");
   const [testEmail, setTestEmail] = useState("contact@wavespestcontrol.com");
   const [testing, setTesting] = useState(false);
+  // Only the newest detail request may write state, so a slow earlier
+  // response can never overwrite a retry.
+  const loadSeq = useRef(0);
 
   const load = useCallback(() => {
+    const requestId = ++loadSeq.current;
     setLoading(true);
+    setLoadError("");
     adminFetch(`/admin/automations/templates/${templateKey}`)
       .then((d) => {
+        if (loadSeq.current !== requestId) return;
         setTemplate(d.template);
         setSteps(d.steps || []);
       })
-      .catch((e) => setToast("Load failed: " + e.message))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (loadSeq.current !== requestId) return;
+        setLoadError(e.message);
+        setToast("Load failed: " + e.message);
+      })
+      .finally(() => {
+        if (loadSeq.current === requestId) setLoading(false);
+      });
   }, [templateKey]);
   useEffect(() => {
     load();
+    return () => {
+      loadSeq.current += 1;
+    };
   }, [load]);
 
   const addStep = async () => {
@@ -663,114 +681,135 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
     }
   };
 
-  if (loading) {
-    return (
-      <div
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+  // One Dialog stays mounted through loading, error and ready, so the dialog
+  // name, focus containment and the opener to restore are never lost between
+  // states. size=lg + max-w-4xl keeps the original desktop width; below md
+  // the primitive fills the phone viewport.
+  return (
+    <Dialog open onClose={onClose} size="lg" className="max-w-4xl">
+      <EditorHeader template={template} onClose={onClose} />
+      <DialogBody className="space-y-4">
+        {loading ? (
+          <div role="status" className="text-14 text-ink-secondary p-6 text-center">
+            Loading…
+          </div>
+        ) : !template ? (
+          <EditorLoadError message={loadError} onRetry={load} onClose={onClose} />
+        ) : (
+          <>
+            <EditorSteps
+              steps={steps}
+              templateKey={template.key}
+              onChanged={load}
+            />
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-hairline border-zinc-200">
+              <Button onClick={addStep} variant="secondary">
+                + Add step
+              </Button>
+              <div className="ml-auto flex items-center gap-2">
+                <input
+                  type="email"
+                  aria-label="Test email address"
+                  value={testEmail}
+                  onChange={(e) => setTestEmail(e.target.value)}
+                  className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-14 text-zinc-900 font-mono w-56"
+                  placeholder="test@wavespestcontrol.com"
+                />
+                <Button
+                  onClick={sendTest}
+                  variant="secondary"
+                  disabled={testing || steps.length === 0}
+                >
+                  {testing ? "Sending…" : "Send test sequence"}
+                </Button>
+              </div>
+            </div>
+            {toast && <div className="text-14 text-ink-secondary">{toast}</div>}
+          </>
+        )}
+      </DialogBody>
+    </Dialog>
+  );
+}
+
+function EditorHeader({ template, onClose }) {
+  return (
+    <DialogHeader className="flex items-start justify-between gap-3">
+      <div className="flex-1 min-w-0">
+        <DialogTitle>{template ? template.name : "Automation steps"}</DialogTitle>
+        {template && (
+          <>
+            <p className="text-14 text-ink-secondary mt-0.5">
+              {template.description}
+            </p>
+            <div className="flex flex-wrap items-center gap-2 mt-2">
+              <Badge tone="neutral">{template.asm_group}</Badge>
+              <Badge tone={template.enabled ? "strong" : "neutral"}>
+                {template.enabled ? "Enabled" : "Disabled"}
+              </Badge>
+              <span className="text-14 text-ink-tertiary">
+                key: {template.key}
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+      <button
+        type="button"
         onClick={onClose}
+        aria-label="Close"
+        className="flex h-11 w-11 shrink-0 items-center justify-center text-ink-tertiary hover:text-zinc-900 text-18"
       >
-        {" "}
-        <div className="bg-white p-5 rounded-sm border-hairline border-zinc-300">
-          Loading…
-        </div>{" "}
+        ×
+      </button>
+    </DialogHeader>
+  );
+}
+
+// A failed detail load stays inside the editor surface so the operator sees
+// what happened and can retry without closing and reopening the row.
+function EditorLoadError({ message, onRetry, onClose }) {
+  return (
+    <div role="alert" className="space-y-3 p-6 text-center">
+      <p className="text-14 text-alert-fg">
+        Could not load this automation{message ? `: ${message}` : "."}
+      </p>
+      <p className="text-14 text-ink-secondary">
+        Nothing was changed. Try again, or close this window.
+      </p>
+      <div className="flex justify-center gap-2">
+        <Button onClick={onRetry}>Retry</Button>
+        <Button variant="secondary" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function EditorSteps({ steps, templateKey, onChanged }) {
+  if (steps.length === 0) {
+    return (
+      <div className="text-14 text-alert-fg p-6 text-center border-hairline border-zinc-200 border-dashed rounded-sm">
+        No steps yet. Add the first step to define what the email says. Until
+        then, new enrollments on this template will not send any emails.
       </div>
     );
   }
-  if (!template) return null;
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[120] flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
-      onClick={onClose}
-    >
-      {" "}
-      <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-4xl my-0 sm:my-8 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {" "}
-        <div className="p-5 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
-          {" "}
-          <div className="flex-1">
-            {" "}
-            <h3 className="text-18 font-medium text-zinc-900">
-              {template.name}
-            </h3>{" "}
-            <p className="text-12 text-ink-secondary mt-0.5">
-              {template.description}
-            </p>{" "}
-            <div className="flex items-center gap-2 mt-2">
-              {" "}
-              <Badge tone="neutral">
-                {template.asm_group}
-              </Badge>{" "}
-              <Badge tone={template.enabled ? "strong" : "neutral"}>
-                {template.enabled ? "Enabled" : "Disabled"}
-              </Badge>{" "}
-              <span className="text-11 text-ink-tertiary">
-                key: {template.key}
-              </span>{" "}
-            </div>{" "}
-          </div>{" "}
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-ink-tertiary hover:text-zinc-900 text-14"
-          >
-            ×
-          </button>{" "}
-        </div>{" "}
-        <div className="p-5 space-y-4">
-          {steps.length === 0 ? (
-            <div className="text-13 text-alert-fg p-6 text-center border-hairline border-zinc-200 border-dashed rounded-sm">
-              No steps yet. Add the first step to define what the email says.
-              Until then, new enrollments on this template will not send any
-              emails.
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {steps.map((s, i) => (
-                <StepEditor
-                  key={s.id}
-                  step={s}
-                  stepIndex={i}
-                  totalSteps={steps.length}
-                  templateKey={template.key}
-                  onSaved={load}
-                  onDeleted={load}
-                />
-              ))}
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 pt-2 border-t border-hairline border-zinc-200">
-            {" "}
-            <Button onClick={addStep} variant="secondary">
-              + Add step
-            </Button>{" "}
-            <div className="ml-auto flex items-center gap-2">
-              {" "}
-              <input
-                type="email"
-                value={testEmail}
-                onChange={(e) => setTestEmail(e.target.value)}
-                className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 font-mono w-56"
-                placeholder="test@wavespestcontrol.com"
-              />{" "}
-              <Button
-                onClick={sendTest}
-                variant="secondary"
-                disabled={testing || steps.length === 0}
-              >
-                {testing ? "Sending…" : "Send test sequence"}
-              </Button>{" "}
-            </div>{" "}
-          </div>
-          {toast && <div className="text-12 text-ink-secondary">{toast}</div>}
-        </div>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+  return (
+    <div className="space-y-3">
+      {steps.map((s, i) => (
+        <StepEditor
+          key={s.id}
+          step={s}
+          stepIndex={i}
+          totalSteps={steps.length}
+          templateKey={templateKey}
+          onSaved={onChanged}
+          onDeleted={onChanged}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -877,7 +916,7 @@ function StepEditor({
           <span className="text-14 font-medium text-zinc-900">
             Step {stepIndex + 1}
           </span>{" "}
-          <span className="text-11 text-ink-tertiary">
+          <span className="text-14 text-ink-tertiary">
             {stepIndex === 0
               ? `Fires ${delayHours}h after enroll`
               : `Fires ${delayHours}h after step ${stepIndex}`}
@@ -905,7 +944,7 @@ function StepEditor({
           <button
             type="button"
             onClick={remove}
-            className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-alert-fg hover:border-alert-fg u-focus-ring"
+            className="text-14 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-alert-fg hover:border-alert-fg u-focus-ring"
           >
             Delete
           </button>{" "}
@@ -915,7 +954,7 @@ function StepEditor({
         {" "}
         <div>
           {" "}
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+          <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
             Delay (hours)
           </label>{" "}
           <input
@@ -923,12 +962,12 @@ function StepEditor({
             min="0"
             value={delayHours}
             onChange={(e) => setDelayHours(Number(e.target.value))}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900 font-mono"
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-14 text-zinc-900 font-mono"
           />{" "}
         </div>{" "}
         <div className="col-span-2 flex items-end gap-2">
           {" "}
-          <label className="inline-flex items-center gap-2 text-12 text-ink-secondary">
+          <label className="inline-flex items-center gap-2 text-14 text-ink-secondary">
             {" "}
             <input
               type="checkbox"
@@ -942,42 +981,42 @@ function StepEditor({
       </div>{" "}
       <div className="mb-3">
         {" "}
-        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+        <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
           Subject
         </label>{" "}
         <input
           type="text"
           value={subject}
           onChange={(e) => setSubject(e.target.value)}
-          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900"
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-14 text-zinc-900"
           placeholder="Hi {{first_name}}, here's what to expect…"
         />{" "}
       </div>{" "}
       <div className="mb-3">
         {" "}
-        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+        <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
           Preview text
         </label>{" "}
         <input
           type="text"
           value={previewText}
           onChange={(e) => setPreviewText(e.target.value)}
-          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900"
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-14 text-zinc-900"
         />{" "}
       </div>{" "}
       <div className="mb-3">
         {" "}
-        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+        <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
           HTML body
         </label>{" "}
         <textarea
           value={htmlBody}
           onChange={(e) => setHtmlBody(e.target.value)}
           rows={10}
-          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 font-mono"
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-14 text-zinc-900 font-mono"
           placeholder="<p>Hi {{first_name}}, welcome to Waves…</p>"
         />{" "}
-        <p className="text-11 text-ink-tertiary mt-1">
+        <p className="text-14 text-ink-tertiary mt-1">
           Use <code>{"{{first_name}}"}</code>/ <code>{"{{last_name}}"}</code>/{" "}
           <code>{"{{email}}"}</code>for personalization. SendGrid appends the
           unsub footer automatically based on the automation's ASM group.
@@ -985,14 +1024,14 @@ function StepEditor({
       </div>{" "}
       <div className="mb-3">
         {" "}
-        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+        <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
           Plain-text fallback
         </label>{" "}
         <textarea
           value={textBody}
           onChange={(e) => setTextBody(e.target.value)}
           rows={3}
-          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-14 text-zinc-900"
         />{" "}
       </div>{" "}
       <div className="flex items-center gap-2 pt-2 border-t border-hairline border-zinc-200">
@@ -1000,7 +1039,7 @@ function StepEditor({
         <Button onClick={save} disabled={saving}>
           {saving ? "Saving…" : "Save step"}
         </Button>
-        {status && <span className="text-12 text-ink-secondary">{status}</span>}
+        {status && <span className="text-14 text-ink-secondary">{status}</span>}
       </div>
       {aiOpen && (
         <AiDraftModal onClose={() => setAiOpen(false)} onDraft={applyAiDraft} />
@@ -1042,65 +1081,51 @@ function StepPreviewModal({ subject, previewText, htmlBody, onClose }) {
     a{color:#18181b;text-decoration:underline;}
   </style></head><body>${fill(htmlBody || "<p>(no body)</p>")}</body></html>`;
 
-  return createPortal(
-    <div
-      // z-[130]: nests INSIDE TemplateEditorModal (z-[120]) — a portaled child
-      // only beats its logical parent by out-stacking it, not by DOM order.
-      className="fixed inset-0 z-[130] flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
-      onClick={onClose}
-    >
-      {" "}
-      <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-3xl my-0 sm:my-8 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {" "}
-        <div className="p-4 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
-          {" "}
-          <div className="min-w-0">
-            {" "}
-            <div className="text-11 uppercase tracking-label text-ink-tertiary">
-              Subject
-            </div>{" "}
-            <div className="text-14 text-zinc-900 truncate">
-              {fill(subject) || (
-                <span className="text-ink-tertiary">(no subject)</span>
-              )}
-            </div>
-            {previewText && (
-              <>
-                {" "}
-                <div className="text-11 uppercase tracking-label text-ink-tertiary mt-2">
-                  Preview text
-                </div>{" "}
-                <div className="text-12 text-ink-secondary truncate">
-                  {fill(previewText)}
-                </div>{" "}
-              </>
+  // Stacked above the editor Dialog (layer 120). useModalFocus gives the
+  // topmost dialog the keyboard, so Escape closes only this preview.
+  return (
+    <Dialog open onClose={onClose} size="lg" layer={130} aria-label="Step preview">
+      <DialogHeader className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-14 uppercase tracking-label text-ink-tertiary">
+            Subject
+          </div>
+          <div className="text-14 text-zinc-900 truncate">
+            {fill(subject) || (
+              <span className="text-ink-tertiary">(no subject)</span>
             )}
-            <div className="text-11 text-ink-tertiary mt-2">
-              Rendered with sample first name "Friend" — real sends use the
-              subscriber's name.
-            </div>{" "}
-          </div>{" "}
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-ink-tertiary hover:text-zinc-900 text-14"
-          >
-            ×
-          </button>{" "}
-        </div>{" "}
-        <iframe
-          srcDoc={doc}
-          sandbox=""
-          title="step preview"
-          className="w-full"
-          style={{ height: "60vh", border: "none", background: "#fff" }}
-        />{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+          </div>
+          {previewText && (
+            <>
+              <div className="text-14 uppercase tracking-label text-ink-tertiary mt-2">
+                Preview text
+              </div>
+              <div className="text-14 text-ink-secondary truncate">
+                {fill(previewText)}
+              </div>
+            </>
+          )}
+          <div className="text-14 text-ink-tertiary mt-2">
+            Rendered with sample first name "Friend" — real sends use the
+            subscriber's name.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="flex h-11 w-11 shrink-0 items-center justify-center text-ink-tertiary hover:text-zinc-900 text-18"
+        >
+          ×
+        </button>
+      </DialogHeader>
+      <iframe
+        srcDoc={doc}
+        sandbox=""
+        title="step preview"
+        className="w-full h-[60vh] border-0 bg-white"
+      />
+    </Dialog>
   );
 }
 
@@ -1147,30 +1172,30 @@ function AiDraftModal({ onClose, onDraft }) {
         <DialogBody className="flex-1 space-y-3">
         <div>
           {" "}
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+          <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
             What should this email say?
           </label>{" "}
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={4}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-14 text-zinc-900"
             placeholder="e.g. Welcome the customer, explain what happens on their first visit, set expectations about timing + weather delays."
           />{" "}
         </div>{" "}
         <div>
           {" "}
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+          <label className="block text-14 uppercase tracking-label text-ink-secondary mb-1">
             Tone
           </label>{" "}
           <input
             type="text"
             value={tone}
             onChange={(e) => setTone(e.target.value)}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-14 text-zinc-900"
           />{" "}
         </div>{" "}
-        <label className="inline-flex items-center gap-2 text-12 text-ink-secondary">
+        <label className="inline-flex items-center gap-2 text-14 text-ink-secondary">
           {" "}
           <input
             type="checkbox"
@@ -1182,7 +1207,7 @@ function AiDraftModal({ onClose, onDraft }) {
 
         </DialogBody>
         <DialogFooter className="flex-wrap">
-        {err && <div role="alert" className="basis-full text-12 text-alert-fg">{err}</div>}
+        {err && <div role="alert" className="basis-full text-14 text-alert-fg">{err}</div>}
           {" "}
           <Button onClick={onClose} variant="secondary" disabled={loading}>
             Cancel
