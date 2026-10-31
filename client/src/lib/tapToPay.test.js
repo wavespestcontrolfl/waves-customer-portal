@@ -12,7 +12,7 @@ vi.mock('./tapToPayReturn', () => ({ snapshotForHandoff: vi.fn() }));
 
 import { adminFetch } from './adminFetch';
 import { snapshotForHandoff } from './tapToPayReturn';
-import { launchTapToPay } from './tapToPay';
+import { launchTapToPay, prepareInAppReader } from './tapToPay';
 
 const DEEP_LINK = 'wavespay://collect?t=header.payload.sig';
 // The app's web view keeps the iPhone WebKit user agent and adds WavesAdmin/<version>.
@@ -81,5 +81,44 @@ describe('launchTapToPay inside the Waves Admin app', () => {
       paymentIntentId: null,
       message: 'The invoice total changed. Close this and tap Tap to Pay again.',
     });
+  });
+});
+
+// The app connects the card reader before the first tap and asks the signed-in
+// page for each Stripe connection token (ios/WavesPay/Sources/PortalView.swift).
+describe('prepareInAppReader', () => {
+  afterEach(() => {
+    delete window.webkit;
+    delete window.wavesAdminConnectionToken;
+    vi.clearAllMocks();
+  });
+
+  it('does nothing in a browser', () => {
+    const cleanup = prepareInAppReader();
+    expect(window.wavesAdminConnectionToken).toBeUndefined();
+    expect(() => cleanup()).not.toThrow();
+    expect(adminFetch).not.toHaveBeenCalled();
+  });
+
+  it('asks the app to prepare and serves tokens under the page sign-in until cleanup', async () => {
+    const postMessage = vi.fn();
+    window.webkit = { messageHandlers: { wavesAdmin: { postMessage } } };
+    adminFetch.mockResolvedValue({ ok: true, json: async () => ({ secret: 'pst_test_123' }) });
+
+    const cleanup = prepareInAppReader();
+    expect(postMessage).toHaveBeenCalledWith({ type: 'prepareReader' });
+    await expect(window.wavesAdminConnectionToken()).resolves.toBe('pst_test_123');
+    expect(adminFetch).toHaveBeenCalledWith('/stripe/terminal/connection-token', { method: 'POST' });
+
+    cleanup();
+    expect(window.wavesAdminConnectionToken).toBeUndefined();
+  });
+
+  it('rejects when the server refuses, so the app falls back to the payment token', async () => {
+    window.webkit = { messageHandlers: { wavesAdmin: { postMessage: vi.fn() } } };
+    adminFetch.mockResolvedValue({ ok: false, status: 401, json: async () => ({ error: 'Token expired' }) });
+
+    prepareInAppReader();
+    await expect(window.wavesAdminConnectionToken()).rejects.toThrow('Connection token failed (401)');
   });
 });
