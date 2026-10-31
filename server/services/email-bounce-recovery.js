@@ -1487,6 +1487,47 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
   });
 }
 
+// A hard bounce on the CC'd copy of a message (sendTemplate `cc`, the invoice Send's CC). The webhook leaves the message row
+// alone (its recipient is the main address), so without this nobody learns the copy the operator asked for never arrived.
+// One bell per message and address; the address rides the detail, not the headline.
+async function alertBouncedCcCopy(message, bouncedEmail) {
+  const email = String(bouncedEmail || '').trim().toLowerCase();
+  if (!email || !parseJsonArray(message?.cc_email_snapshot).includes(email)) return { skipped: 'not_cc' };
+  const { invoiceId, customerId } = ccCopyTargets(message);
+  if (!invoiceId && !customerId) return { skipped: 'no_subject' };
+  const { raiseAdminAlert, cutAtWord } = require('./admin-alert-compose');
+  const { fitAction } = require('./admin-alert-names');
+  const name = await customerDisplayName(customerId);
+  await raiseAdminAlert('alert', {
+    area: 'Comms',
+    action: fitAction('Comms', name, [(who) => `resend ${who}'s CC copy`]),
+    why: cutAtWord(`The CC copy of "${message.subject_snapshot || 'an email'}" bounced; the main recipient was not affected`, 110),
+    severity: 'needs-you',
+    link: invoiceId ? `/admin/invoices?invoice=${encodeURIComponent(invoiceId)}` : `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+    subject: invoiceId ? { type: 'invoice', id: invoiceId } : { type: 'customer', id: String(customerId) },
+    doneWhen: 'cc_copy_resent',
+    who: 'person',
+  }, {
+    dedupeKey: `email-cc-bounce:${message.id}:${email}`,
+    detail: `CC address that bounced: ${email}\nEmail: ${message.subject_snapshot || message.template_key || 'email'}`,
+    metadata: { email_message_id: message.id, customer_id: customerId, invoice_id: invoiceId },
+  });
+  return { alerted: true };
+}
+
+// The invoice a CC'd copy carried (an invoice.sent row's trigger) and the customer it went to, each or null.
+function ccCopyTargets(message) {
+  const invoiceId = /^invoice_sent:(.+)$/.exec(String(message.trigger_event_id || ''))?.[1] || null;
+  return { invoiceId, customerId: message.recipient_type === 'customer' ? (message.recipient_id || null) : null };
+}
+
+async function customerDisplayName(customerId) {
+  const customer = customerId
+    ? await db('customers').where({ id: customerId }).first('first_name', 'last_name', 'company_name').catch(() => null)
+    : null;
+  return [customer?.first_name, customer?.last_name].filter(Boolean).join(' ').trim() || customer?.company_name || 'a customer';
+}
+
 async function alertEmailCollision({ recovery, correctedEmail }) {
   await adminAlertDeduped({
     dedupeKey: `bounce-recovery-collision:${recovery.id}`,
@@ -1671,6 +1712,7 @@ module.exports = {
   retryHeldRecoveries,
   HELD_RECOVERY_STATUS,
   alertBouncedContactAddress,
+  alertBouncedCcCopy,
   commitRecoveryOnDelivery,
   handleRecoveryBounce,
   // exported for tests
