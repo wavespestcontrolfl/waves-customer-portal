@@ -82,47 +82,6 @@ function saysReviewed(body) {
   return Boolean(claim) && !NEGATION_RE.test(claim[0]) && !NOT_REVIEWED_RE.test(text);
 }
 
-// Stricter: a sentence that states as a done fact that the customer left a review ("I left you a
-// review", "I have already posted a review", "Just posted my review!", "Review posted.", "My review
-// was submitted"). saysReviewed only adds weight near a review that exists; this one stops review
-// asks by itself, for good (review-click-guard.js). The rule:
-// - The claim opens its sentence, after courtesy words at most ("Thanks so much, I left a review"),
-//   so a wish, a doubt or a guess around it never counts ("I wish I had left a review", "I thought I
-//   had left one", "not sure if I left a review"). Only helper words may stand between the subject
-//   and the verb ("I have already left").
-// - The claim itself holds no question, plan, condition or promise ("I'll confirm once I've left a
-//   review" opens with no claim; "Already left a review?" is asked). A question or a plan after it
-//   leaves it a done fact ("I left a review, can you see it?", "...and will recommend you").
-// - A negation, or a word that says the review is unfinished or gone, anywhere in the sentence undoes
-//   it: it may be about the review ("My review is done but not posted yet", "I wrote a review but
-//   never published it", "...but forgot to post it"). A missed claim costs one more ask; a wrong one
-//   stops asks for good.
-// A closed list: no word here can open a doubt or a wish ("not sure", "I wish", "maybe").
-const DONE_LEAD_WORDS = '(hi|hello|hey|there|guys|thanks|thank you|thank u|thx|ty|so much|again|for asking|for the reminder|no problem|no worries|ok|okay|yes|yep|yeah|sure|great|perfect|awesome|fyi|btw|also|and|so|but)';
-const DONE_HELPER_WORDS = '(have|has|had|already|just|also|actually|finally|recently|literally|both|each|went and|went ahead and|gone ahead and)';
-const DONE_REVIEW_RE = new RegExp(`^\\s*(${DONE_LEAD_WORDS}\\b[\\s,:-]*)*(`
-  + `(i|we|ive|weve)(\\s+${DONE_HELPER_WORDS})*\\s+(left|posted|wrote|submitted|gave)\\b[^.!?]{0,25}\\breview\\b`
-  + '|(my|our|the) review\\b[^.!?]{0,10}\\b(is|was|has been)\\b[^.!?]{0,8}\\b(posted|done|submitted)\\b'
-  + '|((just|already|also)\\s+)*(left|posted|submitted)\\b[^.!?]{0,25}\\breview\\b'
-  + '|review\\s+(posted|done|submitted|left)\\b)', 'i');
-// Read on the claim alone. A present-tense review inside a time clause is a future one: "after I've
-// posted", "before my review is done".
-const NOT_A_DONE_FACT_RE = /\b(will|ill|would|could|can|should|going to|gonna|plan|planning|try|trying|when|whenever|once|until|till|unless|as soon as|if|let (you|u) know|so (i|we) can|need to|want to|how|where)\b|\b(after|before)\s+(ive|weve|i have|we have|(my|our|the) review (is|has been))\b/i;
-// Read on the whole sentence, apostrophes dropped ("didn't" reads "didnt"), courtesy phrases aside.
-const UNDONE_RE = /\b(no|not|never|nope|didnt|dont|doesnt|isnt|wasnt|arent|werent|havent|hasnt|hadnt|cant|couldnt|wont|wouldnt|forgot|forget|draft|pending|unfinished|deleted|removed|took it down|pulled it)\b/i;
-const COURTESY_NO_RE = /\bno (problem|problems|prob|worries|worry)\b/gi;
-function saidLeftReview(body) {
-  return String(body || '').split(/(?<=[.!?\n])/).some((sentence) => {
-    // "I'll" -> "I will" first (dropping the apostrophe would make "we'll" read "well"), then
-    // "I've" -> "Ive".
-    const plain = sentence.replace(/['’]ll\b/gi, ' will').replace(/[’']/g, '');
-    const claim = DONE_REVIEW_RE.exec(plain);
-    if (!claim) return false;
-    const asked = /^[^a-z0-9]*\?/i.test(plain.slice(claim[0].length));
-    return !asked && !NOT_A_DONE_FACT_RE.test(claim[0]) && !UNDONE_RE.test(plain.replace(COURTESY_NO_RE, ''));
-  });
-}
-
 // Digits stay: dropping them would turn a handle ("Pemberton2") into a real surname.
 function nameTokens(value) {
   return foldNameLetters(value)
@@ -388,7 +347,6 @@ module.exports = {
   scoreCandidate,
   decideReviewLink,
   saysReviewed,
-  saidLeftReview,
   COMMON_SURNAMES,
   PORTAL_ERA_START,
 };

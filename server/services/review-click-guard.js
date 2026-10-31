@@ -28,14 +28,14 @@
  * An untracked click (the bare office URL) is invisible here by nature.
  *
  * Probable reviewer (GATE_REVIEW_PROBABLE_REVIEWER_GUARD, owner 2026-10-31): the same checks also stop
- * an ask, whatever its visit, when the customer probably already left a Google review: an open
- * review-matcher decision names them (services/review-name-match.js), or they texted that they left
- * one. A customer who reviewed under another spelling of their name is not asked again.
+ * an ask, whatever its visit, when an open review-matcher decision names the customer
+ * (services/review-name-match.js). A customer who reviewed under another spelling of their name is
+ * not asked again. An "I left a review" text is not read here: one misread text would stop asks for
+ * good, so it only counts inside the matcher, next to a real review with a related name.
  */
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
 const { reviewProbableReviewerGuardLive } = require('../config/feature-gates');
-const { saidLeftReview } = require('./review-link-evidence');
 
 // A date-only visit column is that ET calendar day, so the fallback anchor is
 // ET midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
@@ -115,12 +115,7 @@ async function probableReviewer(customerId, database = db) {
     .whereNull('customer_id')
     .whereNull('missing_since')
     .first('id');
-  if (named) return true;
-  const texts = await database('sms_log')
-    .where({ customer_id: customerId, direction: 'inbound' })
-    .whereILike('message_body', '%review%')
-    .select('message_body');
-  return texts.some((t) => saidLeftReview(t.message_body));
+  return Boolean(named);
 }
 
 // Operator-initiated asks with no visit and no cadence (Quick Links, admin,

@@ -17,7 +17,6 @@ const {
   scoreCandidate,
   decideReviewLink,
   saysReviewed,
-  saidLeftReview,
 } = require('../services/review-link-evidence');
 
 const REVIEW_AT = '2026-10-20T18:00:00.000Z';
@@ -153,70 +152,6 @@ describe('activity around the review', () => {
     expect(saysReviewed('I left no review')).toBe(false);
     expect(saysReviewed('Left a review, not sure it went through')).toBe(true);
   });
-});
-
-describe('saidLeftReview: a done-fact statement, strict enough to stop review asks alone', () => {
-  test.each([
-    'Just left you a 5 star review!',
-    'I left you a review',
-    'I\u2019ve posted my review on Google',
-    'Review posted. Thank you!',
-    'My review was submitted this morning',
-    'Thanks! We left a review for the tech.',
-    // Helper words between the subject and the verb.
-    'I have already left a review',
-    'I have already posted a review',
-    'We’ve both just left a review',
-    'I went ahead and left you a review',
-    // A past-tense time clause after the claim is still a done fact.
-    'I left a review after the visit',
-    'Will do! Just left a review.',
-    // Courtesy words may open the sentence.
-    'Thanks so much, I left a review',
-    'Ok we left a review for the tech',
-    'Thanks for the reminder but I already left a review',
-    'Already left a review!',
-    // A question or a plan after the claim leaves it a done fact.
-    'I already left a review, can you see it?',
-    'I left a review yesterday and will recommend you',
-    'I’ve left a review and I’ll tell my neighbors',
-    'I already left a review but you keep texting me',
-    'No worries, I left a review',
-  ])('counts %s', (text) => expect(saidLeftReview(text)).toBe(true));
-
-  test.each([
-    'Can you send me the link so I can get my review posted?',
-    'I will let you know when I have left a review.',
-    'I have not left a review yet',
-    'I didn\u2019t leave a review',
-    'I left no review',
-    'When I left the review it asked me to sign in',
-    'Did you review the estimate?',
-    'I gave you guys 5 stars',
-    // A promise or a condition is not a done fact, whatever its tense.
-    'I’ll confirm once I’ve left a review.',
-    'Ill text you after Ive posted my review',
-    'We’ll let you know as soon as we have left a review',
-    'I’ll have left a review by Friday',
-    'Once my review is posted, send me the coupon',
-    'After my review is posted do I get the discount',
-    'I may have left a review',
-    // A wish, a doubt or a guess around the claim: the claim must open its sentence.
-    'I wish I had left a review',
-    'I thought I had left a review but apparently not',
-    'Not sure if I left a review',
-    'I don’t think I left a review yet',
-    'Pretty sure we left a review',
-    // The claim asked as a question; a negation after the claim.
-    'Already left a review?',
-    'I left a review?',
-    'My review is done but not posted yet',
-    // A negation or an unfinished or removed review anywhere in the sentence.
-    'I wrote a review but did not submit it',
-    'I wrote a review but never published it',
-    'I wrote a review but forgot to post it',
-    'I left a review but deleted it',
-  ])('never counts %s', (text) => expect(saidLeftReview(text)).toBe(false));
 });
 
 describe('decideReviewLink', () => {

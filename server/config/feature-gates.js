@@ -7031,9 +7031,8 @@ function reviewNameMatchMode() {
 // GATE_REVIEW_PROBABLE_REVIEWER_GUARD read at CALL time (owner 2026-10-31, review matching plan
 // PR 4): 'true' = every review ask, at the moment it would leave and inside the per-customer
 // review-send lock, also stops when the customer probably already left a Google review: an open
-// review-matcher decision names them (services/review-name-match.js; a person's Dismiss closes it)
-// or they texted that they left one (services/review-click-guard.js). Covers the first-ask lock.
-// Unset = today's guard, no redeploy.
+// review-matcher decision names them (services/review-name-match.js; a person's Dismiss closes it;
+// services/review-click-guard.js). Covers the first-ask lock. Unset = today's guard, no redeploy.
 function reviewProbableReviewerGuardLive() {
   return String(process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD || '').trim().toLowerCase() === 'true';
 }

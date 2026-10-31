@@ -91,8 +91,9 @@ describe('newestCompletedVisitAnchor ordering matches the anchor instant', () =>
 });
 
 // GATE_REVIEW_PROBABLE_REVIEWER_GUARD (owner 2026-10-31, review matching plan PR 4): an ask also
-// stops, whatever its visit, when an open review-matcher decision names the customer or they texted
-// that they left a review. Synthetic names only.
+// stops, whatever its visit, when an open review-matcher decision names the customer. Texts are not
+// read here (the fake throws on any other table): an "I left a review" text is evidence inside the
+// matcher, next to a real review. Synthetic names only.
 describe('probable reviewer', () => {
   const OLD = process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD;
   afterEach(() => {
@@ -100,7 +101,7 @@ describe('probable reviewer', () => {
     else process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = OLD;
   });
 
-  function fakeReviewDb({ reviews = [], texts = [] } = {}) {
+  function fakeReviewDb({ reviews = [] } = {}) {
     return (table) => {
       if (table === 'google_reviews') {
         const filters = [];
@@ -109,15 +110,6 @@ describe('probable reviewer', () => {
           whereIn: (col, values) => { filters.push((r) => values.includes(r[col])); return q; },
           whereNull: (col) => { filters.push((r) => r[col] == null); return q; },
           first: async () => reviews.find((r) => filters.every((f) => f(r))) || undefined,
-        };
-        return q;
-      }
-      if (table === 'sms_log') {
-        const filters = [];
-        const q = {
-          where: (obj) => { filters.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return q; },
-          whereILike: (_col, pattern) => { const needle = pattern.replace(/%/g, '').toLowerCase(); filters.push((r) => r.message_body.toLowerCase().includes(needle)); return q; },
-          select: async () => texts.filter((r) => filters.every((f) => f(r))),
         };
         return q;
       }
@@ -156,20 +148,5 @@ describe('probable reviewer', () => {
       ],
     });
     expect(await guard.probableReviewer('cust-1', db)).toBe(false);
-  });
-
-  test('gate on: a text saying they left a review stops the ask; a negated one does not', async () => {
-    process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = 'true';
-    const said = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'inbound', message_body: 'Just left you a 5 star review!' }] });
-    expect(await guard.probableReviewer('cust-1', said)).toBe(true);
-    const notYet = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'inbound', message_body: 'I have not left a review yet' }] });
-    expect(await guard.probableReviewer('cust-1', notYet)).toBe(false);
-    const ours = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'outbound', message_body: 'Thanks, we saw you left a review!' }] });
-    expect(await guard.probableReviewer('cust-1', ours)).toBe(false);
-    // A question or a plan never stops asks for good.
-    const asking = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'inbound', message_body: 'Can you send me the link so I can get my review posted?' }] });
-    expect(await guard.probableReviewer('cust-1', asking)).toBe(false);
-    const planning = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'inbound', message_body: 'I will let you know when I have left a review.' }] });
-    expect(await guard.probableReviewer('cust-1', planning)).toBe(false);
   });
 });
