@@ -18,8 +18,8 @@
  * Spend guards. There is no Turnstile — Cloudflare's widget cannot render on
  * a chrome-extension:// page — so instead:
  *   - GATE_BUG_ID_EXTENSION (dark by default): off = the whole surface 404s,
- *     first in index.js ahead of the global limiter and the 50 MB photo
- *     parser, and again here ahead of this router's limiters;
+ *     first in index.js ahead of the global cors(), the global limiter and
+ *     the 50 MB photo parser, and again here ahead of this router's limiters;
  *   - per IP (IPv6 collapsed to its /64): 6 an hour and 15 a day, in memory;
  *   - one worldwide daily cap with its own `bug-id-extension` bucket
  *     (BUG_ID_EXTENSION_CAP, default 100), counted in Postgres whatever

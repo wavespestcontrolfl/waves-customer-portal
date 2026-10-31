@@ -305,6 +305,18 @@ app.use('/api/public/map-image', require('./routes/public-map-image'));
 // parser). See docs/public-route-contracts.md "Typed-decision labeler token".
 app.use('/api/admin/typed-decisions', require('./routes/typed-decisions-labeler'));
 
+// Chrome extension bug identifier (routes/public-bug-id-extension.js): while
+// GATE_BUG_ID_EXTENSION is dark EVERY request, any method, gets the generic
+// 404 here — ABOVE the global cors() (which would answer an OPTIONS preflight
+// 204), the global /api/ limiter and the 50 MB photo parser — so a probe never
+// sees a 204 or a 429 and never costs parse work (Codex #7294 r1).
+app.use('/api/public/bug-id-extension', (req, res, next) => {
+  if (!require('./config/feature-gates').bugIdExtensionLive()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -396,16 +408,6 @@ app.use('/api/public/pest-identifier', (req, res, next) => {
   if (req.method === 'GET' && /^\/[a-f0-9]{32}\/?$/.test(req.path)) return next();
    
   if (!require('./config/feature-gates').isEnabled('pestIdentifier')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  next();
-});
-// Chrome extension bug identifier (routes/public-bug-id-extension.js): while
-// GATE_BUG_ID_EXTENSION is dark EVERY request, any method, gets the generic
-// 404 here — ahead of the global /api/ limiter and the 50 MB photo parser —
-// so a probe never sees a 429 and never costs parse work.
-app.use('/api/public/bug-id-extension', (req, res, next) => {
-  if (!require('./config/feature-gates').bugIdExtensionLive()) {
     return res.status(404).json({ error: 'Not found' });
   }
   next();

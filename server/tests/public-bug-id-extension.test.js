@@ -27,6 +27,8 @@ jest.mock('../services/photo-id-v2/pest-engine', () => ({
 
 jest.setTimeout(30000);
 
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const { _test: { MAX_PHOTO_CHARS } } = require('../routes/public-bug-id-extension');
 
@@ -86,6 +88,23 @@ describe('gate', () => {
     });
     expect(mockRaw).not.toHaveBeenCalled();
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+  });
+});
+
+describe('server/index.js mount order', () => {
+  // The route tests mount the router alone, so the dark gate's place in
+  // index.js is only visible in the source (same check as ops-digest).
+  const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  const at = (needle) => { const i = src.indexOf(needle); expect(i).toBeGreaterThan(-1); return i; };
+
+  test('the dark gate precedes the global cors(), the /api/ limiter, the photo parser and the router', () => {
+    const gate = at("app.use('/api/public/bug-id-extension', (req, res, next) => {");
+    expect(src.slice(gate, gate + 300)).toContain('bugIdExtensionLive()');
+    // An OPTIONS preflight must hit the dark 404 before cors() can answer 204.
+    expect(gate).toBeLessThan(at('app.use(cors({'));
+    expect(gate).toBeLessThan(at("app.use('/api/', limiter);"));
+    expect(gate).toBeLessThan(at("'/api/public/bug-id-extension/identify',"));
+    expect(gate).toBeLessThan(at("app.use('/api/public/bug-id-extension', require('./routes/public-bug-id-extension'));"));
   });
 });
 
