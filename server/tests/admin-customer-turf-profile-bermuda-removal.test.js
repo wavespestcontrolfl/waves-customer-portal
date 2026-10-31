@@ -60,6 +60,13 @@ describe('PUT bermuda-removal', () => {
     expect(updates).toEqual([]);
   });
 
+  test.each([['a missing', null], ['an archived', { id: 'c1', deleted_at: new Date('2026-10-01T12:00:00Z') }]])('%s customer: 404 and nothing written', async (_label, customer) => {
+    const updates = fakeDb({ customer, profile: { id: 'p1', grass_type: 'zoysia', active: true } });
+    const res = await put({ enabled: false });
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(updates).toEqual([]);
+  });
+
   test.each([[undefined], ['true'], [1], [null]])('enabled must be a boolean (%p)', async (enabled) => {
     const updates = fakeDb({ profile: { id: 'p1', grass_type: 'zoysia', active: true } });
     const res = await put({ enabled });

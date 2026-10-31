@@ -39,7 +39,7 @@ describe('turf-profile editor stamps a staff grass', () => {
   const mockTrx = (table) => {
     const q = {
       where: () => q, whereRaw: () => q, update: async () => 1,
-      first: async () => (table === 'customer_turf_profiles' ? mockPrior : null),
+      first: async () => (table === 'customer_turf_profiles' ? mockPrior : table === 'customers' ? { deleted_at: null } : null),
       insert: (row) => { mockWrites.push({ insert: row }); return q; },
       onConflict: () => q,
       merge: (row) => { mockWrites.push({ merge: row }); return q; },

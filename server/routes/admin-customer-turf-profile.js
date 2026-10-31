@@ -170,6 +170,8 @@ router.get('/:customerId/turf-profile', async (req, res, next) => {
     if (!(await technicianServicesCustomer(req, customerId))) {
       return res.status(404).json({ error: 'Customer not found' });
     }
+    // Reads stay open for an archived customer: the Schedule page still lists their past visits and
+    // reads this profile for them. Only the PUTs below refuse an archived customer.
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
@@ -209,8 +211,10 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     if (!(await technicianServicesCustomer(req, customerId))) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    const customer = await db('customers').where({ id: customerId }).first();
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    // An archived customer's profile takes no edits: an archived row is usually a merged or deleted
+    // duplicate, so a save here would land on the archived row and never reach the live record.
+    const customer = await db('customers').where({ id: customerId }).first('id', 'deleted_at');
+    if (!customer || customer.deleted_at) return res.status(404).json({ error: 'Customer not found' });
 
     const fields = pickProfileFields(req.body || {});
     const errors = validateProfile(fields);
@@ -251,7 +255,11 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     // read and its estimate insert. Shared fence — every price-bearing
     // turf writer takes it (contract-pinned).
     const { withTurfProfileFence } = require('../services/customer-pricing-ai');
-    const [saved] = await withTurfProfileFence(db, customerId, async (trx) => {
+    const written = await withTurfProfileFence(db, customerId, async (trx) => {
+      // Re-read under the fence's customer row lock: an archive or merge that committed after the
+      // read above wins, and this save writes nothing.
+      const live = await trx('customers').where({ id: customerId }).first('deleted_at');
+      if (!live || live.deleted_at) return null;
       // Prior grass, read under the fence: a save that CHANGES the grass is
       // an actual review of the current lawn and re-confirms it for the
       // weekly plan after a move; the form re-sends every loaded field, so
@@ -317,6 +325,8 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
       }
       return rows;
     });
+    if (!written) return res.status(404).json({ error: 'Customer not found' });
+    const [saved] = written;
 
     logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
     res.json({ profile: profileForResponse(saved, req) });
@@ -339,8 +349,8 @@ router.put('/:customerId/turf-profile/bermuda-removal', requireAdmin, async (req
     const { customerId } = req.params;
     const enabled = (req.body || {}).enabled;
     if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
-    const customer = await db('customers').where({ id: customerId }).first('id');
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const customer = await db('customers').where({ id: customerId }).first('id', 'deleted_at');
+    if (!customer || customer.deleted_at) return res.status(404).json({ error: 'Customer not found' });
     const profile = await db('customer_turf_profiles').where({ customer_id: customerId }).first('id', 'grass_type', 'cultivar', 'active');
     if (!profile) return res.status(400).json({ error: 'Create the turf profile first' });
     if (enabled) {
