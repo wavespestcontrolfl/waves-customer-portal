@@ -191,7 +191,9 @@ function createClient({ fetchImpl = globalThis.fetch, env = process.env, timeout
         out.push(...answer.transactions.map(transactionOf));
         const total = Number(answer.total);
         const more = Number.isFinite(total) ? out.length < total : answer.transactions.length >= PAGE_LIMIT;
-        if (!more || answer.transactions.length === 0) return out;
+        if (!more) return out;
+        // An empty page before the advertised total is a short list, not the end.
+        if (answer.transactions.length === 0) break;
       }
       throw new MercuryError('unknown', { status: 200, code: 'incomplete' });
     },

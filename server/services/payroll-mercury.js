@@ -203,10 +203,11 @@ async function dispatch(row, client, conn = db) {
       externalMemo: EXTERNAL_MEMO,
     });
     patch = { state: 'requested', mercury_request_id: answer.requestId, error: null };
+    await alerts.closeKeyBell({ kind: 'send', conn });
   } catch (err) {
     if (err instanceof MercuryError && (err.kind === 'rejected' || err.kind === 'auth')) {
       patch = { state: 'failed', error: err.kind === 'auth' ? `Mercury refused the key${err.status ? ` (HTTP ${err.status})` : ''}` : failureText(err), resolved_at: conn.fn.now() };
-      if (err.kind === 'auth') await alerts.raiseKeyAlert();
+      if (err.kind === 'auth') await alerts.raiseKeyAlert({ kind: 'send' });
     } else {
       patch = { state: 'unknown', error: 'Mercury did not answer. The request may or may not have reached it.' };
     }

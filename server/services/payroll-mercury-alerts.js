@@ -11,7 +11,9 @@ const { fitAction, shortDateET } = require('./admin-alert-names');
 
 const CATEGORY = 'payroll';
 const KEY_PREFIX = 'payroll-pay:';
-const KEY_PROBLEM_KEY = 'payroll-mercury-key';
+// Two key bells: a refused READ (closed by the next good read) and a refused SEND request (a read proves nothing about
+// the Send Money with Approval permission, so it closes only when a request is accepted).
+const KEY_KEYS = { read: 'payroll-mercury-key', send: 'payroll-mercury-key-send' };
 const LINK = '/admin/timetracking?tab=payroll';
 
 const money = (cents) => `$${(Number(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -46,6 +48,11 @@ const EVENTS = {
   probably_ours: {
     action: [(n) => `check Mercury for ${n}'s pay`, (n) => `check ${n}'s pay`],
     why: (p) => `Mercury has a ${money(p.amountCents)} request to this person that is probably ours; check it.`,
+    doneWhen: 'payment_settled',
+  },
+  account_changed: {
+    action: [(n) => `check Mercury for ${n}'s pay`, (n) => `check ${n}'s pay`],
+    why: (p) => `The Mercury account changed, so the ${money(p.amountCents)} payment is no longer read; check the old account.`,
     doneWhen: 'payment_settled',
   },
   pending_noon: {
@@ -105,18 +112,20 @@ async function raisePaymentAlert(event, row, { conn = db, raise = require('./adm
 }
 
 // The key was deleted or lowered to read-only: one bell until a read works again.
-async function raiseKeyAlert({ raise = require('./admin-alert-compose').raiseAdminAlert } = {}) {
+async function raiseKeyAlert({ kind = 'read', raise = require('./admin-alert-compose').raiseAdminAlert } = {}) {
   try {
     const result = await raise(CATEGORY, {
       area: 'Billing',
       action: 'make a new Mercury key',
-      why: 'Mercury refused our key, so it was deleted or lowered to read-only; a second person must make a new one.',
+      why: kind === 'send'
+        ? 'Mercury refused a payment request, so our key lost its send permission; a second person must make a new one.'
+        : 'Mercury refused our key, so it was deleted or lowered to read-only; a second person must make a new one.',
       severity: 'needs-you',
       link: LINK,
-      subject: { type: 'check', id: 'mercury-key' },
+      subject: { type: 'check', id: KEY_KEYS[kind] },
       doneWhen: 'key_working',
       who: 'person',
-    }, { dedupeKey: KEY_PROBLEM_KEY, dedupeOpenOnly: true, bellDefault: true, metadata: { event: 'key_problem', reminder: 'payroll_payment' } });
+    }, { dedupeKey: KEY_KEYS[kind], dedupeOpenOnly: true, bellDefault: true, metadata: { event: 'key_problem', reminder: 'payroll_payment' } });
     return Boolean(result && result.id);
   } catch (err) {
     logger.error(`[payroll-mercury] key bell not raised (${(err && (err.code || err.name)) || 'error'})`);
@@ -137,7 +146,7 @@ async function closeBells({ paymentId = null, key = null, resolution, conn = db,
 }
 
 const closePaymentBells = (paymentId, resolution, opts = {}) => closeBells({ paymentId, resolution, ...opts });
-const closeKeyBell = (opts = {}) => closeBells({ key: KEY_PROBLEM_KEY, resolution: 'Mercury accepted the key again', ...opts });
+const closeKeyBell = ({ kind = 'read', ...opts } = {}) => closeBells({ key: KEY_KEYS[kind], resolution: kind === 'send' ? 'Mercury accepted a payment request again' : 'Mercury accepted the key again', ...opts });
 
 module.exports = {
   CATEGORY, LINK, EVENTS, specFor, raisePaymentAlert, raiseKeyAlert, closePaymentBells, closeKeyBell,

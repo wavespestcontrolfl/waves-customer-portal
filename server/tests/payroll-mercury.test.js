@@ -93,6 +93,17 @@ describe('bells follow the admin notification rules', () => {
     expect(await alerts.raiseKeyAlert({ raise })).toBe(true);
     expect(raise.mock.calls[0][2]).toMatchObject({ dedupeKey: 'payroll-mercury-key', dedupeOpenOnly: true, bellDefault: true });
   });
+
+  test('a refused send request has its own key bell, so a good read cannot clear it', async () => {
+    const raise = jest.fn(async (_c, spec) => { composeAdminAlert(spec); return { id: 3 }; });
+    await alerts.raiseKeyAlert({ kind: 'send', raise });
+    expect(raise.mock.calls[0][2]).toMatchObject({ dedupeKey: 'payroll-mercury-key-send' });
+    const episodes = { openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn(async () => 1) };
+    await alerts.closeKeyBell({ conn: {}, episodes });
+    expect(episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['payroll-mercury-key']);
+    await alerts.closeKeyBell({ kind: 'send', conn: {}, episodes });
+    expect(episodes.closeAdminAlertKeys.mock.calls[1][1]).toEqual(['payroll-mercury-key-send']);
+  });
 });
 
 describe('poller decisions', () => {

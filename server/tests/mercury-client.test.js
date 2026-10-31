@@ -147,6 +147,9 @@ describe('reads', () => {
     expect((await createClient({ fetchImpl, env }).listTransactions({ start: '2026-09-01' })).map((t) => t.id)).toEqual(['1', '2', '3']);
     expect(fetchImpl.calls[1].url).toContain('offset=2');
     expect(fetchImpl.calls[0].url).toContain('start=2026-09-01');
+    // An empty page before the advertised total is incomplete too.
+    const short = fakeFetch(answer(200, { total: 2, transactions: [tx('1')] }), answer(200, { total: 2, transactions: [] }));
+    await expect(createClient({ fetchImpl: short, env }).listTransactions()).rejects.toMatchObject({ code: 'incomplete' });
     // A total that is never reached is incomplete.
     const never = fakeFetch(answer(200, { total: 99999, transactions: [tx('1')] }));
     await expect(createClient({ fetchImpl: never, env }).listTransactions()).rejects.toMatchObject({ code: 'incomplete' });

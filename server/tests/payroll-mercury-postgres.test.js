@@ -267,6 +267,7 @@ postgres('payroll Mercury paychecks', () => {
       expect(rows.map((r) => r.state)).toEqual(['failed', 'failed']);
       expect(rows.map((r) => r.error).sort()).toEqual(['Mercury refused the key (HTTP 401)', 'Mercury refused the request (HTTP 400): InvalidRecipient']);
       expect(alerts.raiseKeyAlert).toHaveBeenCalledTimes(1);
+      expect(alerts.raiseKeyAlert).toHaveBeenCalledWith({ kind: 'send' });
       expect(raise).toHaveBeenCalledTimes(2);
       expect(raise.mock.calls.every(([event]) => event === 'failed')).toBe(true);
     });
@@ -791,6 +792,26 @@ postgres('payroll Mercury paychecks', () => {
       expect(alerts.raiseKeyAlert).toHaveBeenCalledTimes(1);
       expect(ctx.client.getRequest).toHaveBeenCalledTimes(1);
       expect(out.failed).toBe(1);
+    });
+
+    it('a payment made in another account is not read; it rings and its return watch is not closed', async () => {
+      const bells = quietBells();
+      const ctx = await sent();
+      const row = await ctx.row();
+      await setState(row.id, { account_id: randomUUID() });
+      await poll(ctx.client, NOW);
+      expect(ctx.client.getRequest).not.toHaveBeenCalled();
+      expect(bells).toHaveBeenCalledWith('account_changed', expect.anything(), expect.anything());
+      await setState(row.id, { state: 'sent', resolved_at: new Date(NOW.getTime() - 61 * 24 * 3600 * 1000) });
+      await poll(ctx.client, NOW);
+      expect((await ctx.row()).resolution).not.toBe('No return seen in 60 days');
+    });
+
+    it('a good read does not close the send-permission bell', async () => {
+      jest.spyOn(alerts, 'closeKeyBell').mockResolvedValue(0);
+      const ctx = await sent();
+      await poll(ctx.client, NOW);
+      expect(alerts.closeKeyBell).toHaveBeenCalledWith(expect.not.objectContaining({ kind: 'send' }));
     });
 
     it('a Mercury error on one row does not stop the others, and a working read closes the key bell', async () => {

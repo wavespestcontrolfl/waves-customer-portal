@@ -216,17 +216,24 @@ async function dueRows(conn, now) {
 }
 
 // After 60 days a sent payment stops being read. It stays listed; its resolution says so.
-async function closeReturnWindow(conn, now) {
+async function closeReturnWindow(conn, now, accountId) {
   const window = new Date(now.getTime() - SENT_WINDOW_MS);
-  return conn('payroll_payments').where({ state: 'sent' }).whereRaw('COALESCE(resolved_at, created_at) <= ?', [window])
+  // Only payments this account made: one from another account was never read, so no return was "seen" or missed.
+  return conn('payroll_payments').where({ state: 'sent', account_id: accountId }).whereRaw('COALESCE(resolved_at, created_at) <= ?', [window])
     .whereRaw('resolution IS DISTINCT FROM ?', [RETURN_WINDOW_NOTE])
     .update({ resolution: RETURN_WINDOW_NOTE, updated_at: now });
 }
 
 // Reads each due row once. Stops at the first refused key. Returns { read, changed, failed, refused, answered }.
 async function pollRows(rows, ctx) {
-  const out = { read: 0, changed: 0, failed: 0, refused: false, answered: false };
+  const out = { read: 0, changed: 0, failed: 0, mismatched: 0, refused: false, answered: false };
   for (const row of rows) {
+    // A payment lives in the account it was made in. After an account change it is not read here: surface it instead.
+    if (row.state !== 'queued' && row.account_id && ctx.client.accountId && row.account_id !== ctx.client.accountId) {
+      out.mismatched += 1;
+      await alerts.raisePaymentAlert('account_changed', row, { conn: ctx.conn });
+      continue;
+    }
     try {
       if (await STEPS[row.state](row, ctx)) out.changed += 1;
       if (row.state !== 'queued') out.answered = true;
@@ -246,7 +253,7 @@ async function pollPayments({ client = createClient(), conn = db, now = new Date
   const out = await pollRows(await dueRows(conn, now), { client, conn, now });
   if (out.refused) await alerts.raiseKeyAlert();
   else if (out.answered) await alerts.closeKeyBell({ conn });
-  try { await closeReturnWindow(conn, now); } catch (err) {
+  try { await closeReturnWindow(conn, now, client.accountId); } catch (err) {
     logger.error(`[payroll-mercury-poller] return window not closed (${(err && (err.code || err.name)) || 'error'})`);
   }
   logger.info(`[payroll-mercury-poller] read ${out.read}, changed ${out.changed}, failed ${out.failed}`);
