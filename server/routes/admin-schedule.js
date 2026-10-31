@@ -9299,10 +9299,11 @@ async function scheduleCreateHandler(req, res, next) {
     // Lawn neighborhood day (lawn-area-days.js): a NEW rounds series is placed from its area's anchor
     // (the parent stores it below) with the 28-day first follow-up floor. The dates are planned once
     // here and the insert loop writes exactly these, so plan and write cannot differ.
+    // createRoundOptions returns {} for any pattern other than lawn_rounds_9 without a read.
     const rOpts = {
       ...monthAnchorOpts,
       intervalDays: recurringIntervalDays,
-      ...(isRecurring ? await createRoundOptions(db, customerId, bookingProperty, recurringPattern) : {}),
+      ...await createRoundOptions(db, customerId, bookingProperty, recurringPattern),
     };
     const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
     // B6 (owner ruling 2026-08-27): a customer whose saved property
