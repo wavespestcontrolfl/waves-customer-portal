@@ -93,16 +93,23 @@ describe('legacy SSR page: monthly average', () => {
     expect(html).not.toContain('data-monthly-average-plan');
   });
 
+  // Each render signs a fresh ask token (a JWT whose iat is in whole seconds), so two renders that straddle a second
+  // differ on that line alone (main 10-31). The pair runs with the clock held still.
   test('gate off: no marker, no script hook, and the page is the gate-on page minus the additions (byte-identical)', () => {
-    const on = render(estimate(66.75), data(tree));
-    mockGate.on = false;
-    const off = render(estimate(66.75), data(tree));
-    expect(off).not.toMatch(/data-monthly-average|syncMonthlyAverageVisibility|a month|Averaged over the year/);
-    const stripped = on
-      .replace(/\s*<div class="day-price" data-monthly-average[^>]*>[^<]*<\/div>/g, '')
-      .replace(/ {2}\/\/ GATE_ESTIMATE_MONTHLY_AVERAGE: the average is computed[\s\S]*?\n {2}\}\n\n(?= {2}function syncPaymentSetupCards)/, '')
-      .replace(/ syncMonthlyAverageVisibility\([^)]*\);/g, '');
-    expect(stripped).toBe(off);
+    jest.useFakeTimers({ now: Date.now() });
+    try {
+      const on = render(estimate(66.75), data(tree));
+      mockGate.on = false;
+      const off = render(estimate(66.75), data(tree));
+      expect(off).not.toMatch(/data-monthly-average|syncMonthlyAverageVisibility|a month|Averaged over the year/);
+      const stripped = on
+        .replace(/\s*<div class="day-price" data-monthly-average[^>]*>[^<]*<\/div>/g, '')
+        .replace(/ {2}\/\/ GATE_ESTIMATE_MONTHLY_AVERAGE: the average is computed[\s\S]*?\n {2}\}\n\n(?= {2}function syncPaymentSetupCards)/, '')
+        .replace(/ syncMonthlyAverageVisibility\([^)]*\);/g, '');
+      expect(stripped).toBe(off);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('multi service: the lines add up to the plan line, which equals the stored monthly total', () => {

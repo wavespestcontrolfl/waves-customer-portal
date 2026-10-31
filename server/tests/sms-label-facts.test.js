@@ -2232,11 +2232,13 @@ describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
   // Machine-independent: a generous absolute ceiling per call (CI runners are several times slower than a laptop and noisy under parallel workers;
   // a real ReDoS is seconds or worse) AND a scaling check on the same pattern: a 4x longer input must not take more than ~12x as long (linear is 4x,
   // quadratic 16x, exponential unbounded). Each time is the MIN of five runs after a warm-up, and the ratio only fails when the long run is ALSO
-  // over 50 ms: a few-millisecond difference is GC / scheduler jitter (measured: "number words" is ~10x from 500 to 2,000 chars at 2 ms, and a
-  // CI runner once read 12.3x), while a real blow-up is far past 50 ms at 2,000 chars. PRINT_TIMINGS=1 prints each classifier's slowest case.
+  // over 150 ms: below that the difference is GC / scheduler jitter on a shared runner (measured: "number words" through replyClaims is ~9x from
+  // 500 to 2,000 chars at ~3 ms on a laptop; CI runners read 12.3x, then 15x at 52 ms on main 10-31), and the cap means nothing past 2,000 chars
+  // is ever classified, so the 500 ms ceiling bounds the worst case. A real blow-up is far past 150 ms at 2,000 chars.
+  // PRINT_TIMINGS=1 prints each classifier's slowest case.
   const CEILING_MS = 500;
   const SCALE_FACTOR = 12;
-  const SCALE_MIN_LONG_MS = 50;
+  const SCALE_MIN_LONG_MS = 150;
   const SHORT_N = 500;
   const bestOf = (fn, text, runs = 5) => {
     fn(text); // warm-up (regex compilation, lazy lexicons)
