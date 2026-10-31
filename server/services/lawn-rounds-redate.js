@@ -379,8 +379,8 @@ async function convertPrepayTerms(trx, deps, termIds, now) {
   const terms = await trx('annual_prepay_terms').whereIn('id', termIds).forUpdate().select('*');
   const sixWeek = terms.filter((t) => (normalizeCoverageCadence(t.coverage_cadence) || inferCoverageCadence(t)) === 'every_6_weeks').map((t) => t.id);
   if (!sixWeek.length) return 0;
-  const cols = await trx('annual_prepay_terms').columnInfo();
-  await trx('annual_prepay_terms').whereIn('id', sixWeek).update({ coverage_cadence: LAWN_ROUNDS_9, ...(cols.updated_at ? { updated_at: now } : {}) });
+  // No spread in this write object: the annual-prepay term-states guard reads every term write (the table has updated_at).
+  await trx('annual_prepay_terms').whereIn('id', sixWeek).update({ coverage_cadence: LAWN_ROUNDS_9, updated_at: now });
   return sixWeek.length;
 }
 
