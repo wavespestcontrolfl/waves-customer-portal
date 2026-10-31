@@ -414,6 +414,23 @@ async function notifyProof(type, payload) {
   }
 }
 
+// Token-scoped release of a refused approval's proof claim, so the
+// corrected draft can get a FRESH proof (sendNewsletterProof skips any row
+// with proof_sent_at set). proof_refused_at is the durable sign that a proof
+// WAS sent and an approval was refused (every refusal release sets it; cancel
+// and reset paths clear it), which the Pest Insider catch-up reads to
+// re-proof a corrected draft after its day-10 cutoff. Never throws: the
+// refusal itself already stands.
+async function releaseRefusedProofClaim(sendId, token, reason) {
+  try {
+    await db('newsletter_sends')
+      .where({ id: sendId, proof_token: token })
+      .update({ proof_token: null, proof_sent_at: null, proof_refused_at: new Date(), updated_at: new Date() });
+  } catch (clearErr) {
+    logger.error(`[newsletter-proof] failed to release proof claim after ${reason} for ${sendId}: ${clearErr.message}`);
+  }
+}
+
 /**
  * Send the proof email for a draft. Idempotent: a send that already has
  * proof_sent_at (or isn't a draft anymore) is skipped, so the Monday/early-
@@ -678,17 +695,7 @@ async function maybeHandleProofApproval(email) {
       // proof means the CORRECTED draft needs a fresh proof, and
       // sendNewsletterProof skips any row with proof_sent_at set (codex
       // round 17 P2).
-      // proof_refused_at is the durable sign that a proof WAS sent and an
-      // approval was refused (every refusal release below sets it; cancel and
-      // reset paths clear it), which the Pest Insider catch-up reads to
-      // re-proof a corrected draft after its day-10 cutoff.
-      try {
-        await db('newsletter_sends')
-          .where({ id: send.id, proof_token: token })
-          .update({ proof_token: null, proof_sent_at: null, proof_refused_at: new Date(), updated_at: new Date() });
-      } catch (clearErr) {
-        logger.error(`[newsletter-proof] failed to release proof claim after validation failure for ${send.id}: ${clearErr.message}`);
-      }
+      await releaseRefusedProofClaim(send.id, token, 'validation failure');
       return true;
     }
   }
@@ -708,6 +715,10 @@ async function maybeHandleProofApproval(email) {
       subject: send.subject,
       errors: ['Approved, but the locked event lineup is no longer eligible — nothing scheduled', ...eventSelection.errors],
     });
+    // Release the proof claim like the validation and live-recheck refusals
+    // do: the corrected lineup needs a FRESH proof, and sendNewsletterProof
+    // skips any row with proof_sent_at set (audit 2026-10-30, NEWS-07).
+    await releaseRefusedProofClaim(send.id, token, 'lineup refusal');
     return true;
   }
   // Same live recheck at approval time — the proof may be hours old.
@@ -724,13 +735,7 @@ async function maybeHandleProofApproval(email) {
     // stale-approval branch): the draft needs an event swap and a FRESH
     // proof, but sendNewsletterProof skips any row with proof_sent_at set —
     // leaving the claim in place would strand the whole proof workflow.
-    try {
-      await db('newsletter_sends')
-        .where({ id: send.id, proof_token: token })
-        .update({ proof_token: null, proof_sent_at: null, proof_refused_at: new Date(), updated_at: new Date() });
-    } catch (clearErr) {
-      logger.error(`[newsletter-proof] failed to release proof claim after recheck failure for ${send.id}: ${clearErr.message}`);
-    }
+    await releaseRefusedProofClaim(send.id, token, 'recheck failure');
     return true;
   }
 

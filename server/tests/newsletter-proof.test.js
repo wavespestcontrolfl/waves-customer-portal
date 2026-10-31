@@ -610,12 +610,36 @@ describe('maybeHandleProofApproval', () => {
     }));
   });
 
-  test('legacy recurring lineup is rechecked at approval and never scheduled', async () => {
+  test('legacy recurring lineup is rechecked at approval, never scheduled, and its proof claim is released', async () => {
     mockValidateEventSelection.mockResolvedValue({ valid: false, errors: ['Locked event is no longer eligible: Weekly Yoga.'], flagship: true });
     const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
     expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(true);
-    expect(sendsChain.update).not.toHaveBeenCalled();
     expect(mockSendCampaign).not.toHaveBeenCalled();
+    // The only write is the token-scoped claim release: nothing scheduled.
+    expect(sendsChain.update).toHaveBeenCalledTimes(1);
+    expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', proof_token: 'ab12cd34' });
+    const [patch] = sendsChain.update.mock.calls[0];
+    expect(patch).toEqual(expect.objectContaining({ proof_token: null, proof_sent_at: null, proof_refused_at: expect.any(Date) }));
+    expect(patch).not.toHaveProperty('status');
+    expect(patch).not.toHaveProperty('proof_approved_at');
+  });
+
+  test('a corrected lineup gets one fresh proof after an ineligible-lineup refusal (audit NEWS-07)', async () => {
+    const row = { ...PROOFED_DRAFT };
+    const { sendsChain } = wireDb({ sends: { first: row } });
+    sendsChain.update.mockImplementation(async (patch) => { Object.assign(row, patch); return 1; });
+    mockValidateEventSelection.mockResolvedValue({ valid: false, errors: ['Locked event is no longer eligible: Weekly Yoga.'], flagship: true });
+    expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(true);
+    expect(row.proof_sent_at).toBeNull();
+    expect(row.status).toBe('draft');
+
+    // The lineup is corrected; the catch-up's proof retry now proofs it again.
+    row.event_ids = ['replacement-event'];
+    row.updated_at = new Date(PROOF_STAMP.getTime() + 60_000);
+    mockValidateEventSelection.mockResolvedValue({ valid: true, errors: [], flagship: true });
+    const retry = await sendNewsletterProof(row.id);
+    expect(retry).toEqual(expect.objectContaining({ sent: true }));
+    expect(mockSendOne).toHaveBeenCalledTimes(1);
   });
 
   test('lost the atomic approval claim → no dispatch', async () => {

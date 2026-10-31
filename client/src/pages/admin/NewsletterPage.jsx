@@ -749,6 +749,21 @@ function AdminStatusBadge({ status }) {
     </span>
   );
 }
+// The bulk-action and merge routes refuse more ids than this per request.
+const EVENT_BULK_BATCH = 50;
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// The notice reports what the server actually updated, never the selection.
+function bulkActionNotice(action, requested, updated, failure) {
+  const left = requested - updated;
+  if (!failure && left === 0) return `${plural(updated, "event")} updated.`;
+  const done = `${updated} of ${plural(requested, "event")} updated.`;
+  if (failure) {
+    return `${done} Bulk ${action} failed: ${failure.message}. ${left} still selected.`;
+  }
+  return `${done} ${left} could not be updated and ${left === 1 ? "is" : "are"} still selected.`;
+}
+
 function EventInboxView({ onDraftFromEvent }) {
   const [events, setEvents] = useState([]);
   const [counts, setCounts] = useState({});
@@ -853,18 +868,27 @@ function EventInboxView({ onDraftFromEvent }) {
       return;
     cancelPendingEventRead();
     setActionStatus(`${action} in progress…`);
-    try {
-      await adminFetch("/admin/newsletter/events/bulk-action", {
-        method: "POST",
-        body: JSON.stringify({ action, ids: [...selected] }),
-      });
-      setActionStatus(
-        `${selected.size} event${selected.size === 1 ? "" : "s"} updated.`,
-      );
-      fetchEvents();
-    } catch (e) {
-      setActionStatus(`Bulk ${action} failed: ${e.message}`);
+    // The route takes at most EVENT_BULK_BATCH ids, so a larger selection
+    // goes in batches. Only ids the server reports as updated leave the
+    // selection; the rest stay selected and the notice says so.
+    const ids = [...selected];
+    const updated = new Set();
+    let failure = null;
+    for (let i = 0; i < ids.length && !failure; i += EVENT_BULK_BATCH) {
+      try {
+        const result = await adminFetch("/admin/newsletter/events/bulk-action", {
+          method: "POST",
+          body: JSON.stringify({ action, ids: ids.slice(i, i + EVENT_BULK_BATCH) }),
+        });
+        (result.updatedIds || []).forEach((id) => updated.add(id));
+      } catch (e) {
+        failure = e;
+      }
     }
+    const remaining = ids.filter((id) => !updated.has(id));
+    setSelected(new Set(remaining));
+    setActionStatus(bulkActionNotice(action, ids.length, updated.size, failure));
+    fetchEvents(true);
   };
 
   // Merge duplicates. The survivor is chosen by a visible, deterministic rule
@@ -885,6 +909,14 @@ function EventInboxView({ onDraftFromEvent }) {
     const duplicateIds = chosen
       .filter((e) => e.id !== primaryId)
       .map((e) => e.id);
+    // The merge route refuses more duplicates than one batch; say so before
+    // the confirm instead of promising a merge of the whole selection.
+    if (duplicateIds.length > EVENT_BULK_BATCH) {
+      setActionStatus(
+        `Merge up to ${EVENT_BULK_BATCH + 1} events at a time. ${selected.size} are selected.`,
+      );
+      return;
+    }
     if (
       !confirm(
         `Keep "${primary.title}" and merge ${duplicateIds.length} duplicate${duplicateIds.length === 1 ? "" : "s"} into it?\n\n` +
@@ -894,11 +926,14 @@ function EventInboxView({ onDraftFromEvent }) {
       return;
     cancelPendingEventRead();
     try {
-      await adminFetch("/admin/newsletter/events/merge", {
+      const result = await adminFetch("/admin/newsletter/events/merge", {
         method: "POST",
         body: JSON.stringify({ primaryId, duplicateIds }),
       });
       setSelected(new Set());
+      setActionStatus(
+        `Merged ${plural(result.merged ?? 0, "duplicate")} into "${primary.title}".`,
+      );
       fetchEvents();
     } catch (e) {
       alert("Merge failed: " + e.message);
@@ -1666,6 +1701,9 @@ export default function NewsletterPage() {
   // brand-new install with no sent campaigns would silently drop the badge.
   const [sendsData, setSendsData] = useState(null);
   const [sendsLoading, setSendsLoading] = useState(true);
+  // Completed /sends reads (success or failure). History shows only rows
+  // from a read that finished after it opened.
+  const [sendsReads, setSendsReads] = useState(0);
   const [subscribersActive, setSubscribersActive] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const summaryRequest = useRef(0);
@@ -1682,6 +1720,7 @@ export default function NewsletterPage() {
             },
           );
           setSendsLoading(false);
+          setSendsReads((n) => n + 1);
         }
       })
       // Clear sendsData on error so a failed refresh doesn't silently keep
@@ -1691,6 +1730,7 @@ export default function NewsletterPage() {
         if (request === summaryRequest.current) {
           setSendsData(null);
           setSendsLoading(false);
+          setSendsReads((n) => n + 1);
         }
       });
     adminFetch("/admin/newsletter/subscribers?limit=1")
@@ -1723,6 +1763,7 @@ export default function NewsletterPage() {
             ? sends.value || { sends: [], counts: {} }
             : null,
         );
+        setSendsReads((n) => n + 1);
         setSubscribersActive(
           subscribers.status === "fulfilled"
             ? subscribers.value.counts?.active ?? 0
@@ -1733,13 +1774,14 @@ export default function NewsletterPage() {
     { intervalMs: 120_000 },
   );
 
-  // Refetch on Dashboard re-entry — mirrors the prior per-tab DashboardView
-  // remount so a campaign sent in Compose or a subscriber added in Subscribers
-  // is reflected when the user returns to the dashboard. Skips refetch on
-  // tab switches that don't land on dashboard (e.g. Compose → Subscribers).
+  // Refetch on Dashboard or History entry — mirrors the prior per-tab
+  // remounts so a campaign saved, scheduled or sent in Compose, or a
+  // subscriber added in Subscribers, is reflected when the user lands there.
+  // Skips refetch on tab switches that land elsewhere (e.g. Compose →
+  // Subscribers).
   const prevTabRef = useRef(tab);
   useEffect(() => {
-    if (tab === "dashboard" && prevTabRef.current !== "dashboard") {
+    if ((tab === "dashboard" || tab === "history") && prevTabRef.current !== tab) {
       setRefreshKey((k) => k + 1);
     }
     prevTabRef.current = tab;
@@ -1860,7 +1902,14 @@ export default function NewsletterPage() {
             }}
           />
         )}
-        {tab === "history" && <HistoryView />}
+        {tab === "history" && (
+          <HistoryView
+            sendsData={sendsData}
+            sendsLoading={sendsLoading}
+            sendsReads={sendsReads}
+            onRefresh={() => setRefreshKey((k) => k + 1)}
+          />
+        )}
         {tab === "subscribers" && <SubscribersView />}
         {tab === "events" && (
           <EventInboxView onDraftFromEvent={onDraftFromEvent} />
