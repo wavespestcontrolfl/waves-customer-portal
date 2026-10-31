@@ -181,6 +181,34 @@ describe('sendInvoiceEmail previous-balance note', () => {
     expect(args.payload.invoice_message).toBe('Thanks for having us out!');
   });
 
+  test('a CC rides the same message and is treated like a one-off recipient: no balance note', async () => {
+    isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
+    openBalanceSummary.mockResolvedValue({ total: 450, count: 2, moreCount: 0, invoices: [{}, {}] });
+    mockDb(invoiceRow());
+
+    const result = await sendInvoiceEmail('inv-1', { cc: ' Manager@Example.com ' });
+
+    expect(result).toMatchObject({ ok: true, cc: ['manager@example.com'] });
+    expect(openBalanceSummary).not.toHaveBeenCalled();
+    const args = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(args.to).toBe('customer@example.com');
+    expect(args.cc).toEqual(['manager@example.com']);
+    expect(args.payload.invoice_message).toBe('Thanks for having us out!');
+  });
+
+  test('a CC that is the recipient\'s own address is no CC; a CC that is not an address refuses before sending', async () => {
+    mockDb(invoiceRow());
+    const same = await sendInvoiceEmail('inv-1', { cc: 'CUSTOMER@example.com' });
+    expect(same.ok).toBe(true);
+    expect(same).not.toHaveProperty('cc');
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0]).not.toHaveProperty('cc');
+
+    mockDb(invoiceRow());
+    const bad = await sendInvoiceEmail('inv-1', { cc: 'not-an-email' });
+    expect(bad).toMatchObject({ ok: false, code: 'invalid_cc', error: 'Invalid CC email address' });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
   test('a balance lookup failure sends the email exactly as today', async () => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
     openBalanceSummary.mockRejectedValue(new Error('db down'));
