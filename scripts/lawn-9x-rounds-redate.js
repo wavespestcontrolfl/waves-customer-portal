@@ -123,8 +123,8 @@ async function main(opts) {
   const planFor = async (root, shared) => {
     const ctx = await svc.readSeriesContext(db, root, { todayET, anchorOverride: opts.anchors.get(String(root.id)) || null, areas });
     if (ctx.skip) return ctx;
-    const plan = svc.planSeriesRedate(ctx.series, { maxShiftDays: opts.maxShiftDays, allowLongShift: opts.allowLongShift.has(String(root.id)) });
-    return svc.reviewPlan(db, plan, { closedDates, reserved: shared });
+    return svc.planAndReview(db, ctx.series, { maxShiftDays: opts.maxShiftDays, allowLongShift: opts.allowLongShift.has(String(root.id)) },
+      { closedDates, reserved: shared });
   };
 
   console.log(`${opts.apply ? 'APPLYING' : 'DRY RUN'} - lawn 9x series onto the rounds, max shift ${opts.maxShiftDays} days\n`);

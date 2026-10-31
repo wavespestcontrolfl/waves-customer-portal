@@ -19,7 +19,7 @@ const seeder = require('../services/recurring-appointment-seeder');
 const { dateExceptionStamp, DATE_EXCEPTION_CLEAR } = require('../services/rebooker');
 const { parseCliArgs, summarizePlans } = require('../../scripts/lawn-9x-rounds-redate');
 
-const { planSeriesRedate, stayReason, reviewPlan, applySeries, convertSeries } = redate;
+const { planSeriesRedate, stayReason, reviewPlan, planAndReview, applySeries, convertSeries } = redate;
 
 // An area day (a Tuesday in round 1). The planner takes the anchor as given (the area module
 // validates real ones). The next visit, then a 42-day cadence.
@@ -240,6 +240,28 @@ describe('reviewPlan', () => {
     const heldFirst = new Map();
     await reviewPlan(conn, plan(), { reserved: heldFirst, rebooker, closedDates: new Set(['2027-01-12']) });
     expect(heldFirst.size).toBe(0);
+  });
+});
+
+describe('planAndReview', () => {
+  const conn = {};
+  // The area day 2027-01-12 is full (no open hour); every other day is open.
+  const areaDayFull = { previewMoveConflicts: jest.fn(async (id, date) => (date === '2027-01-12' ? [{ id: 'x' }] : [])) };
+
+  test('an area plan held only because an area day is full falls back to the own weekday: area day full', async () => {
+    const drifted = [visit('v1', '2026-11-17'), visit('v2', '2026-12-29'), visit('v3', '2027-02-11')];
+    const out = await planAndReview(conn, series(drifted), {}, { rebooker: areaDayFull });
+    expect(out).toMatchObject({ held: null, anchorSource: 'own', anchor: '2026-11-17' });
+    expect(out.flags).toContain('area day full');
+    expect(out.moves.map((m) => [m.id, m.to])).toEqual([['v3', '2027-02-09']]);
+  });
+
+  test('the area plan and its hold stand when the own weekday does not pass either, or the hold is not only a full day', async () => {
+    const everyDayFull = { previewMoveConflicts: jest.fn(async () => [{ id: 'x' }]) };
+    const drifted = [visit('v1', '2026-11-17'), visit('v2', '2026-12-29'), visit('v3', '2027-02-11')];
+    expect(await planAndReview(conn, series(drifted), {}, { rebooker: everyDayFull })).toMatchObject({ held: 'hour taken', anchorSource: 'area' });
+    const closed = await planAndReview(conn, series(drifted), {}, { rebooker: areaDayFull, closedDates: new Set(['2027-01-12']) });
+    expect(closed).toMatchObject({ anchorSource: 'area', heldReasons: ['closed day', 'hour taken'] });
   });
 });
 

@@ -62,7 +62,8 @@ function stayReason(visit, nowMs = Date.now()) {
 //   opts:   { maxShiftDays, allowLongShift }
 // Returns { parentId, customerId, anchor, anchorSource, areaKey, flags, heldReasons, held, visits, moves, signature }.
 //   `visits` rows: { id, from, to, shift, kind: 'next' | 'keep' | 'move' | 'at-target', reason, ws, we, dur, tech }
-//   `flags` never hold the series: long shift, no area, area day too far, weekend day, prepaid, short gap.
+//   `flags` never hold the series: long shift, no area, area day too far, weekend day, prepaid, short gap
+//   (planAndReview adds area day full).
 //   `heldReasons` hold it (nothing changes): round conflict, shift over N days, outside prepaid term (a prepaid
 //   visit would leave its term's window, so the term would stop covering it); the schedule review adds hour
 //   taken and closed day.
@@ -270,6 +271,16 @@ async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new 
   return { ...plan, visits, moves: visits.filter((v) => v.kind === 'move'), heldReasons: held, held: held[0] || null };
 }
 
+// Plan and review one series (the dry run and --apply both call this). An area plan held only because some area
+// day has no open hour (the day is full) falls back to the customer's own weekday on the rounds (flag
+// `area day full`) when that plan passes the review; otherwise the area plan and its hold stand.
+async function planAndReview(conn, series, opts, review) {
+  const plan = await reviewPlan(conn, planSeriesRedate(series, opts), review);
+  if (plan.anchorSource !== 'area' || plan.heldReasons.join() !== 'hour taken') return plan;
+  const own = await reviewPlan(conn, planSeriesRedate({ ...series, areaAnchor: null }, opts), review);
+  return own.held ? plan : { ...own, flags: [...own.flags, 'area day full'] };
+}
+
 // ---- writes (--apply only) ---------------------------------------------------------------------------------------
 
 // Move ONE visit, the way move-visit.js does. Throws with a reason when it refuses; nothing is written then.
@@ -396,6 +407,7 @@ module.exports = {
   readCandidateRoots,
   readSeriesContext,
   reviewPlan,
+  planAndReview,
   moveVisitToRound,
   convertSeries,
   applySeries,
