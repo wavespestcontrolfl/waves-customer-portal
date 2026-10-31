@@ -135,6 +135,18 @@ describe("Portal inbox tab", () => {
     expect(adminFetch).toHaveBeenCalledWith("/admin/requests/req-1", { method: "PATCH", body: JSON.stringify({ status: "resolved" }) });
   });
 
+  it("shows the saved hand-off summary, which can hold what the last message does not (an email change)", async () => {
+    const emailChange = {
+      ...chat, id: "esc-9", customerMessage: "yes that's right",
+      summary: "Customer confirmed a new email address: pat.new@example.com (read back and confirmed).",
+      assistantReply: "Thanks Pat. I've sent this to our team.",
+    };
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ items: [emailChange], total: 1 }) : updated(url)));
+    mount();
+    const row = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    expect(within(row).getByTestId("chat-summary")).toHaveTextContent("What they asked for: Customer confirmed a new email address: pat.new@example.com");
+  });
+
   it("tracks each row's Mark handled on its own: a second click on a row still saving sends nothing", async () => {
     const onCount = vi.fn();
     let finishChat;

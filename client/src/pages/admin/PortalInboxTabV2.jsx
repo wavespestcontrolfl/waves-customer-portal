@@ -89,6 +89,11 @@ function ChatDetails({ item }) {
       <blockquote className="text-14 text-zinc-800 mt-1 border-l-2 border-zinc-300 pl-3 whitespace-pre-wrap break-words">
         &ldquo;{item.customerMessage}&rdquo;
       </blockquote>
+      {item.summary && item.summary.trim() !== item.customerMessage.trim() && (
+        <div className="text-14 text-zinc-800 mt-2 whitespace-pre-wrap break-words" data-testid="chat-summary">
+          <span className="font-medium">What they asked for:</span> {item.summary}
+        </div>
+      )}
       {item.assistantReply && (
         <div className="text-14 text-ink-secondary mt-2">
           <span className="font-medium">Assistant replied:</span> {item.assistantReply}
