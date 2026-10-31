@@ -1687,8 +1687,12 @@ function ReviewGraphicsTab({ showToast }) {
   };
   const approveGraphic = async (graphic) => {
     try {
-      await adminFetch(`/admin/social-media/review-graphics/${graphic.id}/approve`, { method: "POST" });
-      showToast("Review graphic approved");
+      const result = await adminFetch(`/admin/social-media/review-graphics/${graphic.id}/approve`, { method: "POST" });
+      showToast(
+        result.published
+          ? "Review graphic approved and posted"
+          : "Approve ran in dry-run mode — nothing was posted"
+      );
       load();
     } catch (e) {
       showToast(`Approve failed: ${e.message}`);
@@ -1823,7 +1827,7 @@ function ReviewGraphicsTab({ showToast }) {
                       onClick={() => approveGraphic(graphic)}
                       className="mt-2 px-2.5 py-1.5 text-ui-body"
                     >
-                      Approve
+                      Approve &amp; post
                     </Button>
                   )}
                   {safeHttpHref(graphic.image_url) && (

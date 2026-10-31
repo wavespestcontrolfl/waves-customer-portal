@@ -7,7 +7,6 @@ const { SOCIAL_FLAGS, RSS_FEED_URL, isPausedByAdmin, normalizeUrl, platformEntry
 const linkedin = require('../services/linkedin');
 const SocialContentStudio = require('../services/social-content-studio');
 const logger = require('../services/logger');
-const { runExclusive } = require('../utils/cron-lock');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -194,61 +193,13 @@ router.post('/review-graphics', requireStudioEnabled, async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// POST /review-graphics/:id/approve — mark a review graphic approved
+// POST /review-graphics/:id/approve — post the graphic through the testimonial
+// publish path; it is marked approved only after a real post
 router.post('/review-graphics/:id/approve', requireStudioEnabled, async (req, res, next) => {
   try {
-    const existing = await db('review_graphics').where({ id: req.params.id }).first();
-    if (!existing) return res.status(404).json({ error: 'review graphic not found' });
-    // Never approve a graphic with no rendered image — approving publishes it as
-    // a "5-star review" card, and a blank card is worse than none.
-    if (!existing.image_url) {
-      return res.status(400).json({ error: 'review graphic has no rendered image; regenerate it before approving' });
-    }
-    // Liveness gate, mirroring the autonomous-run approval: the source review
-    // can be stamped removed between draft creation and this approval, and
-    // approving would publish a removed review as a current testimonial.
-    // Check and approval run in ONE transaction with the source row locked,
-    // UNDER the per-location sync advisory lock (same shape as
-    // createReviewGraphic / publishWithReviewLivenessLock): the row lock
-    // alone only serializes against the stamping UPDATE — a sync cycle that
-    // already fetched a snapshot without this review could stamp it right
-    // after a row-lock-only approval committed.
-    const approve = async () => {
-      let outcome = null;
-      await db.transaction(async (trx) => {
-        if (existing.google_review_id) {
-          const src = await trx('google_reviews')
-            .where({ id: existing.google_review_id })
-            .forUpdate()
-            .first();
-          if (!src || src.missing_since) {
-            outcome = { status: 409, error: 'source Google review has been removed from Google — the graphic cannot be approved' };
-            return;
-          }
-        }
-        const [graphic] = await trx('review_graphics')
-          .where({ id: req.params.id })
-          .update({
-            status: 'approved',
-            approved_at: new Date(),
-            updated_at: new Date(),
-          })
-          .returning('*');
-        outcome = { status: 200, graphic };
-      });
-      return outcome;
-    };
-    let outcome;
-    if (existing.google_review_id && existing.location_id) {
-      outcome = await runExclusive(`gbp-review-sync:${existing.location_id}`, approve, { recordHealth: false });
-      if (outcome?.skipped) {
-        outcome = { status: 409, error: 'review sync is in progress for this location — approve again in a moment' };
-      }
-    } else {
-      outcome = await approve();
-    }
-    if (outcome.status !== 200) return res.status(outcome.status).json({ error: outcome.error });
-    res.json({ success: true, graphic: outcome.graphic });
+    const result = await SocialContentStudio.approveReviewGraphic(req.params.id);
+    if (!result.ok) return res.status(result.status || 500).json({ error: result.error });
+    res.json({ success: true, published: result.published, dryRun: result.dryRun, publishResult: result.publishResult, graphic: result.graphic });
   } catch (err) { next(err); }
 });
 
