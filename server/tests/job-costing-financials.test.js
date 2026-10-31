@@ -901,10 +901,32 @@ describe('calcProductsCost — an application amount is priced per unit, never p
       ],
       products: { 'p-jug': JUG, 'p-bag': { inventory_unit: 'lb', unit_size_oz: 800, best_price: 44.23, cost_per_unit: null } },
     });
-    const notes = save({ inventoryDeductions: [{ productId: 'p-jug', status: 'not_deducted_implausible' }, { productId: 'p-bag', status: 'deducted' }] });
+    const notes = save({ inventoryDeductions: [{ productId: 'p-jug', amount: 1000000, amountUnit: 'fl_oz', status: 'not_deducted_implausible' }, { productId: 'p-bag', amount: 16.968, amountUnit: 'lb', status: 'deducted' }] });
     const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1', notes);
     expect(productsCost).toBe(15.01);
     expect(breakdown).toEqual([expect.objectContaining({ product_id: 'p-bag' })]);
+  });
+
+  describe('a refusal is bound to the amount it refused', () => {
+    const refusedNotes = { inventoryDeductions: [{ productId: 'p-jug', amount: 1000000, amountUnit: 'fl_oz', status: 'not_deducted_implausible' }] };
+    const cost = async (applied, notes = refusedNotes) => calcProductsCost(
+      fakeProductsDb({ applications: [applied], products: { 'p-jug': JUG } }), 'rec-1', notes,
+    );
+
+    test('the same product, amount and unit stays excluded (also when the amount arrives as numeric text)', async () => {
+      expect((await cost({ product_id: 'p-jug', quantity_applied: 1000000, quantity_unit: 'fl_oz' })).productsCost).toBe(0);
+      expect((await cost({ product_id: 'p-jug', quantity_applied: '1000000.0000', quantity_unit: 'fl_oz' })).productsCost).toBe(0);
+    });
+
+    test('after a correction to a different amount, the corrected usage is costed', async () => {
+      const { productsCost, breakdown } = await cost({ product_id: 'p-jug', quantity_applied: 31.5, quantity_unit: 'fl_oz' });
+      expect(productsCost).toBe(3.83);
+      expect(breakdown).toEqual([expect.objectContaining({ product_id: 'p-jug' })]);
+    });
+
+    test('the same number in a different unit is a different line and is costed', async () => {
+      expect((await cost({ product_id: 'p-jug', quantity_applied: 1000000, quantity_unit: 'oz' })).productsCost).toBeGreaterThan(0);
+    });
   });
 
   test('a product an inventory movement already costed is not costed again', async () => {

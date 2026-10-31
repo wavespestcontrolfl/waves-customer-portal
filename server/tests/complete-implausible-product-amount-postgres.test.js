@@ -156,6 +156,10 @@ postgres('technician implausible product amount', () => {
       const out = await complete(f, { role: 'admin', totalAmount: 600 });
       expect(out.status).toBe(200);
       expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 0, stock: 500 });
+      // The refusal is saved with the amount it refused: job costing binds its exclusion to exactly that product, amount and unit.
+      const notes = (await mockPg('service_records').where({ customer_id: f.customerId }).first('structured_notes')).structured_notes;
+      const saved = typeof notes === 'string' ? JSON.parse(notes) : notes;
+      expect(saved.inventoryDeductions).toEqual([expect.objectContaining({ productId: f.productId, amount: 600, amountUnit: 'lb', status: 'not_deducted_implausible' })]);
     } finally { await cleanup(f); }
   });
 
