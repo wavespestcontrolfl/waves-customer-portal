@@ -249,44 +249,50 @@ router.post('/locations/:id/sync', async (req, res, next) => {
       incoming = mapPlacesData(await placesRes.json());
     }
 
-    // Get stored record
-    const stored = await db('gbp_locations').where({ location_id: id }).first();
+    // One sync per location at a time (transaction-scoped advisory lock), and
+    // a difference that already waits as a pending decision with the same new
+    // value is not queued again: a repeated or concurrent sync of an unchanged
+    // difference leaves one pending decision.
+    const { changes, updateRecords } = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`gbp-sync:${id}`]);
+      const storedRow = await trx('gbp_locations').where({ location_id: id }).first();
+      const diff = diffRecords(storedRow, incoming);
+      const queued = [];
+      for (const change of diff) {
+        const alreadyPending = await trx('gbp_updates')
+          .where({ location_id: id, field_name: change.field, status: 'pending', new_value: change.newVal })
+          .first('id');
+        if (alreadyPending) continue;
+        const [inserted] = await trx('gbp_updates').insert({
+          location_id: id,
+          field_name: change.field,
+          old_value: change.oldVal,
+          new_value: change.newVal,
+          source,
+          status: 'pending',
+        }).returning('*');
+        queued.push(inserted);
+      }
 
-    // Diff against stored
-    const changes = diffRecords(stored, incoming);
-
-    // Create update records for each detected change
-    const updateRecords = [];
-    for (const change of changes) {
-      const record = {
-        location_id: id,
-        field_name: change.field,
-        old_value: change.oldVal,
-        new_value: change.newVal,
-        source,
-        status: 'pending',
-      };
-      const [inserted] = await db('gbp_updates').insert(record).returning('*');
-      updateRecords.push(inserted);
-    }
-
-    // If no stored record yet, create one with the Google data
-    if (!stored) {
-      await db('gbp_locations').insert({
-        location_id: id,
-        ...incoming,
-        additional_categories: JSON.stringify(incoming.additional_categories),
-        regular_hours: incoming.regular_hours ? JSON.stringify(incoming.regular_hours) : null,
-        photos: JSON.stringify(incoming.photos),
-        last_synced_at: new Date(),
-      });
-    } else {
-      // Update last_synced_at but don't overwrite fields — those go through approve flow
-      await db('gbp_locations').where({ location_id: id }).update({
-        last_synced_at: new Date(),
-        updated_at: new Date(),
-      });
-    }
+      // If no stored record yet, create one with the Google data
+      if (!storedRow) {
+        await trx('gbp_locations').insert({
+          location_id: id,
+          ...incoming,
+          additional_categories: JSON.stringify(incoming.additional_categories),
+          regular_hours: incoming.regular_hours ? JSON.stringify(incoming.regular_hours) : null,
+          photos: JSON.stringify(incoming.photos),
+          last_synced_at: new Date(),
+        });
+      } else {
+        // Update last_synced_at but don't overwrite fields — those go through approve flow
+        await trx('gbp_locations').where({ location_id: id }).update({
+          last_synced_at: new Date(),
+          updated_at: new Date(),
+        });
+      }
+      return { changes: diff, updateRecords: queued };
+    });
 
     logger.info(`[gbp-mgmt] Synced ${id}: ${changes.length} changes detected`);
     res.json({
