@@ -22,10 +22,19 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 
-const gateState = { live: true, reviewLive: false };
+const gateState = { live: true, reviewLive: false, reuseShell: false };
 jest.mock('../config/feature-gates', () => ({
   leadInspectionLinkLive: jest.fn(() => gateState.live),
+  inspectionReuseLeadShellLive: jest.fn(() => gateState.reuseShell),
   gateEnvValue: jest.fn(name => name === 'GATE_GEOCODE_REVIEW' && gateState.reviewLive),
+}));
+
+// customer-dedupe's shell test (loserAutoBlockers) counts rows in a dozen
+// billing tables with grouped COUNT queries the chain mock below does not
+// model, so the blocker list is controlled directly here.
+const mockLoserBlockers = jest.fn(async () => []);
+jest.mock('../services/customer-dedupe', () => ({
+  loserAutoBlockers: (...args) => mockLoserBlockers(...args),
 }));
 
 const mockGeocode = jest.fn(async () => ({ location: { lat: 27.4, lng: -82.5 } }));
@@ -236,6 +245,9 @@ afterEach(() => {
   insertCalls.length = 0;
   gateState.live = true;
   gateState.reviewLive = false;
+  gateState.reuseShell = false;
+  mockLoserBlockers.mockClear();
+  mockLoserBlockers.mockImplementation(async () => []);
   mockGeocode.mockClear();
   mockGeocode.mockImplementation(async () => ({ location: { lat: 27.4, lng: -82.5 } }));
   mockCounty.mockClear();
@@ -3996,5 +4008,143 @@ describe('bookingAddressInputs — what the booking address resolves from', () =
     ['no trusted customer any more', lead, null],
   ])('%s changing → a different fingerprint', (_label, nextLead, nextCust) => {
     expect(bookingAddressInputs(nextLead, nextCust)).not.toBe(bookingAddressInputs(lead, cust));
+  });
+});
+
+// GATE_INSPECTION_REUSE_LEAD_SHELL: the web form mints a customer for a lead
+// seconds before the lead row. An unverified lead's page used to ignore it and
+// mint a second prospect; with the gate on it books onto the lead's OWN
+// untouched intake shell, and onto a new prospect in every other case.
+describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () => {
+  const SHELL_ID = 'cust-shell';
+  const SHELL = {
+    id: SHELL_ID, first_name: 'Pat', last_name: 'Lee', phone: '(941) 555-0101', email: null, account_id: 'acct-shell',
+    active: true, pipeline_stage: 'new_lead', created_at: '2026-10-31T14:00:00Z',
+    address_line1: '', address_line2: null, city: '', state: 'FL', zip: '', latitude: null, longitude: null,
+  };
+  const SHELL_LEAD = { ...LEAD_ROW, customer_id: SHELL_ID, created_at: '2026-10-31T14:00:30Z' };
+  const BOOK_BODY = { date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209' };
+
+  // Seeds the world and commits. `shell`, `lead`, `earlierLead`, `otherProvenance`
+  // and `journal` vary one condition each; the rest is the clean case.
+  async function commitWith({ shell = SHELL, lead = SHELL_LEAD, earlierLead = null, otherProvenance = null, journal = () => null } = {}) {
+    firstResults.leads = (q) => (q.conds.customer_id ? earlierLead : lead);
+    firstResults.customers = (q) => (q.conds.id === SHELL_ID ? shell : null);
+    firstResults.lead_activities = (q) => (q.conds.lead_id ? null : otherProvenance);
+    firstResults.customer_merge_journal = journal;
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    gateState.reuseShell = true;
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), BOOK_BODY);
+    expect(res.statusCode).toBe(200);
+    return res;
+  }
+
+  const customerInserts = () => insertCalls.filter((c) => c.table === 'customers');
+  const provenanceInsert = () => insertCalls.find((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect');
+
+  function expectNewProspect() {
+    expect(customerInserts()).toHaveLength(1);
+    expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).not.toBe(SHELL_ID);
+    expect(JSON.parse(provenanceInsert().payload.metadata).customer_id).not.toBe(SHELL_ID);
+  }
+
+  test('gate off: a new prospect is created, the shell is never read as a shell', async () => {
+    firstResults.leads = SHELL_LEAD;
+    firstResults.customers = (q) => (q.conds.id === SHELL_ID ? SHELL : null);
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    gateState.reuseShell = false;
+    await callPost(mintLeadConsultationToken(LEAD_ID), BOOK_BODY);
+    expectNewProspect();
+    expect(mockLoserBlockers).not.toHaveBeenCalled();
+    expect(provenanceInsert().payload.description).toBe('Consultation page created a prospect profile for this lead');
+  });
+
+  test('gate on, own untouched shell: no customers insert, booking lands on the shell, outright provenance, a reload resolves it', async () => {
+    await commitWith();
+    expect(customerInserts()).toHaveLength(0);
+    expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe(SHELL_ID);
+    const provenance = provenanceInsert();
+    expect(provenance.payload.description).toBe("Consultation page reused the lead's own intake profile");
+    const meta = JSON.parse(provenance.payload.metadata);
+    expect(meta).toEqual({ customer_id: SHELL_ID }); // no requires_verification
+    // The lead's own link already points at the shell and is left as it is.
+    expect(updateCalls.some((c) => c.table === 'leads' && 'customer_id' in c.payload)).toBe(false);
+    // loserAutoBlockers read a row carrying the columns it reads.
+    expect(mockLoserBlockers.mock.calls[0][1]).toEqual(expect.objectContaining({ id: SHELL_ID, pipeline_stage: 'new_lead' }));
+
+    // A reload (or retry) finds the shell through that provenance.
+    firstResults.lead_activities = (q) => (q.conds.lead_id ? { metadata: provenance.payload.metadata } : null);
+    const reloaded = await inspectionPublicRouter._test.loadTrustedCustomer(db, SHELL_LEAD, { leadId: LEAD_ID });
+    expect(reloaded.id).toBe(SHELL_ID);
+  });
+
+  test('gate on: only the shell\'s EMPTY address fields are filled; a stored value is never overwritten', async () => {
+    await commitWith({ shell: { ...SHELL, city: 'Palmetto' } });
+    const fill = updateCalls.find((c) => c.table === 'customers' && 'address_line1' in c.payload);
+    expect(fill.payload.address_line1).toBe('123 Any St');
+    expect(fill.payload.zip).toBe('34209');
+    expect(fill.payload.state).toBeUndefined();
+    expect(fill.payload.city).toBeUndefined();
+  });
+
+  test.each([
+    ['the shell was created over 10 minutes before the lead', { shell: { ...SHELL, created_at: '2026-10-31T13:49:00Z' } }],
+    ['the shell was created after the lead', { shell: { ...SHELL, created_at: '2026-10-31T14:01:00Z' } }],
+    ['an earlier lead already sits on the shell', { earlierLead: { id: 'lead-earlier' } }],
+    ['the shell has a billing/visit blocker (e.g. a scheduled visit or a portal login)', { blockers: ['scheduled_services', 'portal_login'] }],
+    ['the shell won a merge', { journal: (q) => (q.conds.winner_customer_id ? { winner_customer_id: SHELL_ID } : null) }],
+    ['the shell was merged away', { journal: (q) => (q.conds.loser_customer_id ? { winner_customer_id: 'cust-other' } : null) }],
+    ['the phone differs', { shell: { ...SHELL, phone: '9415559999' } }],
+    ['the email differs', { shell: { ...SHELL, email: 'other@example.com' } }],
+    ['the shell is not a new_lead any more', { shell: { ...SHELL, pipeline_stage: 'active_customer' } }],
+    ['the shell is inactive', { shell: { ...SHELL, active: false } }],
+    ['another lead\'s consultation provenance names the shell', { otherProvenance: { lead_id: 'lead-other' } }],
+    ['the shell\'s stored address clearly differs from the booking address', { shell: { ...SHELL, address_line1: '9 Other Rd', city: 'Sarasota', zip: '34242', latitude: 27.3, longitude: -82.5 } }],
+  ])('gate on, but %s: a new prospect is created', async (_label, { blockers, ...seed }) => {
+    if (blockers) mockLoserBlockers.mockImplementation(async () => blockers);
+    await commitWith(seed);
+    expectNewProspect();
+  });
+
+  test('gate on, email matches ignoring case and spacing, and a stored address that matches is kept: still the shell', async () => {
+    await commitWith({
+      shell: { ...SHELL, email: ' Pat@Example.com ', address_line1: '123 Any St', city: 'Bradenton', zip: '34209', latitude: 27.4, longitude: -82.5 },
+      lead: { ...SHELL_LEAD, email: 'pat@example.com' },
+    });
+    expect(customerInserts()).toHaveLength(0);
+    expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe(SHELL_ID);
+    expect(updateCalls.some((c) => c.table === 'customers' && 'address_line1' in c.payload)).toBe(false);
+  });
+
+  test('gate on, VERIFIED lead (call caller ID): the shell test is never consulted, the linked customer books as before', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: SHELL_ID, created_at: SHELL_LEAD.created_at };
+    firstResults.customers = { ...SHELL, address_line1: '123 Any St', city: 'Bradenton', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    gateState.reuseShell = true;
+    await callPost(mintLeadConsultationToken(LEAD_ID), BOOK_BODY);
+    expect(mockLoserBlockers).not.toHaveBeenCalled();
+    expect(customerInserts()).toHaveLength(0);
+    expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe(SHELL_ID);
+    expect(provenanceInsert()).toBeUndefined();
+  });
+
+  test('leadOwnIntakeShell: a lead with no created_at or no customer link has no shell', async () => {
+    const { leadOwnIntakeShell } = inspectionPublicRouter._test;
+    firstResults.customers = SHELL;
+    expect(await leadOwnIntakeShell(db, { ...SHELL_LEAD, customer_id: null })).toBeNull();
+    expect(await leadOwnIntakeShell(db, { ...SHELL_LEAD, created_at: null })).toBeNull();
+  });
+
+  test('structural: loadLead selects created_at, which leadOwnIntakeShell compares against the shell', () => {
+    expect(inspectionPublicRouter._test.LEAD_ROW_FIELDS).toContain('created_at');
   });
 });
