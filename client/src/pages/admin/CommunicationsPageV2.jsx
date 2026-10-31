@@ -88,6 +88,7 @@ import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
 import PortalInboxTabV2 from "./PortalInboxTabV2";
+import MessengerTabV2 from "./MessengerTabV2";
 import OwedTabV2 from "./OwedTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
@@ -293,10 +294,23 @@ const TABS = [
     adminOnly: true,
   },
 ];
-// Portal (GATE_PORTAL_INBOX): what customers asked for inside the customer
-// portal and nobody answered. Owner-only; added to the nav only when the
-// summary endpoint answers enabled:true, right after Triage.
-const PORTAL_TAB = { key: "portal", label: "Portal", Icon: MessagesSquare, adminOnly: true };
+// Tabs behind a dark gate. Each is added to the nav only when its summary endpoint answers
+// enabled:true; the answer's count rides in the tab label. Listed in nav-insertion order: `after` names the
+// anchor tabs, the first one present wins.
+//  - Portal (GATE_PORTAL_INBOX): what customers asked for inside the customer portal and nobody answered.
+//    Owner-only, right after Triage.
+//  - Messenger (GATE_MESSENGER_INBOX): the Facebook page's Messenger threads. Every staff role (the server
+//    scopes a technician to their own customers); right after Portal, else Triage, else SMS.
+const GATED_TABS = [
+  { tab: { key: "portal", label: "Portal", Icon: MessagesSquare, adminOnly: true }, Component: PortalInboxTabV2, summary: "/admin/portal-inbox/summary", countField: "count", after: ["triage"] },
+  { tab: { key: "messenger", label: "Messenger", Icon: MessagesSquare }, Component: MessengerTabV2, summary: "/admin/messenger/summary", countField: "unanswered", after: ["portal", "triage", "sms"] },
+];
+// A tab placed right after the first of `anchors` that is in the nav.
+function insertTabAfter(tabs, tab, anchors) {
+  const index = anchors.map((key) => tabs.findIndex((t) => t.key === key)).find((i) => i >= 0);
+  const at = index === undefined ? 0 : index + 1;
+  return [...tabs.slice(0, at), tab, ...tabs.slice(at)];
+}
 const SMS_LOG_PAGE_SIZE = 500;
 
 // Short reviewer-facing labels for an Agent Review draft's intended_actions
@@ -4193,36 +4207,38 @@ export default function CommunicationsPageV2() {
   // Memoized by role: the hash-sync effect below depends on `tabs`, and a
   // fresh array every render would re-run applyHashTab() after each tab
   // click, snapping the user back to the deep-linked tab (codex P2).
-  // portalCount: null until the one-time summary read answers; stays null
-  // (no Portal tab) when the gate is off, the read fails or the role is not admin.
-  const [portalCount, setPortalCount] = useState(null);
-  const portalOn = portalCount !== null;
+  // counts: a gated tab's key is present only once its one-time summary read answered enabled:true (gate
+  // off, a failed read or a role without the tab leaves it out). The tabs report later counts through
+  // countSetters, which keep one identity for the life of the page.
+  const [counts, setCounts] = useState({});
+  const countSetters = useMemo(() => Object.fromEntries(GATED_TABS.map(({ tab: { key } }) => [
+    key, (n) => setCounts((prev) => (prev[key] === n ? prev : { ...prev, [key]: n })),
+  ])), []);
   useEffect(() => {
-    if (!isAdminRole) return undefined;
     let cancelled = false;
-    (async () => {
+    GATED_TABS.filter(({ tab }) => isAdminRole || !tab.adminOnly).forEach(async ({ tab, summary, countField }) => {
       try {
-        const summary = await adminFetch("/admin/portal-inbox/summary");
-        if (!cancelled && summary?.enabled === true) setPortalCount(Number(summary.count) || 0);
+        const answer = await adminFetch(summary);
+        if (!cancelled && answer?.enabled === true) countSetters[tab.key](Number(answer[countField]) || 0);
       } catch {
-        /* no Portal tab when the summary cannot be read */
+        /* no tab when the summary cannot be read */
       }
-    })();
+    });
     return () => { cancelled = true; };
-  }, [isAdminRole]);
-  const tabs = useMemo(() => {
-    const visible = TABS.filter((t) => !t.adminOnly || isAdminRole);
-    if (!isAdminRole || !portalOn) return visible;
-    const at = visible.findIndex((t) => t.key === "triage") + 1;
-    return [...visible.slice(0, at), PORTAL_TAB, ...visible.slice(at)];
-  }, [isAdminRole, portalOn]);
+  }, [isAdminRole, countSetters]);
+  const shown = Object.keys(counts).join();
+  const tabs = useMemo(() => GATED_TABS.reduce(
+    (nav, { tab, after }) => (shown.split(",").includes(tab.key) ? insertTabAfter(nav, tab, after) : nav),
+    TABS.filter((t) => !t.adminOnly || isAdminRole),
+  ), [isAdminRole, shown]);
   // The count rides in the label (the nav has no badge slot); label changes do
   // not change `tabs`, so the hash-sync effect below never re-runs for them.
   const navSections = useMemo(
-    () => tabs.map((t) => (t.key === "portal" && portalCount > 0 ? { ...t, label: `Portal (${portalCount})` } : t)),
-    [tabs, portalCount],
+    () => tabs.map((t) => (counts[t.key] > 0 ? { ...t, label: `${t.label} (${counts[t.key]})` } : t)),
+    [tabs, counts],
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
+  const gatedTab = GATED_TABS.find(({ tab: { key } }) => key === activeTab);
   const smsParams = new URLSearchParams(location.search);
   const feedbackEnabled = smsParams.get("feedback") === "1";
   const smsTarget = ["thread", "message", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
@@ -4301,7 +4317,7 @@ export default function CommunicationsPageV2() {
       {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} feedbackEnabled={feedbackEnabled} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
-      {activeTab === "portal" && <PortalInboxTabV2 onCount={setPortalCount} />}
+      {gatedTab && <gatedTab.Component onCount={countSetters[activeTab]} routeHash={location.hash} />}
       {activeTab === "owed" && <OwedTabV2 />}
       {activeTab === "templates" && (
         <>

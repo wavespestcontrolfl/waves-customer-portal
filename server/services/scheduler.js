@@ -1198,6 +1198,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 3 MIN — Facebook Messenger intake (GATE_MESSENGER_INBOX, read in
+  // the poll): the page has no webhook, so new messages are read from the Graph
+  // API into the unified messages store, one bell per thread with a new
+  // customer message. Exclusive, so two instances never poll at once; the
+  // gate-off poll does nothing.
+  cron.schedule('*/3 * * * *', async () => {
+    try {
+      await runExclusive('messenger-inbox', async () => {
+        await require('./messenger-inbox').pollMessenger();
+      });
+    } catch (err) {
+      logger.error(`[messenger-inbox] poll failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — retry committed route-quality refreshes, including dates
   // outside the nightly optimizer's six-day band. The durable row claim
   // fences overlapping ticks/deploys; no second cron lease is needed.

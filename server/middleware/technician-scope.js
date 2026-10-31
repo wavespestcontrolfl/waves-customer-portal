@@ -124,6 +124,10 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|customer-link|agent-draft)$/ },
   { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|rewrite-sms|ai-draft|customer-link)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
+  // Facebook Messenger threads (GATE_MESSENGER_INBOX, dark): the router scopes a
+  // technician to threads linked to a customer on their own route, like the SMS inbox.
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/messenger\/(summary|threads|threads\/[^/]+)$/ },
+  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/messenger\/threads\/[^/]+\/(read|reply)$/ },
   // The line a text to this number leaves from (the composer's server-chosen
   // sender); it returns one of the business's own lines, never customer data.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/sender$/ },

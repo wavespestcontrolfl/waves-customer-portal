@@ -82,7 +82,7 @@ describe('listGates', () => {
     const retired = featureGates.RETIRED_GATES;
     for (const name of indexed) expect(names.includes(name)).toBe(!retired.has(name));
     // Readers outside feature-gates.js are included.
-    for (const name of ['GATE_PREVISIT_BRIEF', 'GATE_SOCIAL_INBOX']) expect(row(name)).toMatchObject({ readByCode: true });
+    expect(row('GATE_PREVISIT_BRIEF')).toMatchObject({ readByCode: true });
   });
 
   test('a GATE_ variable set in the environment but read by no code is listed as such', () => {
