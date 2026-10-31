@@ -257,17 +257,24 @@ function bestNameOnAccount(reviewName, people) {
   return best;
 }
 
+// The Google name, the people on the account, and the best name evidence between them (best: null =
+// none).
+function nameEvidence(review, candidate) {
+  const reviewName = nameParts(review.reviewerName);
+  const people = accountPeople(candidate);
+  return { reviewName, people, best: bestNameOnAccount(reviewName, people) };
+}
+
 /**
  * What is known about one candidate for one review, name evidence or not: the Reviews match queue
  * shows it for every customer a person searched up. candidate = { customerId, holder: {first, last},
  * contacts: [raw names], timeline, activity, linkedProfiles: [location ids with a live linked
- * review], deleted }. null for a deleted customer.
+ * review], deleted }. null for a deleted customer. `names` = nameEvidence() when the caller has it.
  */
-function describeCandidate(review, candidate) {
+function describeCandidate(review, candidate, names = null) {
   if (candidate.deleted) return null;
-  const reviewName = nameParts(review.reviewerName);
-  const people = accountPeople(candidate);
-  const name = bestNameOnAccount(reviewName, people) || { kind: null, role: null, last: people[0].last };
+  const { reviewName, people, best } = names || nameEvidence(review, candidate);
+  const name = best || { kind: null, role: null, last: people[0].last };
   // A full Google surname that matches nobody on the account: a tap that hour may be someone else's.
   const surnameClash = reviewName.last.length > 1 && people.every((p) => !surnameRelation(reviewName.last, p.last));
   const firstContactAt = firstKnownContactAt(candidate.timeline);
@@ -285,8 +292,14 @@ function describeCandidate(review, candidate) {
 
 // One candidate's score for one review, or null when it has no name evidence and no tap.
 function scoreCandidate(review, candidate) {
-  const found = describeCandidate(review, candidate);
-  if (!found || (!found.nameKind && !found.activity.tap)) return null;
+  if (candidate.deleted) return null;
+  // The matcher's pass scores every review against every customer, and most customers share nothing
+  // with the reviewer. With no name evidence and no tap on record the score is null whatever the
+  // dates, so the date and activity reads are skipped.
+  const names = nameEvidence(review, candidate);
+  if (!names.best && !candidate.activity?.taps?.length) return null;
+  const found = describeCandidate(review, candidate, names);
+  if (!found.nameKind && !found.activity.tap) return null;
   const { activity } = found;
   const score = (NAME_POINTS[found.nameKind] || 0) + (activity.tap ? 3 : 0) + (activity.recent ? 1 : 0) + (activity.saidReviewed ? 3 : 0);
   return { ...found, score };

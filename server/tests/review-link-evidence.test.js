@@ -231,6 +231,15 @@ describe('decideReviewLink', () => {
     expect(decide(review('Trent Oakhurst'), [tapped])).toMatchObject({ result: 'none', reason: 'no_candidate' });
   });
 
+  test('a customer who shares no name with the reviewer is scored only on a tap; their dates are never read', () => {
+    // The matcher's pass scores every review against every customer: the date and activity reads are
+    // skipped for the many customers who cannot score.
+    const unreadable = new Proxy({}, { get: () => { throw new Error('timeline read'); } });
+    expect(scoreCandidate(review('Marlow Pemberton'), candidate('c1', 'Dana', 'Fenwick', { timeline: unreadable }))).toBeNull();
+    const tapped = candidate('c2', 'Dana', 'Fenwick', { activity: { taps: [{ at: at(-HOUR), locationId: 'parrish' }] } });
+    expect(scoreCandidate(review('Kathy'), tapped)).toMatchObject({ customerId: 'c2', nameKind: null, activity: { tap: true }, score: 3 });
+  });
+
   test('a first name only needs a tap to reach a person, and queues without one', () => {
     const tapped = candidate('c1', 'Kathy', 'Brindle', { activity: { taps: [{ at: at(-HOUR), locationId: 'parrish' }] } });
     expect(decide(review('Kathy'), [tapped])).toMatchObject({ result: 'link_confirm', reason: 'first_only' });
