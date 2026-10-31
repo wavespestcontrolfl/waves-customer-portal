@@ -104,10 +104,46 @@ async function territoryTechnicianFor(conn, place = {}) {
   return territory ? territory.technicianId : null;
 }
 
+/**
+ * Territories by ZIP, build 3 (GATE_TERRITORY_READOUT): stops per technician and area, booked
+ * in [today, ahead) (pending / confirmed / rescheduled) and done in [back, today) (completed).
+ * The area is the visit's service ZIP, else its customer's ZIP, through territory_zips; a ZIP
+ * outside the table reads area null. An unclaimed estimate hold is not a stop. Dates are
+ * YYYY-MM-DD Eastern. Reads only.
+ * Rows: [{ technicianId, technicianName, area, areaLabel, booked, done }].
+ */
+async function territoryReadout(conn, { today, ahead, back }) {
+  const db = conn || defaultDb;
+  const result = await db.raw(`
+    SELECT ss.technician_id, t.name AS technician_name, tz.area,
+      COUNT(*) FILTER (WHERE ss.scheduled_date >= ?::date AND ss.status IN ('pending', 'confirmed', 'rescheduled'))::int AS booked,
+      COUNT(*) FILTER (WHERE ss.scheduled_date < ?::date AND ss.status = 'completed')::int AS done
+    FROM scheduled_services ss
+    LEFT JOIN customers c ON c.id = ss.customer_id
+    LEFT JOIN technicians t ON t.id = ss.technician_id
+    LEFT JOIN territory_zips tz ON tz.zip = LEFT(COALESCE(NULLIF(TRIM(ss.service_address_zip), ''), TRIM(c.zip)), 5)
+    WHERE ss.scheduled_date >= ?::date AND ss.scheduled_date < ?::date
+      -- An unclaimed estimate hold (slot-reservation: no customer yet, an expiry) is not a stop.
+      AND NOT (ss.customer_id IS NULL AND ss.reservation_expires_at IS NOT NULL)
+    GROUP BY ss.technician_id, t.name, tz.area
+    ORDER BY t.name NULLS LAST, tz.area NULLS LAST`, [today, today, back, ahead]);
+  return (result.rows || [])
+    .filter((row) => row.booked > 0 || row.done > 0)
+    .map((row) => ({
+      technicianId: row.technician_id || null,
+      technicianName: row.technician_name || null,
+      area: row.area || null,
+      areaLabel: row.area ? areaLabel(row.area) : null,
+      booked: row.booked,
+      done: row.done,
+    }));
+}
+
 module.exports = {
   TERRITORY_LINES,
   normalizeZip,
   zipForPoint,
   territoryForZip,
   territoryTechnicianFor,
+  territoryReadout,
 };

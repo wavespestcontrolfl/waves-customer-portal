@@ -194,3 +194,25 @@ describe('lead webhook saves the typed ZIP (source guard)', () => {
     expect(attach.slice(0, 500)).toContain('...(normalizedAddress.zip ? { zip: normalizedAddress.zip } : {}),');
   });
 });
+
+describe('territoryReadout (build 3 read-out rows)', () => {
+  const { territoryReadout } = require('../services/territory');
+
+  test('names each area, keeps the server order and drops rows with no stops', async () => {
+    const db = {
+      raw: jest.fn(async () => ({
+        rows: [
+          { technician_id: 'tech-a', technician_name: 'Adam', area: 'north_river', booked: 12, done: 9 },
+          { technician_id: 'tech-a', technician_name: 'Adam', area: null, booked: 1, done: 0 },
+          { technician_id: null, technician_name: null, area: 'venice', booked: 0, done: 0 },
+        ],
+      })),
+    };
+    await expect(territoryReadout(db, { today: '2026-11-02', ahead: '2026-11-30', back: '2026-10-05' })).resolves.toEqual([
+      { technicianId: 'tech-a', technicianName: 'Adam', area: 'north_river', areaLabel: 'North of the river', booked: 12, done: 9 },
+      { technicianId: 'tech-a', technicianName: 'Adam', area: null, areaLabel: null, booked: 1, done: 0 },
+    ]);
+    // Booked counts from today on, done counts before today, inside [back, ahead).
+    expect(db.raw.mock.calls[0][1]).toEqual(['2026-11-02', '2026-11-02', '2026-10-05', '2026-11-30']);
+  });
+});
