@@ -220,11 +220,25 @@ test('a held draft rings one Leads bell that passes the alert rule, with the age
     link: `/admin/leads?lead=${context.leadId}`,
     metadata: { area: 'Leads', severity: 'needs-you', subject: { type: 'lead', id: context.leadId }, doneWhen: 'lead_contacted', who: 'person' },
   });
-  expect(opts).toMatchObject({ bell: true, dedupeKey: `lead-agent-hold:${context.leadId}`, dedupeOpenOnly: true, metadata: { leadId: context.leadId, hold: 'lead_agent' } });
+  expect(opts).toMatchObject({
+    bell: true, dedupeKey: `lead-agent-hold:${context.leadId}`, dedupeOpenOnly: true, refreshOnDedupe: true, bumpOnRefresh: true,
+    metadata: { leadId: context.leadId, hold: 'lead_agent' },
+  });
   expect(opts.detail).toContain('Why the AI held it: Commercial');
   expect(opts.detail).toContain('Its draft reply: "Hello Pat! We can walk the office');
   expect(opts.detail).toContain('reply within 15 minutes');
   for (const raw of ['owner@example.com', '555-0123', '4521 Sample Ridge Rd']) expect(opts.detail).not.toContain(raw);
+});
+
+test('a second hold for the same lead raises the same bell again with its new draft', async () => {
+  await executeLeadTool('queue_for_adam', { reason: 'Bundle', draft_response: 'First draft' }, context);
+  await executeLeadTool('queue_for_adam', { reason: 'Bundle', draft_response: 'Second draft', urgency: 'urgent' }, { ...context, toolUseId: 'tool-2' });
+  expect(mockRaise).toHaveBeenCalledTimes(2);
+  const [first, second] = mockRaise.mock.calls.map(([, , opts]) => opts);
+  expect(second.dedupeKey).toBe(first.dedupeKey);
+  expect(second).toMatchObject({ refreshOnDedupe: true, bumpOnRefresh: true });
+  expect(second.detail).toContain('Its draft reply: "Second draft"');
+  expect(second.detail).toContain('reply within 15 minutes');
 });
 
 test('a lead with no name still gets a bell that passes the alert rule', async () => {

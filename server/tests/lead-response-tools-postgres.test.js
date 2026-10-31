@@ -31,6 +31,7 @@ const SKIP = !process.env.DATABASE_URL;
   const leadId = randomUUID();
   const context = { customerId, leadId, sessionId: randomUUID(), toolUseId: randomUUID() };
   const input = { reason: 'QA review', draft_response: 'Synthetic draft', urgency: 'normal' };
+  const holdKey = `lead-agent-hold:${leadId}`;
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -65,6 +66,7 @@ const SKIP = !process.env.DATABASE_URL;
     await db('customers').whereIn('id', [customerId, foreignCustomerId]).update({ pipeline_stage: 'new_lead' });
     await db('lead_activities').where({ lead_id: leadId }).del();
     await db('lead_agent_responses').where({ lead_id: leadId }).del();
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [holdKey]).del();
     await db('leads').where({ id: leadId }).update({ customer_id: customerId, deleted_at: null, converted_at: null, status: 'new' });
   });
 
@@ -78,6 +80,7 @@ const SKIP = !process.env.DATABASE_URL;
         await trx('estimates').where({ customer_id: customerId, source: 'lead_agent' }).del();
         await trx('lead_agent_responses').where({ lead_id: leadId }).del();
         await trx('lead_activities').where({ lead_id: leadId }).del();
+        await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [holdKey]).del();
         await trx('leads').where({ id: leadId }).del();
         await trx('customers').whereIn('id', [customerId, foreignCustomerId])
           .where('email', 'like', 'qa-integrity-%@example.invalid').del();
@@ -124,6 +127,27 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'notified' });
     expect(await db('lead_activities').where({ lead_id: leadId })).toHaveLength(1);
     expect(mockRaise).toHaveBeenCalledTimes(2);
+  });
+
+  test('the real bell keeps one row per lead, and a new draft rewrites it and rings it again', async () => {
+    mockRaise.mockImplementation(jest.requireActual('../services/admin-alert-compose').raiseAdminAlert);
+    const bells = () => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [holdKey]);
+    expect(await executeLeadTool('queue_for_adam', { ...input, draft_response: 'First synthetic draft' }, context))
+      .toMatchObject({ queued: true, alertStatus: 'notified' });
+    const [first] = await bells();
+    expect(first).toMatchObject({ category: 'lead', title: 'Leads — reply to QA Integrity', link: `/admin/leads?lead=${leadId}` });
+    expect(first.detail).toContain('First synthetic draft');
+    await db('notifications').where({ id: first.id }).update({ read_at: new Date() });
+
+    const next = { ...context, toolUseId: randomUUID() };
+    expect(await executeLeadTool('queue_for_adam', { ...input, draft_response: 'Second synthetic draft' }, next))
+      .toMatchObject({ queued: true, alertStatus: 'notified' });
+    expect(await executeLeadTool('queue_for_adam', input, next)).toMatchObject({ queued: true, replayed: true, alertStatus: 'notified' });
+    const rows = await bells();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: first.id, read_at: null });
+    expect(rows[0].detail).toContain('Second synthetic draft');
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   test('an unwritten bell remains retryable on the same committed draft', async () => {

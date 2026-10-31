@@ -108,9 +108,14 @@ async function ringHeldDraft(leadId, customer, metadata) {
     who: 'person',
   }, {
     bell: true,
-    // One open row per lead: a replayed hold finds it; a hold after it was closed rings again.
+    // One open row per lead. A replayed hold carries the same text and finds it unchanged; a
+    // new draft rewrites it and rings it again at the top; a hold after it was closed rings a
+    // fresh row. A ringing rewrite stamps rungAt, so the lead_contacted close judges contact
+    // after the newest draft.
     dedupeKey: `lead-agent-hold:${leadId}`,
     dedupeOpenOnly: true,
+    refreshOnDedupe: true,
+    bumpOnRefresh: true,
     detail: [
       `Why the AI held it: ${redactedWords(metadata.reason) || 'no reason given'}`,
       draft ? `Its draft reply: "${draft}"` : 'The AI saved no draft.',
