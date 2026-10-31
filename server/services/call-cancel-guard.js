@@ -9,7 +9,8 @@
  * Two reads of one fact, "this customer canceled on a call":
  *   - runCallCancelGuardSweep (scheduler, every 10 minutes): for a cancel call whose customer has NO live visit, the same
  *     customer's OPEN booking-ask cards from calls in the 14 days before it are dismissed, each with a note naming the
- *     cancel call, when both calls name the same primary service and the customer has at most one property. The cancel
+ *     cancel call, when the cancel covers every service the card asked for, came from a verified caller, and the customer
+ *     has at most one active property. The cancel
  *     card itself stays open for a person. Dismissed, not resolved: nobody did the asked work.
  *   - latestCancelCall (New Appointment notice, GET /admin/schedule/cancel-call-notice): the customer's latest real
  *     conversation in the last 14 days, when that call filed a cancel card. A warning only; the save always goes through.
@@ -60,38 +61,72 @@ async function hasLiveVisit(conn, customerId) {
   return Boolean(row);
 }
 
-const realConversation = (call) => isRealConversation(call, parseExtraction(call.ai_extraction_enriched) || {});
-
-const primaryCategory = (call) => parseExtraction(call.ai_extraction_enriched)?.service_request?.primary_service_category || null;
-const CALL_COLUMNS = ['id', 'customer_id', 'processing_status', 'answered_by', 'ai_extraction_enriched'];
-// Categories that do not name ONE service: 'other' is the catch-all and a WaveGuard bundle spans several, so two calls
-// that share one of them need not be about the same thing.
+const extractionOf = (call) => parseExtraction(call.ai_extraction_enriched) || {};
+const realConversation = (call) => isRealConversation(call, extractionOf(call));
+const CALL_COLUMNS = ['id', 'customer_id', 'direction', 'processing_status', 'answered_by', 'metadata', 'ai_extraction_enriched'];
+// Categories that do not name ONE service: 'other' is the catch-all and a WaveGuard bundle spans several, so a scope
+// holding one of them is never proven covered.
 const NON_SPECIFIC_CATEGORIES = new Set(['other', 'bundled_waveguard']);
 
-// The cancel still stands: the call is still a processed real conversation and its cancel card was not dismissed.
+// Every service a call asked about: its primary and secondary categories.
+function callScope(call) {
+  const request = extractionOf(call).service_request || {};
+  const secondary = Array.isArray(request.secondary_categories) ? request.secondary_categories : [];
+  return [request.primary_service_category, ...secondary].filter(Boolean).map(String);
+}
+
+// What the booking card asked for: the routing snapshot of every requested category (call-routing-gates.js
+// scheduling_window), else its call's own categories.
+function cardScope(card, cardCall) {
+  const payload = parseExtraction(card.payload) || {};
+  const snap = payload.scheduling_window?.requested_service_categories;
+  return Array.isArray(snap) && snap.length ? snap.filter(Boolean).map(String) : callScope(cardCall);
+}
+
+// The cancel covers the whole ask: every service the card asked for is one the cancel call named, and none of them is
+// non-specific. An empty scope on either side covers nothing.
+function cancelCoversCard(cancelCall, card, cardCall) {
+  const asked = cardScope(card, cardCall);
+  const canceled = new Set(callScope(cancelCall));
+  if (!asked.length || !canceled.size) return false;
+  if ([...asked, ...canceled].some((c) => NON_SPECIFIC_CATEGORIES.has(c))) return false;
+  return asked.every((c) => canceled.has(c));
+}
+
+// Who said "cancel" is proven: the office dialed the number (outbound), or the carrier vouched that the caller owns it
+// (STIR/SHAKEN attestation A, the voice relay's own rule). A spoofed caller ID never closes a customer's card.
+function callerVerified(call) {
+  if (String(call.direction || '').toLowerCase().startsWith('outbound')) return true;
+  const meta = parseExtraction(call.metadata) || {};
+  return require('./voice-agent/relay-context').isFullAttestation(meta.stir_verstat);
+}
+
+// The cancel still stands: the call is still a processed real conversation, and the NEWEST cancel card on it (a
+// reprocess can file a second one) was not dismissed.
 async function cancelStands(conn, cancelCall) {
   if (!cancelCall || cancelCall.processing_status !== 'processed' || !realConversation(cancelCall)) return false;
-  const card = await conn('triage_items')
+  const newest = await conn('triage_items')
     .where({ call_log_id: cancelCall.id, reason_code: CANCEL_REASON })
-    .whereIn('status', COUNTED_CANCEL_CARD_STATUSES)
-    .first('id');
-  return Boolean(card);
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('status');
+  return Boolean(newest) && COUNTED_CANCEL_CARD_STATUSES.includes(newest.status);
 }
 
 // Every condition for dismissing one booking card, read fresh from `conn` (re-run under the locks before the write):
-// both calls still belong to this customer, the cancel still stands, both calls name the SAME primary service (a
-// customer with separate pest and lawn asks who cancels one keeps the other; an unknown service on either side keeps
-// the card), the customer has at most one active property (which property was canceled is otherwise unknown), and nothing
-// is booked for them.
-async function cardIsMoot(conn, { customerId, cancelCallId, cardCallId }) {
-  const calls = await conn('call_log').whereIn('id', [cancelCallId, cardCallId]).select(CALL_COLUMNS);
+// the card is still open, both calls still belong to this customer, the cancel still stands and came from a verified
+// caller, it covers every service the card asked for, the customer has at most one active property (which property
+// was canceled is otherwise unknown), and nothing is booked for them.
+async function cardIsMoot(conn, { customerId, cancelCallId, cardId }) {
+  const card = await conn('triage_items').where({ id: cardId }).first('id', 'call_log_id', 'status', 'payload');
+  if (!card || card.status !== 'open') return false;
+  const calls = await conn('call_log').whereIn('id', [cancelCallId, card.call_log_id]).select(CALL_COLUMNS);
   const cancelCall = calls.find((c) => String(c.id) === String(cancelCallId));
-  const cardCall = calls.find((c) => String(c.id) === String(cardCallId));
+  const cardCall = calls.find((c) => String(c.id) === String(card.call_log_id));
   if (!cancelCall || !cardCall) return false;
   if (String(cancelCall.customer_id) !== String(customerId) || String(cardCall.customer_id) !== String(customerId)) return false;
-  if (!(await cancelStands(conn, cancelCall))) return false;
-  const service = primaryCategory(cancelCall);
-  if (!service || NON_SPECIFIC_CATEGORIES.has(service) || primaryCategory(cardCall) !== service) return false;
+  if (!callerVerified(cancelCall) || !(await cancelStands(conn, cancelCall))) return false;
+  if (!cancelCoversCard(cancelCall, card, cardCall)) return false;
   const properties = await conn('customer_properties').where({ customer_id: customerId, active: true }).count('* as n').first();
   if (Number(properties?.n || 0) > 1) return false;
   return !(await hasLiveVisit(conn, customerId));
@@ -111,7 +146,6 @@ async function runCallCancelGuardSweep({ now = new Date() } = {}) {
   const cancels = await db('triage_items as t')
     .join('call_log as c', 'c.id', 't.call_log_id')
     .where('t.reason_code', CANCEL_REASON)
-    .whereIn('t.status', COUNTED_CANCEL_CARD_STATUSES)
     .where('c.processing_status', 'processed')
     .where('c.created_at', '>=', new Date(now.getTime() - LOOKBACK_DAYS * DAY_MS))
     .whereNotNull('c.customer_id')
@@ -135,7 +169,7 @@ async function runCallCancelGuardSweep({ now = new Date() } = {}) {
       .select('t.id', 't.call_log_id');
     for (const card of cards) {
       if (dismissed >= MAX_DISMISSALS_PER_RUN) break;
-      const match = { customerId: cancel.customer_id, cancelCallId: cancel.call_id, cardCallId: card.call_log_id };
+      const match = { customerId: cancel.customer_id, cancelCallId: cancel.call_id, cardId: card.id };
       if (!(await cardIsMoot(db, match))) continue;
       await db.transaction(async (trx) => {
         // Both calls, in one fixed order: the card's call (the write) and the cancel call (its evidence, which a
@@ -174,17 +208,18 @@ async function latestCancelCall(customerId, { now = new Date() } = {}) {
     .select('id', 'created_at', 'processing_status', 'answered_by', 'ai_extraction_enriched');
   const latest = recent.find(realConversation);
   if (!latest) return null;
+  // The newest cancel card decides (a reprocess can file a second one; a dismissal of the newer one wins).
   const card = await db('triage_items')
     .where({ call_log_id: latest.id, reason_code: CANCEL_REASON })
-    .whereIn('status', COUNTED_CANCEL_CARD_STATUSES)
     .orderBy('created_at', 'desc')
-    .first('summary');
-  if (!card) return null;
+    .orderBy('id', 'desc')
+    .first('summary', 'status');
+  if (!card || !COUNTED_CANCEL_CARD_STATUSES.includes(card.status)) return null;
   return { callId: latest.id, at: new Date(latest.created_at).toISOString(), summary: card.summary || null };
 }
 
 module.exports = {
   runCallCancelGuardSweep,
   latestCancelCall,
-  _test: { BOOKING_ASK_REASONS, DISMISS_RULE, cancelNote, hasLiveVisit, cardIsMoot },
+  _test: { BOOKING_ASK_REASONS, DISMISS_RULE, cancelNote, hasLiveVisit, cardIsMoot, cancelCoversCard, callerVerified },
 };

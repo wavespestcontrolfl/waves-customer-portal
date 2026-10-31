@@ -75,7 +75,8 @@ describeDb('call cancel guard (PostgreSQL)', () => {
     const id = randomUUID();
     await trx('call_log').insert({
       id, customer_id: customerId, twilio_call_sid: `CA${id.replace(/-/g, '')}`, from_phone: '+19415550101',
-      processing_status: 'processed', review_status: 'open', created_at: at(createdAt),
+      processing_status: 'processed', review_status: 'open', created_at: at(createdAt), direction: 'inbound',
+      metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-A' }),
       ai_extraction_enriched: JSON.stringify({ service_request: { primary_service_category: 'pest_general' } }), ...over,
     });
     return id;
@@ -173,7 +174,7 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       await trx('call_log').where({ id: third.cancelCall }).update({ answered_by: 'voicemail' });
       expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
       for (const lead of [first, second, third]) expect((await row(lead.ask.id)).status).toBe('open');
-      expect(await _test.cardIsMoot(trx, { customerId: first.customerId, cancelCallId: first.cancelCall, cardCallId: first.askCall })).toBe(false);
+      expect(await _test.cardIsMoot(trx, { customerId: first.customerId, cancelCallId: first.cancelCall, cardId: first.ask.id })).toBe(false);
     });
 
     test('the cancel must name the same service: another service or an unknown one keeps the card', async () => {
@@ -193,6 +194,40 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       expect((await row(lead.ask.id)).status).toBe('open');
     });
 
+    test('the cancel must cover every service the card asked for (the 10-30 card asked pest and stinging insects)', async () => {
+      const partial = await canceledLead();
+      const scope = { scheduling_window: { requested_service_categories: ['pest_general', 'stinging_insect'] } };
+      await trx('triage_items').where({ id: partial.ask.id }).update({ payload: JSON.stringify(scope) });
+      const full = await canceledLead();
+      await trx('triage_items').where({ id: full.ask.id }).update({ payload: JSON.stringify(scope) });
+      await trx('call_log').where({ id: full.cancelCall }).update({ ai_extraction_enriched: JSON.stringify({ service_request: { primary_service_category: 'pest_general', secondary_categories: ['stinging_insect'] } }) });
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 1 });
+      expect((await row(partial.ask.id)).status).toBe('open');
+      expect((await row(full.ask.id)).status).toBe('dismissed');
+    });
+
+    test('a caller the carrier did not fully vouch for keeps the card; an office-dialed call counts', async () => {
+      const spoofable = await canceledLead();
+      await trx('call_log').where({ id: spoofable.cancelCall }).update({ metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-B' }) });
+      const unsigned = await canceledLead();
+      await trx('call_log').where({ id: unsigned.cancelCall }).update({ metadata: JSON.stringify({}) });
+      const outbound = await canceledLead();
+      await trx('call_log').where({ id: outbound.cancelCall }).update({ direction: 'outbound', metadata: JSON.stringify({}) });
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 1 });
+      expect((await row(spoofable.ask.id)).status).toBe('open');
+      expect((await row(unsigned.ask.id)).status).toBe('open');
+      expect((await row(outbound.ask.id)).status).toBe('dismissed');
+    });
+
+    test('the newest cancel card decides: an older resolved one does not outweigh a newer dismissal', async () => {
+      const { customerId, cancelCall, cancel, ask } = await canceledLead();
+      await trx('triage_items').where({ id: cancel.id }).update({ status: 'resolved', created_at: at('2026-10-30T11:09:00Z') });
+      await card(cancelCall, 'cancellation_request', { status: 'dismissed', created_at: at('2026-10-30T11:30:00Z') });
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
+      expect((await row(ask.id)).status).toBe('open');
+      expect(await latestCancelCall(customerId, { now: NOW })).toBeNull();
+    });
+
     test('a customer with two properties keeps the card (which one was canceled is unknown)', async () => {
       const { customerId, ask } = await canceledLead();
       for (const line1 of ['100 Example Lane', '200 Example Lane']) {
@@ -206,7 +241,7 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       const { askCall, ask, customerId, cancelCall } = await canceledLead();
       const other = await customer();
       await trx('call_log').where({ id: askCall }).update({ customer_id: other });
-      expect(await _test.cardIsMoot(trx, { customerId, cancelCallId: cancelCall, cardCallId: askCall })).toBe(false);
+      expect(await _test.cardIsMoot(trx, { customerId, cancelCallId: cancelCall, cardId: ask.id })).toBe(false);
       expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
       expect((await row(ask.id)).status).toBe('open');
     });
