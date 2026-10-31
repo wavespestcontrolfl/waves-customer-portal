@@ -845,6 +845,17 @@ const UNCAPPED_QUEUE_REASONS = new Set([
   "name_match_disputed",
 ]);
 
+// Rows whose match may be confirmed with no visit on file (the server relaxes the payout rules for
+// exactly these): click auto-links and the matcher's suggestions on unlinked reviews. A disputed link
+// is kept with Keep link, or moved under the usual rules.
+const NO_VISIT_CONFIRM_REASONS = new Set([
+  "click_auto_confirm",
+  "name_match_link",
+  "name_match_confirm",
+  "name_match_pause",
+  "name_match_household",
+]);
+
 function nameMatchReasonText(review) {
   const name = review.suggestedCustomerName || "a customer";
   switch (review.reason) {
@@ -942,8 +953,7 @@ function RepairCandidateCard({
       )}
       <div className="flex gap-[8px] flex-wrap mt-[10px]">
         {(candidate.services || []).length === 0 ? (
-          review.reason === "click_auto_confirm" ||
-          UNCAPPED_QUEUE_REASONS.has(review.reason) ? (
+          NO_VISIT_CONFIRM_REASONS.has(review.reason) ? (
             // Click-auto rows must stay correctable even with no recent
             // technician visit: the payout stays unminted server-side, so a
             // technician-less confirm is allowed for exactly these rows

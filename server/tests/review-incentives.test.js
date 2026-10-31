@@ -508,6 +508,12 @@ describe('review incentives', () => {
     await expect(ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: plain, policy: programPolicy }))
       .rejects.toMatchObject({ code: 'review_before_program_start' });
     expect(plain.__state.rows.google_reviews[0].customer_id).toBeNull();
+
+    // A disputed link keeps the usual rules: moving it would strand the first customer's review flag.
+    const disputed = make({ customer_id: 'customer-first', name_match_result: 'disputed', name_match_customer_id: 'customer-first', name_match_reason: 'clash_early' });
+    await expect(ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: disputed, policy: programPolicy }))
+      .rejects.toMatchObject({ code: 'review_before_program_start' });
+    expect(disputed.__state.rows.google_reviews[0].customer_id).toBe('customer-first');
   });
 
   test('candidate search puts the matcher\'s suggestion first even when the name search misses it', async () => {
