@@ -34,6 +34,10 @@ function adminFetch(path, options = {}) {
 // sent this page's stored snapshot, not the live listing.
 const GOOGLE_EDITS_NOTE =
   "Edits here are saved in the portal only. To change the live listing, edit it in Google Business Profile.";
+// With the Places fallback the stored profile was never read, so these
+// editors start empty: a save would overwrite the stored values with blanks.
+const PROFILE_UNREAD_NOTE =
+  "The saved profile could not be loaded, so saving is off. Use Retry above.";
 const DAYS = [
   "monday",
   "tuesday",
@@ -415,6 +419,7 @@ export default function GBPManagement() {
             <BusinessInfoTab
               loc={loc}
               gbp={gbp}
+              unread={degraded}
               onSave={loadLocations}
               showToast={showToast}
             />
@@ -423,6 +428,7 @@ export default function GBPManagement() {
             <HoursTab
               loc={loc}
               gbp={gbp}
+              unread={degraded}
               onSave={loadLocations}
               showToast={showToast}
             />
@@ -431,6 +437,7 @@ export default function GBPManagement() {
             <ServicesTab
               loc={loc}
               gbp={gbp}
+              unread={degraded}
               onSave={loadLocations}
               showToast={showToast}
             />
@@ -676,7 +683,7 @@ function OverviewTab({ loc, gbp, onSync, syncing }) {
 // ══════════════════════════════════════════════════════════════
 // BUSINESS INFO TAB — editable fields
 // ══════════════════════════════════════════════════════════════
-function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
+function BusinessInfoTab({ loc, gbp, unread, onSave, showToast }) {
   const [form, setForm] = useState({
     business_name: "",
     description: "",
@@ -811,9 +818,14 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
         </label>{" "}
         <div className="flex gap-[8px]">
           {" "}
-          <Button onClick={handleSave} disabled={saving} variant="primary">
+          <Button onClick={handleSave} disabled={saving || unread} variant="primary">
             {saving ? "Saving..." : "Save Changes"}
           </Button>{" "}
+          {unread && (
+            <span role="status" className="text-ui-body text-ink-secondary">
+              {PROFILE_UNREAD_NOTE}
+            </span>
+          )}
         </div>{" "}
         <div className="text-ui-body text-ink-secondary mt-[8px]">
           {GOOGLE_EDITS_NOTE}
@@ -826,7 +838,7 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
 // ══════════════════════════════════════════════════════════════
 // HOURS TAB
 // ══════════════════════════════════════════════════════════════
-function HoursTab({ loc, gbp, onSave, showToast }) {
+function HoursTab({ loc, gbp, unread, onSave, showToast }) {
   const [hours, setHours] = useState({});
   const [specialHours, setSpecialHours] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -999,7 +1011,12 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
           ))
         )}
       </Card>{" "}
-      <Button onClick={handleSave} disabled={saving} variant="primary">
+      {unread && (
+        <div role="status" className="text-ui-body text-ink-secondary mb-[8px]">
+          {PROFILE_UNREAD_NOTE}
+        </div>
+      )}
+      <Button onClick={handleSave} disabled={saving || unread} variant="primary">
         {saving ? "Saving..." : "Save Hours"}
       </Button>{" "}
     </div>
@@ -1009,7 +1026,7 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
 // ══════════════════════════════════════════════════════════════
 // SERVICES TAB
 // ══════════════════════════════════════════════════════════════
-function ServicesTab({ loc, gbp, onSave, showToast }) {
+function ServicesTab({ loc, gbp, unread, onSave, showToast }) {
   const [services, setServices] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [newService, setNewService] = useState("");
@@ -1101,9 +1118,14 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
             ))}
           </div>
         )}
+        {unread && (
+          <div role="status" className="text-ui-body text-ink-secondary mt-[16px]">
+            {PROFILE_UNREAD_NOTE}
+          </div>
+        )}
         <Button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || unread}
           variant="primary"
           className="mt-[16px]"
         >

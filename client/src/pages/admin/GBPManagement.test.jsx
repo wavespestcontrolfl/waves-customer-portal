@@ -167,6 +167,22 @@ describe("Google profile workspace", () => {
     expect(screen.queryByText("Business Name")).toBeNull();
   });
 
+  it("with only the Places fallback, profile saves stay off so unread values are never blanked", async () => {
+    routes["GET /admin/gbp/locations"] = () => response({ error: "down" }, 503);
+    routes["GET /admin/reviews/gbp-locations"] = () =>
+      response({ locations: [{ id: "sarasota", name: "Fixture Sarasota", placeId: "fixture-place" }] });
+    render(<GBPManagement />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Showing Places data only");
+    fireEvent.click(screen.getByRole("button", { name: "Profile" }));
+    expect(await screen.findByRole("button", { name: "Save Changes" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Hours" }));
+    expect(await screen.findByRole("button", { name: "Save Hours" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Services" }));
+    expect(await screen.findByRole("button", { name: "Save Services" })).toBeDisabled();
+    expect(screen.getByText(/The saved profile could not be loaded, so saving is off/)).toBeInTheDocument();
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+  });
+
   it("Sync All reports the locations that failed", async () => {
     routes["POST /admin/gbp/locations/:id/sync"] = () => response({ error: "down" }, 503);
     await open();
