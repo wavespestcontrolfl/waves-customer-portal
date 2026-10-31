@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- 96 px of artwork inside 16 px of transparent padding (Chrome Web Store icon guideline). -->
+  <rect x="16" y="16" width="96" height="96" rx="24" fill="#009CDE"/>
+  <path d="M80 80 L97 97" stroke="#FFD700" stroke-width="13" stroke-linecap="round"/>
+  <circle cx="58" cy="58" r="29" fill="#1B2C5B" stroke="#FFFFFF" stroke-width="7"/>
+  <g stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round" fill="none">
+    <path d="M50 55 L41 50"/>
+    <path d="M49 62 L39 62"/>
+    <path d="M50 69 L42 75"/>
+    <path d="M66 55 L75 50"/>
+    <path d="M67 62 L77 62"/>
+    <path d="M66 69 L74 75"/>
+    <path d="M55 43 L51 36"/>
+    <path d="M61 43 L65 36"/>
+  </g>
+  <ellipse cx="58" cy="63" rx="10" ry="13" fill="#FFFFFF"/>
+  <circle cx="58" cy="47" r="6" fill="#FFFFFF"/>
+  <path d="M58 52 L58 75" stroke="#1B2C5B" stroke-width="2.5"/>
+</svg>

@@ -164,6 +164,27 @@ module.exports = [
       'react/jsx-uses-react': 'error',
     },
   },
+  // Chrome extensions (extensions/*) — ESM pages, a module service worker
+  // and injected page scripts, all in the browser with the chrome.* globals.
+  {
+    files: ['extensions/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: { ...globals.browser, ...globals.serviceworker, ...globals.webextensions },
+    },
+    rules: SOURCE_RULES,
+  },
+  // Their Node-run packaging and screenshot scripts — ESM on Node.
+  {
+    files: ['extensions/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: { ...globals.nodeBuiltin },
+    },
+    rules: SOURCE_RULES,
+  },
   // Client build configs (vite/postcss/tailwind) — Node-run ESM (client
   // package.json is "type": "module"); nodeBuiltin for the same reason as
   // the video entries.

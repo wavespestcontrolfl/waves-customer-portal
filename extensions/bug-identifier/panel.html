@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bug Identifier</title>
+  <link rel="stylesheet" href="panel.css">
+  <script type="module" src="panel.js"></script>
+</head>
+<body>
+  <header class="brand">
+    <img src="icons/icon-48.png" alt="" width="36" height="36">
+    <div>
+      <h1>Bug Identifier</h1>
+      <p>by Waves Pest Control</p>
+    </div>
+  </header>
+
+  <main>
+    <p id="append-note" class="note" hidden></p>
+
+    <section id="start" class="card">
+      <div id="drop" class="drop" tabindex="0" role="button" aria-label="Choose a photo of the bug">
+        <p class="drop-title">Drop a photo of the bug</p>
+        <p class="drop-sub">or paste one with Ctrl+V</p>
+        <span class="btn btn-primary" aria-hidden="true">Choose a photo</span>
+      </div>
+      <input type="file" id="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" hidden>
+      <button type="button" id="select" class="btn btn-secondary">Select a bug on this page</button>
+      <p class="hint">Tip: right-click any image on the web and choose <strong>Identify this bug</strong>.</p>
+    </section>
+
+    <section id="status" class="card status" hidden>
+      <div id="spinner" class="spinner" aria-hidden="true"></div>
+      <p id="status-text" role="status"></p>
+    </section>
+
+    <section id="error" class="card error" hidden>
+      <p id="error-text" role="alert"></p>
+      <button type="button" id="error-retry" class="btn btn-secondary">Try again</button>
+    </section>
+
+    <section id="result" hidden></section>
+  </main>
+
+  <footer>
+    <p>An AI suggestion from photos, not a professional inspection. Photos go to Waves and its AI providers to identify the bug, and Waves doesn't keep them. <a id="privacy" target="_blank" rel="noopener">Privacy</a></p>
+  </footer>
+</body>
+</html>
