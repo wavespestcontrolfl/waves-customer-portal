@@ -1,4 +1,4 @@
-// Real PostgreSQL races against the managed worktree QA database only.
+// Real PostgreSQL races against the managed worktree QA database or CI's isolated waves_test database.
 // S3 transport is captured; row locks, dedupe, hashing and rollback are real.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 const { createHash, randomUUID } = require('node:crypto');
@@ -42,10 +42,11 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
   const stagedVisitId = randomUUID();
   let visitDate;
   beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
     const expected = `/waves_qa_${(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
-    if (process.env.WAVES_LOCAL_DEV !== '1' || !process.env.WAVES_WORKTREE_ID || new URL(process.env.DATABASE_URL).pathname !== expected) {
-      throw new Error('Use the managed worktree-owned QA database for PostgreSQL tests.');
-    }
+    const managedQa = process.env.WAVES_LOCAL_DEV === '1' && !!process.env.WAVES_WORKTREE_ID && url.pathname === expected;
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!managedQa && !ciTest) throw new Error('Use the managed worktree-owned QA database or the isolated CI database for PostgreSQL tests.');
     db = require('../models/db');
     upload = require('../services/service-photos').uploadServicePhotoBuffer;
     validatePhotoChain = require('../services/service-report/photo-chain').validatePhotoChain;

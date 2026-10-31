@@ -152,13 +152,8 @@ jobs:
       # this lane sits idle for most of the job, while the DB-gated lane already
       # sets the job's length. Do not add the `const SKIP` line to them, or they
       # run twice.
-      # The third command runs 61 more suites with that same gate (45 of them
+      # The third command runs 64 more suites with that same gate (46 of them
       # lawn suites), which also ran nowhere in CI until 2026-10-31.
-      # Three suites with the gate stay out until they are fixed:
-      # lawn-bermuda-removal.db (one stale assertion, and Jest never exits),
-      # termite-renewal-bill-to-fence-postgres (two assertions predate #6117's
-      # standalone-send fence) and service-photos-postgres (it accepts only the
-      # managed worktree QA database).
       - name: Grouped closeout and gate-code transaction tests
         id: closeout
         background: true
@@ -179,6 +174,7 @@ jobs:
             tests/invoice-create-discount-stacking-postgres.test.js \
             tests/lawn-bermuda-removal-config-migrations.db.test.js \
             tests/lawn-bermuda-removal-pricing.test.js \
+            tests/lawn-bermuda-removal.db.test.js \
             tests/lawn-completion-defaults.db.test.js \
             tests/lawn-reclaimed-half-n.db.test.js \
             tests/lawn-trouble-areas.db.test.js \
@@ -227,9 +223,11 @@ jobs:
             tests/reclaimed-water-meters.db.test.js \
             tests/scheduled-invoice-mint-refuses-non-live-visit-postgres.test.js \
             tests/seo-citations-audit-states-migration.test.js \
+            tests/service-photos-postgres.test.js \
             tests/sms-lead-extraction-postgres.test.js \
             tests/sms-reply-outcomes-postgres.test.js \
-            tests/supplies-consumption.test.js
+            tests/supplies-consumption.test.js \
+            tests/termite-renewal-bill-to-fence-postgres.test.js
       # Right after the migration, on purpose: the reconcile reads the WHOLE
       # customer/subscriber tables (its counts assume only migration seeds)
       # and its write-mode cases would import or link any row another suite

@@ -89,7 +89,11 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   });
-  afterAll(async () => { if (owned) await owned.dispose(); });
+  // getPropertyComplianceStatus takes no handle: it reads through the shared models/db pool, which
+  // must close too, or Jest never exits.
+  afterAll(async () => {
+    try { if (owned) await owned.dispose(); } finally { await require('../models/db').destroy(); }
+  });
   afterEach(() => {
     for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
   });
@@ -965,7 +969,10 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'lb' })])).toBe(MESSAGE);
       expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { areaValue: 5000, totalAmount: 5.5, amountUnit: 'lb' })])).toBe(MESSAGE);
       expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz', areaValue: 5000, totalAmount: 0.3, amountUnit: 'oz' })])).toBe(MESSAGE);
-      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl oz/1000sf' })])).toBeNull();
+      // A label spelling that is not on the shared unit list (shared/rate-units.json) is refused like any
+      // bad unit: the completion's own product write refuses it too ("Invalid product unit"). Fast
+      // Complete sends a "fl oz/1000sf" catalog rate as fl_oz, which passes.
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl oz/1000sf' })])).toBe(MESSAGE);
       // A catalog row with no usable rate unit: the dimension comes from the step's staged row, so
       // Fusilade II by weight is still refused and by volume still allowed (codex r55 P2).
       await knex('products_catalog').where({ id: fus.id }).update({ rate_unit: null });
