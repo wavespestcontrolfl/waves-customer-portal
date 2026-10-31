@@ -313,7 +313,7 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'Please call me', at: ago(2) }] });
       fb.unreadableOnce = true;
       await expect(messenger.pollMessenger()).rejects.toThrow();
-      expect(await messagesOf('a')).toHaveLength(0);
+      expect(await threadOf('a')).toBeUndefined();
       expect(await db('system_settings').where({ key: 'messenger_inbox_bootstrap_done' }).first()).toBeUndefined();
       await messenger.pollMessenger();
       expect(await messagesOf('a')).toHaveLength(1);
@@ -758,6 +758,11 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(dropped.status).toBe(504);
       expect(await dropped.json()).toEqual({ error: 'send_uncertain' });
       fb.sendThrows = false;
+      fb.sendStatus = 500;
+      const fiveHundred = await post(`/threads/${open.id}/reply`, { text: 'We can call you at 3.' });
+      expect(fiveHundred.status).toBe(504);
+      expect(await fiveHundred.json()).toEqual({ error: 'send_uncertain' });
+      fb.sendStatus = 200;
       fb.sendResult = {};
       const noId = await post(`/threads/${open.id}/reply`, { text: 'We can call you at 3.' });
       expect(noId.status).toBe(504);

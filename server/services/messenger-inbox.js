@@ -550,7 +550,8 @@ async function sendReply(req, id, text, { now = new Date() } = {}) {
     logger.warn(`[messenger-inbox] reply not sent: ${safeError(err)}`);
     // No HTTP answer (a timeout or a dropped connection): Facebook may have delivered it, so the
     // staff member must check before sending again. An HTTP error is a refusal: nothing went out.
-    if (!err?.status || err.unreadable) return { ok: false, status: 504, error: 'send_uncertain' };
+    // A 5xx is Facebook's own failure, after it may have delivered: unconfirmed too.
+    if (!err?.status || err.unreadable || err.status >= 500) return { ok: false, status: 504, error: 'send_uncertain' };
     return { ok: false, status: 502, error: 'send_failed' };
   }
   const mid = sent?.message_id;
