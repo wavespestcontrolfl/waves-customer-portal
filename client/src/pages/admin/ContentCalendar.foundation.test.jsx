@@ -224,6 +224,16 @@ it('says when saved drafts could not load and still lets a typed post through',a
   expect(screen.getByLabelText('Title')).toBeInTheDocument();
 });
 
+it('offers Unschedule on a social post held by a dry run (nothing has posted)',async()=>{
+  vi.stubGlobal('fetch',socialFetch({calendar:[
+    {id:'s3',title:'Dry-run social',type:'social',scheduledDate:day,status:'dry_run'},
+  ]}));
+  render(<ContentCalendar/>);
+  fireEvent.click(await screen.findByRole('button',{name:/12, .*1 scheduled item/}));
+  fireEvent.click(screen.getByRole('button',{name:'Unschedule'}));
+  await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/content/schedule/s3',expect.objectContaining({method:'DELETE'})));
+});
+
 it('offers Unschedule on a social post that waits for its time, not on a published one',async()=>{
   vi.stubGlobal('fetch',socialFetch({calendar:[
     {id:'s1',title:'Waiting social',type:'social',scheduledDate:day,status:'pending'},

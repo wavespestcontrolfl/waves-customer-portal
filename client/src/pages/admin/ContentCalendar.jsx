@@ -36,7 +36,8 @@ const statusLabel = item => {
 // A schedule the run has not started, or one it parked as failed, can be withdrawn.
 const UNSCHEDULABLE = new Set(["pending", "failed"]);
 // A social post can be withdrawn only while it waits for its time.
-const canUnschedule = item => item.type === "blog" ? UNSCHEDULABLE.has(item.status) : item.type === "social" && item.status === "pending";
+// Social: the states the scheduler still picks up (nothing has posted yet).
+const canUnschedule = item => item.type === "blog" ? UNSCHEDULABLE.has(item.status) : item.type === "social" && ["pending", "dry_run"].includes(item.status);
 const SCHEDULED_TOAST = { blog: "Scheduled. The preview PR opens at that time.", social: "Scheduled!" };
 // Calendar -> Schedule Social: a saved Social Studio draft posts its own row at
 // the chosen time; with none picked, a typed title makes a new post (SOC-01).
