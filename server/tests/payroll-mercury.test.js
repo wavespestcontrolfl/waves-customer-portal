@@ -198,6 +198,14 @@ describe('poller decisions', () => {
     expect(poller.matchUnknown(unknown, [{ ...base, status: 'rejected', requestId: 'r9', amountCents: 81240, memo: null }])).toEqual({ kind: 'none' });
   });
 
+  test('our note alone never links: the amount and account must match too, else a person reviews it', () => {
+    const unknown = { ...row, account_id: 'acct-1', state: 'unknown', mercury_request_id: null };
+    const base = { recipientId: 'rec-1', createdAt: '2026-11-02T14:00:30Z', status: 'approved', memo: 'waves-pay:p1', requestId: 'r9' };
+    expect(poller.matchUnknown(unknown, [{ ...base, amountCents: 81240, accountId: unknown.account_id }])).toMatchObject({ kind: 'ours', request: { requestId: 'r9' } });
+    expect(poller.matchUnknown(unknown, [{ ...base, amountCents: 81241, accountId: unknown.account_id }])).toEqual({ kind: 'probably_ours' });
+    expect(poller.matchUnknown(unknown, [{ ...base, amountCents: 81240, accountId: 'another-account' }])).toEqual({ kind: 'probably_ours' });
+  });
+
   test('gates off: the poll returns before any Mercury call or query', async () => {
     const client = { configured: true, getRequest: jest.fn(), listRequests: jest.fn(), listTransactions: jest.fn() };
     const conn = jest.fn();

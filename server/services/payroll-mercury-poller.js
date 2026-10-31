@@ -105,13 +105,20 @@ function patchForSentReread(row, tx) {
   return { patch: day && !row.posted_on ? { posted_on: day } : {}, bell: null };
 }
 
-// A request list for an unknown payment: ours (carries our note), or probably ours (same amount, no note).
+// A request list for an unknown payment: ours (carries our note AND matches the stored amount and account, the checks
+// the manual link makes), or probably ours (a same-amount request without our note, or our note with a mismatch): a
+// person reviews those. The list is read for the payment's own account (rows of another account are skipped before
+// this), so a request that names no accountId is from that account.
 function matchUnknown(row, requests) {
   const since = new Date(row.created_at).getTime() - LOOKBACK_MS;
+  const amount = Number(row.amount_cents);
   const near = requests.filter((r) => r.recipientId === row.recipient_id && r.createdAt && new Date(r.createdAt).getTime() >= since);
   const ours = near.find((r) => typeof r.memo === 'string' && r.memo.includes(row.note));
-  if (ours) return { kind: 'ours', request: ours };
-  const likely = near.find((r) => r.amountCents === Number(row.amount_cents) && !['rejected', 'cancelled'].includes(r.status));
+  if (ours) {
+    const exact = ours.amountCents === amount && (ours.accountId == null || ours.accountId === row.account_id);
+    return exact ? { kind: 'ours', request: ours } : { kind: 'probably_ours' };
+  }
+  const likely = near.find((r) => r.amountCents === amount && !['rejected', 'cancelled'].includes(r.status));
   return likely ? { kind: 'probably_ours' } : { kind: 'none' };
 }
 
