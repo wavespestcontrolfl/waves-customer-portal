@@ -15764,6 +15764,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const notification = await triggerNotification('job_complete', {
           techName: svc.tech_name, serviceName: svc.service_type,
           customerName: `${svc.first_name} ${svc.last_name}`, serviceId: svc.id, customerId: svc.customer_id,
+          serviceDate: serviceDateOnly(svc.scheduled_date),
         }, packetEffects ? {
           dedupeKey: `visit_member_complete:${record.id}`,
           beforePush: async ({ dispatching }) => {

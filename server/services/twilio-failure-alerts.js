@@ -271,9 +271,11 @@ async function runAlert(dedupeKey, notification, attempt = 0) {
   // triggerNotification never throws — dispatch failures come back as
   // { bellWritten: false, push: null, error }. If the alert reached no
   // channel, give the window back so the next occurrence still alerts.
-  // A deliberate internal-test suppression counts as handled, not failed.
+  // A deliberate internal-test suppression or a bell-policy silence counts as
+  // handled, not failed: releasing the window would re-run the alert each time.
   const delivered = !!result && (
     result.suppressed === true ||
+    result.policySilenced === true ||
     result.bellWritten === true ||
     Number(result.push?.sent || 0) > 0
   );

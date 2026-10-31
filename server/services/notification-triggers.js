@@ -805,7 +805,10 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Job complete',
       body: `${p.techName || 'Tech'} finished ${p.serviceName || 'service'} at ${p.customerName || 'customer'}`,
-      link: p.serviceId ? `/admin/schedule?service=${p.serviceId}` : '/admin/schedule',
+      // The dispatch page opens the visit's detail sheet from ?appointment= on ?date=.
+      link: p.serviceId && p.serviceDate
+        ? `/admin/dispatch?tab=schedule&date=${encodeURIComponent(p.serviceDate)}&appointment=${encodeURIComponent(p.serviceId)}`
+        : '/admin/schedule',
     }),
   },
   estimate_expired: {

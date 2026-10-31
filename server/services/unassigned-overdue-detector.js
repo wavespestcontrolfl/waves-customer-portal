@@ -68,6 +68,7 @@ async function runUnassignedOverdueCheck() {
 
 async function runInner() {
   if (require('./no-show-detector').enabled()) return { created: 0, skipped: true, reason: 'handled_by_tech_late_check' };
+  const { heldVisitSql, runUnlessLiveHold } = require('./street-level-hold');
   let rows;
   try {
     const result = await db.raw(`
@@ -96,6 +97,9 @@ async function runInner() {
           AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show')
           AND s.technician_id IS NULL
           AND s.window_start IS NOT NULL
+          -- A street-level address hold was never dispatched: no alert for it. tech-late-detector's tick
+          -- resolves these alerts, so raising one here would create and resolve it again every 5 minutes.
+          AND NOT EXISTS (${heldVisitSql('s')})
       )
       SELECT
         c.job_id,
@@ -126,7 +130,9 @@ async function runInner() {
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
     const severity = delayMin >= UNASSIGNED_OVERDUE_CRITICAL_MINUTES ? 'critical' : 'warn';
     try {
-      await createAlert({
+      // A promotion to a street-level hold can land after the scan above: re-read the hold under the
+      // visit row lock right before alerting (same guard as tech-late-detector).
+      const guarded = await runUnlessLiveHold(row.job_id, (trx) => createAlert({
         type: 'unassigned_overdue',
         severity,
         techId: null,
@@ -137,7 +143,9 @@ async function runInner() {
           window_end: row.window_end,
           scheduled_date: row.scheduled_date,
         },
-      });
+        trx,
+      }));
+      if (guarded.held) continue;
       created += 1;
     } catch (err) {
       // 23505 = unique_violation. Concurrent process beat us between
