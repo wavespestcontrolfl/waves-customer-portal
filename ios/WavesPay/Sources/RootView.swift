@@ -80,11 +80,14 @@ struct SuccessView: View {
     let receipt: Receipt
     @State private var shown = false
 
+    // A credit card's surcharge, as its own row above the total paid.
+    private var surchargeRows: [(label: String, cents: Int)] {
+        guard let due = receipt.amountDueCents, receipt.amountCents > due else { return [] }
+        return [("Card surcharge", receipt.amountCents - due)]
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            WavesLogo(height: 104)
-                .padding(.top, 28)
-            Spacer(minLength: 20)
+        SheetLayout {
             GlassCard {
                 VStack(spacing: 12) {
                     Image(systemName: "checkmark.circle.fill")
@@ -109,19 +112,24 @@ struct SuccessView: View {
                             .font(.system(size: 17))
                             .foregroundStyle(Brand.body)
                     }
+                    if !receipt.items.isEmpty {
+                        ServicesList(
+                            items: receipt.items, adjustments: receipt.adjustments, extraRows: surchargeRows,
+                            totalLabel: "Total paid", totalCents: receipt.amountCents,
+                            invoiceNumber: receipt.invoiceNumber, currency: receipt.currency
+                        )
+                    }
                     Text(receipt.paymentIntentId)
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(Brand.body.opacity(0.6))
                         .padding(.top, 4)
                 }
             }
-            Spacer(minLength: 20)
+        } actions: {
             Button("Done") { app.close() }
                 .buttonStyle(GoldButtonStyle())
                 .padding(.bottom, 8)
         }
-        .padding(.horizontal, 24)
-        .background(WavesScene())
         .onAppear {
             withAnimation(.spring(response: 0.45, dampingFraction: 0.55)) { shown = true }
         }
@@ -133,10 +141,7 @@ struct FailureView: View {
     let message: String
 
     var body: some View {
-        VStack(spacing: 0) {
-            WavesLogo(height: 104)
-                .padding(.top, 28)
-            Spacer(minLength: 20)
+        SheetLayout {
             GlassCard {
                 VStack(spacing: 14) {
                     Image(systemName: "xmark.circle.fill")
@@ -152,13 +157,11 @@ struct FailureView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer(minLength: 20)
+        } actions: {
             Button("Back") { app.close() }
                 .buttonStyle(GoldButtonStyle())
                 .padding(.bottom, 8)
         }
-        .padding(.horizontal, 24)
-        .background(WavesScene())
     }
 }
 
@@ -166,27 +169,51 @@ struct FailureView: View {
 // Opens one payment screen with sample data, for simulator screenshots:
 //   xcrun simctl launch booted com.wavespestcontrol.wavespay \
 //     -WavesPreviewScreen success -howToTapShown YES
-// Screens: validating, ready, starting, finishing, success, failure.
+// Screens: validating, ready, ready-long, starting, finishing, success, failure.
 enum PaymentPreview {
     @MainActor
     static func show(in app: AppState) async {
         guard let screen = UserDefaults.standard.string(forKey: "WavesPreviewScreen") else { return }
         // Let the portal view attach its sheet presenter first.
         try? await Task.sleep(nanoseconds: 800_000_000)
+        let items: [API.ValidatedHandoff.Item] = [
+            .init(description: "Quarterly Pest Control Service", amount_cents: 11900),
+            .init(description: "Lawn Fertilization", amount_cents: 7000),
+        ]
         let handoff = API.ValidatedHandoff(
             invoice_id: "preview", customer_name: "Sample Customer",
             amount_cents: 18900, currency: "usd", authToken: nil,
-            surcharge_enabled: true, surcharge_cents: 548, credit_total_cents: 19448
+            surcharge_enabled: true, surcharge_cents: 548, credit_total_cents: 19448,
+            invoice_number: "WPC-2026-0123", items: items, adjustments: []
+        )
+        // Six services, a discount and account credit: the card scrolls.
+        let long = API.ValidatedHandoff(
+            invoice_id: "preview", customer_name: "Sample Customer",
+            amount_cents: 39000, currency: "usd", authToken: nil,
+            surcharge_enabled: true, surcharge_cents: 1131, credit_total_cents: 40131,
+            invoice_number: "WPC-2026-0124",
+            items: items + [
+                .init(description: "Mosquito Barrier Treatment", amount_cents: 8500),
+                .init(description: "Rodent Bait Stations × 4", amount_cents: 6000),
+                .init(description: "Termite Monitoring", amount_cents: 5000),
+                .init(description: "Shrub Fertilization", amount_cents: 4500),
+            ],
+            adjustments: [
+                .init(label: "Gold WaveGuard discount", amount_cents: -2000),
+                .init(label: "Account credit applied", amount_cents: -1900),
+            ]
         )
         switch screen {
         case "validating": app.flow = .validating
         case "ready": app.flow = .ready(handoff)
+        case "ready-long": app.flow = .ready(long)
         case "starting": app.flow = .collecting(.starting)
         case "finishing": app.flow = .collecting(.finishing)
         case "success":
             app.flow = .success(Receipt(
                 paymentIntentId: "pi_preview", amountCents: 19448, currency: "usd",
-                customerName: "Sample Customer", card: "Visa •••• 4242 · Credit"
+                customerName: "Sample Customer", card: "Visa •••• 4242 · Credit",
+                invoiceNumber: "WPC-2026-0123", items: items, amountDueCents: 18900
             ))
         case "failure":
             app.flow = .failure("The invoice total changed. Close this and tap Tap to Pay again.")
