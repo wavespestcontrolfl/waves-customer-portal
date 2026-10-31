@@ -630,6 +630,37 @@ function serializeAttributionQueueItem(review, customer, reason) {
   };
 }
 
+// The review matcher's decisions this queue lists (services/review-name-match.js,
+// GATE_REVIEW_NAME_MATCH_V2): each names one customer for a person to confirm with Match or rule out
+// with Dismiss. 'disputed' is a link whose customer's first contact came after the review.
+const NAME_MATCH_REASONS = Object.freeze({
+  link: 'name_match_link',
+  link_confirm: 'name_match_confirm',
+  pause: 'name_match_pause',
+  household: 'name_match_household',
+  disputed: 'name_match_disputed',
+});
+
+// A decision row still open: unlinked for a suggestion, still on the disputed customer for a dispute.
+function openNameMatch(review) {
+  if (!NAME_MATCH_REASONS[review.name_match_result] || !review.name_match_customer_id) return false;
+  if (review.name_match_result === 'disputed') return String(review.customer_id || '') === String(review.name_match_customer_id);
+  return !review.customer_id;
+}
+
+// One open decision as a queue item. customerName stays the LINKED customer (set for a dispute
+// only); suggestedCustomerName names the customer the matcher points at.
+async function nameMatchQueueItem(review, conn) {
+  const suggested = await conn('customers').where({ id: review.name_match_customer_id }).first();
+  return {
+    ...serializeAttributionQueueItem(review, review.customer_id ? suggested : null, NAME_MATCH_REASONS[review.name_match_result]),
+    suggestedCustomerId: review.name_match_customer_id,
+    suggestedCustomerName: customerName(suggested),
+    // Sent back with Not this customer / Keep link so the dismissal applies only to what was shown.
+    nameMatchResult: review.name_match_result,
+  };
+}
+
 async function getAttributionQueue(options = {}) {
   const conn = options.conn || db;
   const policy = options.policy || await getPolicy(conn);
@@ -671,7 +702,16 @@ async function getAttributionQueue(options = {}) {
     .whereNull('missing_since')
     .orderBy('review_created_at', 'desc');
   const clickAutoIds = new Set(clickAutoRows.map(r => r.id));
-  const reviews = [...clickAutoRows, ...scanned.filter(r => !clickAutoIds.has(r.id))];
+  // The matcher's open decisions, uncapped and outside the period for the same reason: this queue is
+  // where a person settles them (a pause can sit on a review from last year).
+  const nameMatchRows = (await conn('google_reviews')
+    .whereIn('name_match_result', Object.keys(NAME_MATCH_REASONS))
+    .whereNotNull('name_match_customer_id')
+    .whereNull('missing_since')
+    .orderBy('review_created_at', 'desc'))
+    .filter((r) => openNameMatch(r) && !clickAutoIds.has(r.id));
+  const nameMatchIds = new Set(nameMatchRows.map(r => r.id));
+  const reviews = [...clickAutoRows, ...nameMatchRows, ...scanned.filter(r => !clickAutoIds.has(r.id) && !nameMatchIds.has(r.id))];
 
   const reviewIds = reviews.map(row => row.id).filter(Boolean);
   const paidRows = reviewIds.length
@@ -681,6 +721,11 @@ async function getAttributionQueue(options = {}) {
 
   const items = [];
   for (const review of reviews) {
+    // Before the payout check: a disputed link stays visible even after its bonus was paid.
+    if (nameMatchIds.has(review.id)) {
+      items.push(await nameMatchQueueItem(review, conn));
+      continue;
+    }
     if (paidReviewIds.has(review.id)) continue;
 
     // A click auto-link is excluded from payouts until a human confirms
@@ -868,6 +913,7 @@ async function searchAttributionCandidates(options = {}) {
       if (current) customers.unshift(current);
     }
   }
+  await pinSuggestedCustomer(review, customers, conn);
   const candidates = [];
   for (const customer of customers) {
     const services = await recentServiceCandidatesForCustomer(customer.id, review, conn);
@@ -909,11 +955,73 @@ async function searchAttributionCandidates(options = {}) {
     });
   }
 
+  await attachLinkEvidence(review, [...candidates, ...likelyReviewers], conn);
+
   return {
     review: serializeAttributionQueueItem(review, null, review.customer_id ? 'missing_technician' : 'missing_customer'),
     candidates,
     likelyReviewers,
   };
+}
+
+// The matcher's suggestion for an unlinked review leads the candidate list, so its one tap is there
+// even when the name search missed it ("Rebecca Shively" does not find "Shivley").
+async function pinSuggestedCustomer(review, customers, conn) {
+  if (review.customer_id || !openNameMatch(review)) return;
+  const id = String(review.name_match_customer_id);
+  const at = customers.findIndex((c) => String(c.id) === id);
+  if (at === 0) return;
+  if (at > 0) {
+    customers.unshift(...customers.splice(at, 1));
+    return;
+  }
+  const suggested = await conn('customers')
+    .where({ id: review.name_match_customer_id, active: true })
+    .whereNull('deleted_at')
+    .first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  if (suggested) customers.unshift(suggested);
+}
+
+// Why each candidate fits this review or not (owner 2026-10-31): the name evidence, the first known
+// contact against the review date, and activity around it (review-link-evidence.js). Display only:
+// nothing here links, marks or sends. A failed read leaves the cards without evidence.
+async function attachLinkEvidence(review, cards, conn) {
+  const ids = [...new Set(cards.map((card) => String(card.id)))];
+  if (!ids.length) return;
+  try {
+    const { loadEvidenceCandidates } = require('./review-link-candidates');
+    const { describeCandidate } = require('./review-link-evidence');
+    const found = await loadEvidenceCandidates(conn, { customerIds: ids });
+    // Other live reviews already linked to these customers: one Google account reviews a profile once.
+    const linked = await conn('google_reviews')
+      .whereIn('customer_id', ids)
+      .whereNull('missing_since')
+      .whereNot('id', review.id)
+      .select('customer_id', 'location_id');
+    const byId = new Map(found.map((c) => [String(c.customerId), c]));
+    const subject = { reviewerName: review.reviewer_name, reviewedAt: review.review_created_at, locationId: review.location_id };
+    for (const card of cards) {
+      const candidate = byId.get(String(card.id));
+      if (!candidate) continue;
+      const linkedProfiles = linked.filter((r) => String(r.customer_id) === String(card.id)).map((r) => r.location_id);
+      const seen = describeCandidate(subject, { ...candidate, linkedProfiles });
+      const reviewedAt = review.review_created_at ? new Date(review.review_created_at).getTime() : NaN;
+      card.evidence = seen && {
+        nameKind: seen.nameKind,
+        role: seen.role,
+        dates: seen.dates,
+        firstContactAt: seen.firstContactAt ? seen.firstContactAt.toISOString() : null,
+        // Plain chronology for the person matching: true even inside the matcher's 3-day allowance.
+        contactAfterReview: Boolean(seen.firstContactAt && Number.isFinite(reviewedAt) && seen.firstContactAt.getTime() > reviewedAt),
+        tap: seen.activity.tap,
+        recent: seen.activity.recent,
+        saidReviewed: seen.activity.saidReviewed,
+        alreadyLinkedHere: seen.alreadyLinkedHere,
+      };
+    }
+  } catch (err) {
+    logger.warn(`[review-incentives] link evidence for review ${review.id} failed: ${err.message}`);
+  }
 }
 
 async function manualAttributeGoogleReview(attrs = {}, options = {}) {
@@ -948,7 +1056,22 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // 'manual_no_visit' stays re-correctable under the same relaxation — it is
   // a human's earlier technician-less confirm, and re-matching it must not
   // demand the technician the first confirm proved absent.
-  const isClickAutoCorrection = review.link_source === 'click_auto' || review.link_source === 'manual_no_visit';
+  // The review matcher's open suggestion on an UNLINKED review (review-name-match.js) is confirmed
+  // through this endpoint too, from a queue that lists reviews of any age and rating: the same
+  // relaxation applies, and an ineligible review links without a payout. Not a disputed link: moving
+  // a name-matched link to another customer would strand the first customer's review flag (only the
+  // click_auto reversal below can prove it owns that flag), so a dispute is kept or moved under the
+  // usual rules.
+  const isClickAutoCorrection = review.link_source === 'click_auto' || review.link_source === 'manual_no_visit'
+    || (openNameMatch(review) && !review.customer_id);
+  // A disputed link (its customer's first contact came after the review) cannot move to another
+  // customer here: nothing can prove the first customer's review flag came from this link, so it
+  // would stay set with no review behind it. Keep link settles the dispute; a move waits for a safe
+  // flag reversal. A click auto-link keeps its own correction path: its reversal below owns the flag.
+  if (openNameMatch(review) && review.customer_id && review.link_source !== 'click_auto'
+    && String(review.customer_id) !== String(customerId)) {
+    throw operationalError('This link is disputed: its customer\'s first contact came after the review. Use Keep link, or ask for the link to be fixed by hand.', 409, 'disputed_link_move');
+  }
   let payoutEligible = true;
   if (!policy.enabled) {
     if (!isClickAutoCorrection) throw operationalError('Review incentive policy is disabled', 422, 'policy_disabled');

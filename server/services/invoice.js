@@ -8888,6 +8888,9 @@ const InvoiceService = {
       firstDeliveryOnly = false,
       overridesReviewHold = false,
       emailRecipientOverride = null,
+      // The operator's CC for the email leg (the Invoices page Send): one address, or null. Only a
+      // direct operator send passes it; nothing queued or replayed carries it.
+      emailCc = null,
       payUrlParams = null,
       operatorInitiated = false,
       // Opt-out of the default-on dispute-hold check: 'operator' | 'customer' only.
@@ -8938,7 +8941,7 @@ const InvoiceService = {
     }
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
+      emailRecipientOverride, emailCc, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
       expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
     });
 
@@ -8961,7 +8964,7 @@ const InvoiceService = {
       if (renewal) {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-          emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+          emailRecipientOverride, emailCc, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
           expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
         }));
       }
@@ -9411,6 +9414,7 @@ const InvoiceService = {
         assertRenewalGateAlive();
         const r = await sendInvoiceEmail(invoiceId, {
           recipientOverride: emailRecipientOverride,
+          ...(emailCc ? { cc: emailCc } : {}),
           payUrlParams,
           claimToken: claim.invoice.send_claim_token,
           holdExempt,
@@ -9429,6 +9433,7 @@ const InvoiceService = {
         if (r?.skipped) email.skipped = true;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
         if (r?.recipient) email.recipient = r.recipient;
+        if (r?.cc) email.cc = r.cc;
         if (r?.messageId) email.messageId = r.messageId;
       } catch (err) {
         email.error = err.message;

@@ -5062,6 +5062,7 @@ module.exports.occupancyProbeEnd = occupancyProbeEnd;
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
+module.exports.DATE_EXCEPTION_CLEAR = DATE_EXCEPTION_CLEAR;
 module.exports.replaySeriesMoveWithQuality = replaySeriesMoveWithQuality;
 module.exports.needsLifecycleRewind = needsLifecycleRewind;
 module.exports.applyTrackLifecycleCas = applyTrackLifecycleCas;

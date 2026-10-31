@@ -5,8 +5,8 @@
  * reviewed got a review ask; the review agent should catch that). The sync's exact-name matcher
  * (google-business.js _findCustomerIdByReviewerName) misses spelling variants, initials and titles,
  * and never asks when a customer first contacted Waves. This module scores each candidate on names,
- * dates and activity and picks a result. It is pure: no reads, no writes.
- * ops/agents/review-link-audit.js feeds it today.
+ * dates and activity and picks a result. It is pure: no reads, no writes. review-link-candidates.js
+ * reads its inputs for the Reviews match queue and for ops/agents/review-link-audit.js.
  *
  * Names. First names: equal, in the shared nickname groups (utils/name-match.js), or one letter off
  * with the same first letter (4+ letters: Shelly/Shelley). Surnames: equal, one letter off (5+
@@ -258,30 +258,38 @@ function bestNameOnAccount(reviewName, people) {
 }
 
 /**
- * One candidate's evidence for one review. candidate = { customerId, holder: {first, last},
- * contacts: [{first, last}], timeline, activity, linkedProfiles: [location ids with a live linked
- * review], deleted }. Names in holder/contacts are raw record values.
+ * What is known about one candidate for one review, name evidence or not: the Reviews match queue
+ * shows it for every customer a person searched up. candidate = { customerId, holder: {first, last},
+ * contacts: [raw names], timeline, activity, linkedProfiles: [location ids with a live linked
+ * review], deleted }. null for a deleted customer.
  */
-function scoreCandidate(review, candidate) {
+function describeCandidate(review, candidate) {
   if (candidate.deleted) return null;
   const reviewName = nameParts(review.reviewerName);
   const people = accountPeople(candidate);
   const name = bestNameOnAccount(reviewName, people) || { kind: null, role: null, last: people[0].last };
   // A full Google surname that matches nobody on the account: a tap that hour may be someone else's.
   const surnameClash = reviewName.last.length > 1 && people.every((p) => !surnameRelation(reviewName.last, p.last));
-  const activity = activityEvidence(review.reviewedAt, candidate.activity, { surnameClash, locationId: review.locationId });
-  if (!name.kind && !activity.tap) return null;
-  const score = (NAME_POINTS[name.kind] || 0) + (activity.tap ? 3 : 0) + (activity.recent ? 1 : 0) + (activity.saidReviewed ? 3 : 0);
+  const firstContactAt = firstKnownContactAt(candidate.timeline);
   return {
     customerId: candidate.customerId,
     nameKind: name.kind,
     role: name.role,
     surname: name.last,
-    dates: dateVerdict(review.reviewedAt, firstKnownContactAt(candidate.timeline)),
-    activity,
+    firstContactAt,
+    dates: dateVerdict(review.reviewedAt, firstContactAt),
+    activity: activityEvidence(review.reviewedAt, candidate.activity, { surnameClash, locationId: review.locationId }),
     alreadyLinkedHere: (candidate.linkedProfiles || []).includes(review.locationId),
-    score,
   };
+}
+
+// One candidate's score for one review, or null when it has no name evidence and no tap.
+function scoreCandidate(review, candidate) {
+  const found = describeCandidate(review, candidate);
+  if (!found || (!found.nameKind && !found.activity.tap)) return null;
+  const { activity } = found;
+  const score = (NAME_POINTS[found.nameKind] || 0) + (activity.tap ? 3 : 0) + (activity.recent ? 1 : 0) + (activity.saidReviewed ? 3 : 0);
+  return { ...found, score };
 }
 
 const hasActivity = (c) => c.activity.tap || c.activity.recent || c.activity.saidReviewed;
@@ -335,6 +343,7 @@ module.exports = {
   firstKnownContactAt,
   dateVerdict,
   activityEvidence,
+  describeCandidate,
   scoreCandidate,
   decideReviewLink,
   saysReviewed,

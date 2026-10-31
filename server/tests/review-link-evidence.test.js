@@ -13,6 +13,7 @@ const {
   firstKnownContactAt,
   dateVerdict,
   activityEvidence,
+  describeCandidate,
   scoreCandidate,
   decideReviewLink,
   saysReviewed,
@@ -266,6 +267,23 @@ describe('decideReviewLink', () => {
     expect(decide(review('Marlow Pemberton'), [linkedHere])).toMatchObject({ result: 'queue', reason: 'already_linked_on_profile' });
     const linkedElsewhere = candidate('c1', 'Marlow', 'Pemberton', { linkedProfiles: ['venice'] });
     expect(decide(review('Marlow Pemberton'), [linkedElsewhere])).toMatchObject({ result: 'link' });
+  });
+
+  test('describeCandidate reports dates and activity even for a customer with no name evidence', () => {
+    const searched = candidate('c1', 'Kathy', 'Brindle', {
+      timeline: { leadSource: 'website', createdAt: '2026-11-05T14:00:00Z' },
+      activity: { visitsOn: ['2026-10-15'] },
+    });
+    expect(scoreCandidate(review('Marlow Pemberton'), searched)).toBeNull();
+    expect(describeCandidate(review('Marlow Pemberton'), searched)).toMatchObject({
+      customerId: 'c1',
+      nameKind: null,
+      dates: 'clash',
+      firstContactAt: new Date('2026-11-05T14:00:00Z'),
+      activity: { tap: false, recent: true, saidReviewed: false },
+      alreadyLinkedHere: false,
+    });
+    expect(describeCandidate(review('Marlow Pemberton'), { ...searched, deleted: true })).toBeNull();
   });
 
   test('a deleted customer is never a candidate', () => {
