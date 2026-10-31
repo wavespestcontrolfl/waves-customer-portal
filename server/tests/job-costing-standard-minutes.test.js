@@ -309,6 +309,16 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       };
       const tables = { ...withSvc(unpriced), ...withRecord({ revenue: 0 }), invoices: [prepayInvoice] };
       expect((await cost(fakeDb(tables), KEEP)).revenue).toBe(0);
+      // Legacy shape: the invoice names no term, but a term of this customer names it as its prepay invoice.
+      const legacy = { ...prepayInvoice, id: 'inv-legacy', annual_prepay_term_id: null };
+      const legacyTables = {
+        ...tables,
+        invoices: [legacy],
+        annual_prepay_terms: [{ id: 'term-9', customer_id: 'cust-1', prepay_invoice_id: 'inv-legacy' }],
+      };
+      expect((await cost(fakeDb(legacyTables), KEEP)).revenue).toBe(0);
+      // The same invoice with no term naming it is an ordinary visit invoice.
+      expect((await cost(fakeDb({ ...legacyTables, annual_prepay_terms: [] }), KEEP)).revenue).toBe(432);
     });
 
     test('only a term the canonical paid-coverage query returns gives a share', async () => {

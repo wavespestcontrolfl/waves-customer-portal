@@ -436,43 +436,55 @@ async function loadPrepayVisitShare(db, svc) {
   }
 }
 
-// The service money on one invoice, from the totals invoice.js keeps (calculateUpdateFinancials): subtotal is
-// the positive lines and discount_amount every discount, line-backed or document-level. A deposit credit
-// (category deposit_credit) is a prior payment, in neither. Setup, membership and onboarding fee lines are
-// not visit revenue: each one's net (the fee, less any waiver line, which discount_amount already took out)
-// comes off. Line amounts read as invoice.js does: amount, else unit_price x quantity. Tax and the card fee
-// sit outside these totals; a legacy invoice with no subtotal uses its positive lines.
-function invoiceServiceRevenue(invoice) {
-  let items = invoice.line_items;
+// One invoice's lines, read as invoice.js reads them (amount, else unit_price x quantity): the positive total,
+// and the net of its setup, membership and onboarding fee lines (a fee, less any waiver line). A deposit
+// credit (category deposit_credit) is a prior payment and counts in neither.
+function invoiceLineTotals(rawLineItems) {
+  let items = rawLineItems;
   if (typeof items === 'string') {
-    try { items = JSON.parse(items); } catch { items = null; }
+    try { items = JSON.parse(items); } catch { items = []; }
   }
-  if (!Array.isArray(items)) items = [];
-  let positive = 0;
-  let feeNet = 0;
-  for (const li of items) {
-    if (li?.category === 'deposit_credit') continue;
-    const qty = li?.quantity != null ? Number(li.quantity) : 1;
-    const amount = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
-    if (!Number.isFinite(amount)) continue;
-    if (amount > 0) positive += amount;
-    if (INVOICE_NON_SERVICE_LINE_RE.test(`${li?.description || ''} ${li?.category || ''}`)) feeNet += amount;
+  const totals = { positive: 0, feeNet: 0 };
+  for (const li of Array.isArray(items) ? items : []) {
+    const line = li || {};
+    const qty = line.quantity != null ? Number(line.quantity) : 1;
+    const amount = line.amount != null ? Number(line.amount) : Number(line.unit_price) * qty;
+    if (line.category === 'deposit_credit' || !Number.isFinite(amount)) continue;
+    if (amount > 0) totals.positive += amount;
+    if (INVOICE_NON_SERVICE_LINE_RE.test(`${line.description || ''} ${line.category || ''}`)) totals.feeNet += amount;
   }
+  return totals;
+}
+
+// The service money on one invoice, from the totals invoice.js keeps (calculateUpdateFinancials): subtotal
+// (the positive lines) less discount_amount (every discount, line-backed or document-level, once) less the
+// fee lines' net, which discount_amount has already reduced by any waiver. Tax and the card fee sit outside
+// these totals. A legacy invoice with no subtotal uses its positive lines.
+function invoiceServiceRevenue(invoice) {
+  const { positive, feeNet } = invoiceLineTotals(invoice.line_items);
   const storedSubtotal = invoice.subtotal == null ? NaN : Number(invoice.subtotal);
   const subtotal = Number.isFinite(storedSubtotal) ? storedSubtotal : positive;
-  const discount = Number(invoice.discount_amount) || 0;
-  return Math.max(0, round2(subtotal - discount - feeNet));
+  return Math.max(0, round2(subtotal - (Number(invoice.discount_amount) || 0) - feeNet));
 }
 
 // The newest non-void invoice written for this visit's service record: its service money. A prepay invoice
-// (annual_prepay_term_id set) bills the whole term, not this visit: its share comes from loadPrepayVisitShare.
-async function loadLinkedInvoiceTotal(db, record) {
+// bills the whole term, not this visit (its share comes from loadPrepayVisitShare), so it is skipped whether
+// the invoice names the term (annual_prepay_term_id) or only the term names the invoice (prepay_invoice_id,
+// the legacy shape 20260808040000_backfill_self_referential_prepay_credits.js documents).
+async function loadLinkedInvoiceTotal(db, svc, record) {
   if (!record?.id) return 0;
   try {
+    const termInvoiceIds = (await db('annual_prepay_terms')
+      .where({ customer_id: svc.customer_id })
+      .whereNotNull('prepay_invoice_id')
+      .select('prepay_invoice_id'))
+      .map((term) => term.prepay_invoice_id)
+      .filter(Boolean);
     const invoice = await db('invoices')
       .where({ service_record_id: record.id })
       .whereNotIn('status', INVOICE_NO_REVENUE_STATUSES)
       .whereNull('annual_prepay_term_id')
+      .whereNotIn('id', termInvoiceIds)
       .orderBy('created_at', 'desc')
       .first('line_items', 'subtotal', 'discount_amount');
     return invoice ? invoiceServiceRevenue(invoice) : 0;
@@ -489,7 +501,7 @@ async function loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue = fa
   const visitPrice = Number(svc.estimated_price);
   if (recordedWins || (Number.isFinite(visitPrice) && visitPrice > 0)) return { prepayShare: 0, invoiceTotal: 0 };
   const prepayShare = await loadPrepayVisitShare(db, svc);
-  const invoiceTotal = prepayShare > 0 ? 0 : await loadLinkedInvoiceTotal(db, record);
+  const invoiceTotal = prepayShare > 0 ? 0 : await loadLinkedInvoiceTotal(db, svc, record);
   return { prepayShare, invoiceTotal };
 }
 
