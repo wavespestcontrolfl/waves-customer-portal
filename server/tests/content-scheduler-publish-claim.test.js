@@ -384,6 +384,7 @@ describe('atomic SOCIAL publishing claim', () => {
     source_url: 'https://wavespestcontrol.com/blog/x/',
     source_guid: 'g1',
     publish_status: 'pending',
+    scheduled_for: new Date('2026-10-31T14:00:00.000Z'),
     custom_content: null,
   };
 
@@ -407,9 +408,25 @@ describe('atomic SOCIAL publishing claim', () => {
     expect(claim.filters).toEqual(expect.arrayContaining([
       ['id', 'soc-1'],
       ['publish_status', 'pending'],
+      ['scheduled_for', social.scheduled_for],
     ]));
     expect(SocialMedia.publishToAll).toHaveBeenCalledTimes(1);
     expect(result.socialCount).toBe(1);
+  });
+
+  test('a row unscheduled after this tick selected it is not posted (the claim needs the same time)', async () => {
+    const SocialMedia = enableSocial();
+    mockState.pendingSocials = [{ ...social, source_type: 'campaign_builder' }];
+    // The unschedule cleared scheduled_for (publish_status stays 'pending'),
+    // so a claim that requires the selected time matches no row.
+    mockState.updateResult = (table, filters, updates) => (
+      table === 'social_media_posts' && updates.publish_status === 'publishing'
+        && filters.some(([col]) => col === 'scheduled_for') ? 0 : 1);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(SocialMedia.publishToAll).not.toHaveBeenCalled();
+    expect(result.socialCount).toBe(0);
   });
 
   test('skips the post when another instance claimed it first — no duplicate publishToAll', async () => {

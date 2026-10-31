@@ -833,6 +833,10 @@ const ContentScheduler = {
         claimed = (await db('social_media_posts')
           .where('id', social.id)
           .where('publish_status', social.publish_status)
+          // Still scheduled for the time this tick selected: an unschedule
+          // (time cleared; a saved draft keeps publish_status 'pending') or a
+          // reschedule landing after the select must not post the row now.
+          .where('scheduled_for', social.scheduled_for)
           .update({ publish_status: 'publishing' })) > 0;
         if (!claimed) {
           logger.info(`[content-scheduler] social ${social.id} already claimed by a concurrent tick — skipping`);
