@@ -1724,7 +1724,7 @@ async function createNewsletterDraft({
   trx,
   persist = true,
   // Owner ruling 2026-09-27: the newsletter is WRITTEN by Opus 5.5. Autopilot
-  // (the weekly cron, pest-insider-autopilot.js) never passes this — it gets
+  // (the weekly cron) never passes this — it gets
   // the policy's own 'max' effort. The interactive admin composer routes
   // that passed 'high' were removed (owner 2026-10-30).
   effort,
