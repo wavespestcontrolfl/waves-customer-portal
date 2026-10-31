@@ -5,6 +5,8 @@ const { triggerNotification } = require('./notification-triggers');
 
 const STRIPE_ID_RE = /\b(?:pi|pm|ch|seti|evt|cus|src)_[A-Za-z0-9_]+\b/g;
 const MAX_MESSAGE_LENGTH = 500;
+// A repeat of the same failure rings again once its last bell is this old.
+const REALARM_AFTER_HOURS = 24;
 
 const PHASE_LABELS = {
   setup: 'setup',
@@ -167,7 +169,7 @@ async function alertBillPaymentError(input = {}) {
         error_code: errorCode,
         error_message: errorMessage,
         metadata: JSON.stringify(metadata),
-        notified_at: new Date(),
+        notified_at: db.fn.now(),
       })
       .onConflict('dedupe_key')
       .merge({
@@ -176,15 +178,23 @@ async function alertBillPaymentError(input = {}) {
         error_message: errorMessage,
         error_code: errorCode,
         metadata: JSON.stringify(metadata),
+        // Inside the window a repeat stays suppressed; after it, it re-arms.
+        notified_at: db.raw(
+          `CASE WHEN bill_payment_error_alerts.notified_at IS NULL
+                  OR bill_payment_error_alerts.notified_at < now() - interval '${REALARM_AFTER_HOURS} hours'
+                THEN now() ELSE bill_payment_error_alerts.notified_at END`,
+        ),
       })
-      .returning(['id', 'occurrence_count']);
+      // now() is fixed inside a statement, so a stamp equal to it means this
+      // statement inserted the row or re-armed it: the caller alerts exactly once.
+      .returning(['id', 'occurrence_count', db.raw('(notified_at = now()) AS should_notify')]);
     row = inserted?.[0] || null;
   } catch (err) {
     logger.error(`[bill-payment-alerts] dedupe write failed for invoice ${invoice.id}: ${err.message}`);
     return { notified: false, error: err.message };
   }
 
-  if (Number(row?.occurrence_count || 1) > 1) {
+  if (!row?.should_notify) {
     logger.info(`[bill-payment-alerts] duplicate suppressed for invoice ${invoice.invoice_number || invoice.id} phase=${phase}`);
     return { notified: false, duplicate: true, alertId: row?.id || null };
   }

@@ -148,6 +148,15 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/communications?thread=customer-123');
   });
 
+  test('job complete bell opens that visit on its day (the dispatch page reads appointment + date, not service)', () => {
+    const base = { techName: 'Adam', serviceName: 'Pest Control', customerName: 'Pat Demo' };
+    expect(TRIGGER_REGISTRY.job_complete.build({ ...base, serviceId: 'svc-1', serviceDate: '2026-10-28' }).link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-10-28&appointment=svc-1');
+    // No date: the page cannot find the visit, so fall back to the plain schedule.
+    expect(TRIGGER_REGISTRY.job_complete.build({ ...base, serviceId: 'svc-1' }).link).toBe('/admin/schedule');
+    expect(TRIGGER_REGISTRY.job_complete.build(base).link).toBe('/admin/schedule');
+  });
+
   test('SEO sync failure links to the Advisor view the SEO page reads', () => {
     const built = TRIGGER_REGISTRY.seo_sync_failed.build({ source: 'GSC', reason: 'quota' });
     expect(built.link).toBe('/admin/seo?workspace=command&view=advisor');
