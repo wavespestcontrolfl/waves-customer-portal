@@ -1701,6 +1701,9 @@ export default function NewsletterPage() {
   // brand-new install with no sent campaigns would silently drop the badge.
   const [sendsData, setSendsData] = useState(null);
   const [sendsLoading, setSendsLoading] = useState(true);
+  // Completed /sends reads (success or failure). History shows only rows
+  // from a read that finished after it opened.
+  const [sendsReads, setSendsReads] = useState(0);
   const [subscribersActive, setSubscribersActive] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const summaryRequest = useRef(0);
@@ -1717,6 +1720,7 @@ export default function NewsletterPage() {
             },
           );
           setSendsLoading(false);
+          setSendsReads((n) => n + 1);
         }
       })
       // Clear sendsData on error so a failed refresh doesn't silently keep
@@ -1726,6 +1730,7 @@ export default function NewsletterPage() {
         if (request === summaryRequest.current) {
           setSendsData(null);
           setSendsLoading(false);
+          setSendsReads((n) => n + 1);
         }
       });
     adminFetch("/admin/newsletter/subscribers?limit=1")
@@ -1758,6 +1763,7 @@ export default function NewsletterPage() {
             ? sends.value || { sends: [], counts: {} }
             : null,
         );
+        setSendsReads((n) => n + 1);
         setSubscribersActive(
           subscribers.status === "fulfilled"
             ? subscribers.value.counts?.active ?? 0
@@ -1768,13 +1774,14 @@ export default function NewsletterPage() {
     { intervalMs: 120_000 },
   );
 
-  // Refetch on Dashboard re-entry — mirrors the prior per-tab DashboardView
-  // remount so a campaign sent in Compose or a subscriber added in Subscribers
-  // is reflected when the user returns to the dashboard. Skips refetch on
-  // tab switches that don't land on dashboard (e.g. Compose → Subscribers).
+  // Refetch on Dashboard or History entry — mirrors the prior per-tab
+  // remounts so a campaign saved, scheduled or sent in Compose, or a
+  // subscriber added in Subscribers, is reflected when the user lands there.
+  // Skips refetch on tab switches that land elsewhere (e.g. Compose →
+  // Subscribers).
   const prevTabRef = useRef(tab);
   useEffect(() => {
-    if (tab === "dashboard" && prevTabRef.current !== "dashboard") {
+    if ((tab === "dashboard" || tab === "history") && prevTabRef.current !== tab) {
       setRefreshKey((k) => k + 1);
     }
     prevTabRef.current = tab;
@@ -1899,6 +1906,7 @@ export default function NewsletterPage() {
           <HistoryView
             sendsData={sendsData}
             sendsLoading={sendsLoading}
+            sendsReads={sendsReads}
             onRefresh={() => setRefreshKey((k) => k + 1)}
           />
         )}

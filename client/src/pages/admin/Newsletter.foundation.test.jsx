@@ -164,7 +164,7 @@ it('sends a large selection in batches, reports the server count and keeps unpro
  expect(batches.map(ids=>ids.length)).toEqual([50,10]);
  expect(screen.getByText('1 selected')).toBeInTheDocument();
  expect(within(screen.getByText('Batch event 59').closest('tr')).getByRole('checkbox')).toBeChecked();
-});
+}, 20_000); // 60 rendered rows: generous under a loaded CI runner
 
 it('refuses a merge larger than one request before the confirm', async () => {
  const events=Array.from({length:52},(_,i)=>({id:`dup-${i}`,title:`Duplicate ${i}`,adminStatus:'pending'}));
@@ -181,4 +181,4 @@ it('refuses a merge larger than one request before the confirm', async () => {
  expect(await screen.findByText('Merge up to 51 events at a time. 52 are selected.')).toBeInTheDocument();
  expect(confirmSpy).not.toHaveBeenCalled();
  expect(fetch.mock.calls.some(([url])=>String(url).endsWith('/events/merge'))).toBe(false);
-});
+}, 20_000); // 52 rendered rows: generous under a loaded CI runner

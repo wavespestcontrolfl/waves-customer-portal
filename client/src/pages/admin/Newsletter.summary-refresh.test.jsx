@@ -271,3 +271,26 @@ it('a failed A/B breakdown read shows an error with retry instead of loading for
   expect(await screen.findByText('Synthetic subject B')).toBeInTheDocument();
   expect(screen.queryByText("Couldn't load the A/B breakdown.")).not.toBeInTheDocument();
 });
+
+it('History re-reads campaigns when it opens, so a draft saved since the last read is listed', async () => {
+  localStorage.setItem('waves_admin_token', 'fixture');
+  let saved = false;
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    const path = String(url).split('?')[0];
+    if (path.endsWith('/sends')) {
+      return response(saved
+        ? { sends: [historySend({ status: 'draft', subject: 'Synthetic saved draft' })], counts: { draft: 1 } }
+        : { sends: [], counts: {} });
+    }
+    if (path.endsWith('/subscribers')) return response({ subscribers: [], counts: { active: 10 } });
+    if (path.endsWith('/calendar')) return response({ calendar: [] });
+    return response({});
+  }));
+  render(<MemoryRouter><NewsletterPage /></MemoryRouter>);
+  await screen.findByRole('button', { name: 'Schedule (0)' });
+  saved = true; // e.g. a draft saved in Compose after the page's last read
+  fireEvent.click(screen.getByRole('button', { name: 'Schedule (0)' }));
+  fireEvent.click(await screen.findByRole('button', { name: /^History/ }));
+  expect(await screen.findByText('Synthetic saved draft')).toBeInTheDocument();
+  expect(screen.queryByText(/No campaigns yet/)).not.toBeInTheDocument();
+});

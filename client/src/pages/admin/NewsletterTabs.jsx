@@ -2484,21 +2484,25 @@ function AiDraftModal({
 
 // ── History ────────────────────────────────────────────────────────
 
-// History reads the page-level /sends payload (NewsletterPage refreshes it on
-// focus, on an interval and after any action here), so delivery status and
-// recovery controls stay current while the tab is open. A failed refresh
-// keeps the last loaded rows on screen, marked as not refreshed, with Retry.
-export function HistoryView({ sendsData, sendsLoading, onRefresh }) {
+// History reads the page-level /sends payload (NewsletterPage re-reads it
+// when History opens, on focus, on an interval and after any action here),
+// so delivery status and recovery controls stay current while the tab is
+// open. Until a read that finished after History opened lands, it shows
+// Loading, never an older list. A failed refresh keeps the last loaded rows
+// on screen, marked as not refreshed, with a retry.
+export function HistoryView({ sendsData, sendsLoading, sendsReads, onRefresh }) {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [openedAtRead] = useState(sendsReads);
+  const fresh = sendsReads > openedAtRead;
   const [lastLoaded, setLastLoaded] = useState(null);
   useEffect(() => {
-    if (sendsData) setLastLoaded(sendsData);
-  }, [sendsData]);
-  const shown = sendsData || lastLoaded;
+    if (fresh && sendsData) setLastLoaded(sendsData);
+  }, [fresh, sendsData]);
+  const shown = fresh ? sendsData || lastLoaded : null;
   const sends = shown?.sends || [];
-  const aggregate = shown?.aggregate || null;
-  const loading = sendsLoading && !shown;
-  const readFailed = !sendsLoading && !sendsData;
+  const aggregate = shown?.aggregate;
+  const loading = !fresh || (sendsLoading && !shown);
+  const readFailed = fresh && !sendsLoading && !sendsData;
   // Per-send variant breakdown (a vs b counts) — fetched lazily when the
   // operator expands an A/B row, then cached.
   const [variantStats, setVariantStats] = useState({});
@@ -2711,7 +2715,8 @@ export function HistoryView({ sendsData, sendsLoading, onRefresh }) {
           <div className="text-ui-body text-ink-secondary p-6 text-center">
             Loading…
           </div>
-        ) : readFailed && !shown ? (
+        ) : !shown ? (
+          // Not loading with nothing to show: the read failed.
           <ActionFeedback error onRetry={onRefresh} className="m-4">
             Campaigns could not be loaded.
           </ActionFeedback>
