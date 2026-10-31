@@ -129,6 +129,7 @@ function fakeSocialDb(rows, runs = []) {
         return q;
       },
       whereNull(col) { matches = matches.filter((r) => r[col] == null); return q; },
+      whereIn(col, values) { matches = matches.filter((r) => values.includes(r[col])); return q; },
       select(col) { selected = col; return q; },
       orderBy() { return q; },
       limit() { return q; },
@@ -276,5 +277,13 @@ describe('DELETE /schedule/:id — social rows (SOC-01)', () => {
     const r = await callRoute('delete', '/schedule/:id', { params: { id: ID } });
     expect(r.payload).toEqual({ success: true, type: 'social', id: ID });
     expect(rows[0]).toMatchObject({ status: 'draft', publish_status: null, scheduled_for: null });
+  });
+
+  test('a typed post the scheduler already claimed is a 409 and keeps publishing', async () => {
+    const rows = [draftRow({ source_type: 'scheduled', status: 'scheduled', publish_status: 'publishing', scheduled_for: new Date('2026-11-05T14:00:00Z') })];
+    fakeSocialDb(rows);
+    const r = await callRoute('delete', '/schedule/:id', { params: { id: ID } });
+    expect(r.statusCode).toBe(409);
+    expect(rows[0]).toMatchObject({ status: 'scheduled', publish_status: 'publishing' });
   });
 });

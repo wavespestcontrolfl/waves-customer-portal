@@ -578,18 +578,18 @@ const ContentScheduler = {
    * picked again; once the scheduler claimed it, that is a conflict.
    */
   async unscheduleSocialPost(social) {
-    if (social.source_type !== SAVED_DRAFT.source_type) {
-      await db('social_media_posts').where('id', social.id).update({
-        scheduled_for: null,
-        publish_status: null,
-        status: 'draft',
-      });
-      return;
-    }
+    // Only while no publish has started: the scheduler claims a row by moving
+    // publish_status off 'pending' / 'dry_run' to 'publishing', so the WHERE
+    // refuses a claimed (or finished) row instead of reporting a cancel.
+    // A saved draft keeps 'pending' so it can be picked again.
+    const saved = social.source_type === SAVED_DRAFT.source_type;
     const back = await db('social_media_posts')
-      .where({ id: social.id, source_type: SAVED_DRAFT.source_type, publish_status: 'pending' })
-      .update({ scheduled_for: null, status: 'draft' });
-    if (!back) throw scheduleConflict('Posting already started for this draft, so it can no longer be unscheduled.');
+      .where({ id: social.id })
+      .whereIn('publish_status', saved ? ['pending'] : ['pending', 'dry_run'])
+      .update(saved
+        ? { scheduled_for: null, status: 'draft' }
+        : { scheduled_for: null, publish_status: null, status: 'draft' });
+    if (!back) throw scheduleConflict('Posting already started for this post, so it can no longer be unscheduled.');
   },
 
   /**
