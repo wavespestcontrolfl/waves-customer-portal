@@ -437,7 +437,8 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate), laborEstimated };
 }
 
-async function calcProductsCost(db, serviceRecordId) {
+// `structuredNotes` is the visit's service record notes as the caller already loaded them (object or JSON text): no second read.
+async function calcProductsCost(db, serviceRecordId, structuredNotes = null) {
   let total = 0;
   const breakdown = [];
   const costedInventoryProductIds = new Set();
@@ -477,8 +478,7 @@ async function calcProductsCost(db, serviceRecordId) {
   try {
     // A line the completion refused as an implausible amount wrote no movement and no cost, so the ledger fallback skips
     // it too: it counts as costed.
-    const notes = parseJsonObject((await db('service_records').where({ id: serviceRecordId }).first('structured_notes'))?.structured_notes);
-    (notes.inventoryDeductions || []).filter((d) => d?.status === 'not_deducted_implausible')
+    (parseJsonObject(structuredNotes).inventoryDeductions || []).filter((d) => d?.status === 'not_deducted_implausible')
       .forEach((d) => costedInventoryProductIds.add(d.productId));
     const rows = await db('property_application_history')
       .where({ service_record_id: serviceRecordId })
@@ -742,7 +742,7 @@ async function calculateJobCost(scheduledServiceId, db, {
     { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes, estimatedLaborMinutes },
   );
   const { productsCost, breakdown } = record?.id
-    ? await calcProductsCost(db, record.id)
+    ? await calcProductsCost(db, record.id, record.structured_notes)
     : { productsCost: 0, breakdown: [] };
   const expensesCost = await calcExpenses(db, scheduledServiceId);
   // A versioned combined-closeout marker freezes one drive-cost owner for the

@@ -821,7 +821,7 @@ describe('calcProductsCost — an application amount is priced per unit, never p
   // Chainable fake for exactly calcProductsCost's queries: the usage movements,
   // the application rows, and the catalog row. vendor_pricing must never be
   // read (the catalog's best_price already ranks the vendor rows).
-  function fakeProductsDb({ movements = [], applications = [], products = {}, record = null } = {}) {
+  function fakeProductsDb({ movements = [], applications = [], products = {} } = {}) {
     return (table) => {
       let productId = null;
       const chain = {
@@ -835,8 +835,10 @@ describe('calcProductsCost — an application amount is priced per unit, never p
         select: () => Promise.resolve(table.startsWith('product_inventory_movements') ? movements : applications),
         first: () => {
           if (table === 'vendor_pricing') throw new Error('vendor_pricing read');
+          // The record's notes come from the caller: a second read inside calcProductsCost lengthens a job that outlives its
+          // request and, in the Postgres suites, reaches into the next test's transaction.
+          if (table === 'service_records') throw new Error('calcProductsCost must not re-read the service record');
           if (table === 'products_catalog') return Promise.resolve(products[productId] || null);
-          if (table === 'service_records') return Promise.resolve(record);
           return Promise.resolve(null);
         },
       };
@@ -898,9 +900,9 @@ describe('calcProductsCost — an application amount is priced per unit, never p
         { product_id: 'p-bag', quantity_applied: 16.968, quantity_unit: 'lb' },
       ],
       products: { 'p-jug': JUG, 'p-bag': { inventory_unit: 'lb', unit_size_oz: 800, best_price: 44.23, cost_per_unit: null } },
-      record: { structured_notes: save({ inventoryDeductions: [{ productId: 'p-jug', status: 'not_deducted_implausible' }, { productId: 'p-bag', status: 'deducted' }] }) },
     });
-    const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1');
+    const notes = save({ inventoryDeductions: [{ productId: 'p-jug', status: 'not_deducted_implausible' }, { productId: 'p-bag', status: 'deducted' }] });
+    const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1', notes);
     expect(productsCost).toBe(15.01);
     expect(breakdown).toEqual([expect.objectContaining({ product_id: 'p-bag' })]);
   });
