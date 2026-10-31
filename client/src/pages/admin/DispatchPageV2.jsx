@@ -433,6 +433,9 @@ function modalCustomerFrom(record) {
   };
 }
 
+// Board header SPRAY word colors: a rain HOLD reads as an alert, a wind check as a caution.
+const SPRAY_STATUS_TONE = { HOLD: "text-alert-fg", "CHECK WIND": "text-amber-700" };
+
 export default function DispatchPageV2({
   activeTab: controlledActiveTab,
   setOpenCreateHandler,
@@ -1419,11 +1422,11 @@ export default function DispatchPageV2({
   const zoneRainAlerts = Object.entries(safeData.zoneRain || {})
     .filter(([, chance]) => chance != null && chance >= 40)
     .sort(([, a], [, b]) => b - a);
-  const sprayHold =
-    (rainProbability != null && rainProbability > 50) ||
-    (windSpeed != null && windSpeed > 15);
-
-  const sprayStatus = sprayHold ? "HOLD"
+  // Rain over 50% keeps HOLD. Wind over 15 mph is a check, not a hold (owner 2026-10-31, D2;
+  // ruling 2026-10-29: weather warns, it never holds); the tech judges the wind at the nozzle.
+  // A missing reading compares false, so it falls through to UNKNOWN.
+  const sprayStatus = rainProbability > 50 ? "HOLD"
+    : windSpeed > 15 ? "CHECK WIND"
     : rainProbability == null || windSpeed == null ? "UNKNOWN" : "GO";
 
   const dateHeader =
@@ -1982,7 +1985,7 @@ export default function DispatchPageV2({
                 <span
                   className={cn(
                     "font-medium uppercase tracking-label",
-                    sprayHold ? "text-alert-fg" : "text-zinc-900",
+                    SPRAY_STATUS_TONE[sprayStatus] || "text-zinc-900",
                   )}
                 >
                   SPRAY: {sprayStatus}

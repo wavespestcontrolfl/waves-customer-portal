@@ -947,6 +947,7 @@ describe('service report v1', () => {
     expect(good.headline).toBe('Good treatment window.');
     expect(good.factsLine).toContain('82°F');
     expect(windy.headline).toBe('Wind was elevated.');
+    expect(windy.body).toBe('Elevated wind was recorded during the visit and noted with today’s service record.');
     expect(`${good.headline} ${good.body} ${windy.headline} ${windy.body}`).not.toMatch(/perfect|guaranteed|safe/i);
   });
 

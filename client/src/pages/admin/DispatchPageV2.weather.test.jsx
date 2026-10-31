@@ -24,7 +24,9 @@ it.each([
   [{ temp: 77, rainProbability: 10 }, '77°F', 'UNKNOWN'],
   [{ temp: 77, windSpeed: 5 }, '77°F', 'UNKNOWN'],
   [{ rainProbability: 51 }, 'Weather unavailable', 'HOLD'],
-  [{ windSpeed: 16 }, 'Weather unavailable', 'HOLD'],
+  [{ windSpeed: 16 }, 'Weather unavailable', 'CHECK WIND'],
+  [{ temp: 77, rainProbability: 10, windSpeed: 16 }, '77°F', 'CHECK WIND'],
+  [{ temp: 77, rainProbability: 51, windSpeed: 16 }, '77°F', 'HOLD'],
   [{ temp: 77, rainProbability: 50, windSpeed: 15 }, '77°F', 'GO'],
 ])('renders measured versus unavailable weather: %j', async (weather, temperature, assessment) => {
   vi.mocked(adminFetch).mockImplementation(async path => path.startsWith('/admin/schedule?')
