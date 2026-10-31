@@ -86,10 +86,16 @@ async function computeDecisions(conn) {
   // Only a customer a person can confirm in the queue is ever suggested (the candidate search and
   // the pin both require active); a linked review is judged on its customer whatever their status.
   const suggestible = candidates.filter((c) => c.active !== false);
-  return reviews.map((review) => ({
-    review,
-    next: review.customer_id ? decideLinked(review, byId) : decideUnlinked(review, suggestible, context),
-  }));
+  const decisions = [];
+  for (const review of reviews) {
+    decisions.push({
+      review,
+      next: review.customer_id ? decideLinked(review, byId) : decideUnlinked(review, suggestible, context),
+    });
+    // The pass runs inside the web server: requests and timers get a turn between reviews.
+    await new Promise((resolve) => { setImmediate(resolve); });
+  }
+  return decisions;
 }
 
 async function runReviewNameMatch({ conn = db, mode = reviewNameMatchMode(), now = new Date() } = {}) {
