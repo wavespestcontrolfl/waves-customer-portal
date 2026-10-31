@@ -189,8 +189,10 @@ async function pickTechnicianForVisit({
   }
   if (!techs.length) return { active: true, technician: null, reason: 'none_assignable' };
 
+  // The visit's place (customer, map position) rides along for GATE_TERRITORY_ROUTING.
   const linePick = await pickByServiceLine(conn, techs, {
     serviceId, serviceKey, serviceType, date, windowStart, windowEnd, durationMinutes, excludeCustomerId, excludeServiceIds,
+    customerId, lat, lng,
   });
   if (linePick) return linePick;
 

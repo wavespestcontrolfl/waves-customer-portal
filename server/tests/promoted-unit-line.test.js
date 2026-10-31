@@ -58,7 +58,7 @@ describe('ownLineTechnicianForPromotedUnit', () => {
     // The visit's own service ZIP and customer ride along for GATE_TERRITORY_ROUTING.
     expect(lineTechnician.pickLineTechnician).toHaveBeenCalledWith(savepoint, {
       serviceId: 'svc-lawn', serviceKey: 'lawn_care_monthly', serviceType: 'Lawn Care', date: '2027-05-20',
-      zip: null, customerId: null,
+      zip: null,
     });
   });
 
@@ -106,5 +106,25 @@ describe('estimate accept wiring (source)', () => {
     expect(block).toContain('delete standaloneRow.window_end;');
     expect(block).toContain('delete standaloneRow.technician_id;');
     expect(block).toContain('This program has its own technician, so we will set its time separately.');
+  });
+});
+
+describe('ownLineTechnicianForPromotedUnit — territory place (GATE_TERRITORY_ROUTING)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    lineTechnician.lineMapLive.mockReturnValue(true);
+    lineTechnician.pickLineTechnician.mockResolvedValue({ mapped: false, line: 'general', technicianId: null, reason: 'no_map' });
+  });
+
+  test('the reserved visit\'s service ZIP first, else the quoted address ZIP; never the customer row', async () => {
+    const row = { service_type: 'Pest', customer_id: 'cust-1' };
+    await ownLineTechnicianForPromotedUnit(database, args({
+      row, reservedStart: { technician_id: 'tech-pest', service_address_zip: '34293' }, quotedZip: '34219',
+    }));
+    expect(lineTechnician.pickLineTechnician).toHaveBeenLastCalledWith(savepoint, expect.objectContaining({ zip: '34293' }));
+
+    await ownLineTechnicianForPromotedUnit(database, args({ row, quotedZip: '34219' }));
+    expect(lineTechnician.pickLineTechnician).toHaveBeenLastCalledWith(savepoint, expect.objectContaining({ zip: '34219' }));
+    expect(lineTechnician.pickLineTechnician.mock.calls.at(-1)[1]).not.toHaveProperty('customerId');
   });
 });
