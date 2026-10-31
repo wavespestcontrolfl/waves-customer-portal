@@ -1577,6 +1577,9 @@ async function getOptions(serviceId, { caller = null } = {}) {
       ...optionRain(opt.date, window),
       shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
       ...(opt.dayAlreadyLate === true ? { dayAlreadyLate: true } : {}),
+      // What the route-checked day adds to the drive (rebooker driveMinutes), shown as "+N min drive" on both
+      // sheets like the same-day choices (route-dispatcher audit D). A day the check did not price has no key.
+      ...(Number.isFinite(opt.driveMinutes) ? { driveMinutes: opt.driveMinutes } : {}),
     };
   });
 

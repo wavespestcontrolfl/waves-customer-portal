@@ -338,7 +338,14 @@ function ToolHealthContent({ data, stale, staleWindow, adminUser, expanded, setE
           <h2 id="recent-errors-heading" className="text-18 leading-[1.35] font-medium text-zinc-900">
             Recent errors
           </h2>
-          {recentErrors.length > 0 && <Badge tone="neutral">{recentErrors.length}</Badge>}
+          {/* The route sends the latest 30 failures; summary.failed counts them all. */}
+          {recentErrors.length > 0 && (
+            <Badge tone="neutral">
+              {summary.failed > recentErrors.length
+                ? `Latest ${recentErrors.length} of ${summary.failed.toLocaleString()}`
+                : recentErrors.length}
+            </Badge>
+          )}
         </div>
         <Card>
           {recentErrors.length === 0 ? (

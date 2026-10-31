@@ -6,6 +6,16 @@ sessions append entries whenever a finding is rebutted, a behavior is confirmed
 by-design, or a lane is closed by the owner — one line per entry, with the
 PR/audit reference and date, newest first within its section.
 
+## Triage of sweep issues
+
+A session that works a sweep issue posts ONE comment on it that starts with
+"Triage done" and gives every finding's status: fixed (PR), PR open, rebutted
+(added here), owner decision, or parked. The issue closes when no finding is
+left open; a parked finding stays listed in the open issue, so the sweep does
+not re-flag it. Rebuttals and owner rulings go into this file in the same
+session. A weekly ops check rings when a sweep issue is missing or an open one
+has no "Triage done" comment.
+
 ## Rebutted findings (do not re-flag)
 
 - Partial-refund `refund_amount` overwrite: the `charge.refunded` webhook is the
@@ -29,6 +39,16 @@ PR/audit reference and date, newest first within its section.
 
 ## By-design behaviors (not bugs)
 
+- The four blog-automation switches read unset as ON
+  (`GATE_NAMED_COMPETITOR_AUTOPUBLISH`, `AUTONOMOUS_BLOG_AUTO_MERGE`,
+  `AUTONOMOUS_CODEX_REMEDIATION`, `AUTO_PUBLISH_NEW_SUPPORTING_BLOG`); `=false`
+  kills each one. Owner directive 2026-09-05, rulings 2026-09-27 D2 and
+  2026-09-28; #5146 limits named-competitor autopublish to the owner's approved
+  list. (sweep #3960 A1, triaged 2026-10-31)
+- Two migration files may share a timestamp: knex orders by full file name and
+  `server/tests/migration-state-key-uniqueness.test.js` treats same-stamp files
+  as normal. Never rename an applied migration. (sweep #3960 A6, #4616 OF1,
+  triaged 2026-10-31)
 - PDFs intentionally keep plain-text recaps/cells; AI narrative summaries and
   tech-photo cards are web-render only.
 - Arrival window displays as 2 hours from `window_start` (display-only);
@@ -52,6 +72,20 @@ PR/audit reference and date, newest first within its section.
 
 ## Already-catalogued open findings (reference, don't re-report as new)
 
+- A monthly autopay charge refused before Stripe (no usable payment method,
+  sweep #6273 B1) and a wholly missed 8:00 AM billing run (#5874 B2) both end
+  as "no dues payment row this month" with no retry. With 3 monthly-billing
+  customers left (owner ruling 2026-09-01: no new monthly billing) the code fix
+  waits; an ops check outside the repo runs on the 1st of each month at
+  10:15 ET and asks the owner about any due customer with no dues row.
+  (triaged 2026-10-31)
+- A bare "YES" re-subscribes and rings no bell (sweep #5007 B3): the fix is on
+  main (#7014) behind `GATE_SMS_BARE_YES_REPLY`, which is unset in production;
+  the flip is the owner's. (triaged 2026-10-31)
+- Merges are gated by the local merge guard (a clean Codex verdict and green
+  `tests` on the head), not by GitHub: `main` has no branch protection or
+  ruleset, and owner stopping-rule merges use a logged override. A required
+  GitHub check is the owner's call. (sweep #6273 A1, triaged 2026-10-31)
 - Test-suite false-confidence audit 2026-07-12: the missing CI test-run and
   DB-suite-wiring subclaims are resolved by
   [`.github/workflows/tests.yml`](../.github/workflows/tests.yml), which

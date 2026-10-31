@@ -76,8 +76,6 @@ const ITEM_FIELDS = ['id', 'kind', 'area', 'severity', 'who', 'headline', 'why',
 // The allow-list. Keys are action-policy read tools; values are the only
 // response paths that leave the server (keepPaths syntax: `*` steps into a list).
 // Left out on purpose: needs_me `detail` (long free text) and `report_link`;
-// get_day_summary `estimated_revenue` (it counts $125 for every unpriced visit,
-// services/intelligence-bar/schedule-tools.js, so the sum reads as revenue it is not);
 // every note, instruction, comment and other free text typed by staff,
 // customers or callers (customer and visit notes, tags, property labels, lead
 // service_interest and notes, invoice titles, invoice line descriptions and
@@ -108,6 +106,7 @@ const TOOL_FIELDS = Object.freeze({
   ],
   get_day_summary: [
     'date', 'total_services', 'completed', 'remaining', 'unassigned_count', 'new_customer_count', 'by_zone',
+    'visit_price_total', 'visits_with_price', 'visits_without_price',
     'unassigned.*.id', 'unassigned.*.customer', 'unassigned.*.city', 'unassigned.*.service_type',
     'by_tech.*.name', 'by_tech.*.total', 'by_tech.*.completed', 'by_tech.*.remaining', 'by_tech.*.zones',
     ...['id', 'customer', 'city', 'service_type', 'status', 'tier', 'time_window', 'route_order'].map((field) => `by_tech.*.services.*.${field}`),

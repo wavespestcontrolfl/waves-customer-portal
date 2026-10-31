@@ -102,24 +102,23 @@ describe('turf-derived add-ons inherit the review contract', () => {
   const { generateEstimate } = require('../services/pricing-engine');
   const BASE = { homeSqFt: 1800, lotSqFt: 8783, stories: 1 };
 
-  test('top dressing and plugging priced from lot-fallback turf park', () => {
+  test('top dressing priced from lot-fallback turf parks; plugging with no area never uses the turf', () => {
     const estimate = generateEstimate({
       ...BASE,
       services: { topDressing: { depth: 'eighth' }, plugging: { spacing: 12 } },
     });
-    for (const service of ['top_dressing', 'plugging']) {
-      const line = estimate.lineItems.find((l) => l.service === service);
-      expect({ service, flagged: line?.requiresCustomQuote === true }).toEqual({ service, flagged: true });
-      expect(line.manualReviewReasons).toContain('low_confidence_turf_requires_field_verification');
-    }
     // Top dressing keeps the turf reason as the customQuoteReason and also
     // lists its own quote-only reason (owner 2026-10-29).
     const topDressing = estimate.lineItems.find((l) => l.service === 'top_dressing');
+    expect(topDressing.requiresCustomQuote).toBe(true);
     expect(topDressing.customQuoteReason).toBe('low_confidence_turf_requires_field_verification');
     expect(topDressing.manualReviewReasons).toEqual(expect.arrayContaining([
       'low_confidence_turf_requires_field_verification',
       'top_dressing_quote_only',
     ]));
+    // Plugging prices only from an entered area (owner 2026-10-31): no area, no dollars, no turf reason.
+    const plugging = estimate.lineItems.find((l) => l.service === 'plugging');
+    expect(plugging).toMatchObject({ price: null, quoteRequired: true, manualReviewReasons: ['missing_plugging_area_sqft'] });
   });
 
   test('an explicitly entered plugging area stays exempt; top dressing is quote-only regardless (owner 2026-10-29)', () => {

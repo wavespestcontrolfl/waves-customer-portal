@@ -543,6 +543,25 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
   });
 
+  it('does not request the admin-only payer list for a technician', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', 'Avery'))
+      : response({ error: 'Forbidden' }, 403)));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/admin/payers'))).toBe(false);
+  });
+
+  it('still loads the payer list for an admin', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', 'Avery'))
+      : response({})));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/admin/payers'))).toBe(true));
+  });
+
   it.each(['initial load', 'earlier refresh'])(
     'keeps the newest saved profile when the %s finishes late', async (pendingKind) => {
       localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));

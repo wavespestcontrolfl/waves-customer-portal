@@ -295,7 +295,7 @@ describe('send_invoice commit', () => {
     expect(Invoices.sendInvoiceFromBar).toHaveBeenCalledWith({
       invoiceId: INV, body: { requestReview: false, firstDelivery: true }, actor: { technicianId: 'staff-1' },
       approvedSend: {
-        expectedTotal: 129, recipients: { phone: '9415550100' },
+        expectedTotal: 129, recipients: { phone: '9415550100' }, channel: 'text', cc: null,
         version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), smsDigest: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', leadTargets: 'none', followupCadence: [3, 7, 14, 30], verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
       },
     });
@@ -419,7 +419,7 @@ describe('send_invoice commit', () => {
 
     test('the sender never fans out: the bar send is an operator send with no customer-channel marker (source contract)', () => {
       const route = fs.readFileSync(require('path').join(__dirname, '../routes/admin-invoices.js'), 'utf8');
-      expect(route).toMatch(/channels: \['sms'\], adoptsQueuedInvoiceSend: false/);
+      expect(route).toMatch(/channels: req\.ibApprovedSend\.channel === 'email' \? \['email'\] : \['sms'\], adoptsQueuedInvoiceSend: false/);
       const messaging = fs.readFileSync(require('path').join(__dirname, '../services/messaging/billing-channel-routing.js'), 'utf8');
       expect(messaging).toMatch(/\(input\.operatorInitiated \|\| meta\.adminUserId\) && meta\.useCustomerChannel !== true\) return false/);
       const invoice = fs.readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
@@ -862,13 +862,14 @@ describe('round 6', () => {
   });
 
   // Item 1: the attachment fence has two halves.
-  test('send: the bar send starts no email leg and passes no email option (source contract)', () => {
+  test('send: the text card starts no email leg; the email pins ride only on the email card (source contract)', () => {
     const invoice = read('../services/invoice.js');
     expect(invoice).toMatch(/const smsOnly = Array\.isArray\(channels\) && channels\.length === 1 && channels\[0\] === "sms"/);
     expect(invoice).toMatch(/\} else if \(smsOnly\) \{/);
-    expect(invoice).not.toMatch(/expectedEmailDigest|plainInvoiceEmail|expectedEmail\b/);
+    expect(invoice).toMatch(/\.\.\.\(emailOnly && expectedVersion\?\.emailDigest \? \{/);
+    expect(invoice).not.toMatch(/plainInvoiceEmail/);
     const email = read('../services/invoice-email.js');
-    expect(email).not.toMatch(/expectedEmail|expectedAttachments|plainInvoiceEmail|renderInvoiceEmailForApproval/);
+    expect(email).not.toMatch(/expectedAttachments|plainInvoiceEmail|renderInvoiceEmailForApproval/);
   });
 });
 
@@ -935,5 +936,133 @@ describe('round 7: who owes the invoice, and the closeout target', () => {
     const { leadTargets } = Invoices.sendInvoiceFromBar.mock.calls[1][0].approvedSend.version;
     expect(leadTargets).toBe(require('../services/invoice-helpers').leadSetDigest([LEAD]));
     expect(leadTargets).not.toContain(LEAD);
+  });
+});
+
+describe('email card (GATE_IB_INVOICE_EMAIL, gap #20): one invoice email with at most one CC', () => {
+  const InvoiceEmail = require('../services/invoice-email');
+  const EMAIL = { subject: 'Invoice WPC-2099-0001 — $129.00', text: 'Hi Robin,\n\nYour invoice is ready.\n\nPay online: [pay link]', contentHash: 'hash-1', digest: 'digest-1' };
+  let built;
+  beforeEach(() => {
+    process.env.GATE_IB_INVOICE_EMAIL = 'true';
+    built = EMAIL;
+    // The sender's own preview (its tests cover the build): the customer's invoice address, the CC minus that address.
+    jest.spyOn(InvoiceEmail, 'sendInvoiceEmail').mockImplementation(async (_id, opts) => ({
+      ok: true, preview: true, recipient: { email: 'robin@example.com', name: '', role: 'primary' },
+      cc: opts.cc && opts.cc !== 'robin@example.com' ? [opts.cc] : [], email: built,
+    }));
+  });
+  afterEach(() => {
+    delete process.env.GATE_IB_INVOICE_EMAIL;
+    InvoiceEmail.sendInvoiceEmail.mockRestore();
+  });
+  const emailInput = (extra = {}) => ({ invoice_id: INV, channel: 'email', cc_email: 'Manager@Example.com', ...extra });
+
+  test('gate off, a CC on a text, or an unknown channel refuses before anything is read', async () => {
+    delete process.env.GATE_IB_INVOICE_EMAIL;
+    await expect(preview('send_invoice', emailInput())).resolves.toMatchObject({ code: 'gate_off', error: expect.stringMatching(/Emailing invoices from the bar is switched off/) });
+    process.env.GATE_IB_INVOICE_EMAIL = 'true';
+    await expect(preview('send_invoice', { invoice_id: INV, cc_email: 'manager@example.com' })).resolves.toMatchObject({ code: 'cc_needs_email' });
+    await expect(preview('send_invoice', { invoice_id: INV, channel: 'fax' })).resolves.toMatchObject({ code: 'invalid_channel' });
+    expect(db).not.toHaveBeenCalled();
+    expect(InvoiceEmail.sendInvoiceEmail).not.toHaveBeenCalled();
+  });
+
+  test('the card shows the masked address, the CC, the subject and the whole email, and pins the email, template and both addresses', async () => {
+    const card = await preview('send_invoice', emailInput());
+    expect(InvoiceEmail.sendInvoiceEmail).toHaveBeenCalledWith(INV, { previewOnly: true, cc: 'manager@example.com' });
+    expect(card).toMatchObject({ preview: true, channel: 'email', channels: 'email', email_body: EMAIL.text });
+    expect(card.text).toMatch(/^Email to r\S*@example\.com, CC manager@example\.com, subject "Invoice WPC-2099-0001 — \$129\.00", with the invoice PDF attached and the pay link\./);
+    expect(card.text).not.toMatch(/robin@example\.com/);
+    expect(card._version).toMatchObject({ channel: 'email', email_text: 'digest-1', email_content_hash: 'hash-1' });
+    expect(card._version).not.toHaveProperty('sms_text');
+    const lines = cardLines('send_invoice', card);
+    expect(lines).toContainEqual({ kind: 'comms', text: card.text });
+    expect(lines).toContainEqual({ kind: 'comms', text: 'Email text: Hi Robin, Your invoice is ready. Pay online: [pay link]', more: true });
+    expect(lines.map((l) => l.text).join(' ')).not.toMatch(/Text to/);
+  });
+
+  test('a CC that is not one address, or is the recipient\'s own, refuses invalid_cc', async () => {
+    for (const cc_email of ['nope', 'a@example.com, b@example.com', ['a@example.com']]) {
+      await expect(preview('send_invoice', emailInput({ cc_email }))).resolves.toMatchObject({ code: 'invalid_cc' });
+    }
+    await expect(preview('send_invoice', emailInput({ cc_email: 'ROBIN@example.com' }))).resolves.toMatchObject({
+      code: 'invalid_cc', error: 'The CC is the same address the email goes to.',
+    });
+    // No CC is an email to the customer alone.
+    await expect(preview('send_invoice', emailInput({ cc_email: undefined }))).resolves.toMatchObject({ preview: true, channel: 'email' });
+  });
+
+  test('no invoice email address on file refuses with the bar\'s words', async () => {
+    InvoiceEmail.sendInvoiceEmail.mockResolvedValueOnce({ ok: false, error: 'No invoice recipient email' });
+    await expect(preview('send_invoice', emailInput())).resolves.toMatchObject({
+      code: 'invoice_no_channel', error: expect.stringMatching(/No usable invoice email address is on file/),
+    });
+  });
+
+  describe('how the customer gets invoices: the email card needs Email and no App', () => {
+    const withPrefs = (row) => { state.notification_prefs = [{ customer_id: 'cust-1', ...row }]; };
+    test.each([
+      ['Text only', { invoice_channels: ['sms'] }],
+      ['App and Email', { invoice_channels: ['email', 'push'] }],
+      ['the legacy app choice', { invoice_channels: null, invoice_channel: 'push' }],
+    ])('%s is refused invoice_channel_unsupported', async (_label, row) => {
+      withPrefs(row);
+      await expect(preview('send_invoice', emailInput())).resolves.toMatchObject({
+        code: 'invoice_channel_unsupported', error: expect.stringMatching(/by text only, not by email/),
+      });
+    });
+    test.each([
+      ['Email only', { invoice_channels: ['email'] }],
+      ['Text and Email', { invoice_channels: ['email', 'sms'] }],
+      ['no saved choice', null],
+      ['the legacy text choice', { invoice_channels: null, invoice_channel: 'sms' }],
+    ])('%s builds the email card', async (_label, row) => {
+      if (row) withPrefs(row);
+      await expect(preview('send_invoice', emailInput())).resolves.toMatchObject({ preview: true, channel: 'email' });
+    });
+  });
+
+  test('the confirmed run sends the email leg only, with the CC and every email pin, and reports the email', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: false, skipped: true, code: 'sms_not_requested' }, email: { ok: true, cc: ['manager@example.com'] } } });
+    const { run } = await confirmWith('send_invoice', emailInput(), '_verified_invoice_send_version');
+    const result = await run();
+    const { approvedSend } = Invoices.sendInvoiceFromBar.mock.calls[0][0];
+    expect(approvedSend).toMatchObject({
+      expectedTotal: 129, channel: 'email', cc: 'manager@example.com',
+      recipients: { email: 'robin@example.com', cc: 'manager@example.com' },
+      version: { emailDigest: 'digest-1', emailContentHash: 'hash-1', verifyOwner: expect.any(Function) },
+    });
+    expect(approvedSend.version).not.toHaveProperty('smsDigest');
+    expect(result).toMatchObject({ success: true, email: { status: 'sent' }, note: 'The invoice email was sent.' });
+    expect(result).not.toHaveProperty('text');
+    expect(JSON.stringify(result)).not.toMatch(/robin@example\.com/);
+  });
+
+  test('an email that renders differently after the card refuses the confirm; the leg\'s own refusal is preview_changed too', async () => {
+    let { run } = await confirmWith('send_invoice', emailInput(), '_verified_invoice_send_version');
+    built = { ...EMAIL, digest: 'digest-2' };
+    await expect(run()).resolves.toMatchObject({ preview_changed: true });
+    expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+    built = EMAIL;
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 400, json: { ok: false, sms: { ok: false, skipped: true }, email: { ok: false, code: 'email_content_changed', error: 'The invoice email changed after the card was shown; it was not sent' } } });
+    ({ run } = await confirmWith('send_invoice', emailInput(), '_verified_invoice_send_version'));
+    await expect(run()).resolves.toMatchObject({ failed: true, preview_changed: true, email: { status: 'not_sent' } });
+  });
+
+  test('an email the provider may have taken is reported unknown, never not sent', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 400, json: { ok: false, sms: { ok: false, skipped: true }, email: { ok: false, deliveryOutcome: 'uncertain', error: 'socket hang up' } } });
+    const { run } = await confirmWith('send_invoice', emailInput(), '_verified_invoice_send_version');
+    await expect(run()).resolves.toMatchObject({ outcome_unknown: true, email: { status: 'unknown' } });
+  });
+
+  test('the claim\'s live check judges the delivery choice for an email', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, email: { ok: true } } });
+    const { run } = await confirmWith('send_invoice', emailInput(), '_verified_invoice_send_version');
+    await run();
+    const { verifyOwner } = Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version;
+    await expect(verifyOwner({ ...state.invoices[0], status: 'draft' }, db)).resolves.toBeNull();
+    state.notification_prefs = [{ customer_id: 'cust-1', invoice_channels: ['sms'] }];
+    await expect(verifyOwner({ ...state.invoices[0], status: 'draft' }, db)).resolves.toMatch(/by text only, not by email/);
   });
 });

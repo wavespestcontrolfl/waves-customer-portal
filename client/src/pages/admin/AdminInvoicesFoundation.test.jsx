@@ -121,6 +121,23 @@ describe("Invoice foundation workflow preservation", () => {
     ]);
   });
 
+  it("sends one CC with the invoice email and blocks a CC that is not an address", async () => {
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Resend", "Resend invoice");
+    await dialog.findByText("billing@example.invalid");
+    const submit = dialog.getByRole("button", { name: /Send|Resend/, exact: false });
+    fireEvent.change(dialog.getByLabelText("CC (optional)"), { target: { value: "not-an-email" } });
+    expect(submit).toBeDisabled();
+    fireEvent.change(dialog.getByLabelText("CC (optional)"), { target: { value: " manager@example.invalid " } });
+    const key = `POST /api/admin/invoices/${invoice.id}/send`;
+    overrides.set(key, () => response({ ok: true, sms: { ok: true }, email: { ok: true, cc: ["manager@example.invalid"] } }));
+    fireEvent.click(submit);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(requests.filter(request => request.key === key).map(request => request.body)).toEqual([
+      { resend: true, invoiceCcEmail: "manager@example.invalid" },
+    ]);
+  });
+
   // Round-6 P1 (#4131): a draft/scheduled invoice has never been delivered
   // — this dialog's own "Send invoice" title (vs. "Resend invoice" above)
   // IS the first-delivery / explicit-resend distinction, and the request

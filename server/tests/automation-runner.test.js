@@ -1081,6 +1081,87 @@ describe('advanceEnrollment', () => {
     expect(update.where).toHaveBeenCalledWith({ id: 'enr-1', current_step: 0 });
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', next_send_at: null, current_step: 1 }));
   });
+
+  // Weekly sweep #4616 B1, option A (owner 2026-10-31): a customer partway through a sequence
+  // continues after the last step they passed, whatever was turned off, back on, moved or deleted.
+  const S = (id, step_order, extra = {}) => ({ id, step_order, delay_hours: 24, html_body: `<p>${id}</p>`, ...extra });
+  const passedB = { passed_step_order: 1, passed_step_id: 'B', passed_step_ids: ['A', 'B'] };
+
+  test('a step turned off after a customer passed it does not make them skip the next one', () => {
+    const { nextSequenceStep } = require('../services/automation-runner');
+    // A, B sent; B is now off. The count of enabled steps (2) would have pointed at D.
+    const steps = [S('A', 0), S('C', 2), S('D', 3)];
+    expect(nextSequenceStep({ current_step: 2, metadata: passedB }, steps).id).toBe('C');
+  });
+
+  test('an old step turned back on before the customer\'s place is not sent to them, and nothing repeats', () => {
+    const { nextSequenceStep } = require('../services/automation-runner');
+    // X sits between A and B and was off when the customer passed that point.
+    const steps = [S('A', 0), S('X', 0.5), S('B', 1), S('C', 2)];
+    expect(nextSequenceStep({ current_step: 2, metadata: passedB }, steps).id).toBe('C');
+  });
+
+  test('a passed step moved later in the list is never sent again', () => {
+    const { nextSequenceStep } = require('../services/automation-runner');
+    const steps = [S('B', 1), S('C', 2), S('A', 5)];
+    expect(nextSequenceStep({ current_step: 2, metadata: passedB }, steps).id).toBe('C');
+    const passedC = { passed_step_order: 2, passed_step_id: 'C', passed_step_ids: ['A', 'B', 'C'] };
+    expect(nextSequenceStep({ current_step: 2, metadata: passedC }, steps)).toBeNull();
+  });
+
+  test('an enrolment advanced before the cursor existed picks the same step as the old index', () => {
+    const { nextSequenceStep } = require('../services/automation-runner');
+    const steps = [S('A', 0), S('B', 1), S('C', 2)];
+    expect(nextSequenceStep({ current_step: 0, metadata: {} }, steps).id).toBe('A');
+    expect(nextSequenceStep({ current_step: 2, metadata: { lead_id: 'lead-1' } }, steps).id).toBe('C');
+    expect(nextSequenceStep({ current_step: 3, metadata: null }, steps)).toBeNull();
+  });
+
+  test('an enrolment advanced before the cursor existed records every earlier step as passed when it next advances', async () => {
+    const { advanceEnrollment, nextSequenceStep } = require('../services/automation-runner');
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const update = chain();
+    setDbQueues({ automation_enrollments: [update] });
+    const steps = [S('A', 0), S('B', 1), S('C', 2), S('D', 3)];
+    // Sent A and B under the old index (current_step 2), now passes C.
+    await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 2, metadata: {} }, steps, steps[2]);
+    const cursor = JSON.parse(update.update.mock.calls[0][0].metadata.bindings[0]);
+    expect(cursor).toEqual({ passed_step_order: 2, passed_step_id: 'C', passed_step_ids: ['A', 'B', 'C'] });
+    // Moving A after D later never sends A again.
+    const moved = [S('B', 1), S('C', 2), S('D', 3), S('A', 9)];
+    expect(nextSequenceStep({ current_step: 3, metadata: cursor }, moved).id).toBe('D');
+    const afterD = { passed_step_order: 3, passed_step_id: 'D', passed_step_ids: [...cursor.passed_step_ids, 'D'] };
+    expect(nextSequenceStep({ current_step: 3, metadata: afterD }, moved)).toBeNull();
+  });
+
+  test('passing a step records the cursor in metadata, points current_step at the next step, and fences on the last passed step', async () => {
+    const { advanceEnrollment } = require('../services/automation-runner');
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const update = chain();
+    setDbQueues({ automation_enrollments: [update] });
+    const steps = [S('A', 0), S('C', 2), S('D', 3)];
+    const out = await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 1, metadata: { ...passedB } }, steps, steps[1]);
+    expect(out).toMatchObject({ sent: true, done: false });
+    expect(update.where).toHaveBeenCalledWith({ id: 'enr-1', current_step: 1 });
+    expect(update.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'passed_step_id', '') = ?", ['B']);
+    const patch = update.update.mock.calls[0][0];
+    expect(patch.current_step).toBe(2); // D, the next step, is index 2 of the enabled list
+    expect(patch.metadata.sql).toBe("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+    expect(JSON.parse(patch.metadata.bindings[0])).toEqual({ passed_step_order: 2, passed_step_id: 'C', passed_step_ids: ['A', 'B', 'C'] });
+  });
+
+  test('a manual prep settle (no step named) passes the step the enrolment was due to send', async () => {
+    const { advanceEnrollment } = require('../services/automation-runner');
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const update = chain();
+    setDbQueues({ automation_enrollments: [update] });
+    const steps = [S('A', 0), S('B', 1)];
+    await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 0, metadata: {} }, steps);
+    expect(update.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'passed_step_id', '') = ?", ['']);
+    const patch = update.update.mock.calls[0][0];
+    expect(patch.current_step).toBe(1);
+    expect(JSON.parse(patch.metadata.bindings[0])).toEqual({ passed_step_order: 0, passed_step_id: 'A', passed_step_ids: ['A'] });
+  });
 });
 
 describe('renderAutomationStepContent — consultation-booking placeholders', () => {
@@ -1183,6 +1264,8 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     expect(patch.metadata).toEqual({ sql: expect.stringContaining("- 'lead_id'"), bindings: [JSON.stringify({})] });
     expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
     expect(patch.metadata.sql).not.toContain('jsonb_set');
+    // A new episode starts at the first step: the sequence cursor is dropped with the episode stamps.
+    for (const key of ['passed_step_order', 'passed_step_id', 'passed_step_ids']) expect(patch.metadata.sql).toContain(`- '${key}'`);
   });
 
   test('context.recipientRole stamps metadata.recipient_role for an on-location contact\'s address only — the dispatch-time contact recheck reads it back (codex #6363 r10 P1)', async () => {

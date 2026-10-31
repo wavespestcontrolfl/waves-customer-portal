@@ -20,6 +20,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../co
 const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
 const { withOutlinkTrackingForEmail } = require('./outlink-tracking');
 const { resolveEmailLinks } = require('./email-lead-links');
+const { CARBON_COPY_CATEGORY } = require('../constants/email-replay-exclusions');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -551,6 +552,26 @@ function uniqueCategories(values = []) {
       seen.add(value);
       return true;
     });
+}
+
+// The CC list a send carries: trimmed, lowercased, valid addresses, without duplicates or the `to`
+// address itself. An address that is not one throws before any row is written (a caller bug).
+function carbonCopyList(cc, to) {
+  if (cc == null) return [];
+  const list = (Array.isArray(cc) ? cc : [cc]).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+  const invalid = list.find((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
+  if (invalid) throw new Error('Invalid CC email address');
+  const toAddress = String(to || '').trim().toLowerCase();
+  return [...new Set(list)].filter((email) => email !== toAddress);
+}
+
+// The first of `addresses` on the suppression list for this template, with its suppression row.
+async function firstSuppressedAddress(template, addresses, suppressionGroupKey) {
+  for (const address of addresses) {
+    const suppression = await activeSuppressionFor(template, address, suppressionGroupKey);
+    if (suppression) return { suppression, address };
+  }
+  return { suppression: null, address: null };
 }
 
 function categoriesFor(template, extra = []) {
@@ -1470,8 +1491,13 @@ async function sendTemplate({
   // annual-offer guard (a deposit receipt). The lead is derived from
   // recipient_id or the estimate's owner; no caller passes one directly.
   linkEstimateId = null,
+  // Extra addresses the one message is copied to (the invoice Send's CC). Recorded on the row
+  // (cc_email_snapshot) and checked against the suppression list like `to`; a row with a CC is
+  // never re-sent from its stored copy (CARBON_COPY_CATEGORY), since a replay would drop the copy.
+  cc = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
+  const ccList = carbonCopyList(cc, to);
   const auditRefusal = (err) => auditSendRefusal(err, {
     templateKey, versionId, recipientType, recipientId, triggerEventId, automationRunId, idempotencyKey,
   });
@@ -1527,7 +1553,9 @@ async function sendTemplate({
   const fromName = template.from_name || 'Waves Pest Control';
   const fromEmail = template.from_email || 'contact@wavespestcontrol.com';
   const replyTo = template.reply_to || 'contact@wavespestcontrol.com';
-  const allCategories = categoriesFor(template, test ? ['test', ...categories] : categories);
+  const allCategories = categoriesFor(template, [
+    ...(test ? ['test'] : []), ...(Array.isArray(categories) ? categories : [categories]), ...(ccList.length ? [CARBON_COPY_CATEGORY] : []),
+  ]);
   // Fresh per send attempt; echoed in custom_args so the webhook fallback can tell
   // this attempt's events from a prior (retried) attempt's. See webhooks-sendgrid.js.
   const sendAttemptToken = crypto.randomUUID();
@@ -1549,6 +1577,8 @@ async function sendTemplate({
     lead_id: links.lead_id,
     estimate_id: links.estimate_id,
     recipient_email_snapshot: to,
+    // Only a CC'd send writes the column, so every other row is exactly as before.
+    ...(ccList.length ? { cc_email_snapshot: JSON.stringify(ccList) } : {}),
     from_name_snapshot: fromName,
     from_email_snapshot: fromEmail,
     reply_to_snapshot: replyTo,
@@ -1571,9 +1601,10 @@ async function sendTemplate({
   };
 
   if (!test) {
-    const suppression = await activeSuppressionFor(template, to, suppressionGroupKey);
+    const { suppression, address: suppressedAddress } = await firstSuppressedAddress(template, [to, ...ccList], suppressionGroupKey);
     if (suppression) {
-      const reason = `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
+      // A suppressed CC blocks the whole send: dropping the copy quietly would tell the operator it went.
+      const reason = `${suppressedAddress === to ? 'Suppressed' : 'Suppressed CC address'}: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
       const blockedPayload = {
         ...messageSnapshot,
         status: 'blocked',
@@ -1595,7 +1626,7 @@ async function sendTemplate({
       await alertBlockedOperationalSend({
         template,
         suppressionGroupKey: effectiveSuppressionGroupKey,
-        to,
+        to: suppressedAddress,
         suppression,
       });
       return { sent: false, blocked: true, reason, message: blocked, rendered };
@@ -1759,6 +1790,7 @@ async function sendTemplate({
     // override); otherwise sendOne's template-keyed default governs.
     const sendToProvider = (html, text, guardIds, database, providerBoundaryCheck) => sendgrid.sendOne({
         to,
+        ...(ccList.length ? { cc: ccList } : {}),
         fromEmail,
         fromName,
         replyTo,

@@ -4300,6 +4300,12 @@ export default function EstimateToolViewV2({
           return null;
         }
       }
+      // Plugging is priced only from the area to plug, never the whole lawn
+      // (owner 2026-10-31).
+      if (form.svcPlugging && !(parseInt(form.plugArea, 10) > 0)) {
+        alert("Enter the area to plug (sq ft).");
+        return null;
+      }
 
       // Per-estimate overrides for the one-time pest_initial_roach fee.
       // Recurring auto-fire and standalone native carry SEPARATE fields so an
@@ -4689,8 +4695,7 @@ export default function EstimateToolViewV2({
         (form.svcLawn ||
           form.svcOnetimeLawn ||
           (form.svcTopdress && !(parseInt(form.topDressArea, 10) > 0)) ||
-          form.svcDethatch ||
-          (form.svcPlugging && !(parseInt(form.plugArea, 10) > 0)));
+          form.svcDethatch);
       if (
         hasPricedTurfService &&
         profile.lotSqFt <= 0 &&
@@ -5310,13 +5315,14 @@ export default function EstimateToolViewV2({
   const fleaExteriorWarning = !form.svcFleaExterior
     ? null
     : fleaExteriorPreview.warning;
-  const pluggingUsesTurfFallback = !!form.svcPlugging && !(plugAreaSqFt > 0);
+  const plugAreaWarning = form.svcPlugging && !(plugAreaSqFt > 0)
+    ? "Required: plugging is priced from this area only, never the whole lawn."
+    : null;
   const topDressUsesTurfFallback = !!form.svcTopdress && !(topDressAreaSqFt > 0);
   const hasTurfPricedSelection =
     (!commercialDetected && (!!form.svcLawn || !!form.svcOnetimeLawn)) ||
     topDressUsesTurfFallback ||
-    !!form.svcDethatch ||
-    pluggingUsesTurfFallback;
+    !!form.svcDethatch;
   const needsTurfConfirmation =
     hasTurfPricedSelection &&
     confirmedTurfSqFt === null &&
@@ -7169,11 +7175,12 @@ export default function EstimateToolViewV2({
                   {" "}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
-                    <Field label="Plug Area (sq ft)" id="estimate-plugArea" className="mb-4">
+                    <Field label="Area to plug (sq ft)" id="estimate-plugArea" className="mb-4" required error={plugAreaWarning}>
                       <InputV2
                         k="plugArea"
                         type="number"
-                        placeholder="e.g. 1000"
+                        min={1}
+                        placeholder="e.g. 400"
                       />
                     </Field>{" "}
                     <Field label="Spacing" id="estimate-plugSpacing" className="mb-4">

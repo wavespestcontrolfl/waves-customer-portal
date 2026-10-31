@@ -1774,6 +1774,7 @@ async function invoiceSendHandler(req, res, next) {
       invoiceRecipientEmail,
       invoiceRecipientName,
       saveBillingRecipient,
+      invoiceCcEmail,
       firstDelivery,
       resend,
     } = req.body || {};
@@ -1805,6 +1806,14 @@ async function invoiceSendHandler(req, res, next) {
     }
     const overrideEmail = cleanEmail(invoiceRecipientEmail);
     const overrideName = cleanOptionalText(invoiceRecipientName);
+    // One CC address for the invoice email (a copy of the same email and PDF). Never saved.
+    const ccEmail = cleanEmail(invoiceCcEmail);
+    if (invoiceCcEmail != null && typeof invoiceCcEmail !== 'string') {
+      return res.status(400).json({ error: 'The CC must be one email address', code: 'invalid_cc' });
+    }
+    if (ccEmail && !isEmailLike(ccEmail)) {
+      return res.status(400).json({ error: 'Invalid CC email address', code: 'invalid_cc' });
+    }
     const shouldSaveBillingRecipient = saveBillingRecipient === true;
     let emailRecipientOverride = null;
 
@@ -1844,6 +1853,7 @@ async function invoiceSendHandler(req, res, next) {
         requestReview,
         reviewDelayMinutes,
         emailRecipientOverride,
+        ...(ccEmail ? { emailCc: ccEmail } : {}),
         firstDeliveryOnly,
         overridesReviewHold,
         operatorInitiated: true,
@@ -1860,9 +1870,10 @@ async function invoiceSendHandler(req, res, next) {
           // claim refuses an edit or partial credit that landed after the card.
           expectedVersion: req.ibApprovedSend.version || null,
           skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true,
-          // The bar sends ONE text and nothing else: no email leg, and a pay-link text already queued for the send window is
-          // never adopted or cancelled (the claim refuses it).
-          channels: ['sms'], adoptsQueuedInvoiceSend: false,
+          // The bar sends ONE text, or (its email card) ONE email with at most the card's one CC, and nothing else. A pay-link
+          // text already queued for the send window is never adopted or cancelled (the claim refuses it).
+          channels: req.ibApprovedSend.channel === 'email' ? ['email'] : ['sms'], adoptsQueuedInvoiceSend: false,
+          emailCc: req.ibApprovedSend.channel === 'email' ? (req.ibApprovedSend.cc || null) : null,
         } : {}),
       });
     } catch (err) {

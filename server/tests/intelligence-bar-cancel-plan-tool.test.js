@@ -106,6 +106,29 @@ describe('cancel_plan unconfirmed', () => {
     expect(result.note_to_operator).toMatch(/PREVIEW ONLY/);
   });
 
+  test('the preview carries the series template change and the card shows a future_visit_prices line beside visit_prices', async () => {
+    const { confirmationDisplayParams } = require('../routes/admin-intelligence-bar');
+    mockPreview.mockResolvedValue({
+      ...PREVIEW,
+      wholeAccount: false,
+      impact: {
+        ...PREVIEW.impact,
+        perAppChanges: [{ id: 'v1', family: 'pest_control', label: 'Pest Control', before: 115.2, after: 128 }],
+        templateChanges: [{ rootId: 'root-1', family: 'pest_control', label: 'Pest Control', field: 'estimated_price', source: 'own', before: 115.2, after: 128 }],
+      },
+    });
+    const preview = await executeTool('cancel_plan', { customer_id: CUSTOMER, families: ['lawn_care'] }, { technicianId: 'admin-1', isAdmin: true });
+    expect(preview.template_changes).toEqual([expect.objectContaining({ rootId: 'root-1', field: 'estimated_price', before: 115.2, after: 128 })]);
+    const card = confirmationDisplayParams('cancel_plan', { customer_id: CUSTOMER }, preview);
+    expect(card.visit_prices).toBe('Pest Control $115.2 → $128');
+    expect(card.future_visit_prices).toBe('Pest Control future visits $115.2 → $128');
+    // No template change: no line.
+    mockPreview.mockResolvedValue(PREVIEW);
+    const plain = await executeTool('cancel_plan', { customer_id: CUSTOMER }, { technicianId: 'admin-1', isAdmin: true });
+    expect(plain.template_changes).toEqual([]);
+    expect(confirmationDisplayParams('cancel_plan', { customer_id: CUSTOMER }, plain)).not.toHaveProperty('future_visit_prices');
+  });
+
   test('a model-supplied confirmed:true is ignored by the route; the executor only honours the flag /confirm-action attaches — and defaults apply', async () => {
     await executeTool('cancel_plan', { customer_id: CUSTOMER });
     expect(mockPreview).toHaveBeenCalledWith(expect.objectContaining({ families: [], effectiveDate: 'now', waiveLateFee: false, sendConfirmation: true, reasonCode: null, note: '' }));

@@ -175,6 +175,15 @@ function epochMs(seconds) {
   return seconds * 1000;
 }
 
+// 16-point compass label for a bearing in degrees (0 = N, 90 = E); null when
+// the bearing is not a finite number.
+const COMPASS_16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+function compassLabel(degrees) {
+  const deg = finiteNumber(degrees);
+  if (deg == null) return null;
+  return COMPASS_16[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
+}
+
 function normalizeForecastPayload(payload) {
   const h = payload?.hourly || {};
   const times = Array.isArray(h.time) ? h.time : [];
@@ -185,6 +194,7 @@ function normalizeForecastPayload(payload) {
   const rh = column('relative_humidity_2m');
   const wind = column('wind_speed_10m');
   const gust = column('wind_gusts_10m');
+  const windDir = column('wind_direction_10m');
   const hourly = [];
   times.forEach((seconds, i) => {
     const ms = epochMs(seconds);
@@ -201,6 +211,8 @@ function normalizeForecastPayload(payload) {
       humidity_pct: roundedNumber(rh[i]),
       wind_mph: roundedNumber(wind[i], 1),
       wind_gust_mph: roundedNumber(gust[i], 1),
+      wind_dir_deg: finiteNumber(windDir[i]),
+      wind_dir: compassLabel(windDir[i]),
       // Unrounded readings, for callers that test a label limit with a strict
       // comparison (exactReadings); dropped from the returned rows otherwise.
       temperature_raw_f: finiteNumber(temp[i]),
@@ -218,6 +230,8 @@ function normalizeForecastPayload(payload) {
       humidity_pct: roundedNumber(c.relative_humidity_2m),
       wind_mph: roundedNumber(c.wind_speed_10m, 1),
       wind_gust_mph: roundedNumber(c.wind_gusts_10m, 1),
+      wind_dir_deg: finiteNumber(c.wind_direction_10m),
+      wind_dir: compassLabel(c.wind_direction_10m),
       precipitation_probability_pct: roundedNumber(c.precipitation_probability),
       weather_code: finiteNumber(c.weather_code),
     };
@@ -257,8 +271,8 @@ function propertyForecastUrl({ keyLat, keyLon, standard, startDate, endDate }) {
   const url = openMeteoForecastUrl();
   url.searchParams.set('latitude', String(keyLat));
   url.searchParams.set('longitude', String(keyLon));
-  url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,weather_code');
-  url.searchParams.set('hourly', 'precipitation,precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m');
+  url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation_probability,weather_code');
+  url.searchParams.set('hourly', 'precipitation,precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m');
   if (standard) {
     url.searchParams.set('past_days', '1');
     url.searchParams.set('forecast_days', '7');
@@ -337,9 +351,9 @@ function sliceForecast(entry, cached, {
 //   { status: 'ok', source: 'open_meteo', fetchedAt, cached, latitude, longitude,
 //     window: { from, to },                       // ISO instants
 //     current: { time, at, temperature_f, humidity_pct, wind_mph, wind_gust_mph,
-//                precipitation_probability_pct, weather_code } | null,
+//                wind_dir_deg, wind_dir, precipitation_probability_pct, weather_code } | null,
 //     hourly: [{ time, at, precipitation_in, precipitation_probability_pct,
-//                temperature_f, humidity_pct, wind_mph, wind_gust_mph }],
+//                temperature_f, humidity_pct, wind_mph, wind_gust_mph, wind_dir_deg, wind_dir }],
 //             // rows are the hour stamps in [from, to). precipitation_in is the rain
 //             // in the hour ENDING at that stamp (Open-Meteo "sum of the preceding
 //             // hour"); the other fields are readings AT the stamp.
@@ -486,7 +500,37 @@ async function fetchPropertyRainQuarterHours({
 // rain_24h_in "the whole ET day so far plus the rest of today's model" rather
 // than a true trailing 24 h; changing it would change report copy, so it is
 // left for an owner decision.
-async function fetchOpenMeteoConditions({ latitude, longitude } = {}) {
+// The wind for each hour of the visit: the hour stamps from the arrival hour
+// through the hour of the model reading, at most the 4 most recent (the
+// reading hour included). Arrival unknown, invalid or after the reading -> only
+// the reading hour. An hour the payload lacks (or that carries no wind value)
+// is skipped, never invented. No reading instant -> empty.
+const VISIT_HOURS_MAX = 4;
+function visitWindHours(hourly, readingAt, arrivedAt) {
+  const readingMs = readingAt ? Date.parse(readingAt) : NaN;
+  if (!Number.isFinite(readingMs)) return [];
+  const readingHourMs = Math.floor(readingMs / HOUR_MS) * HOUR_MS;
+  const arrivalMs = arrivedAt == null ? NaN : toInstantMs(arrivedAt);
+  const startMs = Number.isFinite(arrivalMs) && arrivalMs <= readingMs
+    ? Math.floor(arrivalMs / HOUR_MS) * HOUR_MS
+    : readingHourMs;
+  return hourly
+    .filter((r) => {
+      const ms = Date.parse(r.at);
+      return ms >= startMs && ms <= readingHourMs
+        && [r.wind_mph, r.wind_gust_mph, r.wind_dir_deg].some((v) => v != null);
+    })
+    .slice(-VISIT_HOURS_MAX)
+    .map((r) => ({
+      at: r.at,
+      time: r.time,
+      wind_mph: r.wind_mph,
+      wind_gust_mph: r.wind_gust_mph,
+      wind_dir: r.wind_dir,
+    }));
+}
+
+async function fetchOpenMeteoConditions({ latitude, longitude, arrivedAt } = {}) {
   const lat = toCoordinate(latitude) ?? SERVICE_AREA_DEFAULT_LOCATION.latitude;
   const lon = toCoordinate(longitude) ?? SERVICE_AREA_DEFAULT_LOCATION.longitude;
   const nowDate = new Date();
@@ -517,6 +561,8 @@ async function fetchOpenMeteoConditions({ latitude, longitude } = {}) {
   const conditions = {
     temp_f: roundedNumber(current.temperature_f),
     humidity_pct: roundedNumber(current.humidity_pct),
+    // The reading at the Complete tap (the ledger's wind number); the keys
+    // below it are the wind record's proof and never count as "useful" alone.
     wind_mph: roundedNumber(current.wind_mph),
     rain_24h_in: roundedNumber(rain24h, 2),
     sky: weatherCodeLabel(current.weather_code),
@@ -525,6 +571,11 @@ async function fetchOpenMeteoConditions({ latitude, longitude } = {}) {
     captured_at: forecast.fetchedAt,
     latitude: lat,
     longitude: lon,
+    wind_gust_mph: roundedNumber(current.wind_gust_mph),
+    wind_dir_deg: roundedNumber(current.wind_dir_deg),
+    wind_dir: current.wind_dir,
+    reading_at: current.at || null,
+    visit_hours: visitWindHours(hourly, current.at, arrivedAt),
   };
   return hasUsefulConditionValue(conditions) ? conditions : null;
 }
@@ -535,8 +586,8 @@ async function fetchOpenMeteoConditions({ latitude, longitude } = {}) {
 // FAWN has no trailing-24h rain or sky, and its nearest station can be up to
 // 35 mi from the property — whether application records should use station
 // data is an owner decision, not a side effect of the FAWN fix (2026-09-26).
-async function fetchApplicationConditions({ latitude, longitude } = {}) {
-  return fetchOpenMeteoConditions({ latitude, longitude });
+async function fetchApplicationConditions({ latitude, longitude, arrivedAt } = {}) {
+  return fetchOpenMeteoConditions({ latitude, longitude, arrivedAt });
 }
 
 // Sum of daily precipitation (inches) over a window. Returns null if ANY day is

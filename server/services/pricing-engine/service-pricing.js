@@ -9355,6 +9355,32 @@ function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
   };
 }
 
+// Plugging is priced only from the area to plug, never the whole lawn (owner
+// 2026-10-31: the whole-lawn fallback priced a 12,000 sq ft lawn at about
+// $29,300 for a few bare patches). With
+// no area the line carries no dollars and the same measurement contract as a
+// pre-slab job with no slab sq ft, so every send, accept and public-quote gate
+// holds it until someone enters the area.
+const PLUGGING_AREA_REQUIRED_REASON = 'missing_plugging_area_sqft';
+function pluggingAreaRequiredLine(spacing = 12) {
+  spacing = assertNonNegativeQuantity(spacing, 'pluggingSpacing');
+  assertEnum(spacing, [6, 9, 12], 'pluggingSpacing');
+  const label = spacing === 6 ? '6" Premium' : spacing === 9 ? '9" Standard' : '12" Economy';
+  return {
+    service: 'plugging',
+    name: 'Lawn Plugging Service',
+    price: null,
+    quoteRequired: true,
+    requiresMeasurement: true,
+    requiresManualReview: true,
+    manualReviewReasons: [PLUGGING_AREA_REQUIRED_REASON],
+    warnings: [PLUGGING_AREA_REQUIRED_REASON],
+    detail: `${label} | area to plug not entered`,
+    lawnSqFt: null, spacing, totalPlugs: null, trays: null, perSf: null, label,
+    sodWarning: spacing === 6,
+  };
+}
+
 // ============================================================
 // FOAM & DRILL (termite perimeter injection)
 // ============================================================
@@ -10290,6 +10316,7 @@ module.exports = {
   assertAreaAddOnsEnabled,
   buildPricingError,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
+  pluggingAreaRequiredLine, PLUGGING_AREA_REQUIRED_REASON,
   // Spec functions (Apr 2026)
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,

@@ -176,6 +176,8 @@ function summaryHour(h, scopedToTech) {
     technicianId: h.technician?.id || null,
     technicianName: scopedToTech ? null : (h.technician?.name || null),
     ...(h.day_already_late === true ? { dayAlreadyLate: true } : {}),
+    // When the van reaches this stop ("HH:MM"), for the box's end-of-window tag. Absent from an older server.
+    ...(h.estimated_arrival ? { estimatedArrival: h.estimated_arrival } : {}),
   };
 }
 

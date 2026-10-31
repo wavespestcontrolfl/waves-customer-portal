@@ -71,6 +71,8 @@ const DEFAULT_DRIVE_COST_PER_STOP = 6;
 // exists for it. The 10-26 measurement: 11 miles and 24 minutes per stop.
 const DEFAULT_DRIVE_MINUTES_PER_STOP = 24;
 const DEFAULT_DRIVE_MILES_PER_STOP = 11;
+// The largest margin percent a decimal(5,2) column holds.
+const MARGIN_PCT_LIMIT = 999.99;
 
 // GATE_JOB_COST_STANDARD_MINUTES. Owner ruling 2026-10-31: measured check-in-to-report spans are inflated
 // by on-site conversation and by writing the report in the van, and one lawn visit closed weeks after
@@ -381,13 +383,23 @@ function isStampedZeroVisit(svc) {
   return stampedZeroFreeLive() && hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
 }
 
+// Rule 1 of deriveRevenueFromOwnSources: a prepaid visit's share, or null. An always-free type, an included
+// follow-up, a consultation or a callback never takes a share. An add-on invoice on a covered visit is not
+// added: invoice.js voids a covered visit's invoice that carries extras today (invoiceHasNonBaseCharges).
+function prepaidVisitRevenue(svc, rec, serviceType, ownRevenue) {
+  if (svc.followup_included === true || isAlwaysFreeServiceType(serviceType)) return null;
+  if (isConsultationServiceType(serviceType) || isCallbackVisit(svc, rec)) return null;
+  return positiveMoney(ownRevenue.prepayShare);
+}
+
 // GATE_JOB_COST_STANDARD_MINUTES revenue (owner ruling 2026-10-31). Order:
-//   1. a recorded revenue above $0 is kept under keepRecordedRevenue; a recorded $0 falls through to the
+//   1. the visit's share of its paid annual-prepay term (prepaidVisitRevenue), even over a recorded amount and
+//      before its price: a covered visit is not billed on its own, so a recorded amount came from the old
+//      fallback (today's monthly rate), and annual prepay keeps the full estimated_price beside the discounted
+//      share it stamps in prepaid_amount; a covered visit can also carry estimated_price 0;
+//   2. a recorded revenue above $0 is kept under keepRecordedRevenue; a recorded $0 falls through to the
 //      visit's OWN sources below, never to customers.monthly_rate (today's plan, not this visit's);
-//   2. always-free types and included follow-ups are $0;
-//   3. the visit's share of its paid annual-prepay term, BEFORE its price: annual prepay keeps the full
-//      estimated_price on a covered visit and stamps the discounted share in prepaid_amount, and a covered
-//      visit can also carry estimated_price 0 (the stamped-zero rule below);
+//   3. always-free types and included follow-ups are $0;
 //   4. the explicit visit price, then an unpriced consultation or a callback is $0 (today's order), then its
 //      linked invoice's service money, $0 included (a fully discounted or fees-only invoice is still the
 //      visit's billing; null = no linked invoice);
@@ -398,13 +410,13 @@ function deriveRevenueFromOwnSources({
 }) {
   const rec = serviceRecord || {};
   const svc = scheduledService || {};
+  const serviceType = svc.service_type || rec.service_type;
+  const prepaid = prepaidVisitRevenue(svc, rec, serviceType, ownRevenue);
+  if (prepaid != null) return prepaid;
   const recorded = positiveMoney(rec.revenue);
   if (recorded != null && (keepRecordedRevenue || !ignoreExistingRevenue)) return recorded;
 
-  const serviceType = svc.service_type || rec.service_type;
   if (svc.followup_included === true || isAlwaysFreeServiceType(serviceType)) return 0;
-  const prepayShare = positiveMoney(ownRevenue.prepayShare);
-  if (prepayShare != null) return prepayShare;
   const visitPrice = positiveMoney(svc.estimated_price);
   if (visitPrice != null) return visitPrice;
   if (isConsultationServiceType(serviceType) || isCallbackVisit(svc, rec)) return 0;
@@ -502,14 +514,14 @@ async function loadLinkedInvoiceTotal(db, svc, record) {
   }
 }
 
-// The visit's own revenue sources (GATE_JOB_COST_STANDARD_MINUTES). A visit whose recorded revenue above $0
-// wins (kept, or not recomputed) never reaches them, so it skips the queries.
+// The visit's own revenue sources (GATE_JOB_COST_STANDARD_MINUTES). The prepay share is always read: it wins
+// over a recorded amount, and a visit with no term returns at once. The invoice is read only when no share, no
+// recorded revenue that wins (kept, or not recomputed) and no visit price comes first.
 async function loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue = false, recomputeRevenue = false } = {}) {
-  const recordedWins = Number(record?.revenue) > 0 && (keepRecordedRevenue || !recomputeRevenue);
-  if (recordedWins) return { prepayShare: 0, invoiceTotal: null };
   const prepayShare = await loadPrepayVisitShare(db, svc);
-  // The invoice is read only when neither the prepay share nor the visit's own price comes first.
-  const invoiceTotal = prepayShare > 0 || Number(svc.estimated_price) > 0 ? null : await loadLinkedInvoiceTotal(db, svc, record);
+  const recordedWins = Number(record?.revenue) > 0 && (keepRecordedRevenue || !recomputeRevenue);
+  const readInvoice = !(prepayShare > 0) && !recordedWins && !(Number(svc.estimated_price) > 0);
+  const invoiceTotal = readInvoice ? await loadLinkedInvoiceTotal(db, svc, record) : null;
   return { prepayShare, invoiceTotal };
 }
 
@@ -534,7 +546,11 @@ function computeServiceRecordFinancials({
   const drvCost = round2(driveCost);
   const totalCost = round2(labCost + matCost + drvCost + (Number(expensesCost) || 0));
   const grossProfit = round2(rev - totalCost);
-  const marginPct = rev > 0 ? round2((grossProfit / rev) * 100) : null;
+  // service_records.gross_margin_pct and job_costs.margin_pct are decimal(5,2): a margin past the column's
+  // limit (a few cents of revenue against a visit's costs) is stored at the limit, not a failed write.
+  const marginPct = rev > 0
+    ? Math.min(MARGIN_PCT_LIMIT, Math.max(-MARGIN_PCT_LIMIT, round2((grossProfit / rev) * 100)))
+    : null;
   const rpmh = labHours > 0 ? round2(rev / labHours) : null;
   return {
     revenue: rev,

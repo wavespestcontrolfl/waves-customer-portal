@@ -1,5 +1,5 @@
 /**
- * PUT /admin/customers/:id accepts smsPrimaryForSharedPhone (GATE_SMS_SHARED_PHONE_LINK)
+ * PUT /admin/customers/:id accepts smsPrimaryForSharedPhone (shared-phone text link, owner 2026-10-10)
  * and writes it to customers.sms_primary_for_shared_phone as a boolean.
  */
 jest.mock('../middleware/admin-auth', () => ({

@@ -55,7 +55,7 @@ describe('sendInvoiceFromBar', () => {
     // Same call as the page, except the bar never draws credit and never takes the
     // page's operator dispute-hold exemption, and it carries the approved total + recipients.
     // The bar sends one text: no email leg, and a queued pay-link text is never adopted (round 13).
-    expect(barCall[1]).toEqual({ ...pageCall[1], expectedTotal: 129, expectedRecipients: recipients, expectedVersion: version, skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true, channels: ['sms'], adoptsQueuedInvoiceSend: false });
+    expect(barCall[1]).toEqual({ ...pageCall[1], expectedTotal: 129, expectedRecipients: recipients, expectedVersion: version, skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true, channels: ['sms'], adoptsQueuedInvoiceSend: false, emailCc: null });
     expect(pageCall[1].channels).toBeUndefined();
     expect(pageCall[1].adoptsQueuedInvoiceSend).toBeUndefined();
     expect(pageCall[1].holdExempt).toBe('operator');
@@ -64,6 +64,23 @@ describe('sendInvoiceFromBar', () => {
     expect(pageCall[1].expectedVersion).toBeUndefined();
     expect(pageCall[1].skipAccountCreditAutoApply).toBeUndefined();
     expect(pageCall[1]).toMatchObject({ requestReview: false, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: 'staff-1', firstDeliveryOnly: false, overridesReviewHold: false });
+  });
+
+  test('the email card (GATE_IB_INVOICE_EMAIL) runs the email leg only, with the card\'s one CC; a body CC never reaches a bar send', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({ ok: true, sms: { ok: false, skipped: true }, email: { ok: true } });
+    const recipients = { email: 'robin@example.com', cc: 'manager@example.com' };
+    await router.sendInvoiceFromBar({
+      invoiceId: 'inv-1', body: { requestReview: false, invoiceCcEmail: 'other@example.com' }, actor: {},
+      approvedSend: { expectedTotal: 129, recipients, channel: 'email', cc: 'manager@example.com', version: { emailDigest: 'd1' } },
+    });
+    expect(InvoiceService.sendViaSMSAndEmail.mock.calls[0][1]).toMatchObject({
+      channels: ['email'], emailCc: 'manager@example.com', expectedRecipients: recipients, refusalOnly: true, adoptsQueuedInvoiceSend: false,
+    });
+    await router.sendInvoiceFromBar({
+      invoiceId: 'inv-1', body: { requestReview: false, invoiceCcEmail: 'other@example.com' }, actor: {},
+      approvedSend: { expectedTotal: 129, recipients: { phone: '9415550100' }, channel: 'text', cc: 'manager@example.com' },
+    });
+    expect(InvoiceService.sendViaSMSAndEmail.mock.calls[1][1]).toMatchObject({ channels: ['sms'], emailCc: null });
   });
 
   test('the handler\'s own refusals come back as its reply; an unexpected error rejects', async () => {
@@ -105,11 +122,13 @@ describe('a send that loses the race to another delivery (PR #6117 round-1 P1)',
 });
 
 describe('the approved recipients reach each send leg (source contract)', () => {
-  test('sendViaSMSAndEmail hands the phone to the text leg; the bar starts no email leg', () => {
+  test('sendViaSMSAndEmail hands the phone to the text leg, and the email card\'s address and email to the email leg only', () => {
     const src = require('fs').readFileSync(require.resolve('../services/invoice.js'), 'utf8');
     const fn = src.slice(src.indexOf('  async sendViaSMSAndEmail('));
     expect(fn).toContain('...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),');
-    expect(fn).not.toContain('expectedEmail');
+    // The email pins ride only on an email-only send that carries the card's email digest.
+    expect(fn).toContain('...(emailOnly && expectedVersion?.emailDigest ? {');
+    expect(fn).toContain('expectedRecipientEmail: expectedRecipients?.email,');
     // Both re-entries (the zero-due retry and the renewal gate) keep the pins.
     expect(fn.slice(0, fn.indexOf('let packetClaim')).match(/^\s+expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,$/gm)).toHaveLength(2);
   });

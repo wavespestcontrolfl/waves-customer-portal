@@ -12,6 +12,7 @@ const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./sche
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
 const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
+const { newSeriesAreaAnchor } = require('./lawn-area-days');
 const { lawn9xRoundsLive } = require('../config/feature-gates');
 
 const MONTH_RECURRENCE_INTERVALS = {
@@ -203,6 +204,14 @@ function seriesRoundAnchor(parent) {
   return dateOnly(parent?.recurring_round_anchor_date) || seriesCadencePosition(parent) || null;
 }
 
+// The anchor a rounds date walk places from: the caller's roundAnchor (a NEW series on its
+// area's anchor, areaSeedOptions), else the parent's own (seriesRoundAnchor: its stored
+// recurring_round_anchor_date, else its cadence position), so a reseed of a series that
+// already stores an area anchor keeps its area day.
+function walkRoundAnchor(parent, opts) {
+  return opts.roundAnchor ?? seriesRoundAnchor(parent) ?? undefined;
+}
+
 function positiveInt(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
@@ -315,27 +324,31 @@ function serviceKeyFor(value = {}) {
 // service_key / name / label / service_type (or serviceType) / isCommercial.
 // Lazy converter require (it loads this module at boot); an identity that
 // cannot be read fails closed to the unchanged pattern.
-function lawnRoundsSeriesPattern({ pattern, intervalDays = null, ...identity } = {}) {
-  const unchanged = { pattern, intervalDays };
+function lawnRoundsSeriesPattern(input = {}) {
+  const { pattern, intervalDays = null } = input;
   try {
-    if (!lawn9xRoundsLive()) return unchanged;
-    const normalized = normalizeRecurringPattern(pattern);
-    const parsedInterval = Number.parseInt(intervalDays, 10);
-    const interval = Number.isFinite(parsedInterval) ? parsedInterval : null;
-    const sixWeek = (normalized === 'every_6_weeks' && (interval == null || interval === 42))
-      || (normalized === 'custom' && interval === 42);
-    if (!sixWeek) return unchanged;
-    const svc = { ...identity };
-    if (!svc.service_type && svc.serviceType) svc.service_type = svc.serviceType;
-    const parentRow = { service_type: svc.service_type };
-    const { seedingFamilyKey, isCommercialRecurringLine } = require('./estimate-converter');
-    if (svc.isCommercial === true || svc.is_commercial === true || isCommercialRecurringLine(svc, parentRow)) return unchanged;
-    if (seedingFamilyKey(svc, parentRow) !== 'lawn_care') return unchanged;
-    return { pattern: LAWN_ROUNDS_9, intervalDays: null };
+    if (lawn9xRoundsLive() && isLawn9xRoundsSeries(input)) return { pattern: LAWN_ROUNDS_9, intervalDays: null };
   } catch (err) {
     require('./logger').warn(`[recurring-seeder] lawn rounds identity unreadable (series left unchanged): ${err.message}`);
-    return unchanged;
   }
+  return { pattern, intervalDays };
+}
+
+// The identity half of lawnRoundsSeriesPattern, without the gate: is this a residential lawn 9x
+// series (lawn family; every_6_weeks, or custom with a 42-day interval)? The one-time re-date of
+// current 9x customers (lawn-rounds-redate.js) asks the same question while the gate is off.
+function isLawn9xRoundsSeries({ pattern, intervalDays = null, ...identity } = {}) {
+  const normalized = normalizeRecurringPattern(pattern);
+  const parsedInterval = Number.parseInt(intervalDays, 10);
+  const interval = Number.isFinite(parsedInterval) ? parsedInterval : null;
+  const sixWeek = (normalized === 'every_6_weeks' && (interval == null || interval === 42))
+    || (normalized === 'custom' && interval === 42);
+  if (!sixWeek) return false;
+  const svc = { ...identity };
+  if (!svc.service_type && svc.serviceType) svc.service_type = svc.serviceType;
+  const { seedingFamilyKey, isCommercialRecurringLine } = require('./estimate-converter');
+  if (svc.isCommercial === true || svc.is_commercial === true || isCommercialRecurringLine(svc, { service_type: svc.service_type })) return false;
+  return seedingFamilyKey(svc, { service_type: svc.service_type }) === 'lawn_care';
 }
 
 // The seeder's own follow-up rows: when it is handed a lawn 9x parent with the
@@ -571,6 +584,8 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     nth: opts.recurringNth ?? parent.recurring_nth,
     weekday: opts.recurringWeekday ?? parent.recurring_weekday,
     intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days,
+    // Lawn rounds, a NEW series on its area's anchor only (resolveNewSeriesAreaAnchor); undefined otherwise.
+    roundAnchor: walkRoundAnchor(parent, opts),
   });
   // existingSeriesDates hands a SeriesDates (boosters own no lawn round); a
   // caller's plain list is read as cadence dates.
@@ -777,6 +792,9 @@ async function markParentRecurring(conn, parent, pattern, opts = {}) {
     recurring_weekday: rOpts.weekday,
     recurring_interval_days: rOpts.intervalDays,
     updated_at: new Date(),
+    // Lawn rounds: a new series born on its area's anchor stores it on the parent (the seed's area
+    // anchor; a later config edit does not move the series).
+    ...(opts.areaRoundAnchor ? { recurring_round_anchor_date: opts.areaRoundAnchor } : {}),
     // Anchored-split PROVENANCE (owner ruling 2026-08-27): when this seed
     // bills follow-ups at an even per-visit quotient (the parent absorbed
     // the annual's remainder cents), record that quotient on the series
@@ -1313,6 +1331,18 @@ async function seedingBlackoutDates(conn, parent, opts = {}) {
   } catch { return null; /* fail open */ }
 }
 
+// Lawn rounds neighborhood day: the extra options of a NEW lawn_rounds_9 series
+// whose area (lawn-area-days.js) has an anchor: the anchor itself (stamped on
+// the parent, and the roundAnchor of the date walk). {} for every other series,
+// a parent that already stores an anchor (its walk reads that, walkRoundAnchor),
+// and a caller that passed its own roundAnchor. The seed and its planner both
+// call this, so their dates are identical.
+async function areaSeedOptions(conn, parent, opts, pattern) {
+  if (dateOnly(opts.roundAnchor)) return {};
+  const areaRoundAnchor = await newSeriesAreaAnchor(conn, parent, pattern);
+  return areaRoundAnchor ? { areaRoundAnchor, roundAnchor: areaRoundAnchor } : {};
+}
+
 // The dates a seedFollowUpsForParent call with the SAME opts would insert —
 // plain reads + the deterministic builder, no locks taken and nothing
 // written. Lets a caller acquire the per-date occupancy locks (rung 1 of
@@ -1334,8 +1364,9 @@ async function planFollowUpSeedDates(conn, inputParent, inputOpts = {}) {
     || await customerPrefersNoWeekends(conn, parent.customer_id);
   const existingDates = await existingSeriesDates(conn, parent, columns);
   const blackoutDates = await seedingBlackoutDates(conn, parent, opts);
+  const area = await areaSeedOptions(conn, parent, opts, pattern);
   return [...new Set(
-    buildRecurringFollowUpRows(parent, { ...opts, pattern, skipWeekends, stampSkipWeekends, existingDates, blackoutDates })
+    buildRecurringFollowUpRows(parent, { ...opts, ...area, pattern, skipWeekends, stampSkipWeekends, existingDates, blackoutDates })
       .map((row) => dateOnly(row.scheduled_date))
       .filter(Boolean),
   )];
@@ -1459,8 +1490,10 @@ async function seedFollowUpsForParent(conn, inputParent, inputOpts = {}) {
   const stampSkipWeekends = opts.skipWeekends !== undefined ? !!opts.skipWeekends : !!parent.skip_weekends;
   const skipWeekends = stampSkipWeekends
     || await customerPrefersNoWeekends(conn, parent.customer_id);
+  const area = await areaSeedOptions(conn, parent, opts, pattern);
   await markParentRecurring(conn, parent, pattern, {
     ...opts,
+    ...area,
     skipWeekends: stampSkipWeekends,
     columns,
   });
@@ -1486,6 +1519,7 @@ async function seedFollowUpsForParent(conn, inputParent, inputOpts = {}) {
   await require('./customer-properties').anchorSoleProperty(anchoredParent, columns, conn);
   const builtRows = buildRecurringFollowUpRows(anchoredParent, {
     ...opts,
+    ...area,
     childIdentity,
     pattern,
     skipWeekends,
@@ -1662,6 +1696,7 @@ module.exports = {
   seedFollowUpsForParent,
   serviceKeyFor,
   lawnRoundsSeriesPattern,
+  isLawn9xRoundsSeries,
   shiftPastWeekend,
   _internals: {
     applySeededPrepayCoverage,
