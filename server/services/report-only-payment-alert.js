@@ -70,7 +70,7 @@ function alertSpec(invoice, record) {
 }
 
 async function runReportOnlyPaymentCheck({ now = new Date() } = {}) {
-  const { raiseAdminAlert } = require('./admin-alert-compose');
+  const { composeAdminAlert } = require('./admin-alert-compose');
   const episodes = require('./admin-alert-episodes');
 
   const owed = new Map();
@@ -98,8 +98,13 @@ async function runReportOnlyPaymentCheck({ now = new Date() } = {}) {
   let raised = 0;
   for (const [key, { invoice, record }] of owed) {
     try {
-      // A standing row for the key dedupes silently: one ring per episode.
-      await raiseAdminAlert('billing', alertSpec(invoice, record), { dedupeKey: key });
+      // A standing row for the key dedupes silently: one ring per episode. A
+      // row this pass closed (a bank payment processing, a payer handoff) and
+      // whose bill is owed again (the debit returned) reopens and rings.
+      const composed = composeAdminAlert(alertSpec(invoice, record));
+      await episodes.raiseAdminAlertWithReopen('billing', composed.headline, composed.why, {
+        link: composed.link, dedupeKey: key, metadata: composed.metadata,
+      });
       raised += 1;
     } catch (err) {
       logger.error(`[report-only-payment-alert] invoice ${invoice.id}: ${err.message}`);

@@ -138,6 +138,20 @@ postgres('report-only payment alert (live Postgres)', () => {
     for (const { invoiceId } of [today, noMarker, old, payer]) expect(await bells(invoiceId)).toHaveLength(0);
   }, DB_TIMEOUT_MS);
 
+  test('a bank payment that is processing closes the bell; a debit that returns reopens it and rings again', async () => {
+    const { invoiceId } = await completion();
+    await runReportOnlyPaymentCheck({ now: NOW });
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'processing' });
+    expect((await runReportOnlyPaymentCheck({ now: NOW })).closed).toBe(1);
+    expect((await bells(invoiceId))[0].metadata.autoCleared).toBe(true);
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sent' });
+    await runReportOnlyPaymentCheck({ now: NOW });
+    const [row] = await bells(invoiceId);
+    expect(row.metadata.autoCleared).toBe(false);
+    expect(row.metadata.recurrenceGeneration).toBe(1);
+    expect(row.read_at).toBeNull();
+  }, DB_TIMEOUT_MS);
+
   test('the bell closes once the bill is paid, even after the visit leaves the 30-day window', async () => {
     const { invoiceId } = await completion();
     await runReportOnlyPaymentCheck({ now: NOW });
