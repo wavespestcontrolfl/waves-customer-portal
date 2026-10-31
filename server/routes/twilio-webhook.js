@@ -967,11 +967,8 @@ router.post('/sms', async (req, res) => {
             else logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`);
           }
         }
-        if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-          try {
-            const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
-            await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
-          } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
+        if (!landed && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+          await recordInboundTextAlert({ customer, From, MessageSid, Body });
         }
         // A loud tapback on a tech line reaches the holder too (same card as a
         // text — codex #4053 r2 P2); quiet ones stay silent everywhere.
@@ -1411,17 +1408,8 @@ router.post('/sms', async (req, res) => {
 
     // A staff text to a tracking line gets this forward: the tracking-line bell above skips staff
     // senders (GATE_TECH_STAFF_GUARDS), and the office must still hear about it.
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && (!isTrackingLeadInbound || staffSender) && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-      try {
-        const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
-        const mediaText = inboundMedia.length
-          ? `\nMedia: ${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`
-          : '';
-        await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"${mediaText}`,
-          { messageType: 'internal_alert' }
-        );
-      } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
+    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && (!isTrackingLeadInbound || staffSender) && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+      await recordInboundTextAlert({ customer, From, MessageSid, Body, mediaCount: inboundMedia.length });
     }
 
     // Van wrap tracking — new lead flow
@@ -2019,6 +2007,29 @@ async function retypeConsumedInbound(smsLogId, messageType, label) {
 
 async function ringSmsReplyBell(args) {
   return require('../services/sms-reply-alert-delivery').ringSmsReplyBell(args);
+}
+
+// The "New SMS" alert for a text no thread bell covered (an unknown sender, a staff text, a bell that did
+// not land). Was an internal text to the owner's phone, silenced since 2026-09 (services/owner-alerts.js).
+// One row per inbound message. Never throws.
+async function recordInboundTextAlert({ customer, From, MessageSid, Body, mediaCount = 0 }) {
+  try {
+    const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
+    const words = String(Body || '').slice(0, 120);
+    const mediaText = mediaCount ? `\nMedia: ${mediaCount} photo${mediaCount === 1 ? '' : 's'}` : '';
+    await require('../services/owner-alerts').recordOwnerAlert('inbound-text', {
+      action: 'read a new text',
+      why: customer ? `${senderName} sent a text no thread bell covered.` : 'A number with no customer record texted Waves.',
+      subject: customer?.id ? { type: 'customer', id: String(customer.id) } : { type: 'check', id: 'inbound-text' },
+      text: `New SMS\nFrom: ${senderName}\n"${words}"${mediaText}`,
+      link: '/admin/communications',
+      dedupeKey: `owner-alert:inbound-text:${MessageSid || `${phoneDigits(From)}:${Date.now()}`}`,
+      itemKeys: [MessageSid || phoneDigits(From)],
+      metadata: customer?.id ? { customerId: customer.id } : {},
+    });
+  } catch (e) {
+    logger.error(`[twilio-webhook] new-text owner alert failed for ${maskPhone(From)}: ${e.code || e.name || 'error'}`);
+  }
 }
 
 // sms_log.message_type of the automated visit notices the system sends on its

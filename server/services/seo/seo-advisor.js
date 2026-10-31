@@ -26,9 +26,6 @@ const { dispatchWithFallback } = require('../llm/call');
 const ADVISOR_TIMEOUT_MS = 10 * 60 * 1000;
 
 
-let TwilioService;
-try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
-
 // storeReport writes `grade` with no fallback (an undefined value there is
 // an undefined DB binding — Knex throws, storeReport's own try/catch
 // swallows it, and the weekly report is silently never persisted) and the
@@ -343,17 +340,23 @@ Analyze and provide specific, prioritized recommendations.`,
     }
   }
 
+  // Was an internal text to the owner's phone, silenced since 2026-09
+  // (services/owner-alerts.js). One row per report day.
   async sendSummary(report) {
-    if (!TwilioService || !process.env.ADAM_PHONE) return;
     try {
       const topRecs = (report.recommendations || []).slice(0, 3).map(r => `• ${r.action}`).join('\n');
       const opps = (report.page2_opportunities || []).length;
-      await TwilioService.sendSMS(process.env.ADAM_PHONE,
-        `🔍 Weekly SEO Report — Grade: ${report.grade || '?'}\n${report.overall_assessment || ''}\n\n${opps} page-2 opportunities\n\nTop actions:\n${topRecs}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
-        { messageType: 'internal_alert' }
-      );
+      const { recordOwnerAlert, whyFromFreeText } = require('../owner-alerts');
+      await recordOwnerAlert('seo-weekly-report', {
+        action: `read the weekly SEO report, grade ${String(report.grade || 'none').slice(0, 3)}`,
+        why: whyFromFreeText(report.overall_assessment),
+        subject: { type: 'check', id: 'seo-weekly-report' },
+        text: `Weekly SEO Report — Grade: ${report.grade || '?'}\n${report.overall_assessment || ''}\n\n${opps} page-2 opportunities\n\nTop actions:\n${topRecs}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
+        link: '/admin/ads',
+        dedupeKey: `owner-alert:seo-weekly-report:${report.date || etDateString()}`,
+      });
     } catch (err) {
-      logger.error(`SEO Advisor SMS failed: ${err.message}`);
+      logger.error(`SEO Advisor owner alert failed: ${err.message}`);
     }
   }
 }

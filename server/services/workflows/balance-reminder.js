@@ -1,5 +1,4 @@
 const db = require("../../models/db");
-const TwilioService = require("../twilio");
 const logger = require("../logger");
 const { etDateString, addETDays } = require("../../utils/datetime-et");
 const { sendCustomerMessage } = require("../messaging/send-customer-message");
@@ -95,11 +94,20 @@ class BalanceReminder {
         if (serviceDateEt !== today && serviceDateEt !== tomorrow) continue;
         if (await customerDunningStopped(balance)) continue;
         const daysUntil = serviceDateEt === today ? 0 : 1;
-        await TwilioService.sendSMS(
-          process.env.ADAM_PHONE || "+19415993489",
-          `💰 Overdue: ${service.first_name} ${service.last_name} — $${balance.totalBalance.toFixed(2)} (${balance.daysOverdue} days). Service ${daysUntil === 0 ? "today" : "tomorrow"}.`,
-          { messageType: "internal_alert" },
-        );
+        const name = [service.first_name, service.last_name].filter(Boolean).join(" ") || "A customer";
+        const when = daysUntil === 0 ? "today" : "tomorrow";
+        // Was an internal text to the owner's phone, silenced since 2026-09
+        // (services/owner-alerts.js). One row per customer per visit day.
+        await require("../owner-alerts").recordOwnerAlert("overdue-visit", {
+          action: "collect an overdue balance before the visit",
+          why: `${name} owes $${balance.totalBalance.toFixed(2)}, ${balance.daysOverdue} days overdue, with service ${when}.`,
+          subject: { type: "customer", id: String(service.cust_id) },
+          text: `Overdue: ${name} — $${balance.totalBalance.toFixed(2)} (${balance.daysOverdue} days). Service ${when}.`,
+          link: `/admin/customers?customerId=${encodeURIComponent(service.cust_id)}`,
+          dedupeKey: `owner-alert:overdue-visit:${alertKey}`,
+          itemKeys: [alertKey],
+          metadata: { customerId: service.cust_id },
+        });
         alerted.add(alertKey);
       } catch (err) {
         logger.error(`Imminent overdue owner alert failed for ${service.cust_id}: ${err.message}`);

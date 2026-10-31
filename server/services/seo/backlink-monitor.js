@@ -394,16 +394,17 @@ class BacklinkMonitor {
     }
 
     // Alert on new critical toxic links
+    // Was an internal text to the owner's phone, silenced since 2026-09
+    // (services/owner-alerts.js). One row per day.
     if (newCritical > 0 && process.env.NODE_ENV === 'production') {
-      try {
-        const TwilioService = require('../twilio');
-        if (process.env.ADAM_PHONE) {
-          await TwilioService.sendSMS(process.env.ADAM_PHONE,
-            `🔗 ${newCritical} new toxic backlink(s) detected for wavespestcontrol.com. Review in /admin/seo → Backlinks`,
-            { messageType: 'internal_alert' }
-          );
-        }
-      } catch { /* best effort */ }
+      await require('../owner-alerts').recordOwnerAlert('seo-toxic-links', {
+        action: 'review new toxic backlinks',
+        why: `${newCritical} new toxic backlink${newCritical === 1 ? '' : 's'} point at the main site.`,
+        subject: { type: 'check', id: 'seo-toxic-links' },
+        text: `${newCritical} new toxic backlink(s) detected for wavespestcontrol.com. Review in /admin/seo → Backlinks`,
+        link: '/admin/seo',
+        dedupeKey: `owner-alert:seo-toxic-links:${etDateString()}`,
+      });
     }
 
     // Alert on VERIFIED referring-domain losses only (DR>=30, non-directory) —
@@ -840,18 +841,20 @@ class BacklinkMonitor {
       }
     }
 
+    // Was an internal text to the owner's phone, silenced since 2026-09
+    // (services/owner-alerts.js). One row per competitor per day.
     if (newHighValueGaps.length > 0 && process.env.NODE_ENV === 'production') {
-      try {
-        const TwilioService = require('../twilio');
-        if (process.env.ADAM_PHONE) {
-          const top = newHighValueGaps.slice(0, 3);
-          const names = top.map(g => `${g.source_domain} DR${g.domain_rating} (${g.competitor})`).join(', ');
-          await TwilioService.sendSMS(process.env.ADAM_PHONE,
-            `🔗 ${newHighValueGaps.length} new competitor gap(s): ${names}. Review in /admin/seo → Backlinks`,
-            { messageType: 'internal_alert' }
-          );
-        }
-      } catch { /* best effort */ }
+      const top = newHighValueGaps.slice(0, 3);
+      const names = top.map(g => `${g.source_domain} DR${g.domain_rating} (${g.competitor})`).join(', ');
+      await require('../owner-alerts').recordOwnerAlert('seo-competitor-gaps', {
+        action: 'review new competitor backlink gaps',
+        why: `${newHighValueGaps.length} strong sites link to ${competitorDomain} and not to Waves.`,
+        subject: { type: 'check', id: 'seo-competitor-gaps' },
+        text: `${newHighValueGaps.length} new competitor gap(s): ${names}. Review in /admin/seo → Backlinks`,
+        link: '/admin/seo',
+        dedupeKey: `owner-alert:seo-competitor-gaps:${competitorDomain}:${etDateString()}`,
+        itemKeys: newHighValueGaps.map(g => g.source_domain),
+      });
     }
 
     logger.info(`Competitor gap scan ${competitorDomain}: ${links.length} links, ${gaps} new gaps, ${newHighValueGaps.length} high-value`);

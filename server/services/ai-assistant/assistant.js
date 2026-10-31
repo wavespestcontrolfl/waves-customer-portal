@@ -1080,17 +1080,11 @@ class WavesAssistant {
       sent_to_customer: true,
     }).catch(e => logger.error(`[ai-assistant] Failed to save escalation reply: ${e.message}`, { conversationId: conversation.id }));
 
-    // Notify Adam via SMS for urgent escalations
-    if (priority === 'urgent') {
-      try {
-        const TwilioService = require('../twilio');
-        if (process.env.ADAM_PHONE) {
-          await TwilioService.sendSMS(process.env.ADAM_PHONE,
-            `🚨 AI Escalation (${priority})\n${customer ? customer.first_name + ' ' + customer.last_name : 'Unknown'}\nReason: ${reason}\nMsg: "${(customerMessage || '').substring(0, 100)}"`,
-            { messageType: 'internal_alert' }
-          );
-        }
-      } catch { /* SMS notification is best-effort */ }
+    // Urgent escalations leave an owner alert unless the portal bell above
+    // already rang (was an internal text to the owner's phone, silenced since
+    // 2026-09; services/owner-alerts.js).
+    if (priority === 'urgent' && !teamNotified) {
+      await require('../owner-alerts').recordUrgentEscalation({ customer, reason, customerMessage, conversationId: conversation.id, escalationId: escalation.id });
     }
 
     logger.info(`AI escalated: ${conversation.id} reason="${reason}" priority=${priority}`);
@@ -1173,16 +1167,16 @@ class WavesAssistant {
       } catch { /* gap reports remain best-effort after the escalation commits */ }
     }
 
-    // The existing urgent internal SMS remains portal behavior. Only the
-    // attempt that created the durable escalation may send it; a request
-    // retry that reconciles the same row never sends it again.
-    if (priority === 'urgent' && persisted.created && process.env.ADAM_PHONE) {
+    // The urgent owner alert (was an internal text to the owner's phone,
+    // silenced since 2026-09; services/owner-alerts.js). Only the attempt that
+    // created the durable escalation writes it, and only when the operator
+    // bell did not land; its key holds one row per escalation either way.
+    if (priority === 'urgent' && persisted.created && !persisted.handoff.teamNotified) {
       try {
-        const TwilioService = require('../twilio');
-        await waitFor(() => TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `🚨 AI Escalation (${priority})\n${persisted.customer ? persisted.customer.first_name + ' ' + persisted.customer.last_name : 'Unknown'}\nReason: ${reason}\nMsg: "${(customerMessage || '').substring(0, 100)}"`,
-          { messageType: 'internal_alert' }), turn, 'urgent escalation notification');
-      } catch { /* internal SMS is best-effort; the operator bell remains truth */ }
+        await waitFor(() => require('../owner-alerts').recordUrgentEscalation({
+          customer: persisted.customer, reason, customerMessage, conversationId: conversation.id, escalationId: persisted.escalation.id,
+        }), turn, 'urgent escalation notification');
+      } catch { /* best-effort; the operator bell remains truth */ }
     }
 
     logger.info('[ai-assistant] portal escalation committed', { conversationId: conversation.id, escalationId: persisted.escalation.id, priority });

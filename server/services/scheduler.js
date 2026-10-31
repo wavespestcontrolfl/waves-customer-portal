@@ -7519,11 +7519,18 @@ function initScheduledJobs() {
     try {
       const CSRCoach = require('./csr/csr-coach');
       const rec = await CSRCoach.generateWeeklyTeamRecommendation();
-      if (rec.recommendation && TwilioService && process.env.ADAM_PHONE) {
-        await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `📊 Weekly CSR Tip:\n\n${rec.recommendation}\n\n${rec.dataPoint}\n${rec.estimatedImpact}`,
-          { messageType: 'internal_alert' }
-        );
+      // Was an internal text to the owner's phone, silenced since 2026-09
+      // (services/owner-alerts.js). One row per week.
+      if (rec.recommendation) {
+        const { recordOwnerAlert, whyFromFreeText } = require('./owner-alerts');
+        await recordOwnerAlert('csr-weekly-tip', {
+          action: 'read the weekly call coaching tip',
+          why: whyFromFreeText(rec.recommendation),
+          subject: { type: 'check', id: 'csr-weekly-tip' },
+          text: `Weekly CSR Tip:\n\n${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
+          link: '/admin/communications',
+          dedupeKey: `owner-alert:csr-weekly-tip:${etDateString()}`,
+        });
       }
     } catch (err) {
       logger.error(`Weekly CSR rec failed: ${err.message}`);
@@ -8279,9 +8286,21 @@ function initScheduledJobs() {
       const results = await tokenHealth.checkAll();
       const failures = results.filter(r => r.status === 'expired' || r.status === 'error');
       if (failures.length > 0) {
-        const msg = `⚠️ Token Alert: ${failures.length} credential(s) need attention:\n` +
+        const msg = `Token Alert: ${failures.length} credential(s) need attention:\n` +
           failures.map(f => `- ${f.platform}: ${f.status} — ${f.lastError || 'check dashboard'}`).join('\n');
-        await TwilioService.sendSMS(process.env.ADAM_PHONE || '+19415993489', msg, { messageType: 'internal_alert', skipLogo: true });
+        // Was an internal text to the owner's phone, silenced since 2026-09
+        // (services/owner-alerts.js). One row per day; the failing platforms
+        // are its items, so a ringing alert rings again only on a new one.
+        const platforms = [...new Set(failures.map(f => String(f.platform)))].sort();
+        await require('./owner-alerts').recordOwnerAlert('credential-check', {
+          action: 'renew an expired credential',
+          why: `${failures.length} credential${failures.length === 1 ? '' : 's'} failed the 7 AM check.`,
+          subject: { type: 'check', id: 'credential-check' },
+          text: msg,
+          link: '/admin/settings?tab=integrations',
+          dedupeKey: `owner-alert:credential-check:${etDateString()}`,
+          itemKeys: platforms,
+        });
       }
       logger.info(`Token health check done: ${failures.length} failure(s) out of ${results.length}`);
     } catch (err) {

@@ -87,6 +87,12 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})), isKnownOwnerPhone: jest.fn(() => false) }));
+// The "New SMS" owner alert is an ops digest row now (services/owner-alerts.js), never a text to the
+// owner phone: that text was silenced in 2026-09. The counts below are that alert.
+jest.mock('../services/ops-digest', () => ({
+  ...jest.requireActual('../services/ops-digest'),
+  deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n-1' })),
+}));
 jest.mock('../services/messaging/validators/suppression', () => ({
   recordSuppression: jest.fn(async () => ({})), clearSuppression: jest.fn(async () => ({})),
 }));
@@ -130,6 +136,7 @@ const { handleClarifyReply } = require('../services/estimate-clarify-asks');
 const { startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
 const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { sendSMS } = require('../services/twilio');
+const { deliverOpsDigest } = require('../services/ops-digest');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { markRecipientOptin } = require('../services/recipient-optin');
@@ -200,7 +207,7 @@ test('a shadow pitch stays unread, records its verdict, and follows ordinary est
   expect(handleClarifyReply).toHaveBeenCalledTimes(1);
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
   expect(processInboundSms).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
 });
 
 // Codex round 3 design fix, 2026-09-11: consent (opt-out) handling now runs
@@ -261,7 +268,7 @@ describe('GATE_SMS_BARE_YES_REPLY=true', () => {
     expect(mockWrites.some(({ table, row }) => table === 'sms_log' && row.message_type === 'opt_in')).toBe(false);
     expect(updateByTwilioSid).not.toHaveBeenCalledWith('SM-synthetic-solicitation', expect.objectContaining({ message_type: 'opt_in' }));
     // The owner forward a known contact's ordinary text gets: the YES is heard.
-    expect(sendSMS).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
     const line = require('../services/logger').info.mock.calls.map(([msg]) => msg).find((msg) => /bare YES/.test(msg));
     expect(line).toContain('handled as a reply');
     expect(line).not.toContain('2025550101');
@@ -343,7 +350,7 @@ test('known service contacts keep ordinary handling without a verdict', async ()
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
   expect(dispatchWithFallback).not.toHaveBeenCalled();
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
 });
 
 // Codex P1, 2026-09-11: restored the pre-round-2 `||` short-circuit — the
@@ -409,7 +416,7 @@ test.each(['shadow', 'true'])('failed unified persistence returns 503 before %s 
   expect(dispatchWithFallback).not.toHaveBeenCalled();
   expect(mockWrites).toHaveLength(0);
   expect(startSmsThreadDraft).not.toHaveBeenCalled();
-  expect(sendSMS).not.toHaveBeenCalled();
+  expect(deliverOpsDigest).not.toHaveBeenCalled();
   expect(require('../services/messaging/inbound-dedupe').releaseInboundWebhook)
     .toHaveBeenCalledWith('SM-synthetic-solicitation');
 });
@@ -424,7 +431,7 @@ test.each(['missing', 'error'])('failed verdict attachment (%s) leaves the messa
   expect(row.is_read).not.toBe(true);
   expect(JSON.parse(row.metadata).spam_verdict.enforced).toBe(false);
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
 });
 
 test.each([
@@ -471,7 +478,7 @@ test.each([
       expect(handleClarifyReply).not.toHaveBeenCalled();
       expect(startSmsThreadDraft).not.toHaveBeenCalled();
       expect(processInboundSms).not.toHaveBeenCalled();
-      expect(sendSMS).not.toHaveBeenCalled();
+      expect(deliverOpsDigest).not.toHaveBeenCalled();
       expect(require('../services/tech-line').notifyTechLineText).not.toHaveBeenCalled();
     } finally {
       if (savedTechGate === undefined) delete process.env.GATE_TECH_LINES;
@@ -496,7 +503,7 @@ test('a regex-strength pitch never enforces when the model is unavailable', asyn
   expect(row.is_read).not.toBe(true);
   expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: false, method: 'model_failed', enforced: false });
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
 });
 
 // Codex P1 chokepoint fix, 2026-09-11 (pre-push): the screen only ever
@@ -515,7 +522,7 @@ test('an MMS with a regex-strength caption is never screened — media content w
   expect(row.is_read).not.toBe(true);
   expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
 });
 
 // Codex round 3 design fix, 2026-09-11: this used to exercise a
@@ -551,7 +558,7 @@ test('a rental-service request remains actionable with enforcement enabled', asy
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
   expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict.enforced).toBe(false);
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
 });
 
 test.each([
@@ -574,7 +581,7 @@ test.each([
   expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: false, method: 'model', enforced: false });
   expect(recordSuppression).not.toHaveBeenCalled();
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
 });
 
 // Codex round 3 design fix, 2026-09-11: footer-stripping (the previous
@@ -645,7 +652,19 @@ test('a genuine prior inbound (not an enforced verdict) still suppresses the rep
 test('a first-contact unknown sender with no prior row still gets the owner alert', async () => {
   const res = await receive('Can we schedule for Tuesday?');
   expect(res.body).toBe('<Response></Response>');
-  expect(sendSMS).toHaveBeenCalledWith(process.env.ADAM_PHONE, expect.stringContaining('📩 New SMS'), expect.anything());
+  expect(sendSMS).not.toHaveBeenCalled();
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  const digest = deliverOpsDigest.mock.calls[0][0];
+  expect(digest).toMatchObject({
+    key: 'owner-alert:inbound-text',
+    headline: 'Comms — read a new text',
+    summary: 'A number with no customer record texted Waves.',
+    link: '/admin/communications',
+    audience: 'fyi',
+    dedupeKey: 'owner-alert:inbound-text:SM-synthetic-solicitation',
+  });
+  expect(digest.text).toContain('New SMS');
+  expect(digest.text).toContain('Can we schedule for Tuesday?');
 });
 
 // Codex P1, 2026-09-11: the unified copy was marked read at classification

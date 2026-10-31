@@ -45,18 +45,18 @@ class RankTracker {
       }
     }
 
-    // Send SMS alerts for rank drops
+    // Rank drops leave an owner alert (was an internal text to the owner's
+    // phone, silenced since 2026-09; services/owner-alerts.js). One row per day.
     if (alerts.length > 0) {
-      try {
-        const TwilioService = require('../twilio');
-        if (process.env.ADAM_PHONE) {
-          const alertText = alerts.slice(0, 3).map(a => `"${a.keyword}" ${a.from}→${a.to} (↓${a.delta})`).join('\n');
-          await TwilioService.sendSMS(process.env.ADAM_PHONE,
-            `📉 SEO Rank Drops:\n${alertText}${alerts.length > 3 ? `\n+${alerts.length - 3} more` : ''}\n\nCheck: /admin/ads → SEO`,
-            { messageType: 'internal_alert' }
-          );
-        }
-      } catch { /* best effort */ }
+      const alertText = alerts.slice(0, 3).map(a => `"${a.keyword}" ${a.from}→${a.to} (↓${a.delta})`).join('\n');
+      await require('../owner-alerts').recordOwnerAlert('seo-rank-drops', {
+        action: 'check SEO rank drops',
+        why: `${alerts.length} priority keyword${alerts.length === 1 ? '' : 's'} fell 3 or more places today.`,
+        subject: { type: 'check', id: 'seo-rank-drops' },
+        text: `SEO Rank Drops:\n${alertText}${alerts.length > 3 ? `\n+${alerts.length - 3} more` : ''}\n\nCheck: /admin/ads → SEO`,
+        link: '/admin/ads',
+        dedupeKey: `owner-alert:seo-rank-drops:${today}`,
+      });
     }
 
     logger.info(`Rank tracker: ${tracked} checked, ${alerts.length} alerts`);
