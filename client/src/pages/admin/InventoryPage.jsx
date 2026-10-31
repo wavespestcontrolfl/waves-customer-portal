@@ -65,6 +65,18 @@ function safeExternalHref(value) {
     return null;
   }
 }
+// A tab whose read failed: the error and Retry, never "Loading..." forever.
+// Each caller's Retry clears its error and sets loading before reloading.
+function LoadRetry({ what, error, onRetry }) {
+  return (
+    <ActionFeedback error>
+      Failed to load {what}: {error}{" "}
+      <Button type="button" onClick={onRetry} variant="primary" className="ml-[8px]">
+        Retry
+      </Button>
+    </ActionFeedback>
+  );
+}
 function formatMoney(value, decimals = 2) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "—";
@@ -2376,23 +2388,17 @@ export function ProductsTab({
   };
   if (loadError)
     return (
-      <ActionFeedback error>
-        Failed to load products: {loadError}{" "}
-        <Button
-          type="button"
-          onClick={() => {
-            // Clear the error first so the loading branch renders during the
-            // retry; leaving it up allowed repeated clicks and overlapping loads.
-            setLoadError(null);
-            setLoading(true);
-            load();
-          }}
-          variant="primary"
-          className="ml-[8px]"
-        >
-          Retry
-        </Button>
-      </ActionFeedback>
+      <LoadRetry
+        what="products"
+        error={loadError}
+        onRetry={() => {
+          // Clear the error first so the loading branch renders during the
+          // retry; leaving it up allowed repeated clicks and overlapping loads.
+          setLoadError(null);
+          setLoading(true);
+          load();
+        }}
+      />
     );
   if (loading) return <ActionFeedback>Loading products...</ActionFeedback>;
   return (
@@ -4633,10 +4639,19 @@ function VendorsTab({ showToast }) {
   const [vendors, setVendors] = useState([]);
   const [editing, setEditing] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const load = async () => {
-    const d = await adminFetch("/admin/inventory/vendors");
-    setVendors(d.vendors || []);
-    setLoading(false);
+    // The read had no catch, so a non-2xx left "Loading vendors..." up
+    // forever (operations audit OP-10).
+    try {
+      const d = await adminFetch("/admin/inventory/vendors");
+      setVendors(d.vendors || []);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e?.message || "Request failed");
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => {
     load();
@@ -4654,6 +4669,7 @@ function VendorsTab({ showToast }) {
       showToast("Failed: " + e.message);
     }
   };
+  if (loadError) return <LoadRetry what="vendors" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); load(); }} />;
   if (loading) return <ActionFeedback>Loading vendors...</ActionFeedback>;
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-[12px]">
@@ -5002,6 +5018,7 @@ function ProtocolsTab({
   const [products, setProducts] = useState([]);
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const normalizedInitialLine = PROTOCOL_FILTERS.some(
     (f) => f.key === initialServiceLine,
   )
@@ -5026,21 +5043,28 @@ function ProtocolsTab({
   const [showNewService, setShowNewService] = useState(false);
   const [appliedDeepLink, setAppliedDeepLink] = useState(false);
   const load = async () => {
-    const [sData, pData, hData] = await Promise.all([
-      adminFetch("/admin/inventory/service-usage"),
-      adminFetch("/admin/inventory?limit=200"),
-      adminFetch("/admin/inventory/protocol-health").catch(() => null),
-    ]);
-    setServices(sData.services || []);
-    setProducts(pData.products || []);
-    setHealth(hData);
-    setLoading(false);
+    try {
+      const [sData, pData, hData] = await Promise.all([
+        adminFetch("/admin/inventory/service-usage"),
+        adminFetch("/admin/inventory?limit=200"),
+        adminFetch("/admin/inventory/protocol-health").catch(() => null),
+      ]);
+      setServices(sData.services || []);
+      setProducts(pData.products || []);
+      setHealth(hData);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e?.message || "Request failed");
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => {
     load();
   }, []);
   useEffect(() => {
-    if (loading || appliedDeepLink || normalizedInitialLine === "all") return;
+    // A failed read must not open the deep-linked "add" form over an empty list.
+    if (loading || loadError || appliedDeepLink || normalizedInitialLine === "all") return;
     setAppliedDeepLink(true);
     if (initialAction === "add") {
       const existingService = services.find(
@@ -5063,6 +5087,7 @@ function ProtocolsTab({
     }
   }, [
     loading,
+    loadError,
     appliedDeepLink,
     normalizedInitialLine,
     initialAction,
@@ -5136,6 +5161,7 @@ function ProtocolsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
+  if (loadError) return <LoadRetry what="protocols" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); load(); }} />;
   if (loading) return <ActionFeedback>Loading protocols...</ActionFeedback>;
   const unitOpts = [
     "oz",
@@ -5832,14 +5858,21 @@ function ScrapeTab({ showToast }) {
   const [vendors, setVendors] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const load = async () => {
-    const [vData, jData] = await Promise.all([
-      adminFetch("/admin/inventory/vendors"),
-      adminFetch("/admin/inventory/scrape-jobs"),
-    ]);
-    setVendors((vData.vendors || []).filter((v) => v.scrapingEnabled));
-    setJobs(jData.jobs || []);
-    setLoading(false);
+    try {
+      const [vData, jData] = await Promise.all([
+        adminFetch("/admin/inventory/vendors"),
+        adminFetch("/admin/inventory/scrape-jobs"),
+      ]);
+      setVendors((vData.vendors || []).filter((v) => v.scrapingEnabled));
+      setJobs(jData.jobs || []);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e?.message || "Request failed");
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => {
     load();
@@ -5856,6 +5889,7 @@ function ScrapeTab({ showToast }) {
       showToast(`Failed: ${e.message}`);
     }
   };
+  if (loadError) return <LoadRetry what="scrape data" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); load(); }} />;
   if (loading) return <ActionFeedback>Loading scrape data...</ActionFeedback>;
   return (
     <div>
