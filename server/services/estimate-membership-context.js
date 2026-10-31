@@ -1480,11 +1480,10 @@ async function computeMembershipContext(database, {
   // the global streetScope instead (their pricing scoped the same way), and
   // this bound is then redundant.
   extensionStreetScope = null,
-  // Option B (GATE_WAVEGUARD_EXTEND_PICK): { ticked, unticked } family keys
+  // Staff pick (owner 2026-10-30 option B): { ticked, unticked } family keys
   // from the estimate tool's list — only ticked families freeze, from any
   // starting tier; unticked ones are the staff's keep-price choice. Absent
-  // (an older tab, an agent lane) or the gate off: the Bronze-start-only
-  // automatic plan.
+  // (an older tab, an agent lane): the Bronze-start-only automatic plan.
   extensionPick,
 } = {}) {
   try {
@@ -1563,9 +1562,9 @@ async function computeMembershipContext(database, {
     // Two deliberate exclusions keep every displayed number exactly
     // billable (codex #3338 r3+r4):
     //  - BRONZE-ORIGIN upgrades only (current tier discount 0%) unless
-    //    staff pick the services (GATE_WAVEGUARD_EXTEND_PICK, owner
-    //    2026-10-30 option B). Above Bronze the new price is the
-    //    contracted price moved from the old tier rate to the new one
+    //    staff pick the services (owner 2026-10-30 option B). Above
+    //    Bronze the new price is the contracted price moved from the old
+    //    tier rate to the new one
     //    (price / (1 − old) × (1 − new): $90 Silver-priced at Gold gives
     //    $85, the Gold rate off the $100 basis), never −5pp off the
     //    contracted price ($85.50). Staff see each figure and tick which
@@ -1582,11 +1581,8 @@ async function computeMembershipContext(database, {
       const { customerPreservesMonthlyMembership } = require('./billing-cadence');
       return customerPreservesMonthlyMembership(customer);
     })();
-    // Staff pick (option B): ignored with the pick gate off, so the
-    // Bronze-start-only automatic plan stays exactly as is.
-    const pickedKeys = Array.isArray(extensionPick?.ticked) && isEnabled('waveguardExtendPick')
-      ? new Set(extensionPick.ticked.map(String))
-      : null;
+    // Staff pick (option B); no pick = the Bronze-start-only automatic plan.
+    const pickedKeys = Array.isArray(extensionPick?.ticked) ? new Set(extensionPick.ticked.map(String)) : null;
     if (upgraded && (oldTier.discount === 0 || pickedKeys) && !monthlyLaneMember
       && freezeExtensionPlan === true && isEnabled('waveguardExtendExisting')) {
       const { etDateString } = require('../utils/datetime-et');
@@ -2053,13 +2049,13 @@ async function offeredFamilyMarginPct(database, service, visitsPerYear) {
   return cost === null ? null : Math.round((1 - cost / Number(service.newPerVisit)) * 1000) / 10;
 }
 
-// The estimate tool's tick list (GATE_WAVEGUARD_EXTEND_PICK, owner
-// 2026-10-30 option B): each current service this quote would move up a
-// tier, at the new price, with an estimated margin, under the same property
-// scope a save uses. Staff-only and read-only; null when either extension
-// gate is off, the quote raises no tier, or nothing is eligible.
+// The estimate tool's tick list (owner 2026-10-30 option B): each current
+// service this quote would move up a tier, at the new price, with an
+// estimated margin, under the same property scope a save uses. Staff-only
+// and read-only; null when GATE_WAVEGUARD_EXTEND_EXISTING is off, the quote
+// raises no tier, or nothing is eligible.
 async function currentServiceTierOffer(database, { customerId, estData, groupedEstimate, perPropertyStreetScope }) {
-  if (!isEnabled('waveguardExtendPick') || !isEnabled('waveguardExtendExisting')) return null;
+  if (!isEnabled('waveguardExtendExisting')) return null;
   const ctx = await computeMembershipContext(database, {
     customerId,
     estData,

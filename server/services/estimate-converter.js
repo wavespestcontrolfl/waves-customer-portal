@@ -1176,9 +1176,8 @@ async function applyFrozenExistingServiceExtension({
     // another property (codex #3338 r8).
     appliedRowIds: [],
     monthlyRateReviewNeeded: false,
-    // Current services staff unticked in the estimate tool
-    // (GATE_WAVEGUARD_EXTEND_PICK): kept at their contracted price by that
-    // choice, so never a family for office review.
+    // Current services staff unticked in the estimate tool: kept at their
+    // contracted price by that choice, so never a family for office review.
     keptFamilies: [],
   };
   const snapshot = estimateData?.membershipSnapshot;
@@ -9089,8 +9088,8 @@ const EstimateConverter = {
     // review alert the moment an accept actually moves the stored tier up.
     // An APPLIED extension always notifies, upgrade or not — money moved;
     // so does a frozen plan that parked for review.
-    // Staff kept every current service at its price on the estimate
-    // (GATE_WAVEGUARD_EXTEND_PICK): the upgrade itself leaves nothing to review.
+    // Staff kept every current service at its price on the estimate: the
+    // upgrade itself leaves nothing to review.
     const everyPriorKept = extension?.keptFamilies?.length === priorQualifyingKeys.length;
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0

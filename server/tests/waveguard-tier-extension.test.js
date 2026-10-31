@@ -326,7 +326,7 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
-  test('a current service staff left unticked keeps its price without an office review line (GATE_WAVEGUARD_EXTEND_PICK)', async () => {
+  test('a current service staff left unticked keeps its price without an office review line', async () => {
     const { database, updates } = fakeTrx();
     mockRowsState.rows = [
       pestRow({ id: 'row-1', scheduled_date: '2099-10-28' }),
