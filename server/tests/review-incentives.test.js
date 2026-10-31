@@ -509,10 +509,11 @@ describe('review incentives', () => {
       .rejects.toMatchObject({ code: 'review_before_program_start' });
     expect(plain.__state.rows.google_reviews[0].customer_id).toBeNull();
 
-    // A disputed link keeps the usual rules: moving it would strand the first customer's review flag.
+    // A disputed link never moves to another customer here, whatever the payout rules say: the first
+    // customer's review flag would stay set with no review behind it.
     const disputed = make({ customer_id: 'customer-first', name_match_result: 'disputed', name_match_customer_id: 'customer-first', name_match_reason: 'clash_early' });
-    await expect(ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: disputed, policy: programPolicy }))
-      .rejects.toMatchObject({ code: 'review_before_program_start' });
+    await expect(ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: disputed, policy }))
+      .rejects.toMatchObject({ code: 'disputed_link_move', statusCode: 409 });
     expect(disputed.__state.rows.google_reviews[0].customer_id).toBe('customer-first');
   });
 

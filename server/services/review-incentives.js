@@ -1062,6 +1062,13 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // usual rules.
   const isClickAutoCorrection = review.link_source === 'click_auto' || review.link_source === 'manual_no_visit'
     || (openNameMatch(review) && !review.customer_id);
+  // A disputed link (its customer's first contact came after the review) cannot move to another
+  // customer here: nothing can prove the first customer's review flag came from this link, so it
+  // would stay set with no review behind it. Keep link settles the dispute; a move waits for a safe
+  // flag reversal.
+  if (openNameMatch(review) && review.customer_id && String(review.customer_id) !== String(customerId)) {
+    throw operationalError('This link is disputed: its customer\'s first contact came after the review. Use Keep link, or ask for the link to be fixed by hand.', 409, 'disputed_link_move');
+  }
   let payoutEligible = true;
   if (!policy.enabled) {
     if (!isClickAutoCorrection) throw operationalError('Review incentive policy is disabled', 422, 'policy_disabled');
