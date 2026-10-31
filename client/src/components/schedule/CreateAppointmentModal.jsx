@@ -37,6 +37,7 @@ import useModalFocus from '../../hooks/useModalFocus';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
+import CancelCallNotice from './CancelCallNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import HourTechCompare from './HourTechCompare';
 import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
@@ -2264,6 +2265,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   }, [reserviceProbeCustomerId]);
   // A different customer's suggestion or words never carry over.
   useEffect(() => { setCustomerWords(''); setUsedSuggestion(null); }, [reserviceProbeCustomerId]);
+  // "Canceled on a call" (GATE_CALL_CANCEL_GUARD): the chosen customer's latest call, when it was a cancellation.
+  // A warning only. The probe doubles as the gate read: the route answers {enabled:false} while the lane is dark,
+  // and a failed fetch shows nothing, so a dark lane renders as before. It runs for every chosen customer, so a fetch
+  // that throws synchronously is turned into that same quiet failure.
+  const cancelProbeCustomerId = selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
+  const [cancelCallProbe, setCancelCallProbe] = useState({ customerId: '', call: null });
+  useEffect(() => {
+    if (!cancelProbeCustomerId) return undefined;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => adminFetch(`/admin/schedule/cancel-call-notice?customerId=${encodeURIComponent(cancelProbeCustomerId)}`))
+      .then((r) => {
+        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: r?.enabled ? (r.call || null) : null });
+      })
+      .catch(() => {
+        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: null });
+      });
+    return () => { cancelled = true; };
+  }, [cancelProbeCustomerId]);
+  const cancelCallNotice = cancelCallProbe.customerId === cancelProbeCustomerId ? cancelCallProbe.call : null;
   const reserviceRequestActive = !!reserviceProbeCustomerId
     && reserviceRequestProbe.customerId === reserviceProbeCustomerId
     && reserviceRequestProbe.enabled;
@@ -5578,6 +5599,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               >✕</button>
             </div>
           )}
+          {selectedCustomer && cancelCallNotice && <CancelCallNotice call={cancelCallNotice} />}
           {selectedCustomer && quickAddSaveNotice && (
             <div role="status" style={{ fontSize: 14, color: '#18181B', marginTop: 10 }}>{quickAddSaveNotice}</div>
           )}
