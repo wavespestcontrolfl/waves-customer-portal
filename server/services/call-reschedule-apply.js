@@ -503,7 +503,12 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
         }
       },
       beforeMove,
-      ...(plan.seriesMove ? { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences } : { seriesPolicy: 'single' }),
+      // No date change: a plain single edit. A date change the plan calls a one-off (lawn rounds size rule) is
+      // single only because of that rule, so the rebooker judges it again (expectScope). A series move keeps the
+      // reviewed occurrence set, and its scope when the review previewed one.
+      ...[{ seriesPolicy: 'single' }, { expectScope: 'single' }, {
+        expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences, ...(occurrenceIds.length ? { expectScope: 'series' } : {}),
+      }][Number(plan.dateMove) + Number(plan.seriesMove)],
       expect: {
         scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
@@ -805,7 +810,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
       return { outcome: 'noop', reason: 'already_at_requested_time', visitId: visit.id, cardsResolved };
     }
     const result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, INITIATED_BY, {
-      keepStatus: true, beforeMove, ...(plan.seriesMove ? {} : { seriesPolicy: 'single' }), moveGuard: writeDecision,
+      keepStatus: true, beforeMove, ...[{ seriesPolicy: 'single' }, { expectScope: 'single' }, {}][Number(plan.dateMove) + Number(plan.seriesMove)], moveGuard: writeDecision,
       sourceSurface: 'call_reschedule', notifyRequested: false,
       expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,

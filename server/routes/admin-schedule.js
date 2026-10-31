@@ -22,7 +22,7 @@ const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFi
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
-const { collectiveMoveGateOn, dateExceptionStamp, movesAsSeries } = require('../services/rebooker');
+const { collectiveMoveGateOn, movesAsSeries, singleMoveStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
@@ -11182,7 +11182,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 scheduled_date: bulkTargetDate,
                 // Bulk board move of a cadence row = a this-visit-only date
                 // exception (rebooker.dateExceptionStamp) when the date changes.
-                ...(dateOnly(svc.scheduled_date) !== bulkTargetDate ? dateExceptionStamp(svc, 'admin_bulk') : {}),
+                ...(dateOnly(svc.scheduled_date) !== bulkTargetDate ? singleMoveStamp(svc, bulkTargetDate, 'admin_bulk') : {}),
               };
               // Same validate-then-persist-the-normalized-value rule as the
               // date above: an unnormalized time Postgres happens to accept
@@ -12382,6 +12382,8 @@ async function planCollectiveEditDateMove(req) {
         notifyRequested: notifyCustomer === true,
         // The acknowledged occurrence set, enforced against the locked sweep.
         expectOccurrenceIds: ackedIds,
+        // The scope the operator acknowledged; the rebooker judges it again on the row it moves.
+        expectScope: 'series',
         ...(operationKey ? { operationKey } : {}),
         // An explicit two-bound clear rides IN the series transaction with
         // the date move — never persisted ahead of it by the per-row edit.
@@ -15932,7 +15934,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           // runs while the collective gate is dark, or for rows the planner
           // left to it), so the first collective move shifts it instead of
           // regenerating it from cadence.
-          Object.assign(updates, dateExceptionStamp(preTupleRow, 'admin'));
+          Object.assign(updates, singleMoveStamp(preTupleRow, updates.scheduled_date, 'admin'));
           liveEditWasLive = ['en_route', 'on_site'].includes(String(preTupleRow.status));
           if (liveEditWasLive) {
             Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });

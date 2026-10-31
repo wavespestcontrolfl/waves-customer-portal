@@ -1010,6 +1010,7 @@ describe('rain-out service', () => {
           sourceSurface: 'quick_move',
           notifyRequested: false,
           expectAnchor: { scheduled_date: '2026-06-11', window_start: '09:00' },
+          expectScope: 'series',
         },
       );
       // Series path replaces the single move entirely.
@@ -1074,6 +1075,28 @@ describe('rain-out service', () => {
         wireRecurring({ ...ROUNDS_SERVICE, date_exception: true, date_exception_cadence_date: '2026-06-04' });
         await RainOut.commit(moveTo('2026-06-12'));
         expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+      });
+
+      test('the single path pins the size-rule inputs the decision was made on; a job that carries none adds no pin', async () => {
+        process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+        wireRecurring({ ...ROUNDS_SERVICE, date_exception: true, date_exception_cadence_date: new Date('2026-06-10T00:00:00Z') });
+        SmartRebooker.reschedule.mockResolvedValueOnce({ id: 'svc-1', visitMove: null });
+        await RainOut.commit(moveTo('2026-06-12'));
+        expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual({
+          recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: '2026-06-10',
+        });
+        SmartRebooker.reschedule.mockClear();
+        wireRecurring(RECURRING_SERVICE);
+        SmartRebooker.reschedule.mockResolvedValueOnce({ id: 'svc-1', visitMove: null });
+        await RainOut.commit({ ...moveTo('2026-06-12'), requireAssignedTechnicianId: 'tech-1' });
+        expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual({ technician_id: 'tech-1' });
+      });
+
+      test('the series shift asks the rebooker to confirm its scope on the locked anchor', async () => {
+        process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+        wireRecurring(ROUNDS_SERVICE);
+        await RainOut.commit(moveTo('2026-06-19'));
+        expect(SmartRebooker.rescheduleSeries.mock.calls[0][5]).toMatchObject({ expectScope: 'series' });
       });
 
       test('another recurring pattern keeps the series shift for the same one-day move', async () => {

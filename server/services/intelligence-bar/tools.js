@@ -4578,7 +4578,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
           ...(dateStr !== observedDate ? { route_order: null } : {}),
           // A this-visit-only DATE move of a cadence row is a deliberate
           // exception to its series (rebooker.dateExceptionStamp).
-          ...(dateStr !== observedDate ? require('../rebooker').dateExceptionStamp(appt, 'admin_ib') : {}),
+          ...(dateStr !== observedDate ? require('../rebooker').singleMoveStamp(appt, dateStr, 'admin_ib') : {}),
           notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
           // Public track links live until the day after the visit — refresh onto
           // the new date, same as schedule-tools' movers. Built off the root

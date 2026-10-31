@@ -109,7 +109,7 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckIds: ['o4', 'o3', 'o2', 'o1'] });
     expect(status).toBe(200);
     expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
-    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ expectOccurrenceIds: ['o1', 'o2', 'o3', 'o4'] });
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ expectOccurrenceIds: ['o1', 'o2', 'o3', 'o4'], expectScope: 'series' });
   });
 
   test('gate on: an ack whose occurrence set no longer matches the plan (a cancel + an auto-extend since the preview — same count, different visits) is refused with the REFRESHED preview — nothing moves', async () => {
@@ -157,6 +157,8 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     expect(status).toBe(200);
     expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
     expect(SmartRebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('expectOccurrenceIds');
+    // ... and the rebooker is asked to confirm that scope on the row it moves (SCOPE_CHANGED if the plan changed since).
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ expectScope: 'single' });
   });
 
   test('GET series-move-preview: `enabled` is false for a one-off and follows the gate otherwise', async () => {

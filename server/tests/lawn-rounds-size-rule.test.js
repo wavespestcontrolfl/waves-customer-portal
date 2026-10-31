@@ -119,9 +119,11 @@ describe('every staff and tool surface asks the one shared decision (rebooker.mo
   const COLUMNS = "'recurring_pattern', 'date_exception', 'date_exception_cadence_date'";
 
   test.each([
-    ['routes/admin-schedule.js', ['movesAsSeries(svc, bulkTargetDate)', 'movesAsSeries(row, target)', 'movesAsSeries(moveRow, collectiveMoveTarget)'], 3],
-    ['services/intelligence-bar/tools.js', ['movesAsSeries(appt, dateStr) && dateStr !== oldDateStr'], 1],
-    ['services/intelligence-bar/schedule-tools.js', ["require('../rebooker').movesAsSeries(s, dateStr)"], 1],
+    ['routes/admin-schedule.js', ['movesAsSeries(svc, bulkTargetDate)', 'movesAsSeries(row, target)', 'movesAsSeries(moveRow, collectiveMoveTarget)',
+      // the direct writers confirm the decision on the row they hold; the Edit series commit passes its scope
+      "singleMoveStamp(svc, bulkTargetDate, 'admin_bulk')", "singleMoveStamp(preTupleRow, updates.scheduled_date, 'admin')", "expectScope: 'series'"], 6],
+    ['services/intelligence-bar/tools.js', ['movesAsSeries(appt, dateStr) && dateStr !== oldDateStr', "singleMoveStamp(appt, dateStr, 'admin_ib')"], 2],
+    ['services/intelligence-bar/schedule-tools.js', ["require('../rebooker').movesAsSeries(s, dateStr)", "singleMoveStamp(s, dateStr, 'admin_ib')"], 2],
     ['routes/admin-intelligence-bar.js', ["require('../services/rebooker').movesAsSeries(pin, params.new_date)"], 1],
   ])('%s', (rel, needles) => {
     const src = read(rel);
@@ -138,9 +140,9 @@ describe('every staff and tool surface asks the one shared decision (rebooker.mo
 
   test('the choke point and the dispatch preview use the shared decision or its preview verdict', () => {
     const rebooker = read('services/rebooker.js');
-    expect(rebooker.match(/movesAsSeries\(service, newDate\)/g)).toHaveLength(2);
+    expect(rebooker.match(/movesAsSeries\(service, newDate\)/g)).toHaveLength(3); // the scope check, the grouped replay, the series branch
     const dispatch = read('routes/admin-dispatch.js');
     expect(dispatch).toContain('preview.oneOff !== true');
-    expect(dispatch).toContain('if (preview?.oneOff) return null;');
+    expect(dispatch).toContain('if (preview?.oneOff) {');
   });
 });

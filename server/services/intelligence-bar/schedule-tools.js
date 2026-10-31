@@ -1476,7 +1476,7 @@ async function probeMoveOverlaps(trx, classified, dateStr) {
 // update (status + observed schedule fields + visit_id + tracker snapshot, no
 // FOR UPDATE; a miss aborts the batch).
 async function writeMovedStop(trx, c, dateStr, reason) {
-  const { applyTrackLifecycleCas, dateExceptionStamp } = require('../rebooker');
+  const { applyTrackLifecycleCas, singleMoveStamp } = require('../rebooker');
   const s = c.s;
   await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
   // Package visit 2 recheck, atomic with this stop's write; aborts the batch.
@@ -1502,7 +1502,7 @@ async function writeMovedStop(trx, c, dateStr, reason) {
     .update({
       scheduled_date: dateStr,
       ...recurringDispatchDuePatch(s, { scheduled_date: dateStr }),
-      ...(c.observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
+      ...(c.observedDate !== dateStr ? singleMoveStamp(s, dateStr, 'admin_ib') : {}),
       // Old day's sequence number is meaningless on the new date — NULL
       // appends the stop after the target day's ordered run.
       route_order: null,

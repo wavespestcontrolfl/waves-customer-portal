@@ -6282,7 +6282,11 @@ async function requireSeriesMoveAck({ serviceId, newDate, body, actor, reschedul
   }
   const preview = await Promise.resolve().then(() => SmartRebooker.previewSeriesMove(serviceId, newDate)).catch(() => null);
   // Size rule (lawn_rounds_9 one-off): this move shifts nothing, so no acknowledgement is owed.
-  if (preview?.oneOff) return null;
+  if (preview?.oneOff) {
+    // The rebooker judges the same decision on the row it moves and refuses (SCOPE_CHANGED) if the plan changed since.
+    rescheduleOptions.expectScope = 'single';
+    return null;
+  }
   // Bound to the previewed OCCURRENCE SET (seriesAckIds), never a count.
   const ids = Array.isArray(body.seriesAckIds) ? body.seriesAckIds.map(String) : null;
   const have = preview && Array.isArray(preview.occurrenceIds) ? new Set(preview.occurrenceIds.map(String)) : null;
@@ -6298,6 +6302,7 @@ async function requireSeriesMoveAck({ serviceId, newDate, body, actor, reschedul
     });
   }
   rescheduleOptions.expectOccurrenceIds = preview.occurrenceIds.map(String);
+  rescheduleOptions.expectScope = 'series';
   return null;
 }
 

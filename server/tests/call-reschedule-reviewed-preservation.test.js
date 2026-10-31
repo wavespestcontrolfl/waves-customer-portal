@@ -239,11 +239,13 @@ describe('applyReviewedCallReschedule', () => {
       occurrences: [{ id: VISIT_ID }, { id: sibling.id }] });
     const options = rebooker.reschedule.mock.calls[0][5];
     if (single) {
-      expect(options).toMatchObject({ seriesPolicy: 'single' });
+      expect(options).toMatchObject({ expectScope: 'single' });
+      expect(options).not.toHaveProperty('seriesPolicy');
       expect(options).not.toHaveProperty('expectOccurrenceIds');
       expect(conn.lockedSets[0]).toEqual([VISIT_ID]);
     } else {
-      expect(options).toMatchObject({ expectOccurrenceIds: [VISIT_ID, sibling.id] });
+      // The review previewed a series (occurrence ids), so the rebooker is asked to confirm that scope too.
+      expect(options).toMatchObject({ expectOccurrenceIds: [VISIT_ID, sibling.id], expectScope: 'series' });
       expect(options).not.toHaveProperty('seriesPolicy');
     }
   });

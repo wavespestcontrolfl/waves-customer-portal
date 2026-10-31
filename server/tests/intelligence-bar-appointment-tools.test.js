@@ -2042,6 +2042,23 @@ describe('reschedule_appointment', () => {
     });
   });
 
+  test('the write pins the size-rule inputs the single-versus-series decision was made on (a series re-anchor since makes it miss)', async () => {
+    const updateChain = chain({ update: jest.fn().mockImplementation(() => updateResult(0)) });
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, is_recurring: true, recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: new Date('2026-06-29T00:00:00Z') }) }),
+        chain(), // advisory probe
+        updateChain,
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+    });
+    const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15' });
+    expect(result.error).toMatch(/changed concurrently/);
+    expect(updateChain.where).toHaveBeenCalledWith(expect.objectContaining({
+      recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: '2026-06-29',
+    }));
+  });
+
   test('a windowless visit CASes on null start/end (object-form IS NULL contract) and moves date-only', async () => {
     // A windowless row's observed window fields are null — the object-form
     // predicate renders them as IS NULL (never `= NULL`, which matches

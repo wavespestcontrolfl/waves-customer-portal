@@ -790,8 +790,12 @@ describe('applyCallReschedule', () => {
       return { success: true };
     }) };
     await applyCallReschedule({ conn, call: callFor(startAt), now: NOW, rebooker });
-    if (oneOff) expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({ seriesPolicy: 'single' });
-    else expect(rebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('seriesPolicy');
+    // A one-off is single only by the size rule, so the rebooker is asked to judge it again (expectScope); the explicit
+    // seriesPolicy 'single' stays for moves that are single for another reason (no date change).
+    const options = rebooker.reschedule.mock.calls[0][5];
+    expect(options).not.toHaveProperty('seriesPolicy');
+    if (oneOff) expect(options).toMatchObject({ expectScope: 'single' });
+    else expect(options).not.toHaveProperty('expectScope');
   });
 
   test('a same-day time change is never a rounds one-off (no date move)', () => {
