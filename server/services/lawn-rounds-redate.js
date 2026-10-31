@@ -12,7 +12,8 @@
 //
 // Moves go through SmartRebooker.reschedule for ONE occurrence, the way ~/ops-oneshots/lib/move-visit.js does:
 // staff initiator, `expect` guard, no per-move tech notice, route placement, the reminder re-timed silently.
-// No customer message of any kind; no tech push.
+// A timed visit takes the first open time on its new day (reviewPlan); an untimed visit moves by date only and
+// auto-dispatch times it, as for any untimed visit. No customer message of any kind; no tech push.
 //
 // The plan is pure (planSeriesRedate) and the same in a dry run and in --apply. A dry run only reads.
 const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOrdinal } = require('./lawn-rounds');
@@ -21,6 +22,7 @@ const { isLawn9xRoundsSeries } = require('./recurring-appointment-seeder');
 const { seriesCustomerSkipReason } = require('./series-customer-eligibility');
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const { DATE_EXCEPTION_CLEAR } = require('./rebooker');
+const { DAY_START_HOUR, DAY_END_HOUR } = require('./scheduling/find-time');
 
 const DEFAULT_MAX_SHIFT_DAYS = 14;
 const STAY_WINDOW_HOURS = 73;
@@ -60,11 +62,20 @@ function stayReason(visit, nowMs = Date.now()) {
 //   opts:   { maxShiftDays, allowLongShift }
 // Returns { parentId, customerId, anchor, anchorSource, areaKey, flags, heldReasons, held, visits, moves, signature }.
 //   `visits` rows: { id, from, to, shift, kind: 'next' | 'keep' | 'move' | 'at-target', reason, ws, we, dur, tech }
-//   `flags` never hold the series: weekend day, prepaid, no area, short gap.
-//   `heldReasons` hold it (nothing changes): round conflict, untimed visit, shift over N days, outside prepaid
-//   term (a prepaid visit would leave its term's window, so the term would stop covering it); the schedule
-//   review adds hour taken and closed day.
-function planSeriesRedate(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allowLongShift = false } = {}) {
+//   `flags` never hold the series: long shift, no area, area day too far, weekend day, prepaid, short gap.
+//   `heldReasons` hold it (nothing changes): round conflict, shift over N days, outside prepaid term (a prepaid
+//   visit would leave its term's window, so the term would stop covering it); the schedule review adds hour
+//   taken and closed day.
+// An area plan that needs a move over the limit falls back to the customer's own weekday on the rounds (flag
+// `area day too far`) when that plan fits; otherwise the area plan and its hold stand.
+function planSeriesRedate(series, opts = {}) {
+  const plan = planFromAnchor(series, opts);
+  if (plan.anchorSource !== 'area' || !plan.tooFar) return plan;
+  const own = planFromAnchor({ ...series, areaAnchor: null }, opts);
+  return own.tooFar ? plan : { ...own, flags: [...own.flags, 'area day too far'] };
+}
+
+function planFromAnchor(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allowLongShift = false } = {}) {
   const [next, ...later] = series.visits;
   const anchorSource = series.anchorOverride ? 'override' : (series.areaAnchor ? 'area' : 'own');
   const anchor = series.anchorOverride || series.areaAnchor || next.date;
@@ -83,10 +94,10 @@ function planSeriesRedate(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allow
     rows.push(row);
   }
   const c = { series, anchor, anchorSource, rows, conflict, long: rows.some((r) => Math.abs(r.shift) > maxShiftDays) };
+  const tooFar = c.long && !allowLongShift;
   const heldReasons = [
     c.conflict && 'round conflict',
-    rows.some((r) => r.kind === 'move' && !r.ws) && 'untimed visit',
-    c.long && !allowLongShift && `shift over ${maxShiftDays} days`,
+    tooFar && `shift over ${maxShiftDays} days`,
     rows.some((r) => r.kind === 'move' && r.termId && !insideTerm(series.terms, r)) && 'outside prepaid term',
   ].filter(Boolean);
   return {
@@ -100,6 +111,7 @@ function planSeriesRedate(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allow
     flags: FLAG_RULES.filter(([, test]) => test(c)).map(([name]) => name),
     heldReasons,
     held: heldReasons[0] || null,
+    tooFar,
     visits: rows,
     moves: rows.filter((r) => r.kind === 'move'),
     signature: JSON.stringify([anchor, rows.map((r) => [r.id, r.from, r.to])]),
@@ -109,7 +121,7 @@ function planSeriesRedate(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allow
 // Flags report; they never hold a series.
 const FLAG_RULES = [
   ['long shift', (c) => c.long],
-  ['no area', (c) => c.anchorSource === 'own'],
+  ['no area', (c) => !c.series.areaKey],
   ['weekend day', (c) => ['Sat', 'Sun'].includes(weekdayOf(c.anchor))],
   ['prepaid', (c) => c.series.visits.some((v) => v.prepaid)],
   ['short gap', (c) => c.rows.some((r, i) => i > 0 && diffDays(c.rows[i - 1].to, r.to) < SHORT_GAP_DAYS)],
@@ -216,27 +228,47 @@ async function readSeriesContext(conn, root, { todayET, nowMs = Date.now(), anch
 
 const windowEnd = (row) => row.we || hhmm(toMin(row.ws) + Number(row.dur));
 
-// The schedule half of the plan: a move onto a closed day, onto an hour the rebooker's own commit check refuses
-// (previewMoveConflicts: its technician scope and statuses, unassigned visits included), or onto an hour an
-// earlier planned series in this run takes holds the series. The app cannot hand a recurring visit to
-// auto-dispatch untimed through SmartRebooker.reschedule, so a taken hour is a hold, not a hand-off.
-// `reserved` (Map date -> [[start, end]]) carries the hours earlier series in this run claim, whatever the
-// technician (never looser than the commit check); this call adds this plan's moves to it when the plan is not held.
+const OPEN_STEP_MINUTES = 30;
+
+// The first open start for a timed move on its new date, for its own length: its own time, then later in the
+// working day (scheduling/find-time hours), then earlier, in 30-minute steps. Open = the rebooker's own commit
+// check (previewMoveConflicts: its technician scope and statuses, unassigned visits included) finds nothing, and
+// no hour in `claimed` (earlier planned series in this run, by date, whatever the technician) overlaps.
+// Returns [start, end] (HH:MM) or null.
+async function openStart(conn, rebooker, move, claimed) {
+  const own = toMin(move.ws);
+  const length = toMin(windowEnd(move)) - own;
+  const last = DAY_END_HOUR * 60 - length;
+  const later = Array.from({ length: Math.max(0, Math.floor((last - own) / OPEN_STEP_MINUTES) + 1) }, (_, i) => own + i * OPEN_STEP_MINUTES);
+  const earlier = Array.from({ length: Math.max(0, Math.floor((Math.min(own, last + OPEN_STEP_MINUTES) - DAY_START_HOUR * 60) / OPEN_STEP_MINUTES)) },
+    (_, i) => Math.min(own, last + OPEN_STEP_MINUTES) - (i + 1) * OPEN_STEP_MINUTES);
+  for (const start of [...later, ...earlier]) {
+    const span = [hhmm(start), hhmm(start + length)];
+    if (claimed.some(([s, e]) => toMin(s) < start + length && start < toMin(e))) continue;
+    if (!(await rebooker.previewMoveConflicts(move.id, move.to, { start: span[0], end: span[1] }, { conn })).length) return span;
+  }
+  return null;
+}
+
+// The schedule half of the plan. Each timed move gets its open start (openStart); a move with none, or a move onto
+// a closed day, holds the series. An untimed move keeps no time: auto-dispatch times it after the move.
+// `reserved` (Map date -> [[start, end]]) carries the hours earlier series in this run claim; this call adds this
+// plan's moves to it when the plan is not held.
 async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new Map(), rebooker = require('./rebooker') } = {}) {
   const reasons = [...plan.heldReasons];
-  const claims = [];
+  const placed = new Map();
   for (const move of plan.moves) {
     if (closedDates.has(move.to)) reasons.push('closed day');
-    if (!move.ws) continue;
-    const [start, end] = [move.ws, windowEnd(move)];
-    const taken = (await rebooker.previewMoveConflicts(move.id, move.to, { start, end }, { conn })).length > 0
-      || (reserved.get(move.to) || []).some(([s, e]) => toMin(s) < toMin(end) && toMin(start) < toMin(e));
-    if (taken) reasons.push('hour taken');
-    claims.push([move.to, [start, end]]);
+    const span = move.ws ? await openStart(conn, rebooker, move, reserved.get(move.to) || []) : [null, null];
+    if (!span) reasons.push('hour taken');
+    else placed.set(move.id, { ...move, ws: span[0], we: span[1] });
   }
   const held = [...new Set(reasons)];
-  if (!held.length) for (const [key, span] of claims) reserved.set(key, [...(reserved.get(key) || []), span]);
-  return { ...plan, heldReasons: held, held: held[0] || null };
+  if (!held.length) {
+    for (const move of placed.values()) if (move.ws) reserved.set(move.to, [...(reserved.get(move.to) || []), [move.ws, move.we]]);
+  }
+  const visits = plan.visits.map((v) => placed.get(v.id) || v);
+  return { ...plan, visits, moves: visits.filter((v) => v.kind === 'move'), heldReasons: held, held: held[0] || null };
 }
 
 // ---- writes (--apply only) ---------------------------------------------------------------------------------------
@@ -253,9 +285,10 @@ async function moveVisitToRound(conn, deps, row) {
     return v;
   };
   const v = await unchanged(conn);
-  const end = windowEnd(v);
-  // A taken hour is refused by the rebooker's own commit check (SLOT_TAKEN), under its date lock; nothing is written.
-  const result = await deps.rebooker.reschedule(row.id, row.to, { start: v.ws, end }, MOVE_REASON, 'admin', {
+  // The planned open time (reviewPlan); an untimed visit moves by date only. A time taken since the plan is
+  // refused by the rebooker's own commit check (SLOT_TAKEN), under its date lock; nothing is written.
+  const window = row.ws ? { start: row.ws, end: row.we } : null;
+  const result = await deps.rebooker.reschedule(row.id, row.to, window, MOVE_REASON, 'admin', {
     seriesPolicy: 'single',
     visitPolicy: 'single',
     suppressTechNotice: true,
@@ -270,7 +303,8 @@ async function moveVisitToRound(conn, deps, row) {
     },
   });
   if (result && result.smsSent === true) throw new Error(`visit ${row.id}: the rebooker reported a customer text; stopping`);
-  await deps.reminders.handleReschedule(row.id, `${row.to}T${v.ws}`, { sendNotification: false, keepPendingConfirmation: true });
+  // The reminder reads the committed row; an untimed visit uses its 08:00 convention.
+  await deps.reminders.handleReschedule(row.id, `${row.to}T${row.ws || '08:00'}`, { sendNotification: false, keepPendingConfirmation: true });
   return v.tech;
 }
 

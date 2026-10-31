@@ -71,9 +71,10 @@ function summarizePlans(plans, skipped) {
   const planned = plans.filter((p) => !p.held);
   const held = {};
   for (const p of plans.filter((x) => x.held)) held[p.held] = (held[p.held] || 0) + 1;
+  // Lawns per area date: the visits an area plan puts on the area day (moved or already there).
   const load = {};
-  for (const p of planned.filter((x) => x.areaKey)) {
-    for (const v of p.visits) load[`${p.areaKey} ${v.to}`] = (load[`${p.areaKey} ${v.to}`] || 0) + 1;
+  for (const p of planned.filter((x) => x.anchorSource === 'area')) {
+    for (const v of p.visits.filter((x) => x.kind === 'move' || x.kind === 'at-target')) load[`${p.areaKey} ${v.to}`] = (load[`${p.areaKey} ${v.to}`] || 0) + 1;
   }
   const withFlag = (flag) => plans.filter((p) => p.flags.includes(flag)).map((p) => p.parentId);
   return {
@@ -99,7 +100,7 @@ function printPlan(plan) {
     + `${plan.oldWeekday}->${plan.newWeekday}${plan.flags.length ? ` flags=[${plan.flags.join(', ')}]` : ''}`
     + `${plan.held ? ` HELD=[${plan.heldReasons.join(', ')}]` : ''}`);
   for (const v of plan.visits) {
-    const text = v.kind === 'move' ? `${v.from} -> ${v.to} (${v.shift > 0 ? '+' : ''}${v.shift}d)`
+    const text = v.kind === 'move' ? `${v.from} -> ${v.to} ${v.ws || 'untimed'} (${v.shift > 0 ? '+' : ''}${v.shift}d)`
       : `keep ${v.from}${v.reason ? ` (${v.reason})` : v.kind === 'next' ? ' (next visit)' : ' (already on its round day)'}`;
     console.log(`  visit=${v.id} ${text}`);
   }

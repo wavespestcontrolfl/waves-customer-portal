@@ -94,12 +94,24 @@ describe('planSeriesRedate', () => {
     expect(plan.held).toBe('round conflict');
   });
 
-  test('a move over the limit holds the series unless that series is allowed', () => {
-    const held = planSeriesRedate(series(legacy()), { maxShiftDays: 7 });
-    expect(held.held).toBe('shift over 7 days');
-    expect(held.flags).toContain('long shift');
-    const allowed = planSeriesRedate(series(legacy()), { maxShiftDays: 7, allowLongShift: true });
-    expect(allowed.held).toBeNull();
+  test('an area plan over the limit falls back to the own weekday when that fits: area day too far', () => {
+    // The area day needs 14-day moves; the customer's own weekday is already on the rounds.
+    const plan = planSeriesRedate(series(legacy()), { maxShiftDays: 7 });
+    expect(plan).toMatchObject({ held: null, anchorSource: 'own', anchor: '2026-11-17', areaKey: 'parrish', moves: [] });
+    expect(plan.flags).toContain('area day too far');
+    expect(plan.flags).not.toContain('no area');
+  });
+
+  test('a move over the limit holds the series unless that series is allowed (own day too)', () => {
+    // v3 sits 11 days off its own-day round date (2027-02-09), and the area day is further still.
+    const drifted = [visit('v1', '2026-11-17'), visit('v2', '2026-12-29'), visit('v3', '2027-02-20')];
+    const own = planSeriesRedate(series(drifted, { areaAnchor: null, areaKey: null }), { maxShiftDays: 7 });
+    expect(own.held).toBe('shift over 7 days');
+    expect(own.flags).toEqual(expect.arrayContaining(['long shift', 'no area']));
+    const area = planSeriesRedate(series(drifted), { maxShiftDays: 7 });
+    expect(area).toMatchObject({ held: 'shift over 7 days', anchorSource: 'area' });
+    const allowed = planSeriesRedate(series(drifted), { maxShiftDays: 7, allowLongShift: true });
+    expect(allowed).toMatchObject({ held: null, anchorSource: 'area' });
     expect(allowed.flags).toContain('long shift');
   });
 
@@ -124,9 +136,10 @@ describe('planSeriesRedate', () => {
     expect(plan.flags).toContain('prepaid');
   });
 
-  test('a move that needs a time of day but has none holds the series: untimed visit', () => {
+  test('an untimed visit moves by date only (auto-dispatch times it): no hold', () => {
     const plan = planSeriesRedate(series([visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { ws: null, we: null })]));
-    expect(plan.held).toBe('untimed visit');
+    expect(plan.held).toBeNull();
+    expect(plan.moves).toEqual([expect.objectContaining({ id: 'v2', to: '2027-01-12', ws: null })]);
   });
 
   test('planning again after the moves landed plans nothing', () => {
@@ -180,13 +193,28 @@ describe('reviewPlan', () => {
     expect(out.held).toBeNull();
   });
 
-  test('an hour the rebooker would refuse holds the series: hour taken; every timed move is checked, unassigned too', async () => {
-    const rebooker = scheduleWith([{ id: 'x' }]);
+  test('a move whose own hour the rebooker would refuse takes the next open time; every timed move is checked, unassigned too', async () => {
+    // The rebooker's commit check refuses 09:00 on every day; 09:30 is open.
+    const rebooker = { previewMoveConflicts: jest.fn(async (id, date, window) => (window.start === '09:00' ? [{ id: 'x' }] : [])) };
     const unassigned = planSeriesRedate(series(legacy().map((v) => ({ ...v, tech: null }))));
     const out = await reviewPlan(conn, unassigned, { rebooker });
-    expect(out.held).toBe('hour taken');
-    expect(rebooker.previewMoveConflicts.mock.calls.map(([id, date, window, opts]) => [id, date, window, opts.conn]))
-      .toEqual(unassigned.moves.map((m) => [m.id, m.to, { start: '09:00', end: '10:00' }, conn]));
+    expect(out.held).toBeNull();
+    expect(out.moves.map((m) => [m.id, m.ws, m.we])).toEqual([['v2', '09:30', '10:30'], ['v3', '09:30', '10:30'], ['v4', '09:30', '10:30']]);
+    expect(out.visits.find((v) => v.id === 'v2')).toMatchObject({ ws: '09:30', we: '10:30' });
+    expect(rebooker.previewMoveConflicts.mock.calls.slice(0, 2).map(([id, date, window, opts]) => [id, date, window, opts.conn]))
+      .toEqual([['v2', '2027-01-12', { start: '09:00', end: '10:00' }, conn], ['v2', '2027-01-12', { start: '09:30', end: '10:30' }, conn]]);
+  });
+
+  test('a day with no open time in working hours holds the series: hour taken; an untimed move needs none', async () => {
+    const full = { previewMoveConflicts: jest.fn(async () => [{ id: 'x' }]) };
+    expect((await reviewPlan(conn, plan(), { rebooker: full })).held).toBe('hour taken');
+    // 09:00 to 16:00 later (15 starts, the last that ends by 17:00), then 08:30 and 08:00 earlier.
+    expect(full.previewMoveConflicts.mock.calls.filter(([id]) => id === 'v2').map(([, , w]) => w.start))
+      .toEqual(['09:00', '09:30', '10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30', '16:00', '08:30', '08:00']);
+    const untimed = planSeriesRedate(series([visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { ws: null, we: null })]));
+    const free = await reviewPlan(conn, untimed, { rebooker: full });
+    expect(free.held).toBeNull();
+    expect(free.moves[0]).toMatchObject({ id: 'v2', ws: null, we: null });
   });
 
   test('a closed day holds the series', async () => {
@@ -197,11 +225,14 @@ describe('reviewPlan', () => {
   test('an earlier planned series in the run claims its hour, whatever the technician; a held series claims none', async () => {
     const reserved = new Map();
     const rebooker = scheduleWith([]);
-    expect((await reviewPlan(conn, plan(), { reserved, rebooker })).held).toBeNull();
+    expect((await reviewPlan(conn, plan(), { reserved, rebooker })).moves.map((m) => m.ws)).toEqual(['09:00', '09:00', '09:00']);
     const otherTech = planSeriesRedate(series(legacy().map((v) => ({ ...v, tech: 'another-tech' }))));
-    expect((await reviewPlan(conn, otherTech, { reserved, rebooker })).held).toBe('hour taken');
+    const second = await reviewPlan(conn, otherTech, { reserved, rebooker });
+    expect(second.held).toBeNull();
+    expect(second.moves.map((m) => m.ws)).toEqual(['10:00', '10:00', '10:00']);
+    expect(reserved.get('2027-01-12')).toEqual([['09:00', '10:00'], ['10:00', '11:00']]);
     const heldFirst = new Map();
-    await reviewPlan(conn, planSeriesRedate(series(legacy()), { maxShiftDays: 3 }), { reserved: heldFirst, rebooker });
+    await reviewPlan(conn, plan(), { reserved: heldFirst, rebooker, closedDates: new Set(['2027-01-12']) });
     expect(heldFirst.size).toBe(0);
   });
 });
@@ -229,7 +260,7 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
   const fail = { id: rebookerFails };
   const rows = new Map(visits.map((v) => [v.id, {
     id: v.id, d: v.date, ws: v.ws, we: v.we, dur: v.dur, tech: v.tech, term_id: v.termId || null, is_recurring: true,
-    window_start: `${v.ws}:00`, window_end: `${v.we}:00`, technician_id: v.tech, status: 'pending', customer_confirmed: false,
+    window_start: v.ws ? `${v.ws}:00` : null, window_end: v.we ? `${v.we}:00` : null, technician_id: v.tech, status: 'pending', customer_confirmed: false,
     auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null,
   }]));
   const state = { root: lawnRoot(parentPattern), terms };
@@ -263,7 +294,7 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
     prepay: { normalizeCoverageCadence: (v) => v || null, inferCoverageCadence: () => 'quarterly' },
   };
   const termWindows = Object.fromEntries(terms.map((term) => [term.id, { start: '2026-01-01', end: '2027-12-31' }]));
-  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { termId: r.term_id, prepaid: !!r.term_id })), { terms: termWindows })), { rebooker });
+  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { ws: r.ws, we: r.we, termId: r.term_id, prepaid: !!r.term_id })), { terms: termWindows })), { rebooker });
   return { conn, deps, rebooker, reminders, log, rows, state, replan, fail };
 }
 
@@ -311,6 +342,19 @@ describe('applySeries', () => {
       ['v4', '2027-03-30T09:00', { sendNotification: false, keepPendingConfirmation: true }],
     ]);
     expect(out.moved.map((m) => m.tech)).toEqual([TECH, TECH, TECH]);
+  });
+
+  test('a move takes its planned open time; an untimed visit moves by date only', async () => {
+    const rows = [visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { ws: null, we: null }), visit('v3', '2027-02-09'), visit('v4', '2027-03-23')];
+    const w = world({ visits: rows });
+    // The rebooker's commit check refuses 09:00 on v4's new day, so v4 takes 09:30.
+    w.rebooker.previewMoveConflicts.mockImplementation(async (id, date, win) => (date === '2027-03-30' && win.start === '09:00' ? [{ id: 'x' }] : []));
+    const out = await applySeries(w.conn, w.deps, await w.replan(), w.replan);
+    expect(out.status).toBe('converted');
+    const calls = Object.fromEntries(w.rebooker.reschedule.mock.calls.map(([id, date, window]) => [id, [date, window]]));
+    expect(calls).toEqual({ v2: ['2027-01-12', null], v3: ['2027-02-23', { start: '09:00', end: '10:00' }], v4: ['2027-03-30', { start: '09:30', end: '10:30' }] });
+    expect(w.reminders.handleReschedule.mock.calls.map((c) => [c[0], c[1]]))
+      .toEqual([['v2', '2027-01-12T08:00'], ['v3', '2027-02-23T09:00'], ['v4', '2027-03-30T09:30']]);
   });
 
   test('the conversion runs only after every move landed, under the series locks', async () => {
@@ -538,8 +582,7 @@ describe('summarizePlans', () => {
     const report = summarizePlans([ok, conflict], { 'already rounds': 2 });
     expect(report.summary).toEqual({ candidates: 4, planned: 1, held: { 'round conflict': 1 }, skipped: { 'already rounds': 2 }, visitsMoved: 3, visitsKept: 1 });
     expect(report.roundConflict).toEqual(['p2']);
-    expect(report.areaDayLoad).toEqual({
-      'parrish 2026-11-17': 1, 'parrish 2027-01-12': 1, 'parrish 2027-02-23': 1, 'parrish 2027-03-30': 1,
-    });
+    // The kept next visit (2026-11-17) is on its own date, not the area day.
+    expect(report.areaDayLoad).toEqual({ 'parrish 2027-01-12': 1, 'parrish 2027-02-23': 1, 'parrish 2027-03-30': 1 });
   });
 });
