@@ -36,7 +36,7 @@ function plannerOptions(req) {
 // already withholds billingMode with the other billing fields (Codex #4365
 // P2). Completion attribution builds its own plan server-side, never from
 // this response.
-// GATE_LAWN_TS_STOCK_ADVISORY: `stockAdvisory: true` when /complete takes this lawn visit's stock below zero instead of
+// `stockAdvisory: true` when /complete takes this lawn visit's stock below zero instead of
 // refusing (the same classifier), so the full completion form drops its inventory hold too. Absent otherwise.
 function projectPlanResponse(plan) {
   if (!plan || typeof plan !== 'object' || !plan.propertyGate || typeof plan.propertyGate !== 'object') return plan;

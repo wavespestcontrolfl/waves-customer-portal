@@ -299,7 +299,7 @@ const isOutOfStockRow = (row) => stockHolds(row.product, submittedAmount(row.tot
 
 // The first requirement the application record still needs, in screen order
 // (reason '' when none), and the product whose stock holds Complete when
-// that is what is missing. `stockAdvisory` (GATE_PEST_STOCK_ADVISORY, the
+// that is what is missing. `stockAdvisory` (the
 // context's key): no product at 0 in stock holds, and `stockNotices` names each.
 function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0, voiceHolds = {}, stockAdvisory) {
   const active = rows.filter((row) => row.active);
@@ -456,7 +456,7 @@ const wrapUpGateOf = (data) => data?.wrapUp === true;
 // The one-tap report (GATE_ONE_TAP_REPORT, owner 2026-10-17): the recurring pest report sheet writes on the rating tap, reads no note for
 // products and takes typed feet where no trace is saved. The server says so with `oneTap: true`.
 const oneTapGateOf = (data) => data?.oneTap === true;
-// GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): /complete takes this visit's stock below zero instead of
+// Owner 2026-10-20, "dont block": /complete takes a pest visit's stock below zero instead of
 // refusing, so no product at 0 in stock holds the sheet. The server says so with `stockAdvisory: true`.
 const stockAdvisoryOf = (data) => data?.stockAdvisory === true;
 // It runs on the plain pest report (a visit of a recurring series or a re-service: the server sends `oneTap` for no
@@ -1176,7 +1176,7 @@ const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mod
 // `productsFromNote` (voice fill, a note not yet read for products): Generate
 // reads the products out of the note first, so neither an empty list nor a row
 // still missing its amount holds it; both are judged again once the note is read.
-// `stockAdvisory` (GATE_PEST_STOCK_ADVISORY, the context's key): a 0-in-stock product holds nothing, because /complete
+// `stockAdvisory` (the context's key): a 0-in-stock product holds nothing, because /complete
 // takes this pest visit's stock below zero and records the shortfall (owner 2026-10-20, "dont block"); `stockNotices`
 // lists every such product for the sheet to name.
 // `oneTap` (GATE_ONE_TAP_REPORT, owner 2026-10-17): the photo read holds nothing (photos are optional, shown when

@@ -657,6 +657,11 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate), laborEstimated };
 }
 
+// The identity of a refused line: product, amount and base unit, so a corrected amount is a different line. The
+// amount is compared at the stored precision (quantity_applied / total_amount are decimal(8,3)), so a submitted
+// 641.1234 matches the 641.123 the ledger kept.
+const refusedLineKey = (productId, amount, unit) => `${productId}|${Number(amount).toFixed(3)}|${baseQuantityUnit(unit) || ''}`;
+
 // GATE_JOB_COST_STANDARD_MINUTES labor (owner ruling 2026-10-31), applied to the measured result of
 // calcLaborCost. Order: an admin time-on-site correction (overrideLaborMinutes, resolved by the caller) wins;
 // else the standard for the service type of a completed visit, which replaces measured time, time entries,
@@ -676,7 +681,8 @@ function applyStandardLabor(measured, { svc, rate, overrideLaborMinutes, estimat
   return priced(estimated, estimated > 0);
 }
 
-async function calcProductsCost(db, serviceRecordId) {
+// `structuredNotes` is the visit's service record notes as the caller already loaded them (object or JSON text): no second read.
+async function calcProductsCost(db, serviceRecordId, structuredNotes = null) {
   let total = 0;
   const breakdown = [];
   const costedInventoryProductIds = new Set();
@@ -714,6 +720,12 @@ async function calcProductsCost(db, serviceRecordId) {
   }
 
   try {
+    // A line the completion refused as an implausible amount wrote no movement and no cost, so the ledger fallback skips
+    // that line too. The refusal is bound to the amount it refused (product, amount and unit): a correction that changes
+    // the amount no longer matches, and the corrected usage is costed.
+    const refused = new Set((parseJsonObject(structuredNotes).inventoryDeductions || [])
+      .filter((d) => d?.status === 'not_deducted_implausible')
+      .map((d) => refusedLineKey(d.productId, d.amount, d.amountUnit)));
     const rows = await db('property_application_history')
       .where({ service_record_id: serviceRecordId })
       // Retracted applications (recap corrections) carry no material cost.
@@ -724,6 +736,7 @@ async function calcProductsCost(db, serviceRecordId) {
       const qty = Number(r.quantity_applied) || 0;
       if (!qty || !r.product_id) continue;
       if (costedInventoryProductIds.has(r.product_id)) continue;
+      if (refused.has(refusedLineKey(r.product_id, r.quantity_applied, r.quantity_unit))) continue;
 
       // Price the amount the way the completion deduction prices an inventory
       // movement (inventory-cost.js): cost_per_unit in its own unit, else the
@@ -987,7 +1000,7 @@ async function calculateJobCost(scheduledServiceId, db, {
     ? applyStandardLabor(measuredLabor, { svc, rate: laborRate, overrideLaborMinutes, estimatedLaborMinutes })
     : measuredLabor;
   const { productsCost, breakdown } = record?.id
-    ? await calcProductsCost(db, record.id)
+    ? await calcProductsCost(db, record.id, record.structured_notes)
     : { productsCost: 0, breakdown: [] };
   const expensesCost = await calcExpenses(db, scheduledServiceId);
   // A versioned combined-closeout marker freezes one drive-cost owner for the

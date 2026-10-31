@@ -182,7 +182,7 @@ jest.setTimeout(30000);
     await mockConn('products_catalog').where({ id: taurus.id }).update({ inventory_unit: 'fl_oz' });
     expect(await processReceiptLine(line())).toMatchObject({ status: 'logged' });
   });
-  // GATE_PEST_STOCK_ADVISORY: a pest visit that took a product below zero left one open office alert for it
+  // A pest visit that took a product below zero left one open office alert for it
   // (complete-scheduled-service.js); a movement that brings the count back to zero or above closes it, and the next
   // shortfall then rings a fresh row (dedupeOpenOnly skips the closed one).
   describe('a count back to zero or above closes the pest stock shortfall alert', () => {

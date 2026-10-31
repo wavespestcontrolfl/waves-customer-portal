@@ -591,18 +591,19 @@ function isWaveGuardLawnCompletion(svc) {
     && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
-// GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): a pest visit's completion treats stock as advisory too,
+// Owner 2026-10-20, "dont block": a pest visit's completion treats stock as advisory too,
 // by the server's own service line (as WaveGuard lawn above); the pest sheet's context reads the same answer, so the
 // sheet never lets through what /complete refuses.
 function isPestStockAdvisoryCompletion(svc) {
-  return require('../config/feature-gates').pestStockAdvisoryLive() && detectServiceLine(svc?.service_type) === 'pest';
+  return detectServiceLine(svc?.service_type) === 'pest';
 }
 
-// GATE_LAWN_TS_STOCK_ADVISORY: a lawn or tree & shrub visit (services/stock-advisory.js).
+// A lawn or tree & shrub visit (services/stock-advisory.js).
 const { isLawnTsStockAdvisoryCompletion } = require('./stock-advisory');
 
-// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing.
-const isStockAdvisoryCompletion = (svc) => isWaveGuardLawnCompletion(svc) || isPestStockAdvisoryCompletion(svc) || isLawnTsStockAdvisoryCompletion(svc);
+// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing: a pest, lawn
+// (any tier, WaveGuard included) or tree & shrub visit.
+const isStockAdvisoryCompletion = (svc) => isPestStockAdvisoryCompletion(svc) || isLawnTsStockAdvisoryCompletion(svc);
 
 // Plan/approval-engine block messages predate the advisory policy and can
 // still phrase conditions as approval mandates ("manager review is required
@@ -1649,6 +1650,135 @@ async function recordCountedUsage(trx, {
   };
 }
 
+// What one product line may move stock by in a single visit: a FIXED reviewed maximum per dimension (real prod per-line
+// maxima: 320 fl oz, 85 oz, 27.5 lb, 16 each). The advisory lane lets stock go negative, so a typo (a million fl oz) must
+// not corrupt the count. No history is read: a limit computed from past usage can be raised or lowered by whoever logged
+// that usage. An amount whose unit has no known dimension (a blank inventory unit, a per-area rate such as oz/1000sf, bags)
+// fails closed on the submitted number itself.
+const VISIT_LIMITS = {
+  // Weight first: a bare "oz" converts to both lb and fl oz, and counts as weight (the looser limit: 1,600 oz), so "oz" lines
+  // and "lb" lines of one product add up together.
+  floors: [{ amount: 100, unit: 'lb' }, { amount: 640, unit: 'fl_oz' }, { amount: 50, unit: 'each' }],
+  unknownDimensionCap: 50,
+};
+
+// What one line counts for against a visit limit, from its SUBMITTED unit alone (the catalog's stock unit is irrelevant, so a
+// blank or odd stock unit cannot split one product into groups): the amount converted to its dimension's base unit (fl oz,
+// lb, each) against that dimension's limit, or, for a unit with no known dimension, the submitted number against the cap
+// (its bucket is the unit string). Pure.
+function visitLimitShare({ amount, amountUnit }) {
+  for (const floor of VISIT_LIMITS.floors) {
+    const value = convertInventoryQuantity(amount, amountUnit, floor.unit);
+    if (value != null) return { value, limit: floor.amount, bucket: floor.unit, baseUnit: floor.unit };
+  }
+  return { value: amount, limit: VISIT_LIMITS.unknownDimensionCap, bucket: `unit:${String(amountUnit || '').trim().toLowerCase()}`, baseUnit: null };
+}
+
+// True when one line is over its visit limit. The same line always gets the same answer, however many concurrent completions there are.
+function exceedsVisitLimit(line) {
+  const share = visitLimitShare(line);
+  return share.value > share.limit;
+}
+
+// A technician's completion is refused, before any service write, when a submitted line is over its product's ceiling
+// (the office keeps the advisory path in deductProductInventory: an admin entry is deliberate, so the line is recorded, stock
+// is left alone and the office is alerted). The line would otherwise reach service_products, the FDACS ledger, usage, limits
+// and the customer report.
+const IMPLAUSIBLE_PRODUCT_AMOUNT = 'IMPLAUSIBLE_PRODUCT_AMOUNT';
+
+// The ONE parse of a submitted product amount. An absent or empty amount is "no amount" (null); a number or a plain
+// decimal string is that number; anything else ("99999junk", "1e3", a boolean, an object, a negative) is invalid (NaN).
+// parseFloat/Number on the raw value would each read it differently, and a sink that read "99999junk" as 99,999 would
+// store a number the preflight never judged. The pattern has no overlapping quantifiers (the fraction needs its dot)
+// and the string is length-capped first, so a long digit run fails in linear time.
+const PLAIN_DECIMAL = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
+const MAX_AMOUNT_CHARS = 32;
+function strictProductAmount(raw) {
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw >= 0 ? raw : NaN;
+  if (typeof raw === 'string' && raw.length <= MAX_AMOUNT_CHARS && PLAIN_DECIMAL.test(raw.trim())) return Number(raw.trim());
+  return NaN;
+}
+
+// Parses every submitted line's amount once and writes the parsed number back onto the line, so every later sink
+// (the stock check, the service_products insert, the FDACS ledger, limits, nutrients) reads the same number. Returns
+// the 400 for the first malformed amount, else null. Runs for every role, on a fresh completion only.
+function normalizeProductAmounts(lines, nameOf) {
+  for (const line of lines) {
+    const amount = strictProductAmount(line.totalAmount);
+    if (Number.isNaN(amount)) {
+      return { status: 400, body: {
+        error: `The amount for ${nameOf(line)} is not a number. Enter the amount as a plain number and submit again.`,
+        code: 'INVALID_PRODUCT_AMOUNT', productId: line.productId,
+      } };
+    }
+    line.totalAmount = amount;
+  }
+  return null;
+}
+
+// What to judge for one line: its amount and units, or null when there is nothing to judge (no product, no amount).
+function visitLimitInput(submitted, catalogRow) {
+  const amount = submitted.totalAmount;
+  if (!catalogRow || !amount || !Number.isFinite(amount) || amount <= 0) return null;
+  const amountUnit = baseQuantityUnit(submitted.amountUnit || submitted.rateUnit || null);
+  return { amount, amountUnit };
+}
+
+function implausibleRefusal(catalogRow, { amount, amountUnit }) {
+  return {
+    error: `${amount} ${String(amountUnit || '').replace(/_/g, ' ')} of ${catalogRow.name} is far more than one visit uses. Check the amount and submit again.`.replace(/\s{2,}/g, ' '),
+    code: IMPLAUSIBLE_PRODUCT_AMOUNT,
+    productId: catalogRow.id,
+    productName: catalogRow.name,
+    amount,
+    amountUnit,
+  };
+}
+
+// The first product whose lines TOGETHER are over its visit limit, as { catalogRow, amount, amountUnit } for the refusal, else null.
+// Lines are grouped by canonical product id (a host row and an add-on row, or the same id repeated, are one product's use)
+// and by dimension, each line converted to the dimension's base unit from its own submitted unit. A group of one submitted
+// unit reports the submitted total; mixed units report the total in the dimension's base unit.
+function firstProductOverVisitLimit(lines, rowById) {
+  const groups = new Map();
+  for (const line of lines) {
+    const catalogRow = rowById.get(line.productId);
+    const judged = visitLimitInput(line, catalogRow);
+    if (!judged) continue;
+    const share = visitLimitShare(judged);
+    const key = `${line.productId}|${share.bucket}`;
+    const group = groups.get(key) || { catalogRow, value: 0, raw: 0, units: new Set(), limit: share.limit, baseUnit: share.baseUnit };
+    group.value += share.value;
+    group.raw += judged.amount;
+    group.units.add(String(judged.amountUnit || '').trim().toLowerCase());
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    if (group.value <= group.limit) continue;
+    const single = group.units.size === 1;
+    return { catalogRow: group.catalogRow, amount: Number((single ? group.raw : group.value).toFixed(4)), amountUnit: single ? [...group.units][0] : group.baseUnit };
+  }
+  return null;
+}
+
+// Vets every submitted product line before the first write. The ids are already canonical (canonicalizeProductLines ran at
+// intake), so spellings of one id are one product here and everywhere downstream. A malformed amount is a 400 for any role. A technician whose lines for one product add up to
+// more than its visit limit gets a 422 naming the product and the total (an admin's keeps the advisory path in
+// deductProductInventory). Returns { status, body } or null. One catalog read, no history read. `skip` is a replay, a
+// resume or a packet effects phase: nothing is judged or changed.
+async function vetProductAmounts(database, { actor, products, skip = false }) {
+  if (skip || !Array.isArray(products)) return null;
+  const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
+  const ids = [...new Set(lines.map((p) => p.productId).filter((id) => UUID_SHAPE.test(id)))];
+  const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
+  const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
+  const invalid = normalizeProductAmounts(lines, (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product');
+  if (invalid || actor?.techRole === 'admin') return invalid;
+  const over = firstProductOverVisitLimit(lines, rowById);
+  return over ? { status: 422, body: implausibleRefusal(over.catalogRow, over) } : null;
+}
+
 async function deductProductInventory(trx, {
   product,
   productInput,
@@ -1708,9 +1838,8 @@ async function deductProductInventory(trx, {
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
   // allowNegative is passed ONLY for an advisory-stock completion
-  // (isStockAdvisoryCompletion): a WaveGuard lawn closeout (owner directive
-  // 2026-08-03) or, under GATE_PEST_STOCK_ADVISORY / GATE_LAWN_TS_STOCK_ADVISORY,
-  // a pest, lawn or tree & shrub visit (owner 2026-10-20). The deduction proceeds,
+  // (isStockAdvisoryCompletion): a lawn closeout (WaveGuard since the owner
+  // directive 2026-08-03), a pest or a tree & shrub visit (owner 2026-10-20). The deduction proceeds,
   // inventory_on_hand goes negative, and the movement/snapshot below record the
   // insufficient-stock state for audit (a shortfall also alerts the office:
   // notifyOfficeOfStockShortfalls). Every other completion keeps the hard
@@ -1722,6 +1851,18 @@ async function deductProductInventory(trx, {
     err.isOperational = true;
     err.code = 'waveguard_inventory_lockout';
     throw err;
+  }
+  // Owner "dont block": the completion still succeeds, but an amount no visit uses moves no stock and no cost. The
+  // office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
+  if (insufficient && exceedsVisitLimit({ amount, amountUnit })) {
+    return {
+      ...snapshot,
+      status: 'not_deducted_implausible',
+      inventoryUnit,
+      stockBefore,
+      remainingStock: stockBefore,
+      warning: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
+    };
   }
   const { unitCost, costUsed } = calculateInventoryCost({
     product: inventoryProduct,
@@ -2000,6 +2141,29 @@ const FINDING_LIMIT_LABELS = { ...HARD_COUNT_LIMIT_LABELS, [areaAddOnGovernedRat
 const MAX_RAW_SUBMITTED_PRODUCTS = 200;
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// INTAKE: makes every product line's productId canonical (trim, lower case: the form the catalog lookup, the de-duplication and
+// the add-on tag keys compare) ONCE, before anything reads the ids, so spellings of one id are one product everywhere
+// downstream. The lines are written in place. Returns the ids as submitted when any changed (the idempotency hash keeps
+// hashing those, so a retry, and an attempt recorded before this change, still match), else null.
+function canonicalizeProductLines(products) {
+  if (!Array.isArray(products)) return null;
+  const submitted = products.map((p) => p?.productId);
+  let changed = false;
+  for (const p of products) {
+    if (!p?.productId) continue;
+    const canonical = canonicalProductId(p.productId);
+    changed = changed || canonical !== p.productId;
+    p.productId = canonical;
+  }
+  return changed ? submitted : null;
+}
+
+// The request body as it was submitted, for the idempotency hash: the product lines carry their ids as submitted.
+function bodyAsSubmitted(body, submittedIds) {
+  if (!submittedIds || !Array.isArray(body?.products)) return body;
+  return { ...body, products: body.products.map((p, i) => (p && typeof p === 'object' && submittedIds[i] ? { ...p, productId: submittedIds[i] } : p)) };
+}
+
 // An oversized products array is refused up front (a 400), before anything reads it.
 function rawProductsTooManyPayload(products) {
   if (!Array.isArray(products) || products.length <= MAX_RAW_SUBMITTED_PRODUCTS) return null;
@@ -2238,7 +2402,16 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   }
 }
 
-// GATE_PEST_STOCK_ADVISORY / GATE_LAWN_TS_STOCK_ADVISORY (owner 2026-10-20, "dont block"): one office alert for each
+const STOCK_ALERT_VISIT_LABELS = { pest: 'pest', lawn: 'lawn', tree_shrub: 'tree & shrub' };
+// The alert words with the product named, or plain words when the alert rules refuse the name (a code, a bracket, a
+// second sentence). The headline and the one-sentence why carry a short name; the detail keeps it whole.
+function stockAlertWords(fullName, wordsFor, plain) {
+  const { breaksAlertRules, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+  const named = wordsFor(require('../services/ops-digest').truncateAtWord(fullName, 24));
+  return breaksAlertRules(named.action) || breaksAlertRules(named.why) || named.why.length > MAX_WHY_CHARS ? plain : named;
+}
+
+// Owner 2026-10-20, "dont block": one office alert for each
 // product this pest, lawn or tree & shrub visit took below zero, raised after the record is saved and never blocking. The key is the product's, and only an OPEN row
 // dedupes (dedupeOpenOnly): a retry, a resume or the next visit that overdraws it again finds the standing alert and
 // does not ring; a restock or count back to zero or above closes it (inventory-operations.js), and a person may mark
@@ -2246,56 +2419,62 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
 // product's row lock, the lock a restock or count takes before it closes the alert: a restock can never land between
 // the read and the insert (it would leave a stale open alert that hides the next real one), and a product already
 // back to zero or above gets none. Called after the record's transaction has committed, so no lock is held here.
-// Decided from the committed record, not the live gate: a pest, non-member lawn or tree & shrub record holds a
-// shortfall only when its gate was on at the save. A WaveGuard lawn record has held one since 2026-08-03 with no alert,
-// so it alerts only while GATE_LAWN_TS_STOCK_ADVISORY is live (off restores today's quiet WaveGuard behavior).
-const STOCK_ALERT_VISIT_LABELS = { pest: 'pest', lawn: 'lawn', tree_shrub: 'tree & shrub' };
+// Decided from the committed record: a pest, lawn (WaveGuard included) or tree & shrub record alerts for each
+// shortfall it holds.
+// A line refused for an implausible amount (deductProductInventory) moved no stock: the office checks the amount entered,
+// one open alert for each record and product, instead of restocking.
 async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
   const visitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)];
-  if (!visitLabel || (isWaveGuardLawnCompletion(svc) && !require('../config/feature-gates').lawnTsStockAdvisoryLive())) return;
-  const { raiseAdminAlert, breaksAlertRules, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+  if (!visitLabel) return;
+  const { raiseAdminAlert } = require('../services/admin-alert-compose');
   const { stockShortfallKey } = require('../services/inventory-operations');
   let notes = record?.structured_notes || {};
   if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = {}; } }
-  const shortfalls = (Array.isArray(notes.inventoryDeductions) ? notes.inventoryDeductions : [])
-    .filter((deduction) => deduction?.status === 'deducted_insufficient_stock' && deduction.productId);
-  for (const deduction of shortfalls) {
-    try {
-      const fullName = deduction.productName || 'A product';
-      // The headline and the one-sentence why carry a short name; the detail keeps it whole. A name the alert rules
-      // refuse (a code, a bracket, a second sentence) falls back to plain words.
-      const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
-      const namedWhy = `${name} went below zero in stock after a ${visitLabel} visit.`;
-      const plain = breaksAlertRules(`restock ${name}`) || breaksAlertRules(namedWhy) || namedWhy.length > MAX_WHY_CHARS;
-      const dedupeKey = stockShortfallKey(deduction.productId);
-      const unit = String(deduction.inventoryUnit || '').replace(/_/g, ' ');
-      const created = await database.transaction(async (trx) => {
-        const product = await trx('products_catalog').where({ id: deduction.productId }).forUpdate().first('inventory_on_hand');
-        if (!(product?.inventory_on_hand != null && Number(product.inventory_on_hand) < 0)) return 'not_below_zero';
-        return raiseAdminAlert('inventory', {
-          area: 'Inventory',
-          action: plain ? 'restock a product' : `restock ${name}`,
-          why: plain ? `A product went below zero in stock after a ${visitLabel} visit.` : namedWhy,
-          severity: 'needs-you',
-          who: 'person',
-          link: `/admin/inventory?tab=products&search=${encodeURIComponent(fullName)}&productId=${deduction.productId}`,
-          subject: { type: 'check', id: dedupeKey },
-          doneWhen: 'stock_restocked',
-        }, {
-          bell: true,
-          dedupeKey,
-          dedupeOpenOnly: true,
-          trx,
-          detail: `${fullName} went to ${deduction.stockAfter} ${unit} on hand after a ${visitLabel} visit used ${deduction.deductedAmount} ${unit}. Restock it, or fix the count if the shelf has more.`,
-          metadata: {
-            productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id,
-            stockAfter: deduction.stockAfter, inventoryUnit: deduction.inventoryUnit, dedupeKey,
-          },
-        });
+  const lines = Array.isArray(notes.inventoryDeductions) ? notes.inventoryDeductions : [];
+  const raise = (words, dedupeKey, spec, opts) => raiseAdminAlert('inventory', {
+    area: 'Inventory', action: words.action, why: words.why, severity: 'needs-you', who: 'person', subject: { type: 'check', id: dedupeKey }, ...spec,
+  }, { bell: true, dedupeKey, dedupeOpenOnly: true, ...opts, metadata: { ...opts.metadata, dedupeKey } });
+  const sendShortfall = async (deduction) => {
+    const fullName = deduction.productName || 'A product';
+    const words = stockAlertWords(fullName, (n) => ({ action: `restock ${n}`, why: `${n} went below zero in stock after a ${visitLabel} visit.` }),
+      { action: 'restock a product', why: `A product went below zero in stock after a ${visitLabel} visit.` });
+    const unit = String(deduction.inventoryUnit || '').replace(/_/g, ' ');
+    return database.transaction(async (trx) => {
+      const product = await trx('products_catalog').where({ id: deduction.productId }).forUpdate().first('inventory_on_hand');
+      if (!(product?.inventory_on_hand != null && Number(product.inventory_on_hand) < 0)) return 'not_below_zero';
+      return raise(words, stockShortfallKey(deduction.productId), {
+        link: `/admin/inventory?tab=products&search=${encodeURIComponent(fullName)}&productId=${deduction.productId}`,
+        doneWhen: 'stock_restocked',
+      }, {
+        trx,
+        detail: `${fullName} went to ${deduction.stockAfter} ${unit} on hand after a ${visitLabel} visit used ${deduction.deductedAmount} ${unit}. Restock it, or fix the count if the shelf has more.`,
+        metadata: { productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id, stockAfter: deduction.stockAfter, inventoryUnit: deduction.inventoryUnit },
       });
-      if (!created) logger.error(`[dispatch] stock shortfall alert NOT recorded for record ${record.id} (admin alert returned null)`);
-    } catch (err) {
-      logger.error(`[dispatch] stock shortfall alert failed (non-blocking): ${err.message}`);
+    });
+  };
+  const sendAmount = async (deduction) => {
+    const fullName = deduction.productName || 'A product';
+    const words = stockAlertWords(fullName, (n) => ({ action: `check ${n} amount`, why: `${n} amount looks too big for a ${visitLabel} visit, so stock was not changed.` }),
+      { action: 'check a product amount', why: `A product amount looks too big for a ${visitLabel} visit, so stock was not changed.` });
+    return raise(words, `stock-amount-check:${record.id}:${deduction.productId}`, {
+      link: `/admin/customers?customerId=${svc.customer_id}`,
+      doneWhen: 'amount_checked',
+    }, {
+      detail: `${fullName}: ${deduction.amount} ${String(deduction.amountUnit || '').replace(/_/g, ' ')} was entered on a ${visitLabel} visit. That is too much for one visit, so stock was not changed and no cost was recorded. Check the amount entered, and fix the visit's product line if it is wrong.`,
+      metadata: { productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id, amount: deduction.amount, amountUnit: deduction.amountUnit },
+    });
+  };
+  const kinds = [
+    { status: 'deducted_insufficient_stock', label: 'shortfall', send: sendShortfall },
+    { status: 'not_deducted_implausible', label: 'amount', send: sendAmount },
+  ];
+  for (const { status, label, send } of kinds) {
+    for (const deduction of lines.filter((line) => line?.status === status && line.productId)) {
+      try {
+        if (!(await send(deduction))) logger.error(`[dispatch] stock ${label} alert NOT recorded for record ${record.id} (admin alert returned null)`);
+      } catch (err) {
+        logger.error(`[dispatch] stock ${label} alert failed (non-blocking): ${err.message}`);
+      }
     }
   }
 }
@@ -3229,6 +3408,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
     if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
+    const productIdsAsSubmitted = canonicalizeProductLines(products);
     const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -4762,7 +4942,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             idempotencyKey,
             // Both packet phases hash what the effects resume will present.
             requestHash: CompletionAttempts.hashCompletionRequest(packetContext
-              ? CompletionAttempts.withoutPhotoBytes(completionInput.body) : completionInput.body),
+              ? CompletionAttempts.withoutPhotoBytes(bodyAsSubmitted(completionInput.body, productIdsAsSubmitted))
+              : bodyAsSubmitted(completionInput.body, productIdsAsSubmitted)),
           }, lockTrx);
           if (packetEffects && ['resume', 'replay'].includes(attemptClaim.action)
               && (attemptClaim.serviceRecordId || attemptClaim.payload?.serviceRecordId) !== ownedItem.service_record_id) {
@@ -5005,6 +5186,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
     await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
     // ... and a completed visit records an application for EVERY chemical add-on it carries (they are invoiced from the visit).
     await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
+
+    // A malformed amount (any role) and a technician's amount no visit uses are refused on a FRESH completion only, before the first service write
+    // (service_products, inventory, FDACS ledger, cost, report). A same-key replay or resume of a committed completion is
+    // never judged. The claim is released as failed, as for the other refusals above, so a corrected resubmit is not blocked. Admin keeps the
+    // advisory path in deductProductInventory.
+    const amountRefusal = await vetProductAmounts(db, {
+      actor: completionInput.actor, products, skip: claim.action !== 'proceed',
+    });
+    if (amountRefusal) {
+      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(amountRefusal.body.code), db);
+      return amountRefusal;
+    }
 
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.
@@ -8404,8 +8597,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
               err.code = 'area_sqft_required';
               throw err;
             }
+            // The amount was parsed once, strictly, before the first write (normalizeProductAmounts); NaN here is a line
+            // that never went through it, and is refused below.
             const appliedAmount = p.totalAmount != null && p.totalAmount !== ''
-              ? parseFloat(p.totalAmount)
+              ? Number(p.totalAmount)
               : null;
             // A "/gal" unit is a mix concentration: a total recorded against
             // it is the amount of concentrate, so store the base quantity
@@ -8468,9 +8663,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceProduct,
               serviceRecord: record,
               scheduledService: svc,
-              // Advisory inventory posture: WaveGuard lawn, and a pest visit
-              // under GATE_PEST_STOCK_ADVISORY, a lawn or tree & shrub visit
-              // under GATE_LAWN_TS_STOCK_ADVISORY (isStockAdvisoryCompletion).
+              // Advisory inventory posture: a pest, lawn or tree & shrub visit
+              // (isStockAdvisoryCompletion).
               allowNegative: isStockAdvisoryCompletion(svc),
             });
             inventoryDeductions.push(deduction);
@@ -9739,9 +9933,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
-    // GATE_PEST_STOCK_ADVISORY / GATE_LAWN_TS_STOCK_ADVISORY: the office alert for each product this pest, lawn or tree &
-    // shrub visit took below zero. Never blocks. Decided from the committed record (notifyOfficeOfStockShortfalls picks the
-    // visit's line), so a resume (or a packet's effects phase) after the gate is turned off still alerts the office.
+    // The office alert for each product this pest, lawn or tree & shrub visit took below zero. Never blocks. Decided
+    // from the committed record (notifyOfficeOfStockShortfalls picks the visit's line), so a resume (or a packet's
+    // effects phase) still alerts the office.
     if (record?.id) await notifyOfficeOfStockShortfalls({ svc, record });
 
     // An area add-on row recorded above the add-on's governed rate (protocols.json area_addon): the same
@@ -16206,5 +16400,8 @@ module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
 module.exports.isPestStockAdvisoryCompletion = isPestStockAdvisoryCompletion;
 module.exports.isLawnTsStockAdvisoryCompletion = isLawnTsStockAdvisoryCompletion;
 module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
+module.exports.vetProductAmounts = vetProductAmounts;
+module.exports.canonicalizeProductLines = canonicalizeProductLines;
+module.exports.exceedsVisitLimit = exceedsVisitLimit;
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

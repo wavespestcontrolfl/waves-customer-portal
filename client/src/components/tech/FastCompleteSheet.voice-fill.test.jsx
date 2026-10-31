@@ -364,7 +364,7 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(screen.getByRole('button', { name: 'Spot treatment' }).getAttribute('aria-pressed')).toBe('true');
   });
 
-  // GATE_PEST_STOCK_ADVISORY: the advisory Check stock waits for a voice capture like every other control (codex r1
+  // The advisory Check stock waits for a voice capture like every other control (codex r1
   // on #6355): another tap would drop words still in flight.
   test('stockAdvisory: the Check stock beside a 0-in-stock line waits for the voice capture', async () => {
     const products = CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' } : p));
