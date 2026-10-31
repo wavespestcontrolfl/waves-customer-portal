@@ -580,7 +580,10 @@ describe('a series move stores its round anchor, and later top-ups hop from it',
     });
     test('a series move, an Edit appointment cadence rewrite and make-recurring store the anchor', () => {
       expect(rebookerSrc).toMatch(/if \(parent\.recurring_pattern === LAWN_ROUNDS_9\) \{\s*const anchorCols = await trx\('scheduled_services'\)\.columnInfo\(\);\s*if \(anchorCols\.recurring_round_anchor_date\) \{\s*await trx\('scheduled_services'\)\.where\(\{ id: parentId \}\)\.update\(\{\s*recurring_round_anchor_date: dateOnly\(newDate\),/);
-      expect(scheduleSrc.match(/await stampSeriesRoundAnchor\(trx, parent, baseDateStr\);/g)).toHaveLength(2);
+      // The rewrite stores the parent's date (office changes the lawn day); make-recurring stores the area anchor
+      // (lawn-area-days.js) when one applies, else the parent's date.
+      expect(scheduleSrc.match(/await stampSeriesRoundAnchor\(trx, parent, baseDateStr\);/g)).toHaveLength(1);
+      expect(scheduleSrc.match(/await stampSeriesRoundAnchor\(trx, parent, spawnRound\.roundAnchor\);/g)).toHaveLength(1);
       // The pre-lock planner plans a same-save top-up from the anchor the rewrite stores.
       expect(scheduleSrc).toMatch(/if \(after\.recurring_pattern === LAWN_ROUNDS_9\) after\.recurring_round_anchor_date = baseDateStr;/);
     });

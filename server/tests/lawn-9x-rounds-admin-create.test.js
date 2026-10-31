@@ -285,6 +285,62 @@ describe('POST / — admin create — lawn 9x series pattern', () => {
   });
 });
 
+// Lawn neighborhood day (lawn-area-days.js) on the office New Appointment: a NEW rounds series is placed
+// from its area's anchor and the parent stores it.
+describe('POST / — admin create — lawn neighborhood day', () => {
+  const { lawnRoundDateFrom } = require('../services/lawn-rounds');
+  const PARRISH = '2027-01-26';
+  const withCustomer = (extra) => {
+    // The same row on db and trx: the booking compares the two reads of the customer.
+    const row = { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null, ...extra };
+    for (const conn of [db, trx]) {
+      const base = conn.getMockImplementation();
+      conn.mockImplementation((table) => (table === 'customers' ? chain({ ...row }) : base(table)));
+    }
+  };
+  const dates = () => inserts.map((d) => d.scheduled_date);
+  const areaDates = (base) => [0, 1, 2, 3].map((i) => lawnRoundDateFrom(PARRISH, base, i));
+
+  test('an area customer: the parent stores the area anchor and the children follow it', async () => {
+    gateOn();
+    withCustomer({ zip: '34219', city: 'Parrish' });
+    const { status } = await post(lawnBody);
+    expect(status).toBe(201);
+    expect(dates()).toEqual(areaDates('2099-07-03'));
+    expect(inserts[0].recurring_round_anchor_date).toBe(PARRISH);
+    expect(inserts.slice(1).every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
+    // Every follow-up is on the Parrish Tuesday and 28+ days after the visit.
+    expect(dates().slice(1).every((d) => new Date(`${d}T12:00:00Z`).getUTCDay() === 2)).toBe(true);
+    expect(Math.round((new Date(`${dates()[1]}T12:00:00Z`) - new Date('2099-07-03T12:00:00Z')) / 86400000)).toBeGreaterThanOrEqual(28);
+  });
+
+  test('planner equals write: the dates locked up front are exactly the dates inserted', async () => {
+    gateOn();
+    withCustomer({ zip: '34219', city: 'Parrish' });
+    const { status } = await post(lawnBody);
+    expect(status).toBe(201);
+    const locked = [...new Set(acquireOccupancyLock.mock.calls.map((c) => c[1]))].sort();
+    expect(locked).toEqual([...dates()].sort());
+  });
+
+  test('a customer outside every area is unchanged: own anchor, no stamp', async () => {
+    gateOn();
+    withCustomer({ zip: '34251', city: 'Myakka City' });
+    const { status } = await post(lawnBody);
+    expect(status).toBe(201);
+    expect(dates()).toEqual([0, 1, 2, 3].map((i) => lawnRoundDateFrom('2099-07-03', '2099-07-03', i)));
+    expect(inserts.every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
+  });
+
+  test('gate off: custom/42 is stored as posted and never takes an area anchor', async () => {
+    withCustomer({ zip: '34219', city: 'Parrish' });
+    const off = await post(lawnBody);
+    expect(off.status).toBe(201);
+    expect(inserts.every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
+    expect(dates()).toEqual(['2099-07-03', '2099-08-14', '2099-09-25', '2099-11-06']);
+  });
+});
+
 describe('GET /annual-prepay-preview — lawn 9x draft', () => {
   const gates = require('../config/feature-gates').gates;
   let prepayOnBookWas;
@@ -386,7 +442,7 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     { id: 'svc-ts', service_key: 'tree_shrub_6week', name: 'Tree & Shrub Care', category: 'tree_shrub' },
   ];
 
-  function mockVisit(row) {
+  function mockVisit(row, customerExtra = {}) {
     spawned = [];
     parentUpdates = [];
     const make = (table) => {
@@ -400,8 +456,13 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
       }
       const c = chain(table === 'scheduled_services'
         ? { ...row }
-        : (table === 'customers' ? { id: 'cust-1', waveguard_tier: 'Bronze', monthly_rate: 46.33 } : undefined));
+        : (table === 'customers' ? { id: 'cust-1', waveguard_tier: 'Bronze', monthly_rate: 46.33, ...customerExtra } : undefined));
       if (table === 'scheduled_services') {
+        // The visit has no child rows yet: it is becoming a NEW series (lawn-area-days newSeriesAreaAnchor).
+        const firstRow = c.first;
+        c.first = jest.fn(async (...args) => (c.where.mock.calls.some(([w]) => w && typeof w === 'object' && 'recurring_parent_id' in w)
+          ? undefined
+          : firstRow(...args)));
         c.insert = jest.fn((data) => {
           spawned.push(data);
           return { returning: jest.fn().mockResolvedValue([{ ...row, ...data, id: `new-${spawned.length}` }]) };
@@ -525,5 +586,52 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     const { status } = await put({ ...makeRecurring, spawnRecurringChildren: false });
     expect(status).toBe(200);
     expect(parentWrites().every((u) => u.recurring_pattern === 'custom')).toBe(true);
+  });
+
+  // Lawn neighborhood day (lawn-area-days.js): a make-recurring spawn of a rounds visit with no stored
+  // anchor is placed from its area's anchor. The save's drift check aborts when the pre-lock plan
+  // (planUpdateDetailsRecurrenceDates) and the write disagree, so a 200 here means plan == write.
+  describe('gate on: a lawn neighborhood day', () => {
+    const roundsVisit = { ...lawnVisit, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2099-07-01', day: '2099-07-01' };
+    const { lawnRoundDateFrom } = require('../services/lawn-rounds');
+    const PARRISH = '2027-01-26';
+    const stamps = () => parentUpdates.filter((u) => u.recurring_round_anchor_date !== undefined);
+
+    test('an area customer: the parent stores the area anchor and the children follow it', async () => {
+      gateOn();
+      mockVisit(roundsVisit, { zip: '34219', city: 'Parrish' });
+      const { status } = await put({ ...makeRecurring, recurringCount: 4 });
+      expect(status).toBe(200);
+      expect(stamps()).toEqual([{ recurring_round_anchor_date: PARRISH }]);
+      const expected = [1, 2, 3].map((i) => lawnRoundDateFrom(PARRISH, '2099-07-01', i));
+      expect(spawned.map((d) => d.scheduled_date)).toEqual(expected);
+      expect(spawned.every((d) => d.recurring_pattern === 'lawn_rounds_9')).toBe(true);
+    });
+
+    test('a visit late in its round: the first follow-up is still 28+ days out, on the area day', async () => {
+      gateOn();
+      mockVisit({ ...roundsVisit, scheduled_date: '2099-07-07', day: '2099-07-07' }, { zip: '34219', city: 'Parrish' });
+      const { status } = await put({ ...makeRecurring, recurringCount: 3 });
+      expect(status).toBe(200);
+      expect(spawned.map((d) => d.scheduled_date)).toEqual([1, 2].map((i) => lawnRoundDateFrom(PARRISH, '2099-07-07', i)));
+      expect(Math.round((new Date(`${spawned[0].scheduled_date}T12:00:00Z`) - new Date('2099-07-07T12:00:00Z')) / 86400000)).toBeGreaterThanOrEqual(28);
+    });
+
+    test('a customer outside every area keeps the visit date as the anchor', async () => {
+      gateOn();
+      mockVisit(roundsVisit, { zip: '34251', city: 'Myakka City' });
+      const { status } = await put({ ...makeRecurring, recurringCount: 3 });
+      expect(status).toBe(200);
+      expect(stamps()).toEqual([{ recurring_round_anchor_date: '2099-07-01' }]);
+      expect(spawned.map((d) => d.scheduled_date)).toEqual([1, 2].map((i) => lawnRoundDateFrom('2099-07-01', '2099-07-01', i)));
+    });
+
+    test('a parent that already stores an anchor is re-placed from its own date, as before', async () => {
+      gateOn();
+      mockVisit({ ...roundsVisit, recurring_round_anchor_date: '2099-01-05' }, { zip: '34219', city: 'Parrish' });
+      const { status } = await put({ ...makeRecurring, recurringCount: 3 });
+      expect(status).toBe(200);
+      expect(stamps()).toEqual([{ recurring_round_anchor_date: '2099-07-01' }]);
+    });
   });
 });
