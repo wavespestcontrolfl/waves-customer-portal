@@ -6,6 +6,7 @@ const timesheetApproval = require('../services/timesheet-approval');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 const { STAFF_WORK_DATE_SQL, staffWorkDate } = require('../utils/staff-time-work-date');
+const { validDateOnly } = require('../utils/date-only');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -156,16 +157,28 @@ router.get('/status', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /history — paginated entries for this tech
 // ---------------------------------------------------------------------------
+// A page holds 1-100 entries and the offset is a whole number; anything else
+// falls back to the defaults. A date filter must be a real YYYY-MM-DD day: a
+// malformed one is refused here instead of failing the ::date cast in Postgres.
+const HISTORY_PAGE_MAX = 100;
 router.get('/history', async (req, res, next) => {
   try {
-    const { startDate, endDate, entryType, limit, offset } = req.query;
+    const { startDate, endDate, entryType } = req.query;
+    for (const [name, value] of Object.entries({ startDate, endDate })) {
+      if (value && !validDateOnly(value)) {
+        return res.status(400).json({ error: `${name} must be a valid YYYY-MM-DD date` });
+      }
+    }
+    const limit = Number.parseInt(req.query.limit, 10);
+    const offset = Number.parseInt(req.query.offset, 10);
     const result = await timeTracking.getEntries({
       technicianId: req.technicianId,
       startDate,
       endDate,
       entryType,
-      limit: parseInt(limit) || 50,
-      offset: parseInt(offset) || 0,
+      limit: limit >= 1 ? Math.min(limit, HISTORY_PAGE_MAX) : 50,
+      // A 20-digit offset would overflow Postgres bigint: past a safe integer it falls back too.
+      offset: Number.isSafeInteger(offset) && offset > 0 ? offset : 0,
     });
     res.json(result);
   } catch (err) {
