@@ -8,24 +8,52 @@
 // a 'wavesadmin:pushtoken' window event: detail = { token, environment }.
 // Sign-out releases the token again (releaseInAppPush), and the app stops
 // this install's notifications until the next sign-in registers again.
+//
+// Each sign-up carries its own id (`reg`). A release names the sign-up it
+// ends, so a late release can never switch off a newer sign-up of the same
+// token (the server matches both in one update).
 
 import { adminFetch } from '../lib/adminFetch';
 import { isWavesAdminApp } from './platform';
 
 const TOKEN_EVENT = 'wavesadmin:pushtoken';
-// This iPhone's registered token. Stored, so a sign-out after a page reload
-// still releases it.
-const TOKEN_KEY = 'waves_admin_push_token';
+// This iPhone's sign-up ({ token, reg }). Stored, so a sign-out after a page
+// reload still releases it.
+const SIGN_UP_KEY = 'waves_admin_push_signup';
 const RELEASE_ATTEMPTS = 3;
+const MAX_RETRY_MS = 60000;
 
-// The sign-up request in flight; a release waits for it to land first.
-let registering = Promise.resolve();
-// Bumped by every registerInAppPush and every release, so a token that
-// arrives after a sign-out never registers.
+// The last sign-up and release requests; each new step waits for the one
+// before it, so they reach the server in order.
+let lastStep = Promise.resolve();
+// Bumped by every registerInAppPush and every release: a sign-up retry or a
+// token that belongs to an earlier sign-in stops.
 let epoch = 0;
 
 function postToApp(message) {
   window.webkit.messageHandlers.wavesAdmin.postMessage(message);
+}
+
+function newSignUpId() {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+}
+
+// Waits before the next try: longer each time, or less when the connection
+// comes back.
+function retryDelay(attempt) {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      window.removeEventListener('online', done);
+      resolve();
+    };
+    const timer = setTimeout(done, Math.min(attempt * 5000, MAX_RETRY_MS));
+    window.addEventListener('online', done);
+  });
 }
 
 // Returns a cleanup for sign-out and account switches.
@@ -35,8 +63,18 @@ export function registerInAppPush() {
   const onToken = (event) => {
     const { token, environment } = event?.detail || {};
     if (mine !== epoch || !token) return;
-    try { localStorage.setItem(TOKEN_KEY, token); } catch { /* storage unavailable */ }
-    registering = adminFetch('/admin/push/native-subscribe', { method: 'POST', body: { token, environment } }).catch(() => {});
+    const reg = newSignUpId();
+    try { localStorage.setItem(SIGN_UP_KEY, JSON.stringify({ token, reg })); } catch { /* storage unavailable */ }
+    // Retried while this sign-in lasts: an offline launch registers once the
+    // connection is back. A refusal (expired sign-in, bad input) stops.
+    const signUp = async () => {
+      for (let attempt = 1; mine === epoch; attempt += 1) {
+        const response = await adminFetch('/admin/push/native-subscribe', { method: 'POST', body: { token, environment, reg } }).catch(() => null);
+        if (response && (response.ok || (response.status < 500 && response.status !== 429))) return;
+        await retryDelay(attempt);
+      }
+    };
+    lastStep = lastStep.then(signUp, signUp);
   };
   window.addEventListener(TOKEN_EVENT, onToken);
   postToApp({ type: 'registerPush' });
@@ -46,31 +84,32 @@ export function registerInAppPush() {
 // Sign-out: stop this iPhone's staff alerts before the credentials go. The
 // app clears shown alerts and the badge and stops this install's
 // notifications at once, so nothing more shows even if the server cannot be
-// reached. The server release waits for a sign-up still in flight, so that
-// one cannot land after it, and is retried on failure. Never rejects.
+// reached. The server release goes after any sign-up still in flight and is
+// retried on failure. Never rejects.
 export function releaseInAppPush() {
   if (!isWavesAdminApp()) return Promise.resolve();
   epoch += 1;
   postToApp({ type: 'signOut' });
-  let token = null;
+  let signUp = null;
   try {
-    token = localStorage.getItem(TOKEN_KEY);
-    localStorage.removeItem(TOKEN_KEY);
-  } catch { /* storage unavailable */ }
-  if (!token) return Promise.resolve();
+    signUp = JSON.parse(localStorage.getItem(SIGN_UP_KEY) || 'null');
+    localStorage.removeItem(SIGN_UP_KEY);
+  } catch { /* storage unavailable or unreadable */ }
+  if (!signUp?.token || !signUp?.reg) return Promise.resolve();
   const auth = localStorage.getItem('waves_admin_token');
   const release = async () => {
     for (let attempt = 1; attempt <= RELEASE_ATTEMPTS; attempt += 1) {
       const response = await adminFetch('/admin/push/native-unsubscribe', {
         method: 'POST',
-        body: { token },
+        body: { token: signUp.token, reg: signUp.reg },
         headers: { Authorization: `Bearer ${auth}` },
       }).catch(() => null);
       if (response?.ok) return;
       if (attempt < RELEASE_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
     }
   };
-  return registering.then(release, release);
+  lastStep = lastStep.then(release, release);
+  return lastStep;
 }
 
 // True when the app took the count, so the caller skips the Badging API.

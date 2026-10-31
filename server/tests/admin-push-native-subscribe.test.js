@@ -63,7 +63,7 @@ describe('POST /api/admin/push/native-subscribe', () => {
   test('binds the token to the current staff session with the app bundle and environment', async () => {
     const { upsert } = installTransaction(TECH);
     const res = response();
-    await nativeSubscribe(request({ token: TOKEN, environment: 'sandbox' }), res, jest.fn());
+    await nativeSubscribe(request({ token: TOKEN, environment: 'sandbox', reg: 'reg-0001' }), res, jest.fn());
 
     expect(res.body).toEqual({ ok: true, id: 'sub-9' });
     const row = upsert.insert.mock.calls[0][0];
@@ -78,7 +78,7 @@ describe('POST /api/admin/push/native-subscribe', () => {
       staff_mfa: true,
     });
     expect(JSON.parse(row.subscription_data)).toEqual({
-      token: TOKEN, topic: 'com.wavespestcontrol.wavespay', environment: 'sandbox',
+      token: TOKEN, topic: 'com.wavespestcontrol.wavespay', environment: 'sandbox', reg: 'reg-0001',
     });
     expect(upsert.onConflict).toHaveBeenCalledWith('device_token');
     expect(upsert.merge).toHaveBeenCalledWith({ ...row, updated_at: 'NOW()' });
@@ -87,15 +87,19 @@ describe('POST /api/admin/push/native-subscribe', () => {
   test('a session whose staff version rotated registers nothing', async () => {
     const { upsert } = installTransaction(TECH);
     const res = response();
-    await nativeSubscribe(request({ token: TOKEN, environment: 'sandbox' }, 6), res, jest.fn());
+    await nativeSubscribe(request({ token: TOKEN, environment: 'sandbox', reg: 'reg-0001' }, 6), res, jest.fn());
 
     expect(res.statusCode).toBe(401);
     expect(res.body.code).toBe('TOKEN_REVOKED');
     expect(upsert.insert).not.toHaveBeenCalled();
   });
 
-  test('refuses a malformed token or an unknown environment before any write', async () => {
-    for (const body of [{ token: 'not-hex', environment: 'sandbox' }, { token: TOKEN, environment: 'staging' }]) {
+  test('refuses a malformed token, an unknown environment or a missing sign-up id before any write', async () => {
+    for (const body of [
+      { token: 'not-hex', environment: 'sandbox', reg: 'reg-0001' },
+      { token: TOKEN, environment: 'staging', reg: 'reg-0001' },
+      { token: TOKEN, environment: 'sandbox' },
+    ]) {
       const res = response();
       await nativeSubscribe(request(body), res, jest.fn());
       expect(res.statusCode).toBe(400);
@@ -107,22 +111,26 @@ describe('POST /api/admin/push/native-subscribe', () => {
 describe('POST /api/admin/push/native-unsubscribe', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('deactivates only the signed-in staff member\'s row for this iPhone', async () => {
-    const query = { where: jest.fn(() => query), update: jest.fn(async () => 1) };
+  test('deactivates only the signed-in staff member\'s row for this sign-up, in one update', async () => {
+    const query = { where: jest.fn(() => query), whereRaw: jest.fn(() => query), update: jest.fn(async () => 1) };
     db.mockImplementation(() => query);
     const res = response();
-    await nativeUnsubscribe(request({ token: TOKEN }), res, jest.fn());
+    await nativeUnsubscribe(request({ token: TOKEN, reg: 'reg-0001' }), res, jest.fn());
 
     expect(db).toHaveBeenCalledWith('push_subscriptions');
     expect(query.where).toHaveBeenCalledWith({ admin_user_id: 'tech-1', device_token: TOKEN, platform: 'ios' });
+    // A newer sign-up of the same token carries another id and stays active.
+    expect(query.whereRaw).toHaveBeenCalledWith("subscription_data::jsonb->>'reg' = ?", ['reg-0001']);
     expect(query.update).toHaveBeenCalledWith({ active: false });
     expect(res.body).toEqual({ ok: true, deactivated: 1 });
   });
 
-  test('refuses a malformed token before any write', async () => {
-    const res = response();
-    await nativeUnsubscribe(request({ token: 'nope' }), res, jest.fn());
-    expect(res.statusCode).toBe(400);
+  test('refuses a malformed token or a missing sign-up id before any write', async () => {
+    for (const body of [{ token: 'nope', reg: 'reg-0001' }, { token: TOKEN }]) {
+      const res = response();
+      await nativeUnsubscribe(request(body), res, jest.fn());
+      expect(res.statusCode).toBe(400);
+    }
     expect(db).not.toHaveBeenCalled();
   });
 });

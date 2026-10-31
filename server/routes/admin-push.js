@@ -163,15 +163,22 @@ router.post('/subscribe', subscribe);
 // Waves Admin (the iOS staff app) registers its APNs device token here. The
 // signed-in page posts it under its own staff session, so the app never holds
 // the staff token. The row names the app's bundle and APNs environment
-// (development installs use the sandbox), which the APNs sender routes by.
+// (development installs use the sandbox), which the APNs sender routes by,
+// and the sign-up's own id (`reg`), which a sign-out release must name.
+const DEVICE_TOKEN = /^[0-9a-f]{64,200}$/i;
+const SIGN_UP_ID = /^[A-Za-z0-9-]{8,64}$/;
+
 async function nativeSubscribe(req, res, next) {
   try {
-    const { token, environment } = req.body || {};
-    if (typeof token !== 'string' || !/^[0-9a-f]{64,200}$/i.test(token)) {
+    const { token, environment, reg } = req.body || {};
+    if (typeof token !== 'string' || !DEVICE_TOKEN.test(token)) {
       return res.status(400).json({ error: 'device token required' });
     }
     if (environment !== 'sandbox' && environment !== 'production') {
       return res.status(400).json({ error: 'environment must be sandbox or production' });
+    }
+    if (typeof reg !== 'string' || !SIGN_UP_ID.test(reg)) {
+      return res.status(400).json({ error: 'sign-up id required' });
     }
     const outcome = await db.transaction(async (trx) => {
       const technician = await lockCurrentStaff(trx, req);
@@ -184,7 +191,7 @@ async function nativeSubscribe(req, res, next) {
         role: technician.role,
         platform: 'ios',
         device_token: token,
-        subscription_data: JSON.stringify({ token, topic: STAFF_APP_BUNDLE_ID, environment }),
+        subscription_data: JSON.stringify({ token, topic: STAFF_APP_BUNDLE_ID, environment, reg }),
         device_info: 'Waves Admin (iPhone)',
         active: true,
         staff_token_version: Number(technician.auth_token_version),
@@ -207,16 +214,22 @@ async function nativeSubscribe(req, res, next) {
 
 router.post('/native-subscribe', nativeSubscribe);
 
-// Sign-out on Waves Admin: the page releases this device's token before its
-// credentials go, so the iPhone stops getting this staff member's alerts.
+// Sign-out on Waves Admin: the page releases this device's sign-up before its
+// credentials go, so the iPhone stops getting this staff member's alerts. It
+// matches the sign-up id in the same update, so a late release cannot switch
+// off a newer sign-up of the same token.
 async function nativeUnsubscribe(req, res, next) {
   try {
-    const { token } = req.body || {};
-    if (typeof token !== 'string' || !/^[0-9a-f]{64,200}$/i.test(token)) {
+    const { token, reg } = req.body || {};
+    if (typeof token !== 'string' || !DEVICE_TOKEN.test(token)) {
       return res.status(400).json({ error: 'device token required' });
+    }
+    if (typeof reg !== 'string' || !SIGN_UP_ID.test(reg)) {
+      return res.status(400).json({ error: 'sign-up id required' });
     }
     const deactivated = await db('push_subscriptions')
       .where({ admin_user_id: req.technicianId, device_token: token, platform: 'ios' })
+      .whereRaw("subscription_data::jsonb->>'reg' = ?", [reg])
       .update({ active: false });
     return res.json({ ok: true, deactivated: Number(deactivated) || 0 });
   } catch (err) { next(err); }
