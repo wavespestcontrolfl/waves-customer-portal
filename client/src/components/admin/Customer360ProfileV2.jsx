@@ -440,6 +440,18 @@ function annualPrepayLabelsMatch(left, right) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+// Amount lookup match: the same service label match, plus cadence. When the
+// selected label names a cadence, a candidate whose own label names a different
+// one must not supply the amount (two plans of one service, different cadences,
+// different totals). A candidate or selection that names no cadence still
+// matches, so the single-plan case is unchanged (sweep #3960 A3, codex P1).
+function annualPrepayAmountLabelsMatch(candidateLabel, serviceType) {
+  if (!annualPrepayLabelsMatch(candidateLabel, serviceType)) return false;
+  const wanted = inferAnnualPrepayCadenceFromLabel(serviceType);
+  const candidate = inferAnnualPrepayCadenceFromLabel(candidateLabel);
+  return !wanted || !candidate || wanted === candidate;
+}
+
 function formatAnnualPrepayServiceLabel(baseLabel, cadence) {
   const base = String(baseLabel || "").trim();
   if (!base) return "";
@@ -566,8 +578,8 @@ function annualPrepayRenewalDefault(term) {
   return noticed > 0 && untaxed ? noticed : base;
 }
 
-function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
-  const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayLabelsMatch(
+export function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
+  const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayAmountLabelsMatch(
     activeTerm.coverageServiceType || activeTerm.planLabel || "",
     serviceType,
   )
@@ -579,16 +591,16 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
   const activeTermMatch = Array.isArray(customer?.annualPrepayTerms)
     ? customer.annualPrepayTerms.find((term) => {
       const termLabel = term?.coverageServiceType || term?.planLabel || "";
-      return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayLabelsMatch(termLabel, serviceType);
+      return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayAmountLabelsMatch(termLabel, serviceType);
     })
     : null;
   const activeTermMatchBase = annualPrepayRenewalDefault(activeTermMatch);
   if (activeTermMatchBase > 0) return activeTermMatchBase;
 
   const matchingPlan = Array.isArray(prepaidPlans) && prepaidPlans.length > 0
-    ? prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
+    ? prepaidPlans.find((plan) => annualPrepayAmountLabelsMatch(plan?.serviceType, serviceType))
     : Array.isArray(customer?.prepaidPlans)
-      ? customer.prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
+      ? customer.prepaidPlans.find((plan) => annualPrepayAmountLabelsMatch(plan?.serviceType, serviceType))
       : null;
   if (matchingPlan?.seriesTotal > 0) return Number(matchingPlan.seriesTotal);
 
