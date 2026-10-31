@@ -69,7 +69,7 @@ const postgres = SKIP ? describe.skip : describe;
 let mockPg;
 jest.setTimeout(90000);
 
-async function seedPestVisit({ addOnKey = null, productName = null, category = 'herbicide' } = {}) {
+async function seedPestVisit({ addOnKey = null, productName = null, category = 'herbicide', inventoryUnit = 'lb' } = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), productId: randomUUID(),
     serviceKey: `fixture_pest_${randomUUID().slice(0, 8)}` };
@@ -78,7 +78,7 @@ async function seedPestVisit({ addOnKey = null, productName = null, category = '
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `Fixture General Pest Control ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
   await mockPg('products_catalog').insert({ id: f.productId, name: productName || `Fixture Celsius WG ${f.serviceKey}`, category, active: true,
-    inventory_on_hand: 500, inventory_unit: 'lb' });
+    inventory_on_hand: 500, inventory_unit: inventoryUnit });
   await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId,
     service_type: `Fixture General Pest Control ${f.serviceKey}`, scheduled_date: etDateString(), window_start: '09:00', window_end: '10:00', status: 'confirmed',
     estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false,
@@ -185,6 +185,21 @@ postgres('technician implausible product amount', () => {
       const row = await mockPg('service_products as sp').join('service_records as sr', 'sr.id', 'sp.service_record_id').where('sr.customer_id', f.customerId).first('sp.product_id');
       expect(row.product_id).toBe(f.productId);
       expect(await writesFor(f)).toMatchObject({ serviceProducts: 1, allMovements: 1, stock: 495 });
+    } finally { await cleanup(f); }
+  });
+
+  test('a blank stock unit does not split a product: 60 lb + 960 oz (120 lb) is a 422 with nothing written; 50 lb + 800 oz passes', async () => {
+    const f = await seedPestVisit({ inventoryUnit: null });
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const send = (lines) => completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'technician', technicianId: f.techId, technician: null },
+        body: { ...bodyFor(f, 1), products: lines.map(([totalAmount, amountUnit], i) => ({ productId: i ? f.productId.toUpperCase() : f.productId, totalAmount, amountUnit })) } });
+      const over = await send([[60, 'lb'], [960, 'oz']]);
+      expect(over.status).toBe(422);
+      expect(over.body).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', amount: 120, amountUnit: 'lb' });
+      expect(await writesFor(f)).toMatchObject({ records: 0, serviceProducts: 0, allMovements: 0, stock: 500 });
+      expect((await send([[50, 'lb'], [800, 'oz']])).status).toBe(200);
     } finally { await cleanup(f); }
   });
 

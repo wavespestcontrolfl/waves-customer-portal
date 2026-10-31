@@ -1646,18 +1646,22 @@ async function recordCountedUsage(trx, {
 // that usage. An amount whose unit has no known dimension (a blank inventory unit, a per-area rate such as oz/1000sf, bags)
 // fails closed on the submitted number itself.
 const VISIT_LIMITS = {
-  floors: [{ amount: 640, unit: 'fl_oz' }, { amount: 100, unit: 'lb' }, { amount: 50, unit: 'each' }],
+  // Weight first: a bare "oz" converts to both lb and fl oz, and counts as weight (the looser limit: 1,600 oz), so "oz" lines
+  // and "lb" lines of one product add up together.
+  floors: [{ amount: 100, unit: 'lb' }, { amount: 640, unit: 'fl_oz' }, { amount: 50, unit: 'each' }],
   unknownDimensionCap: 50,
 };
 
-// What one line counts for against a visit limit: its amount in the product's inventory unit against that dimension's
-// limit, or, for a unit with no known dimension, the submitted number against the cap. Pure.
-function visitLimitShare({ amount, amountUnit, inventoryUnit }) {
-  const deductedAmount = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
-  const limit = Math.max(0, ...VISIT_LIMITS.floors.map((f) => convertInventoryQuantity(f.amount, f.unit, inventoryUnit) ?? 0));
-  return deductedAmount != null && limit > 0
-    ? { value: deductedAmount, limit, bucket: 'dimension' }
-    : { value: amount, limit: VISIT_LIMITS.unknownDimensionCap, bucket: 'number' };
+// What one line counts for against a visit limit, from its SUBMITTED unit alone (the catalog's stock unit is irrelevant, so a
+// blank or odd stock unit cannot split one product into groups): the amount converted to its dimension's base unit (fl oz,
+// lb, each) against that dimension's limit, or, for a unit with no known dimension, the submitted number against the cap
+// (its bucket is the unit string). Pure.
+function visitLimitShare({ amount, amountUnit }) {
+  for (const floor of VISIT_LIMITS.floors) {
+    const value = convertInventoryQuantity(amount, amountUnit, floor.unit);
+    if (value != null) return { value, limit: floor.amount, bucket: floor.unit, baseUnit: floor.unit };
+  }
+  return { value: amount, limit: VISIT_LIMITS.unknownDimensionCap, bucket: `unit:${String(amountUnit || '').trim().toLowerCase()}`, baseUnit: null };
 }
 
 // True when one line is over its visit limit. The same line always gets the same answer, however many concurrent completions there are.
@@ -1706,7 +1710,7 @@ function visitLimitInput(submitted, catalogRow) {
   const amount = submitted.totalAmount;
   if (!catalogRow || !amount || !Number.isFinite(amount) || amount <= 0) return null;
   const amountUnit = baseQuantityUnit(submitted.amountUnit || submitted.rateUnit || null);
-  return { amount, amountUnit, inventoryUnit: catalogRow.inventory_unit || amountUnit };
+  return { amount, amountUnit };
 }
 
 function implausibleRefusal(catalogRow, { amount, amountUnit }) {
@@ -1721,9 +1725,9 @@ function implausibleRefusal(catalogRow, { amount, amountUnit }) {
 }
 
 // The first product whose lines TOGETHER are over its visit limit, as { catalogRow, amount, amountUnit } for the refusal, else null.
-// Lines are grouped by canonical product id (a host row and an add-on row, or the same id repeated, are one product's
-// use) and by the unit bucket they count in. A group of one unit reports the submitted total; mixed units report the
-// total in the stock unit.
+// Lines are grouped by canonical product id (a host row and an add-on row, or the same id repeated, are one product's use)
+// and by dimension, each line converted to the dimension's base unit from its own submitted unit. A group of one submitted
+// unit reports the submitted total; mixed units report the total in the dimension's base unit.
 function firstProductOverVisitLimit(lines, rowById) {
   const groups = new Map();
   for (const line of lines) {
@@ -1731,17 +1735,17 @@ function firstProductOverVisitLimit(lines, rowById) {
     const judged = visitLimitInput(line, catalogRow);
     if (!judged) continue;
     const share = visitLimitShare(judged);
-    const key = `${line.productId}|${judged.inventoryUnit}|${share.bucket}`;
-    const group = groups.get(key) || { catalogRow, value: 0, raw: 0, units: new Set(), limit: share.limit, inventoryUnit: judged.inventoryUnit };
+    const key = `${line.productId}|${share.bucket}`;
+    const group = groups.get(key) || { catalogRow, value: 0, raw: 0, units: new Set(), limit: share.limit, baseUnit: share.baseUnit };
     group.value += share.value;
     group.raw += judged.amount;
-    group.units.add(judged.amountUnit);
+    group.units.add(String(judged.amountUnit || '').trim().toLowerCase());
     groups.set(key, group);
   }
   for (const group of groups.values()) {
     if (group.value <= group.limit) continue;
     const single = group.units.size === 1;
-    return { catalogRow: group.catalogRow, amount: Number((single ? group.raw : group.value).toFixed(4)), amountUnit: single ? [...group.units][0] : group.inventoryUnit };
+    return { catalogRow: group.catalogRow, amount: Number((single ? group.raw : group.value).toFixed(4)), amountUnit: single ? [...group.units][0] : group.baseUnit };
   }
   return null;
 }
@@ -1838,7 +1842,7 @@ async function deductProductInventory(trx, {
   }
   // Owner "dont block": the completion still succeeds, but an amount no visit uses moves no stock and no cost. The
   // office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
-  if (insufficient && exceedsVisitLimit({ amount, amountUnit, inventoryUnit })) {
+  if (insufficient && exceedsVisitLimit({ amount, amountUnit })) {
     return {
       ...snapshot,
       status: 'not_deducted_implausible',

@@ -169,6 +169,39 @@ describe('one product\'s lines are judged together, under one canonical id', () 
     expect((await vet({ actor: tech, products })).body).toMatchObject({ amount: 110, amountUnit: 'lb' });
   });
 
+  describe.each([['a blank stock unit', null], ['a set stock unit', 'lb'], ['a stock unit in another dimension', 'fl_oz']])('mixed units of one product with %s', (_name, inventoryUnit) => {
+    beforeEach(() => { mockTables.products_catalog = [{ ...catalog, inventory_unit: inventoryUnit }]; });
+    const mix = (...parts) => parts.map(([totalAmount, amountUnit], i) => ({ productId: i % 2 ? CELSIUS.toUpperCase() : CELSIUS, totalAmount, amountUnit }));
+
+    test('60 lb host + 960 oz add-on is 120 lb: refused, naming the total in lb', async () => {
+      const out = await vet({ actor: tech, products: mix([60, 'lb'], [960, 'oz']) });
+      expect(out.status).toBe(422);
+      expect(out.body).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', amount: 120, amountUnit: 'lb' });
+      expect(out.body.error).toBe('120 lb of Celsius WG is far more than one visit uses. Check the amount and submit again.');
+    });
+
+    test('50 lb + 800 oz is 100 lb: passes', async () => {
+      expect(await vet({ actor: tech, products: mix([50, 'lb'], [800, 'oz']) })).toBeNull();
+    });
+
+    test('gal + fl oz add up in fluid ounces: 5 gal + 1 fl oz is 641 fl oz and is refused, 5 gal alone passes', async () => {
+      const out = await vet({ actor: tech, products: mix([5, 'gal'], [1, 'fl_oz']) });
+      expect(out.body).toMatchObject({ amount: 641, amountUnit: 'fl_oz' });
+      expect(await vet({ actor: tech, products: mix([4, 'gal'], [128, 'fl_oz']) })).toBeNull();
+    });
+
+    test('lines in unrelated dimensions are not added together', async () => {
+      expect(await vet({ actor: tech, products: mix([100, 'lb'], [640, 'fl_oz'], [50, 'each']) })).toBeNull();
+    });
+  });
+
+  test('number-bucket units add only within the same unit string', async () => {
+    mockTables.products_catalog = [{ ...catalog, inventory_unit: null }];
+    const rows = (...parts) => parts.map(([totalAmount, amountUnit]) => ({ productId: CELSIUS, totalAmount, amountUnit }));
+    expect(await vet({ actor: tech, products: rows([30, 'bags'], [30, 'cases']) })).toBeNull();
+    expect((await vet({ actor: tech, products: rows([30, 'bags'], [30, 'Bags ']) })).body).toMatchObject({ amount: 60, amountUnit: 'bags' });
+  });
+
   test('a unit with no known dimension adds the submitted numbers against the cap of 50', async () => {
     mockTables.products_catalog = [{ ...catalog, inventory_unit: null }];
     const rows = (a, b) => [{ productId: CELSIUS, totalAmount: a, amountUnit: 'oz/1000sf' }, { productId: CELSIUS.toUpperCase(), totalAmount: b, amountUnit: 'oz/1000sf' }];
