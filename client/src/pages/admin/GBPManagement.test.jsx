@@ -207,6 +207,20 @@ describe("Google profile workspace", () => {
     render(<GBPManagement />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not load locations: HTTP 503");
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    // Nothing to sync: it says so instead of reporting "All 0 locations synced".
+    fireEvent.click(screen.getByRole("button", { name: "Sync All" }));
+    expect(await screen.findByText("No locations to sync")).toBeInTheDocument();
+    expect(calls.some((c) => c.path.endsWith("/sync"))).toBe(false);
+  });
+
+  it("with only the Places fallback, the Google listing links still name the location's Place ID", async () => {
+    routes["GET /admin/gbp/locations"] = () => response({ error: "down" }, 503);
+    routes["GET /admin/reviews/gbp-locations"] = () =>
+      response({ locations: [{ id: "sarasota", name: "Fixture Sarasota", placeId: "fixture-place" }] });
+    render(<GBPManagement />);
+    const listing = await screen.findByRole("link", { name: "Open Google Business" });
+    expect(listing).toHaveAttribute("href", "https://business.google.com/dashboard/l/fixture-place");
+    expect(screen.getByRole("link", { name: "Create Google Post" }).getAttribute("href")).not.toContain("undefined");
   });
 
   it("a failed pending read is not shown as all reviewed", async () => {
