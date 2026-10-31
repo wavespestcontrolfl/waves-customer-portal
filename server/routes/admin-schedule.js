@@ -1399,7 +1399,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
       existingUpcomingChildren = parseInt(upRow?.c || 0, 10);
     } catch { existingUpcomingChildren = 0; }
     const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
-    // Lawn rounds neighborhood day: the same area anchor and first-follow-up floor the write uses.
+    // Lawn rounds neighborhood day: the same area anchor the write uses.
     const spawnOpts = { ...editOpts(after), ...await spawnRoundPlacement(conn, after, recurringPattern, baseDateStr) };
     for (const d of planSpawnChildDates({
       baseDateStr, pattern: recurringPattern, rOpts: spawnOpts, skip, dir, seen, spawnCount, spawnTarget, blackoutDates,
