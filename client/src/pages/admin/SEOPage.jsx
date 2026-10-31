@@ -133,6 +133,16 @@ function KpiCard({ label, value, sub, color }) {
     </UiCard>
   );
 }
+// A sub-tab's read state: loading, then its failure element, else the content.
+function SubTabLoad({ loading, failure, children }) {
+  if (loading)
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        Loading...
+      </div>
+    );
+  return failure || children;
+}
 const WORKSPACES = [
   {
     key: "command",
@@ -8326,8 +8336,8 @@ function ActionsTab({ domain }) {
   const [actions, setActions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [actionError, setActionError] = useState(null);
-  const [actionNotice, setActionNotice] = useState(null);
+  // Outcome of the last mutation: { error: boolean, text }.
+  const [feedback, setFeedback] = useState(null);
   // A mutation can finish after the operator switched tabs, so it reloads
   // through this key (the effect runs the current tab's loadData), never by
   // calling the loadData it captured when it started.
@@ -8377,20 +8387,19 @@ function ActionsTab({ domain }) {
     // Clear the old tab's rows in the same render that switches tabs.
     setActions([]);
     setLoading(true);
-    setActionNotice(null);
+    setFeedback(null);
     setSubTab(key);
   }
   // Every mutation shows its failure (or a 200 { error }) and reloads on success.
   function reportMutation(pending, { failure, notice = null }) {
-    setActionError(null);
-    setActionNotice(null);
+    setFeedback(null);
     pending
       .then((result) => {
-        if (result?.error) setActionError(result.error);
-        else if (notice) setActionNotice(notice(result));
+        if (result?.error) setFeedback({ error: true, text: result.error });
+        else if (notice) setFeedback({ error: false, text: notice(result) });
         setReloadKey((n) => n + 1);
       })
-      .catch((e) => setActionError(e.message || failure));
+      .catch((e) => setFeedback({ error: true, text: e.message || failure }));
   }
   function handleAction(id, verb) {
     reportMutation(adminPost(`/admin/seo/actions/${id}/${verb}`, {}), {
@@ -8418,6 +8427,69 @@ function ActionsTab({ domain }) {
       label: "Experiments",
     },
   ];
+  const loadFailure = loadError && (
+    <ActionFeedback
+      error
+      onRetry={loadData}
+      className="justify-center [padding:40px] text-center"
+    >
+      {`SEO actions unavailable: ${loadError}`}
+    </ActionFeedback>
+  );
+  // Per-tab admin buttons, picked by the active sub-tab.
+  const toolbar = {
+    queue: (
+      <div className="flex flex-wrap justify-end [gap:8px]">
+        <Button
+          onClick={() =>
+            reportMutation(adminPost("/admin/seo/actions/generate", { domain }), {
+              failure: "Action generation failed.",
+            })
+          }
+        >
+          Generate Actions
+        </Button>
+        <Button
+          onClick={() =>
+            reportMutation(adminPost("/admin/seo/actions/auto-approve", { domain }), {
+              failure: "Auto-approve failed.",
+              notice: (r) =>
+                `Auto-approved ${fmt(r?.auto_approved)}. Approved actions stay in Progress until they are done.`,
+            })
+          }
+          variant="secondary"
+        >
+          Auto-Approve
+        </Button>
+      </div>
+    ),
+    drafts: (
+      <Button
+        onClick={() =>
+          reportMutation(adminPost("/admin/seo/actions/generate-drafts", {}), {
+            failure: "Draft generation failed.",
+          })
+        }
+        className="self-end"
+      >
+        Generate Drafts
+      </Button>
+    ),
+    progress: (
+      <Button
+        onClick={() =>
+          reportMutation(adminPost("/admin/seo/actions/auto-execute", { domain }), {
+            failure: "Auto-execute failed.",
+            notice: (r) =>
+              `Auto-execute: ${fmt(r?.auto_executed)} done, ${fmt(r?.manual_required)} need manual work, ${fmt(r?.failed)} failed.`,
+          })
+        }
+        className="self-end"
+      >
+        Run Auto-Execute
+      </Button>
+    ),
+  };
   const tierColors = {
     auto: "#15803D",
     editor: "#71717A",
@@ -8438,99 +8510,34 @@ function ActionsTab({ domain }) {
             </Button>
           ))}
         </div>
-        {canAdmin && subTab === "queue" && (
-          <div className="flex flex-wrap justify-end [gap:8px]">
-            <Button
-              onClick={() =>
-                reportMutation(adminPost("/admin/seo/actions/generate", { domain }), {
-                  failure: "Action generation failed.",
-                })
-              }
-            >
-              Generate Actions
-            </Button>
-            <Button
-              onClick={() =>
-                reportMutation(adminPost("/admin/seo/actions/auto-approve", { domain }), {
-                  failure: "Auto-approve failed.",
-                  notice: (r) =>
-                    `Auto-approved ${fmt(r?.auto_approved)}. Approved actions stay in Progress until they are done.`,
-                })
-              }
-              variant="secondary"
-            >
-              Auto-Approve
-            </Button>
-          </div>
-        )}
-        {canAdmin && subTab === "drafts" && (
-          <Button
-            onClick={() =>
-              reportMutation(adminPost("/admin/seo/actions/generate-drafts", {}), {
-                failure: "Draft generation failed.",
-              })
-            }
-            className="self-end"
-          >
-            Generate Drafts
-          </Button>
-        )}
-        {canAdmin && subTab === "progress" && (
-          <Button
-            onClick={() =>
-              reportMutation(adminPost("/admin/seo/actions/auto-execute", { domain }), {
-                failure: "Auto-execute failed.",
-                notice: (r) =>
-                  `Auto-execute: ${fmt(r?.auto_executed)} done, ${fmt(r?.manual_required)} need manual work, ${fmt(r?.failed)} failed.`,
-              })
-            }
-            className="self-end"
-          >
-            Run Auto-Execute
-          </Button>
-        )}
+        {canAdmin && toolbar[subTab]}
       </div>
 
-      {actionError && (
-        <div className="text-alert-fg text-ui-body [margin-top:8px]">
-          {actionError}
-        </div>
+      {feedback && (
+        <ActionFeedback error={feedback.error}>{feedback.text}</ActionFeedback>
       )}
-      {actionNotice && <ActionFeedback>{actionNotice}</ActionFeedback>}
 
       {summary && (
         <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:16px]">
           <KpiCard
             label="Pending Auto"
-            value={fmt(summary.pending_by_tier?.auto || 0)}
+            value={fmt(summary.pending_by_tier?.auto)}
             color={"#15803D"}
           />
           <KpiCard
             label="Pending Editor"
-            value={fmt(summary.pending_by_tier?.editor || 0)}
+            value={fmt(summary.pending_by_tier?.editor)}
           />
           <KpiCard
             label="Pending SEO"
-            value={fmt(summary.pending_by_tier?.seo || 0)}
+            value={fmt(summary.pending_by_tier?.seo)}
             color={"#A16207"}
           />
           <KpiCard label="Done" value={fmt(summary.done)} color={"#15803D"} />
         </div>
       )}
 
-      {loading ? (
-        <div className="text-ink-secondary [padding:40px] text-center">
-          Loading...
-        </div>
-      ) : loadError ? (
-        <ActionFeedback
-          error
-          onRetry={loadData}
-          className="justify-center [padding:40px] text-center"
-        >
-          {`SEO actions unavailable: ${loadError}`}
-        </ActionFeedback>
-      ) : (
+      <SubTabLoad loading={loading} failure={loadFailure}>
         <UiCard className="p-6">
           {subTab === "queue" && (
             <>
@@ -8867,7 +8874,7 @@ function ActionsTab({ domain }) {
             </>
           )}
         </UiCard>
-      )}
+      </SubTabLoad>
     </div>
   );
 }
@@ -8976,13 +8983,9 @@ function IndexationTab({ domain }) {
         ))}
       </div>
 
-      {subTab === "gap" &&
-        (loading ? (
-          <div className="text-ink-secondary [padding:40px] text-center">
-            Loading...
-          </div>
-        ) : (
-          loadFailure || gapData && (
+      {subTab === "gap" && (
+        <SubTabLoad loading={loading} failure={loadFailure}>
+          {gapData && (
             <UiCard className="p-6">
               <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:20px]">
                 Indexation Gap — {gapData.domain}
@@ -9045,15 +9048,12 @@ function IndexationTab({ domain }) {
                 </>
               )}
             </UiCard>
-          )
-        ))}
+          )}
+        </SubTabLoad>
+      )}
 
-      {subTab === "conflicts" &&
-        (loading ? (
-          <div className="text-ink-secondary [padding:40px] text-center">
-            Loading...
-          </div>
-        ) : loadFailure || (
+      {subTab === "conflicts" && (
+        <SubTabLoad loading={loading} failure={loadFailure}>
           <UiCard className="p-6">
             <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
               Canonical Conflicts — Hub / Spoke
@@ -9118,14 +9118,11 @@ function IndexationTab({ domain }) {
               </div>
             )}
           </UiCard>
-        ))}
+        </SubTabLoad>
+      )}
 
-      {subTab === "crawled" &&
-        (loading ? (
-          <div className="text-ink-secondary [padding:40px] text-center">
-            Loading...
-          </div>
-        ) : loadFailure || (
+      {subTab === "crawled" && (
+        <SubTabLoad loading={loading} failure={loadFailure}>
           <UiCard className="p-6">
             <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
               Not Indexed — Priority URLs
@@ -9169,7 +9166,8 @@ function IndexationTab({ domain }) {
               </div>
             )}
           </UiCard>
-        ))}
+        </SubTabLoad>
+      )}
 
       {subTab === "sitemap" && <SitemapIssuesSubTab domain={domain} />}
 
