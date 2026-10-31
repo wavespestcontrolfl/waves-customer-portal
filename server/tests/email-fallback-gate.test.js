@@ -14,7 +14,6 @@ const path = require('path');
 
 const GATE_CALLERS = [
   'services/invoice-email.js',
-  'services/estimate-auto-renew.js',
   'routes/admin-estimates.js',
   'services/service-report/email-delivery.js',
 ];

@@ -2793,17 +2793,13 @@ const gates = {
   // rule reads it; the shadow-vs-live SEND decision is
   // emailTemplateAutomationsMode()'s alone.
   //
-  // SHADOW NEVER CHANGES A LIVE SEND. Two existing producers ALREADY sent a
+  // SHADOW NEVER CHANGES A LIVE SEND. An existing producer ALREADY sent a
   // customer email/SMS on this boolean alone before shadow mode existed —
-  // routing them into the executor on the boolean (true in shadow too)
-  // would have shadow silently REPLACE their live send with a would_send
-  // no-op. Both now gate on `emailTemplateAutomationsMode() === 'live'`
-  // instead, so shadow leaves them byte-identical to today's gate-off
+  // routing it into the executor on the boolean (true in shadow too)
+  // would have shadow silently REPLACE its live send with a would_send
+  // no-op. It now gates on `emailTemplateAutomationsMode() === 'live'`
+  // instead, so shadow leaves it byte-identical to today's gate-off
   // behavior:
-  //   - server/services/estimate-auto-renew.js (~line 173): 'live' only ⇒
-  //     routes to the executor; off/shadow ⇒ falls straight to the direct
-  //     EmailTemplateLibrary.sendTemplate('estimate.extension_notice') it
-  //     always used before this executor existed.
   //   - server/services/appointment-tagger.js (~line 657,
   //     triggerPrepEmailGuide): 'live' only ⇒ queues through the executor;
   //     off/shadow ⇒ returns { queued:false, reason:'gate_off' }, same as

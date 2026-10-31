@@ -19659,9 +19659,9 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
 // one transaction. `blocked` is the generic-404 answer; `claimed` 0 without a
 // block is the ordinary 24h dedupe (GH codex P1 r5 on #4309).
 //
-// Lock-then-reread ordering matches the auto-renew sweep
-// (estimate-auto-renew.js): the initial read is only a PEEK of the group to
-// lock — an eligible sent/viewed row can be moved into or between groups
+// Lock-then-reread ordering matches the other estimate-group lock paths
+// (proposal saves, grouped sends, extensions): the initial read is only a
+// PEEK of the group to lock — an eligible sent/viewed row can be moved into or between groups
 // while this transaction waits on that group's advisory lock (or, for an
 // initially ungrouped row, no lock is taken at all), so the code re-reads
 // `estimate_group_id` FOR UPDATE after the lock and refuses to judge or

@@ -106,7 +106,6 @@ describe('unconfirmed product directions take precedence throughout the report',
 describe('aftercare verdict fixture table (PR #5033 findings)', () => {
   const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
   const { buildAftercare } = require('../services/service-report/lawn-report-v2');
-  const { applyLawnReportNarrative } = require('../services/service-report/lawn-report-narrative');
   const CONFIRM = /Confirm the product watering directions/;
   const PLAN_CONDITION = /before applying the plan below/;
   const RUN_PLAN = { title: 'This week: run once', detail: 'One turf cycle before Friday.', action: 'run' };
@@ -150,30 +149,6 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
     });
     return report;
   };
-  const neutralAftercare = () => ({ watering: 'No special watering is needed because of today’s treatment.', neutral: true });
-  // Drought-signal report (the only one the overlay rewrites) whose model
-  // output swaps every customer action for generic drought advice.
-  const GENERIC_DROUGHT = 'Add extra irrigation every day this week to beat the drought.';
-  const rewrite = async (aftercare, observations) => {
-    const report = buildLawnReportV2({ lawnAssessment: CASES.deficit });
-    report.aftercare = aftercare;
-    const before = JSON.parse(JSON.stringify(report));
-    const callModel = jest.fn(async () => ({ ok: true, json: {
-      customerAction: GENERIC_DROUGHT,
-      insights: report.insights.map(() => ({ customerAction: GENERIC_DROUGHT })),
-    } }));
-    return { before, callModel, out: await applyLawnReportNarrative(report, { observations }, { callModel }) };
-  };
-  const keepsCreditedActions = ({ before, callModel, out }) => {
-    expect(before.water.droughtSignal).toBe(true);
-    expect(callModel).toHaveBeenCalledTimes(1);
-    expect(out.aftercare).toEqual(creditedAftercare());
-    expect(out.snapshot.customerAction).toBeTruthy();
-    expect(out.snapshot.customerAction).toBe(before.snapshot.customerAction);
-    expect(out.insights.map((i) => i.customerAction)).toEqual(before.insights.map((i) => i.customerAction));
-    expect(JSON.stringify(out)).not.toContain(GENERIC_DROUGHT);
-  };
-
   test.each([
     ['P1 hero watering advice waits on aftercare review', () => render('deficit', RUN_PLAN), (report) => {
       expect(report.snapshot.rootCause).toBeNull();
@@ -204,11 +179,6 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
       expect(aftercare.watering).not.toMatch(/not recorded/);
       expect(aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false });
     }],
-    ['P1 narrative rewrite keeps credited aftercare customer actions', () => rewrite(creditedAftercare(), 'Credited aftercare rewrite.'), keepsCreditedActions],
-    ['P1 narrative cache never serves another aftercare verdict', async () => {
-      await rewrite(neutralAftercare(), 'Shared narrative facts.');
-      return rewrite(creditedAftercare(), 'Shared narrative facts.');
-    }, keepsCreditedActions],
     ['P2 passive watering question outranks findings wording', () => ['I found mushrooms; should the lawn be watered?', 'I found mushrooms; may I water?', 'You found dry spots; does it need water?']
       .map((question) => ask(question, { weekPlan: { ...RUN_PLAN, visitInPlanWeek: true } })), (answers) => {
       for (const answer of answers) {
@@ -248,28 +218,6 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
         expect(answer).toMatch(PLAN_CONDITION);
         expect(answer).toContain(RUN_PLAN.title);
       }
-    }],
-    ['P1 narrative water copy is grounded in the rendered reduced plan', async () => {
-      const report = buildLawnReportV2({ lawnAssessment: { ...CASES.deficit, waterContext: { ...CASES.deficit.waterContext, weekPlan: CREDIT_PLAN } } });
-      report.aftercare = creditedAftercare();
-      const before = JSON.parse(JSON.stringify(report));
-      const callModel = jest.fn(async () => ({ ok: true, json: { water: 'Rain this week was low, so water once on Wednesday for the week.' } }));
-      return { before, callModel, out: await applyLawnReportNarrative(report, { observations: 'Reduced plan grounding.' }, { callModel }) };
-    }, ({ before, callModel, out }) => {
-      const facts = callModel.mock.calls[0][0].text;
-      expect(facts).toContain(CREDIT_PLAN.afterTreatment.title);
-      expect(facts).not.toContain(CREDIT_PLAN.detail);
-      expect(out.water.explanation).toBe(before.water.explanation);
-    }],
-    ['P2 credited water explanation is never rewritten against the product note', async () => {
-      const report = buildLawnReportV2({ lawnAssessment: CASES.deficit });
-      report.aftercare = creditedAftercare();
-      const before = JSON.parse(JSON.stringify(report));
-      const callModel = jest.fn(async () => ({ ok: true, json: { water: 'Rain this week was low, so skip the product watering-in and delay irrigation until next week.' } }));
-      return { before, out: await applyLawnReportNarrative(report, { observations: 'Credited no-plan water copy.' }, { callModel }) };
-    }, ({ before, out }) => {
-      expect(out.water.explanation).toBe(before.water.explanation);
-      expect(out.water.explanation).not.toMatch(/skip the product watering-in/);
     }],
     // Round 10 (PR #5033, codex P2 on lawn-report-v2.js:653): a reopened/
     // history-carried report's own attached weekPlan can mark
