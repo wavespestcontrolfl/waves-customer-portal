@@ -189,7 +189,6 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/triage-auto-resolve.js': 'writer keyed by id',
     'services/missed-call-bell.js': 'requires customer_id and a terminal missed status',
     'services/contact-correction.js': 'keyed by id',
-    'services/call-sentiment.js': 'keyed by id',
     'services/call-intelligence.js': 'keyed by id',
     'services/customer-properties.js': 'keyed by id / ownership token',
     'services/ads/call-attribution.js': 'keyed by id / a marker the processor stamps',

@@ -260,17 +260,12 @@ describe('the snapshot path (no property rain, an area snapshot instead)', () =>
 });
 
 describe('every surface agrees on a rain-covered week', () => {
-  test('Ask Waves is told the status and the sentence; the narrative is not given a watering claim', () => {
+  test('Ask Waves is told the status and the sentence', () => {
     const on = weekOf([0, 3, 3, 0, 0, 0, 0], { rainAdvice: ON });
     const facts = buildReportAskFacts({ data: { serviceLine: 'lawn', applications: [], reportV2: on } }).lawn_report.water_this_week;
     expect(facts.status).toBe('rain_covered');
     expect(facts.explanation).toContain('Rain alone covered your lawn this week.');
     expect(facts.rain_last_7_days_inches).toBe(6);
-    const { groundingFacts, mergeNarrative } = require('../services/service-report/lawn-report-narrative')._test;
-    expect(groundingFacts(on, { grassLabel: 'lawn' }).water).toMatchObject({ status: 'unknown', rainCoveredWeek: true });
-    // the model may not rewrite the fixed sentence (it may rewrite an ordinary explanation)
-    const rewritten = mergeNarrative(on, { water: 'Over the past week the lawn got plenty of rain, so skip the sprinklers.' });
-    expect(rewritten.water.explanation).toBe(COVERED);
   });
 
   test('the root cause and the insights name no watering fix beside it', () => {
@@ -283,35 +278,6 @@ describe('every surface agrees on a rain-covered week', () => {
 describe('round 1 review: one watering story across every surface', () => {
   const DRY = [0, 0, 0.2, 0, 0, 0, 0];
   const PLAN = { title: 'This week: run once', detail: 'x', action: 'run' };
-  const narrative = require('../services/service-report/lawn-report-narrative');
-  const MODEL = {
-    statusHeadline: 'Your lawn is thirsty', customerAction: 'Add ten minutes to every run this week.', water: 'Over the past week the lawn needs more irrigation time.',
-    insights: [{ headline: 'h', whatWeSaw: 'w', whyItMatters: 'y', wavesAction: 'a', customerAction: 'Add irrigation time to every zone.', nextVisitPlan: 'n' }],
-  };
-
-  test('narrative: a rain-card report is not rewritten by the model, in any action field (P1)', async () => {
-    const on = weekOf(DRY, { rainAdvice: ON });
-    expect(on.water.rainCard).toBe(true);
-    const report = { ...on, water: { ...on.water, droughtSignal: true } };
-    // the merge keeps the snapshot action, every insight action and the card sentence
-    const merged = narrative._test.mergeNarrative(report, MODEL);
-    expect(merged.snapshot.customerAction).toBe(report.snapshot.customerAction);
-    expect(merged.water.explanation).toBe(report.water.explanation);
-    merged.insights.forEach((card, i) => expect(card.customerAction).toBe(report.insights[i].customerAction));
-    // and the whole overlay is skipped: the model is never called, the very same report comes back
-    const callModel = jest.fn(async () => ({ ok: true, json: MODEL }));
-    expect(await narrative.applyLawnReportNarrative(report, { grassLabel: 'lawn' }, { callModel })).toBe(report);
-    expect(callModel).not.toHaveBeenCalled();
-  });
-
-  test('narrative: without the rain card the overlay still runs (gate off is untouched)', async () => {
-    const off = weekOf(DRY);
-    expect(off.water.rainCard).toBeUndefined();
-    const report = { ...off, water: { ...off.water, droughtSignal: true } };
-    const callModel = jest.fn(async () => ({ ok: true, json: MODEL }));
-    await narrative.applyLawnReportNarrative(report, { grassLabel: 'lawn' }, { callModel });
-    expect(callModel).toHaveBeenCalled();
-  });
 
   test('root cause: a deficit with no plan says what the card says, wilt signs and one full cycle (P2)', () => {
     const on = weekOf(DRY, { rainAdvice: ON });

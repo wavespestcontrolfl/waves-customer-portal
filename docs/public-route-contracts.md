@@ -3636,8 +3636,6 @@ of these overall numbers, so they can still move when only the light did:
   +N overall points" (`ReportViewPage.jsx`, only when `reportV2` is absent);
 - the portal's "N pts since first visit" and "+N pts improvement" overall deltas
   (`PortalPage.jsx`; the overall score includes color);
-- the legacy narrative's `trendDirection` (`lawn-report-narrative.js`; env-gated and
-  bypassed, since the lawn v6 copy is always live);
 - the report-assistant answer "Current lawn health is N% overall. Breakdown: ..."
   (`report-assistant.js` `answerTrend`): current scores only, no comparison;
 - the staff and technician screens (Intelligence Bar, `LawnVisitReview`).
