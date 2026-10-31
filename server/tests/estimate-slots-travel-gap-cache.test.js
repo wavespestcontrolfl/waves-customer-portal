@@ -27,6 +27,8 @@ jest.mock('../config/feature-gates', () => ({
   // time (scheduling/travel-gap.js); keep the real helper so the collision
   // filter runs exactly as it does in prod with the gate unset.
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
+  // The same-hour technician scope (GATE_MULTI_TECH_CONFIRM) reads the real call-time reader.
+  multiTechConfirmLive: jest.requireActual('../config/feature-gates').multiTechConfirmLive,
 }));
 
 const db = require('../models/db');

@@ -4946,9 +4946,11 @@ const gates = {
   // (occupancy.js findConflictingVisits, /book's zone overlap check) were
   // tech-blind by design for the one-technician era, so a slot offered on
   // technician B's day was refused at confirm because technician A had an
-  // overlapping or nearby stop. On (with capacity mode), the self-serve commits
-  // that pass a technicianId scope their conflict rows to that technician plus
-  // unassigned rows. **Ships DARK: off unless exactly `true`/`1`/`on`**. This
+  // overlapping or nearby stop. On (owner 2026-10-30: in hour mode too, no
+  // longer needs capacity mode), the self-serve commits that pass a technicianId
+  // scope their conflict rows to that technician plus unassigned rows, and the
+  // /book and estimate offers scope the same way, so two technicians can book
+  // the same hour. **Ships DARK: off unless exactly `true`/`1`/`on`**. This
   // entry is for logGateStatus only — the canonical CALL-TIME reader is
   // multiTechConfirmLive() below. Kill switch: unset GATE_MULTI_TECH_CONFIRM —
   // every confirm-side probe goes back to tech-blind, byte for byte.
@@ -6971,8 +6973,9 @@ function assistantRouteTimesMode() {
 
 // GATE_MULTI_TECH_CONFIRM read at CALL time — the one canonical reader for the
 // tech-aware confirm-side conflict scope (scheduling/occupancy.js
-// techScopedConfirmActive, which also requires GATE_SCHEDULING_CAPACITY so the
-// confirm side scopes exactly when the offer side does). The `multiTechConfirm`
+// techScopedConfirmActive; owner 2026-10-30: it no longer also requires
+// GATE_SCHEDULING_CAPACITY, so the gate alone scopes in hour mode, and the offer
+// sites scope on capacity mode OR this gate). The `multiTechConfirm`
 // gates-map entry above is for logGateStatus only.
 function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
