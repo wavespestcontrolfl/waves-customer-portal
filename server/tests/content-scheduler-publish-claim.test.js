@@ -191,6 +191,18 @@ describe('atomic publishing claim', () => {
     expect(AstroPublisher.publishAstro).toHaveBeenCalledWith(7);
   });
 
+  test('the review handoff after publishAstro lands only while this run holds the claim (audit BLOG-04)', async () => {
+    mockState.pendingBlogs = [blog];
+    await ContentScheduler.processScheduledPosts();
+
+    const handoff = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'pending_review'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7));
+    expect(handoff).toBeDefined();
+    expect(handoff.filters).toEqual(expect.arrayContaining([['publish_status', 'publishing']]));
+  });
+
   test('skips the blog when another instance claimed it first (0 rows updated)', async () => {
     mockState.pendingBlogs = [blog];
     mockState.updateResult = (table, filters, updates) =>
