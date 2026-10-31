@@ -494,7 +494,7 @@ router.post('/internal-links/:id/decision', async (req, res, next) => {
 // GET /api/admin/content/blog?status=queued&tag=Pest+Control&city=Bradenton&sort=publish_date
 router.get('/blog', async (req, res, next) => {
   try {
-    const { status, tag, city, sort = 'publish_date', order = 'asc', search, limit } = req.query;
+    const { status, tag, city, sort = 'publish_date', order = 'asc', search, limit, offset } = req.query;
 
     // sort went raw into orderBy (unknown column → 42703 → 500 killed the
     // list view) and limit=NaN made knex silently drop the limit (full-table
@@ -502,23 +502,32 @@ router.get('/blog', async (req, res, next) => {
     const sortColumn = BLOG_SORT_COLUMNS.has(String(sort)) ? String(sort) : 'publish_date';
     const sortOrder = String(order).toLowerCase() === 'desc' ? 'desc' : 'asc';
     const boundedLimit = parseBoundedInt(limit, { defaultValue: 200, min: 1, max: 500, name: 'limit' });
+    const boundedOffset = parseBoundedInt(offset, { defaultValue: 0, min: 0, max: 1000000, name: 'offset' });
 
-    let query = db('blog_posts');
-    if (status) query = query.where('status', status);
-    if (tag) query = query.where('tag', tag);
-    if (city) query = query.where('city', city);
-    if (search) query = query.where(function () {
-      this.where('title', 'ilike', `%${search}%`).orWhere('keyword', 'ilike', `%${search}%`);
-    });
+    const filtered = () => {
+      let query = db('blog_posts');
+      if (status) query = query.where('status', status);
+      if (tag) query = query.where('tag', tag);
+      if (city) query = query.where('city', city);
+      if (search) query = query.where(function () {
+        this.where('title', 'ilike', `%${search}%`).orWhere('keyword', 'ilike', `%${search}%`);
+      });
+      return query;
+    };
 
-    const posts = await query.orderBy(sortColumn, sortOrder).limit(boundedLimit);
+    // id breaks sort ties so a page boundary never repeats or skips a row.
+    const posts = await filtered().orderBy([{ column: sortColumn, order: sortOrder }, { column: 'id', order: 'asc' }])
+      .offset(boundedOffset).limit(boundedLimit);
+    // total = every row that matches the filters, so the list can page past
+    // the first response (audit BLOG-12).
+    const matching = await filtered().count('* as count').first();
 
     // Counts by status
     const statusCounts = await db('blog_posts').select('status').count('* as count').groupBy('status');
     const counts = {};
     statusCounts.forEach(s => { counts[s.status] = parseInt(s.count); });
 
-    res.json({ posts, counts, total: posts.length });
+    res.json({ posts, counts, total: Number(matching?.count) || 0, offset: boundedOffset });
   } catch (err) { next(err); }
 });
 
@@ -909,7 +918,16 @@ router.post('/blog/:id/merge-astro', async (req, res, next) => {
   try {
     const AstroPublisher = require('../services/content-astro/astro-publisher');
     const result = await AstroPublisher.mergeAstro(req.params.id);
-    res.json({ success: true, ...result });
+    // The editor applies the row as it stands after the merge: a removal
+    // PR leaves a draft with cleared links, a publish PR leaves it merged.
+    // The PR is merged by now, so a failed read must not report a failure.
+    let post = null;
+    try {
+      post = await db('blog_posts').where({ id: req.params.id }).first();
+    } catch (readErr) {
+      logger.warn(`[content] merge-astro post-merge read failed for ${req.params.id}: ${readErr.message}`);
+    }
+    res.json({ success: true, ...result, post });
   } catch (err) {
     logger.error(`[content] merge-astro failed: ${err.message}`);
     // The merge-time topic-targeting recheck is an author-correctable policy
