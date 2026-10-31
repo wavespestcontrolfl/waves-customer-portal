@@ -100,6 +100,7 @@
  *     call time via callCancelGuardLive(), strict 'true', dark by default.)
  *   GATE_AI_CHANGE_CHECK=true (owner 2026-10-30, "all": before-and-after AI check for every content change. The daily impact tracker compares how often AI answers cited a changed page in the 14 days before its deploy with the 14 days after, adjusted for site-wide Waves citations, and stores gained / lost / flat / no_data on the content_optimization_impact row. A "lost" verdict adds one FIX leg to the impact digest (also needs GATE_IMPACT_DIGEST), at most one email a day. Reads seo_llm_mentions that the daily prober already stored; fires no probes, costs $0, sends nothing to a customer. Read at call time via aiChangeCheckLive(), strict 'true', dark by default; off = no check runs and the digest has no such leg.)
  *   GATE_SAME_QUESTION_CHECK=true (content engine, owner 2026-10-30 "all": before a NEW supporting blog is drafted, topic-targeting-gate looks for a live post whose title, slug or primary keyword already holds every topic word of the brief's keyword (geo and framing words dropped, singular/plural folded; a one-word topic blocks only when at most 3 live posts hold it and it is not a broad pest or service word like termite or lawn). Off = the rule runs in shadow: it records run.topic_targeting_result.same_question and logs, and never blocks. On = the row is skipped by design (topic_targeting:TOPIC_SAME_QUESTION_LIVE) and one same_question_refresh row is queued against the owner page, which adds the candidate question as an answer block (ANSWER-GAP MODE) through the normal refresh chain: protected pages, in-flight page edit and the 28-day page cooldown still apply. Strict opt-in: exactly 'true', read at call time via sameQuestionCheckLive(). Ships DARK. Off also stops same_question_refresh rows already queued from being claimed (opportunity-queue lane fence); they wait and expire unclaimed after 60 days.)
+ *   GATE_PORTAL_INBOX=true (owner 2026-10-31, option A: a Portal tab in Admin > Communications lists what customers asked for inside the customer portal and nobody answered: portal chat hand-offs (ai_escalations from a portal_chat session still pending) and customer service requests not yet resolved, closed or cancelled and not made by staff. Shows the last 14 days; older open items sit under one Older line with a Close all older button that closes them and sends nothing to customers. Mark handled on a row closes the item and the admin bell alerts raised for it. Admin only. Read at call time via portalInboxLive(), strict 'true', dark by default; off = the tab is hidden, the new routes answer enabled:false/404, and the escalation and request update routes close no alerts. Sends nothing to a customer.)
  *   GATE_ROUTE_ENGINE_SUMMARY=true (owner 2026-10-31: the admin Day Scorecard payload also carries an `engine` block, a plain summary of the nightly auto-dispatch run over the last 7 ET nights: moves made, visits the per-run cap held back and how many of those moved later, nights that failed or finished with errors, and the model's net estimate of drive minutes saved. Read-only over auto_dispatch_runs and auto_dispatch_audit_logs; sends nothing. Strict opt-in: exactly 'true', read at call time via routeEngineSummaryLive() by server/routes/admin-route-scorecard.js; dark by default; off = the scorecard payload is unchanged, with no engine key.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
@@ -9397,6 +9398,12 @@ function aiChangeCheckLive() {
 function sameQuestionCheckLive() {
   return process.env.GATE_SAME_QUESTION_CHECK === 'true';
 }
+
+// GATE_PORTAL_INBOX read at CALL time, strict `=== 'true'`, dark in every environment.
+// Off, the Portal tab in Communications is hidden and the portal-inbox routes answer enabled:false / 404.
+function portalInboxLive() {
+  return process.env.GATE_PORTAL_INBOX === 'true';
+}
 // GATE_ROUTE_ENGINE_SUMMARY read at CALL time, strict `=== 'true'`, dark in every environment. Off = the route scorecard payload has no
 // engine key. Read-only over the auto-dispatch run and audit tables; sends nothing.
 function routeEngineSummaryLive() {
@@ -9550,5 +9557,7 @@ module.exports.callCancelGuardLive = callCancelGuardLive;
 module.exports.aiChangeCheckLive = aiChangeCheckLive;
 // GATE_SAME_QUESTION_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.sameQuestionCheckLive = sameQuestionCheckLive;
+// GATE_PORTAL_INBOX reader, on its own line so gate PRs never conflict.
+module.exports.portalInboxLive = portalInboxLive;
 // GATE_ROUTE_ENGINE_SUMMARY reader, on its own line so gate PRs never conflict.
 module.exports.routeEngineSummaryLive = routeEngineSummaryLive;

@@ -14,6 +14,8 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { closeRequestAlertsOnResolve } = require('../services/portal-inbox');
+const { requestProperty } = require('../services/service-request-property');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { convertHeicToJpeg, MAX_HEIC_BYTES } = require('../services/heic-to-jpeg');
 
@@ -53,19 +55,6 @@ const updateSchema = Joi.object({
   adminNotes: Joi.string().trim().allow('').max(2000).optional(),
   assignedTechnicianId: Joi.string().uuid().allow(null).optional(),
 }).min(1);
-
-function requestProperty(metadata) {
-  let meta = metadata;
-  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { return null; } }
-  const p = meta && typeof meta === 'object' ? meta.property : null;
-  if (!p || typeof p !== 'object') return null;
-  return {
-    id: p.id != null ? String(p.id) : null,
-    isPrimary: p.isPrimary === true,
-    label: p.label || null,
-    address: p.address || null,
-  };
-}
 
 // GET /api/admin/requests — list service requests for staff triage.
 router.get('/', async (req, res, next) => {
@@ -206,6 +195,10 @@ router.patch('/:id', async (req, res, next) => {
       const current = await db('service_requests').where({ id: req.params.id }).first();
       return res.json({ request: current, statusChanged: false });
     }
+
+    // GATE_PORTAL_INBOX: the writer that won the move to resolved also closes
+    // this request's open admin bell alerts (a no-op while the gate is off).
+    await closeRequestAlertsOnResolve(updated, statusChanged, { technicianId: req.technicianId, role: req.techRole });
 
     // measurement_review rows (the estimate "does the lawn size look off?"
     // flow) are office-only by contract — the customer is NEVER auto-messaged
