@@ -1058,7 +1058,7 @@ const NO_SINGLE_TERRITORY = 'no-single-territory';
  * must land in its own territory. One territory technician shared by every restricted
  * member = that technician; two different ones = NO_SINGLE_TERRITORY (every candidate
  * drops and the stop keeps its place); none = null. The apply-time member guard checks the
- * same rule against the committed rows (apply.js assertMembersInTerritory).
+ * same rule against the committed rows (apply.js assertInOwnTerritory).
  */
 async function unitTerritoryTechnician(service, geo, ctx) {
   const own = await territoryTechnicianForVisit(service, geo);
