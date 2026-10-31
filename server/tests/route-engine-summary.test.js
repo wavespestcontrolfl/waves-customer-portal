@@ -63,18 +63,13 @@ describe('summarizeRouteEngine', () => {
       ],
     });
     expect(out.nights.map((n) => [n.movesMade, n.held])).toEqual([[1, 3], [1, 1], [1, 1]]);
-    expect(out.totals).toMatchObject({ movesMade: 3, heldVisits: 4, heldThenMoved: 2, estDriveMinutesSaved: 60 });
+    expect(out.totals).toMatchObject({ movesMade: 3, heldVisits: 4, heldThenMoved: 2 });
   });
 
-  test('estimated minutes: a net sum (a move that adds driving subtracts), missing numbers give null', () => {
-    const base = { today, nights: 1, runs: [run('a', '2026-10-31', 'completed')] };
-    const some = summarizeRouteEngine({ ...base, rows: [changed('a', 's1', -5, at('2026-10-31')), changed('a', 's2', 12, at('2026-10-31'))] });
-    expect(some.totals.estDriveMinutesSaved).toBe(7);
-    const none = summarizeRouteEngine({ ...base, rows: [changed('a', 's1', undefined, at('2026-10-31'))] });
-    expect(none.totals.movesMade).toBe(1);
-    expect(none.totals.estDriveMinutesSaved).toBeNull();
-    const text = summarizeRouteEngine({ ...base, rows: [{ ...changed('a', 's1', 0, at('2026-10-31')), route_metrics_snapshot: '{"drive_saving_minutes":"7"}' }] });
-    expect(text.totals.estDriveMinutesSaved).toBe(7);
+  test('carries no drive-time figure (the per-move estimate overstates; counts only)', () => {
+    const out = summarizeRouteEngine({ today, nights: 1, runs: [run('a', '2026-10-31', 'completed')], rows: [changed('a', 's1', 114, at('2026-10-31'))] });
+    expect(out.totals.movesMade).toBe(1);
+    expect(out.totals).not.toHaveProperty('estDriveMinutesSaved');
   });
 
   test('cap comes from the latest run config_snapshot.maxChangesPerRun, null when absent', () => {
@@ -138,7 +133,7 @@ describe('buildRouteEngineSummary', () => {
     const out = await buildRouteEngineSummary(conn, { nights: 2, now: new Date('2026-10-31T16:00:00Z') });
     expect(conn.calls[0]).toEqual(['auto_dispatch_runs', 'whereIn', 'triggered_by', ['cron', 'catch_up']]);
     expect(out.nights.map((n) => n.date)).toEqual(['2026-10-30', '2026-10-31']);
-    expect(out.totals).toMatchObject({ movesMade: 1, estDriveMinutesSaved: 15, finishedNights: 1, noRunNights: 1 });
+    expect(out.totals).toMatchObject({ movesMade: 1, finishedNights: 1, noRunNights: 1 });
   });
 
   test('skips the audit read when no run exists', async () => {

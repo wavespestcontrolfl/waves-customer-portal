@@ -9,12 +9,13 @@
  * runs: auto_dispatch_runs rows (id, started_at, status, config_snapshot) for
  *   the night triggers ('cron', 'catch_up').
  * rows: auto_dispatch_audit_logs rows (auto_dispatch_run_id,
- *   scheduled_service_id, action, reason_code, route_metrics_snapshot,
- *   created_at).
+ *   scheduled_service_id, action, reason_code, created_at).
  *
- * estDriveMinutesSaved is the model's own NET estimate (route_metrics_snapshot.
- * drive_saving_minutes on each applied move, summed with its sign: a move that
- * adds driving, e.g. an overlap fix, subtracts), not measured driving.
+ * Counts only, no drive-time figure. The engine's per-move estimate
+ * (route_metrics_snapshot.drive_saving_minutes) is the detour it expected to
+ * avoid when it moved a visit, often against a future day that was still
+ * nearly empty. On 2026-10-31 the last 7 nights summed to 949 minutes, more
+ * than a whole week of modeled driving, so a total of it would mislead.
  */
 const defaultDb = require('../../models/db');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -79,11 +80,6 @@ function capFrom(runs, nightOfRun) {
   return Number.isFinite(cap) && cap > 0 ? cap : null;
 }
 
-function savingMinutes(row) {
-  const n = Number(asObject(row.route_metrics_snapshot).drive_saving_minutes);
-  return Number.isFinite(n) ? n : null;
-}
-
 function tallyRows(rows, nightOfRun, dates) {
   const moves = new Map(dates.map((date) => [date, 0]));
   const heldByNight = new Map(dates.map((date) => [date, new Set()]));
@@ -91,7 +87,6 @@ function tallyRows(rows, nightOfRun, dates) {
   // (a cut-off run, then its catch-up) is not "moved on a later night".
   const firstHeld = new Map(); // service id -> earliest night it was held
   const lastChanged = new Map(); // service id -> latest night it was moved
-  let minutes = null;
   for (const row of rows) {
     const date = nightOfRun.get(String(row.auto_dispatch_run_id));
     if (!date) continue;
@@ -99,14 +94,12 @@ function tallyRows(rows, nightOfRun, dates) {
     if (row.action === 'changed') {
       moves.set(date, moves.get(date) + 1);
       if (id) lastChanged.set(id, later(lastChanged.get(id), date));
-      const saved = savingMinutes(row);
-      if (saved !== null) minutes = (minutes || 0) + saved;
     } else if (row.reason_code === HELD_CODE && id) {
       heldByNight.get(date).add(id);
       firstHeld.set(id, earlier(firstHeld.get(id), date));
     }
   }
-  return { moves, heldByNight, firstHeld, lastChanged, minutes };
+  return { moves, heldByNight, firstHeld, lastChanged };
 }
 
 function summarizeRouteEngine({ runs = [], rows = [], today, nights = DEFAULT_NIGHTS } = {}) {
@@ -134,7 +127,6 @@ function summarizeRouteEngine({ runs = [], rows = [], today, nights = DEFAULT_NI
       movesMade: nightList.reduce((sum, n) => sum + n.movesMade, 0),
       heldVisits: heldIds.length,
       heldThenMoved: heldIds.filter((id) => (tally.lastChanged.get(id) || '') > tally.firstHeld.get(id)).length,
-      estDriveMinutesSaved: tally.minutes === null ? null : Math.round(tally.minutes),
     },
     cap: capFrom(runs, nightOfRun),
     windowNights: nights,
@@ -155,7 +147,7 @@ async function buildRouteEngineSummary(conn = defaultDb, { nights = DEFAULT_NIGH
     ? await conn('auto_dispatch_audit_logs')
       .whereIn('auto_dispatch_run_id', runs.map((run) => run.id))
       .where((q) => q.where('action', 'changed').orWhere('reason_code', HELD_CODE))
-      .select('auto_dispatch_run_id', 'scheduled_service_id', 'action', 'reason_code', 'route_metrics_snapshot', 'created_at')
+      .select('auto_dispatch_run_id', 'scheduled_service_id', 'action', 'reason_code', 'created_at')
     : [];
   return summarizeRouteEngine({ runs, rows, today, nights });
 }
