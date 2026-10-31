@@ -75,7 +75,8 @@ describeDb('call cancel guard (PostgreSQL)', () => {
     const id = randomUUID();
     await trx('call_log').insert({
       id, customer_id: customerId, twilio_call_sid: `CA${id.replace(/-/g, '')}`, from_phone: '+19415550101',
-      processing_status: 'processed', review_status: 'open', created_at: at(createdAt), ...over,
+      processing_status: 'processed', review_status: 'open', created_at: at(createdAt),
+      ai_extraction_enriched: JSON.stringify({ service_request: { primary_service_category: 'pest_general' } }), ...over,
     });
     return id;
   }
@@ -172,7 +173,34 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       await trx('call_log').where({ id: third.cancelCall }).update({ answered_by: 'voicemail' });
       expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
       for (const lead of [first, second, third]) expect((await row(lead.ask.id)).status).toBe('open');
-      expect(await _test.cancelStands(trx, first.cancelCall)).toBe(false);
+      expect(await _test.cardIsMoot(trx, { customerId: first.customerId, cancelCallId: first.cancelCall, cardCallId: first.askCall })).toBe(false);
+    });
+
+    test('the cancel must name the same service: another service or an unknown one keeps the card', async () => {
+      const lawn = await canceledLead();
+      await trx('call_log').where({ id: lawn.cancelCall }).update({ ai_extraction_enriched: JSON.stringify({ service_request: { primary_service_category: 'lawn_care' } }) });
+      const unknown = await canceledLead();
+      await trx('call_log').where({ id: unknown.cancelCall }).update({ ai_extraction_enriched: JSON.stringify({}) });
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
+      for (const lead of [lawn, unknown]) expect((await row(lead.ask.id)).status).toBe('open');
+    });
+
+    test('a customer with two properties keeps the card (which one was canceled is unknown)', async () => {
+      const { customerId, ask } = await canceledLead();
+      for (const line1 of ['100 Example Lane', '200 Example Lane']) {
+        await trx('customer_properties').insert({ customer_id: customerId, address_line1: line1, city: 'Sampleton', state: 'FL', zip: '34200' });
+      }
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
+      expect((await row(ask.id)).status).toBe('open');
+    });
+
+    test('a call relinked to another customer keeps the card', async () => {
+      const { askCall, ask, customerId, cancelCall } = await canceledLead();
+      const other = await customer();
+      await trx('call_log').where({ id: askCall }).update({ customer_id: other });
+      expect(await _test.cardIsMoot(trx, { customerId, cancelCallId: cancelCall, cardCallId: askCall })).toBe(false);
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
+      expect((await row(ask.id)).status).toBe('open');
     });
 
     test('a resolved cancel card still counts (the office handled the cancel)', async () => {
