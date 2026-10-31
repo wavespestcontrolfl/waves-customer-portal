@@ -3,7 +3,7 @@
  * to a self-pay customer with no open invoice to move and no open checkout; the confirmed card runs the customer page's
  * own PUT /:id handler (setCustomerBillToFromBar), which re-checks the card inside its transaction and refuses if any
  * invoice would move; a Bill-To, payer, visit or invoice that changed after the card refuses with nothing written.
- * Synthetic names only.
+ * IB gap #19: a payer not set up yet is added by the confirmed card (deduped by AP email), then set. Synthetic names only.
  */
 const { randomUUID } = require('crypto');
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -23,7 +23,7 @@ jest.setTimeout(30000);
 const ADMIN = { isAdmin: true, technicianId: null };
 
 (usable ? describe : describe.skip)('IB set_customer_bill_to (real PG)', () => {
-  const created = { payers: [], customers: [] };
+  const created = { payers: [], customers: [], apEmails: [], payerNames: [] };
   beforeAll(() => {
     process.env.GATE_IB_SET_BILL_TO = 'true';
     process.env.GATE_IB_PLATFORM = 'true';
@@ -39,6 +39,8 @@ const ADMIN = { isAdmin: true, technicianId: null };
       await db('customers').where({ id: customerId }).del();
     }
     if (created.payers.length) await db('payers').whereIn('id', created.payers).del();
+    if (created.apEmails.length) await db('payers').whereIn('ap_email', created.apEmails).del();
+    if (created.payerNames.length) await db('payers').whereIn('display_name', created.payerNames).del();
     await db.destroy();
   });
 
@@ -188,5 +190,85 @@ const ADMIN = { isAdmin: true, technicianId: null };
     await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, actor: {} }))
       .rejects.toMatchObject({ code: 'preview_changed' });
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: other });
+  });
+  // IB gap #19: the payer is not set up yet.
+  const newPayerInput = (customerId, suffix) => {
+    const email = `ap-${suffix}@example.invalid`;
+    created.apEmails.push(email);
+    return { customer_id: customerId, new_payer_name: `Fixture New Payer ${suffix}`, new_payer_company: `Fixture Holdings ${suffix}`, new_payer_email: email.toUpperCase(), new_payer_phone: '+12025550157' };
+  };
+
+  test('a new payer: the card writes nothing; Confirm adds it with the card fields and sets it, moving nothing', async () => {
+    const customerId = await customer();
+    const suffix = randomUUID().slice(0, 8);
+    const input = newPayerInput(customerId, suffix);
+    const preview = await executeBillToTool('set_customer_bill_to', input, ADMIN);
+    expect(preview).toMatchObject({ preview: true, payer_new: true, payer_id: null });
+    expect(await db('payers').where({ ap_email: `ap-${suffix}@example.invalid` })).toHaveLength(0);
+    const done = await executeBillToTool('set_customer_bill_to', { ...input, confirmed: true, _verified_bill_to_version: preview._version }, ADMIN);
+    expect(done).toMatchObject({ success: true, payer_created: true, sent_to_customer: false });
+    const rows = await db('payers').where({ ap_email: `ap-${suffix}@example.invalid` });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ display_name: `Fixture New Payer ${suffix}`, company_name: `Fixture Holdings ${suffix}`, ap_phone: '+12025550157', payment_terms: 'due_on_receipt', tax_exempt: false, active: true });
+    expect(String(rows[0].id)).toBe(done.payer_id);
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: rows[0].id });
+    // Asked again for another customer, the same email finds that payer instead of adding a second one.
+    const second = await customer();
+    const again = await executeBillToTool('set_customer_bill_to', { ...input, customer_id: second }, ADMIN);
+    expect(again).toMatchObject({ preview: true, payer_new: false, payer_id: String(rows[0].id) });
+  });
+
+  test('a new payer whose Bill-To save refuses stays added, and the customer keeps paying', async () => {
+    const customerId = await customer();
+    const suffix = randomUUID().slice(0, 8);
+    const input = newPayerInput(customerId, suffix);
+    const preview = await executeBillToTool('set_customer_bill_to', input, ADMIN);
+    // An unpaid invoice appears after the card: the re-check before the add refuses, nothing is added.
+    const invoiceId = await invoice(customerId, { status: 'sent' });
+    expect(await executeBillToTool('set_customer_bill_to', { ...input, confirmed: true, _verified_bill_to_version: preview._version }, ADMIN))
+      .toMatchObject({ preview_changed: true });
+    expect(await db('payers').where({ ap_email: `ap-${suffix}@example.invalid` })).toHaveLength(0);
+    await db('invoices').where({ id: invoiceId }).del();
+    // The card's in-transaction re-check refuses after the add (another edit set a payer first).
+    const other = await payer();
+    const routes = require('../routes/admin-customers');
+    const real = routes.setCustomerBillToFromBar;
+    jest.spyOn(routes, 'setCustomerBillToFromBar').mockImplementation(async (args) => {
+      await db('customers').where({ id: customerId }).update({ payer_id: other });
+      return real(args);
+    });
+    const failed = await executeBillToTool('set_customer_bill_to', { ...input, confirmed: true, _verified_bill_to_version: preview._version }, ADMIN);
+    expect(failed).toMatchObject({ failed: true, code: 'preview_changed', payer_created: true });
+    expect(await db('payers').where({ ap_email: `ap-${suffix}@example.invalid` })).toHaveLength(1);
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: other });
+  });
+  test('a new payer whose name or company an active payer already has is refused, naming it', async () => {
+    const customerId = await customer();
+    const suffix = randomUUID().slice(0, 8);
+    const [dup] = await db('payers').insert({ display_name: `  FIXTURE SAME NAME ${suffix} `, active: true }).returning('id');
+    created.payers.push(dup.id);
+    const [inactive] = await db('payers').insert({ display_name: `Fixture Off ${suffix}`, company_name: `Fixture Holdings ${suffix}`, active: false }).returning('id');
+    created.payers.push(inactive.id);
+    expect(await executeBillToTool('set_customer_bill_to', { customer_id: customerId, new_payer_name: `fixture same name ${suffix}` }, ADMIN))
+      .toMatchObject({ code: 'payer_exists', candidates: [{ payer_id: String(dup.id) }] });
+    // An inactive payer's name or company is not a match.
+    expect(await executeBillToTool('set_customer_bill_to', { customer_id: customerId, new_payer_name: `Fixture Other ${suffix}`, new_payer_company: `Fixture Holdings ${suffix}` }, ADMIN))
+      .toMatchObject({ preview: true, payer_new: true });
+  });
+  test('two cards for the same new payer confirmed at once: the locks let one add it, the other refuses', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const name = `Fixture Concurrent Payer ${suffix}`;
+    created.payerNames.push(name);
+    const customers = [await customer(), await customer()];
+    // No invoice email, so only the name locks stand between the two inserts.
+    const cards = await Promise.all(customers.map((id) => executeBillToTool('set_customer_bill_to', { customer_id: id, new_payer_name: name }, ADMIN)));
+    cards.forEach((c) => expect(c).toMatchObject({ preview: true, payer_new: true }));
+    const results = await Promise.all(customers.map((id, i) => executeBillToTool('set_customer_bill_to', {
+      customer_id: id, new_payer_name: name, confirmed: true, _verified_bill_to_version: cards[i]._version,
+    }, ADMIN)));
+    expect(results.filter((r) => r.success)).toHaveLength(1);
+    // The loser refuses either under the locks or in its own re-check, if the winner committed first (payer_exists).
+    expect(results.filter((r) => r.preview_changed === true && !r.payer_created)).toHaveLength(1);
+    expect(await db('payers').where({ display_name: name })).toHaveLength(1);
   });
 });
