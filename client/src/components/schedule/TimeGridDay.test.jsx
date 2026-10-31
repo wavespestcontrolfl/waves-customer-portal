@@ -406,6 +406,47 @@ describe('TimeGridDay open hours', () => {
   });
 });
 
+describe('TimeGridDay one-hour block rows at 14px (schedule audit S9)', () => {
+  // A 64px block holds three 14px rows. The readiness strip sits at the foot
+  // of a one-hour block, so the time moves onto the name's row and the
+  // service keeps a row of its own above the strip.
+  const withReadiness = {
+    ...SERVICES[0],
+    serviceType: 'General Pest Control',
+    readiness: { issues: [{ status: 'hold', label: 'Gate code needed' }] },
+  };
+
+  it('puts the time on the name row when the readiness strip takes the foot', () => {
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[withReadiness]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onProtocol={vi.fn()}
+      />,
+    );
+    const row = screen.getByText('8–9 AM').parentElement;
+    expect(row).toHaveClass('flex');
+    expect(row).toContainElement(screen.getByRole('button', { name: 'First Customer' }));
+    expect(row).not.toContainElement(screen.getByText('General Pest Control'));
+    expect(screen.getByRole('button', { name: /Gate code needed/ })).toBeInTheDocument();
+  });
+
+  it('keeps the time on its own row without a readiness strip', () => {
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[{ ...withReadiness, readiness: null }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onProtocol={vi.fn()}
+      />,
+    );
+    // Stacked: the time and the name row sit one above the other.
+    expect(screen.getByText('8–9 AM').parentElement).not.toHaveClass('flex');
+    expect(screen.getByText('General Pest Control')).toBeInTheDocument();
+  });
+});
+
 describe('TimeGridDay drive labels', () => {
   it('shows the drive into a one-hour block once, and nothing on the block it leaves', () => {
     const first = { ...SERVICES[0], driveToNextMin: 59 };
