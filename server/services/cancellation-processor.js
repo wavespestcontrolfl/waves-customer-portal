@@ -542,8 +542,8 @@ const TEMPLATE_PRICE_KEYS = ['estimated_price', 'primary_line_price'];
 // and appointment discounts) the flat reprice cannot do: leave it for an
 // operator instead of guessing.
 const TEMPLATE_DISCOUNT_FIELDS = [
-  'discount_type', 'discount_amount', 'discount_dollars',
-  'line_discount_type', 'line_discount_amount', 'line_discount_dollars',
+  'discount_type', 'discount_amount', 'discount_dollars', 'discount_id',
+  'line_discount_type', 'line_discount_amount', 'line_discount_dollars', 'line_discount_id',
 ];
 
 function readTemplateOverrides(raw) {
@@ -596,7 +596,10 @@ function planTemplateChange(root, family, repricedIds, reprice) {
 }
 
 async function templateBlockedReason(trx, root) {
-  const fields = TEMPLATE_DISCOUNT_FIELDS.filter((f) => isSet(root[f]));
+  // The scheduler prices off the root OVERLAID with its overrides, so a
+  // discount carried only in the override jsonb counts the same.
+  const overrides = readTemplateOverrides(root.recurring_template_overrides);
+  const fields = TEMPLATE_DISCOUNT_FIELDS.filter((f) => isSet(root[f]) || isSet(overrides[f]));
   if (fields.length) return `discount field ${fields.join('/')}`;
   const addon = await trx('scheduled_service_addons').where({ scheduled_service_id: root.id }).first('id');
   return addon ? 'add-on rows' : null;

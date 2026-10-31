@@ -1338,6 +1338,15 @@ describe('per-application tier drop reprices the series price template', () => {
     expect(mockState.tables.customers[0].waveguard_tier).toBe('Bronze');
   });
 
+  test('a discount carried only in the override jsonb also leaves the template unchanged and named', async () => {
+    const ov = { primary_line_price: 100, line_discount_dollars: 10, appointment_address: '3 Elm St' };
+    await run(perAppCustomer(), [lawn(), pestRoot({ estimated_price: 115.2, recurring_template_overrides: ov }), pestChild()]);
+    expect(overridesOf('root-pest')).toEqual(ov);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('discount field line_discount_dollars'));
+    expect(note()).toContain('NOT changed');
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Bronze');
+  });
+
   test('monthly and annual-prepay lanes write no template', async () => {
     for (const mode of ['monthly_membership', 'annual_prepay']) {
       seed({
