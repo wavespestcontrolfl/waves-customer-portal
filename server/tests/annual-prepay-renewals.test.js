@@ -967,6 +967,30 @@ describe('annual prepay renewal helpers', () => {
         expect(rows.slice(1).every((r) => !('recurring_round_anchor_date' in r))).toBe(true);
       });
 
+      test('a lawn neighborhood day: a first activation for an area customer stamps the AREA anchor and places later rounds from it', async () => {
+        const paid = '2027-02-02'; // last day of round 1; the Parrish day in round 2 (Feb 23) is under 28 days away
+        const parrish = '2027-01-12';
+        const expected = coverageScheduleDates(paid, 9, 'lawn_rounds_9', null, { roundAnchor: parrish, areaFirstGapFloor: true });
+        expect(expected[0]).toBe(paid);
+        expect(expected[1]).toBe('2027-03-02'); // paid + 28 days, inside round 2
+        expect(expected.slice(2)).toEqual(Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(parrish, paid, i)).slice(2));
+        const inserts = seedInserts(expected);
+        setDbQueues({
+          scheduled_services: [query({ columnInfo: ROUNDS_COLS }), query({ rows: [] }), query({ first: undefined }), ...inserts],
+          system_settings: [query({ first: undefined })],
+          customers: [query({ first: { zip: '34219', city: 'Parrish' } })],
+        });
+        const result = await _private.ensureCoverageRowsForTerm({
+          id: 'term-area', customer_id: 'customer-r', term_start: paid, term_end: '2028-02-01',
+          coverage_service_type: 'Lawn Care', coverage_visit_count: 9, coverage_cadence: 'lawn_rounds_9', first_visit_date: paid,
+        }, undefined, { today: '2027-01-01' });
+        expect(result.targetDates).toEqual(expected);
+        const rows = insertedRows(inserts);
+        expect(rows.map((r) => r.scheduled_date)).toEqual(expected);
+        expect(rows[0].recurring_round_anchor_date).toBe(parrish);
+        expect(rows.slice(1).every((r) => !('recurring_round_anchor_date' in r))).toBe(true);
+      });
+
       test('rows that join an existing series parent get no stamp', async () => {
         const anchor = '2026-06-16';
         const dates = Array.from({ length: 9 }, (_, i) => lawnRoundDate(anchor, i));

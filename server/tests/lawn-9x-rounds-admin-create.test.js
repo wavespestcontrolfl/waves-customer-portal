@@ -386,7 +386,7 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     { id: 'svc-ts', service_key: 'tree_shrub_6week', name: 'Tree & Shrub Care', category: 'tree_shrub' },
   ];
 
-  function mockVisit(row) {
+  function mockVisit(row, customerExtra = {}) {
     spawned = [];
     parentUpdates = [];
     const make = (table) => {
@@ -400,7 +400,7 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
       }
       const c = chain(table === 'scheduled_services'
         ? { ...row }
-        : (table === 'customers' ? { id: 'cust-1', waveguard_tier: 'Bronze', monthly_rate: 46.33 } : undefined));
+        : (table === 'customers' ? { id: 'cust-1', waveguard_tier: 'Bronze', monthly_rate: 46.33, ...customerExtra } : undefined));
       if (table === 'scheduled_services') {
         c.insert = jest.fn((data) => {
           spawned.push(data);
@@ -525,5 +525,58 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     const { status } = await put({ ...makeRecurring, spawnRecurringChildren: false });
     expect(status).toBe(200);
     expect(parentWrites().every((u) => u.recurring_pattern === 'custom')).toBe(true);
+  });
+
+  // Lawn neighborhood day (lawn-area-days.js): a make-recurring spawn of a rounds visit with no stored
+  // anchor is placed from its area's anchor. The save's drift check aborts when the pre-lock plan
+  // (planUpdateDetailsRecurrenceDates) and the write disagree, so a 200 here means plan == write.
+  describe('gate on: a lawn neighborhood day', () => {
+    const roundsVisit = { ...lawnVisit, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2099-07-01', day: '2099-07-01' };
+    const { lawnRoundDateFrom } = require('../services/lawn-rounds');
+    const PARRISH = '2027-01-12';
+    const stamps = () => parentUpdates.filter((u) => u.recurring_round_anchor_date !== undefined);
+
+    test('an area customer: the parent stores the area anchor and the children follow it', async () => {
+      gateOn();
+      mockVisit(roundsVisit, { zip: '34219', city: 'Parrish' });
+      const { status } = await put({ ...makeRecurring, recurringCount: 4 });
+      expect(status).toBe(200);
+      expect(stamps()).toEqual([{ recurring_round_anchor_date: PARRISH }]);
+      // The Parrish Tuesday in the next round (Jul 28) is 27 days out: the first follow-up is visit + 28 days.
+      expect(lawnRoundDateFrom(PARRISH, '2099-07-01', 1)).toBe('2099-07-28');
+      const expected = ['2099-07-29', ...[2, 3].map((i) => lawnRoundDateFrom(PARRISH, '2099-07-01', i))];
+      expect(spawned.map((d) => d.scheduled_date)).toEqual(expected);
+      expect(spawned.every((d) => d.recurring_pattern === 'lawn_rounds_9')).toBe(true);
+    });
+
+    test('the first follow-up keeps 28 days from the visit, then the area day', async () => {
+      gateOn();
+      // The Parrish Tuesday in the next round is under 28 days after Jul 7, so the floor applies.
+      mockVisit({ ...roundsVisit, scheduled_date: '2099-07-07', day: '2099-07-07' }, { zip: '34219', city: 'Parrish' });
+      const { status } = await put({ ...makeRecurring, recurringCount: 3 });
+      expect(status).toBe(200);
+      const areaDate = lawnRoundDateFrom(PARRISH, '2099-07-07', 1);
+      const first = spawned[0].scheduled_date;
+      expect(Math.round((new Date(`${first}T12:00:00Z`) - new Date('2099-07-07T12:00:00Z')) / 86400000)).toBeGreaterThanOrEqual(28);
+      expect(first >= areaDate).toBe(true);
+      expect(spawned[1].scheduled_date).toBe(lawnRoundDateFrom(PARRISH, '2099-07-07', 2));
+    });
+
+    test('a customer outside every area keeps the visit date as the anchor', async () => {
+      gateOn();
+      mockVisit(roundsVisit, { zip: '34251', city: 'Myakka City' });
+      const { status } = await put({ ...makeRecurring, recurringCount: 3 });
+      expect(status).toBe(200);
+      expect(stamps()).toEqual([{ recurring_round_anchor_date: '2099-07-01' }]);
+      expect(spawned.map((d) => d.scheduled_date)).toEqual([1, 2].map((i) => lawnRoundDateFrom('2099-07-01', '2099-07-01', i)));
+    });
+
+    test('a parent that already stores an anchor is re-placed from its own date, as before', async () => {
+      gateOn();
+      mockVisit({ ...roundsVisit, recurring_round_anchor_date: '2099-01-05' }, { zip: '34219', city: 'Parrish' });
+      const { status } = await put({ ...makeRecurring, recurringCount: 3 });
+      expect(status).toBe(200);
+      expect(stamps()).toEqual([{ recurring_round_anchor_date: '2099-07-01' }]);
+    });
   });
 });

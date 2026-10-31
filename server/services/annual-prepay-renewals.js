@@ -13,7 +13,8 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const AccountMembershipEmail = require('./account-membership-email');
 const CancellationResolution = require('./cancellation-resolution');
 const { portalUrl } = require('../utils/portal-url');
-const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOrdinal } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDate, roundOrdinal } = require('./lawn-rounds');
+const { newSeriesAreaAnchor, lawnRoundDateFromFloored } = require('./lawn-area-days');
 
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // Decided coverage: the renewal decision is recorded but the paid window still
@@ -638,6 +639,8 @@ function coverageSeriesAnchor(termStart, { firstVisitDate = null, notBefore = nu
 // the series' own extension makes), so the rows match the series; without it
 // they are lawnRoundDate(anchor, i) from the term's series anchor, the exact
 // dates the seeder writes for the same anchor.
+// options.areaFirstGapFloor (rounds only, with roundAnchor = the area anchor of
+// a NEW series, see areaRoundAnchorOptionsForTerm): visit 2 keeps 28 days from visit 1.
 function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, options = {}) {
   const normalizedStart = dateOnly(termStart);
   const count = normalizeCoverageVisitCount(visitCount);
@@ -651,7 +654,7 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
   for (let index = 0; index < count; index++) {
     let date;
     if (schedule.unit === 'rounds') {
-      date = roundAnchor ? lawnRoundDateFrom(roundAnchor, anchor, index) : lawnRoundDate(anchor, index);
+      date = roundAnchor ? lawnRoundDateFromFloored(roundAnchor, anchor, index, options.areaFirstGapFloor) : lawnRoundDate(anchor, index);
     } else if (schedule.unit === 'days') {
       date = addDaysYmd(anchor, index * schedule.value);
     } else {
@@ -1237,6 +1240,18 @@ async function findWindowSlideMarker(term, conn) {
   };
 }
 
+// Lawn rounds neighborhood day (lawn-area-days.js): a lawn_rounds_9 term that
+// covers NO series yet creates a new series parent, which is born on its area's
+// anchor. Returns { roundAnchor, areaFirstGapFloor } for coverageScheduleDates
+// (visit 1 stays on the paid anchor; later rounds follow the area), or {} when
+// the term is tied to a series or no area applies. Shared by the payment-time
+// seeder and the invoice/PDF schedule, so both list the same dates.
+async function areaRoundAnchorOptionsForTerm({ term, coverageCadence, existingRows, conn = db } = {}) {
+  if (coverageCadence !== LAWN_ROUNDS_9 || (Array.isArray(existingRows) && existingRows.length) || !term?.customer_id) return {};
+  const roundAnchor = await newSeriesAreaAnchor(conn, { customer_id: term.customer_id }, LAWN_ROUNDS_9);
+  return roundAnchor ? { roundAnchor, areaFirstGapFloor: true } : {};
+}
+
 // The round anchor a lawn_rounds_9 term's dates are placed from: the anchor
 // the covered series itself extends from (seriesRoundAnchor, the one rule shared
 // with admin-schedule's top-up/extension: the parent's stored
@@ -1412,6 +1427,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // itself would extend to.
   const storedRoundAnchor = await seriesRoundAnchorForTerm({ term, coverageCadence, existingRows, conn, cols });
   if (storedRoundAnchor) anchorOptions.roundAnchor = storedRoundAnchor;
+  else Object.assign(anchorOptions, await areaRoundAnchorOptionsForTerm({ term, coverageCadence, existingRows, conn }));
   const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, effectiveTermEnd, anchorOptions);
   // The anchor the rounds target dates were placed from (paidAnchor and
   // coverageScheduleDates read the same anchorOptions). A NEW rounds series parent
@@ -11680,6 +11696,7 @@ module.exports = {
     coverageCadenceDays,
     coverageCadenceSchedule,
     seriesRoundAnchorForTerm,
+    areaRoundAnchorOptionsForTerm,
     inferCoverageCadence,
     normalizeCoverageServiceType,
     normalizeCoverageVisitCount,

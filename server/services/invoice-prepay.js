@@ -154,7 +154,7 @@ function buildPrepayCoverageSummary(prepay) {
 // visit's share of the prepay total. Computed from the term — not a
 // scheduled_services join — so it's correct even before the invoice is paid and
 // coverage rows are seeded. Empty array when coverage isn't configured.
-function buildCoverageVisits(term, prepayAmount, { today = null, roundAnchor } = {}) {
+function buildCoverageVisits(term, prepayAmount, { today = null, roundAnchor, areaFirstGapFloor } = {}) {
   // A term that has not been paid yet has not seeded any visits, so its
   // displayed schedule is still a forecast; an active/decided term's visits
   // are already on the calendar.
@@ -184,6 +184,8 @@ function buildCoverageVisits(term, prepayAmount, { today = null, roundAnchor } =
       // lawn_rounds_9 only: the covered series' stored round anchor, the one
       // the payment-time seeder places the dates from.
       roundAnchor,
+      // A NEW rounds series on its area anchor: visit 2 keeps 28 days from visit 1 (annual-prepay-renewals).
+      areaFirstGapFloor,
     };
     let scheduleEnd = term.term_end;
     if (paymentPending) {
@@ -289,15 +291,15 @@ async function resolveInvoiceTermId(invoice, conn = db, { strict = false } = {})
 // A rounds (lawn_rounds_9) term lists its covered visits from the covered
 // series' stored round anchor, resolved the way the payment-time seeder does
 // (annual-prepay-renewals seriesRoundAnchorForTerm over the term's own window).
-// Display only: any failure returns null (the plain round walk) and never
+// Returns the buildCoverageVisits options { roundAnchor, areaFirstGapFloor }. Display only: any failure returns {} (the plain round walk) and never
 // breaks the invoice load. Other cadences make no extra read.
-async function roundAnchorForDisplay(term, invoice, conn) {
+async function roundAnchorOptionsForDisplay(term, invoice, conn) {
   try {
     const renewals = require('./annual-prepay-renewals');
-    const { normalizeCoverageCadence, seriesRoundAnchorForTerm } = renewals._private;
-    if (normalizeCoverageCadence(term.coverage_cadence) !== 'lawn_rounds_9') return null;
+    const { normalizeCoverageCadence, seriesRoundAnchorForTerm, areaRoundAnchorOptionsForTerm } = renewals._private;
+    if (normalizeCoverageCadence(term.coverage_cadence) !== 'lawn_rounds_9') return {};
     const customerId = term.customer_id || invoice?.customer_id;
-    if (!customerId) return null;
+    if (!customerId) return {};
     const scoped = {
       ...term,
       customer_id: customerId,
@@ -307,12 +309,17 @@ async function roundAnchorForDisplay(term, invoice, conn) {
     // Inside a savepoint (optionalRead), so a failed read cannot poison a caller's transaction.
     return await optionalRead(conn, async (database) => {
       const existingRows = await renewals.coverageRowsForTerm(scoped, database);
-      return seriesRoundAnchorForTerm({
+      const roundAnchor = await seriesRoundAnchorForTerm({
         term: scoped, coverageCadence: 'lawn_rounds_9', existingRows, conn: database,
       });
-    }, null);
+      if (roundAnchor) return { roundAnchor };
+      // No series yet: the new series parent is born on its area's anchor.
+      return areaRoundAnchorOptionsForTerm({
+        term: scoped, coverageCadence: 'lawn_rounds_9', existingRows, conn: database,
+      });
+    }, {});
   } catch {
-    return null;
+    return {};
   }
 }
 
@@ -360,7 +367,7 @@ async function loadInvoiceAnnualPrepay(invoice, conn = db) {
     coverageVisitCount: term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null,
     coverageCadence: term.coverage_cadence || null,
     coverageVisits: coverageActive
-      ? buildCoverageVisits(term, prepayAmount, { roundAnchor: await roundAnchorForDisplay(term, invoice, conn) })
+      ? buildCoverageVisits(term, prepayAmount, await roundAnchorOptionsForDisplay(term, invoice, conn))
       : [],
     setupFeeWaived: annualPrepaySetupFeeWaived(invoice),
   };

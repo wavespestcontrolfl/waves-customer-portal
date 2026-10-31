@@ -607,7 +607,8 @@ const { lawn9xRoundsLive } = require('../config/feature-gates');
 const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
 // Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
 // The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
-const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
+const { LAWN_ROUNDS_9, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
+const { newSeriesAreaAnchor, lawnRoundDateFromFloored } = require('../services/lawn-area-days');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 
@@ -674,6 +675,17 @@ async function stampSeriesRoundAnchor(conn, parent, anchorDateStr) {
   await conn('scheduled_services').where({ id: parent.id }).update({ recurring_round_anchor_date: anchorDateStr });
 }
 
+// Lawn neighborhood day (lawn-area-days.js): where a make-recurring spawn places
+// its series. A rounds parent with no stored anchor is placed from its area's
+// anchor (and keeps its first follow-up 28 days out); every other parent from
+// its own date `baseDateStr`. The planner and the write both call this, so
+// their dates are identical. Returns the { roundAnchor, areaFirstGapFloor }
+// recurrence options; roundAnchor is also what the parent stores.
+async function spawnRoundPlacement(conn, parentRow, pattern, baseDateStr) {
+  const areaAnchor = await newSeriesAreaAnchor(conn, parentRow, pattern);
+  return { roundAnchor: areaAnchor || baseDateStr, areaFirstGapFloor: !!areaAnchor };
+}
+
 // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the pattern + interval a NEW series is
 // written with. The shared lawnRoundsSeriesPattern decides (residential lawn
 // 9x only); this adds the catalog row's key to the identity when the booking
@@ -727,7 +739,8 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   // top-up and reseed hop from the LATEST visit, so opts.roundAnchor (the
   // series anchor, set by recurrenceOrdinalOptions) keeps the anchor's offset
   // in every round; without it every hop drifts toward the round's end.
-  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safeBaseStr, i);
+  // opts.areaFirstGapFloor: a new series on an area anchor (lawn-area-days.js) keeps its first follow-up 28 days out.
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFromFloored(opts.roundAnchor, safeBaseStr, i, opts.areaFirstGapFloor);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -1368,8 +1381,10 @@ async function planUpdateDetailsRecurrenceDates(conn, {
       existingUpcomingChildren = parseInt(upRow?.c || 0, 10);
     } catch { existingUpcomingChildren = 0; }
     const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
+    // Lawn rounds neighborhood day: the same area anchor and first-follow-up floor the write uses.
+    const spawnOpts = { ...editOpts(after), ...await spawnRoundPlacement(conn, after, recurringPattern, baseDateStr) };
     for (const d of planSpawnChildDates({
-      baseDateStr, pattern: recurringPattern, rOpts: editOpts(after), skip, dir, seen, spawnCount, spawnTarget, blackoutDates,
+      baseDateStr, pattern: recurringPattern, rOpts: spawnOpts, skip, dir, seen, spawnCount, spawnTarget, blackoutDates,
     })) { dates.add(d); dates.insertDates.push(d); }
   }
 
@@ -16739,7 +16754,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           };
           // Lawn rounds: the rewrite re-places the series from the parent's
           // date, so later top-ups hop from it too (seriesRoundAnchor;
-          // planUpdateDetailsRecurrenceDates plans the same).
+          // planUpdateDetailsRecurrenceDates plans the same). No area anchor
+          // here: an Edit cadence rewrite is the office changing the lawn day.
           await stampSeriesRoundAnchor(trx, parent, baseDateStr);
           // B6: DATES honor the live weekday preference (ORed over both the
           // parent flag and the form's routinely-submitted false — the edit
@@ -17112,14 +17128,17 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           }
           const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
           const spawnBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
+          // Lawn rounds neighborhood day: a parent with no stored anchor on a lawn_rounds_9 series
+          // is placed from its area's anchor (planUpdateDetailsRecurrenceDates plans the same).
+          const spawnRound = await spawnRoundPlacement(trx, parent, recurringPattern, baseDateStr);
           const rOpts = {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
-            roundAnchor: baseDateStr,
+            ...spawnRound,
           };
-          // Lawn rounds: the series is placed from this row's date.
-          await stampSeriesRoundAnchor(trx, parent, baseDateStr);
+          // Lawn rounds: the series is placed from the area anchor, else from this row's date.
+          await stampSeriesRoundAnchor(trx, parent, spawnRound.roundAnchor);
           // B6: DATES honor the live preference; the STAMPED flag stays the
           // operator's raw value (see the rewrite branch above).
           const spawnPrefNoWeekends = editPrefNoWeekends;
