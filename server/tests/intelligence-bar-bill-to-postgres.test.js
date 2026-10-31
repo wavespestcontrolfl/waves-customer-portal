@@ -23,7 +23,7 @@ jest.setTimeout(30000);
 const ADMIN = { isAdmin: true, technicianId: null };
 
 (usable ? describe : describe.skip)('IB set_customer_bill_to (real PG)', () => {
-  const created = { payers: [], customers: [], apEmails: [] };
+  const created = { payers: [], customers: [], apEmails: [], payerNames: [] };
   beforeAll(() => {
     process.env.GATE_IB_SET_BILL_TO = 'true';
     process.env.GATE_IB_PLATFORM = 'true';
@@ -40,6 +40,7 @@ const ADMIN = { isAdmin: true, technicianId: null };
     }
     if (created.payers.length) await db('payers').whereIn('id', created.payers).del();
     if (created.apEmails.length) await db('payers').whereIn('ap_email', created.apEmails).del();
+    if (created.payerNames.length) await db('payers').whereIn('display_name', created.payerNames).del();
     await db.destroy();
   });
 
@@ -253,5 +254,21 @@ const ADMIN = { isAdmin: true, technicianId: null };
     // An inactive payer's name or company is not a match.
     expect(await executeBillToTool('set_customer_bill_to', { customer_id: customerId, new_payer_name: `Fixture Other ${suffix}`, new_payer_company: `Fixture Holdings ${suffix}` }, ADMIN))
       .toMatchObject({ preview: true, payer_new: true });
+  });
+  test('two cards for the same new payer confirmed at once: the locks let one add it, the other refuses', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const name = `Fixture Concurrent Payer ${suffix}`;
+    created.payerNames.push(name);
+    const customers = [await customer(), await customer()];
+    // No invoice email, so only the name locks stand between the two inserts.
+    const cards = await Promise.all(customers.map((id) => executeBillToTool('set_customer_bill_to', { customer_id: id, new_payer_name: name }, ADMIN)));
+    cards.forEach((c) => expect(c).toMatchObject({ preview: true, payer_new: true }));
+    const results = await Promise.all(customers.map((id, i) => executeBillToTool('set_customer_bill_to', {
+      customer_id: id, new_payer_name: name, confirmed: true, _verified_bill_to_version: cards[i]._version,
+    }, ADMIN)));
+    expect(results.filter((r) => r.success)).toHaveLength(1);
+    // The loser refuses either under the locks or in its own re-check, if the winner committed first (payer_exists).
+    expect(results.filter((r) => r.preview_changed === true && !r.payer_created)).toHaveLength(1);
+    expect(await db('payers').where({ display_name: name })).toHaveLength(1);
   });
 });

@@ -107,24 +107,32 @@ async function resolveNewPayer(input) {
   });
   if (error) return refusal(error === 'Invalid AP email' ? `"${String(input.new_payer_email).trim()}" is not a valid invoice email.` : error, 'invalid_payer');
   const fields = { display_name: dbUpdates.display_name, company_name: dbUpdates.company_name, ap_email: dbUpdates.ap_email, ap_phone: dbUpdates.ap_phone };
-  if (fields.ap_email) {
-    const held = await db('payers').whereRaw('LOWER(ap_email) = ?', [fields.ap_email]).orderBy('id', 'asc');
-    const active = held.find((p) => p.active !== false);
-    if (active) return { payer: active, matchedEmail: fields.ap_email };
-    if (held.length) return refusal(`A deactivated payer already uses ${fields.ap_email}, so nothing was offered. Reactivate or edit it in Finance → Payers.`, 'payer_inactive');
-  }
-  // Exact (trimmed, case-blind) name or company matches, read directly so no search limit can hide one.
-  const names = [...new Set([fields.display_name, fields.company_name].filter(Boolean).map((n) => n.toLowerCase()))];
-  const marks = names.map(() => '?').join(', ');
-  const taken = await db('payers').where('active', true)
-    .where((w) => w.whereRaw(`LOWER(TRIM(display_name)) IN (${marks})`, names).orWhereRaw(`LOWER(TRIM(COALESCE(company_name, ''))) IN (${marks})`, names))
-    .orderBy('id', 'asc').limit(6);
-  if (taken.length) {
-    return refusal(`An active payer named ${payerLabel(taken[0])} already exists. Ask whether to use it (or which one, if candidates lists more), then pass its payer_id.`, 'payer_exists', {
-      candidates: taken.slice(0, 5).map((p) => ({ payer_id: String(p.id), name: payerLabel(p) })),
+  const { emailHolders, sameName } = await existingPayers(fields);
+  const active = emailHolders.find((p) => p.active !== false);
+  if (active) return { payer: active, matchedEmail: fields.ap_email };
+  if (emailHolders.length) return refusal(`A deactivated payer already uses ${fields.ap_email}, so nothing was offered. Reactivate or edit it in Finance → Payers.`, 'payer_inactive');
+  if (sameName.length) {
+    return refusal(`An active payer named ${payerLabel(sameName[0])} already exists. Ask whether to use it (or which one, if candidates lists more), then pass its payer_id.`, 'payer_exists', {
+      candidates: sameName.slice(0, 5).map((p) => ({ payer_id: String(p.id), name: payerLabel(p) })),
     });
   }
   return { payer: { ...fields, active: true, payment_terms: NEW_PAYER_TERMS, tax_exempt: false }, isNew: true };
+}
+
+const payerNameKeys = (fields) => [...new Set([fields.display_name, fields.company_name].filter(Boolean).map((n) => n.toLowerCase()))];
+
+// The payers a new one would duplicate: every row holding its AP email (the form's dedupe), and every ACTIVE payer
+// whose trimmed, case-blind name or company equals its name or company (read directly, so no search limit hides one).
+async function existingPayers(fields, database = db) {
+  const emailHolders = fields.ap_email
+    ? await database('payers').whereRaw('LOWER(ap_email) = ?', [fields.ap_email]).orderBy('id', 'asc')
+    : [];
+  const names = payerNameKeys(fields);
+  const marks = names.map(() => '?').join(', ');
+  const sameName = await database('payers').where('active', true)
+    .where((w) => w.whereRaw(`LOWER(TRIM(display_name)) IN (${marks})`, names).orWhereRaw(`LOWER(TRIM(COALESCE(company_name, ''))) IN (${marks})`, names))
+    .orderBy('id', 'asc').limit(6);
+  return { emailHolders, sameName };
 }
 
 async function resolvePayer(input, ctx = {}) {
@@ -334,19 +342,23 @@ async function handlerReplyResult({ status, json }, plan, base) {
     note: `${plan.customer_name || 'The customer'} now bills to ${plan.payer_name}. No existing invoice moved. Nothing was sent to anyone.` };
 }
 
-// Adds the payer a confirmed card showed, as the page's "New payer" form does: with an AP email through the atomic
-// find-or-create (advisory-locked on the email); without one, a plain create. A payer that turned up with that email
-// since the re-check refuses (the card promised a new one), and nothing is written.
+// Adds the payer a confirmed card showed, as the page's "New payer" form does, in one transaction: transaction
+// advisory locks on the AP email (the same key payer.js findOrCreatePayerByEmail takes, so the page's quick-add and
+// the call pipeline wait for it) and on each name, taken in sorted order; then the duplicate checks again, then the
+// insert. A payer that took the email or the name since the card refuses, and nothing is written.
 async function addCardPayer(fields) {
-  const Payers = require('../payer');
-  const body = { ...fields, payment_terms: NEW_PAYER_TERMS };
-  const { payer, created, inactive, error } = fields.ap_email ? await Payers.findOrCreatePayerByEmail(body) : await Payers.createPayer(body);
-  if (payer && (created || !fields.ap_email)) return { payer };
-  if (payer || inactive) {
-    return { refusal: { error: `A payer with ${fields.ap_email} was added or changed after the card was shown, so nothing was changed. Ask again for a fresh confirmation card.`, code: 'preview_changed', preview_changed: true } };
-  }
-  logger.error(`[intelligence-bar:bill-to] payer create refused (${error ? 'validation' : 'no row'})`);
-  return { refusal: { error: `The new payer was not added, so nothing was changed${error ? `: ${error}` : ''}.`, code: 'payer_not_added' } };
+  const { dbUpdates, error } = require('../payer').buildPayerWrite({ ...fields, payment_terms: NEW_PAYER_TERMS });
+  if (error) return { refusal: { error: `The new payer was not added, so nothing was changed: ${error}`, code: 'payer_not_added' } };
+  return db.transaction(async (trx) => {
+    const keys = [...(fields.ap_email ? [fields.ap_email] : []), ...payerNameKeys(fields).map((n) => `ib-bill-to-payer-name:${n}`)].sort();
+    for (const key of keys) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+    const { emailHolders, sameName } = await existingPayers(fields, trx);
+    if (emailHolders.length || sameName.length) {
+      return { refusal: { error: 'A payer with this invoice email or name was added after the card was shown, so nothing was changed. Ask again for a fresh confirmation card.', code: 'preview_changed', preview_changed: true } };
+    }
+    const [payer] = await trx('payers').insert(dbUpdates).returning('*');
+    return { payer };
+  });
 }
 
 // The card's pin restated for the payer it just added; null when the stored row is not the payer the card showed.

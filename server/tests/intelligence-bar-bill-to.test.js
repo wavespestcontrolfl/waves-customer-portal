@@ -12,14 +12,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../routes/admin-customers', () => ({ setCustomerBillToFromBar: jest.fn() }));
 const mockGetPayer = jest.fn();
 const mockListPayers = jest.fn();
-const mockCreatePayer = jest.fn();
-const mockFindOrCreatePayerByEmail = jest.fn();
+// The new-payer reads and the insert (bill-to-tools.js existingPayers / addCardPayer).
+const mockEmailHolders = jest.fn();
+const mockSameName = jest.fn();
+const mockInsertPayer = jest.fn();
 jest.mock('../services/payer', () => ({
   listPayers: (...a) => mockListPayers(...a),
   scheduledServicesHasSelfPay: async () => true,
   buildPayerWrite: (...a) => jest.requireActual('../services/payer').buildPayerWrite(...a),
-  createPayer: (...a) => mockCreatePayer(...a),
-  findOrCreatePayerByEmail: (...a) => mockFindOrCreatePayerByEmail(...a),
 }));
 
 const db = require('../models/db');
@@ -34,6 +34,7 @@ const ADMIN = { isAdmin: true, technicianId: 'staff-1' };
 const PAYER = { id: 7, display_name: 'Synthetic Property Co', company_name: null, active: true, payment_terms: 'net_30' };
 
 let state;
+const mockRaw = jest.fn(() => 'RAW');
 function freshState() {
   return {
     customer: { id: CUST, first_name: 'Robin', last_name: 'Sample', company_name: null, payer_id: null },
@@ -48,14 +49,12 @@ function freshState() {
 // A small knex stand-in keyed on the table each read uses. Any write throws.
 function makeDb() {
   function builder(table) {
-    const q = { single: false, whereId: null, email: null, names: null };
+    const q = { single: false, whereId: null, email: null, names: null, inserted: null };
     const rows = () => {
       if (table === 'customers') return q.single ? state.customer : [state.customer];
-      if (table === 'payers' && q.email) return state.payersByEmail[q.email] || [];
-      if (table === 'payers' && q.names) {
-        const norm = (v) => String(v || '').trim().toLowerCase();
-        return state.activePayers.filter((p) => q.names.includes(norm(p.display_name)) || q.names.includes(norm(p.company_name)));
-      }
+      if (table === 'payers' && q.inserted) return [mockInsertPayer(q.inserted)];
+      if (table === 'payers' && q.email) return mockEmailHolders(q.email);
+      if (table === 'payers' && q.names) return mockSameName(q.names);
       if (table === 'payers') return mockGetPayer(q.whereId);
       if (table === 'invoices') return state.open;
       if (table === 'scheduled_services') return Array.from({ length: state.pinnedVisits }, (_v, i) => ({ id: `visit-${i}` }));
@@ -74,6 +73,7 @@ function makeDb() {
         }
         // where(callback): run it against this builder so the callback's whereRaw calls land here.
         if (prop === 'where') return (k) => { if (typeof k === 'function') k(b); else if (k && typeof k === 'object' && 'id' in k) q.whereId = k.id; return b; };
+        if (prop === 'insert' && table === 'payers') return (row) => { q.inserted = row; return b; };
         if (['insert', 'update', 'del', 'delete', 'upsert'].includes(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
         return () => b;
       },
@@ -81,7 +81,7 @@ function makeDb() {
     return b;
   }
   const fn = (table) => builder(table);
-  fn.raw = () => 'RAW';
+  fn.raw = mockRaw;
   return fn;
 }
 
@@ -99,11 +99,18 @@ beforeEach(() => {
   jest.clearAllMocks();
   state = freshState();
   db.mockImplementation(makeDb());
+  // models/db is the mocked function itself: its transaction runs the work on the same stand-in.
+  db.raw = mockRaw;
+  db.transaction = async (work) => work(db);
   envGate(true);
   mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : null));
   mockListPayers.mockResolvedValue([PAYER]);
-  mockCreatePayer.mockImplementation(async (body) => ({ payer: addedRow(body) }));
-  mockFindOrCreatePayerByEmail.mockImplementation(async (body) => ({ payer: addedRow(body), created: true }));
+  mockEmailHolders.mockImplementation((email) => state.payersByEmail[email] || []);
+  mockSameName.mockImplementation((names) => {
+    const norm = (v) => String(v || '').trim().toLowerCase();
+    return state.activePayers.filter((p) => names.includes(norm(p.display_name)) || names.includes(norm(p.company_name)));
+  });
+  mockInsertPayer.mockImplementation((row) => addedRow(row));
   Customers.setCustomerBillToFromBar.mockImplementation(async ({ payerId }) => {
     state.customer = { ...state.customer, payer_id: Number(payerId) };
     return { status: 200, json: { success: true } };
@@ -323,8 +330,7 @@ describe('a new payer (IB gap #19)', () => {
     expect(cardLines('set_customer_bill_to', card)[0].text).toBe('Bill-To for Robin Sample: The customer (self-pay) → Jordan Sample (Sample Holdings) (new payer)');
     const { confirmationDisplayParams } = jest.requireActual('../routes/admin-intelligence-bar');
     expect(confirmationDisplayParams('set_customer_bill_to', { customer_id: CUST }, card)).toMatchObject({ new_bill_to: 'Jordan Sample (Sample Holdings) (new payer)' });
-    expect(mockCreatePayer).not.toHaveBeenCalled();
-    expect(mockFindOrCreatePayerByEmail).not.toHaveBeenCalled();
+    expect(mockInsertPayer).not.toHaveBeenCalled();
     expect(Customers.setCustomerBillToFromBar).not.toHaveBeenCalled();
   });
 
@@ -339,7 +345,7 @@ describe('a new payer (IB gap #19)', () => {
     expect(card).toMatchObject({ preview: true, payer_id: '7', payer_new: false, payer_name: 'Synthetic Property Co' });
     expect(card.effects.map((e) => e.text).join('\n')).toMatch(/No new payer is added: ap@sample-holdings\.test already belongs to the payer Synthetic Property Co/);
     expect(await confirm(card, NEW)).toMatchObject({ success: true, payer_id: '7' });
-    expect(mockFindOrCreatePayerByEmail).not.toHaveBeenCalled();
+    expect(mockInsertPayer).not.toHaveBeenCalled();
     expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledWith(expect.objectContaining({ payerId: '7' }));
     state.payersByEmail['ap@sample-holdings.test'] = [{ ...PAYER, id: 8, active: false }];
     expect(await preview(NEW)).toMatchObject({ code: 'payer_inactive' });
@@ -370,16 +376,18 @@ describe('a new payer (IB gap #19)', () => {
     expect(await preview(NEW)).toMatchObject({ code: 'needs_customer_page', reason: 'has_payer' });
   });
 
-  test('confirm adds the payer through the email dedupe, then runs the page handler on it once', async () => {
+  test('confirm adds the payer under the email and name locks, then runs the page handler on it once', async () => {
     const card = await preview(NEW);
     const done = await confirm(card, NEW);
     expect(done).toMatchObject({ success: true, payer_created: true, payer_id: String(ADDED_ID), sent_to_customer: false });
     expect(done.note).toMatch(/Added the payer Jordan Sample \(Sample Holdings\), and Robin Sample now bills to it/);
-    expect(mockFindOrCreatePayerByEmail).toHaveBeenCalledTimes(1);
-    expect(mockFindOrCreatePayerByEmail).toHaveBeenCalledWith({
+    expect(mockInsertPayer).toHaveBeenCalledTimes(1);
+    expect(mockInsertPayer).toHaveBeenCalledWith({
       display_name: 'Jordan Sample', company_name: 'Sample Holdings', ap_email: 'ap@sample-holdings.test', ap_phone: '941-555-0101', payment_terms: 'due_on_receipt',
     });
-    expect(mockCreatePayer).not.toHaveBeenCalled();
+    // The email lock is payer.js findOrCreatePayerByEmail's own key; every key is taken in sorted order.
+    const locked = mockRaw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql)).map(([, binds]) => binds[0]);
+    expect(locked).toEqual(['ap@sample-holdings.test', 'ib-bill-to-payer-name:jordan sample', 'ib-bill-to-payer-name:sample holdings']);
     expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledTimes(1);
     expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledWith(expect.objectContaining({ customerId: CUST, payerId: String(ADDED_ID), expectedPayerId: null }));
     // The in-transaction re-check judges the added payer against the card.
@@ -395,13 +403,14 @@ describe('a new payer (IB gap #19)', () => {
     await expect(verifyPlan(db)).rejects.toMatchObject({ code: 'preview_changed' });
   });
 
-  test('no invoice email: confirm uses the plain create', async () => {
+  test('no invoice email: confirm locks the names only and adds the payer with no email', async () => {
     const input = { ...NEW, new_payer_email: undefined };
     const card = await preview(input);
     mockGetPayer.mockImplementation(async (id) => (String(id) === String(ADDED_ID) ? { ...ADDED, ap_email: null } : null));
     expect(await confirm(card, input)).toMatchObject({ success: true, payer_created: true });
-    expect(mockCreatePayer).toHaveBeenCalledWith(expect.objectContaining({ display_name: 'Jordan Sample', ap_email: null, payment_terms: 'due_on_receipt' }));
-    expect(mockFindOrCreatePayerByEmail).not.toHaveBeenCalled();
+    expect(mockInsertPayer).toHaveBeenCalledWith(expect.objectContaining({ display_name: 'Jordan Sample', ap_email: null, payment_terms: 'due_on_receipt' }));
+    expect(mockRaw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql)).map(([, binds]) => binds[0]))
+      .toEqual(['ib-bill-to-payer-name:jordan sample', 'ib-bill-to-payer-name:sample holdings']);
   });
 
   test('a payer that took the email after the card refuses with nothing added or set', async () => {
@@ -410,13 +419,17 @@ describe('a new payer (IB gap #19)', () => {
     state.payersByEmail['ap@sample-holdings.test'] = [PAYER];
     expect(await confirm(card, NEW)).toMatchObject({ code: 'preview_changed' });
     state.payersByEmail = {};
-    // Raced in between the re-check and the add: the find-or-create returns it instead of adding.
-    mockFindOrCreatePayerByEmail.mockResolvedValueOnce({ payer: PAYER, created: false });
+    // Raced in between the re-check and the add: the check under the locks sees it (the re-check read nothing).
+    mockEmailHolders.mockReturnValueOnce([]).mockReturnValueOnce([PAYER]);
     expect(await confirm(card, NEW)).toMatchObject({ code: 'preview_changed', preview_changed: true });
-    mockFindOrCreatePayerByEmail.mockResolvedValueOnce({ payer: null, inactive: true });
+    mockEmailHolders.mockReturnValueOnce([]).mockReturnValueOnce([{ ...PAYER, active: false }]);
     expect(await confirm(card, NEW)).toMatchObject({ code: 'preview_changed' });
-    mockFindOrCreatePayerByEmail.mockResolvedValueOnce({ error: 'Payer name is required' });
-    expect(await confirm(card, NEW)).toMatchObject({ code: 'payer_not_added' });
+    // Another card added the same name first (no email: only the name locks serialize them).
+    const input = { ...NEW, new_payer_email: undefined };
+    const card2 = await preview(input);
+    mockSameName.mockReturnValueOnce([]).mockReturnValueOnce([{ id: 43, display_name: 'Jordan Sample', active: true }]);
+    expect(await confirm(card2, input)).toMatchObject({ code: 'preview_changed' });
+    expect(mockInsertPayer).not.toHaveBeenCalled();
     expect(Customers.setCustomerBillToFromBar).not.toHaveBeenCalled();
   });
 
@@ -427,9 +440,9 @@ describe('a new payer (IB gap #19)', () => {
     expect(failed).toMatchObject({ failed: true, code: 'preview_changed', payer_created: true, payer_id: String(ADDED_ID) });
     expect(failed.error).toMatch(/The payer Jordan Sample \(Sample Holdings\) was added \(payer_id 42\) and stays in Finance → Payers/);
     // A stored row that is not the payer the card showed: the Bill-To is not set.
-    mockFindOrCreatePayerByEmail.mockResolvedValueOnce({ payer: { ...ADDED, tax_exempt: true }, created: true });
+    mockInsertPayer.mockReturnValueOnce({ ...ADDED, tax_exempt: true });
     expect(await confirm(card, NEW)).toMatchObject({ failed: true, code: 'preview_changed', payer_created: true });
-    mockFindOrCreatePayerByEmail.mockResolvedValueOnce({ payer: { ...ADDED, ap_phone: '941-555-0199' }, created: true });
+    mockInsertPayer.mockReturnValueOnce({ ...ADDED, ap_phone: '941-555-0199' });
     expect(await confirm(card, NEW)).toMatchObject({ failed: true, code: 'preview_changed', payer_created: true });
     expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledTimes(1);
   });
