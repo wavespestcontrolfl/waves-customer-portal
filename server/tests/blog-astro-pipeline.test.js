@@ -1737,8 +1737,9 @@ describe('Content scheduler scheduling timezone handling', () => {
   });
 
   test('stores naive blog schedule times as Eastern Time instants', async () => {
-    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1' }) });
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1', content: '# body' }) });
     const write = chain({
+      whereNull: jest.fn().mockReturnThis(),
       update: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'post-1', title: 'Scheduled blog' }]),
     });
@@ -1751,6 +1752,36 @@ describe('Content scheduler scheduling timezone handling', () => {
       scheduled_publish_at: expect.any(Date),
     }));
     expect(write.update.mock.calls[0][0].scheduled_publish_at.toISOString()).toBe('2026-07-01T13:00:00.000Z');
+  });
+
+  test.each([
+    ['an open preview PR', { astro_status: 'pr_open', astro_pr_number: 12, content: '# body' }, /Astro state 'pr_open' \(PR #12\)/],
+    ['a failed publish', { astro_status: 'publish_failed', content: '# body' }, /Astro state 'publish_failed'/],
+    ['a run already publishing it', { publish_status: 'publishing', content: '# body' }, /already started/],
+    ['no content', { content: null }, /no content/],
+  ])('refuses a row the scheduled run would skip: %s (audit BLOG-03)', async (_label, row, message) => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1', ...row }) });
+    const write = chain({ whereNull: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis() });
+    const queries = [read, write];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(ContentScheduler.scheduleBlogPost('post-1', '2026-07-01T09:00:00', true))
+      .rejects.toMatchObject({ statusCode: 409, isOperational: true, message: expect.stringMatching(message) });
+    expect(write.update).not.toHaveBeenCalled();
+  });
+
+  test('a row that changed between the read and the guarded write is refused, not reported scheduled', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1', content: '# body' }) });
+    const write = chain({
+      whereNull: jest.fn().mockReturnThis(),
+      update: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([]),
+    });
+    const queries = [read, write];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(ContentScheduler.scheduleBlogPost('post-1', '2026-07-01T09:00:00', true))
+      .rejects.toMatchObject({ statusCode: 409 });
   });
 
   test('stores naive social schedule times as Eastern Time instants', async () => {

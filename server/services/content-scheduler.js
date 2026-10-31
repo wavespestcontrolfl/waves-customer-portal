@@ -13,6 +13,29 @@ const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
+// Astro states the scheduled-publish consumer (processScheduledPosts) skips:
+// a row in one of them, or carrying PR/branch markers, would be accepted and
+// then never published (audit BLOG-03).
+const SCHEDULE_BLOCKING_ASTRO = ['pr_open', 'build_failed', 'publish_failed', 'merged', 'live', 'unpublish_pending'];
+
+function scheduleConflict(message) {
+  const err = new Error(message);
+  err.isOperational = true;
+  err.statusCode = 409;
+  return err;
+}
+
+// Why the consumer could not publish this row, or null when it can.
+function scheduleRefusal(post) {
+  if (post.publish_status === 'publishing') return 'Publishing has already started for this post.';
+  if (post.astro_pr_number || post.astro_branch_name || SCHEDULE_BLOCKING_ASTRO.includes(post.astro_status)) {
+    const pr = post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : '';
+    return `This post already has Astro state '${post.astro_status || 'pending'}'${pr}. Open it in the post editor instead.`;
+  }
+  if (!post.content) return 'This draft has no content to publish.';
+  return null;
+}
+
 function parseScheduledTime(value, label) {
   const parsed = parseETDateTime(value);
   if (Number.isNaN(parsed.getTime())) throw new Error(`${label} is invalid`);
@@ -406,15 +429,26 @@ const ContentScheduler = {
   },
 
   /**
-   * Schedule a blog post for auto-publish at a specific time.
+   * Schedule a blog post to open its Astro preview PR at a specific time. The
+   * post goes live when an admin approves that PR (Approve & Go Live).
+   * Refuses rows the consumer would skip, so success always means the
+   * scheduled run will pick the row up.
    */
   async scheduleBlogPost(blogPostId, publishAt, autoShareSocial = true) {
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Blog post not found');
     const scheduledAt = parseScheduledTime(publishAt, 'publishAt');
+    const refusal = scheduleRefusal(post);
+    if (refusal) throw scheduleConflict(refusal);
 
+    // Same predicate on the write: a publish that starts between the read
+    // and here must not be re-armed under its running claim.
     const [updated] = await db('blog_posts')
       .where('id', blogPostId)
+      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+      .whereNull('astro_pr_number')
+      .whereNull('astro_branch_name')
+      .where((q) => q.whereNull('astro_status').orWhereNotIn('astro_status', SCHEDULE_BLOCKING_ASTRO))
       .update({
         scheduled_publish_at: scheduledAt,
         auto_share_social: autoShareSocial,
@@ -422,6 +456,7 @@ const ContentScheduler = {
         updated_at: new Date(),
       })
       .returning('*');
+    if (!updated) throw scheduleConflict('This post changed while scheduling. Reload and try again.');
 
     logger.info(`[content-scheduler] Scheduled blog "${updated.title}" for ${publishAt}`);
     return updated;
@@ -567,7 +602,9 @@ const ContentScheduler = {
         } else {
           const AstroPublisher = require('./content-astro/astro-publisher');
           await AstroPublisher.publishAstro(blog.id);
-          await db('blog_posts').where('id', blog.id).update({
+          // Only while this run still holds the claim: an unschedule or the
+          // stale sweep that moved the row on must not be overwritten (BLOG-04).
+          await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing').update({
             publish_status: 'pending_review',
             updated_at: new Date(),
           });

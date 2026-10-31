@@ -1036,7 +1036,7 @@ router.get('/calendar', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/content/schedule-blog/:id — schedule a blog post for auto-publish
+// POST /api/admin/content/schedule-blog/:id — schedule a blog post's preview PR (it goes live on approval)
 router.post('/schedule-blog/:id', async (req, res, next) => {
   try {
     const { publishAt, autoShareSocial } = req.body;
@@ -1064,12 +1064,22 @@ router.delete('/schedule/:id', async (req, res, next) => {
     // Try blog first
     const blog = await db('blog_posts').where('id', id).first();
     if (blog) {
-      await db('blog_posts').where('id', id).update({
-        scheduled_publish_at: null,
-        publish_status: null,
-        updated_at: new Date(),
-      });
-      return res.json({ success: true, type: 'blog', id });
+      // A run that already claimed the row keeps going (it opens the PR), so
+      // refuse instead of reporting a cancel that does not happen (BLOG-04).
+      // The guard sits in the WHERE so a claim taken after the read loses too.
+      const cleared = await db('blog_posts')
+        .where('id', id)
+        .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+        .update({
+          scheduled_publish_at: null,
+          publish_status: null,
+          updated_at: new Date(),
+        });
+      if (!cleared) {
+        return res.status(409).json({ error: 'Publishing already started for this post, so it can no longer be unscheduled.' });
+      }
+      // A preview PR the run already opened stays open for approval.
+      return res.json({ success: true, type: 'blog', id, pr_number: blog.astro_pr_number || null });
     }
 
     // Try social
