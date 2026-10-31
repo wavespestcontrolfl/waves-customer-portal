@@ -16,6 +16,8 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: (g) => !!mockGates[g],
   // GATE_REVIEW_ASK_AFTER_REPORT: the call-time reader, driven by the same flags object.
   reviewAskAfterReportLive: () => mockGates.reviewAskAfterReport === true,
+  // GATE_REVIEW_PROBABLE_REVIEWER_GUARD: the send guard's call-time reader (review-click-guard.js).
+  reviewProbableReviewerGuardLive: () => mockGates.reviewProbableReviewerGuard === true,
   gates: mockGates,
 }));
 // Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
