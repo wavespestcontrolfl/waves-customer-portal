@@ -463,11 +463,17 @@ async function handleEvent(ev) {
     return;
   }
   if (suppressionOnlyEmailMessage) {
-    await processWebhookEvent(ev, messageId, email, async (trx) => {
+    const processed = await processWebhookEvent(ev, messageId, email, async (trx) => {
       const snapshotGroup = await groupKeyForEmailMessage(suppressionOnlyEmailMessage, trx);
       const groupKey = staleEmailSuppressionGroupKey(ev, snapshotGroup);
       await recordEmailSuppressionForEvent(ev, suppressionOnlyEmailMessage, groupKey, eventOccurredAt(ev), trx);
     });
+    // The event is for a CC'd copy (the row's recipient is the main address): a hard bounce there is told to a person.
+    // Once per event (a redelivery is not processed again); fire-and-forget, like the recovery calls above.
+    if (processed && bounceRecovery.isHardBounceEvent(ev)) {
+      bounceRecovery.alertBouncedCcCopy(suppressionOnlyEmailMessage, email)
+        .catch((err) => logger.error(`[sendgrid-webhook] CC bounce alert failed for ${messageId}: ${err.message}`));
+    }
     return;
   }
   // Fully untracked send (direct sendgrid.sendOne callers) — no ledger row to

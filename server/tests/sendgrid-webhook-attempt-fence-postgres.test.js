@@ -31,6 +31,7 @@ jest.mock('../services/email-bounce-recovery', () => ({
   isNoMailServerEvent: jest.fn(() => false),
   attemptRecovery: jest.fn(),
   alertBouncedContactAddress: jest.fn(),
+  alertBouncedCcCopy: jest.fn(async () => ({ skipped: 'not_cc' })),
   commitRecoveryOnDelivery: jest.fn(),
   isRecoveryMessage: jest.fn(() => false),
 }));
@@ -70,6 +71,7 @@ postgres('SendGrid webhook attempt fence (PostgreSQL)', () => {
         'provider_handoff_phase', 'provider_handoff_attempt_token'].forEach((name) => t.string(name));
       t.integer('provider_retry_count').notNullable().defaultTo(0);
       t.boolean('has_attachments').notNullable().defaultTo(false);
+      t.jsonb('cc_email_snapshot');
       ['updated_at', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at', 'complained_at',
         'provider_retry_next_at', 'provider_retry_exhausted_at'].forEach((name) => t.timestamp(name));
     });
@@ -187,6 +189,27 @@ postgres('SendGrid webhook attempt fence (PostgreSQL)', () => {
     expect(await mockPg('email_message_events').where({ provider_event_id: 'claim-race-bounce' })).toHaveLength(1);
     expect(bounceRecovery.attemptRecovery).not.toHaveBeenCalled();
     expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+  });
+
+  test('a hard bounce on the CC address asks for the CC bell and leaves the main recipient\'s row alone', async () => {
+    await mockPg('email_messages').where({ id: messageId }).update({ cc_email_snapshot: JSON.stringify(['copy@example.com']) });
+    const event = (id, kind) => ({
+      event: kind, type: 'hard', email: 'copy@example.com', sg_event_id: id,
+      sg_message_id: 'provider-old.filter', email_message_id: messageId, send_attempt_token: 'attempt-old',
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+    await expect(handleEvent(event('cc-bounce', 'bounce'))).resolves.toBeUndefined();
+    // A redelivery of the same event is not processed again; a delivery event rings nothing.
+    await handleEvent(event('cc-bounce', 'bounce'));
+    await handleEvent(event('cc-delivered', 'delivered'));
+
+    expect(bounceRecovery.alertBouncedCcCopy).toHaveBeenCalledTimes(1);
+    expect(bounceRecovery.alertBouncedCcCopy).toHaveBeenCalledWith(expect.objectContaining({ id: messageId }), 'copy@example.com');
+    expect(await mockPg('email_suppressions').where({ email: 'copy@example.com' }).first())
+      .toMatchObject({ suppression_type: 'bounce', status: 'active' });
+    expect(await mockPg('email_messages').where({ id: messageId }).first())
+      .toMatchObject({ status: 'sent', bounced_at: null, recipient_email_snapshot: 'old@example.com' });
+    expect(bounceRecovery.attemptRecovery).not.toHaveBeenCalled();
   });
 
   test.each([
