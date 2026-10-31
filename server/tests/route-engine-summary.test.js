@@ -66,10 +66,10 @@ describe('summarizeRouteEngine', () => {
     expect(out.totals).toMatchObject({ movesMade: 3, heldVisits: 4, heldThenMoved: 2, estDriveMinutesSaved: 60 });
   });
 
-  test('estimated minutes: negative savings count as 0, missing numbers give null', () => {
+  test('estimated minutes: a net sum (a move that adds driving subtracts), missing numbers give null', () => {
     const base = { today, nights: 1, runs: [run('a', '2026-10-31', 'completed')] };
     const some = summarizeRouteEngine({ ...base, rows: [changed('a', 's1', -5, at('2026-10-31')), changed('a', 's2', 12, at('2026-10-31'))] });
-    expect(some.totals.estDriveMinutesSaved).toBe(12);
+    expect(some.totals.estDriveMinutesSaved).toBe(7);
     const none = summarizeRouteEngine({ ...base, rows: [changed('a', 's1', undefined, at('2026-10-31'))] });
     expect(none.totals.movesMade).toBe(1);
     expect(none.totals.estDriveMinutesSaved).toBeNull();

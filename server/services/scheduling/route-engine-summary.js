@@ -12,8 +12,9 @@
  *   scheduled_service_id, action, reason_code, route_metrics_snapshot,
  *   created_at).
  *
- * estDriveMinutesSaved is the model's own estimate (route_metrics_snapshot.
- * drive_saving_minutes on each applied move), not measured driving.
+ * estDriveMinutesSaved is the model's own NET estimate (route_metrics_snapshot.
+ * drive_saving_minutes on each applied move, summed with its sign: a move that
+ * adds driving, e.g. an overlap fix, subtracts), not measured driving.
  */
 const defaultDb = require('../../models/db');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -71,7 +72,7 @@ function capFrom(runs, nightOfRun) {
 
 function savingMinutes(row) {
   const n = Number(asObject(row.route_metrics_snapshot).drive_saving_minutes);
-  return Number.isFinite(n) ? Math.max(0, n) : null;
+  return Number.isFinite(n) ? n : null;
 }
 
 function tallyRows(rows, nightOfRun, dates) {
