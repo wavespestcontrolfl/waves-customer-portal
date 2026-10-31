@@ -1,17 +1,12 @@
-// Locks the pure idea-generation gate logic in blog-writer.js:
-//   - tag taxonomy normalization (kills "Fleas & Ticks" vs "Fleas" drift)
-//   - city-stripped concept key (backstops the cross-city sprawl the
-//     shingle/jaccard gate can't see)
-//   - slugify
+// Locks blog-writer.js tag taxonomy normalization (kills "Fleas & Ticks" vs
+// "Fleas" drift). The idea generator that also used the concept key, slugify
+// and seasonal helpers was retired with manual create (2026-10-30).
 // DB and Anthropic are not exercised here — only the deterministic helpers.
 
 jest.mock('../models/db', () => jest.fn());
 
 const { _internals } = require('../services/content/blog-writer');
-const {
-  normalizeTag, conceptKey, slugify, BLOG_TAGS, SEASONAL_PESTS,
-  conceptCapForCity, PRIORITY_CONCEPT_CITY_CAP, SERVICE_AREA_CONCEPT_CITY_CAP,
-} = _internals;
+const { normalizeTag, BLOG_TAGS } = _internals;
 
 describe('normalizeTag', () => {
   test('passes canonical tags through unchanged', () => {
@@ -53,67 +48,5 @@ describe('normalizeTag', () => {
 
   test('every alias resolves to a canonical tag', () => {
     for (const tag of BLOG_TAGS) expect(BLOG_TAGS).toContain(normalizeTag(tag));
-  });
-});
-
-describe('conceptKey (city-stripped concept identity)', () => {
-  test('same concept across different cities collapses to one key', () => {
-    const a = conceptKey({ keyword: 'indoor cat fleas Port Charlotte', tag: 'Fleas & Ticks' });
-    const b = conceptKey({ keyword: 'indoor cat fleas North Port', tag: 'Fleas' });
-    const c = conceptKey({ keyword: 'indoor cat fleas Palmetto', tag: 'Fleas & Ticks' });
-    expect(a).toBe(b);
-    expect(a).toBe(c);
-  });
-
-  test('strips trailing state tokens (FL / Florida)', () => {
-    const a = conceptKey({ keyword: 'german roaches Venice FL', tag: 'Roaches' });
-    const b = conceptKey({ keyword: 'german roaches Venice', tag: 'cockroach' });
-    expect(a).toBe(b);
-  });
-
-  test('genuinely different angles stay distinct', () => {
-    const signs = conceptKey({ keyword: 'roach signs Bradenton homes', tag: 'Roaches' });
-    const infest = conceptKey({ keyword: 'german roach infestation Bradenton', tag: 'Roaches' });
-    expect(signs).not.toBe(infest);
-  });
-
-  test('falls back to title when keyword is absent', () => {
-    const k = conceptKey({ title: 'Carpenter bees Venice deck', tag: 'wasp' });
-    expect(k).toContain('Stinging Insects::');
-    expect(k).not.toContain('venice');
-  });
-});
-
-describe('slugify', () => {
-  test('produces a clean url-safe slug', () => {
-    expect(slugify("Your Venice Lawn Has Dollar Spot — And No, More Fertilizer Won't Fix It"))
-      .toBe('your-venice-lawn-has-dollar-spot-and-no-more-fertilizer-won-t-fix-it');
-    expect(slugify('  Multiple   Spaces  ')).toBe('multiple-spaces');
-    expect(slugify('')).toBe('');
-  });
-});
-
-describe('conceptCapForCity (tiered fan-out)', () => {
-  test('priority/staffed cities get the higher cap', () => {
-    for (const c of ['Bradenton', 'Parrish', 'Lakewood Ranch', 'Sarasota', 'Venice']) {
-      expect(conceptCapForCity(c)).toBe(PRIORITY_CONCEPT_CITY_CAP);
-    }
-    expect(PRIORITY_CONCEPT_CITY_CAP).toBe(3);
-  });
-
-  test('service-area cities and unknown/null get the tight cap', () => {
-    for (const c of ['North Port', 'Palmetto', 'Port Charlotte', null, 'Nowhere']) {
-      expect(conceptCapForCity(c)).toBe(SERVICE_AREA_CONCEPT_CITY_CAP);
-    }
-    expect(SERVICE_AREA_CONCEPT_CITY_CAP).toBe(1);
-  });
-});
-
-describe('SEASONAL_PESTS', () => {
-  test('covers all 12 months with non-empty emphasis', () => {
-    for (let m = 0; m < 12; m++) {
-      expect(Array.isArray(SEASONAL_PESTS[m])).toBe(true);
-      expect(SEASONAL_PESTS[m].length).toBeGreaterThan(0);
-    }
   });
 });

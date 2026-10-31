@@ -6,8 +6,6 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const BlogWriter = require('../services/content/blog-writer');
 const BlogAuditor = require('../services/content/blog-auditor');
 const logger = require('../services/logger');
-const MODELS = require('../config/models');
-const { dispatchWithFallback } = require('../services/llm/call');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { invalidSpokeSites } = require('../services/content-astro/spoke-sites');
 const autonomousReviewQueue = require('../services/content/autonomous-review-queue');
@@ -25,14 +23,6 @@ const aiContentLimiter = rateLimit({
   message: { error: 'Too many AI content requests in the last hour. Try again later.' },
 });
 
-const CONTENT_LIMITS = {
-  bulkGenerateMax: 10,
-  ideaCountMax: 50,
-  topicMaxChars: 500,
-};
-
-const ALLOWED_CONTENT_TYPES = new Set(['blog_post', 'page_refresh', 'pest_pressure', 'gbp_post', 'service_page']);
-const ALLOWED_TARGET_CITIES = new Set(['Lakewood Ranch', 'Parrish', 'Bradenton', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Port Charlotte']);
 const HUB_BLOG_TARGET_SITES = ['wavespestcontrol.com'];
 
 const BLOG_UPDATE_FIELDS = new Set([
@@ -207,31 +197,10 @@ function parseBoundedInt(value, { defaultValue, min, max, name }) {
   return parsed;
 }
 
-function normalizeGenerateBody(body = {}) {
-  const topic = String(body.topic || '').trim();
-  if (!topic) throw operationalBadRequest('Topic is required');
-  if (topic.length > CONTENT_LIMITS.topicMaxChars) {
-    throw operationalBadRequest(`Topic must be ${CONTENT_LIMITS.topicMaxChars} characters or fewer`);
-  }
-
-  const contentType = body.contentType || 'blog_post';
-  if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
-    throw operationalBadRequest(`contentType must be one of: ${Array.from(ALLOWED_CONTENT_TYPES).join(', ')}`);
-  }
-
-  const targetCity = body.targetCity || 'Lakewood Ranch';
-  if (!ALLOWED_TARGET_CITIES.has(targetCity)) {
-    throw operationalBadRequest(`targetCity must be one of: ${Array.from(ALLOWED_TARGET_CITIES).join(', ')}`);
-  }
-
-  return { topic, contentType, targetCity };
-}
-
 // ── Hero-image generator ────────────────────────────────────────────
 //
-// Shared between POST /generate (initial draft creation) and POST
-// /blog/:id/regenerate-image (operator-triggered retry). Returns a
-// `data:` URL on success; throws a typed Error otherwise so the
+// Used by POST /blog/:id/regenerate-image (operator-triggered retry).
+// Returns a `data:` URL on success; throws a typed Error otherwise so the
 // caller can surface the reason to the UI instead of silent-failing.
 //
 // Goes through the publisher's generatePlannedImage so an admin hero gets
@@ -751,30 +720,6 @@ router.delete('/blog/:id', async (req, res, next) => {
 // CONTENT GENERATION
 // =========================================================================
 
-// POST /api/admin/content/blog/:id/generate — generate AI content for a post
-router.post('/blog/:id/generate', aiContentLimiter, async (req, res, next) => {
-  try {
-    assertBlogPostId(req.params.id);
-    const post = await db('blog_posts').where('id', req.params.id).first();
-    if (!post) return res.status(404).json({ error: 'Post not found' });
-    // generatePost overwrites `content` and forces status back to draft —
-    // on a published/live post that irreversibly destroys the live
-    // article's source text (no versioning exists). This read-side check
-    // gives the friendly 409; generatePost's own CAS'd final write closes
-    // the race where the state changes during the long AI call.
-    if (post.status === 'published' || post.publish_status === 'publishing' || publishClaimActive(post) || astroActivePost(post)) {
-      const why = post.status === 'published' ? 'published'
-        : (post.publish_status === 'publishing' || publishClaimActive(post)) ? 'being published right now (publisher claim)'
-          : `in Astro state '${post.astro_status || 'pending'}'`;
-      return res.status(409).json({
-        error: `Post is ${why} — generating would overwrite its content. Unpublish it first.`,
-      });
-    }
-    const result = await BlogWriter.generatePost(req.params.id);
-    res.json(result);
-  } catch (err) { next(err); }
-});
-
 // POST /api/admin/content/blog/:id/optimize — generate optimization suggestions
 router.post('/blog/:id/optimize', aiContentLimiter, async (req, res, next) => {
   try {
@@ -785,10 +730,8 @@ router.post('/blog/:id/optimize', aiContentLimiter, async (req, res, next) => {
 
 // POST /api/admin/content/blog/:id/regenerate-image — Gemini retry.
 //
-// The create path silent-falls-back when the first image-gen attempt
-// fails (missing API key, Gemini safety block, network blip). This
-// lets the operator retry from the editor without re-running the
-// whole content pipeline.
+// Lets the operator replace a missing or rejected hero from the editor
+// (missing API key, Gemini safety block, network blip on an earlier try).
 router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => {
   try {
     assertBlogPostId(req.params.id);
@@ -825,56 +768,6 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
     logger.warn(`[content] regenerate-image failed: ${err.message}`);
     res.status(400).json({ error: err.message });
   }
-});
-
-// POST /api/admin/content/blog/bulk-generate — generate content for next N posts
-router.post('/blog/bulk-generate', aiContentLimiter, async (req, res, next) => {
-  try {
-    const count = parseBoundedInt(req.body.count, {
-      defaultValue: 5,
-      min: 1,
-      max: CONTENT_LIMITS.bulkGenerateMax,
-      name: 'count',
-    });
-    const posts = await db('blog_posts')
-      .where('status', 'queued')
-      .whereNull('content')
-      .orderBy('publish_date', 'asc')
-      .limit(count);
-
-    // The topic gate's live corpus (~255 GitHub file reads) is loaded ONCE for
-    // the batch; if that load fails each generatePost loads (and fails
-    // closed) on its own, exactly as before.
-    let index = null;
-    if (posts.length > 1) {
-      try { index = await require('../services/content/topic-targeting-gate').loadLiveIndex(); } catch (err) { logger.warn(`[content] bulk-generate: live topic index unavailable, per-post loading: ${err.message}`); }
-    }
-    const results = [];
-    for (const post of posts) {
-      try {
-        const result = await BlogWriter.generatePost(post.id, { index });
-        results.push({ id: post.id, title: post.title, wordCount: result.wordCount, success: true });
-      } catch (err) {
-        results.push({ id: post.id, title: post.title, error: err.message, success: false });
-      }
-    }
-
-    res.json({ results, generated: results.filter(r => r.success).length });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/content/blog/ideas — generate new ideas
-router.post('/blog/ideas', aiContentLimiter, async (req, res, next) => {
-  try {
-    const count = parseBoundedInt(req.body.count, {
-      defaultValue: 20,
-      min: 1,
-      max: CONTENT_LIMITS.ideaCountMax,
-      name: 'count',
-    });
-    const ideas = await BlogWriter.generateNewIdeas(count);
-    res.json({ ideas, count: ideas.length });
-  } catch (err) { next(err); }
 });
 
 // =========================================================================
@@ -1128,243 +1021,6 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
 });
 
 // =========================================================================
-// HYPER-LOCAL CONTENT GENERATION
-// =========================================================================
-
-// GET /api/admin/content/weather — FAWN weather snapshot + active signals
-router.get('/weather', async (req, res, next) => {
-  try {
-    // Attempt to pull live FAWN data (Florida Automated Weather Network)
-    let weather = {};
-    try {
-      const fawnRes = await fetch('https://fawn.ifas.ufl.edu/controller.php/lastObservation/summary/');
-      if (fawnRes.ok) {
-        const fawnData = await fawnRes.json();
-        // Find Manatee or Sarasota County station
-        const station = (fawnData || []).find(s =>
-          (s.StationName || '').toLowerCase().includes('manatee') ||
-          (s.StationName || '').toLowerCase().includes('sarasota') ||
-          (s.StationName || '').toLowerCase().includes('myakka')
-        ) || fawnData?.[0];
-        if (station) {
-          weather = {
-            temp: station.AirTemp_Avg || station.t2m_avg,
-            humidity: station.RelHum_Avg || station.rh_avg,
-            rainfall: station.Rain_Tot || station.rain_sum,
-            soilTemp: station.SoilTemp4_Avg || station.ts4_avg,
-            station: station.StationName || 'FAWN SWFL',
-            timestamp: new Date().toISOString(),
-          };
-        }
-      }
-    } catch { /* FAWN unavailable — return defaults */ }
-
-    // Active content signals based on date/season
-    const month = new Date().getMonth();
-    const signals = [];
-    if (month >= 3 && month <= 9) signals.push('Mosquito season active — high search volume');
-    if (month >= 4 && month <= 8) signals.push('Chinch bug pressure peak in SWFL');
-    if (month >= 5 && month <= 8) signals.push('Nitrogen blackout in effect (Sarasota + Manatee counties)');
-    if (month >= 2 && month <= 4) signals.push('Termite swarm season — swarmer reports trending');
-    if (month >= 5 && month <= 9) signals.push('Afternoon thunderstorms — reschedule content relevant');
-    if (month >= 0 && month <= 2) signals.push('Pre-emergent window — lawn content peak');
-    if (month >= 9 && month <= 11) signals.push('Rodent season ramping — attic entry point content');
-
-    res.json({ weather, signals });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/content/generate — hyper-local content generation
-router.post('/generate', aiContentLimiter, async (req, res, next) => {
-  try {
-    const { topic, contentType, targetCity } = normalizeGenerateBody(req.body);
-
-    // Get voice config
-    const voice = await db('blog_voice_config').where('active', true).first();
-    const voiceDesc = voice?.voice_description || '';
-    const sampleTitles = (typeof voice?.sample_titles === 'string' ? JSON.parse(voice.sample_titles) : voice?.sample_titles) || [];
-
-    // Pull weather data for the prompt
-    let weatherContext = '';
-    try {
-      const fawnRes = await fetch('https://fawn.ifas.ufl.edu/controller.php/lastObservation/summary/');
-      if (fawnRes.ok) {
-        const fawnData = await fawnRes.json();
-        const station = (fawnData || []).find(s =>
-          (s.StationName || '').toLowerCase().includes('manatee') ||
-          (s.StationName || '').toLowerCase().includes('myakka')
-        );
-        if (station) {
-          weatherContext = `Current FAWN data (${station.StationName}): Air temp ${station.AirTemp_Avg || '?'}F, Humidity ${station.RelHum_Avg || '?'}%, Soil temp ${station.SoilTemp4_Avg || '?'}F, Rain ${station.Rain_Tot || '?'}". Timestamp: ${new Date().toISOString()}`;
-        }
-      }
-    } catch { weatherContext = 'FAWN data unavailable — use seasonal SWFL defaults.'; }
-
-    // Content type parameters
-    const typeConfig = {
-      blog_post: { wordRange: '800–1200', format: 'H2 subheadings every 200–300 words, short paragraphs, 1–2 pro tip callouts, FAQ section with 3 questions at the end using schema-ready format' },
-      pest_pressure: { wordRange: '400–600', format: 'This week format: conditions → active pests → what homeowners should do → when to call. Include FAWN data timestamp.' },
-      gbp_post: { wordRange: '150–300', format: 'Google Business Profile post format: hook line, 2–3 short paragraphs, soft CTA. No headers.' },
-      service_page: { wordRange: '1500–2000', format: 'Comprehensive landing page: hero section, problem/solution, process steps, FAQ (5+ questions), service area mention, trust signals, CTA sections.' },
-    };
-    const config = typeConfig[contentType] || typeConfig.blog_post;
-
-    // Check for existing content overlap
-    const existing = await db('blog_posts')
-      .where('status', 'published')
-      .where(function () {
-        const words = topic.toLowerCase().split(/\s+/).filter(w => w.length > 4).slice(0, 3);
-        for (const w of words) {
-          this.orWhere('title', 'ilike', `%${w}%`);
-        }
-      })
-      .select('title', 'city')
-      .limit(5);
-
-    const overlapNote = existing.length > 0
-      ? `\n\nEXISTING CONTENT (differentiate from these):\n${existing.map(e => `- "${e.title}" (${e.city})`).join('\n')}`
-      : '';
-
-    // Generate via Sonnet with OpenAI Terra backup; otherwise return an outline.
-    let content, title, metaDesc, keyword;
-
-    try {
-      const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
-        laneId: 'content_misc',
-        maxTokens: 4000,
-        jsonMode: false,
-        system: `You write hyper-local pest control and lawn care content for Waves Pest Control in Southwest Florida.
-
-VOICE: ${voiceDesc}
-
-SAMPLE TITLES FOR TONE:
-${sampleTitles.slice(0, 5).map(t => `• "${t}"`).join('\n')}
-
-REQUIREMENTS FOR EVERY ARTICLE:
-1. Include timestamped FAWN weather data from the station provided
-2. Cite at least one UF/IFAS source with EDIS publication ID (e.g., ENY-2006, SS-AGR-417)
-3. Reference a specific neighborhood or landmark in ${targetCity}
-4. Include a real field observation (phrase it as "Our techs are seeing..." or "On recent inspections in ${targetCity}...")
-5. If lawn/fertilizer related, mention county fertilizer ordinance compliance
-6. End with a WaveGuard CTA tied to the specific problem discussed
-
-FORMAT: ${config.wordRange} words. ${config.format}
-CITY: ${targetCity} — mention it by name multiple times, reference local conditions.`,
-        text: `Write a ${contentType.replace(/_/g, ' ')} about: ${topic}
-
-Target city: ${targetCity}
-
-FAWN WEATHER: ${weatherContext || 'Use seasonal SWFL defaults for current month.'}
-${overlapNote}
-
-Return the content in markdown. Before the content, on the first 3 lines provide:
-TITLE: [the article title]
-META: [meta description, max 160 chars]
-KEYWORD: [primary SEO keyword]
-
-Then a blank line, then the full content.`,
-      });
-      if (!response.ok) throw new Error('content providers unavailable');
-
-      const raw = response.text;
-
-      // Parse title/meta/keyword from the header
-      const titleMatch = raw.match(/^TITLE:\s*(.+)/m);
-      const metaMatch = raw.match(/^META:\s*(.+)/m);
-      const kwMatch = raw.match(/^KEYWORD:\s*(.+)/m);
-
-      title = titleMatch?.[1]?.trim() || topic;
-      metaDesc = metaMatch?.[1]?.trim() || '';
-      keyword = kwMatch?.[1]?.trim() || '';
-      content = raw.replace(/^TITLE:.*\n?/m, '').replace(/^META:.*\n?/m, '').replace(/^KEYWORD:.*\n?/m, '').trim();
-    } catch (aiErr) {
-      // Fallback — create the post record without generated content
-      title = topic;
-      metaDesc = '';
-      keyword = '';
-      content = null;
-      logger.warn(`Content generation AI unavailable: ${aiErr.message}`);
-    }
-
-    // Auto-detect tag from content
-    const TAG_RULES = [
-      { tag: 'Lawn Pests', patterns: ['chinch bug', 'grub', 'sod webworm', 'mole cricket', 'armyworm', 'lawn pest'] },
-      { tag: 'Lawn Care', patterns: ['lawn care', 'fertiliz', 'mowing', 'irrigation', 'turf', 'grass', 'aeration', 'weed control', 'herbicide', 'st. augustine', 'sod'] },
-      { tag: 'Termites', patterns: ['termite', 'wdo', 'wood-destroying', 'subterranean', 'drywood'] },
-      { tag: 'Mosquitoes', patterns: ['mosquito'] },
-      { tag: 'Rodents', patterns: ['rodent', 'rat', 'mouse', 'mice'] },
-      { tag: 'Ants', patterns: ['ant ', 'ants', 'fire ant', 'carpenter ant', 'ghost ant'] },
-      { tag: 'Cockroaches', patterns: ['cockroach', 'roach'] },
-      { tag: 'Bed Bugs', patterns: ['bed bug', 'bedbug'] },
-      { tag: 'Spiders', patterns: ['spider', 'arachnid', 'brown recluse', 'black widow'] },
-      { tag: 'Fleas', patterns: ['flea', 'tick'] },
-      { tag: 'Flying Insects', patterns: ['fly ', 'flies', 'wasp', 'bee ', 'hornet', 'yellow jacket', 'flying insect'] },
-      { tag: 'Insects', patterns: ['insect', 'bug'] },
-      { tag: 'Pest Control', patterns: ['pest control', 'exterminator', 'pest management', 'ipm'] },
-    ];
-
-    const combined = `${title} ${keyword} ${topic} ${(content || '').substring(0, 500)}`.toLowerCase();
-    let autoTag = null;
-    for (const rule of TAG_RULES) {
-      if (rule.patterns.some(p => combined.includes(p))) {
-        autoTag = rule.tag;
-        break;
-      }
-    }
-    if (!autoTag && contentType === 'pest_pressure') autoTag = 'Pest Control';
-
-    // The row's slug seeds the hero's variation plan, so it is derived
-    // before the image call (same formula the insert below uses).
-    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 80);
-
-    // Generate the featured image (planned + screened, see generateFeaturedImage).
-    let featuredImageUrl = null;
-    let featuredImageError = null;
-    try {
-      featuredImageUrl = await generateFeaturedImage({ title, topic, keyword, slug });
-    } catch (imgErr) {
-      featuredImageError = imgErr.message || String(imgErr);
-      logger.warn(`[content] Featured image generation failed: ${featuredImageError}`);
-    }
-
-    // Create the blog post record
-    const wordCount = content ? content.split(/\s+/).filter(Boolean).length : 0;
-
-    const insertData = {
-      title,
-      keyword,
-      meta_description: metaDesc,
-      slug,
-      city: targetCity,
-      tag: autoTag,
-      status: content ? 'draft' : 'queued',
-      content,
-      word_count: wordCount,
-      source: 'ai_generated',
-      // Default new posts to hub-only so a fresh AI-generated draft
-      // doesn't surprise-publish to all 15 domains on the next merge.
-      // Author picks additional spokes intentionally in the editor.
-      target_sites: JSON.stringify(['wavespestcontrol.com']),
-    };
-    if (featuredImageUrl) insertData.featured_image_url = featuredImageUrl;
-
-    let post;
-    try {
-      [post] = await db('blog_posts').insert(insertData).returning('*');
-    } catch (insErr) {
-      // featured_image_url or target_sites columns may not exist on
-      // older DBs that haven't run the migrations yet. Drop the
-      // optional columns and retry.
-      delete insertData.featured_image_url;
-      delete insertData.target_sites;
-      [post] = await db('blog_posts').insert(insertData).returning('*');
-    }
-
-    res.json({ post, wordCount, contentType, hasContent: !!content, tag: autoTag, hasImage: !!featuredImageUrl });
-  } catch (err) { next(err); }
-});
-
-// =========================================================================
 // CONTENT CALENDAR + SCHEDULING
 // =========================================================================
 
@@ -1543,8 +1199,6 @@ router.get('/agent/runs', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports.CONTENT_LIMITS = CONTENT_LIMITS;
 module.exports.parseBoundedInt = parseBoundedInt;
-module.exports.normalizeGenerateBody = normalizeGenerateBody;
 module.exports.normalizeBlogUpdates = normalizeBlogUpdates;
 module.exports._internals = { generateFeaturedImage };
