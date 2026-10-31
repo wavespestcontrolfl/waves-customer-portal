@@ -1650,12 +1650,20 @@ const VISIT_LIMITS = {
   unknownDimensionCap: 50,
 };
 
-// True when one line is over its visit limit. Pure: the same line always gets the same answer, however many other lines or
-// concurrent completions there are.
-function exceedsVisitLimit({ amount, amountUnit, inventoryUnit }) {
+// What one line counts for against a visit limit: its amount in the product's inventory unit against that dimension's
+// limit, or, for a unit with no known dimension, the submitted number against the cap. Pure.
+function visitLimitShare({ amount, amountUnit, inventoryUnit }) {
   const deductedAmount = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
   const limit = Math.max(0, ...VISIT_LIMITS.floors.map((f) => convertInventoryQuantity(f.amount, f.unit, inventoryUnit) ?? 0));
-  return deductedAmount != null && limit > 0 ? deductedAmount > limit : amount > VISIT_LIMITS.unknownDimensionCap;
+  return deductedAmount != null && limit > 0
+    ? { value: deductedAmount, limit, bucket: 'dimension' }
+    : { value: amount, limit: VISIT_LIMITS.unknownDimensionCap, bucket: 'number' };
+}
+
+// True when one line is over its visit limit. The same line always gets the same answer, however many concurrent completions there are.
+function exceedsVisitLimit(line) {
+  const share = visitLimitShare(line);
+  return share.value > share.limit;
 }
 
 // A technician's completion is refused, before any service write, when a submitted line is over its product's ceiling
@@ -1712,23 +1720,49 @@ function implausibleRefusal(catalogRow, { amount, amountUnit }) {
   };
 }
 
-// Vets every submitted product line before the first write: a malformed amount is a 400 for any role, and a technician's
-// line over its visit limit is a 422 (an admin's keeps the advisory path in deductProductInventory). Returns { status, body }
-// or null. One catalog read, no history read. `skip` is a replay, a resume or a packet effects phase: nothing is judged.
-async function vetProductAmounts(database, { actor, products, skip = false }) {
-  if (skip || !Array.isArray(products)) return null;
-  const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
-  const ids = [...new Set(lines.map((p) => canonicalProductId(p.productId)).filter((id) => UUID_SHAPE.test(id)))];
-  const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
-  const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
-  const invalid = normalizeProductAmounts(lines, (line) => rowById.get(canonicalProductId(line.productId))?.name || line.name || line.product_name || 'a product');
-  if (invalid || actor?.techRole === 'admin') return invalid;
+// The first product whose lines TOGETHER are over its visit limit, as { catalogRow, amount, amountUnit } for the refusal, else null.
+// Lines are grouped by canonical product id (a host row and an add-on row, or the same id repeated, are one product's
+// use) and by the unit bucket they count in. A group of one unit reports the submitted total; mixed units report the
+// total in the stock unit.
+function firstProductOverVisitLimit(lines, rowById) {
+  const groups = new Map();
   for (const line of lines) {
-    const catalogRow = rowById.get(canonicalProductId(line.productId));
+    const catalogRow = rowById.get(line.productId);
     const judged = visitLimitInput(line, catalogRow);
-    if (judged && exceedsVisitLimit(judged)) return { status: 422, body: implausibleRefusal(catalogRow, judged) };
+    if (!judged) continue;
+    const share = visitLimitShare(judged);
+    const key = `${line.productId}|${judged.inventoryUnit}|${share.bucket}`;
+    const group = groups.get(key) || { catalogRow, value: 0, raw: 0, units: new Set(), limit: share.limit, inventoryUnit: judged.inventoryUnit };
+    group.value += share.value;
+    group.raw += judged.amount;
+    group.units.add(judged.amountUnit);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    if (group.value <= group.limit) continue;
+    const single = group.units.size === 1;
+    return { catalogRow: group.catalogRow, amount: Number((single ? group.raw : group.value).toFixed(4)), amountUnit: single ? [...group.units][0] : group.inventoryUnit };
   }
   return null;
+}
+
+// Vets every submitted product line before the first write. Each line's productId is made canonical (trim, lower case:
+// the form the catalog lookup and the de-duplication compare) and written back, so spellings of one id are one product
+// everywhere downstream. A malformed amount is a 400 for any role. A technician whose lines for one product add up to
+// more than its visit limit gets a 422 naming the product and the total (an admin's keeps the advisory path in
+// deductProductInventory). Returns { status, body } or null. One catalog read, no history read. `skip` is a replay, a
+// resume or a packet effects phase: nothing is judged or changed.
+async function vetProductAmounts(database, { actor, products, skip = false }) {
+  if (skip || !Array.isArray(products)) return null;
+  for (const p of products) if (p?.productId) p.productId = canonicalProductId(p.productId);
+  const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
+  const ids = [...new Set(lines.map((p) => p.productId).filter((id) => UUID_SHAPE.test(id)))];
+  const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
+  const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
+  const invalid = normalizeProductAmounts(lines, (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product');
+  if (invalid || actor?.techRole === 'admin') return invalid;
+  const over = firstProductOverVisitLimit(lines, rowById);
+  return over ? { status: 422, body: implausibleRefusal(over.catalogRow, over) } : null;
 }
 
 async function deductProductInventory(trx, {

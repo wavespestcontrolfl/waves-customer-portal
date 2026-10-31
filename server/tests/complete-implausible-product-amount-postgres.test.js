@@ -158,6 +158,35 @@ postgres('technician implausible product amount', () => {
     } finally { await cleanup(f); }
   });
 
+  test('200 spellings of one product id at 100 lb each are refused for a technician: 422, nothing written', async () => {
+    const f = await seedPestVisit();
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const spellings = [f.productId, ` ${f.productId.toUpperCase()}`, `${f.productId}\t`, `  ${f.productId.toUpperCase()}  `];
+      const products = Array.from({ length: 200 }, (_v, i) => ({ productId: spellings[i % 4], totalAmount: 100, amountUnit: 'lb' }));
+      const out = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'technician', technicianId: f.techId, technician: null },
+        body: { ...bodyFor(f, 1), products } });
+      expect(out.status).toBe(422);
+      expect(out.body).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', amount: 20000 });
+      expect(await writesFor(f)).toEqual({ records: 0, serviceProducts: 0, ownMovements: 0, allMovements: 0, stock: 500 });
+    } finally { await cleanup(f); }
+  });
+
+  test('the written row and its movement carry the canonical product id however the id was spelled', async () => {
+    const f = await seedPestVisit();
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const out = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'technician', technicianId: f.techId, technician: null },
+        body: { ...bodyFor(f, 1), products: [{ productId: `  ${f.productId.toUpperCase()} `, totalAmount: 5, amountUnit: 'lb' }] } });
+      expect(out.status).toBe(200);
+      const row = await mockPg('service_products as sp').join('service_records as sr', 'sr.id', 'sp.service_record_id').where('sr.customer_id', f.customerId).first('sp.product_id');
+      expect(row.product_id).toBe(f.productId);
+      expect(await writesFor(f)).toMatchObject({ serviceProducts: 1, allMovements: 1, stock: 495 });
+    } finally { await cleanup(f); }
+  });
+
   test('a malformed amount is a 400 for a technician and an admin, with nothing written and the claim released', async () => {
     for (const role of ['technician', 'admin']) {
       const f = await seedPestVisit();

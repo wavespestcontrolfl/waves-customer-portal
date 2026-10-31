@@ -131,6 +131,56 @@ describe('the fixed per-visit limit (technician refusal)', () => {
   });
 });
 
+describe('one product\'s lines are judged together, under one canonical id', () => {
+  const spellings = [CELSIUS, ` ${CELSIUS.toUpperCase()}`, `${CELSIUS}\t`, `  ${CELSIUS.toUpperCase()}  `];
+  const variants = (n, amount = 100) => Array.from({ length: n }, (_v, i) => ({ productId: spellings[i % spellings.length], totalAmount: amount, amountUnit: 'lb' }));
+
+  test('200 lines of one UUID in whitespace and case variants, each at the 100 lb limit, are refused for a technician and name the total', async () => {
+    const products = variants(200);
+    const out = await vet({ actor: tech, products });
+    expect(out.status).toBe(422);
+    expect(out.body).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', productId: CELSIUS, productName: 'Celsius WG', amount: 20000, amountUnit: 'lb' });
+    expect(out.body.error).toBe('20000 lb of Celsius WG is far more than one visit uses. Check the amount and submit again.');
+  });
+
+  test('every line carries the canonical id afterwards, for a technician and an admin alike', async () => {
+    for (const actor of [tech, admin]) {
+      const products = variants(6, 10);
+      await vet({ actor, products });
+      expect(products.map((p) => p.productId)).toEqual(Array(6).fill(CELSIUS));
+    }
+  });
+
+  test('an admin with the same 200 lines is not refused (the advisory path decides on stock)', async () => {
+    expect(await vet({ actor: admin, products: variants(200) })).toBeNull();
+  });
+
+  test('host and add-on rows of one product that add up to the limit or less still pass; one lb more is refused', async () => {
+    const rows = (a, b) => [{ productId: CELSIUS, totalAmount: a, amountUnit: 'lb' }, { productId: ` ${CELSIUS.toUpperCase()} `, totalAmount: b, amountUnit: 'lb', areaAddOnKey: 'x' }];
+    expect(await vet({ actor: tech, products: rows(60, 40) })).toBeNull();
+    expect((await vet({ actor: tech, products: rows(60, 41) })).body).toMatchObject({ amount: 101, amountUnit: 'lb' });
+  });
+
+  test('lines in different units add up in the stock unit', async () => {
+    const products = [{ productId: CELSIUS, totalAmount: 90, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 320, amountUnit: 'oz' }]; // 90 + 20 lb
+    expect((await vet({ actor: tech, products })).body).toMatchObject({ amount: 110, amountUnit: 'lb' });
+  });
+
+  test('a unit with no known dimension adds the submitted numbers against the cap of 50', async () => {
+    mockTables.products_catalog = [{ ...catalog, inventory_unit: null }];
+    const rows = (a, b) => [{ productId: CELSIUS, totalAmount: a, amountUnit: 'oz/1000sf' }, { productId: CELSIUS.toUpperCase(), totalAmount: b, amountUnit: 'oz/1000sf' }];
+    expect(await vet({ actor: tech, products: rows(25, 25) })).toBeNull();
+    expect((await vet({ actor: tech, products: rows(25, 26) })).body).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', amount: 51 });
+  });
+
+  test('different products are judged separately', async () => {
+    const other = '33333333-3333-4333-8333-333333333333';
+    mockTables.products_catalog = [catalog, { id: other, name: 'Other', inventory_unit: 'lb' }];
+    const products = [{ productId: CELSIUS, totalAmount: 100, amountUnit: 'lb' }, { productId: other, totalAmount: 100, amountUnit: 'lb' }];
+    expect(await vet({ actor: tech, products })).toBeNull();
+  });
+});
+
 describe('a malformed amount is refused with a 400 for every role, and the parsed number is what every sink reads', () => {
   test.each([
     ['trailing junk', '99999junk'],
