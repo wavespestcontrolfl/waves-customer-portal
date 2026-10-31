@@ -23,18 +23,35 @@ const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./ema
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
 
-function substitute(text, customer) {
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Names and emails come from lead forms and calls, so in the HTML arm they are
+// escaped: a form that puts a link in the name field and a stranger's address
+// in the email field must not make Waves send that stranger a live link
+// (sweep #4616 B2). Text bodies and subjects are plain text and stay raw.
+// Replacer functions, not strings: a value holding `$&` or `$'` must not pull
+// template text back in.
+function substitute(text, customer, { html = false } = {}) {
   if (!text) return text;
+  const value = html ? escapeHtml : String;
   // 'there' for a customer with no first name on file (call-created on a last
   // name alone): never "Hi  —".
-  const first = customer.first_name || customer.firstName || 'there';
-  const last = customer.last_name || customer.lastName || '';
+  const first = value(customer.first_name || customer.firstName || 'there');
+  const last = value(customer.last_name || customer.lastName || '');
+  const email = value(customer.email || '');
   return text
-    .replace(/\{\{\s*first_name\s*\}\}/g, first)
-    .replace(/\{\{\s*last_name\s*\}\}/g, last)
-    .replace(/\{\{\s*email\s*\}\}/g, customer.email || '')
-    .replace(/\{first_name\}/g, first)          // also support single-brace for parity with SMS templates
-    .replace(/\{last_name\}/g, last);
+    .replace(/\{\{\s*first_name\s*\}\}/g, () => first)
+    .replace(/\{\{\s*last_name\s*\}\}/g, () => last)
+    .replace(/\{\{\s*email\s*\}\}/g, () => email)
+    .replace(/\{first_name\}/g, () => first)          // also support single-brace for parity with SMS templates
+    .replace(/\{last_name\}/g, () => last);
 }
 
 // The consultation-booking placeholders, whitespace-tolerant like every
@@ -305,7 +322,7 @@ async function repointPaymentFailedEnrollment({ enrollment, sendId, current, ema
 // whose body never carries the placeholder) renders byte-identical to
 // before these params existed.
 function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId, consultationHtml = '', consultationText = '' }) {
-  const rawHtml = substitute(htmlBody || '', customer).replace(CONSULTATION_HTML_RE, withSeparator(consultationHtml));
+  const rawHtml = substitute(htmlBody || '', customer, { html: true }).replace(CONSULTATION_HTML_RE, withSeparator(consultationHtml));
   const rawText = substitute(textBody || '', customer).replace(CONSULTATION_TEXT_RE, withSeparator(consultationText));
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
   // Every automation renders the service chrome — "Waves Newsletter"
