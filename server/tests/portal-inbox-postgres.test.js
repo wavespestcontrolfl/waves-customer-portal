@@ -63,10 +63,10 @@ maybeDescribe('portal inbox (live Postgres)', () => {
     return esc.id;
   }
 
-  async function request({ daysOld, status = 'new', source = null, withAlert = false }) {
+  async function request({ daysOld, status = 'new', source = null, withAlert = false, metadata = null }) {
     const [row] = await db('service_requests').insert({
       customer_id: customerId, category: 'general', subject: `${RUN} request ${daysOld}d`, description: 'Please call me',
-      status, source, created_at: ago(daysOld),
+      status, source, created_at: ago(daysOld), ...(metadata ? { metadata: JSON.stringify(metadata) } : {}),
     }).returning('id');
     ids.requests.push(row.id);
     if (withAlert) {
@@ -147,6 +147,13 @@ maybeDescribe('portal inbox (live Postgres)', () => {
     expect(before.older.requests).toBeGreaterThanOrEqual(1);
     const summary = await portalInbox.summary();
     expect(summary.count).toBeGreaterThanOrEqual(3);
+  });
+
+  test('a request row names the saved property it was filed under, never the raw metadata', async () => {
+    const id = await request({ daysOld: 1, source: 'portal_home', metadata: { property: { id: 'p-1', label: 'Rental', address: '12 Example St', isPrimary: false }, note: 'internal' } });
+    const item = mine((await portalInbox.list()).items).find((i) => i.id === id);
+    expect(item.property).toEqual({ id: 'p-1', label: 'Rental', address: '12 Example St', isPrimary: false });
+    expect(item).not.toHaveProperty('metadata');
   });
 
   test('a chat whose only admin alert is Done is hidden; no alert or one open alert keeps it listed', async () => {

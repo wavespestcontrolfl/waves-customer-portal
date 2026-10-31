@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { portalInboxLive } = require('../config/feature-gates');
+const { requestProperty } = require('./service-request-property');
 
 const WINDOW_DAYS = 14;
 const LIST_CAP = 200;
@@ -118,6 +119,7 @@ function chatItem(row) {
 }
 
 function requestItem(row) {
+  const property = requestProperty(row.metadata);
   return {
     kind: 'request',
     id: row.id,
@@ -130,6 +132,7 @@ function requestItem(row) {
     source: row.source || '',
     urgency: row.urgency || '',
     status: row.status || '',
+    ...(property ? { property } : {}),
   };
 }
 
@@ -147,7 +150,7 @@ async function listRecent(cutoff) {
     .orderBy('r.created_at', 'desc')
     .limit(LIST_CAP)
     .select('r.id', 'r.created_at', 'r.customer_id', 'r.category', 'r.subject', 'r.description',
-      'r.requested_service', 'r.source', 'r.urgency', 'r.status', 'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL));
+      'r.requested_service', 'r.source', 'r.urgency', 'r.status', 'r.metadata', 'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL));
   return [...chatRows.map(chatItem), ...requestRows.map(requestItem)]
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }

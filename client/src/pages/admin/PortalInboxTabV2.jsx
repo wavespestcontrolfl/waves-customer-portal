@@ -33,6 +33,14 @@ function plural(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+const DONE_STATUSES = { chat: ["resolved", "dismissed"], request: ["resolved", "closed", "cancelled"] };
+
+// Did the update route really finish the item? A request PATCH that lost a race
+// answers 200 with the still-open row (statusChanged: false); keep it then.
+function handledStatus(item, res) {
+  return item.kind === "chat" ? res?.escalation?.status : res?.request?.status;
+}
+
 // Mark handled uses the existing update routes: chat -> the escalation PUT,
 // request -> the request PATCH (which keeps its own customer email).
 function markHandled(item) {
@@ -63,6 +71,12 @@ function RequestDetails({ item }) {
   return (
     <>
       {item.subject && <div className="text-14 font-medium text-zinc-900 mt-1">{item.subject}</div>}
+      {item.property?.address && (
+        <div className="text-14 text-ink-secondary mt-1" data-testid="request-property">
+          {item.property.label ? `${item.property.label} · ` : ""}{item.property.address}
+          {item.property.isPrimary ? "" : " (secondary property)"}
+        </div>
+      )}
       {item.description && <blockquote className="text-14 text-zinc-800 mt-1 border-l-2 border-zinc-300 pl-3">&ldquo;{item.description}&rdquo;</blockquote>}
       {meta && <div className="text-14 text-ink-secondary mt-1">{meta}</div>}
     </>
@@ -223,7 +237,11 @@ export default function PortalInboxTabV2({ onCount }) {
     setBusyKey(key);
     setRowErrors((prev) => ({ ...prev, [key]: "" }));
     try {
-      await markHandled(item);
+      const res = await markHandled(item);
+      if (!DONE_STATUSES[item.kind].includes(handledStatus(item, res))) {
+        setRowErrors((prev) => ({ ...prev, [key]: "This changed before you could mark it handled. It is still open." }));
+        return;
+      }
       handledSinceLoad.current += 1;
       setData((prev) => ({ ...prev, items: prev.items.filter((row) => rowKey(row) !== key), total: Math.max(0, prev.total - 1) }));
     } catch (err) {

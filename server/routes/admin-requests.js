@@ -15,6 +15,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { closeRequestAlertsOnResolve } = require('../services/portal-inbox');
+const { requestProperty } = require('../services/service-request-property');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { convertHeicToJpeg, MAX_HEIC_BYTES } = require('../services/heic-to-jpeg');
 
@@ -54,19 +55,6 @@ const updateSchema = Joi.object({
   adminNotes: Joi.string().trim().allow('').max(2000).optional(),
   assignedTechnicianId: Joi.string().uuid().allow(null).optional(),
 }).min(1);
-
-function requestProperty(metadata) {
-  let meta = metadata;
-  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { return null; } }
-  const p = meta && typeof meta === 'object' ? meta.property : null;
-  if (!p || typeof p !== 'object') return null;
-  return {
-    id: p.id != null ? String(p.id) : null,
-    isPrimary: p.isPrimary === true,
-    label: p.label || null,
-    address: p.address || null,
-  };
-}
 
 // GET /api/admin/requests — list service requests for staff triage.
 router.get('/', async (req, res, next) => {

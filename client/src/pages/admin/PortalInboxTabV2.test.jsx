@@ -43,8 +43,16 @@ function mount(onCount) {
   );
 }
 
+// What the two existing update routes answer when the item really closed.
+function updated(url) {
+  const id = url.split("/").pop();
+  if (url.startsWith("/ai/admin/escalations/")) return { escalation: { id, status: "resolved" } };
+  if (url.startsWith("/admin/requests/")) return { request: { id, status: "resolved" }, statusChanged: true };
+  return { ok: true };
+}
+
 beforeEach(() => {
-  adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing() : { ok: true }));
+  adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing() : updated(url)));
 });
 
 describe("Portal inbox tab", () => {
@@ -89,7 +97,7 @@ describe("Portal inbox tab", () => {
     const onCount = vi.fn();
     let calls = 0;
     adminFetch.mockImplementation(async (url) => {
-      if (url !== "/admin/portal-inbox") return { ok: true };
+      if (url !== "/admin/portal-inbox") return updated(url);
       calls += 1;
       const third = { ...request, id: "req-3", customer: { id: "cust-4", firstName: "Sam", lastName: "Placeholder", phone: "+19415550104", hasTexts: false } };
       return calls === 1 ? listing({ total: 3 }) : listing({ items: [third], total: 1 });
@@ -125,6 +133,27 @@ describe("Portal inbox tab", () => {
     fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
     await waitFor(() => expect(screen.queryByText("Kim Sample")).not.toBeInTheDocument());
     expect(adminFetch).toHaveBeenCalledWith("/admin/requests/req-1", { method: "PATCH", body: JSON.stringify({ status: "resolved" }) });
+  });
+
+  it("keeps a request whose resolve lost a race, says so, and leaves the count alone", async () => {
+    const onCount = vi.fn();
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox"
+      ? listing()
+      : { request: { id: "req-1", status: "acknowledged" }, statusChanged: false }));
+    mount(onCount);
+    const row = (await screen.findByText("Kim Sample")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    expect(await within(row).findByRole("alert")).toHaveTextContent("This changed before you could mark it handled. It is still open.");
+    expect(screen.getByText("Kim Sample")).toBeInTheDocument();
+    expect(onCount).toHaveBeenLastCalledWith(2);
+  });
+
+  it("shows which saved property a request is about", async () => {
+    const withHome = { ...request, property: { id: "prop-2", label: "Rental", address: "12 Example St, Bradenton", isPrimary: false } };
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ items: [withHome], total: 1 }) : updated(url)));
+    mount();
+    const row = (await screen.findByText("Kim Sample")).closest("[data-testid]");
+    expect(within(row).getByTestId("request-property")).toHaveTextContent("Rental · 12 Example St, Bradenton (secondary property)");
   });
 
   it("keeps the row and shows a plain error on that row when Mark handled fails", async () => {
