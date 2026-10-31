@@ -383,8 +383,9 @@ describe('reschedule-public wiring', () => {
     } finally {
       if (prev === undefined) delete process.env.GATE_RESCHEDULE_MOVE_LIMITS; else process.env.GATE_RESCHEDULE_MOVE_LIMITS = prev;
     }
-    // Both movers run the guard that holds the pin.
-    expect(src).toMatch(/'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'\);\n[\s\S]{0,700}if \(cadenceChangedSince\(svc, await withCatalogCadence\(locked, trx\)\)\)/);
+    // Both movers run the guard that holds the pin. The same locked read carries the size-rule columns
+    // (lawn_rounds_9 one-off recheck), which runs first.
+    expect(src).toMatch(/'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',\s*'date_exception', 'date_exception_cadence_date'\);\n[\s\S]{0,1300}if \(cadenceChangedSince\(svc, await withCatalogCadence\(locked, trx\)\)\)/);
   });
 
   test('the search rechecks the visit after its availability build and before it applies the limit', () => {

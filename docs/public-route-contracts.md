@@ -1021,6 +1021,38 @@ rounds a year and a customer move stays inside the round the visit sits in:
   distance in rounds from the moved visit, so a skipped or cancelled round stays
   empty, and a date exception stays in the round of its own place in the
   series. No token, eligibility, rate-limit or privacy change.
+- **Size rule (owner 2026-10-31; no gate, `lawn_rounds_9` only; needs
+  `GATE_COLLECTIVE_SERIES_ANCHOR`).** A date within 7 days of the visit's regular
+  date, inside the same round, moves only that visit: no sibling shift and no
+  re-anchor, later rounds keep their dates. A bigger move re-anchors as before.
+  The regular date is the cadence date a date exception deviated from
+  (`date_exception_cadence_date`), else the visit's own date, so repeated small
+  moves cannot walk a visit across its round. The rule is
+  `roundsMoveIsOneOff` in `services/lawn-rounds.js`. Contract:
+  - `GET /api/public/reschedule/:token` carries `roundsOneOff: { maxDays: 7,
+    fromDate, roundStart, roundEnd }` (all `YYYY-MM-DD`; `fromDate` is the regular
+    date). A date is a one-off when it is inside `[roundStart, roundEnd]` and at
+    most `maxDays` from `fromDate`. The key is `null` for every other visit and
+    while `GATE_COLLECTIVE_SERIES_ANCHOR` is off (the pull-forward rule then
+    decides, unchanged). The client shows the existing "Only this visit will move"
+    line for a one-off date and the existing re-anchor note for any other date;
+    it computes nothing but that comparison.
+  - Scope pin: the commit body carries `disclosed_rounds_one_off` (the object the
+    page got, or null). For a `lawn_rounds_9` series visit under collective
+    anchoring the body must carry the same object the server holds now: absent,
+    null or different (another regular date, round or `maxDays`) answers `409
+    SCOPE_CHANGED` and the page reloads (fail closed, like the other `disclosed_*`
+    fields). A visit of any other pattern expects none and is unchanged.
+  - `shouldReanchor` and `pickerMayReanchor` agree with the disclosure per date:
+    a one-off date commits through `SmartRebooker.reschedule` with
+    `seriesPolicy: 'single'`; any other date commits through `rescheduleSeries`.
+    `nextVisit.byDate` has no entry for a one-off date
+    (`loadNextVisitShift`, `SmartRebooker.projectNextVisitDates`). The success
+    line still follows `seriesShifted`. The SMS offer executor
+    (`services/sms-scheduling-act.js`) uses the same `shouldReanchor`.
+  - Staff paths: the rebooker choke point, Quick Move (`services/rain-out.js`)
+    and the call reschedule apply use the same rule; the office "Reschedule
+    series" action (`scope: 'series'`) always re-anchors.
 
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its

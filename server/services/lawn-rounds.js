@@ -238,8 +238,62 @@ function roundSpotMonth({ round, realMonth, grassTrack }) {
   return Number(realMonth);
 }
 
+// The size rule for moves (owner 2026-10-31): on a lawn_rounds_9 series a date move of this many days or fewer, inside one round,
+// moves ONLY that visit (no sibling shift, no re-anchor); a bigger move re-anchors as before. Every other pattern is untouched.
+const ROUNDS_ONE_OFF_MAX_DAYS = 7;
+
+// The visit's REGULAR date: the cadence position a date exception deviated from, else its own date. Measuring a move from here
+// (not from the moved date) stops repeated small moves from walking a visit across its round.
+function roundsRegularDate(row) {
+  return dateOnly(row?.date_exception === true && row?.date_exception_cadence_date
+    ? row.date_exception_cadence_date
+    : row?.scheduled_date);
+}
+
+// The dates a one-off move may land on: within maxDays of the regular date AND inside that date's round. Null when the pattern is
+// not lawn_rounds_9 or the date is unreadable. { maxDays, fromDate, roundStart, roundEnd, start, end }: start/end are the window's
+// first and last day (inclusive); roundStart/roundEnd are the round's own bounds (what the customer page discloses).
+function roundsOneOffWindow(pattern, fromDateStr, { maxDays = ROUNDS_ONE_OFF_MAX_DAYS } = {}) {
+  if (pattern !== LAWN_ROUNDS_9) return null;
+  const fromDate = dateOnly(fromDateStr);
+  const home = isValidDateStr(fromDate) ? roundOf(fromDate) : null;
+  if (!home) return null;
+  const lo = addDays(fromDate, -maxDays);
+  const hi = addDays(fromDate, maxDays);
+  return { maxDays, fromDate, roundStart: home.start, roundEnd: home.end, start: lo < home.start ? home.start : lo, end: hi > home.end ? home.end : hi };
+}
+
+// True when moving a visit of `pattern` from `fromDateStr` (its regular date) to `toDateStr` is a one-off: lawn_rounds_9 only, both
+// dates valid, at most maxDays apart, both in the same round.
+function roundsMoveIsOneOff(pattern, fromDateStr, toDateStr, opts) {
+  const window = roundsOneOffWindow(pattern, fromDateStr, opts);
+  const to = dateOnly(toDateStr);
+  return !!window && isValidDateStr(to) && to >= window.start && to <= window.end;
+}
+
+// The same verdict for MOVING a scheduled_services row (needs recurring_pattern, scheduled_date, and when present
+// date_exception + date_exception_cadence_date). Keeping the row on its own date is no move, so never a one-off.
+function roundsRowMoveIsOneOff(row, toDateStr, opts) {
+  return dateOnly(toDateStr) !== dateOnly(row?.scheduled_date)
+    && roundsMoveIsOneOff(row?.recurring_pattern, roundsRegularDate(row), toDateStr, opts);
+}
+
+// True when moving `row` from `fromDateStr` to `toDateStr` changes its date AND shifts its series: the date changes and
+// the move is not a lawn rounds one-off (size rule). Shared by the rebooker's series preview, rain-out's series shift
+// and the call reschedule plan, so they decide alike.
+function datesMoveSeries(row, fromDateStr, toDateStr) {
+  const to = dateOnly(toDateStr);
+  return !!to && to !== dateOnly(fromDateStr) && !roundsRowMoveIsOneOff(row, to);
+}
+
 module.exports = {
   LAWN_ROUNDS_9,
+  ROUNDS_ONE_OFF_MAX_DAYS,
+  roundsRegularDate,
+  roundsOneOffWindow,
+  roundsMoveIsOneOff,
+  roundsRowMoveIsOneOff,
+  datesMoveSeries,
   ROUND_STEPS,
   roundStepForVisit,
   roundSpotMonth,

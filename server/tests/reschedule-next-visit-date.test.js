@@ -210,6 +210,51 @@ describe('SmartRebooker.projectNextVisitDates', () => {
   });
 });
 
+describe('lawn rounds size rule: a one-off date shifts no later visit', () => {
+  // Round 8 runs 2026-10-01 to 2026-11-09; the plan sits on 2026-10-15 with its next visit in round 9.
+  const roundsPlan = () => {
+    const p = plan();
+    const rounds = { recurring_pattern: 'lawn_rounds_9', recurring_round_anchor_date: '2026-10-15' };
+    p.service = { ...p.service, ...rounds };
+    p.parent = { ...p.parent, ...rounds };
+    p.siblings[1] = { ...p.siblings[1], scheduled_date: '2026-11-19' };
+    return p;
+  };
+
+  test('projectNextVisitDates names no date for a one-off (7 days or fewer, same round) and still names a bigger move', async () => {
+    const out = await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-18', '2026-10-22', '2026-10-23'], { conn: connFor(roundsPlan()) });
+    expect(out.byDate['2026-10-18']).toBeUndefined();
+    expect(out.byDate['2026-10-22']).toBeUndefined(); // exactly 7 days
+    expect(out.byDate['2026-10-23']).toEqual(expect.any(String)); // 8 days: re-anchors, so the next visit follows
+  });
+
+  test('a non-rounds plan names every moved date, one-day moves included', async () => {
+    const out = await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-16'], { conn: connFor(plan()) });
+    expect(out.byDate['2026-10-16']).toEqual(expect.any(String));
+  });
+
+  test('the page asks the projection only about the dates that re-anchor', async () => {
+    process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE = 'true';
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const spy = jest.spyOn(SmartRebooker, 'projectNextVisitDates').mockResolvedValue({ currentDate: '2026-11-19', byDate: { '2026-10-30': '2026-12-04' } });
+    try {
+      const svc = { id: 'svc-1', is_recurring: true, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2026-10-15' };
+      const availability = { days: [{ date: '2026-10-18' }, { date: '2026-10-22' }, { date: '2026-10-30' }] };
+      await loadNextVisitShift(svc, availability);
+      expect(spy).toHaveBeenCalledWith('svc-1', ['2026-10-30']);
+      spy.mockClear();
+      // Every offered date is a one-off: nothing to project, nothing named.
+      expect(await loadNextVisitShift(svc, { days: [{ date: '2026-10-18' }] })).toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+      // Another pattern: every date is asked about.
+      await loadNextVisitShift({ ...svc, recurring_pattern: 'custom' }, availability);
+      expect(spy).toHaveBeenCalledWith('svc-1', ['2026-10-18', '2026-10-22', '2026-10-30']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('reschedule-public loadNextVisitShift', () => {
   const series = { id: 'svc-1', is_recurring: true, scheduled_date: '2026-10-15' };
   const availability = { days: [{ date: '2026-10-22' }, { date: '2026-10-29' }] };

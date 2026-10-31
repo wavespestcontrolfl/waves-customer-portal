@@ -1281,9 +1281,8 @@ function splitMoveByDate(nonTerminal, dateStr) {
   const onTarget = (s) => stopDateOnly(s.scheduled_date) === dateStr;
   const movableAnyDate = nonTerminal.filter((s) => !elapsed(s));
   const movableByDate = movableAnyDate.filter((s) => !onTarget(s));
-  // The gate read is the rebooker's own (lazy — only when a recurring stop is in the set).
-  const collectiveGateOn = movableByDate.some((s) => s.is_recurring === true) && require('../rebooker').collectiveMoveGateOn();
-  const isSeries = (s) => collectiveGateOn && s.is_recurring === true;
+  // The rebooker's own decision (gate + cadence row + the lawn rounds size rule), read lazily — only for a recurring stop.
+  const isSeries = (s) => s.is_recurring === true && require('../rebooker').movesAsSeries(s, dateStr);
   return {
     skippedElapsed: nonTerminal.filter(elapsed).map((s) => ({ id: s.id, status: s.status })),
     skippedUnchanged: movableAnyDate.filter(onTarget).map((s) => ({ id: s.id })),
@@ -1477,7 +1476,7 @@ async function probeMoveOverlaps(trx, classified, dateStr) {
 // update (status + observed schedule fields + visit_id + tracker snapshot, no
 // FOR UPDATE; a miss aborts the batch).
 async function writeMovedStop(trx, c, dateStr, reason) {
-  const { applyTrackLifecycleCas, dateExceptionStamp } = require('../rebooker');
+  const { applyTrackLifecycleCas, singleMoveStamp } = require('../rebooker');
   const s = c.s;
   await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
   // Package visit 2 recheck, atomic with this stop's write; aborts the batch.
@@ -1503,7 +1502,7 @@ async function writeMovedStop(trx, c, dateStr, reason) {
     .update({
       scheduled_date: dateStr,
       ...recurringDispatchDuePatch(s, { scheduled_date: dateStr }),
-      ...(c.observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
+      ...(c.observedDate !== dateStr ? singleMoveStamp(s, dateStr, 'admin_ib') : {}),
       // Old day's sequence number is meaningless on the new date — NULL
       // appends the stop after the target day's ordered run.
       route_order: null,

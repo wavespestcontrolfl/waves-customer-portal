@@ -23,12 +23,13 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
 const SmartRebooker = require('./rebooker');
+const { datesMoveSeries } = require('./lawn-rounds');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
-const { etParts, etDateString, deriveWindowEnd } = require('../utils/datetime-et');
+const { etParts, etDateString, deriveWindowEnd, dateOnlyString } = require('../utils/datetime-et');
 const { DAY_START_HOUR, DAY_END_HOUR } = require('./scheduling/find-time');
 const { arrivalWindowRange, formatSmsTimeRange, ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
@@ -851,6 +852,9 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       // stop, not just the anchor — omitting it silently routed recurring
       // siblings down the single-visit path (codex P1).
       'is_recurring',
+      // The size rule for lawn rounds (datesMoveSeries) reads the pattern
+      // and the regular (cadence) date of every stop it moves.
+      'recurring_pattern', 'date_exception', 'date_exception_cadence_date',
       // Visit group: a route batch moves a grouped stop ONCE, through its
       // first member; later members of the same visit are skipped.
       'visit_id',
@@ -2528,7 +2532,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // locked read), so no series write happens without the ownership check.
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
-      && String(target.date) !== jobDateStr
+      // A date change, except a lawn rounds one-off (size rule, owner 2026-10-31: 7 days or fewer
+      // inside the round moves only this visit, so it takes the single path below).
+      && datesMoveSeries(job, jobDateStr, String(target.date).split('T')[0])
       && (!requireAssignedTechnicianId || allowSeriesForAssignedTechnician === true);
     // The anchor's on-the-hour normalization for this path lives at the
     // TOP of commit() (before the custom move's SMS pre-render) — by here
@@ -2571,6 +2577,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             // the series transaction (the dispatch route passes none for a technician).
             ...(roadSpender ? { roadSpender } : {}),
             sourceSurface: 'quick_move',
+            // The scope this branch decided (wantsSeriesShift); the rebooker judges it again on the locked anchor.
+            expectScope: 'series',
             qualityDates: rebookerQualityDates,
             // The intent is recorded WITH the operation (durable): the live
             // pass sends Quick Move's own moved-SMS (claimed on the row
@@ -2626,6 +2634,24 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         // would let this fallback overwrite the newer choice. The same
         // expected-state predicate makes the single path 409 instead —
         // caught below as a per-member failure the tech re-runs.
+        const casPin = {
+          // A recurring job's single-versus-series decision (the size rule) was made on its pattern, date exception,
+          // cadence date and date (the regular date of a row with no exception): a series re-anchor that changed any
+          // of them since makes the write miss (the concurrent-change 409) instead of committing a stale single move.
+          ...Object.fromEntries((job.is_recurring === true ? ['recurring_pattern', 'date_exception', 'date_exception_cadence_date', 'scheduled_date'] : [])
+            .filter((col) => col in job)
+            .map((col) => [col, (col.endsWith('_date') ? dateOnlyString(job[col]) : job[col]) ?? null])),
+          ...(wantsSeriesShift ? { scheduled_date: job.scheduled_date, window_start: job.window_start } : {}),
+          // codex-review P1 (PR #4673): a technician-initiated
+          // rain-out fences the ACTUAL write, not just the route's
+          // pre-check — a reassignment landing between that check
+          // and this call now makes the write miss and 409, the
+          // same concurrent-change fence every other CAS field in
+          // rebooker.reschedule already gets. Admin-initiated
+          // rain-outs (requireAssignedTechnicianId null) pin no
+          // technician.
+          ...(requireAssignedTechnicianId ? { technician_id: requireAssignedTechnicianId } : {}),
+        };
         const moveResult = await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
           allowLive: true,
           // The acting staff row (Quick Move's actorUserId): a tech moving
@@ -2644,22 +2670,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // it is the fallback after a series attempt (the visit moves ALONE
           // by design) or the sheet asked for a single move.
           seriesPolicy: 'single',
-          ...(wantsSeriesShift || requireAssignedTechnicianId
-            ? {
-                expect: {
-                  ...(wantsSeriesShift ? { scheduled_date: job.scheduled_date, window_start: job.window_start } : {}),
-                  // codex-review P1 (PR #4673): a technician-initiated
-                  // rain-out fences the ACTUAL write, not just the route's
-                  // pre-check — a reassignment landing between that check
-                  // and this call now makes the write miss and 409, the
-                  // same concurrent-change fence every other CAS field in
-                  // rebooker.reschedule already gets. Admin-initiated
-                  // rain-outs (requireAssignedTechnicianId null) stay
-                  // unscoped.
-                  ...(requireAssignedTechnicianId ? { technician_id: requireAssignedTechnicianId } : {}),
-                },
-              }
-            : {}),
+          ...(Object.keys(casPin).length ? { expect: casPin } : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
         coverMoved(moveResult, job);

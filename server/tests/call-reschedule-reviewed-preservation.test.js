@@ -223,6 +223,33 @@ describe('applyReviewedCallReschedule', () => {
     });
   });
 
+  // Size rule (owner 2026-10-31, lawn_rounds_9 only): a short move inside the round is a single move
+  // even when the review carried a series preview; a bigger one keeps the reviewed occurrence set.
+  test.each([
+    ['2026-09-15T14:00:00-04:00', 'lawn_rounds_9', true],   // 1 day inside round 7
+    ['2026-09-22T14:00:00-04:00', 'lawn_rounds_9', false],  // 8 days
+    ['2026-09-15T14:00:00-04:00', 'custom', false],         // another pattern
+  ])('a move to %s of a %s visit is single: %s', async (startAt, pattern, single) => {
+    const sibling = visit({ id: 'visit-sibling', scheduled_date: '2026-10-14' });
+    const row = visit({ is_recurring: true, recurring_pattern: pattern });
+    const conn = makeConn({ lockedVisit: row, lockedVisits: [row, sibling] });
+    const rebooker = mover(conn);
+    const v2 = { ...extraction, scheduling: { ...extraction.scheduling, proposed_start_at: startAt } };
+    await applyReviewedCallReschedule({ ...applyArgs(conn, rebooker), v2, candidates: [row], occurrenceIds: [VISIT_ID, sibling.id],
+      occurrences: [{ id: VISIT_ID }, { id: sibling.id }] });
+    const options = rebooker.reschedule.mock.calls[0][5];
+    if (single) {
+      expect(options).toMatchObject({ expectScope: 'single' });
+      expect(options).not.toHaveProperty('seriesPolicy');
+      expect(options).not.toHaveProperty('expectOccurrenceIds');
+      expect(conn.lockedSets[0]).toEqual([VISIT_ID]);
+    } else {
+      // The review previewed a series (occurrence ids), so the rebooker is asked to confirm that scope too.
+      expect(options).toMatchObject({ expectOccurrenceIds: [VISIT_ID, sibling.id], expectScope: 'series' });
+      expect(options).not.toHaveProperty('seriesPolicy');
+    }
+  });
+
   test.each([
     ['claimed', { id: 'sibling-card', status: 'in_progress', resolution_source: null }],
     ['resolved', { id: 'sibling-card', status: 'resolved', resolution_source: 'human' }],

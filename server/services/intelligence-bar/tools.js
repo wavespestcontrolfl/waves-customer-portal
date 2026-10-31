@@ -4365,9 +4365,9 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // for gated scopes). The Intelligence Bar series path (preview card +
   // rebooker choke point + series effects) lands in the follow-up PR.
   {
-    const { collectiveMoveGateOn } = require('../rebooker');
+    const { movesAsSeries } = require('../rebooker');
     const oldDateStr = oldDate instanceof Date ? oldDate.toISOString().slice(0, 10) : String(oldDate || '').slice(0, 10);
-    if (collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr) {
+    if (movesAsSeries(appt, dateStr) && dateStr !== oldDateStr) {
       return {
         error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move, and the bar can\'t move a series from here yet. Nothing was changed.',
         code: 'collective_move_unsupported',
@@ -4580,7 +4580,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
           ...(dateStr !== observedDate ? { route_order: null } : {}),
           // A this-visit-only DATE move of a cadence row is a deliberate
           // exception to its series (rebooker.dateExceptionStamp).
-          ...(dateStr !== observedDate ? require('../rebooker').dateExceptionStamp(appt, 'admin_ib') : {}),
+          ...(dateStr !== observedDate ? require('../rebooker').singleMoveStamp(appt, dateStr, 'admin_ib') : {}),
           notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
           // Public track links live until the day after the visit — refresh onto
           // the new date, same as schedule-tools' movers. Built off the root
