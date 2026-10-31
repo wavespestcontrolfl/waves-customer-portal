@@ -307,25 +307,18 @@ function isLiveRow(row) {
 // Apt 3", and inline "Bldg 2"/"Apt 2"):
 // - the street part (any trailing inline unit peeled by splitStreetLineUnit)
 //   parses to the same street key, with no unit text left inside it;
-// - the full unit keys are equal (unitLineValueKey: Apt/Unit/Suite/# are one
-//   dwelling designator, while Bldg/Floor/Space/Lot stay, so "Bldg 2" never
+// - the full unit keys are equal (premiseUnitKey: the inline unit and line 2
+//   joined, then keyed by unitLineValueKey, where Apt/Unit/Suite/# are one
+//   dwelling designator while Bldg/Floor/Space/Lot stay, so "Bldg 2" never
 //   equals "Apt 2", and a multi-part unit compares every part; no unit on
 //   both rows counts as equal);
 // - the ZIPs are equal, or, when either ZIP is blank, both cities are
 //   present and equal.
 function strictPremise(row) {
-  const { splitStreetLineUnit, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
-  const { street, unit: inlineUnit } = splitStreetLineUnit(String(row.address_line1 || ''));
-  const streetKey = normalizeStreetKey(street);
+  const { splitStreetLineUnit, premiseUnitKey } = require('../utils/address-normalizer');
+  const streetKey = normalizeStreetKey(splitStreetLineUnit(String(row.address_line1 || '')).street);
   if (!streetKey || streetKey.unit) return null;
-  const keyOf = (unitText) => unitLineValueKey(normalizeUnitLine(unitText));
-  // Join the unit fragments BEFORE keying (Codex #7249 r4 P2): "Bldg C" inline
-  // plus "Apt 2" on line 2 must key like a typed "Bldg C Apt 2"; keyed apart,
-  // the lone "Apt 2" lost its dwelling designator. The same unit given in
-  // both places counts once.
-  const parts = [inlineUnit, row.address_line2].map((s) => String(s || '').trim()).filter(Boolean);
-  const fragments = parts.length === 2 && keyOf(parts[0]) === keyOf(parts[1]) ? [parts[0]] : parts;
-  return { street: streetKey.key, unit: fragments.length ? keyOf(fragments.join(' ')) : '' };
+  return { street: streetKey.key, unit: premiseUnitKey(row.address_line1, row.address_line2) };
 }
 
 function samePremiseStrict(a, b) {
