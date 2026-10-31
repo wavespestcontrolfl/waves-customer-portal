@@ -160,7 +160,8 @@ function createClient({ fetchImpl = globalThis.fetch, env = process.env, timeout
       return requestOf(await send('GET', `/request-send-money/${encodeURIComponent(requestId)}`));
     },
 
-    // Every request on the account (all statuses, or one), following Mercury's page cursor a few pages.
+    // Every request on the account (all statuses, or one), following Mercury's page cursor. A list that cannot be read in
+    // full is an error, never a short list: callers use it to decide a payment does not exist.
     async listRequests({ status = null } = {}) {
       if (!config) throw new MercuryError('not_configured');
       const out = [];
@@ -169,20 +170,30 @@ function createClient({ fetchImpl = globalThis.fetch, env = process.env, timeout
         const answer = await send('GET', '/request-send-money', {
           query: { accountId: config.accountId, status, start_after: startAfter, limit: PAGE_LIMIT },
         });
-        out.push(...(Array.isArray(answer.requests) ? answer.requests.map(requestOf) : []));
+        if (!Array.isArray(answer.requests)) throw new MercuryError('unknown', { status: 200 });
+        out.push(...answer.requests.map(requestOf));
         startAfter = answer.page && answer.page.nextPage ? String(answer.page.nextPage) : null;
-        if (!startAfter) break;
+        if (!startAfter) return out;
       }
-      return out;
+      throw new MercuryError('unknown', { status: 200, code: 'incomplete' });
     },
 
-    // Transactions of the account. `requestId` asks Mercury for the one an approval request made.
+    // Transactions of the account, every page (offset), or an error when they cannot all be read. `requestId` asks
+    // Mercury for the one an approval request made; `start` bounds the window (Mercury defaults to the last 30 days).
     async listTransactions({ requestId = null, start = null, end = null } = {}) {
       if (!config) throw new MercuryError('not_configured');
-      const answer = await send('GET', `/account/${encodeURIComponent(config.accountId)}/transactions`, {
-        query: { requestId, start, end, limit: PAGE_LIMIT, order: 'desc' },
-      });
-      return Array.isArray(answer.transactions) ? answer.transactions.map(transactionOf) : [];
+      const out = [];
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const answer = await send('GET', `/account/${encodeURIComponent(config.accountId)}/transactions`, {
+          query: { requestId, start, end, limit: PAGE_LIMIT, offset: out.length, order: 'desc' },
+        });
+        if (!Array.isArray(answer.transactions)) throw new MercuryError('unknown', { status: 200 });
+        out.push(...answer.transactions.map(transactionOf));
+        const total = Number(answer.total);
+        const more = Number.isFinite(total) ? out.length < total : answer.transactions.length >= PAGE_LIMIT;
+        if (!more || answer.transactions.length === 0) return out;
+      }
+      throw new MercuryError('unknown', { status: 200, code: 'incomplete' });
     },
 
     // The payee's name and status only. The full answer holds account and routing numbers: dropped here.

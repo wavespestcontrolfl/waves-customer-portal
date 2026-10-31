@@ -476,6 +476,15 @@ describe('Mercury paychecks', () => {
     await screen.findByText('Recorded a paper check for Sample Alpha.');
   });
 
+  it('Send again says so when Mercury did not take the new request', async () => {
+    writeReply = () => reply({ result: { outcome: 'failed' }, run: current });
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));
+    fireEvent.click(view.getByRole('button', { name: 'Send again for Sample Alpha' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Confirm send again for Sample Alpha' })).getByRole('button', { name: 'Yes, send again' }));
+    await screen.findByText('Mercury did not take the new request for Sample Alpha. Look at the payment below.');
+    expect(screen.queryByText(/Approve it in the Mercury app/)).toBeNull();
+  });
+
   it('shows the server message when an action is refused', async () => {
     writeReply = () => reply({ error: 'Confirm that nothing is waiting in Mercury first.' }, false, 409);
     const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));

@@ -209,9 +209,15 @@ function MercuryCell({ call, check, onSaved }) {
   async function run(path, body, done) {
     setBusy(true); setError('');
     try {
-      await call(path, { method: 'POST', body });
+      const data = await call(path, { method: 'POST', body });
       setMode(null);
-      onSaved(done);
+      // A send-again can answer 200 and still not have reached Mercury: say what happened.
+      const outcome = data && data.result && data.result.outcome;
+      if (outcome === 'failed' || outcome === 'unknown') {
+        onSaved(outcome === 'failed'
+          ? `Mercury did not take the new request for ${check.name}. Look at the payment below.`
+          : `We cannot tell if Mercury got the new request for ${check.name}. Look in Mercury before you send again.`);
+      } else onSaved(done);
     } catch (failure) { setError(failure.message); }
     setBusy(false);
   }
@@ -352,7 +358,7 @@ function SendToMercury({ call, run, onChanged, onMessage }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const info = run.mercury;
-  if (!info || !info.payEnabled) return null;
+  if (run.status !== 'finalized' || !info || !info.payEnabled) return null;
 
   async function openConfirm() {
     setBusy(true); setError(''); setResults(null);
@@ -495,7 +501,7 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
       {run.status !== 'voided' && run.checks.length > 0 && <Button variant="secondary" disabled={busy} onClick={exportCsv}>Export CSV</Button>}
     </div>}
 
-    {isFinal && <SendToMercury call={call} run={run} onChanged={onChanged} onMessage={onMessage} />}
+    <SendToMercury call={call} run={run} onChanged={onChanged} onMessage={onMessage} />
 
     {stubFor && <StubDialog call={call} check={stubFor} onClose={() => setStubFor(null)} />}
   </Card>;

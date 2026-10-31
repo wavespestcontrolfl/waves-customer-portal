@@ -135,6 +135,23 @@ describe('reads', () => {
     expect(fetchImpl.calls[3].url).toContain('requestId=r1');
   });
 
+  test('a list that cannot be read in full is an error, never a short list', async () => {
+    const page = (id) => answer(200, { requests: [{ requestId: id, status: 'approved', amount: 1 }], page: { nextPage: id } });
+    const endless = createClient({ fetchImpl: fakeFetch(page('a'), page('b'), page('c'), page('d'), page('e')), env });
+    await expect(endless.listRequests()).rejects.toMatchObject({ kind: 'unknown', code: 'incomplete' });
+    await expect(createClient({ fetchImpl: fakeFetch(answer(200, { page: {} })), env }).listRequests()).rejects.toMatchObject({ kind: 'unknown' });
+    await expect(createClient({ fetchImpl: fakeFetch(answer(200, { total: 1 })), env }).listTransactions()).rejects.toMatchObject({ kind: 'unknown' });
+    // A second page of transactions is fetched by offset until the total is reached.
+    const tx = (id) => ({ id, status: 'sent', amount: -1 });
+    const fetchImpl = fakeFetch(answer(200, { total: 3, transactions: [tx('1'), tx('2')] }), answer(200, { total: 3, transactions: [tx('3')] }));
+    expect((await createClient({ fetchImpl, env }).listTransactions({ start: '2026-09-01' })).map((t) => t.id)).toEqual(['1', '2', '3']);
+    expect(fetchImpl.calls[1].url).toContain('offset=2');
+    expect(fetchImpl.calls[0].url).toContain('start=2026-09-01');
+    // A total that is never reached is incomplete.
+    const never = fakeFetch(answer(200, { total: 99999, transactions: [tx('1')] }));
+    await expect(createClient({ fetchImpl: never, env }).listTransactions()).rejects.toMatchObject({ code: 'incomplete' });
+  });
+
   test('getRecipient returns the name and status only, never numbers', async () => {
     const fetchImpl = fakeFetch(answer(200, {
       id: RECIPIENT, name: 'Sample Employee', status: 'active',

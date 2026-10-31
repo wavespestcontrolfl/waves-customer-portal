@@ -128,9 +128,14 @@ async function afterChange(row, result, patch, conn) {
 // ---- One row
 
 async function stepQueued(row, ctx) {
-  if (ctx.now.getTime() - new Date(row.created_at).getTime() < QUEUED_STALE_MS) return false;
-  const patch = { state: 'unknown', error: 'The server stopped before Mercury answered. The request may or may not have reached it.' };
-  return applyPatch(ctx.conn, row, patch, ctx.now);
+  // Judged on updated_at, which a send touches right before it asks Mercury (dispatch claims the row the same way), so a
+  // row being sent now is never taken, and a row taken here is never sent afterwards.
+  const cutoff = new Date(ctx.now.getTime() - QUEUED_STALE_MS);
+  const changed = await ctx.conn('payroll_payments').where({ id: row.id, state: 'queued' }).where('updated_at', '<', cutoff).update({
+    state: 'unknown', updated_at: ctx.now, last_polled_at: ctx.now,
+    error: 'The server stopped before Mercury answered. The request may or may not have reached it.',
+  });
+  return Number(changed) > 0;
 }
 
 async function stepRequested(row, ctx) {
@@ -149,7 +154,7 @@ async function maybeRingPendingNoon(row, ctx) {
 }
 
 async function stepApproved(row, ctx) {
-  let transactions = await ctx.client.listTransactions({ requestId: row.mercury_request_id });
+  let transactions = await ctx.client.listTransactions({ requestId: row.mercury_request_id, start: etDateString(new Date(row.created_at)) });
   let tx = transactionFor(row, transactions);
   if (!tx) {
     transactions = await ctx.client.listTransactions({ start: etDateString(new Date(row.created_at)) });
@@ -162,7 +167,8 @@ async function stepApproved(row, ctx) {
 }
 
 async function stepSent(row, ctx) {
-  const transactions = await ctx.client.listTransactions({ requestId: row.mercury_request_id });
+  // From the day the request was made: Mercury's own default is the last 30 days, short of the 60-day watch.
+  const transactions = await ctx.client.listTransactions({ requestId: row.mercury_request_id, start: etDateString(new Date(row.created_at)) });
   const result = patchForSentReread(row, transactionFor(row, transactions));
   const changed = await applyPatch(ctx.conn, row, result.patch, ctx.now);
   if (changed && (result.patch.state || result.patch.posted_on)) await afterChange(row, result, resolveNow(result.patch, ctx.now), ctx.conn);

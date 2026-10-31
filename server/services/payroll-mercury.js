@@ -186,6 +186,13 @@ async function insertQueued(trx, { check, recipientId, accountId, actorId }) {
 
 // POST the request for a queued row and record what came back. A lost answer is `unknown`: never sent again here.
 async function dispatch(row, client, conn = db) {
+  // Claim the row first, in one conditional write: the poller turns a queued row that sat too long into `unknown`, and
+  // an owner may then start a new attempt. A row that is no longer queued is never sent.
+  let claimed = 0;
+  try {
+    claimed = Number(await conn('payroll_payments').where({ id: row.id, state: 'queued' }).update({ updated_at: conn.fn.now() }));
+  } catch { claimed = 0; }
+  if (!claimed) return { state: 'unknown', error: 'This request was not sent: it waited too long. Check Mercury before you send again.' };
   let patch;
   try {
     const answer = await client.requestSendMoney({
@@ -274,12 +281,13 @@ async function unpaidPayrollTaxCents(conn) {
   return rows.reduce((sum, row) => sum + Math.round(Number(row.amount_due || 0) * 100), 0);
 }
 
-async function fundingWarning(conn, client, { payrollCents, ownRequestIds }) {
+async function fundingWarning(conn, client, { payrollCents }) {
   try {
     const [{ availableCents }, requests, taxCents] = await Promise.all([
       client.getBalance(), client.listRequests({ status: 'pendingApproval' }), unpaidPayrollTaxCents(conn),
     ]);
-    const otherCents = requests.filter((r) => !ownRequestIds.has(r.requestId)).reduce((sum, r) => sum + r.amountCents, 0);
+    // Every open request counts once, this run's earlier ones too: the checks still to send are not in Mercury yet.
+    const otherCents = requests.reduce((sum, r) => sum + r.amountCents, 0);
     const need = payrollCents + otherCents + taxCents;
     return {
       kind: 'funding', short: availableCents < need, availableCents, payrollCents, otherRequestsCents: otherCents, taxCents, needCents: need,
@@ -316,11 +324,9 @@ async function sendPreview(runId, { client = createClient(), conn = db, now = ne
   if (!run) throw new PayrollError(404, 'Pay run not found.');
   if (run.status !== 'finalized') throw new PayrollError(409, 'Finalize the pay run first.');
   const plan = await planSend(conn, runId);
-  const ownRequestIds = new Set((await conn('payroll_payments as p').join('payroll_checks as c', 'c.id', 'p.check_id')
-    .where('c.run_id', runId).whereNotNull('p.mercury_request_id').select('p.mercury_request_id')).map((r) => r.mercury_request_id));
   const payrollCents = plan.eligible.reduce((sum, item) => sum + item.netCents, 0);
   const by = approveBy(run.pay_date);
-  const [funding, key] = await Promise.all([fundingWarning(conn, client, { payrollCents, ownRequestIds }), keyWarning(conn, now)]);
+  const [funding, key] = await Promise.all([fundingWarning(conn, client, { payrollCents }), keyWarning(conn, now)]);
   return {
     runId,
     payDate: run.pay_date,

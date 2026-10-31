@@ -223,6 +223,26 @@ postgres('payroll Mercury paychecks', () => {
       expect(await payments(first.check_id)).toHaveLength(2);
     });
 
+    it('a row the poller took as unknown while it waited is never sent afterwards', async () => {
+      const { run, check } = await bankRun(['Sample Alpha', 'Sample Beta']);
+      const client = fakeClient();
+      let first = true;
+      client.requestSendMoney.mockImplementation(async (body) => {
+        if (first) {
+          first = false;
+          // While the first request is out, the second row has waited past the stale limit and the poller takes it.
+          await trx('payroll_payments').where({ state: 'queued' }).whereNot({ note: body.note }).update({ updated_at: new Date(Date.now() - 10 * 60 * 1000) });
+          await poll(fakeClient());
+        }
+        return { requestId: `req-${body.note}`, status: 'pendingApproval' };
+      });
+      const results = await sendRun(run.id, client);
+      expect(client.requestSendMoney).toHaveBeenCalledTimes(1);
+      expect(results.map((r) => r.outcome).sort()).toEqual(['requested', 'unknown']);
+      const states = [...await payments(check('Sample Alpha').id), ...await payments(check('Sample Beta').id)].map((r) => r.state).sort();
+      expect(states).toEqual(['requested', 'unknown']);
+    });
+
     it('a lost answer is unknown, and sending the run again makes no second request', async () => {
       const { run, check } = await bankRun();
       const client = fakeClient();
@@ -701,7 +721,8 @@ postgres('payroll Mercury paychecks', () => {
       const id = randomUUID();
       await trx('payroll_payments').insert({
         id, check_id: ctx.check('Sample Alpha').id, attempt: 1, state: 'queued', idempotency_key: randomUUID(), note: `waves-pay:${id}`,
-        amount_cents: 100, recipient_id: 'r', account_id: ACCOUNT, created_at: new Date(NOW.getTime() - 10 * 60 * 1000),
+        amount_cents: 100, recipient_id: 'r', account_id: ACCOUNT,
+        created_at: new Date(NOW.getTime() - 10 * 60 * 1000), updated_at: new Date(NOW.getTime() - 10 * 60 * 1000),
       });
       const client = fakeClient();
       await poll(client, NOW);
@@ -888,13 +909,18 @@ postgres('payroll Mercury paychecks', () => {
       expect((await preview(run.id, client)).funding.short).toBe(false);
     });
 
-    it('funding: our own open requests are not counted twice, and a failed balance read says so without blocking', async () => {
-      const { run } = await bankRun();
+    it('funding: this run\'s earlier open requests count once, and a failed balance read says so without blocking', async () => {
+      const { run } = await bankRun(['Sample Alpha', 'Sample Beta']);
+      // Beta has no recipient id yet, so only Alpha is sent; Beta is added afterwards.
+      const beta = await trx('technicians').where({ name: 'Sample Beta' }).first();
+      await trx('technicians').where({ id: beta.id }).update({ mercury_recipient_id: null });
       const client = fakeClient();
       await sendRun(run.id, client);
       const [row] = await trx('payroll_payments').select('*');
+      await trx('technicians').where({ id: beta.id }).update({ mercury_recipient_id: randomUUID() });
       client.listRequests.mockResolvedValue([{ requestId: row.mercury_request_id, status: 'pendingApproval', amountCents: Number(row.amount_cents) }]);
-      expect((await preview(run.id, client)).funding.otherRequestsCents).toBe(0);
+      const betaNet = run.checks.find((c) => c.name === 'Sample Beta').netCents;
+      expect((await preview(run.id, client)).funding).toMatchObject({ payrollCents: betaNet, otherRequestsCents: Number(row.amount_cents), needCents: betaNet + Number(row.amount_cents) });
       client.getBalance.mockRejectedValue(new MercuryError('unknown'));
       expect((await preview(run.id, client)).funding).toMatchObject({ short: null, text: expect.stringMatching(/Could not read/) });
     });
