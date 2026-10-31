@@ -827,6 +827,19 @@ postgres('payroll Mercury paychecks', () => {
       expect(bells.mock.calls.map(([event]) => event)).toContain('month_mismatch');
     });
 
+    it('a month-mismatch bell that failed to write is raised again from the saved posting date', async () => {
+      const ctx = await sent();
+      const row = await ctx.row();
+      await setState(row.id, { state: 'sent', resolved_at: NOW, posted_on: '2026-10-01', last_polled_at: NOW });
+      const bells = quietBells();
+      await poll(ctx.client, NOW);
+      expect(bells.mock.calls.map(([event]) => event)).toContain('month_mismatch');
+      bells.mockClear();
+      await setState(row.id, { posted_on: '2026-09-24' });
+      await poll(ctx.client, NOW);
+      expect(bells.mock.calls.map(([event]) => event)).not.toContain('month_mismatch');
+    });
+
     it('sent: read once a day for 60 days; a failed, reversed or refunded transaction becomes returned', async () => {
       const bells = quietBells();
       const ctx = await sent();

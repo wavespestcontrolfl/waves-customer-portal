@@ -250,6 +250,15 @@ async function reraiseTerminalBells(conn, now) {
     .limit(50)
     .select('p.*', 'c.employee_name', conn.raw("to_char(c.pay_date, 'YYYY-MM-DD') as pay_date"));
   for (const row of rows) await alerts.raisePaymentAlert(row.state, row, { conn });
+  // A sent payment that posted in another month than its pay date: the posting date is saved before the bell, so the
+  // bell is also rebuilt from the saved date.
+  const sent = await conn('payroll_payments as p').join('payroll_checks as c', 'c.id', 'p.check_id')
+    .where('p.state', 'sent').whereNotNull('p.posted_on')
+    .where('p.resolved_at', '>', new Date(now.getTime() - TERMINAL_BELL_WINDOW_MS))
+    .whereRaw("to_char(p.posted_on, 'YYYY-MM') <> to_char(c.pay_date, 'YYYY-MM')")
+    .limit(50)
+    .select('p.*', 'c.employee_name', conn.raw("to_char(c.pay_date, 'YYYY-MM-DD') as pay_date"));
+  for (const row of sent) await alerts.raisePaymentAlert('month_mismatch', row, { conn });
 }
 
 // Reads each due row once. Stops at the first refused key. Returns { read, changed, failed, refused, answered }.
