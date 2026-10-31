@@ -1164,7 +1164,7 @@ describe('boundary inputs and holds under the lock (Codex r3)', () => {
     seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), visitRow('pest_control')] });
     const entry = await planScopedWindDown('c1', ['lawn_care']);
     const approved = scopedPricingFingerprint(entry);
-    expect(approved).toMatch(/\|tierbefore=Silver\|mode=per_application$/);
+    expect(approved).toMatch(/\|tierbefore=Silver\|mode=per_application\|templates=$/);
     // No priced rows (no per-app prices) → tier/monthly/rates/perapp identical…
     mockState.tables.scheduled_services = [visitRow('pest_control')];
     mockState.tables.customers[0].billing_mode = 'monthly_membership';
@@ -1364,9 +1364,53 @@ describe('per-application tier drop reprices the series price template', () => {
     }
   });
 
-  test('the approval fingerprint does not change with the template step', async () => {
+  test('the plan carries template rows and skips, and the fingerprint carries the templates part', async () => {
     seed({ customers: [perAppCustomer()], visits: [lawn(), pestRoot({ estimated_price: 115.2 }), pestChild()] });
     const entry = await planScopedWindDown('c1', ['lawn_care']);
-    expect(scopedPricingFingerprint(entry)).toBe(`tier=Bronze|monthly=|rates=pest_control:null:null|perapp=child-pest:115.2:128|tierbefore=Silver|mode=per_application`);
+    expect(entry.templateRows).toEqual([{ rootId: 'root-pest', family: 'pest_control', field: 'estimated_price', source: 'own', before: 115.2, after: 128 }]);
+    expect(entry.templateSkips).toEqual([]);
+    expect(scopedPricingFingerprint(entry)).toBe('tier=Bronze|monthly=|rates=pest_control:null:null|perapp=child-pest:115.2:128|tierbefore=Silver|mode=per_application|templates=root-pest:estimated_price:115.2:128');
+    // Planning is read-only and quiet: nothing written, nothing warned.
+    expect(rowOf('root-pest').recurring_template_overrides).toBeUndefined();
+    seed({ customers: [perAppCustomer()], visits: [lawn(), pestRoot({ estimated_price: 115.2, recurring_template_overrides: { anchored_split_per_visit: 115.2 } }), pestChild()] });
+    const marker = await planScopedWindDown('c1', ['lawn_care']);
+    expect(marker.templateRows).toEqual([{ rootId: 'root-pest', family: 'pest_control', field: 'anchored_split_per_visit', source: 'marker', before: 115.2, after: 128 }]);
+    seed({ customers: [perAppCustomer()], visits: [lawn(), pestRoot({ estimated_price: 115.2, discount_type: 'percentage' }), pestChild()] });
+    const skipped = await planScopedWindDown('c1', ['lawn_care']);
+    expect(skipped.templateRows).toEqual([]);
+    expect(skipped.templateSkips).toEqual([{ rootId: 'root-pest', family: 'pest_control', reason: 'discount field discount_type' }]);
+    // No template part content when nothing changes; the part is still present so both strings stay one shape.
+    expect(scopedPricingFingerprint(skipped)).toMatch(/\|templates=$/);
+  });
+
+  test('a template edited after approval fails the per-root compare-and-set and aborts the whole wind-down', async () => {
+    seed({ customers: [perAppCustomer()], visits: [lawn(), pestRoot({ estimated_price: 115.2, recurring_template_overrides: { estimated_price: 100 } }), pestChild()] });
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    expect(entry.templateRows).toEqual([{ rootId: 'root-pest', family: 'pest_control', field: 'estimated_price', source: 'override', before: 100, after: 111.11 }]);
+    const approved = scopedPricingFingerprint(entry);
+    mockState.tables.scheduled_services = mockState.tables.scheduled_services.filter((r) => r.id !== 'v-lawn');
+    // An operator edits the override between approval and commit: the boundary
+    // re-plan sees a different fingerprint and refuses with scoped_pricing_changed.
+    rowOf('root-pest').recurring_template_overrides = { estimated_price: 120 };
+    await expect(applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: approved }))
+      .rejects.toMatchObject({ code: 'scoped_pricing_changed' });
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
+    expect(rowOf('child-pest').estimated_price).toBe(115.2);
+    expect(overridesOf('root-pest')).toEqual({ estimated_price: 120 });
+    // The same edit landing AFTER the boundary re-plan (harness path, plan applied
+    // as given) trips the row-locked CAS and throws, leaving the tier alone.
+    await expect(applyScopedWindDown('c1', entry, { requestId: 'req-1' })).rejects.toThrow(/series template CAS failed/);
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
+  });
+
+  test('a root with the right current value is re-read FOR UPDATE and written', async () => {
+    seed({ customers: [perAppCustomer()], visits: [lawn(), pestRoot({ estimated_price: 115.2 }), pestChild()] });
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    mockState.forUpdate = 0;
+    await applyScopedWindDown('c1', entry, { requestId: 'req-1' });
+    expect(mockState.forUpdate).toBeGreaterThanOrEqual(2); // customers row + the root
+    expect(overridesOf('root-pest')).toEqual({ estimated_price: 128 });
   });
 });

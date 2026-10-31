@@ -395,6 +395,11 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFee
     perApp: impact && Array.isArray(impact.perAppChanges)
       ? impact.perAppChanges.map((r) => `${r.id}:${r.before}:${r.after}`).sort()
       : null,
+    // The series price template future visits bill from — approved per root
+    // and field; an edit between preview and commit must trip preview_changed.
+    templates: impact && Array.isArray(impact.templateChanges)
+      ? require('./cancellation-resolution/template-keys').scopedTemplateKeys(impact.templateChanges)
+      : null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(facts)).digest('hex');
 }
@@ -1839,6 +1844,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         // tier or billing-mode edit during the sweep must be re-approved.
         `tierbefore=${liveImpact.tierBefore ?? ''}`,
         `mode=${liveImpact.billingMode ?? ''}`,
+        // The ONE formatter the processor's scopedPricingFingerprint uses.
+        require('./cancellation-resolution/template-keys').scopedTemplatesPart(liveImpact.templateChanges),
       ].join('|');
     }
   }
