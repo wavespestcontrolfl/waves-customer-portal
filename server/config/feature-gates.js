@@ -165,6 +165,7 @@
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; exactly 'live' (build 4, owner "DO THIS NOW" 2026-10-30) = record AND pick: /book offers, the phone booking recheck, the after-call booking, the office Auto choice, the estimate time offers and the estimate accept send a mapped line's new work to its home technician, else its gap technician; a line with no technician set keeps today's choice. Anything else, including 'true', = off, no resolver call and no query. Shadow never changes a booking; neither value sends anything to a customer or staff member.)
  *   GATE_TERRITORY_ROUTING=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page: each technician has a territory, drawn as a ZIP list in territory_zips. On, the service-line map (GATE_SERVICE_LINE_MAP) lays the territory over a pest, mosquito, rodent or termite / WDO line: the technician who owns the visit's ZIP is that line's home technician, and the line's own home (else gap) technician covers gaps. Lawn / tree & shrub keeps the line map. The ZIP comes from the visit's ZIP, else its map position (Census ZIP shapes), else the customer's row. A ZIP with no territory technician adds no rule. It acts only where the line map acts: shadow rows show it under 'shadow', picks follow it under 'live'. Strict opt-in: exactly 'true', read at call time via territoryRoutingLive(). Ships DARK; off = the line map exactly as before, no territory query. Sends nothing to a customer.)
  *   GATE_TERRITORY_NIGHT_RUN=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page, build 7: the auto-dispatch night run gives an UNASSIGNED pest, mosquito, rodent or termite / WDO visit only to the technician who owns the visit's ZIP (territory_zips): every other technician's slot is dropped as a candidate (drops.other_territory), so with no slot for that technician the visit keeps its place. The ZIP comes from the visit's service ZIP, else its map position, else the customer row. A visit with a technician, a lawn / tree & shrub visit, or a ZIP with no territory technician adds no rule. Strict opt-in: exactly 'true', read at call time via territoryNightRunLive(). Ships DARK; off = the night run byte-identical, no territory query. Sends nothing to a customer.)
+ *   GATE_TERRITORY_READOUT=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page, build 3: the Team tab shows a Territories card, stops a week per technician and area, booked over the next 4 weeks and done over the last 4, so the re-cut rule is a number you see. The area is the visit's service ZIP, else its customer's ZIP, through territory_zips. Read only. Strict opt-in: exactly 'true', read at call time via territoryReadoutLive(). Ships DARK; off = the roster response carries no territoryReadoutEnabled flag and GET /api/admin/timetracking/territory-readout answers 404. Sends nothing.)
  *   GATE_UNASSIGNED_VISIT_GUARD=true (owner 2026-10-25, second technician starts early 2027: an office visit must not silently land with no technician. On, the office create modal's "Auto" technician choice picks a real technician: the one technician assignable that day (active, field-dispatchable, not off that day or absent, not Off for the service category), or, when several qualify, the existing scheduling pick when that is active; otherwise the visit is saved unassigned and the response and modal say so (the old tech-matcher path never existed, so Auto always saved it unassigned). A daily 6:10 PM ET check also reports timed visits tomorrow through 3 days out that have no technician as one standing Schedule bell (rings when a new visit joins, clears at zero). Strict opt-in: exactly 'true', read at call time via unassignedVisitGuardLive(). Ships DARK; off = Auto behaves exactly as before and the check does nothing, no query. Sends nothing to a customer.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
@@ -5024,6 +5025,9 @@ const gates = {
   // service-line map. Registered for logGateStatus only; consumers read territoryRoutingLive() at
   // CALL time. Kill switch: unset.
   territoryRouting: process.env.GATE_TERRITORY_ROUTING === 'true',
+  // Territories by ZIP, build 3 (owner 2026-10-30): the Team tab's territory read-out. Registered for
+  // logGateStatus only; consumers read territoryReadoutLive() at CALL time. Kill switch: unset.
+  territoryReadout: process.env.GATE_TERRITORY_READOUT === 'true',
 
   // Territories by ZIP, build 7 (owner 2026-10-30): the night run gives an unassigned pest /
   // termite visit only to its ZIP's territory technician. Registered for logGateStatus only;
@@ -7109,6 +7113,13 @@ function territoryNightRunLive() {
   return process.env.GATE_TERRITORY_NIGHT_RUN === 'true';
 }
 
+// GATE_TERRITORY_READOUT read at CALL time - strict `=== 'true'`. On: the Team tab's Territories card
+// (routes/admin-timetracking.js GET /territory-readout): stops a week per technician and area. Read
+// only. Off = no roster flag and the route answers 404.
+function territoryReadoutLive() {
+  return process.env.GATE_TERRITORY_READOUT === 'true';
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -8713,6 +8724,7 @@ module.exports.serviceLineMapMode = serviceLineMapMode;
 module.exports.unassignedVisitGuardLive = unassignedVisitGuardLive;
 module.exports.territoryRoutingLive = territoryRoutingLive;
 module.exports.territoryNightRunLive = territoryNightRunLive;
+module.exports.territoryReadoutLive = territoryReadoutLive;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
 module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
 module.exports.autoDispatchKeepTechLive = autoDispatchKeepTechLive;
