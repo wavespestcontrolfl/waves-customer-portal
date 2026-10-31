@@ -1,7 +1,7 @@
 /**
  * TechNoticeFeed
  *
- * Polls /api/tech/notifications every 10s and renders:
+ * Polls /api/tech/notifications every 10s while the page is visible and renders:
  *   - a visit card for `visit_assigned` / `visit_unassigned` /
  *     `visit_rescheduled` / `visit_cancelled` (tech-visit-notifications.js) —
  *     no auto-dismiss: it waits until the tech taps "Got it"
@@ -46,6 +46,7 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
 import { useTechBasePath } from './techBasePath';
 import { formatETDateOnly } from '../../lib/timezone';
 
@@ -193,11 +194,12 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
     }
   }, []);
 
-  useEffect(() => {
-    poll();
-    const id = setInterval(poll, POLL_MS);
-    return () => clearInterval(id);
-  }, [poll]);
+  // One read on mount. After that the shared hook reads every POLL_MS only while
+  // the page is visible and online, and once at once when the tech comes back
+  // (tab shown, window focused, app resumed). A hidden tab or a phone in a
+  // pocket makes no reads.
+  useEffect(() => { poll(); }, [poll]);
+  useVisiblePageRefresh(poll, { intervalMs: POLL_MS });
 
   // Storm cards are capped so a burst of alerts can never bury the home
   // screen: one card per stop (newest wins when the sweep re-alerts), at
