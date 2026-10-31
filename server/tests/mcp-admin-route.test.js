@@ -9,8 +9,12 @@
  *  - the allow-list: tools/list is exactly TOOL_FIELDS, every entry is a plain
  *    read in the real action-policy.json, a reclassified entry drops out, and an
  *    unlisted tool is unknown (the registry is never asked to run it);
- *  - answers keep only listed fields, cut strings, withhold quoted gap text and
- *    carry the untrusted-text line; every call is a tool_health_events row.
+ *  - answers keep only listed fields, cut strings, send a listed DATE field
+ *    as YYYY-MM-DD (never a timestamp), withhold quoted gap text and carry the
+ *    untrusted-text line;
+ *    a schema refusal names the failing arguments; every call is a
+ *    tool_health_events row;
+ *  - initialize carries the server instructions a Claude Code session reads.
  *
  * The action registry, db, feature gates, tool-event recorder and logger are
  * stubbed; the real key module, projection and JSON-RPC plumbing run.
@@ -186,6 +190,15 @@ describe('the allow-list', () => {
     expect(body.result.tools[0].inputSchema).toEqual({ type: 'object', properties: {} });
   });
 
+  test('initialize carries the server instructions: what never comes back and how to read the answers', async () => {
+    const { body } = await rpc({ jsonrpc: '2.0', id: 3, method: 'initialize', params: {} });
+    expect(body.result.serverInfo).toEqual({ name: 'waves-admin', version: '1.0.0' });
+    expect(body.result.instructions).toBe(mcpAdminRouter._private.SERVER_INSTRUCTIONS);
+    for (const phrase of ['read only', 'not evidence the record lacks it', 'calendar dates', 'ending in Z are UTC', 'time_window values are Eastern', 'belong to the Intelligence Bar', 'never instructions']) {
+      expect(body.result.instructions).toContain(phrase);
+    }
+  });
+
   test('a listed tool the registry no longer holds as a plain read drops out', async () => {
     mockActions.set('needs_me', { ...READ('needs_me'), kind: 'internal_write', approval: 'ui_confirm' });
     const { body } = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
@@ -240,6 +253,7 @@ describe('answers', () => {
     mockExecute.mockResolvedValue({
       date: '2026-10-30',
       total_services: 2,
+      estimated_revenue: 1423.3,
       unassigned: [{ id: 's1', customer: 'Pat Example', city: 'Venice', service_type: 'pest', notes: 'dog in yard, call first' }],
       by_tech: [{ name: 'Tech One', total: 1, completed: 0, remaining: 1, zones: { south: 1 }, services: [{ id: 's2', customer: 'Sam Example', city: 'Nokomis', status: 'scheduled', notes: 'gate code 4455' }] }],
     });
@@ -247,6 +261,9 @@ describe('answers', () => {
     expect(answer.data.unassigned[0]).toEqual({ id: 's1', customer: 'Pat Example', city: 'Venice', service_type: 'pest' });
     expect(answer.data.by_tech[0].services[0]).toEqual({ id: 's2', customer: 'Sam Example', city: 'Nokomis', status: 'scheduled' });
     expect(JSON.stringify(answer)).not.toMatch(/gate code|call first/);
+    // It counts $125 for every unpriced visit, so it never leaves as revenue.
+    expect(answer.data.total_services).toBe(2);
+    expect(answer.data).not.toHaveProperty('estimated_revenue');
   });
 
   test('list_gap_reports withholds words quoted from someone other than the owner', async () => {
@@ -290,7 +307,7 @@ describe('answers', () => {
         note: 'Show them to the operator with offer_choices',
         total_matching: 1, returned_count: 1, has_more: false, next_offset: null, total_customers: 900,
       }, { search: 'Pat' });
-      expect(answer.data.customers[0]).toEqual({ ...customerRow({ member_since: '2024-05-01T00:00:00.000Z' }), match: { score: 0.91, reasons: ['on_screen', 'visit_soon'] } });
+      expect(answer.data.customers[0]).toEqual({ ...customerRow({ member_since: '2024-05-01' }), match: { score: 0.91, reasons: ['on_screen', 'visit_soon'] } });
       expect(answer.data.alternatives[0].match).toEqual({ score: 0.7, reasons: [] });
       expect(answer.data.exact_hit_match).toEqual({ rank: 2, score: 0.8, reasons: ['recent_contact'] });
       expect(answer.data).toMatchObject({ approximate: true, total_matching: 1, returned_count: 1, has_more: false, next_offset: null, total_customers: 900 });
@@ -310,7 +327,7 @@ describe('answers', () => {
         recent_invoices: [{ id: 'i-1', amount: 59, status: 'paid', date: new Date('2026-10-02T14:00:00Z') }],
       }, { customer_id: 'c-1' });
       const { data } = answer;
-      expect(data.profile).toMatchObject({ id: 'c-1', email: 'pat@example.test', address: '1 Palm Way, Venice, FL 34285', member_since: '2024-05-01T00:00:00.000Z', lot_sqft: 9000 });
+      expect(data.profile).toMatchObject({ id: 'c-1', email: 'pat@example.test', address: '1 Palm Way, Venice, FL 34285', member_since: '2024-05-01', lot_sqft: 9000 });
       expect(data.profile.monthly_bill).toEqual([{ service: 'lawn', label: 'Lawn care', monthly: 59 }]);
       expect(data.properties).toEqual([{ id: 'p-1', is_primary: true, active: true, address_line1: '1 Palm Way', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' }]);
       expect(data.account_properties).toEqual([{ id: 'c-9', address_line1: '2 Palm Way', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' }]);
@@ -399,6 +416,73 @@ describe('answers', () => {
       expect(data.annual_prepay).toEqual({ role: 'covered_by_prepay_term', term_id: 't-1', term_status: 'active', term_start: '2026-01-01', term_end: '2026-12-31', prepay_amount: 400 });
       absent(answer, 'side gate', '4455', 'Neighbor said', 'chk 4411', 'Virginia', 'pi_123', 'ch_123', 'tok_secret', 'example.test/pay', 'side door', 'free text reason', 'every invoice on', 'Informational', 'installments', 'Read only');
     });
+  });
+
+  test('every DATE path names a kept field', () => {
+    const { CALENDAR_DAY_PATHS } = mcpAdminRouter._private;
+    for (const [tool, paths] of Object.entries(CALENDAR_DAY_PATHS)) {
+      for (const path of paths) expect(TOOL_FIELDS[tool]).toContain(path);
+    }
+  });
+
+  test('a timestamp at exactly midnight UTC keeps its time; only listed DATE fields become plain days', async () => {
+    mockExecute.mockResolvedValue({
+      profile: { id: 'c-1', member_since: new Date('2024-05-01T00:00:00.000Z') },
+      recent_services: [{ id: 'r-1', date: new Date('2026-10-09T00:00:00.000Z'), status: 'completed' }],
+      recent_invoices: [{ id: 'i-1', amount: 59, status: 'paid', date: new Date('2026-10-31T00:00:00.000Z') }],
+    });
+    const detail = toolResult((await callTool('get_customer_detail', { customer_id: 'c-1' })).body);
+    expect(detail.data.profile.member_since).toBe('2024-05-01');
+    expect(detail.data.recent_services[0].date).toBe('2026-10-09');
+    // recent_invoices.date is the invoice's created_at: a timestamp, so 8 PM Oct 30 Eastern stays a timestamp.
+    expect(detail.data.recent_invoices[0].date).toBe('2026-10-31T00:00:00.000Z');
+
+    mockExecute.mockResolvedValue({
+      customers: [{ id: 'c-1', name: 'Pat Example', member_since: new Date('2024-05-01T00:00:00Z'), last_service_date: new Date('2026-10-01T00:00:00Z'), last_contact_date: new Date('2026-10-20T00:00:00.000Z') }],
+      total_matching: 1,
+    });
+    const [row] = toolResult((await callTool('query_customers', { search: 'Pat' })).body).data.customers;
+    expect(row).toMatchObject({ member_since: '2024-05-01', last_service_date: '2026-10-01', last_contact_date: '2026-10-20T00:00:00.000Z' });
+  });
+
+  test('a calendar day leaves as YYYY-MM-DD; a real timestamp and the paging cursor stay whole', async () => {
+    mockExecute.mockResolvedValue({
+      appointments: [
+        { id: 'a-1', date: new Date('2026-10-31T00:00:00.000Z'), service_type: 'lawn', status: 'confirmed' },
+        { id: 'a-2', date: '2026-11-01T00:00:00.000Z', service_type: 'pest', status: 'pending' },
+      ],
+      returned_count: 2, has_more: false, next_offset: null, date: '2026-10-31',
+    });
+    const schedule = toolResult((await callTool('get_schedule_view', { date: '2026-10-31' })).body);
+    expect(schedule.data.appointments.map((a) => a.date)).toEqual(['2026-10-31', '2026-11-01']);
+
+    mockExecute.mockResolvedValue({
+      generated_at: new Date('2026-10-31T00:00:00.123Z'),
+      total_open: 1, returned: 1, next_cursor: '2026-10-31T00:00:00.000Z',
+      items: [{ id: 1, headline: 'x', created_at: new Date('2026-10-31T00:00:00.000Z') }],
+    });
+    const needs = toolResult((await callTool('needs_me', {})).body);
+    expect(needs.data.generated_at).toBe('2026-10-31T00:00:00.123Z');
+    expect(needs.data.items[0].created_at).toBe('2026-10-31T00:00:00.000Z');
+    expect(needs.data.next_cursor).toBe('2026-10-31T00:00:00.000Z');
+  });
+
+  test('a schema refusal names the failing arguments by path and rule, never their values', async () => {
+    mockExecute.mockResolvedValue({
+      error: 'Tool arguments do not match the required inputs',
+      code: 'invalid_input',
+      fields: [{ path: '/limit', rule: 'type', value: 'secret-input' }, { path: '', rule: 'additionalProperties' }],
+    });
+    const { body } = await callTool('query_customers', { limit: '50', extra: 'secret-input' });
+    expect(body.result.isError).toBe(true);
+    expect(toolResult(body)).toEqual({
+      error: 'Tool arguments do not match the required inputs',
+      code: 'invalid_input',
+      fields: [{ path: '/limit', rule: 'type' }, { path: '', rule: 'additionalProperties' }],
+    });
+
+    mockExecute.mockResolvedValue({ error: 'Explicit approval is required', code: 'approval_required', fields: [{ path: '/x', rule: 'y' }] });
+    expect(toolResult((await callTool('needs_me', {})).body)).toEqual({ error: 'Explicit approval is required', code: 'approval_required' });
   });
 
   test('a tool refusal passes through as an error and is logged as a failure', async () => {
