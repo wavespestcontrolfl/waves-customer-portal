@@ -285,6 +285,65 @@ describe('POST / — admin create — lawn 9x series pattern', () => {
   });
 });
 
+// Lawn neighborhood day (lawn-area-days.js) on the office New Appointment: a NEW rounds series is placed
+// from its area's anchor, the parent stores it, and the first follow-up keeps 28 days from the visit.
+describe('POST / — admin create — lawn neighborhood day', () => {
+  const { lawnRoundDateFrom } = require('../services/lawn-rounds');
+  const { areaFirstFollowUpDate } = require('../services/lawn-area-days');
+  const PARRISH = '2027-01-12';
+  const withCustomer = (extra) => {
+    // The same row on db and trx: the booking compares the two reads of the customer.
+    const row = { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null, ...extra };
+    for (const conn of [db, trx]) {
+      const base = conn.getMockImplementation();
+      conn.mockImplementation((table) => (table === 'customers' ? chain({ ...row }) : base(table)));
+    }
+  };
+  const dates = () => inserts.map((d) => d.scheduled_date);
+  const areaDates = (base) => [0, 1, 2, 3].map((i) => (i === 1
+    ? areaFirstFollowUpDate(base, lawnRoundDateFrom(PARRISH, base, 1))
+    : lawnRoundDateFrom(PARRISH, base, i)));
+
+  test('an area customer: the parent stores the area anchor, children follow it with the 28-day floor', async () => {
+    gateOn();
+    withCustomer({ zip: '34219', city: 'Parrish' });
+    const { status } = await post(lawnBody);
+    expect(status).toBe(201);
+    expect(dates()).toEqual(areaDates('2099-07-03'));
+    expect(inserts[0].recurring_round_anchor_date).toBe(PARRISH);
+    expect(inserts.slice(1).every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
+    // The Parrish Tuesday in the next round is 25 days out, so the first follow-up is the visit + 28 days.
+    expect(lawnRoundDateFrom(PARRISH, '2099-07-03', 1)).toBe('2099-07-28');
+    expect(dates()[1]).toBe('2099-07-31');
+  });
+
+  test('planner equals write: the dates locked up front are exactly the dates inserted', async () => {
+    gateOn();
+    withCustomer({ zip: '34219', city: 'Parrish' });
+    const { status } = await post(lawnBody);
+    expect(status).toBe(201);
+    const locked = [...new Set(acquireOccupancyLock.mock.calls.map((c) => c[1]))].sort();
+    expect(locked).toEqual([...dates()].sort());
+  });
+
+  test('a customer outside every area is unchanged: own anchor, no stamp', async () => {
+    gateOn();
+    withCustomer({ zip: '34251', city: 'Myakka City' });
+    const { status } = await post(lawnBody);
+    expect(status).toBe(201);
+    expect(dates()).toEqual([0, 1, 2, 3].map((i) => lawnRoundDateFrom('2099-07-03', '2099-07-03', i)));
+    expect(inserts.every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
+  });
+
+  test('gate off: custom/42 is stored as posted and never takes an area anchor', async () => {
+    withCustomer({ zip: '34219', city: 'Parrish' });
+    const off = await post(lawnBody);
+    expect(off.status).toBe(201);
+    expect(inserts.every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
+    expect(dates()).toEqual(['2099-07-03', '2099-08-14', '2099-09-25', '2099-11-06']);
+  });
+});
+
 describe('GET /annual-prepay-preview — lawn 9x draft', () => {
   const gates = require('../config/feature-gates').gates;
   let prepayOnBookWas;

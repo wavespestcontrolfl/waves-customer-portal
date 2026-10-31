@@ -686,6 +686,26 @@ async function spawnRoundPlacement(conn, parentRow, pattern, baseDateStr) {
   return { roundAnchor: areaAnchor || baseDateStr, areaFirstGapFloor: !!areaAnchor };
 }
 
+// Lawn neighborhood day, office New Appointment: the recurrence options of a NEW
+// series ({} unless it is a lawn_rounds_9 series in an area). The parent row does
+// not exist yet, so the service address (the picked property, else the customer)
+// is passed by hand.
+async function createRoundOptions(conn, customerId, bookingProperty, pattern) {
+  const areaAnchor = await newSeriesAreaAnchor(conn, {
+    customer_id: customerId,
+    service_address_zip: bookingProperty?.service_address_zip ?? null,
+    service_address_city: bookingProperty?.service_address_city ?? null,
+  }, pattern);
+  return areaAnchor ? { roundAnchor: areaAnchor, areaFirstGapFloor: true } : {};
+}
+
+// The parent column that stores an area anchor chosen by createRoundOptions.
+function areaAnchorColumns(cols, rOpts) {
+  return cols.recurring_round_anchor_date && rOpts.areaFirstGapFloor
+    ? { recurring_round_anchor_date: rOpts.roundAnchor }
+    : {};
+}
+
 // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the pattern + interval a NEW series is
 // written with. The shared lawnRoundsSeriesPattern decides (residential lawn
 // 9x only); this adds the catalog row's key to the identity when the booking
@@ -9276,7 +9296,14 @@ async function scheduleCreateHandler(req, res, next) {
     const plannedCount = isRecurring
       ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
       : 0;
-    const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
+    // Lawn neighborhood day (lawn-area-days.js): a NEW rounds series is placed from its area's anchor
+    // (the parent stores it below) with the 28-day first follow-up floor. The dates are planned once
+    // here and the insert loop writes exactly these, so plan and write cannot differ.
+    const rOpts = {
+      ...monthAnchorOpts,
+      intervalDays: recurringIntervalDays,
+      ...(isRecurring ? await createRoundOptions(db, customerId, bookingProperty, recurringPattern) : {}),
+    };
     const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
     // B6 (owner ruling 2026-08-27): a customer whose saved property
     // preference names a weekday has said "not weekends" — generated
@@ -9701,6 +9728,7 @@ async function scheduleCreateHandler(req, res, next) {
       if (cols.source_estimate_id && insertLinkId) insertData.source_estimate_id = insertLinkId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
       if (isRecurring) {
+        Object.assign(insertData, areaAnchorColumns(cols, rOpts));
         if (cols.recurring_nth && monthAnchorOpts.nth != null && monthAnchorOpts.nth !== '' && !isNaN(parseInt(monthAnchorOpts.nth))) insertData.recurring_nth = parseInt(monthAnchorOpts.nth);
         if (cols.recurring_weekday && monthAnchorOpts.weekday != null && monthAnchorOpts.weekday !== '' && !isNaN(parseInt(monthAnchorOpts.weekday))) insertData.recurring_weekday = parseInt(monthAnchorOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
