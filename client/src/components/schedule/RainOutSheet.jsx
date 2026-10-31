@@ -771,6 +771,9 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                   >
                     <span>
                       {opt.display}
+                      {opt.driveMinutes != null && (
+                        <span style={{ color: '#71717A', fontWeight: 400 }}>{` · +${opt.driveMinutes} min drive`}</span>
+                      )}
                       {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && reason !== CUSTOM_REASON && (
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
@@ -778,7 +781,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                     {(conflictsFor(opt).length > 0 || opt.rainChance != null || opt.dayAlreadyLate) && (
                       <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
                         {opt.dayAlreadyLate && (
-                          <span data-testid="already-late-tag" style={{ fontSize: 12, fontWeight: 500, color: '#854D0E' }}>already late</span>
+                          <span data-testid="already-late-tag" style={{ fontSize: 14, fontWeight: 500, color: '#854D0E' }}>already late</span>
                         )}
                         {conflictsFor(opt).length > 0 && (
                           <span style={{ fontSize: 14, fontWeight: 500, color: '#B45309' }}>overlaps</span>

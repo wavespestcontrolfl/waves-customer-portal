@@ -348,3 +348,181 @@ describe('Finalized run', () => {
     click.mockRestore();
   });
 });
+
+describe('Mercury paychecks', () => {
+  const pay = (patch = {}) => ({ state: 'none', canPaper: true, canSendAgain: null, ...patch });
+  const info = (patch = {}) => ({ payEnabled: true, configured: true, eligibleCount: 1, missingRecipient: [], canSend: true, ...patch });
+  const mercuryRun = (checks, mercury) => run({
+    status: 'finalized',
+    checks: checks.map(([id, name, patch]) => check({ id, technicianId: `tech-${id}`, name, payMethod: 'bank_transfer', status: 'finalized', ...patch })),
+    ...(mercury ? { mercury } : {}),
+  });
+  const PREVIEW = {
+    eligible: [{ checkId: 'check-a', name: 'Sample Alpha', netCents: 81263 }], skipped: [],
+    funding: { short: true, text: 'Mercury shows $10.00 available. This run needs $812.63: $812.63 in all.' },
+    key: { stale: true, text: 'First payment: check the Mercury key still allows payment requests.' },
+    approveBy: { text: 'Approve in Mercury by Wed, Oct 21 at 5 PM ET so the pay lands on Fri, Oct 23.' },
+  };
+
+  async function openFinal(checks, mercury = info()) {
+    current = mercuryRun(checks, mercury);
+    runs = [listItem({ status: 'finalized' })];
+    render(<PayrollSettings />);
+    const section = await screen.findByRole('region', { name: 'Pay runs' });
+    fireEvent.click(await within(section).findByRole('button', { name: /Open pay run for/ }));
+    return within(await screen.findByLabelText(/Pay run for/));
+  }
+
+  it('shows nothing about Mercury when the server sends no payment (gates off)', async () => {
+    const view = await openFinal([['check-a', 'Sample Alpha', {}]], null);
+    expect(view.queryByRole('columnheader', { name: 'Mercury' })).toBeNull();
+    expect(view.queryByRole('button', { name: 'Send to Mercury' })).toBeNull();
+  });
+
+  it.each([
+    [{ state: 'requested' }, 'Waiting for your approval in Mercury'],
+    [{ state: 'approved' }, 'Approved'],
+    [{ state: 'sent', postedOn: '2026-10-23' }, 'Sent Oct 23, 2026'],
+    [{ state: 'failed', error: 'Mercury refused the request (HTTP 400)' }, 'Failed'],
+    [{ state: 'rejected' }, 'Rejected'],
+    [{ state: 'cancelled' }, 'Cancelled'],
+    [{ state: 'returned' }, 'Returned'],
+    [{ state: 'unknown' }, 'Outcome unknown'],
+    [{ state: 'paper', checkNumber: '1001' }, 'Paid by check #1001'],
+    [{ state: 'none' }, 'Not sent'],
+  ])('shows the chip for %j', async (payment, words) => {
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay(payment) }]], info({ canSend: false }));
+    expect(view.getByRole('columnheader', { name: 'Mercury' })).toBeInTheDocument();
+    expect(view.getByText(words)).toBeInTheDocument();
+    if (payment.error) expect(view.getByText(payment.error)).toBeInTheDocument();
+  });
+
+  it('Send to Mercury shows the three warnings first, sends nothing until confirmed, then reports each check', async () => {
+    writeReply = (path) => reply({ results: [{ checkId: 'check-a', name: 'Sample Alpha', outcome: 'requested' }, { checkId: 'check-b', name: 'Sample Beta', outcome: 'skipped', reason: 'no_recipient' }], run: current });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => (path === '/admin/payroll/runs/run-1/send-preview' ? (calls.push({ path, method: 'GET' }), reply({ preview: PREVIEW })) : base(path, options)));
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay() }]]);
+    fireEvent.click(view.getByRole('button', { name: 'Send to Mercury' }));
+    const confirm = within(await screen.findByRole('group', { name: 'Confirm send to Mercury' }));
+    expect(confirm.getByText(/Nothing is paid until you approve each one in the Mercury app/)).toBeInTheDocument();
+    expect(confirm.getByText(PREVIEW.funding.text)).toBeInTheDocument();
+    expect(confirm.getByText(PREVIEW.key.text)).toBeInTheDocument();
+    expect(confirm.getByText(PREVIEW.approveBy.text)).toBeInTheDocument();
+    expect(writes()).toHaveLength(0);
+    fireEvent.click(confirm.getByRole('button', { name: 'Yes, send to Mercury' }));
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0]).toMatchObject({ path: '/admin/payroll/runs/run-1/send', method: 'POST' });
+    await screen.findByText('Asked Mercury for 1 payment. Approve them in the Mercury app.');
+    const results = within(await screen.findByRole('list', { name: 'Send results' }));
+    expect(results.getByText(/Sample Beta: no Mercury recipient id/)).toBeInTheDocument();
+  });
+
+  it.each([
+    [['unknown'], 'We cannot tell if Mercury got 1 request. Look in Mercury before you send again.'],
+    [['requested', 'unknown', 'unknown'], 'Asked Mercury for 1 payment. Approve them in the Mercury app. We cannot tell if Mercury got 2 requests. Look in Mercury before you send again.'],
+    [['failed'], 'Mercury did not take 1 request. Look at the payments below.'],
+    [['skipped'], 'Nothing was sent to Mercury.'],
+  ])('after Send, %j: never "nothing was sent" when a request may have reached Mercury', async (outcomes, message) => {
+    writeReply = () => reply({ results: outcomes.map((outcome, i) => ({ checkId: `check-${i}`, name: `Sample ${i}`, outcome, ...(outcome === 'skipped' ? { reason: 'no_recipient' } : {}) })), run: current });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => (path.endsWith('/send-preview') ? reply({ preview: PREVIEW }) : base(path, options)));
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay() }]]);
+    fireEvent.click(view.getByRole('button', { name: 'Send to Mercury' }));
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Confirm send to Mercury' })).getByRole('button', { name: 'Yes, send to Mercury' }));
+    await screen.findByText(message);
+  });
+
+  it('can be cancelled at the confirm step without a write, and names who has no recipient id', async () => {
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => (path.endsWith('/send-preview') ? reply({ preview: PREVIEW }) : base(path, options)));
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay() }]], info({ missingRecipient: ['Sample Beta'] }));
+    expect(view.getByText(/No Mercury recipient id yet for Sample Beta/)).toBeInTheDocument();
+    fireEvent.click(view.getByRole('button', { name: 'Send to Mercury' }));
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Confirm send to Mercury' })).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('group', { name: 'Confirm send to Mercury' })).toBeNull();
+    expect(writes()).toHaveLength(0);
+  });
+
+  it('has no Send button when the pay gate is off, or nothing can be sent', async () => {
+    let view = await openFinal([['check-a', 'Sample Alpha', { payment: pay() }]], info({ payEnabled: false }));
+    expect(view.queryByRole('button', { name: 'Send to Mercury' })).toBeNull();
+    cleanup();
+    view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'requested', canPaper: false }) }]], info({ canSend: false, eligibleCount: 0 }));
+    expect(view.queryByRole('button', { name: 'Send to Mercury' })).toBeNull();
+  });
+
+  it('Send again after a failure asks first, then posts', async () => {
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));
+    fireEvent.click(view.getByRole('button', { name: 'Send again for Sample Alpha' }));
+    expect(writes()).toHaveLength(0);
+    fireEvent.click(within(screen.getByRole('group', { name: 'Confirm send again for Sample Alpha' })).getByRole('button', { name: 'Yes, send again' }));
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0]).toMatchObject({ path: '/admin/payroll/checks/check-a/send-again', method: 'POST', body: {} });
+  });
+
+  it('Send again after an unknown outcome needs the "Nothing is waiting in Mercury" box', async () => {
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'unknown', canSendAgain: 'confirm' }) }]], info({ canSend: false }));
+    expect(view.getByText(/Look in Mercury for a request of this amount before you send again/)).toBeInTheDocument();
+    fireEvent.click(view.getByRole('button', { name: 'Send again for Sample Alpha' }));
+    const group = within(screen.getByRole('group', { name: 'Confirm send again for Sample Alpha' }));
+    const go = group.getByRole('button', { name: 'Yes, send again' });
+    expect(go).toBeDisabled();
+    fireEvent.click(group.getByLabelText('Nothing is waiting in Mercury'));
+    expect(go).toBeEnabled();
+    fireEvent.click(go);
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0]).toMatchObject({ path: '/admin/payroll/checks/check-a/send-again', body: { confirmNothingWaiting: true } });
+  });
+
+  it('records a paper check instead, and offers neither action while a payment is open', async () => {
+    let view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'requested', canPaper: false }) }]], info({ canSend: false }));
+    expect(view.queryByRole('button', { name: /Paid by paper check instead/ })).toBeNull();
+    expect(view.queryByRole('button', { name: /Send again/ })).toBeNull();
+    cleanup();
+    view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));
+    fireEvent.click(view.getByRole('button', { name: 'Paid by paper check instead for Sample Alpha' }));
+    const form = within(screen.getByRole('form', { name: 'Paper check for Sample Alpha' }));
+    const save = form.getByRole('button', { name: 'Save paper check' });
+    expect(save).toBeDisabled();
+    fireEvent.change(form.getByLabelText('Paper check number for Sample Alpha'), { target: { value: '2001' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0]).toMatchObject({ path: '/admin/payroll/checks/check-a/paper', method: 'POST', body: { checkNumber: '2001' } });
+    await screen.findByText('Recorded a paper check for Sample Alpha.');
+  });
+
+  it('Send again says so when Mercury did not take the new request', async () => {
+    writeReply = () => reply({ result: { outcome: 'failed' }, run: current });
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));
+    fireEvent.click(view.getByRole('button', { name: 'Send again for Sample Alpha' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Confirm send again for Sample Alpha' })).getByRole('button', { name: 'Yes, send again' }));
+    await screen.findByText('Mercury did not take the new request for Sample Alpha. Look at the payment below.');
+    expect(screen.queryByText(/Approve it in the Mercury app/)).toBeNull();
+  });
+
+  it('an unknown outcome can be linked to the Mercury request by its id', async () => {
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ id: 'pay-1', state: 'unknown', canSendAgain: 'confirm' }) }]], info({ canSend: false }));
+    fireEvent.click(view.getByRole('button', { name: 'Link the Mercury request for Sample Alpha' }));
+    const form = within(screen.getByRole('form', { name: 'Link request for Sample Alpha' }));
+    const save = form.getByRole('button', { name: 'Link request' });
+    expect(save).toBeDisabled();
+    fireEvent.change(form.getByLabelText('Mercury request id for Sample Alpha'), { target: { value: 'req-123' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0]).toMatchObject({ path: '/admin/payroll/payments/pay-1/link-request', method: 'POST', body: { requestId: 'req-123' } });
+    await screen.findByText('Linked the Mercury request for Sample Alpha.');
+  });
+
+  it('offers the link only for an unknown outcome', async () => {
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ id: 'pay-1', state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));
+    expect(view.queryByRole('button', { name: /Link the Mercury request/ })).toBeNull();
+  });
+
+  it('shows the server message when an action is refused', async () => {
+    writeReply = () => reply({ error: 'Confirm that nothing is waiting in Mercury first.' }, false, 409);
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay({ state: 'failed', canSendAgain: 'yes' }) }]], info({ canSend: false }));
+    fireEvent.click(view.getByRole('button', { name: 'Send again for Sample Alpha' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Confirm send again for Sample Alpha' })).getByRole('button', { name: 'Yes, send again' }));
+    await screen.findByText('Confirm that nothing is waiting in Mercury first.');
+  });
+});

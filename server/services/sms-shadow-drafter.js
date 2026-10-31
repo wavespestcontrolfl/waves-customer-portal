@@ -33,6 +33,7 @@ const { renderCompanyFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
 const portalCancelFact = require('./sms-portal-cancel-fact');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
+const promptPatch = require('./sms-prompt-patch');
 const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
 const { etParts } = require('../utils/datetime-et');
 // The canonical "how we accept payment" source — the SAME env-driven reader
@@ -286,7 +287,7 @@ function withVoiceInputTags(base, categoryTags = []) {
   const tags = [...categoryTags, ...voiceInputTags()].sort();
   return tags.length ? `${base}+${tags.join('')}` : base;
 }
-function currentPromptVersion() {
+function currentPromptVersionBase() {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return withVoiceInputTags(PROMPT_VERSION);
   const activeCategoryTags = REAL_ANSWERS_HANDOFF_CATEGORIES
     .filter((c) => gateEnvValue(c.gate))
@@ -302,6 +303,21 @@ function currentPromptVersion() {
     return base;
   }
   return version;
+}
+
+/**
+ * The version a draft generated RIGHT NOW stamps. currentPromptVersionBase() is the identity
+ * from the gates alone; with GATE_SMS_PROMPT_AUTOPROMOTE='true' and an ACTIVE prompt patch the
+ * patch tag joins it (sms-prompt-patch.js), because the patch changes what the drafter
+ * receives. No active patch: identical to the base identity. generateGroundedDraft reads the
+ * patch snapshot ONCE and stamps from that same read; this function is for the other readers
+ * (graduation cohorts, exam coverage, the proposer) that ask what is live.
+ */
+function currentPromptVersion() {
+  const base = currentPromptVersionBase();
+  // The learned-rules block only exists in the real-answers prompt (the v11 prompt never gets one).
+  const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  return promptPatch.resolvePromptPatch({ realAnswersOn, baseVersion: base }).version || base;
 }
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
@@ -4614,7 +4630,7 @@ async function fetchVoiceProfileForDrafter({ dbi = db } = {}) {
   }
 }
 
-function buildSystemPromptWithProfile(voiceProfileText = '') {
+function buildSystemPromptWithProfile(voiceProfileText = '', patchOptions) {
   // v12 REAL ANSWERS: every conditional below resolves to the exact v11
   // literal when the gate is off (see the constant-block comment above
   // PROMPT_VERSION) — gate off is byte-identical. Every branch below is also
@@ -4624,6 +4640,10 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   // 8am/8pm ET boundary, since sms-gratitude-qualification.js hashes and
   // pins the full rendered system prompt.
   const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  // GATE_SMS_PROMPT_AUTOPROMOTE: the one active learned-rules block (or an exam-only candidate
+  // passed in by the sealed exam). block '' and version null when none applies, so the prompt
+  // below is byte-identical to the unpatched one.
+  const patch = promptPatch.resolvePromptPatch({ realAnswersOn, options: patchOptions, baseVersion: currentPromptVersionBase() });
   const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS' : ''}, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
@@ -4737,7 +4757,7 @@ ${handoffBullet}
 - Each intended_actions entry's "type" must be one of: ${INTENDED_ACTION_TYPES.join(', ')}.
 ${attentionBullets}- When CLASSIFIED INTENT is gratitude_reply, the customer may be expressing standalone thanks. Inspect the recent conversation and account flags first. Only when a completed answer/service or payment acknowledgement clearly explains the thanks, and there is no unresolved request, complaint, instruction, booking acceptance or operational question, return exactly the APPROVED GRATITUDE REPLY and intended_actions [{"type":"none"}]. If context is uncertain or anything still needs attention, return reply "". Never add a question, sales offer, review request, promise, sign-off or CTA. Never answer a reaction or continue an exchange after our own courtesy reply. Names mentioned by the customer are addressees, not customer identity. The server independently checks eligibility after a quiet period; this is only a draft.
 - For other intents, if the message is a pure courtesy acknowledgement that warrants NO reply at all (e.g. "Thanks!", a bare "ok" closing the thread), set "reply" to "" and intended_actions to [{"type":"none","note":"no reply warranted"}]. But a short confirmation that answers a question we asked (a "yes" to a proposed time) DOES warrant a reply.
-
+${patch.block}
 Respond with ONLY a JSON object, no prose, no code fences:
 {
   "reply": "the SMS you would send",
@@ -4762,12 +4782,12 @@ Respond with ONLY a JSON object, no prose, no code fences:
       const composed = composeSystemPrompt(base, voiceProfileText);
       // composeSystemPrompt returns the base untouched when sanitization
       // strips every profile line — identity IS the applied signal.
-      if (composed !== base) return { system: composed, applied: true, realAnswersApplied: realAnswersOn };
+      if (composed !== base) return { system: composed, applied: true, realAnswersApplied: realAnswersOn, promptPatchVersion: patch.version };
     } catch (err) {
       logger.warn(`[sms-shadow] voice profile compose failed (${err.message}); drafting on base prompt`);
     }
   }
-  return { system: base, applied: false, realAnswersApplied: realAnswersOn };
+  return { system: base, applied: false, realAnswersApplied: realAnswersOn, promptPatchVersion: patch.version };
 }
 
 function realAnswersAttentionBullets() {
@@ -6032,7 +6052,7 @@ function draftPromptHints({ context, reserviceLaneDecides, reserviceState, inbou
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, promptPatch: presetPromptPatch, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -6044,7 +6064,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const voiceProfile = presetVoiceProfile !== undefined
     ? presetVoiceProfile
     : await fetchVoiceProfileForDrafter();
-  const { system, applied: profileApplied, realAnswersApplied } = buildSystemPromptWithProfile(voiceProfile?.profile_text || '');
+  const { system, applied: profileApplied, realAnswersApplied, promptPatchVersion } = buildSystemPromptWithProfile(voiceProfile?.profile_text || '', { promptPatch: presetPromptPatch });
   // Only the drafts that actually saw the rewritten (real-answers) prompt
   // stamp the bumped version — a base-prompt draft (gate off) keeps v11, the
   // same "applied is the stamped signal" rule the voice profile already
@@ -6054,7 +6074,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // rendered under e.g. "complaints handled" stamps a version distinct from
   // one rendered with complaints still held — the one identity every other
   // consumer (graduation cohorts, sealed-eval exam checks) shares.
-  const promptVersion = realAnswersApplied ? currentPromptVersion() : withVoiceInputTags(PROMPT_VERSION);
+  // promptPatchVersion comes from the SAME patch read that built `system`, so the stamp always
+  // matches the prompt even if the active-patch snapshot refreshes mid-draft.
+  const promptVersion = realAnswersApplied ? (promptPatchVersion || currentPromptVersionBase()) : withVoiceInputTags(PROMPT_VERSION);
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
   // would grade the draft against today's schedule/balance (the exact drift
@@ -7008,6 +7030,7 @@ module.exports = {
   latestVisitFindingParts,
   REAL_ANSWERS_VERSION_FAMILY,
   currentPromptVersion,
+  currentPromptVersionBase,
   VERIFY_ENABLED,
   MAX_REVISIONS,
   SHADOW_STATUS,

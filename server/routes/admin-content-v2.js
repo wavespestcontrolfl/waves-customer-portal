@@ -1064,10 +1064,24 @@ router.post('/schedule-blog/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/content/schedule-social — schedule a new social media post
+// GET /api/admin/content/social-drafts — saved campaign drafts the Calendar can schedule
+router.get('/social-drafts', async (req, res, next) => {
+  try {
+    res.json({ drafts: await ContentScheduler.listSavedSocialDrafts() });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/content/schedule-social — schedule a new social media post,
+// or (with postId) give a saved campaign draft its time so the same row posts
 router.post('/schedule-social', async (req, res, next) => {
   try {
-    const { title, description, link, platforms, scheduledFor, customContent } = req.body;
+    const { postId, title, description, link, platforms, scheduledFor, customContent } = req.body;
+    if (postId) {
+      if (!scheduledFor) return res.status(400).json({ error: 'scheduledFor is required' });
+      assertBlogPostId(postId);
+      const post = await ContentScheduler.scheduleSavedSocialDraft(postId, scheduledFor);
+      return res.json({ success: true, post });
+    }
     if (!title || !scheduledFor) return res.status(400).json({ error: 'title and scheduledFor are required' });
     const post = await ContentScheduler.scheduleSocialPost({ title, description, link, platforms, scheduledFor, customContent });
     res.json({ success: true, post });
@@ -1103,11 +1117,7 @@ router.delete('/schedule/:id', async (req, res, next) => {
     // Try social
     const social = await db('social_media_posts').where('id', id).first();
     if (social) {
-      await db('social_media_posts').where('id', id).update({
-        scheduled_for: null,
-        publish_status: null,
-        status: 'draft',
-      });
+      await ContentScheduler.unscheduleSocialPost(social);
       return res.json({ success: true, type: 'social', id });
     }
 

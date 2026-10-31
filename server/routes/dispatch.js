@@ -51,9 +51,13 @@ function legacyStatus(status) {
   return 'scheduled';
 }
 
+// 'scheduled' means a live job: a rescheduled placeholder or a no-show is not
+// one, and legacyStatus would relabel either as 'scheduled' (Scores, routes).
+const NOT_LIVE_JOB_STATUSES = ['completed', 'cancelled', 'skipped', 'rescheduled', 'no_show'];
+
 function matchesLegacyStatus(row, status) {
   if (!status) return true;
-  if (status === 'scheduled') return !['completed', 'cancelled', 'skipped'].includes(row.status);
+  if (status === 'scheduled') return !NOT_LIVE_JOB_STATUSES.includes(row.status);
   if (status === 'complete' || status === 'completed') return row.status === 'completed';
   return row.status === status;
 }

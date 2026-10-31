@@ -438,9 +438,12 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
 
     // MARK: - Helpers
 
+    // False while the top screen is still animating in or out: UIKit drops a
+    // presentation started then and only logs a warning, which left the
+    // payment sheet open but never shown (every later tap: "already open").
     @discardableResult
     private func present(_ controller: UIViewController) -> Bool {
-        guard let top = TopViewController.current(), !top.isBeingDismissed else { return false }
+        guard let top = TopViewController.current(), !top.isBeingDismissed, !top.isBeingPresented else { return false }
         top.present(controller, animated: true)
         return true
     }

@@ -5368,7 +5368,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         ) : (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
             <h1 id="new-appointment-title" style={{ fontFamily: ROBOTO_STACK, fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
-            <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+            <button onClick={onClose} aria-label="Close" style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
           </div>
         )}
         <div style={mobileContentStyle}>
@@ -5713,12 +5713,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
             <div>
-              <label style={labelStyle}>Date</label>
-              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle} />
+              <label htmlFor="new-appt-date" style={labelStyle}>Date</label>
+              <input id="new-appt-date" type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle} />
             </div>
             <div>
-              <label style={labelStyle}>Time</label>
-              <select value={timeChosen ? windowStart : ''} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
+              <label htmlFor="new-appt-time" style={labelStyle}>Time</label>
+              <select id="new-appt-time" value={timeChosen ? windowStart : ''} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
                 {!timeChosen && <option value="" disabled>Choose a time</option>}
                 {HOURLY_TIME_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
@@ -6807,7 +6807,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             ))}
           </div>
           {techMode === 'choose' && (
-            <select value={techId} onChange={e => setTechId(e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
+            <select aria-label="Technician" value={techId} onChange={e => setTechId(e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
               <option value="">Select technician...</option>
               {techs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
@@ -6848,12 +6848,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           )}
           <div style={{ marginBottom: 10 }}>
-            <label style={labelStyle}>Customer Notes</label>
-            <textarea value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
+            <label htmlFor="new-appt-customer-notes" style={labelStyle}>Customer Notes</label>
+            <textarea id="new-appt-customer-notes" value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
           <div style={{ marginBottom: 12 }}>
-            <label style={{ ...labelStyle, color: D.amber }}>Internal Notes (Admin only)</label>
-            <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
+            <label htmlFor="new-appt-internal-notes" style={{ ...labelStyle, color: D.amber }}>Internal Notes (Admin only)</label>
+            <textarea id="new-appt-internal-notes" value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
           {/* Book sends nothing to the caller: the confirmation goes out once the customer is linked. */}
           {!newCallerBookMode && (

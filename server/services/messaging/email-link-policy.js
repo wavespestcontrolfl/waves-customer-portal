@@ -28,6 +28,15 @@ const APP_LINK_PATH_PREFIXES = Object.freeze([
   '/inspection', '/price-change',
 ]);
 
+// Customer-reachable pages that open in the browser on purpose. Android's
+// allowlist leaves them out and the iOS association file excludes them
+// (routes/well-known.js).
+const BROWSER_ONLY_PATH_ROOTS = Object.freeze([
+  '/card', // a tech's business card for prospects: Save contact downloads a vCard
+  '/careers', // job applicants, not customers
+  '/newsletter', // public newsletter pages
+]);
+
 // /quote, bare /estimate and the /estimate/<service> pages redirect to the
 // marketing site, so the app would only bounce them to the browser.
 function isAppLinkPath(pathname) {
@@ -38,10 +47,20 @@ function isAppLinkPath(pathname) {
 const ANCHOR_RE = /<a\b([^>]*)>/gi;
 const HREF_RE = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
 
+// GATE_EMAIL_APP_LINKS, off by default. A device test on 2026-10-31 found that
+// the iPhone app opens on Home, not on the tapped page (/?tab=billing, /book),
+// so untracked email links took app users to Home instead of the right page
+// in the browser. Turn it on once the app lands on the tapped page. Read
+// defensively: a test that mocks feature-gates without this reader gets off.
+function emailAppLinksLive() {
+  const gates = require('../../config/feature-gates');
+  return typeof gates.emailAppLinksLive === 'function' && gates.emailAppLinksLive();
+}
+
 // Adds clicktracking=off to each anchor that points at a customer page on the
 // portal host. Anything unparseable stays as written (and so stays tracked).
 function untrackAppLinks(html) {
-  if (typeof html !== 'string' || !html) return html;
+  if (typeof html !== 'string' || !html || !emailAppLinksLive()) return html;
   let portalHost;
   try {
     portalHost = new URL(publicPortalUrl()).host;
@@ -63,4 +82,4 @@ function untrackAppLinks(html) {
   });
 }
 
-module.exports = { APP_LINK_PATH_PREFIXES, untrackAppLinks };
+module.exports = { APP_LINK_PATH_PREFIXES, BROWSER_ONLY_PATH_ROOTS, untrackAppLinks };

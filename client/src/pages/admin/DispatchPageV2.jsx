@@ -2,8 +2,8 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 // client/src/pages/admin/DispatchPageV2.jsx
 //
 // Mobile-first orchestrator for /admin/dispatch under the dispatch-v2
-// feature flag. Renders the day/week board, sidebars (TechMatchPanelV2 /
-// CSRPanelV2 / RevenuePanelV2 / InsightsPanelV2), and on mobile manages
+// feature flag. Renders the day/week board, sidebars (RevenuePanelV2 /
+// InsightsPanelV2), and on mobile manages
 // the action-sheet stack (MobileAppointmentDetailSheet,
 // MobileCheckoutSheet, MobilePaymentSheet, MobileServicePickerSheet, and
 // the four payment tender sheets). Reuses CompletionPanel /
@@ -28,7 +28,7 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 //   restoration so the user doesn't lose context on dismiss.
 // - Day-grid drag-drop (TimeGridDay / TimeGridDays) — race conditions
 //   between optimistic local move and the PATCH /admin/services/:id call.
-// - Sidebar lazy loading — Suspense boundaries around TechMatchPanelV2 etc.
+// - Sidebar lazy loading — Suspense boundaries around RevenuePanelV2 etc.
 //   should fail gracefully when the API for a panel times out.
 // - Mobile vs desktop divergence — confirm the same appointment renders
 //   the same details / action set on both, no orphaned mobile-only state
@@ -111,10 +111,6 @@ import { shortAddress } from "../tech/visitBrief";
 import { serviceWindowLabel } from "../tech/routeStops";
 import { requestDispatchSync } from "../../lib/dispatchSync";
 
-const TechMatchPanel = lazy(
-  () => import("../../components/dispatch/TechMatchPanelV2"),
-);
-const CSRPanel = lazy(() => import("../../components/dispatch/CSRPanelV2"));
 const RevenuePanel = lazy(
   () => import("../../components/dispatch/RevenuePanelV2"),
 );
@@ -248,8 +244,6 @@ function slotDurationMinutes(start, end) {
 const SCHEDULE_TABS = [
   { id: "board", label: "Schedule" },
   { id: "protocols", label: "Protocols" },
-  { id: "match", label: "Matching", desktopOnly: true },
-  { id: "csr", label: "Booking", desktopOnly: true },
   { id: "revenue", label: "Scores", desktopOnly: true },
   { id: "insights", label: "Insights", desktopOnly: true },
 ];
@@ -433,6 +427,9 @@ function modalCustomerFrom(record) {
   };
 }
 
+// Board header SPRAY word colors: a rain HOLD reads as an alert, a wind check as a caution.
+const SPRAY_STATUS_TONE = { HOLD: "text-alert-fg", "CHECK WIND": "text-amber-700" };
+
 export default function DispatchPageV2({
   activeTab: controlledActiveTab,
   setOpenCreateHandler,
@@ -448,7 +445,7 @@ export default function DispatchPageV2({
   const activeTab = isControlled ? controlledActiveTab : internalActiveTab;
   const setActiveTab = isControlled ? () => {} : setInternalActiveTab;
 
-  // On mobile, desktopOnly tabs (Tech Match / CSR / Job Scores / Insights) are
+  // On mobile, desktopOnly tabs (Job Scores / Insights) are
   // hidden from both the top row and the More sheet. If a returning user's
   // persisted activeTab is one of those, snap back to 'board' so they don't
   // land on a panel they can't navigate away from. Skip in controlled mode —
@@ -1419,11 +1416,11 @@ export default function DispatchPageV2({
   const zoneRainAlerts = Object.entries(safeData.zoneRain || {})
     .filter(([, chance]) => chance != null && chance >= 40)
     .sort(([, a], [, b]) => b - a);
-  const sprayHold =
-    (rainProbability != null && rainProbability > 50) ||
-    (windSpeed != null && windSpeed > 15);
-
-  const sprayStatus = sprayHold ? "HOLD"
+  // Rain over 50% keeps HOLD. Wind over 15 mph is a check, not a hold (owner 2026-10-31, D2;
+  // ruling 2026-10-29: weather warns, it never holds); the tech judges the wind at the nozzle.
+  // A missing reading compares false, so it falls through to UNKNOWN.
+  const sprayStatus = rainProbability > 50 ? "HOLD"
+    : windSpeed > 15 ? "CHECK WIND"
     : rainProbability == null || windSpeed == null ? "UNKNOWN" : "GO";
 
   const dateHeader =
@@ -1893,31 +1890,9 @@ export default function DispatchPageV2({
       {/* Recurring-series alerts are office-only on the server. */}
       {viewMode === "day" && verifiedRole === "admin" && <RecurringAlertsBannerV2 />}
 
-      {/* Non-board tabs — V2 monochrome panels (Match/CSR/Revenue/Insights/Protocols). */}
+      {/* Non-board tabs — V2 monochrome panels (Revenue/Insights/Protocols). */}
       {viewMode === "day" && activeTab === "protocols" && (
         <ProtocolReferenceTabV2 />
-      )}
-      {viewMode === "day" && activeTab === "match" && (
-        <Suspense
-          fallback={
-            <div className="py-10 text-center text-14 text-ink-secondary">
-              Loading…
-            </div>
-          }
-        >
-          <TechMatchPanel />
-        </Suspense>
-      )}
-      {viewMode === "day" && activeTab === "csr" && (
-        <Suspense
-          fallback={
-            <div className="py-10 text-center text-14 text-ink-secondary">
-              Loading…
-            </div>
-          }
-        >
-          <CSRPanel />
-        </Suspense>
       )}
       {viewMode === "day" && activeTab === "revenue" && (
         <Suspense
@@ -1982,7 +1957,7 @@ export default function DispatchPageV2({
                 <span
                   className={cn(
                     "font-medium uppercase tracking-label",
-                    sprayHold ? "text-alert-fg" : "text-zinc-900",
+                    SPRAY_STATUS_TONE[sprayStatus] || "text-zinc-900",
                   )}
                 >
                   SPRAY: {sprayStatus}

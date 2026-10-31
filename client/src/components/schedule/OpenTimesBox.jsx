@@ -108,8 +108,22 @@ const rowStyle = ({ withDate, far, current, takeable }) => ({
 // The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small status
 // tag like "unverified", never a sentence about the hour.
 export const ALREADY_LATE_TAG = 'already late';
+// The van reaches this stop more than END_OF_WINDOW_MINUTES after the hour, at the end of its arrival
+// window (route-dispatcher audit D, owner 2026-10-31 "ok go"). A word tag like the one above; the arrival
+// time is the tag's title, never a second number on the row (owner ruling 2026-10-24, #6655).
+export const END_OF_WINDOW_TAG = 'end of window';
+export const END_OF_WINDOW_MINUTES = 90;
+const minuteOf = (hhmm) => {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+export function arrivesAtWindowEnd(hour) {
+  const start = minuteOf(hour?.start);
+  const arrival = minuteOf(hour?.estimatedArrival);
+  return start != null && arrival != null && arrival - start > END_OF_WINDOW_MINUTES;
+}
 const tagStyle = (current) => ({
-  display: 'inline-block', marginLeft: 6, padding: '0 6px', borderRadius: 999, fontSize: 12, fontWeight: 500, lineHeight: '18px',
+  display: 'inline-block', marginLeft: 6, padding: '0 6px', borderRadius: 999, fontSize: 14, fontWeight: 500, lineHeight: '20px',
   border: `0.5px solid ${current ? '#FFFFFF' : '#D4D4D8'}`, color: current ? '#FFFFFF' : '#854D0E', background: current ? 'transparent' : '#FEFCE8',
 });
 const subInk = (current) => ({ display: 'block', fontSize: 14, fontWeight: 400, color: current ? '#FFFFFF' : '#52525B' });
@@ -197,6 +211,11 @@ export default function OpenTimesBox({
           const current = isCurrent(hour);
           const far = Number(hour.detourMinutes) > FAR_MINUTES;
           const takeable = !!pick && !current;
+          const windowEnd = arrivesAtWindowEnd(hour) ? (
+            <span data-testid="end-of-window-tag" title={`Arrives about ${fmtHour(hour.estimatedArrival)}`} style={tagStyle(current)}>
+              {END_OF_WINDOW_TAG}
+            </span>
+          ) : null;
           return (
             <div role="listitem" key={`${hour.date}-${hour.start}-${hour.technicianId || ''}`}>
               <button
@@ -210,10 +229,11 @@ export default function OpenTimesBox({
               >
                 <span style={{ fontSize: 16, fontWeight: 600 }}>
                   {focusDate ? fmtHour(hour.start) : fmtDay(hour.date)}
+                  {focusDate ? windowEnd : null}
                   {hour.dayAlreadyLate && !focusDate ? <span data-testid="already-late-tag" style={tagStyle(current)}>{ALREADY_LATE_TAG}</span> : null}
                   {hour.technicianName ? <span style={subInk(current)}>{hour.technicianName}</span> : null}
                 </span>
-                {!focusDate && <span style={{ fontSize: 17, fontWeight: 600 }}>{fmtHour(hour.start)}</span>}
+                {!focusDate && <span style={{ fontSize: 17, fontWeight: 600 }}>{fmtHour(hour.start)}{windowEnd}</span>}
                 <span style={{ textAlign: 'right', fontSize: 15, fontWeight: far ? 500 : 400, color: current ? '#FFFFFF' : (far ? '#B45309' : '#52525B') }}>
                   {addsPhrase(hour)}
                 </span>

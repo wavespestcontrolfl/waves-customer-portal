@@ -451,3 +451,86 @@ describe('the shadow record (GATE_SPRAY_RAIN_RULES=shadow)', () => {
     expect(raw).not.toHaveBeenCalled();
   });
 });
+
+// Owner 2026-10-31 (D1): the wind caution names the compass direction of the hour that gave the reading.
+describe('wind direction in the wind caution', () => {
+  const windy = { ...celsius, max_wind_mph: 10 };
+  const rain = () => rulesOn([windy], PEST);
+  const withWind = (winds, dirs = []) => hours([0, 0, 0]).map((h, i) => ({ ...h, windMph: winds[i] ?? 5, ...(dirs[i] !== undefined ? { windDirection: dirs[i] } : {}) }));
+  const run = (hourly, products = [windy], rainRules = rain()) => buildSprayCheck({ products, hourly, now: NOW, rainRules }).verdicts[0];
+
+  test('product limit: the direction of the max-wind hour, not the first hour', () => {
+    expect(run(withWind([12, 17], ['NE', 'E'])).reason).toBe('wind 17 mph from the E at 3 pm — over the 10 mph limit');
+    expect(run(withWind([17, 12], ['ENE', 'E'])).reason).toBe('wind 17 mph from the ENE at 2 pm — over the 10 mph limit');
+  });
+
+  test('unknown direction keeps today\'s exact text', () => {
+    expect(run(withWind([14])).reason).toBe('wind 14 mph at 2 pm — over the 10 mph limit');
+    expect(run(withWind([14], [null])).reason).toBe('wind 14 mph at 2 pm — over the 10 mph limit');
+    expect(run(withWind([12, 17], ['NE', null])).reason).toBe('wind 17 mph at 3 pm — over the 10 mph limit');
+  });
+
+  test('label wind line carries the direction too', () => {
+    const artavia = { id: 'v', name: 'Artavia 2 SC (Azoxy)', category: 'fungicide', formulation: 'SC', epa_reg_number: '91234-74' };
+    const rows = [14, 16].map((windMph, i) => ({ startTime: new Date(NOW.getTime() + i * 3600000).toISOString(), temperatureF: 85, windMph, rainChance: 0, windDirection: i ? 'SSE' : 'S' }));
+    const out = buildSprayCheck({ products: [artavia], hourly: rows, now: NOW, rainRules: rulesOn([artavia], 'Every 6 Weeks Lawn Care Service') }).verdicts[0];
+    expect(out.reason).toBe('wind 16 mph from the SSE at 3 pm — label: no spraying above 15 mph');
+  });
+
+  test('the direction changes nothing but the words: same verdict, level, kind, action', () => {
+    const plain = run(withWind([14]));
+    const dir = run(withWind([14], ['E']));
+    const { reason: a, ...restPlain } = plain;
+    const { reason: b, ...restDir } = dir;
+    expect(restDir).toEqual(restPlain);
+    expect(b).not.toBe(a);
+  });
+
+  test('with the rain rules off, the hold text is unchanged', () => {
+    expect(run(withWind([14], ['E']), [windy], null).reason).toBe('wind over 10 mph');
+  });
+});
+
+// Owner 2026-10-31: heat index line for the tech, today's visits only. A warning beside the check, never a verdict.
+describe('heat safety line (heatSafetyAt)', () => {
+  const { heatSafetyAt } = jobCard._test;
+  const hot = (extra = {}) => hours([0, 0, 0, 0]).map((h) => ({ ...h, temperatureF: 92, relativeHumidity: 70, ...extra }));
+
+  test('names the hour of the worst heat index among the start hour and the next', () => {
+    const rows = hot().map((h, i) => (i === 1 ? { ...h, temperatureF: 96, relativeHumidity: 70 } : i === 2 ? { ...h, temperatureF: 100, relativeHumidity: 80 } : h));
+    const out = heatSafetyAt({ hourly: rows, now: NOW, isToday: true });
+    expect(out).toMatchObject({ at: '3 pm', level: 'extreme' });
+    expect(out.heatIndexF).toBeGreaterThan(115);
+    expect(out.text).toMatch(/^Heat index \d+°F at 3 pm — extreme heat\./);
+  });
+
+  test('High text, the hour formatted like the wind text', () => {
+    const out = heatSafetyAt({ hourly: hot(), now: NOW, isToday: true });
+    expect(out).toMatchObject({ at: '2 pm', level: 'high' });
+    expect(out.text).toBe(`Heat index ${out.heatIndexF}°F at 2 pm. Drink water every 15 minutes. Rest in the shade.`);
+  });
+
+  test('only the start hour and the next count', () => {
+    const rows = hot({ temperatureF: 85, relativeHumidity: 50 }).map((h, i) => (i === 2 ? { ...h, temperatureF: 100, relativeHumidity: 60 } : h));
+    expect(heatSafetyAt({ hourly: rows, now: NOW, isToday: true })).toBeNull();
+  });
+
+  test('no line without humidity, not today, or without a forecast', () => {
+    expect(heatSafetyAt({ hourly: hot({ relativeHumidity: null }), now: NOW, isToday: true })).toBeNull();
+    expect(heatSafetyAt({ hourly: hot(), now: NOW, isToday: false })).toBeNull();
+    expect(heatSafetyAt({ hourly: null, now: NOW, isToday: true })).toBeNull();
+  });
+
+  test('the heat readings never change a verdict, a chip, or the check shape', () => {
+    const rules = rulesOn([talak, celsius], PEST);
+    const run = (hourly) => buildSprayCheck({ products: [talak, celsius], hourly, now: NOW, rainRules: rules });
+    const cool = hours([0, 0, 0, 0, 0]).map((h) => ({ ...h, temperatureF: 85, relativeHumidity: 40 }));
+    const scorching = cool.map((h) => ({ ...h, temperatureF: 85, relativeHumidity: 100 }));
+    const a = run(cool);
+    const b = run(scorching);
+    expect(b).toEqual(a);
+    expect(weatherIssue(b, true)).toEqual(weatherIssue(a, true));
+    expect(b.hold).toBe(false);
+    expect(Object.keys(b)).not.toContain('heatSafety');
+  });
+});
