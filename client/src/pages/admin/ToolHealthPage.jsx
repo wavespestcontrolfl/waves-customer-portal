@@ -135,7 +135,11 @@ export default function ToolHealthPage() {
 
       {err && (
         <ActionFeedback error onRetry={load} className="min-h-20">
-          Failed to load: {err}
+          {/* With a snapshot on screen, say which one it is: the header
+              already marks the newly picked window. */}
+          {data
+            ? `Refresh failed: ${err}. Showing the ${TOOL_HEALTH_WINDOWS.find((w) => w.key === loadedHours)?.label || `${loadedHours}h`} snapshot from ${formatRelative(data.generatedAt)}.`
+            : `Failed to load: ${err}`}
         </ActionFeedback>
       )}
       {!data && !err ? (
@@ -161,8 +165,8 @@ function ToolHealthContent({ data, stale, staleWindow, adminUser, expanded, setE
     data;
 
   return (
-    <div className={cn("space-y-5", stale && "opacity-60")}>
-      <Card className={overallStatus === "critical" ? "border-alert-fg" : undefined}>
+    <div className="space-y-5">
+      <Card className={!stale && overallStatus === "critical" ? "border-alert-fg" : undefined}>
         <CardHeader className="flex flex-wrap items-center justify-between gap-3">
           <CardTitle>Overall status</CardTitle>
           {stale ? (
@@ -206,6 +210,7 @@ function ToolHealthContent({ data, stale, staleWindow, adminUser, expanded, setE
         <Card>
           <CardHeader>
             <CardTitle>PDF render success rate</CardTitle>
+            <p className="mt-1 text-ui-body text-ink-secondary">The last hour, whatever window is selected.</p>
           </CardHeader>
           <CardBody>
             <dl className="grid grid-cols-2 gap-4 md:grid-cols-4">
@@ -352,7 +357,7 @@ function ToolHealthContent({ data, stale, staleWindow, adminUser, expanded, setE
 
       <p className="pb-5 text-center text-ui-caption text-ink-secondary">
         {stale
-          ? `Not current: last successful update ${formatRelative(data.generatedAt)}${staleWindow ? ` (${staleWindow} window)` : ""}`
+          ? `Not current: last successful update ${formatRelative(data.generatedAt)}${staleWindow ? ` (${staleWindow} window)` : ""} · retrying every 30s`
           : `Updated ${formatRelative(data.generatedAt)} · auto-refreshes every 30s`}
       </p>
     </div>

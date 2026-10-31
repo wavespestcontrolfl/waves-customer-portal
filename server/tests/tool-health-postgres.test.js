@@ -105,6 +105,22 @@ postgres('tool health against migrated PostgreSQL', () => {
     expect(body.overallStatus).toBe('critical');
   });
 
+  test('a degraded critical source reads "degraded" and makes the banner a warning', async () => {
+    await events([
+      { source: 'intelligence-bar', context: 'dashboard', tool_name: 'kpi_summary', success: false },
+      ...many(19, { source: 'intelligence-bar', context: 'dashboard', tool_name: 'kpi_summary' }),
+      ...many(40, { source: 'mcp-admin', context: 'mcp', tool_name: 'get_day_summary' }),
+    ]);
+    const body = await health('24');
+    expect(body.agents.find((a) => a.source === 'intelligence-bar').status).toBe('warning');
+    expect(body.alerts).toContainEqual({
+      severity: 'warning',
+      title: 'Admin Intelligence Bar degraded',
+      detail: '1/20 calls failed (5%) in the last 24h.',
+    });
+    expect(body.overallStatus).toBe('warning');
+  });
+
   test('a failing source that is not critical makes the banner a warning, not critical', async () => {
     await events([
       { source: 'tech-intelligence-bar', context: 'tech', tool_name: 'route_lookup', success: false },

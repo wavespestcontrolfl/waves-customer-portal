@@ -6,7 +6,7 @@
  * router.stack, like admin-departure-time-route.test.js.
  */
 jest.mock('../models/db', () => jest.fn(() => {
-  throw new Error('a refused window must not query');
+  throw new Error('db reached');
 }));
 
 const toolHealthRouter = require('../routes/tool-health');
@@ -30,6 +30,18 @@ async function get(query) {
 }
 
 describe('GET /tool-health window check', () => {
+  it.each([
+    ['missing', undefined],
+    ['empty', ''],
+    ['one hour', '1'],
+    ['thirty days', '720'],
+  ])('accepts %s and goes on to read', async (_label, hours) => {
+    const { res, next } = await get(hours === undefined ? {} : { hours });
+    expect(res.statusCode).not.toBe(400);
+    // The mocked db throws on the first read, so reaching it ends in next().
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'db reached' }));
+  });
+
   it.each([
     ['a negative window', '-1'],
     ['zero', '0'],

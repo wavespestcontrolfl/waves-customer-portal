@@ -170,10 +170,11 @@ router.get('/', async (req, res, next) => {
     // can name the source. A critical source keeps its card's severity; any
     // other source counts as a warning at most (health audit HE-03).
     for (const agent of agents) {
-      if (!STATUS_RANK[agent.status]) continue;
+      if (agent.status !== 'warning' && agent.status !== 'critical') continue;
       alerts.push({
         severity: agent.critical ? agent.status : 'warning',
-        title: `${agent.label} failing`,
+        // The word follows the card: Critical reads "failing", Degraded "degraded".
+        title: `${agent.label} ${agent.status === 'critical' ? 'failing' : 'degraded'}`,
         detail: `${agent.failed}/${agent.total} calls failed (${Math.round(agent.errorRate * 100)}%) in the last ${hours}h.`,
       });
     }
