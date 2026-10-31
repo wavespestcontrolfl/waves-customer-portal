@@ -959,6 +959,9 @@ function buildAgents(tasks, sources) {
       ...agent,
       status,
       openTasks: actionable.length,
+      // Every loaded task of this agent, info rows included — the same unit as
+      // feed rows, so the feed can say how many of them its window shows.
+      totalTasks: agentTasks.length,
       needsApproval,
       highPriority: critical + high,
       lastActivityAt: latestDate(agentTasks),

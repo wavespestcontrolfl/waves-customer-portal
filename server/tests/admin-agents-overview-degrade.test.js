@@ -102,6 +102,7 @@ it('counts tasks past the 80-row feed in totals and keeps their agent non-idle',
   expect(body.tasks.some((t) => t.agentId === 'lead_conversion')).toBe(false);
   const lead = body.agents.find((a) => a.id === 'lead_conversion');
   expect(lead.openTasks).toBe(20);
+  expect(lead.totalTasks).toBe(20);
   expect(lead.status).not.toBe('idle');
   expect(summary.shownTasks).toBe(body.tasks.length);
   expect(summary.shownTasks).toBe(80);

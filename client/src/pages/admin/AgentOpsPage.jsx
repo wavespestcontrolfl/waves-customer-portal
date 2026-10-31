@@ -317,12 +317,18 @@ function LeadConversionPanel({ details }) {
   );
 }
 
-function FeedWindowNote({ data }) {
-  const summary = data?.summary;
-  if (!summary?.truncated) return null;
+// All agents: the server's window over every loaded task. One agent: that
+// agent's rows in the window against all of its loaded tasks, so a selected
+// agent never sits under the whole feed's counts.
+function FeedWindowNote({ data, activeAgent, visibleCount }) {
+  const agent = activeAgent === "all" ? null : data?.agents?.find((item) => item.id === activeAgent);
+  if (activeAgent !== "all" && !agent) return null;
+  const shown = agent ? visibleCount : data?.summary?.shownTasks;
+  const total = agent ? agent.totalTasks : data?.summary?.totalTasks;
+  if (!(total > shown)) return null;
   return (
     <div style={{ padding: "10px 16px", borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 14 }}>
-      {`Showing ${numberLabel(summary.shownTasks)} of ${numberLabel(summary.totalTasks)} tasks`}
+      {`Showing ${numberLabel(shown)} of ${numberLabel(total)} tasks${agent ? ` for ${agent.shortName || agent.name}` : ""}`}
     </div>
   );
 }
@@ -493,7 +499,7 @@ export default function AgentOpsPage({ embedded = false } = {}) {
                 </button>
               )}
             </div>
-            <FeedWindowNote data={data} />
+            <FeedWindowNote data={data} activeAgent={activeAgent} visibleCount={tasks.length} />
             {loading && !data ? (
               <div style={{ padding: 18, color: D.muted, fontSize: 13 }}>Loading tasks...</div>
             ) : tasks.length ? (
