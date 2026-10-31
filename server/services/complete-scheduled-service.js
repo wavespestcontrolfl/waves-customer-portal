@@ -7060,6 +7060,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // (treatment-zone-maps.js traceJudgedAllows).
             ...(traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {}),
             visitOutcome,
+            // The operator's "report only, no pay link" choice on a real
+            // completion. A tech cannot record cash or a check, so the next-day
+            // office check (report-only-payment-alert.js) reads this marker to
+            // find a bill that stayed open.
+            ...(includePayLink === false && visitOutcome === 'completed' && !isBackfillCompletion
+              && !systemQuietCloseout && !issuedInvoiceCloseout && !invoiceAlreadySent
+              ? { payLinkOmitted: true } : {}),
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
             // (stripe-webhook.js) also suppresses it for a billed assessment.

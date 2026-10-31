@@ -131,6 +131,7 @@
  *   GATE_SERIES_MOVE_SKIP_CLOSED_DAYS=true (a staff series move re-dates the later visits of the plan; a re-dated visit that lands on a closed day (owner blackout date, weekly day off, closed holiday) moves forward to the next open day, as the Edit appointment cadence rewrite already does; the date the staffer picked stays as picked; owner 2026-10-22 "fix series edit". Read at call time via seriesMoveSkipClosedDaysLive(), strict 'true', dark by default; off = every projected date is byte-identical to before; customer moves unchanged)
  *   GATE_ONE_TEXT_PER_CUSTOMER_DAY=true (owner 2026-10-12/13: one on-the-way text and one arrived text per customer, service address, technician and ET day, however many services or visits that day has; appointment reminders are NOT changed (the existing same-slot merge owns them); the rule never reads visit_id, service_visits or visit_effects; read at call time via oneTextPerCustomerDayLive(), dark by default; off = every tracker text is byte-identical to before)
  *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
+ *   GATE_REPORT_ONLY_PAYMENT_ALERT=true (hourly 8 AM-8 PM ET, a bill still open the ET day after a "report only, no pay link" completion raises one needs-you Billing alert to record the payment, and the alert closes when the bill is paid, voided or no longer owed; read at call time via reportOnlyPaymentAlertLive(), dark by default; office-side only, sends nothing)
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
  *   GATE_MULTI_TECH_TEXT_TIMES=true (the lead reply agent's next-available check, the text drafter's open-times fallback and the estimate converter's first service day read the website booking engine (per technician, route-aware) instead of the old by-city engine; a lead with only a city is placed at that city's centre; read at call time via multiTechTextTimesLive(), dark by default; customer-facing; off = the old by-city engine, byte-identical)
  *   GATE_PACKAGE_FOLLOWUP_AUTOBOOK=true (booking visit 1 of a two-treatment package — catalog cockroach_control, flea_tick or bed_bug_treatment — also books visit 2 in the same transaction: 14 days later (the catalog row's follow-up interval), same technician and window, confirmed with no office confirm step, $0 included, linked to visit 1 so a date move of visit 1 shifts it by the same days until the customer confirms or moves it (its time of day is kept) and a cancel, skip or no-show of visit 1 always retires it; owner rulings 2026-10-04. Covers admin Schedule create, estimate acceptance, the Leads page, the call pipeline (its visit 2 is written confirmed too); voice-agent and outbound-callback bookings are not covered yet. Off = visit 2 is booked only from the closeout card or a call that discussed it. Read at call time via packageFollowupAutobookLive(), dark by default; kill = unset. No confirmation text for visit 2; reminders arm through the self-heal sweep; the customer can reschedule it.)
@@ -5585,6 +5586,15 @@ function estimateDraftRetireOnSendLive() {
   return process.env.GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND === 'true';
 }
 
+// GATE_REPORT_ONLY_PAYMENT_ALERT read at CALL time — strict `=== 'true'`
+// (server/services/report-only-payment-alert.js via the scheduler). Owner
+// 2026-10-30 (tech portal gaps, option A): a bill still open the ET day after
+// a "report only, no pay link" completion raises one office alert to record
+// the payment. Office-side only; sends no customer message. Unset = kill.
+function reportOnlyPaymentAlertLive() {
+  return process.env.GATE_REPORT_ONLY_PAYMENT_ALERT === 'true';
+}
+
 function seriesMoveTextCoalesceLive() {
   return process.env.GATE_SERIES_MOVE_TEXT_COALESCE === 'true';
 }
@@ -8729,6 +8739,7 @@ module.exports.lawnWikiPauseLive = lawnWikiPauseLive;
 module.exports.seriesMoveTextCoalesceLive = seriesMoveTextCoalesceLive;
 // GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND reader. Kept here, away from the end of the file, so gate PRs appending there never conflict with it.
 module.exports.estimateDraftRetireOnSendLive = estimateDraftRetireOnSendLive;
+module.exports.reportOnlyPaymentAlertLive = reportOnlyPaymentAlertLive;
 // GATE_SMS_UNANSWERED_REPLY reader, on its own line.
 module.exports.smsUnansweredReplyLive = smsUnansweredReplyLive;
 // GATE_NEIGHBORHOOD_ACCESS reader, on its own line.
