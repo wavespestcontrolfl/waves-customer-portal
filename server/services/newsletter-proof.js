@@ -15,10 +15,10 @@
  * ignored.
  *
  * GATE_NEWSLETTER_AUTO_SEND (default OFF; owner 2026-10-30, option A): the
- * weekly flagship that passes every check here queues itself for its
- * Tuesday 6:00 AM ET target in the same write that claims the proof, and the
- * owner's copy is FYI. A HOLD reply to that copy skips the week. Unset the
- * switch and the issue waits for an APPROVED reply again.
+ * weekly flagship that passes every check here gets an FYI copy instead of
+ * a proof, and queues itself for its Tuesday 6:00 AM ET target once that
+ * copy went out. A HOLD reply to the copy skips the week. Unset the switch
+ * and the issue waits for an APPROVED reply again.
  */
 
 const crypto = require('crypto');
@@ -468,62 +468,60 @@ async function releaseRefusedProofClaim(sendId, token, reason) {
 }
 
 /**
- * How the proof step hands an issue on. Default: a proof that waits for an
+ * What the proof step emails the owner. Default: a proof that waits for an
  * APPROVED reply. GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A): a
- * weekly issue that passed every check is queued for its Tuesday target in
- * the proof claim itself, and the owner's copy is FYI. The Tuesday tick
- * re-runs the checks before it sends.
+ * weekly issue that passed every check gets an FYI copy and is queued once
+ * the copy went out (queueAutoSendIssue).
  */
-function proofDelivery(calendarContext, recipientCount, now) {
-  if (!calendarContext.flagship || !newsletterAutoSendLive()) {
-    const noop = async () => {};
-    return {
-      queued: false,
-      prefix: 'ACT',
-      bannerHtml: proofBannerHtml(recipientCount, calendarContext.flagship),
-      bannerText: proofBannerText(recipientCount, calendarContext.flagship),
-      claimPatch: {},
-      releaseWhere: {},
-      releasePatch: {},
-      afterClaim: noop,
-      afterRelease: noop,
-    };
+function proofDelivery(calendarContext, recipientCount) {
+  if (calendarContext.flagship && newsletterAutoSendLive()) {
+    return { autoSend: true, prefix: 'FYI', bannerHtml: autoSendBannerHtml(recipientCount), bannerText: autoSendBannerText(recipientCount) };
   }
-  const week = () => db('newsletter_calendar').where({ id: calendarContext.linkedCalendar.id });
   return {
-    queued: true,
-    prefix: 'FYI',
-    bannerHtml: autoSendBannerHtml(recipientCount),
-    bannerText: autoSendBannerText(recipientCount),
-    // No approving email id: that is how the dispatcher and the reply
-    // handler tell an auto-queued issue from a reply-approved one.
-    claimPatch: {
-      status: 'scheduled',
-      scheduled_for: calendarContext.scheduledFor,
-      proof_approved_at: now,
-      proof_approval_email_id: null,
-      proof_refused_at: null,
-    },
-    // The issue sends only once the owner's copy went out.
-    releaseWhere: { status: 'scheduled' },
-    releasePatch: { status: 'draft', scheduled_for: null, proof_approved_at: null },
-    afterClaim: () => week().update({ status: 'scheduled', updated_at: new Date() }),
-    afterRelease: () => week().update({ status: 'drafted', updated_at: new Date() }),
+    autoSend: false,
+    prefix: 'ACT',
+    bannerHtml: proofBannerHtml(recipientCount, calendarContext.flagship),
+    bannerText: proofBannerText(recipientCount, calendarContext.flagship),
   };
 }
 
-// Release OUR claim (token-scoped) after the proof email failed, so the
-// catch-up tick can retry a transient SendGrid failure instead of the week
-// silently losing its proof. An auto-queued issue also comes off the queue.
-async function releaseUnsentProof(sendId, token, delivery) {
+/**
+ * Queue an auto-send issue for its Tuesday target once the owner's FYI copy
+ * went out. Until then the proof claim is a draft the dispatcher never picks
+ * up, so a crash or a run near 6:00 AM cannot send an issue the owner got no
+ * copy of. Bound to the claim (token, draft, no edit since the claim): an
+ * issue that changed in between stays unqueued and the owner is told.
+ * No approving email id: that is how the dispatcher and the reply handler
+ * tell an auto-queued issue from a reply-approved one.
+ */
+async function queueAutoSendIssue(send, token, claimedAt, calendarContext) {
+  let queued = 0;
   try {
-    const released = await db('newsletter_sends')
-      .where({ id: sendId, proof_token: token, ...delivery.releaseWhere })
-      .update({ proof_token: null, proof_sent_at: null, updated_at: new Date(), ...delivery.releasePatch });
-    if (released) await delivery.afterRelease();
-  } catch (clearErr) {
-    logger.error(`[newsletter-proof] failed to release proof claim for ${sendId}: ${clearErr.message}`);
+    queued = await db('newsletter_sends')
+      .where({ id: send.id, proof_token: token, status: 'draft' })
+      .whereNull('proof_approved_at')
+      .whereRaw("date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)", [claimedAt])
+      .update({
+        status: 'scheduled',
+        scheduled_for: calendarContext.scheduledFor,
+        proof_approved_at: new Date(),
+        proof_approval_email_id: null,
+        proof_refused_at: null,
+        updated_at: new Date(),
+      });
+    if (queued) {
+      await db('newsletter_calendar').where({ id: calendarContext.linkedCalendar.id }).update({ status: 'scheduled', updated_at: new Date() });
+    }
+  } catch (err) {
+    logger.error(`[newsletter-proof] queueing auto-send issue ${send.id} failed: ${err.message}`);
   }
+  if (!queued) {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+      subject: send.subject,
+      errors: ['The FYI copy went out, but the issue changed before it could be queued, so it will not send this week.'],
+    });
+  }
+  return Boolean(queued);
 }
 
 /**
@@ -608,7 +606,7 @@ async function sendNewsletterProof(sendId) {
   // gate while we email a proof rendered from the pre-edit body.
   const token = crypto.randomBytes(4).toString('hex');
   const now = new Date();
-  const delivery = proofDelivery(calendarContext, recipientCount, now);
+  const delivery = proofDelivery(calendarContext, recipientCount);
   const claimQuery = db('newsletter_sends')
     .where({ id: send.id, status: 'draft' })
     .whereNull('proof_sent_at');
@@ -622,12 +620,10 @@ async function sendNewsletterProof(sendId) {
       [send.updated_at],
     );
   }
-  const claimed = await claimQuery.update({ proof_token: token, proof_sent_at: now, updated_at: now, ...delivery.claimPatch });
+  const claimed = await claimQuery.update({ proof_token: token, proof_sent_at: now, updated_at: now });
   if (!claimed) return { skipped: true, reason: 'proof_claimed_elsewhere' };
 
   try {
-    // Inside the try: a failure here releases the claim (and the queue).
-    await delivery.afterClaim();
     // Internal diagnostics render between the proof banner and the
     // recipient preview — proof email ONLY, never the list send.
     const diagnosticsHtml = await buildProofDiagnosticsHtml(
@@ -662,8 +658,9 @@ async function sendNewsletterProof(sendId) {
     });
 
     // The "reply APPROVED" bell is for a proof that waits on the owner; an
-    // auto-queued issue needs no one (its FYI copy is the record).
-    if (!delivery.queued) {
+    // auto-send issue needs no one (its FYI copy is the record).
+    const queued = delivery.autoSend && await queueAutoSendIssue(send, token, now, calendarContext);
+    if (!delivery.autoSend) {
       await notifyProof('newsletter_proof_sent', { sendId: send.id,
         subject: send.subject,
         recipient: maskEmail(to),
@@ -671,10 +668,19 @@ async function sendNewsletterProof(sendId) {
       });
     }
 
-    logger.info(`[newsletter-proof] proof sent for ${send.id} (token ${token}, queued ${delivery.queued}, messageId ${result?.messageId || 'n/a'})`);
-    return { sent: true, token, queued: delivery.queued };
+    logger.info(`[newsletter-proof] proof sent for ${send.id} (token ${token}, queued ${queued}, messageId ${result?.messageId || 'n/a'})`);
+    return { sent: true, token, queued };
   } catch (sendErr) {
-    await releaseUnsentProof(send.id, token, delivery);
+    // Release OUR claim (token-scoped) so the catch-up tick can retry a
+    // transient SendGrid failure instead of the week silently losing its
+    // proof (an auto-send issue is not queued yet, so nothing else to undo).
+    try {
+      await db('newsletter_sends')
+        .where({ id: send.id, proof_token: token })
+        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+    } catch (clearErr) {
+      logger.error(`[newsletter-proof] failed to release proof claim for ${send.id}: ${clearErr.message}`);
+    }
     logger.error(`[newsletter-proof] proof send failed for ${send.id}: ${sendErr.message}`);
     return { skipped: true, reason: 'proof_send_failed' };
   }

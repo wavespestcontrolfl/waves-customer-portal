@@ -101,6 +101,14 @@ describe('processScheduledSends: auto-send kill switch (owner 2026-10-30, option
     expect(mockValidateEventSelection).not.toHaveBeenCalled();
   });
 
+  test('switch off: a check-in email the switch queued is held too', async () => {
+    wireDue([{ ...AUTO_QUEUED_WEEKLY, id: 'wb-1', newsletter_type: 'reengagement', scheduled_for: new Date('2026-09-07T11:30:00Z') }]);
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+  });
+
   test('switch on: the same issue goes through to the send-time checks', async () => {
     process.env.GATE_NEWSLETTER_AUTO_SEND = 'true';
     wireDue([AUTO_QUEUED_WEEKLY]);

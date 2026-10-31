@@ -246,7 +246,13 @@ const WINBACK_TEXT = [
 ].join('\n');
 
 // queued = GATE_NEWSLETTER_AUTO_SEND on: the row is scheduled for now, so
-// the next scheduler tick sends it.
+// the next scheduler tick sends it. autoQueued() marks it the way the proof
+// step marks an auto-send issue (approved, no approving email), so the
+// dispatcher holds it while the switch is off.
+function autoQueued(now = new Date()) {
+  return { status: 'scheduled', scheduled_for: now, proof_approved_at: now };
+}
+
 function buildWinbackDraftRow({ queued = false } = {}) {
   return {
     subject: WINBACK_SUBJECT,
@@ -257,7 +263,7 @@ function buildWinbackDraftRow({ queued = false } = {}) {
     from_name: 'Waves Pest Control',
     from_email: 'newsletter@wavespestcontrol.com',
     reply_to: 'contact@wavespestcontrol.com',
-    ...(queued ? { status: 'scheduled', scheduled_for: new Date() } : { status: 'draft' }),
+    ...(queued ? autoQueued() : { status: 'draft' }),
     segment_filter: { tags: [REENGAGEMENT_TAG] },
     newsletter_type: REENGAGEMENT_TYPE,
     // slug stays null — the public archive falls back to send.id, and the
@@ -310,7 +316,7 @@ async function ensureWinbackDraft(cohort, { autoSend = false } = {}) {
     if (autoSend && cohort && open.status === 'draft') {
       const queued = await db('newsletter_sends')
         .where({ id: open.id, status: 'draft' })
-        .update({ status: 'scheduled', scheduled_for: new Date(), updated_at: new Date() });
+        .update({ ...autoQueued(), updated_at: new Date() });
       return { created: false, openSendId: open.id, queued: Boolean(queued) };
     }
     return { created: false, openSendId: open.id };

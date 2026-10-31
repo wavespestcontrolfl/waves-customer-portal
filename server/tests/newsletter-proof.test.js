@@ -704,20 +704,27 @@ describe('GATE_NEWSLETTER_AUTO_SEND — the weekly issue sends itself (owner 202
   beforeEach(() => { process.env.GATE_NEWSLETTER_AUTO_SEND = 'true'; });
   afterAll(() => { delete process.env.GATE_NEWSLETTER_AUTO_SEND; });
 
-  test('an issue that passes every check is queued in the proof claim and the copy is FYI', async () => {
+  test('an issue that passes every check gets an FYI copy and is queued once the copy went out', async () => {
     const { sendsChain, calendarChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
     const r = await sendNewsletterProof('send-1');
     expect(r).toEqual(expect.objectContaining({ sent: true, queued: true }));
     expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', status: 'draft' });
-    const claim = sendsChain.update.mock.calls[0][0];
-    expect(claim).toEqual(expect.objectContaining({
-      proof_token: r.token,
+    // The claim stays a draft the dispatcher never picks up...
+    const [[claim], [queue]] = sendsChain.update.mock.calls;
+    expect(claim.proof_token).toBe(r.token);
+    expect(claim.status).toBeUndefined();
+    // ...and the issue is queued only after the copy went out, bound to the claim.
+    expect(mockSendOne.mock.invocationCallOrder[0]).toBeLessThan(sendsChain.update.mock.invocationCallOrder[1]);
+    expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', proof_token: r.token, status: 'draft' });
+    expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_approved_at');
+    expect(sendsChain.whereRaw).toHaveBeenCalledWith(expect.stringContaining("date_trunc('milliseconds', updated_at)"), [claim.proof_sent_at]);
+    expect(queue).toEqual(expect.objectContaining({
       status: 'scheduled',
       scheduled_for: TARGET_SEND_AT,
+      proof_approved_at: expect.any(Date),
       proof_approval_email_id: null,
       proof_refused_at: null,
     }));
-    expect(claim.proof_approved_at).toBe(claim.proof_sent_at);
     expect(calendarChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
     const args = mockSendOne.mock.calls[0][0];
     expect(args.subject).toBe(`FYI: [PROOF-${r.token}] Bubbles & Sea Lions`);
@@ -729,16 +736,26 @@ describe('GATE_NEWSLETTER_AUTO_SEND — the weekly issue sends itself (owner 202
     expect(mockTrigger).not.toHaveBeenCalledWith('newsletter_proof_sent', expect.anything());
   });
 
-  test('a failed copy takes the issue off the queue so the catch-up retries', async () => {
+  test('a failed copy never queues the issue, and the claim is released so the catch-up retries', async () => {
     mockSendOne.mockImplementation(async () => { throw new Error('sendgrid 503'); });
     const { sendsChain, calendarChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
     const r = await sendNewsletterProof('send-1');
     expect(r.reason).toBe('proof_send_failed');
-    expect(sendsChain.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'send-1', status: 'scheduled' }));
-    expect(sendsChain.update.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({
-      proof_token: null, proof_sent_at: null, status: 'draft', scheduled_for: null, proof_approved_at: null,
+    expect(sendsChain.update.mock.calls.some(([patch]) => patch.status === 'scheduled')).toBe(false);
+    expect(sendsChain.update.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ proof_token: null, proof_sent_at: null }));
+    expect(calendarChain.update).not.toHaveBeenCalled();
+  });
+
+  test('an issue that changed before it could be queued stays unqueued and the owner is told', async () => {
+    const { sendsChain, calendarChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    sendsChain.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0); // claim lands, queue finds the row changed
+    const r = await sendNewsletterProof('send-1');
+    expect(r).toEqual(expect.objectContaining({ sent: true, queued: false }));
+    expect(calendarChain.update).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      sendId: 'send-1',
+      errors: ['The FYI copy went out, but the issue changed before it could be queued, so it will not send this week.'],
     }));
-    expect(calendarChain.update.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ status: 'drafted' }));
   });
 
   test('a failed check queues nothing and raises the alert that says why', async () => {

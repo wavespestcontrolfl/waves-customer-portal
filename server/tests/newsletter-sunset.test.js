@@ -129,6 +129,9 @@ describe('win-back under GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A)'
     const row = q.insert.mock.calls[0][0];
     expect(row.status).toBe('scheduled');
     expect(row.scheduled_for).toBeInstanceOf(Date);
+    // Approved with no approving email = auto-queued: the dispatcher holds it while the switch is off.
+    expect(row.proof_approved_at).toBeInstanceOf(Date);
+    expect(row).not.toHaveProperty('proof_approval_email_id');
     expect(row.segment_filter).toEqual({ tags: [REENGAGEMENT_TAG] });
   });
 
@@ -145,7 +148,7 @@ describe('win-back under GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A)'
     db.mockImplementation(() => q);
     expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: false, openSendId: 'wb-old', queued: true });
     expect(q.where).toHaveBeenCalledWith({ id: 'wb-old', status: 'draft' });
-    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', scheduled_for: expect.any(Date) }));
+    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', scheduled_for: expect.any(Date), proof_approved_at: expect.any(Date) }));
     expect(q.insert).not.toHaveBeenCalled();
   });
 
