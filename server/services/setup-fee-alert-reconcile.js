@@ -28,6 +28,12 @@ function acceptedEstimateIdFromNotes(notes) {
   return match ? match[1].toLowerCase() : null;
 }
 
+// The open invoices setupFeeSettledElsewhere listed, named for staff
+// (GATE_SETUP_FEE_OPEN_INVOICE_NOTICE). Invoice numbers are NOT NULL and unique.
+function openFeeInvoiceClause(open) {
+  return `the one-time setup fee is already on open invoice ${open.map((invoice) => invoice.invoiceNumber).join(' and ')} (not paid yet)`;
+}
+
 async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel = '' }) {
   if (!customerId || !sourceEstimateId) return;
   sourceEstimateId = String(sourceEstimateId).toLowerCase();
@@ -387,6 +393,14 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             || (expectedFeeCents !== null
               ? coveredFeeCentsAll >= expectedFeeCents
               : (refundedFeeCents > 0 || uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine)));
+          // GATE_SETUP_FEE_OPEN_INVOICE_NOTICE: the fee is not paid yet, but the
+          // customer's open invoices carry fee lines the settled-anywhere rule counts
+          // once they are paid — billing it by hand would charge it twice. The alert
+          // stays open and says so; the payment resolves it, a void brings it back.
+          // Only against the frozen fee amount: open lines short of it change nothing.
+          const openFeeCents = partialElsewhereCents(elsewhere.open, [...stampedAll, ...onParkedAll]);
+          const feeOnOpenInvoice = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive()
+            && !feeProven && expectedFeeCents !== null && coveredFeeCentsAll + openFeeCents >= expectedFeeCents;
           await reconcileTerminalFeeAlerts(feeProven, expectedFeeCents !== null ? coveredFeeCentsAll : null);
           const expectedAppCents = (visitId) => {
             const map = staleMeta?.expectedApplicationCentsByVisit;
@@ -585,21 +599,37 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...feeCoveredBody,
               read_at: null, done_at: null, done_by: null, resolution: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, feeCovered: true, applicationCovered: false, uncoveredVisitIds: effectiveUncoveredIds })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, feeCovered: true, applicationCovered: false, uncoveredVisitIds: effectiveUncoveredIds, feeOnOpenInvoice: false })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — fee covered, ${uncoveredIds.length} application(s) still owed`);
+          } else if (feeOnOpenInvoice) {
+            // The fee waits on an open invoice: never instructed again, only an
+            // application still owed is (applicationProven leaves no uncovered visit).
+            const openFeeBody = NotificationService.adminBodyColumns('billing', applicationProven
+              ? `UPDATE: nothing to bill — ${openFeeInvoiceClause(elsewhere.open)} and every parked visit's application charge for this estimate is COVERED. Do NOT bill the setup fee or an application again; this alert clears by itself after the customer pays.`
+              : `UPDATE: ${openFeeInvoiceClause(elsewhere.open)} — do NOT bill it again. Still owed: ${appInstruction(effectiveUncoveredIds)}, and include "accepted estimate #${sourceEstimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any covered visit.`);
+            const openFeeState = { feeCovered: false, applicationCovered: applicationProven, coveredFeeCents: coveredFeeCentsNow, uncoveredVisitIds: effectiveUncoveredIds };
+            if (partialStateUnchanged(openFeeState, openFeeBody)) return;
+            await trx('notifications').where({ id: staleAlert.id }).update({
+              ...openFeeBody,
+              read_at: null, done_at: null, done_by: null, resolution: null,
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, ...openFeeState, feeOnOpenInvoice: true })]),
+            });
+            logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — fee on an open invoice, ${effectiveUncoveredIds.length} application(s) still owed`);
           } else if (applicationProven) {
             const appCoveredBody = NotificationService.adminBodyColumns('billing', `UPDATE: every parked visit's application charge for this estimate is now COVERED — do NOT bill an application again. Still owed: ${feeInstruction}, and include "accepted estimate #${sourceEstimateId}" in the invoice notes so the system recognizes it as billed.`);
             if (partialStateUnchanged({ feeCovered: false, applicationCovered: true, coveredFeeCents: coveredFeeCentsNow, uncoveredVisitIds: [] }, appCoveredBody)) return;
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...appCoveredBody,
               read_at: null, done_at: null, done_by: null, resolution: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, applicationCovered: true, feeCovered: false, uncoveredVisitIds: [] })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, applicationCovered: true, feeCovered: false, uncoveredVisitIds: [], feeOnOpenInvoice: false })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — application(s) covered, fee still owed`);
           } else if (wasResolved || staleMeta?.feeCovered === true || staleMeta?.applicationCovered === true
             || (uncoveredIds.length < parkedIds.length)
-            || (priorUncovered !== null && priorUncovered !== uncoveredIds.map(String).sort().join(','))) {
+            || (priorUncovered !== null && priorUncovered !== uncoveredIds.map(String).sort().join(','))
+            // A standing open-invoice notice is rewritten back (gate off, invoice voided).
+            || flagTrue(staleMeta?.feeOnOpenInvoice)) {
             // Fee uncovered; applications partially covered (or coverage
             // regressed after a resolved/partial state) — the instruction
             // lists exactly the still-owed charges, excluding every
@@ -612,7 +642,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...stillOwedBody,
               read_at: null, done_at: null, done_by: null, resolution: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, feeCovered: false, applicationCovered: false, uncoveredVisitIds: effectiveUncoveredIds })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, feeCovered: false, applicationCovered: false, uncoveredVisitIds: effectiveUncoveredIds, feeOnOpenInvoice: false })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — fee owed, ${uncoveredIds.length}/${parkedIds.length} application(s) still owed`);
           }

@@ -6,6 +6,10 @@
 // read "the setup fee is covered, the application is still owed" although the
 // application was billed: billing it by hand would have charged twice.
 //
+// GATE_SETUP_FEE_OPEN_INVOICE_NOTICE (owner 2026-10-31) closes what #6937 left:
+// the 08-25 shape with the visit's invoice not paid yet still read "setup fee
+// owed, bill it" although the fee rode that invoice as the add-on.
+//
 // The helper and the completion source contract run without a database; the
 // reconcile runs on real migrated PostgreSQL, synthetic records, rolled back
 // after every test.
@@ -28,6 +32,7 @@ const { randomUUID } = require('node:crypto');
 const { sumVisitChargeCents } = require('../services/estimate-first-application-invoice');
 
 const GATE = 'GATE_SETUP_FEE_APPLICATION_SETTLED';
+const NOTICE = 'GATE_SETUP_FEE_OPEN_INVOICE_NOTICE';
 
 describe('sumVisitChargeCents: the visit\'s own charge, add-ons included', () => {
   const visitId = 'v-1';
@@ -86,6 +91,7 @@ postgres('setup-fee alert reconcile: an application billed by a prepay year or t
 
   beforeEach(async () => {
     delete process.env[GATE];
+    delete process.env[NOTICE];
     trx = await database.transaction();
     require('../models/db').connection = trx;
     require('../services/annual-prepay-renewals')._private.resetCachesForTests();
@@ -94,6 +100,7 @@ postgres('setup-fee alert reconcile: an application billed by a prepay year or t
   afterEach(async () => { if (trx) await trx.rollback(); });
   afterAll(async () => {
     delete process.env[GATE];
+    delete process.env[NOTICE];
     delete process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE;
     await database?.destroy();
   });
@@ -162,7 +169,7 @@ postgres('setup-fee alert reconcile: an application billed by a prepay year or t
   // 08-25: the office put the $99 fee on the first visit as a WaveGuard
   // Membership add-on, so the alert froze the visit charge at $209; the
   // visit's own invoice billed $110 + $99 and was paid.
-  async function feeAddonOnTheVisit({ withBaseLine = true } = {}) {
+  async function feeAddonOnTheVisit({ withBaseLine = true, invoiceStatus = 'paid' } = {}) {
     const { customerId, estimateId } = await customerWithEstimate();
     const visitId = await visit(customerId, { date: day(-64), status: 'completed', serviceType: 'Pest Control Service',
       price: 209, estimateId });
@@ -174,10 +181,10 @@ postgres('setup-fee alert reconcile: an application billed by a prepay year or t
       category: 'WaveGuard Membership', amount: 99, quantity: 1, unit_price: 99 };
     const baseLine = { client_id: `scheduled_${visitId}_primary`, description: 'Pest Control Service',
       category: 'Pest Control Service', amount: 110, quantity: 1, unit_price: 110 };
-    await invoice(customerId, { status: 'paid', total: withBaseLine ? 209 : 99, visitId,
+    const invoiceId = await invoice(customerId, { status: invoiceStatus, total: withBaseLine ? 209 : 99, visitId,
       lines: withBaseLine ? [baseLine, addonLine] : [addonLine] });
     const alertId = await standingAlert({ customerId, estimateId, visitId, recordId, expectedAppCents: 20900 });
-    return { customerId, estimateId, visitId, alertId };
+    return { customerId, estimateId, visitId, alertId, invoiceId, invoiceNumber: `TEST-${invoiceId.slice(0, 8)}` };
   }
 
   // 09-11: a same-day annual sale. The visit's own invoice is the year's
@@ -281,6 +288,87 @@ postgres('setup-fee alert reconcile: an application billed by a prepay year or t
       const shape = await feeAddonOnTheVisit({ withBaseLine: false });
       const { text } = await reconciled(shape);
       expect(text).toContain(`Still owed: the application charge for visit ${shape.visitId}`);
+    });
+  });
+
+  // The 08-25 shape with the visit's invoice not paid yet: the plain "WaveGuard
+  // Membership" add-on is fee money only once paid, so the alert said to bill a fee
+  // the customer was already invoiced for.
+  describe('the fee add-on on a visit invoice not paid yet (application gate on, as in prod)', () => {
+    beforeEach(() => { process.env[GATE] = 'true'; });
+    const owedFee = 'Still owed: the one-time WaveGuard setup fee';
+    const owedBoth = 'UPDATE: still owed for this estimate: the one-time WaveGuard setup fee';
+
+    test('notice off: the alert says to bill the fee again (the gap)', async () => {
+      const shape = await feeAddonOnTheVisit({ invoiceStatus: 'sent' });
+      const { text, meta } = await reconciled(shape);
+      expect(text).toContain(owedFee);
+      expect(meta.feeOnOpenInvoice).toBe(false);
+    });
+
+    test('notice on: the alert names the open invoice and stays open, a Done sticks, and off restores the fee instruction', async () => {
+      process.env[NOTICE] = 'true';
+      const shape = await feeAddonOnTheVisit({ invoiceStatus: 'sent' });
+      const { text, meta, row } = await reconciled(shape);
+      expect(text).toBe(`UPDATE: nothing to bill — the one-time setup fee is already on open invoice ${shape.invoiceNumber} (not paid yet) and every parked visit's application charge for this estimate is COVERED. Do NOT bill the setup fee or an application again; this alert clears by itself after the customer pays.`);
+      expect(meta).toMatchObject({ feeOnOpenInvoice: true, feeCovered: false, applicationCovered: true, resolvedCovered: false });
+      expect(row.done_at).toBeNull();
+      await trx('notifications').where({ id: shape.alertId }).update({ read_at: new Date(), done_at: new Date(), done_by: 'owner' });
+      expect((await reconciled(shape)).row.done_by).toBe('owner');
+      delete process.env[NOTICE];
+      const off = await reconciled(shape);
+      expect(off.text).toContain(owedFee);
+      expect(off.meta.feeOnOpenInvoice).toBe(false);
+      expect(off.row.done_at).toBeNull();
+    });
+
+    test('notice on: once the customer pays, the alert resolves', async () => {
+      process.env[NOTICE] = 'true';
+      const shape = await feeAddonOnTheVisit({ invoiceStatus: 'viewed' });
+      expect((await reconciled(shape)).meta.feeOnOpenInvoice).toBe(true);
+      await trx('invoices').where({ id: shape.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+      const { text, meta, row } = await reconciled(shape);
+      expect(text).toMatch(/^RESOLVED — no action needed/);
+      expect(meta.resolvedCovered).toBe(true);
+      expect(row.done_at).not.toBeNull();
+    });
+
+    test('notice on: voiding the invoice brings both charges back', async () => {
+      process.env[NOTICE] = 'true';
+      const shape = await feeAddonOnTheVisit({ invoiceStatus: 'overdue' });
+      expect((await reconciled(shape)).meta.feeOnOpenInvoice).toBe(true);
+      await trx('invoices').where({ id: shape.invoiceId }).update({ status: 'void' });
+      const { text, meta } = await reconciled(shape);
+      expect(text).toContain(owedBoth);
+      expect(text).toContain(`plus the application charge for visit ${shape.visitId}`);
+      expect(meta.feeOnOpenInvoice).toBe(false);
+    });
+
+    test('notice on: open fee lines short of the fee change nothing', async () => {
+      process.env[NOTICE] = 'true';
+      const shape = await feeAddonOnTheVisit({ invoiceStatus: 'sent' });
+      const { line_items: stored } = await trx('invoices').where({ id: shape.invoiceId }).first('line_items');
+      const lines = (typeof stored === 'string' ? JSON.parse(stored) : stored).map((li) => (li.description === 'WaveGuard Membership'
+        ? { ...li, amount: 50, unit_price: 50 } : { ...li, amount: 159, unit_price: 159 }));
+      await trx('invoices').where({ id: shape.invoiceId }).update({ line_items: JSON.stringify(lines) });
+      const { text, meta } = await reconciled(shape);
+      expect(text).toContain(owedFee);
+      expect(meta.feeOnOpenInvoice).toBe(false);
+    });
+
+    test('notice on, the application owed too: the notice keeps the application instruction, and off restores the fee', async () => {
+      process.env[NOTICE] = 'true';
+      const shape = await feeAddonOnTheVisit({ withBaseLine: false, invoiceStatus: 'sent' });
+      // As raised at completion: no coverage state recorded yet.
+      await trx('notifications').where({ id: shape.alertId }).update({ done_at: null, done_by: null, resolution: null,
+        metadata: trx.raw("metadata - 'feeCovered' - 'applicationCovered' - 'coveredFeeCents' - 'uncoveredVisitIds' - 'resolvedCovered'") });
+      const on = await reconciled(shape);
+      expect(on.text).toContain(`UPDATE: the one-time setup fee is already on open invoice ${shape.invoiceNumber} (not paid yet) — do NOT bill it again. Still owed: the application charge for visit ${shape.visitId}`);
+      expect(on.meta.feeOnOpenInvoice).toBe(true);
+      delete process.env[NOTICE];
+      const off = await reconciled(shape);
+      expect(off.text).toContain(owedBoth);
+      expect(off.meta.feeOnOpenInvoice).toBe(false);
     });
   });
 

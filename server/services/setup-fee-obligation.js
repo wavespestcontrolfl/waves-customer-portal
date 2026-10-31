@@ -434,7 +434,14 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
 //     invoice from the last 13 months.
 // Gate off returns { settled: false } before any read. Pass `lock: true` inside
 // a transaction to read the invoices FOR UPDATE (the reconcile does).
+// Not settled, it also lists the open invoices whose fee lines this rule counts
+// once they are paid (`open`: id, invoice number, cents), so the reconcile can say
+// "already billed, do NOT bill again" (GATE_SETUP_FEE_OPEN_INVOICE_NOTICE).
 const SETUP_FEE_SETTLED_PREPAY_WINDOW_MS = 400 * 24 * 60 * 60 * 1000;
+
+// An invoice the customer is still asked to pay, which turns 'paid' when they do —
+// never a draft (it may never be sent) or a 'prepaid' one (it never turns paid).
+const OPEN_FEE_INVOICE_STATUSES = new Set(['scheduled', 'sent', 'viewed', 'overdue', 'partially_paid']);
 
 // Other services' own one-time fees (the rodent "Bait Station Setup — one-time
 // setup fee", a termite install) are not the WaveGuard fee and never settle it.
@@ -500,7 +507,7 @@ async function setupFeeSettledElsewhere(conn, {
     .where({ customer_id: customerId })
     .whereRaw(`(line_items::text ILIKE '%fee%' OR line_items::text ILIKE '%membership%' OR line_items::text ILIKE '%prepay%' OR line_items::text ILIKE '%prepaid%')`);
   if (lock) query = query.forUpdate();
-  const rows = await query.select('id', 'status', 'line_items', 'created_at');
+  const rows = await query.select('id', 'invoice_number', 'status', 'line_items', 'created_at');
   const dead = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void', 'draft']);
   dead.delete('refunded');
   const paidByInvoice = new Map();
@@ -523,11 +530,23 @@ async function setupFeeSettledElsewhere(conn, {
     .whereNull('t.annual_plan_version') // a termite annual plan never waives the WaveGuard fee
     .first('t.id');
   if (term) return { settled: true, reason: 'annual_prepay_term', termId: term.id };
+  // Each open invoice with the fee cents its lines become once it is paid (only a
+  // 'paid' result carries cents; a waived or prepay line settles nothing here).
+  const open = rows
+    .filter((row) => OPEN_FEE_INVOICE_STATUSES.has(String(row.status || '').toLowerCase()))
+    .map((row) => ({
+      id: String(row.id),
+      invoiceNumber: row.invoice_number,
+      cents: invoiceLineItems(row).reduce((sum, li) => sum + (feeLineEvidence(li, 'paid', row.created_at)?.cents || 0), 0),
+    }))
+    .filter((invoice) => invoice.cents > 0);
   // Not settled, but fee money found elsewhere still counts toward the fee:
   // the callers subtract it so only the remainder is instructed.
-  return paidByInvoice.size
-    ? { settled: false, partial: [...paidByInvoice].map(([id, cents]) => ({ id, cents })) }
-    : { settled: false };
+  return {
+    settled: false,
+    ...(paidByInvoice.size ? { partial: [...paidByInvoice].map(([id, cents]) => ({ id, cents })) } : {}),
+    open,
+  };
 }
 
 // Cents of the elsewhere-partial payments the caller has NOT already counted: per
