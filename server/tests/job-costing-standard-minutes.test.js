@@ -8,8 +8,20 @@ jest.mock('../services/ad-attribution-sync', () => ({
   syncCustomerAdAttribution: jest.fn().mockResolvedValue({}),
 }));
 jest.mock('../services/tech-cost-rates', () => ({ loadVisitRates: jest.fn() }));
+// Stand-in for the canonical paid-coverage query: a term is paid-covered when its test row says covered: true.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  coveredTermsAsOf: jest.fn((conn) => {
+    const terms = conn('annual_prepay_terms');
+    const query = {
+      where: (col, id) => { terms.where({ id, covered: true }); return query; },
+      first: () => terms.first(),
+    };
+    return query;
+  }),
+}));
 
 const logger = require('../services/logger');
+const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
 const { loadVisitRates } = require('../services/tech-cost-rates');
 const { GLOBAL } = require('../services/pricing-engine/constants');
 const jobCosting = require('../services/job-costing');
@@ -266,7 +278,7 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
         annual_prepay_terms: [term],
         scheduled_services: [{ ...SVC, ...unpriced, annual_prepay_term_id: 'term-1' }, ...others],
       });
-      const live = { id: 'term-1', prepay_amount: '480.00', status: 'active' };
+      const live = { id: 'term-1', prepay_amount: '480.00', status: 'active', covered: true };
       // This visit and 11 scheduled ones are counted: 12. The cancelled and the skipped one are not.
       expect((await cost(fakeDb(tables(live)), KEEP)).revenue).toBe(40);
       // A covered visit stamped $0 gets the share BEFORE the stamped-zero rule.
@@ -278,7 +290,7 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
     test('the share divides by the larger of the covered visit count and the linked visits', async () => {
       const tables = (coverage, linkedOthers) => ({
         ...withRecord({ revenue: 0 }),
-        annual_prepay_terms: [{ id: 'term-1', prepay_amount: '480.00', status: 'active', coverage_visit_count: coverage }],
+        annual_prepay_terms: [{ id: 'term-1', prepay_amount: '480.00', status: 'active', coverage_visit_count: coverage, covered: true }],
         scheduled_services: [
           { ...SVC, ...unpriced, annual_prepay_term_id: 'term-1' },
           ...Array.from({ length: linkedOthers }, (_, i) => ({ id: `v-${i}`, annual_prepay_term_id: 'term-1', status: 'scheduled' })),
@@ -299,18 +311,18 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       expect((await cost(fakeDb(tables), KEEP)).revenue).toBe(0);
     });
 
-    test('an unpaid term gives no share; a payment_pending term counts once its prepay invoice is paid', async () => {
-      const base = {
+    test('only a term the canonical paid-coverage query returns gives a share', async () => {
+      const tables = (covered) => ({
         ...withSvc({ ...unpriced, annual_prepay_term_id: 'term-1' }),
         ...withRecord({ revenue: 0 }),
-      };
-      const term = (patch) => ({ id: 'term-1', prepay_amount: '120.00', status: 'payment_pending', prepay_invoice_id: 'inv-p', ...patch });
-      const pending = fakeDb({ ...base, annual_prepay_terms: [term()], invoices: [{ id: 'inv-p', status: 'sent', paid_at: null }] });
-      expect((await cost(pending, KEEP)).revenue).toBe(0);
-      const paid = fakeDb({ ...base, annual_prepay_terms: [term()], invoices: [{ id: 'inv-p', status: 'paid', paid_at: '2026-10-01T00:00:00Z' }] });
-      expect((await cost(paid, KEEP)).revenue).toBe(120); // this visit is the only one counted
-      const refunded = fakeDb({ ...base, annual_prepay_terms: [term({ status: 'refunded' })] });
-      expect((await cost(refunded, KEEP)).revenue).toBe(0);
+        annual_prepay_terms: [{ id: 'term-1', prepay_amount: '120.00', status: 'payment_pending', covered }],
+      });
+      // Unpaid, voided or fully refunded: coveredTermsAsOf leaves it out, so no share.
+      expect((await cost(fakeDb(tables(false)), KEEP)).revenue).toBe(0);
+      coveredTermsAsOf.mockClear();
+      const db = fakeDb(tables(true));
+      expect((await cost(db, KEEP)).revenue).toBe(120); // this visit is the only one counted
+      expect(coveredTermsAsOf).toHaveBeenCalledWith(db, null);
     });
 
     test('a linked invoice gives its service lines, without setup, membership or onboarding fee lines or tax', async () => {

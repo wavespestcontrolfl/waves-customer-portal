@@ -88,12 +88,6 @@ const JOB_COST_STANDARD = Object.freeze({
   defaultDriveMinutes: 20,
 });
 
-// Paid annual-prepay term statuses, from annual-prepay-renewals.js: ACTIVE_STATUSES (line 18), the decided
-// coverage statuses (line 22, covered while the prepay invoice is paid), payment_pending (line 23, covered
-// once the invoice is collected), and PREPAY_INVOICE_COLLECTED_STATUSES (line 2591).
-const PREPAY_LIVE_TERM_STATUSES = ['active', 'renewal_pending'];
-const PREPAY_DECIDED_TERM_STATUSES = ['renewed', 'switch_plan'];
-const PREPAY_INVOICE_COLLECTED_STATUSES = ['paid', 'prepaid'];
 // Visit statuses that do not take a share of the prepay (annual-prepay-renewals.js COVERAGE_EXCLUDED_STATUSES, line 218).
 const PREPAY_UNCOUNTED_VISIT_STATUSES = ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'];
 // Invoice statuses that bill nothing (annual-prepay-invoice-statuses.js).
@@ -416,30 +410,19 @@ function deriveRevenueFromOwnSources({
   return (keepRecordedRevenue ? null : positiveMoney(customer?.monthly_rate)) ?? 0;
 }
 
-// Is this annual-prepay term paid? Live statuses are. A payment_pending or decided term (renewed,
-// switch_plan, or a decided lapse riding out its paid window) counts once its prepay invoice is collected;
-// a decided term with no linked invoice is legacy and keeps its covered meaning (coveredTermsAsOf,
-// annual-prepay-renewals.js:4016). Cancelled-without-decision, refunded and the rest are not paid.
-async function prepayTermIsPaid(db, term) {
-  const status = String(term.status || '').toLowerCase();
-  if (PREPAY_LIVE_TERM_STATUSES.includes(status)) return true;
-  const decided = PREPAY_DECIDED_TERM_STATUSES.includes(status)
-    || (status === 'cancelled' && term.renewal_decision === 'cancel');
-  if (status !== 'payment_pending' && !decided) return false;
-  if (!term.prepay_invoice_id) return decided;
-  const invoice = await db('invoices').where({ id: term.prepay_invoice_id }).first('status', 'paid_at');
-  return !!invoice && (PREPAY_INVOICE_COLLECTED_STATUSES.includes(String(invoice.status || '').toLowerCase())
-    || !!invoice.paid_at);
-}
-
 // The visit's share of its paid annual-prepay term: prepay_amount over the larger of the term's covered visit
 // count (coverage_visit_count) and its linked visits that still count. Visits not yet scheduled keep their
-// share, and the linked visits together never book more than the prepayment.
+// share, and the linked visits together never book more than the prepayment. "Paid" is the canonical
+// paid-coverage query (coveredTermsAsOf with no date: a paid status, a prepay invoice that is not void or
+// refunded, and a payment that was not fully refunded).
 async function loadPrepayVisitShare(db, svc) {
   if (!svc.annual_prepay_term_id) return 0;
   try {
-    const term = await db('annual_prepay_terms').where({ id: svc.annual_prepay_term_id }).first();
-    if (!term || !(Number(term.prepay_amount) > 0) || !(await prepayTermIsPaid(db, term))) return 0;
+    const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+    const term = await coveredTermsAsOf(db, null)
+      .where('t.id', svc.annual_prepay_term_id)
+      .first('t.id', 't.prepay_amount', 't.coverage_visit_count');
+    if (!term || !(Number(term.prepay_amount) > 0)) return 0;
     const counted = await db('scheduled_services')
       .where({ annual_prepay_term_id: term.id })
       .whereNotIn('status', PREPAY_UNCOUNTED_VISIT_STATUSES)

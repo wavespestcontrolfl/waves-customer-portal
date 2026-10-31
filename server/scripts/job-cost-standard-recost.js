@@ -16,6 +16,10 @@
 // recorded amount above $0 (keepRecordedRevenue); a recorded $0 falls to the visit's own price, prepay share or
 // invoice. At most 400 days per run, inclusive. No customer names are printed.
 //
+// Before costing, the script loads the price settings (pricing_config) as the app does at boot, so the drive
+// time is the configured Average Drive Time, not the code default; it stops if they do not load. Each visit's
+// "before" figures come from the service record calculateJobCost resolves and updates (resolveServiceRecord).
+//
 // --write needs --snapshot <new file>: before each visit commits, the script appends one JSON line with the
 // visit's service record figures and its job_costs row as they were, so the re-cost can be undone. The file
 // must not exist yet; keep every snapshot file (the first one holds the original figures).
@@ -104,11 +108,30 @@ function checkSnapshot(opts) {
   if (fs.existsSync(opts.snapshot)) throw new Error(`${opts.snapshot} already exists: name a new file and keep the old one`);
 }
 
+// The run's report: the mode and range, each service type's before and after, the totals, and the snapshot.
+function logReport(log, opts, { days, visits, types, totals, noRecord, failed, kept }) {
+  log(`${opts.write ? 'RE-COSTED' : 'DRY RUN (nothing written)'} ${visits} completed visit(s) from ${opts.from} to ${opts.to} (${days} days).`);
+  for (const [label, bucket] of Object.entries(types).sort(([a], [b]) => a.localeCompare(b))) log(formatBucket(label, bucket));
+  log(formatBucket('ALL SERVICE TYPES', totals));
+  log(`${noRecord} without a service record (not counted); ${failed} failed.`);
+  if (opts.write) log(`Figures before the re-cost: ${opts.snapshot} (${kept} visit(s)). Keep this file for an undo.`);
+}
+
+// The service record calculateJobCost costs and updates: the canonical resolver (scheduled_service_id, else the
+// legacy customer/date/type match). An ambiguous legacy match is costed record-less and never written: null.
+async function costedRecord(trx, id, resolveServiceRecord) {
+  const svc = await trx('scheduled_services').where({ id }).first();
+  if (!svc) return null;
+  const srCols = await trx('service_records').columnInfo().catch(() => ({}));
+  const { record, ambiguous } = await resolveServiceRecord(trx, svc, srCols);
+  return ambiguous ? null : record || null;
+}
+
 // One visit, one transaction: committed with --write (after its snapshot line is kept), rolled back otherwise.
-async function recostVisit(conn, id, { write, calculateJobCost, keepBefore }) {
+async function recostVisit(conn, id, { write, calculateJobCost, keepBefore, loadRecord }) {
   const trx = await conn.transaction();
   try {
-    const record = await trx('service_records').where({ scheduled_service_id: id }).orderBy('created_at', 'desc').first();
+    const record = await loadRecord(trx, id);
     const jobCost = write ? await trx('job_costs').where({ scheduled_service_id: id }).first() : null;
     const res = await calculateJobCost(id, trx, { keepRecordedRevenue: true });
     if (res.staleSkipped) throw new Error('costing inputs moved during the re-cost; visit skipped');
@@ -127,7 +150,8 @@ async function recostVisit(conn, id, { write, calculateJobCost, keepBefore }) {
 
 /**
  * @param {string[]} argv
- * @param {{conn?:object, log?:Function, gateOn?:Function, calculateJobCost?:Function}} deps injectable for tests
+ * @param {{conn?:object, log?:Function, gateOn?:Function, calculateJobCost?:Function, syncPricing?:Function,
+ *   loadRecord?:Function, keepBefore?:Function}} deps injectable for tests
  */
 async function run(argv, deps = {}) {
   const opts = parseArgs(argv);
@@ -139,7 +163,13 @@ async function run(argv, deps = {}) {
     throw new Error('GATE_JOB_COST_STANDARD_MINUTES is not "true" here, so nothing was costed (a re-cost would use the old numbers).');
   }
   const conn = deps.conn || require('../models/db');
-  const calculateJobCost = deps.calculateJobCost || require('../services/job-costing').calculateJobCost;
+  const syncPricing = deps.syncPricing || ((c) => require('../services/pricing-engine').syncConstantsFromDB(c));
+  if ((await syncPricing(conn)) !== true) {
+    throw new Error('The price settings (pricing_config) did not load, so nothing was costed (the drive time would be the code default).');
+  }
+  const jobCosting = require('../services/job-costing');
+  const calculateJobCost = deps.calculateJobCost || jobCosting.calculateJobCost;
+  const loadRecord = deps.loadRecord || ((trx, id) => costedRecord(trx, id, jobCosting.resolveServiceRecord));
   let kept = 0;
   const writeLine = deps.keepBefore || ((row) => fs.appendFileSync(opts.snapshot, `${JSON.stringify(row)}\n`));
   const keepBefore = (row) => { writeLine(row); kept += 1; };
@@ -152,7 +182,7 @@ async function run(argv, deps = {}) {
   let noRecord = 0;
   for (const id of ids) {
     try {
-      const { record, res } = await recostVisit(conn, id, { write: opts.write, calculateJobCost, keepBefore });
+      const { record, res } = await recostVisit(conn, id, { write: opts.write, calculateJobCost, keepBefore, loadRecord });
       if (!record) { noRecord += 1; continue; }
       const serviceType = res.service_type || 'unknown';
       types[serviceType] = types[serviceType] || emptyBucket();
@@ -166,16 +196,12 @@ async function run(argv, deps = {}) {
       log(`  visit ${id} failed: ${err.message}`);
     }
   }
-  log(`${opts.write ? 'RE-COSTED' : 'DRY RUN (nothing written)'} ${ids.length} completed visit(s) from ${opts.from} to ${opts.to} (${days} days).`);
-  for (const [label, bucket] of Object.entries(types).sort(([a], [b]) => a.localeCompare(b))) log(formatBucket(label, bucket));
-  log(formatBucket('ALL SERVICE TYPES', totals));
-  log(`${noRecord} without a service record (not counted); ${failed} failed.`);
-  if (opts.write) log(`Figures before the re-cost: ${opts.snapshot} (${kept} visit(s)). Keep this file for an undo.`);
+  logReport(log, opts, { days, visits: ids.length, types, totals, noRecord, failed, kept });
   if (failed) throw new Error(`${failed} visit(s) failed`);
   return { visits: ids.length, counted: totals.visits, noRecord, failed, types, totals };
 }
 
-module.exports = { run, parseArgs, checkRange, beforeFigures, afterFigures, snapshotRecord, MAX_DAYS };
+module.exports = { run, parseArgs, checkRange, beforeFigures, afterFigures, snapshotRecord, costedRecord, MAX_DAYS };
 
 if (require.main === module) {
   run(process.argv.slice(2))

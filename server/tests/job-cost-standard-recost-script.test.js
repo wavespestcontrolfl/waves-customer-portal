@@ -3,7 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { run, parseArgs } = require('../scripts/job-cost-standard-recost');
+const { run, parseArgs, costedRecord } = require('../scripts/job-cost-standard-recost');
 
 const RECORDS = {
   a: { revenue: '100.00', material_cost: '5.00', labor_cost: '40.00', drive_cost: '6.00', gross_profit: '49.00' },
@@ -41,6 +41,8 @@ const calc = (failId) => jest.fn(async (id) => {
   return RESULTS[id];
 });
 const ARGS = ['--from', '2026-08-01', '--to', '2026-10-30'];
+// The price settings load and each visit's record comes from the injected stand-ins.
+const BASE = { gateOn: () => true, syncPricing: async () => true, loadRecord: async (trx, id) => RECORDS[id] };
 
 describe('job-cost-standard-recost script', () => {
   test('refuses, dry run included, when the gate is off', async () => {
@@ -54,7 +56,7 @@ describe('job-cost-standard-recost script', () => {
     const conn = fakeConn(['a', 'b', 'c']);
     const log = jest.fn();
     const calculateJobCost = calc();
-    const out = await run(ARGS, { conn, log, gateOn: () => true, calculateJobCost });
+    const out = await run(ARGS, { conn, log, ...BASE, calculateJobCost });
     expect(calculateJobCost).toHaveBeenCalledWith('a', expect.any(Function), { keepRecordedRevenue: true });
     expect(conn.trxs).toHaveLength(3);
     for (const trx of conn.trxs) {
@@ -74,7 +76,7 @@ describe('job-cost-standard-recost script', () => {
     const conn = fakeConn(['a', 'b']);
     const keepBefore = jest.fn();
     const snapshot = path.join(os.tmpdir(), `recost-snapshot-${process.pid}-${Date.now()}.jsonl`);
-    await run([...ARGS, '--write', '--snapshot', snapshot], { conn, log: jest.fn(), gateOn: () => true, calculateJobCost: calc(), keepBefore });
+    await run([...ARGS, '--write', '--snapshot', snapshot], { conn, log: jest.fn(), ...BASE, calculateJobCost: calc(), keepBefore });
     for (const trx of conn.trxs) {
       expect(trx.commit).toHaveBeenCalledTimes(1);
       expect(trx.rollback).not.toHaveBeenCalled();
@@ -90,7 +92,7 @@ describe('job-cost-standard-recost script', () => {
 
   test('--write is refused without a new snapshot file, before any visit is costed', async () => {
     const conn = fakeConn(['a']);
-    const deps = { conn, log: jest.fn(), gateOn: () => true, calculateJobCost: calc() };
+    const deps = { conn, log: jest.fn(), ...BASE, calculateJobCost: calc() };
     await expect(run([...ARGS, '--write'], deps)).rejects.toThrow('--write needs --snapshot');
     const existing = path.join(os.tmpdir(), `recost-snapshot-existing-${process.pid}-${Date.now()}.jsonl`);
     fs.writeFileSync(existing, '');
@@ -104,9 +106,32 @@ describe('job-cost-standard-recost script', () => {
 
   test('a failed visit is rolled back and makes the run fail', async () => {
     const conn = fakeConn(['a', 'b']);
-    await expect(run(ARGS, { conn, log: jest.fn(), gateOn: () => true, calculateJobCost: calc('b') })).rejects.toThrow('1 visit(s) failed');
+    await expect(run(ARGS, { conn, log: jest.fn(), ...BASE, calculateJobCost: calc('b') })).rejects.toThrow('1 visit(s) failed');
     expect(conn.trxs[1].rollback).toHaveBeenCalled();
     expect(conn.trxs[1].commit).not.toHaveBeenCalled();
+  });
+
+  test('stops before any visit when the price settings do not load', async () => {
+    const conn = fakeConn(['a']);
+    const syncPricing = jest.fn().mockResolvedValue(false);
+    await expect(run(ARGS, { ...BASE, conn, log: jest.fn(), calculateJobCost: calc(), syncPricing }))
+      .rejects.toThrow('price settings (pricing_config) did not load');
+    expect(syncPricing).toHaveBeenCalledWith(conn);
+    expect(conn.trxs).toHaveLength(0);
+  });
+
+  test('costedRecord is the record costing resolves; an ambiguous legacy match has none', async () => {
+    const svc = { id: 'a', customer_id: 'c-1' };
+    const cols = { scheduled_service_id: {} };
+    const trx = (table) => ({
+      where: () => ({ first: () => Promise.resolve(table === 'scheduled_services' ? svc : null) }),
+      columnInfo: () => Promise.resolve(cols),
+    });
+    const legacy = { id: 'rec-legacy', revenue: '0.00' };
+    const resolve = jest.fn().mockResolvedValueOnce({ record: legacy, ambiguous: false }).mockResolvedValueOnce({ record: legacy, ambiguous: true });
+    expect(await costedRecord(trx, 'a', resolve)).toBe(legacy);
+    expect(resolve).toHaveBeenCalledWith(trx, svc, cols);
+    expect(await costedRecord(trx, 'a', resolve)).toBeNull();
   });
 
   test('an unknown flag is refused', () => {
