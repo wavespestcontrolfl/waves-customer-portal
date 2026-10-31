@@ -1776,10 +1776,24 @@ export function FilingCalendarTab() {
           update.amountPaid = amt;
         }
         if (status === "filed" || status === "paid") {
-          // Optional: the confirmation number from EFTPS, the state or the
-          // agency. Cancel aborts the change; blank sends none.
-          const conf = window.prompt("Confirmation number (optional):", "");
+          // The confirmation number from EFTPS, the state or the agency. Cancel
+          // aborts the change; blank sends none. A payroll row (source_key
+          // payroll:) requires one; the server refuses without it.
+          const payrollRow = String(
+            filings.find((f) => f.id === id)?.sourceKey || "",
+          ).startsWith("payroll:");
+          const conf = window.prompt(
+            payrollRow
+              ? "Confirmation number (required):"
+              : "Confirmation number (optional):",
+            "",
+          );
           if (conf === null) return;
+          if (payrollRow && conf.trim() === "") {
+            return alert(
+              "Enter the confirmation number — a payroll filing cannot be marked done without one.",
+            );
+          }
           if (conf.trim() !== "") update.confirmationNumber = conf.trim();
         }
         await adminFetch(`/admin/tax/filings/${id}`, {
@@ -6873,7 +6887,10 @@ export default function TaxPage() {
   const [activeTab, setActiveTab] = useState(() =>
     new URLSearchParams(window.location.search).has("oauth_state_id")
       ? "bankimport"
-      : "overview",
+      : // a tax deadline bell opens the Filing calendar (?tab=filings)
+        new URLSearchParams(window.location.search).get("tab") === "filings"
+        ? "filings"
+        : "overview",
   );
   // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
   // on (status is the one bank-import endpoint that answers while dark).

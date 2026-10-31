@@ -7162,6 +7162,15 @@ function initScheduledJobs() {
       // get this run's reminder. Never throws.
       await require('./payroll-tax-calendar').syncPayrollFilingsSafe();
 
+      // GATE_TAX_DEADLINE_BELLS (owner 2026-10-30): the reminders ring the admin bell, one per row and
+      // stage, in place of the text below (the bell policy had silenced that text since 2026-09-01).
+      // The typeof guard keeps a suite that mocks feature-gates without the reader on today's text.
+      const gates = require('../config/feature-gates');
+      if (typeof gates.taxDeadlineBellsLive === 'function' && gates.taxDeadlineBellsLive()) {
+        await require('./tax-deadline-reminders').runTaxDeadlineReminders({ now });
+        return;
+      }
+
       // Find filings due in the next 14 days that haven't been reminded yet
       const upcomingFilings = await db('tax_filing_calendar')
         .where('due_date', '>=', today)
