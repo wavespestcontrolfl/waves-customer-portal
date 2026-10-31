@@ -20,12 +20,14 @@ const { lawnAreaRoundAnchor } = require('./lawn-area-days');
 const { isLawn9xRoundsSeries } = require('./recurring-appointment-seeder');
 const { seriesCustomerSkipReason } = require('./series-customer-eligibility');
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+const { DATE_EXCEPTION_CLEAR } = require('./rebooker');
 
 const DEFAULT_MAX_SHIFT_DAYS = 14;
 const STAY_WINDOW_HOURS = 73;
 // A series gap under this is reported (never held): the area anchors keep it above 28 by construction.
 const SHORT_GAP_DAYS = 28;
 const MOVE_REASON = 'admin';
+const NOT_LAWN_9X = 'not a lawn 9x series any more';
 const DEAD = "('cancelled','skipped','completed','no_show','rescheduled')";
 const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -141,7 +143,8 @@ async function readFutureVisits(conn, parentId, todayET) {
 
 // Root rows that could be a lawn 9x series. Each: { candidate: root } or { skip: reason | null } (null = not a
 // lawn 9x series at all, so it is not counted). The identity rule is the app's own (isLawn9xRoundsSeries).
-async function readCandidateRoots(conn, { customerId = null, parentId = null } = {}) {
+// `lock` holds the root and customer rows until the caller's transaction ends (the conversion).
+async function readCandidateRoots(conn, { customerId = null, parentId = null, lock = false } = {}) {
   const query = conn('scheduled_services as ss')
     .join('customers as c', 'c.id', 'ss.customer_id')
     .leftJoin('services as sv', 'sv.id', 'ss.service_id')
@@ -154,6 +157,7 @@ async function readCandidateRoots(conn, { customerId = null, parentId = null } =
     .orderBy('ss.id');
   if (customerId) query.where('ss.customer_id', customerId);
   if (parentId) query.where('ss.id', parentId);
+  if (lock) query.forUpdate('ss', 'c');
   return (await query).map(classifyRoot);
 }
 
@@ -266,23 +270,26 @@ async function moveVisitToRound(conn, deps, row) {
   return v.tech;
 }
 
-const LIVE_FUTURE_SQL = `select ss.id::text id, ss.scheduled_date::text d, ss.annual_prepay_term_id::text term_id
+const LIVE_FUTURE_SQL = `select ss.id::text id, ss.scheduled_date::text d, ss.annual_prepay_term_id::text term_id,
+    ss.date_exception, ss.date_exception_source
   from scheduled_services ss
   where (ss.id = ? or ss.recurring_parent_id = ?) and ss.is_recurring is distinct from false
     and coalesce(ss.status,'pending') in ('pending','confirmed') and ss.scheduled_date >= ?::date
   for update`;
 
-// The conversion, in one transaction under the series locks. Every planned visit must be at its target and no
-// other live future visit may have appeared. Parent + live future children get recurring_pattern lawn_rounds_9
-// and no interval; the parent stores the anchor. A covering annual-prepay term on the every-6-weeks cadence is
-// moved to lawn_rounds_9, or its renewal and gap-fill would write 42-day rows again.
+// The conversion, in one transaction under the series locks. The series must still pass the plan's identity and
+// customer rules on locked rows (a cadence edit, a pause or a cancellation during the moves stops it), every
+// planned visit must be at its target and no other live future visit may have appeared. Parent + live future
+// children get recurring_pattern lawn_rounds_9 and no interval; the parent stores the anchor. Each move stamped
+// its visit a one-off exception to the 6-week schedule; on the rounds those dates are the regular ones, so the
+// stamps are cleared (a date the customer chose keeps its exception). A covering annual-prepay term on the
+// every-6-weeks cadence is moved to lawn_rounds_9, or its renewal and gap-fill would write 42-day rows again.
 async function convertSeries(conn, deps, plan) {
   return conn.transaction(async (trx) => {
     await deps.lockSeries(trx, plan.parentId);
     await deps.lockComms(trx, plan.customerId);
-    const parent = await trx('scheduled_services').where({ id: plan.parentId }).forUpdate().first('id', 'recurring_pattern');
-    if (!parent) return { converted: false, why: 'series not found' };
-    if (parent.recurring_pattern === LAWN_ROUNDS_9) return { converted: false, why: 'already rounds' };
+    const [entry] = await readCandidateRoots(trx, { parentId: plan.parentId, lock: true });
+    if (!entry?.candidate) return { converted: false, why: entry?.skip || NOT_LAWN_9X };
     const { rows: live } = await trx.raw(LIVE_FUTURE_SQL, [plan.parentId, plan.parentId, deps.todayET || etDateString()]);
     const target = new Map(plan.visits.map((r) => [r.id, r.to]));
     if (live.length !== target.size || live.some((r) => target.get(r.id) !== r.d)) {
@@ -292,6 +299,8 @@ async function convertSeries(conn, deps, plan) {
     const now = new Date();
     const rounds = { recurring_pattern: LAWN_ROUNDS_9, recurring_interval_days: null, ...(cols.updated_at ? { updated_at: now } : {}) };
     await trx('scheduled_services').whereIn('id', live.map((r) => r.id)).update(rounds);
+    const staleStamps = live.filter((r) => r.date_exception === true && !CUSTOMER_INITIATORS.has(String(r.date_exception_source || '')));
+    await trx('scheduled_services').whereIn('id', staleStamps.map((r) => r.id)).update(DATE_EXCEPTION_CLEAR);
     await trx('scheduled_services').where({ id: plan.parentId }).update({
       ...rounds,
       ...(cols.recurring_round_anchor_date ? { recurring_round_anchor_date: plan.anchor } : {}),
@@ -312,12 +321,14 @@ async function convertPrepayTerms(trx, deps, termIds, now) {
   return sixWeek.length;
 }
 
-// Apply ONE series. `replan()` re-reads and re-plans from the database; the series is skipped when that
-// differs from `plan` (a visit changed since the dry run). Returns { status, ... }: converted | held |
-// skipped | error. An error after some moves leaves the series unconverted; a re-run plans zero moves for
-// the visits already at target and finishes.
+// Apply ONE series. The root is read again first: a series that no longer passes the identity and customer
+// rules (a cadence edit, a pause, a cancellation since the plan) is skipped. `replan(root)` re-plans it from
+// fresh reads; the series is skipped when that differs from `plan` (a visit changed since the dry run).
+// Returns { status, ... }: converted | held | skipped | error. An error after some moves leaves the series
+// unconverted; a re-run plans zero moves for the visits already at target and finishes.
 async function applySeries(conn, deps, plan, replan) {
-  const fresh = await replan();
+  const [entry] = await readCandidateRoots(conn, { parentId: plan.parentId });
+  const fresh = entry?.candidate ? await replan(entry.candidate) : { skip: entry?.skip || NOT_LAWN_9X };
   if (!fresh || fresh.skip) return { status: 'skipped', why: fresh?.skip || 'series not found' };
   if (fresh.signature !== plan.signature) return { status: 'skipped', why: 'series changed since the plan' };
   if (fresh.held) return { status: 'held', why: fresh.held };

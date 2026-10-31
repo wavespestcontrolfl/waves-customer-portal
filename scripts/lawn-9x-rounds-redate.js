@@ -128,13 +128,11 @@ async function main(opts) {
 
   console.log(`${opts.apply ? 'APPLYING' : 'DRY RUN'} - lawn 9x series onto the rounds, max shift ${opts.maxShiftDays} days\n`);
   const plans = [];
-  const rootOf = new Map();
   for (const entry of roots) {
     if (!entry.candidate) { if (entry.skip) bump(entry.skip); continue; }
     const result = await planFor(entry.candidate, reserved);
     if (result.skip) { bump(result.skip); continue; }
     plans.push(result);
-    rootOf.set(result.parentId, entry.candidate);
     printPlan(result);
   }
   const report = summarizePlans(plans, skipped);
@@ -142,13 +140,13 @@ async function main(opts) {
   console.log(JSON.stringify(report, null, 2));
 
   let failed = 0;
-  if (opts.apply) failed = await applyAll({ db, svc, plans, rootOf, planFor, todayET });
+  if (opts.apply) failed = await applyAll({ db, svc, plans, planFor, todayET });
   else console.log('\nDry run only - nothing was written. Pass --apply to move and convert.');
   await db.destroy();
   if (failed > 0) process.exitCode = 1;
 }
 
-async function applyAll({ db, svc, plans, rootOf, planFor, todayET }) {
+async function applyAll({ db, svc, plans, planFor, todayET }) {
   const deps = {
     rebooker: require('../server/services/rebooker'),
     reminders: require('../server/services/appointment-reminders'),
@@ -162,7 +160,7 @@ async function applyAll({ db, svc, plans, rootOf, planFor, todayET }) {
   const counts = {};
   console.log('\nApplying');
   for (const plan of plans) {
-    const outcome = await svc.applySeries(db, deps, plan, () => planFor(rootOf.get(plan.parentId), new Map()));
+    const outcome = await svc.applySeries(db, deps, plan, (root) => planFor(root, new Map()));
     counts[outcome.status] = (counts[outcome.status] || 0) + 1;
     console.log(`[${outcome.status}] parent=${plan.parentId}${outcome.why ? ` ${outcome.why}` : ''} moved=${(outcome.moved || []).length}`
       + `${outcome.termsMoved ? ` prepay terms moved=${outcome.termsMoved}` : ''}`);

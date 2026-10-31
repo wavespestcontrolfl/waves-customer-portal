@@ -16,6 +16,7 @@ jest.mock('../utils/customer-comms-lock', () => ({
 
 const redate = require('../services/lawn-rounds-redate');
 const seeder = require('../services/recurring-appointment-seeder');
+const { dateExceptionStamp, DATE_EXCEPTION_CLEAR } = require('../services/rebooker');
 const { parseCliArgs, summarizePlans } = require('../../scripts/lawn-9x-rounds-redate');
 
 const { planSeriesRedate, stayReason, reviewPlan, applySeries, convertSeries } = redate;
@@ -190,31 +191,49 @@ describe('reviewPlan', () => {
 
 // ---- the applier ----------------------------------------------------------------------------------------------
 
+// The series root as readCandidateRoots returns it (scheduled_services plus the customer columns it joins).
+const lawnRoot = (pattern) => ({
+  id: PARENT, customer_id: CUSTOMER, is_recurring: true, recurring_parent_id: null, recurring_pattern: pattern,
+  recurring_interval_days: pattern === 'custom' ? 42 : null, service_type: 'Lawn Care', c_active: true, c_deleted_at: null,
+  c_service_paused_at: null, c_service_pause_reason: null, c_pipeline_stage: null, c_property_type: 'residential',
+});
+
+// readCandidateRoots' query on the fakes: the chain returns the world's root row (a row lock is logged).
+function rootQuery(state, log) {
+  const chain = {};
+  for (const method of ['join', 'leftJoin', 'where', 'whereNull', 'whereIn', 'select', 'orderBy']) chain[method] = () => chain;
+  chain.forUpdate = (...tables) => { log.push(`lock-rows:${tables.join(',')}`); return chain; };
+  chain.then = (resolve, reject) => Promise.resolve(state.root ? [{ ...state.root }] : []).then(resolve, reject);
+  return chain;
+}
+
 function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebookerFails = null, smsSent = false } = {}) {
   const log = [];
   const fail = { id: rebookerFails };
   const rows = new Map(visits.map((v) => [v.id, {
-    id: v.id, d: v.date, ws: v.ws, we: v.we, dur: v.dur, tech: v.tech, term_id: v.termId || null,
+    id: v.id, d: v.date, ws: v.ws, we: v.we, dur: v.dur, tech: v.tech, term_id: v.termId || null, is_recurring: true,
     window_start: `${v.ws}:00`, window_end: `${v.we}:00`, technician_id: v.tech, status: 'pending', customer_confirmed: false,
     auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null,
   }]));
-  const state = { parent: { id: PARENT, recurring_pattern: parentPattern }, terms };
+  const state = { root: lawnRoot(parentPattern), terms };
   const live = () => [...rows.values()].sort((a, b) => a.d.localeCompare(b.d));
-  const conn = {
+  const conn = Object.assign(() => rootQuery(state, log), {
     raw: jest.fn(async (sql, params) => {
       if (/where ss\.id = \?/.test(sql)) return { rows: rows.has(params[0]) ? [rows.get(params[0])] : [] };
       if (/where \(ss\.id = \?/.test(sql)) return { rows: live() };
       return { rows: [] };
     }),
     transaction: jest.fn(async (fn) => fn(makeTrx(state, live, log))),
-  };
+  });
   const rebooker = {
     reschedule: jest.fn(async (id, date, window, reason, by, options) => {
       log.push(`move:${id}`);
       if (fail.id === id) throw new Error('refused');
-      // The real rebooker runs beforeMove inside its transaction, before the row write.
+      // The real rebooker runs beforeMove inside its transaction, before the row write, and stamps a date move
+      // a one-off exception to the cadence (dateExceptionStamp, initiator 'admin').
       await options.beforeMove(conn);
-      rows.get(id).d = date;
+      const row = rows.get(id);
+      Object.assign(row, dateExceptionStamp({ ...row, scheduled_date: row.d }, by), { d: date });
       return { ok: true, smsSent };
     }),
   };
@@ -231,12 +250,12 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
 
 function makeTrx(state, live, log) {
   const trx = (table) => {
+    if (table === 'scheduled_services as ss') return rootQuery(state, log);
     const q = { ids: null, filter: null };
     const chain = {
       where(filter) { q.filter = filter; return chain; },
       whereIn(_col, ids) { q.ids = ids; return chain; },
       forUpdate() { return chain; },
-      first: async () => (table === 'scheduled_services' ? state.parent : null),
       select: async () => (table === 'annual_prepay_terms' ? state.terms.filter((t) => q.ids.includes(t.id)) : []),
       columnInfo: async () => ({ updated_at: {}, recurring_round_anchor_date: {}, recurring_round_floor_date: {}, coverage_cadence: {} }),
       update: async (obj) => { log.push({ op: 'update', table, filter: q.filter, ids: q.ids, obj }); return 1; },
@@ -279,13 +298,14 @@ describe('applySeries', () => {
     const w = world();
     await applySeries(w.conn, w.deps, await w.replan(), w.replan);
     const names = w.log.map((e) => (typeof e === 'string' ? e : `update:${e.table}`));
-    expect(names).toEqual(['move:v2', 'remind:v2', 'move:v3', 'remind:v3', 'move:v4', 'remind:v4', 'lock-series', 'lock-comms', 'update:scheduled_services', 'update:scheduled_services']);
+    expect(names).toEqual(['move:v2', 'remind:v2', 'move:v3', 'remind:v3', 'move:v4', 'remind:v4', 'lock-series', 'lock-comms',
+      'lock-rows:ss,c', 'update:scheduled_services', 'update:scheduled_services', 'update:scheduled_services']);
   });
 
   test('stores the anchor with the rounds pattern and no interval; no floor column is written', async () => {
     const w = world();
     await applySeries(w.conn, w.deps, await w.replan(), w.replan);
-    const [children, parent] = updates(w.log);
+    const [children, , parent] = updates(w.log);
     expect(children.ids).toEqual(['v1', 'v2', 'v3', 'v4']);
     expect(children.obj).toMatchObject({ recurring_pattern: 'lawn_rounds_9', recurring_interval_days: null });
     expect(parent.filter).toEqual({ id: PARENT });
@@ -345,7 +365,46 @@ describe('applySeries', () => {
     const second = await applySeries(w.conn, w.deps, await w.replan(), w.replan);
     expect(second.status).toBe('converted');
     expect(second.moved.map((m) => m.row.id)).toEqual(['v3', 'v4']);
-    expect(updates(w.log).length).toBe(2);
+    expect(updates(w.log).length).toBe(3);
+  });
+
+  test('the conversion clears the move stamps (the round dates are regular) and keeps a date the customer chose', async () => {
+    const w = world();
+    // The next visit is kept as booked: a date the customer picked, a genuine exception.
+    Object.assign(w.rows.get('v1'), { date_exception: true, date_exception_source: 'customer_self_serve', date_exception_cadence_date: '2026-11-10' });
+    const out = await applySeries(w.conn, w.deps, await w.replan(), w.replan);
+    expect(out.status).toBe('converted');
+    // Each move was stamped a one-off from the old 6-week date, as the rebooker does.
+    expect(w.rows.get('v2')).toMatchObject({ date_exception: true, date_exception_source: 'admin', date_exception_cadence_date: '2026-12-29' });
+    const [, cleared] = updates(w.log);
+    expect(cleared.ids).toEqual(['v2', 'v3', 'v4']);
+    expect(cleared.obj).toEqual(DATE_EXCEPTION_CLEAR);
+  });
+
+  test('a series that no longer passes the identity or customer rules is skipped before any move', async () => {
+    const paused = world();
+    const plan = await paused.replan();
+    Object.assign(paused.state.root, { c_service_paused_at: new Date(), c_service_pause_reason: 'owner hold' });
+    expect(await applySeries(paused.conn, paused.deps, plan, paused.replan)).toMatchObject({ status: 'skipped', why: 'customer_service_held' });
+    const recadenced = world();
+    Object.assign(recadenced.state.root, { recurring_interval_days: 90 });
+    expect(await applySeries(recadenced.conn, recadenced.deps, plan, recadenced.replan))
+      .toMatchObject({ status: 'skipped', why: 'not a lawn 9x series any more' });
+    for (const w of [paused, recadenced]) expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('a change that lands during the moves stops the conversion, judged on locked rows', async () => {
+    const w = world();
+    const move = w.rebooker.reschedule.getMockImplementation();
+    w.rebooker.reschedule.mockImplementation(async (id, ...rest) => {
+      const result = await move(id, ...rest);
+      if (id === 'v4') w.state.root.c_active = false;
+      return result;
+    });
+    const out = await applySeries(w.conn, w.deps, await w.replan(), w.replan);
+    expect(out).toMatchObject({ status: 'skipped', why: 'customer_inactive' });
+    expect(w.log).toContain('lock-rows:ss,c');
+    expect(updates(w.log)).toEqual([]);
   });
 
   test('a converted series is skipped on a re-run', async () => {
