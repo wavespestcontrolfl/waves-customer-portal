@@ -213,4 +213,71 @@ describe("Reviews workspace foundation", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(screen.getByText("Synthetic candidate failure")).toBeInTheDocument();
   });
+
+  it("shows why each match candidate fits the review or not", async () => {
+    const fetch = vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("/admin/reviews/incentives/attribution-candidates?")) {
+        return response({
+          candidates: [
+            {
+              id: "customer-fit",
+              name: "Marlow Pemberton",
+              services: [],
+              evidence: {
+                nameKind: "exact", role: "holder", dates: "fits", firstContactAt: "2025-10-24T04:00:00.000Z",
+                tap: false, recent: true, saidReviewed: false, alreadyLinkedHere: false,
+              },
+            },
+            {
+              id: "customer-late",
+              name: "Gwen Pemberton",
+              services: [],
+              evidence: {
+                nameKind: "household", role: "holder", dates: "clash", firstContactAt: "2026-05-14T16:00:00.000Z",
+                tap: true, recent: false, saidReviewed: true, alreadyLinkedHere: true,
+              },
+            },
+            { id: "customer-plain", name: "Dana Fenwick", services: [] },
+          ],
+          likelyReviewers: [],
+        });
+      }
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) {
+        return response({
+          items: [{ id: "review-unmatched", reviewerName: "Marlow Pemberton", reason: "missing_customer", starRating: 5 }],
+        });
+      }
+      if (path.includes("/admin/reviews/incentives?")) {
+        return response({
+          summary: { confirmedGoogleReviews: 1 },
+          payouts: [],
+          leaderboard: [],
+          policy: { enabled: true, amountCents: 500 },
+        });
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({
+          reviews: [],
+          locations: [],
+          stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 },
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Match" }));
+    await screen.findByText("Dana Fenwick");
+
+    // A card without evidence (an older server) shows no evidence line.
+    expect(screen.getAllByTestId("link-evidence").map((node) => node.textContent)).toEqual([
+      "Same name | First contact Oct 24, 2025 | Visit or review text in the 14 days before",
+      'Same surname, different first name | First contact May 14, 2026, after this review | Tapped the review link within 3 hours | Texted "I left a review" | Already linked to another review on this profile',
+    ]);
+  });
 });
