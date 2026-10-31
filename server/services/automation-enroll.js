@@ -186,7 +186,12 @@ const REVIEW_THANKYOU_BY_LOCATION = Object.freeze({
   venice: 'review_thank_you_venice',
 });
 
-async function enrollReviewThankYou({ customerId, locationId, starRating, source = 'google_review' } = {}) {
+// "We saw your Google review" reads wrong weeks later: a review matched to its
+// customer long after it posted (a late name match, a manual match from the
+// Reviews queue, a backlog cleanup) gets no thank-you (owner 2026-10-31).
+const REVIEW_THANKYOU_MAX_AGE_DAYS = 14;
+
+async function enrollReviewThankYou({ customerId, locationId, starRating, reviewCreatedAt, source = 'google_review' } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('reviewThankYouEnroll')) return { enrolled: false, reason: 'gate_off' };
   const templateKey = REVIEW_THANKYOU_BY_LOCATION[locationId] || null;
@@ -194,6 +199,12 @@ async function enrollReviewThankYou({ customerId, locationId, starRating, source
   // 4-5 stars only: an automated "thank you for your review" on a 1-3 star
   // review reads as tone-deaf.
   if (Number(starRating || 0) < 4) return { enrolled: false, reason: 'low_rating' };
+  // No review date, no thank-you: the age rule cannot be checked.
+  const postedAt = reviewCreatedAt ? new Date(reviewCreatedAt).getTime() : NaN;
+  if (!Number.isFinite(postedAt)) return { enrolled: false, reason: 'review_date_unknown' };
+  if (Date.now() - postedAt > REVIEW_THANKYOU_MAX_AGE_DAYS * 24 * 60 * 60 * 1000) {
+    return { enrolled: false, reason: 'review_too_old' };
+  }
   return enrollSequenceFromEvent({
     templateKey,
     customerId,

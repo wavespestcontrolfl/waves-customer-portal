@@ -2887,7 +2887,9 @@ const gates = {
   // unset the var, or toggle the sequence off in the tab to hold in-flight):
   //
   // Google review attributed to a customer (4-5 stars) → the matching
-  // location's Review Thank You sequence. Once per customer ever.
+  // location's Review Thank You sequence. Once per customer ever, and only
+  // for a review posted within the last 14 days (a late or manual match of an
+  // older review gets no "we saw your review" email; owner 2026-10-31).
   reviewThankYouEnroll: process.env.GATE_REVIEW_THANKYOU_ENROLL === 'true',
   // Automatic Google review replies. The gate is a MODE, not a boolean:
   // GATE_REVIEW_AUTO_REPLY = off (unset) | shadow (drafts only) | auto
