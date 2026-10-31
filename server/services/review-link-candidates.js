@@ -27,7 +27,7 @@ async function loadEvidenceRows(conn, { customerIds = null } = {}) {
   const cu = onlyCustomers('cu.id', customerIds);
   const customers = (await conn.raw(`
     SELECT cu.id, cu.first_name, cu.last_name, ${CONTACT_COLUMNS.map((c) => `cu.${c}`).join(', ')},
-           cu.has_left_google_review, cu.created_at, cu.lead_source,
+           cu.has_left_google_review, cu.active, cu.created_at, cu.lead_source,
            -- date columns as 'YYYY-MM-DD': the evidence module reads a date-only value as Eastern midnight
            cu.member_since::text AS member_since, cu.customer_since::text AS customer_since,
            (SELECT min(coalesce(l.first_contact_at, l.created_at)) FROM leads l WHERE l.customer_id = cu.id) AS first_lead_at,
@@ -96,6 +96,8 @@ function buildCandidates({ customers, visits, asks, taps, texts }) {
     return {
       customerId: cu.id,
       marked: cu.has_left_google_review === true,
+      // The Reviews match queue offers active customers only (review-incentives.js).
+      active: cu.active !== false,
       holder: { first: cu.first_name, last: cu.last_name },
       contacts: CONTACT_COLUMNS.map((c) => cu[c]).filter(Boolean),
       timeline: {

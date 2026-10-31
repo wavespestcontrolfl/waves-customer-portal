@@ -45,7 +45,7 @@ describe('buildCandidates', () => {
   test('groups activity by customer id as text', () => {
     const id = { toString: () => 'c1' };
     const [candidate] = buildCandidates({
-      customers: [{ id: 'c1', first_name: 'Marlow', last_name: 'Pemberton', service_contact_name: 'Gwen' }],
+      customers: [{ id: 'c1', first_name: 'Marlow', last_name: 'Pemberton', service_contact_name: 'Gwen', active: false }],
       visits: [{ customer_id: id, on_day: '2026-10-10' }],
       asks: [{ customer_id: 'c1', sms_sent_at: '2026-10-11T15:00:00Z' }],
       taps: [],
@@ -53,6 +53,7 @@ describe('buildCandidates', () => {
     });
     expect(candidate).toMatchObject({
       customerId: 'c1',
+      active: false,
       contacts: ['Gwen'],
       activity: { visitsOn: ['2026-10-10'], asksAt: ['2026-10-11T15:00:00Z'], inboundTexts: [{ body: 'Just left you a review!' }] },
     });

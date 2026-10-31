@@ -83,9 +83,12 @@ async function computeDecisions(conn) {
     linkedBy.set(idOf(r.customer_id), list);
   }
   const context = { linkedBy, surnameHolderCount: (surname) => holders.get(surname) || 0 };
+  // Only a customer a person can confirm in the queue is ever suggested (the candidate search and
+  // the pin both require active); a linked review is judged on its customer whatever their status.
+  const suggestible = candidates.filter((c) => c.active !== false);
   return reviews.map((review) => ({
     review,
-    next: review.customer_id ? decideLinked(review, byId) : decideUnlinked(review, candidates, context),
+    next: review.customer_id ? decideLinked(review, byId) : decideUnlinked(review, suggestible, context),
   }));
 }
 

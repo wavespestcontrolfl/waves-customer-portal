@@ -128,6 +128,13 @@ describe('runReviewNameMatch', () => {
     expect(conn.updates[0].wheres).toContainEqual(['raw', 'name_match_dismissed_at IS NOT DISTINCT FROM ?::timestamptz', [dismissedAt]]);
   });
 
+  test('an inactive customer is never suggested: the queue could not confirm them', async () => {
+    const conn = fakeConn([review('r1', 'Marlow Pemberton')]);
+    loadEvidenceCandidates.mockResolvedValue([candidate('c1', 'Marlow', 'Pemberton', { active: false })]);
+    const out = await runReviewNameMatch({ conn, mode: 'on' });
+    expect(out).toMatchObject({ counts: { none: 1 }, written: 0 });
+  });
+
   test('a decision that no longer holds is cleared', async () => {
     const conn = fakeConn([review('r1', 'Trent Oakhurst', { name_match_result: 'pause', name_match_customer_id: 'c1', name_match_reason: 'near' })]);
     loadEvidenceCandidates.mockResolvedValue([candidate('c1', 'Dana', 'Fenwick')]);
