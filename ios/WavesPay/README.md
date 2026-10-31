@@ -23,6 +23,7 @@ ios/WavesPay/
 │   ├── WavesPayApp.swift     — app entry + URL scheme handler
 │   ├── AppState.swift        — payment flow state, deep-link parser, JWT reader
 │   ├── PortalView.swift      — staff portal web view + Tap to Pay bridge
+│   ├── StaffAlerts.swift     — staff alerts: push registration, badge, taps
 │   ├── HowToTap.swift        — Apple's "How to Tap" lesson (iOS 18+)
 │   ├── Keychain.swift        — terminal token storage
 │   ├── API.swift             — portal HTTP client
@@ -167,6 +168,19 @@ signed-in staff page posts `{ type: 'prepareReader' }` and defines
 token from `/connection-token` under the page's own sign-in. The app asks
 the page for each token and falls back to the payment's terminal token.
 
+## Staff alerts
+
+Web push cannot run in the app's web view, so staff alerts arrive as iPhone
+notifications (APNs). After sign-in the staff page posts
+`{ type: 'registerPush' }`; the app asks for notification permission once and
+answers with a `wavesadmin:pushtoken` window event (`{ token, environment }`).
+The page registers the token under its own sign-in at
+`POST /api/admin/push/native-subscribe` (`client/src/native/wavesAdminPush.js`);
+the row names this app's bundle and APNs environment (Xcode installs use the
+sandbox), and `server/services/apns.js` sends to the matching topic and host.
+The page sets the icon badge with `{ type: 'badge', count }`, and a tap on an
+alert opens its portal page.
+
 ## Security notes
 
 - The JWT's signature is verified server-side on `/validate-handoff`. The
@@ -214,7 +228,4 @@ the page for each token and falls back to the payment's terminal token.
 - Background reader keep-alive. The SDK disconnects when the app is
   backgrounded and reconnects by itself when it comes back; the app
   connects again if that fails.
-- Staff push notifications. Web Push does not run in the app's web view,
-  so staff alerts stay in the home-screen web app. Native push needs server
-  work (`/push/native-subscribe` accepts customer tokens only).
 - A custom launch screen.

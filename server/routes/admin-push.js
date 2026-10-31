@@ -21,6 +21,7 @@ const {
   clearOverrideCache,
 } = require('../services/notification-bell-policy');
 const PushService = require('../services/push-notifications');
+const { STAFF_APP_BUNDLE_ID } = require('../services/apns');
 const {
   adminAuthenticate,
   requireAdmin,
@@ -57,6 +58,27 @@ router.get('/diagnostics', adminAuthenticate, requireAdmin, (req, res) => {
 // Subscription and preference operations require a signed-in admin portal user.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// The staff row a push registration binds to, revalidated under its row lock:
+// credential mutations either commit first and reject this stale request, or
+// wait and deactivate the newly registered subscription after this
+// transaction commits. Null when the session no longer stands.
+async function lockCurrentStaff(trx, req) {
+  const technician = await trx('technicians')
+    .where({ id: req.technicianId })
+    .forUpdate()
+    .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+  if (
+    !technician
+    || !technician.active
+    || !['admin', 'technician'].includes(technician.role)
+    || technician.must_change_password
+    || !staffTokenVersionMatches(req.staffToken, technician)
+  ) {
+    return null;
+  }
+  return technician;
+}
+
 async function subscribe(req, res, next) {
   try {
     const { subscription, deviceInfo } = req.body;
@@ -81,22 +103,8 @@ async function subscribe(req, res, next) {
     // EVERY active row, so leaving them active means failed attempts or
     // duplicate notifications to the same device.
     const outcome = await db.transaction(async (trx) => {
-      // Revalidate under the staff row lock. Credential mutations either
-      // commit first and reject this stale request, or wait and deactivate the
-      // newly registered subscription after this transaction commits.
-      const technician = await trx('technicians')
-        .where({ id: adminUserId })
-        .forUpdate()
-        .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
-      if (
-        !technician
-        || !technician.active
-        || !['admin', 'technician'].includes(technician.role)
-        || technician.must_change_password
-        || !staffTokenVersionMatches(req.staffToken, technician)
-      ) {
-        return { revoked: true };
-      }
+      const technician = await lockCurrentStaff(trx, req);
+      if (!technician) return { revoked: true };
       const staffTokenVersion = Number(technician.auth_token_version);
 
       const existingRows = await trx('push_subscriptions')
@@ -151,6 +159,53 @@ async function subscribe(req, res, next) {
 }
 
 router.post('/subscribe', subscribe);
+
+// Waves Admin (the iOS staff app) registers its APNs device token here. The
+// signed-in page posts it under its own staff session, so the app never holds
+// the staff token. The row names the app's bundle and APNs environment
+// (development installs use the sandbox), which the APNs sender routes by.
+async function nativeSubscribe(req, res, next) {
+  try {
+    const { token, environment } = req.body || {};
+    if (typeof token !== 'string' || !/^[0-9a-f]{64,200}$/i.test(token)) {
+      return res.status(400).json({ error: 'device token required' });
+    }
+    if (environment !== 'sandbox' && environment !== 'production') {
+      return res.status(400).json({ error: 'environment must be sandbox or production' });
+    }
+    const outcome = await db.transaction(async (trx) => {
+      const technician = await lockCurrentStaff(trx, req);
+      if (!technician) return { revoked: true };
+      const row = {
+        admin_user_id: technician.id,
+        // A token belongs to one install of one app: re-point it whole.
+        customer_id: null,
+        contact_phone_key: null,
+        role: technician.role,
+        platform: 'ios',
+        device_token: token,
+        subscription_data: JSON.stringify({ token, topic: STAFF_APP_BUNDLE_ID, environment }),
+        device_info: 'Waves Admin (iPhone)',
+        active: true,
+        staff_token_version: Number(technician.auth_token_version),
+        // Two-step proof of the registering session (GATE_ADMIN_MFA).
+        staff_mfa: req.staffToken?.mfa === true,
+      };
+      const [saved] = await trx('push_subscriptions')
+        .insert(row)
+        .onConflict('device_token')
+        .merge({ ...row, updated_at: db.fn.now() })
+        .returning('id');
+      return { id: saved?.id ?? saved };
+    });
+    if (outcome.revoked) {
+      return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    }
+    return res.json({ ok: true, id: outcome.id });
+  } catch (err) { next(err); }
+}
+
+router.post('/native-subscribe', nativeSubscribe);
 
 router.post('/unsubscribe', async (req, res, next) => {
   try {
@@ -332,4 +387,4 @@ router.post('/test', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports._handlers = { subscribe };
+module.exports._handlers = { subscribe, nativeSubscribe };

@@ -21,7 +21,14 @@ import WebKit
 // connection token from POST /api/stripe/terminal/connection-token under the
 // page's own sign-in. The app then connects the reader before any payment.
 //
-// The page side of this contract is client/src/lib/tapToPay.js.
+// Staff alerts: a signed-in staff page posts { type: 'registerPush' }; the app
+// asks for notification permission and answers with
+//   window.dispatchEvent(new CustomEvent('wavesadmin:pushtoken', { detail }))
+// detail = { token, environment: 'sandbox' | 'production' }, which the page
+// registers under its own sign-in. { type: 'badge', count } sets the icon badge.
+//
+// The page side of this contract is client/src/lib/tapToPay.js and
+// client/src/native/wavesAdminPush.js.
 
 enum Portal {
     static let messageHandler = "wavesAdmin"
@@ -81,6 +88,9 @@ struct PortalView: UIViewRepresentable {
         coordinator.webView = webView
         app.portal = coordinator
         webView.load(URLRequest(url: Portal.startURL))
+        // A tapped alert opens its page here; one that launched the app was
+        // held until now and replaces the start page.
+        StaffAlerts.shared.openPage = { [weak webView] url in webView?.load(URLRequest(url: url)) }
         return webView
     }
 
@@ -100,6 +110,8 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     private weak var requester: WKWebView?
     // The page that last asked to prepare the reader; it fetches the tokens.
     private weak var readerPage: WKWebView?
+    // The page that last asked for staff alerts; it registers the device token.
+    private weak var alertsPage: WKWebView?
     private var paymentController: UIViewController?
     private weak var popup: UIViewController?
     private var offlineView: UIView?
@@ -128,6 +140,8 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         switch body["type"] as? String {
         case "tapToPay": startPayment(body, from: sender)
         case "prepareReader": prepareReader(from: sender)
+        case "registerPush": registerPush(from: sender)
+        case "badge": StaffAlerts.shared.setBadge((body["count"] as? Int) ?? 0)
         default: break
         }
     }
@@ -179,6 +193,26 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     private static let noTokenPage = NSError(domain: "wavespay", code: -5, userInfo: [
         NSLocalizedDescriptionKey: "No signed-in portal page to connect the card reader.",
     ])
+
+    private func registerPush(from page: WKWebView) {
+        alertsPage = page
+        StaffAlerts.shared.onToken = { [weak self] token in self?.deliverPushToken(token) }
+        StaffAlerts.shared.register()
+    }
+
+    private func deliverPushToken(_ token: String) {
+        guard let page = alertsPage ?? webView, let url = page.url, Portal.isPortal(url) else { return }
+        page.callAsyncJavaScript(
+            "window.dispatchEvent(new CustomEvent(name, { detail }));",
+            arguments: [
+                "name": "wavesadmin:pushtoken",
+                "detail": ["token": token, "environment": StaffAlerts.environment],
+            ],
+            in: nil,
+            in: .page,
+            completionHandler: nil
+        )
+    }
 
     func deliver(_ result: TapToPayResult) {
         deliver(result, to: requester ?? webView)

@@ -19,6 +19,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { prepareInAppReader } from "../lib/tapToPay";
+import { registerInAppPush } from "../native/wavesAdminPush";
 import { cn } from "./ui/cn";
 import { Button } from "./ui";
 import {
@@ -148,11 +149,17 @@ export default function AdminLayoutV2() {
   }, []);
 
   // Waves Admin (the iOS staff app): connect the phone's card reader while
-  // staff work, so Tap to Pay opens at once. Only the roles that
-  // /stripe/terminal/connection-token accepts. No-op in a browser.
+  // staff work, so Tap to Pay opens at once, and register the app for staff
+  // alerts. Only the roles that /stripe/terminal/connection-token and staff
+  // push accept. No-op in a browser.
   useEffect(() => {
     if (!sessionReady || !["admin", "technician"].includes(user?.role)) return undefined;
-    return prepareInAppReader();
+    const stopReader = prepareInAppReader();
+    const stopPush = registerInAppPush();
+    return () => {
+      stopReader();
+      stopPush();
+    };
   }, [sessionReady, user?.role]);
 
   // Role scoping on deep links: the sidebar/More page hide adminOnly
