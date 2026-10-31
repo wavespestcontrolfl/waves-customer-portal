@@ -352,20 +352,22 @@ async function importConversation(config, conv, { since, firstRun, limits, page 
 // Cursor, bootstrap flag and failure signal after a poll. A capped list or a failed conversation
 // is an error for job health; the bootstrap flag is set only by a first run that finished clean.
 async function settlePoll({ complete, failed, firstRun, advanced, empty, now, pageLimit }) {
-  if (complete && advanced) await writeCursor(advanced);
-  else if (complete && firstRun && empty && !failed) await writeCursor(now);
+  if (complete && !failed) {
+    if (advanced) await writeCursor(advanced);
+    else if (firstRun && empty) await writeCursor(now);
+  }
   if (!complete) {
     logger.warn(`[messenger-inbox] conversation list stopped at ${pageLimit} page(s) with more left; the cursor stays`);
     throw new Error('Messenger poll stopped at its page cap with conversations left; the cursor stays');
   }
-  if (failed) throw new Error(`Messenger poll left ${failed} conversation(s) unread; the cursor stays before them`);
+  if (failed) throw new Error(`Messenger poll left ${failed} conversation(s) unread; the cursor stays`);
   if (firstRun) await writeSetting(BOOTSTRAP_KEY, now.toISOString());
 }
 
 /**
- * One poll. The cursor moves only through update-time groups in which every
- * conversation succeeded, so a failed conversation (or one sharing its time) is
- * read again next run; the boundary is inclusive and replays are deduped by key.
+ * One poll. The cursor moves only when every conversation in the run succeeded, so a
+ * failed conversation is read again from the run's own cutoff; the boundary is inclusive
+ * and replays are deduped by key.
  * A page or message cap that stops the walk early leaves the cursor where it was.
  */
 async function pollMessenger({ now = new Date(), limits: override } = {}) {
@@ -384,19 +386,18 @@ async function pollMessenger({ now = new Date(), limits: override } = {}) {
 
   let inserted = 0;
   let failed = 0;
-  let advanced = null;
-  for (let i = 0; i < changed.length; i += 1) {
-    const conv = changed[i];
+  for (const conv of changed) {
     try {
       inserted += (await importConversation(config, conv, { since, firstRun, limits, page })).inserted;
     } catch (err) {
       failed += 1;
       logger.warn(`[messenger-inbox] conversation not imported: ${safeError(err)}`);
     }
-    const groupEnds = !changed[i + 1] || changed[i + 1].updatedAt.getTime() !== conv.updatedAt.getTime();
-    if (groupEnds && !failed) advanced = conv.updatedAt;
   }
-  await settlePoll({ complete, failed, firstRun, advanced, empty: !changed.length, now, pageLimit: limits.conversationPages });
+  // The cursor moves only when every conversation in the run succeeded: a failed one is read again
+  // from this run's own cutoff, so none of its messages between the old cursor and a newer one are lost.
+  const newest = changed.length ? changed[changed.length - 1].updatedAt : null;
+  await settlePoll({ complete, failed, firstRun, advanced: newest, empty: !changed.length, now, pageLimit: limits.conversationPages });
   if (inserted) logger.info(`[messenger-inbox] stored ${inserted} new message(s) from ${changed.length} changed conversation(s)`);
   return { conversations: changed.length, inserted, firstRun };
 }

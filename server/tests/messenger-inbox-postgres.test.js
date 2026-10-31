@@ -250,8 +250,8 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       const b = conversation('b', { name: 'Kim Sample', unread: 1, messages: [{ fromPage: false, text: 'same time b', at: when }] });
       fb.failMessagesFor = b.id;
       await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
-      // The cursor stops at the older group: never at or past the shared time.
-      expect(new Date(await cursor()).getTime()).toBe(fb.conversations.find((c) => c.psid === psid('z')).updated.getTime());
+      // A run with a failure moves the cursor nowhere.
+      expect(await cursor()).toBeUndefined();
       expect(await threadOf('b')).toBeUndefined();
 
       fb.failMessagesFor = null;
@@ -416,18 +416,41 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(reopened[0].done_at).toBeNull();
     });
 
-    test('a conversation that cannot be read keeps the cursor behind it, is retried, and fails the job', async () => {
+    test('a conversation that cannot be read holds the cursor, is retried, and fails the job', async () => {
       conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'older thread', at: ago(20) }] });
       const broken = conversation('b', { name: 'Kim Sample', unread: 1, messages: [{ fromPage: false, text: 'newer thread', at: ago(10) }] });
       fb.failMessagesFor = broken.id;
       await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
       expect(await threadOf('a')).toBeTruthy();
       expect(await threadOf('b')).toBeUndefined();
-      expect(new Date(await cursor()).getTime()).toBe(fb.conversations.find((c) => c.id !== broken.id).updated.getTime());
+      expect(await cursor()).toBeUndefined();
 
       fb.failMessagesFor = null;
       expect(await messenger.pollMessenger()).toMatchObject({ conversations: 2, inserted: 1 });
       expect(await threadOf('b')).toBeTruthy();
+    });
+
+    test('a failed conversation keeps the run cutoff: its messages older than a succeeding group are still imported on the retry', async () => {
+      conversation('base', { name: 'Lee Example', unread: 0, messages: [{ fromPage: false, text: 'first import', at: ago(40) }] });
+      await messenger.pollMessenger();
+      const cutoff = await cursor();
+      expect(cutoff).toBeDefined();
+
+      // f has a message (m1) between the cutoff and g's time; g succeeds, f fails.
+      const f = conversation('f', { name: 'Kim Sample', unread: 1, messages: [{ fromPage: false, text: 'm1 before g', at: ago(20) }, { fromPage: false, text: 'm2 after g', at: ago(5) }] });
+      conversation('g', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'g message', at: ago(10) }] });
+      fb.failMessagesFor = f.id;
+      await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
+      expect(await threadOf('g')).toBeTruthy();
+      expect(await threadOf('f')).toBeUndefined();
+      // The succeeding group did not move the cursor past f's older message.
+      expect(await cursor()).toBe(cutoff);
+
+      fb.failMessagesFor = null;
+      expect(await messenger.pollMessenger()).toMatchObject({ firstRun: false });
+      expect((await messagesOf('f')).map((m) => m.body)).toEqual(['m1 before g', 'm2 after g']);
+      expect(await messagesOf('g')).toHaveLength(1);
+      expect(new Date(await cursor()).getTime()).toBe(f.updated.getTime());
     });
 
     test('a partial first import is not finished: the retry reads the failed thread back the full window under the first-run policy, then incremental polls resume', async () => {
