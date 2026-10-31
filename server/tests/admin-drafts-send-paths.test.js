@@ -605,6 +605,42 @@ describe('SMS-anchored drafts — the reply must still belong to the draft\'s cu
     expect(updates.some((u) => u.table === 'message_drafts' && u.payload.sent_at)).toBe(false);
   });
 
+  test('a customer-less draft whose SMS row moves from B to C mid-send is refused at the handoff', async () => {
+    enqueue('message_drafts', { returning: [smsDraft({ customer_id: null })] });
+    enqueue('sms_log', { first: smsRow({ customer_id: 'cust-B' }) });
+    enqueue('customers', { first: { id: 'cust-B', phone: SENDER } });
+    enqueue('sms_log', { first: { customer_id: 'cust-C' } });             // re-linked meanwhile
+    enqueue('customers', { first: { id: 'cust-C', phone: SENDER } });     // C owns the number too
+    let atHandoff;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      atHandoff = await input.preProviderCheck({ channel: 'sms' });
+      return { sent: false, blocked: true, code: atHandoff.code, reason: atHandoff.reason };
+    });
+    await withServer(async (baseUrl) => {
+      expect((await approve(baseUrl)).status).toBe(422);
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].customerId).toBe('cust-B');
+    expect(atHandoff).toMatchObject({ ok: false, code: 'DRAFT_RECIPIENT_CHANGED' });
+    expect(released()).toBe(true);
+  });
+
+  test('a number that moves from the customer\'s own phone to a slot mid-send is refused at the handoff', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { first: { id: 'cust-A', phone: SENDER } });
+    enqueue('sms_log', { first: { customer_id: 'cust-A' } });
+    enqueue('customers', { first: { id: 'cust-A', phone: '+19415550199', service_contact_phone: SENDER } });
+    let atHandoff;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      atHandoff = await input.preProviderCheck({ channel: 'sms' });
+      return { sent: false, blocked: true, code: atHandoff.code, reason: atHandoff.reason };
+    });
+    await withServer(async (baseUrl) => {
+      expect((await approve(baseUrl)).status).toBe(422);
+    });
+    expect(atHandoff).toMatchObject({ ok: false, code: 'DRAFT_RECIPIENT_CHANGED' });
+  });
+
   test('a lookup failure fails closed: 503, claim released, nothing sent', async () => {
     enqueue('message_drafts', { returning: [smsDraft()] });
     enqueue('sms_log', { first: smsRow() });

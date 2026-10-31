@@ -143,6 +143,12 @@ const DRAFT_RECIPIENT_HOLDS = {
     error: "The number this draft replies to is no longer on the customer's record — reject it and reply from the conversation.",
     code: 'DRAFT_PHONE_NOT_ON_RECORD',
   },
+  // Handoff only: the recheck passed for another customer or trust level
+  // than the send was prepared with (its identity and consent context).
+  changed_during_send: {
+    error: 'The recipient changed while this draft was being sent — it was left pending; open it again before sending.',
+    code: 'DRAFT_RECIPIENT_CHANGED',
+  },
 };
 const DRAFT_RECIPIENT_UNAVAILABLE = {
   error: 'Recipient check unavailable — draft left pending, try again',
@@ -169,10 +175,14 @@ async function smsDraftRecipientVerdict(draft, toPhone, smsCustomerId) {
 }
 
 // The provider-handoff form (preProviderCheck contract): the SMS row's link
-// and the customer's numbers are re-read at the last await before Twilio;
-// `next` (a later hook, e.g. the photo-triage offer recheck) runs only on a
-// pass. An outage answers a retryable code, never a raw exception message.
-function draftRecipientLateCheck(draft, toPhone, next) {
+// and the customer's numbers are re-read at the last await before Twilio,
+// and the answer must name the same customer and trust level the send was
+// prepared with (`prepared`, the route-level verdict) — a customer-less
+// draft's SMS row re-linked from B to C mid-send must not pass as C while
+// the send carries B's identity and preferences. `next` (a later hook, e.g.
+// the photo-triage offer recheck) runs only on a pass. An outage answers a
+// retryable code, never a raw exception message.
+function draftRecipientLateCheck(draft, toPhone, prepared, next) {
   return async (ctx) => {
     let verdict;
     try {
@@ -181,8 +191,11 @@ function draftRecipientLateCheck(draft, toPhone, next) {
     } catch {
       return { ok: false, code: DRAFT_RECIPIENT_UNAVAILABLE.code, reason: DRAFT_RECIPIENT_UNAVAILABLE.error, retryable: true };
     }
-    if (!verdict.ok) {
-      const hold = DRAFT_RECIPIENT_HOLDS[verdict.hold];
+    const holdKey = !verdict.ok ? verdict.hold
+      : String(verdict.customerId || '') !== String(prepared.customerId || '')
+        || verdict.identityTrustLevel !== prepared.identityTrustLevel ? 'changed_during_send' : null;
+    if (holdKey) {
+      const hold = DRAFT_RECIPIENT_HOLDS[holdKey];
       return { ok: false, code: hold.code, reason: hold.error };
     }
     return next ? next(ctx) : { ok: true };
@@ -212,7 +225,7 @@ async function guardDraftRecipient(draft, recipient, res, releaseFields = {}) {
   return {
     blocked: false,
     recipient: { ...recipient, customerId: verdict.customerId, identityTrustLevel: verdict.identityTrustLevel },
-    lateCheck: (next) => draftRecipientLateCheck(draft, recipient.toPhone, next),
+    lateCheck: (next) => draftRecipientLateCheck(draft, recipient.toPhone, verdict, next),
   };
 }
 
