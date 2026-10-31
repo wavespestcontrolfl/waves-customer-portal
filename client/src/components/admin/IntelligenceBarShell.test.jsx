@@ -3,6 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
+import { MemoryRouter, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import IntelligenceBarShell from './IntelligenceBarShell';
 
 const ok = body => ({ ok: true, json: async () => body });
@@ -109,4 +110,84 @@ it('offers recovery retry after an initial history outage', async () => {
   unavailable = false;
   fireEvent.click(retry);
   expect(await screen.findByRole('button', { name: /Synthetic Selected · completed/ })).toBeInTheDocument();
+});
+
+// The admin shell hands the verified staff user to its pages (AdminLayoutV2's outlet).
+function Where() { return <output data-testid="where">{useLocation().pathname}</output>; }
+const renderAs = user => render(<MemoryRouter initialEntries={['/admin/dispatch']}>
+  <Where />
+  <Routes><Route element={<Outlet context={{ user }} />}><Route path="/admin/*" element={<IntelligenceBarShell context="dispatch" />} /></Route></Routes>
+</MemoryRouter>);
+const ask = text => {
+  fireEvent.change(screen.getByPlaceholderText(/Questions/), { target: { value: text } });
+  fireEvent.keyDown(screen.getByPlaceholderText(/Questions/), { key: 'Enter' });
+};
+
+it('answer links open records in the app and https pages in a new tab; other targets stay text', async () => {
+  localStorage.clear();
+  const record = '/admin/customers?customerId=customer-a';
+  vi.stubGlobal('fetch', vi.fn(async url => (url.endsWith('/query') ? ok({ response: [
+    `Open [the fixture customer](${record}).`,
+    'Read **[the guide](https://example.invalid/guide)** for `INV-0001`.',
+    '[run](javascript:alert(1)) [Pay at waves.invalid](https://evil.invalid/pay)',
+  ].join('\n') }) : ok({ actions: [], tasks: [] }))));
+  renderAs({ id: 'staff-a' });
+  ask('Show the record and guide');
+  const recordLink = await screen.findByRole('link', { name: 'the fixture customer' });
+  expect(recordLink).toHaveAttribute('href', record);
+  const guide = screen.getByRole('link', { name: 'the guide' });
+  expect(guide).toHaveAttribute('target', '_blank');
+  expect(guide).toHaveAttribute('rel', 'noopener noreferrer');
+  expect(guide.closest('strong')).not.toBeNull();
+  expect(screen.getByText('INV-0001').tagName).toBe('CODE');
+  for (const name of ['run', 'Pay at waves.invalid']) expect(screen.queryByRole('link', { name })).not.toBeInTheDocument();
+  expect(screen.getByText(/\[run\]\(javascript:alert\(1\)\)/)).toBeInTheDocument();
+  fireEvent.click(recordLink);
+  expect(screen.getByTestId('where')).toHaveTextContent('/admin/customers');
+});
+
+it('keeps pinned prompts per staff login and never shows the older list shared by every login', async () => {
+  localStorage.clear();
+  localStorage.setItem('ib.favorites.dispatch', JSON.stringify(['Older shared pin']));
+  localStorage.setItem('ib.recents.dispatch', JSON.stringify(['Fixture recent question']));
+  vi.stubGlobal('fetch', vi.fn(async () => ok({ actions: [], tasks: [] })));
+  const open = user => {
+    const view = renderAs(user);
+    fireEvent.focus(screen.getByPlaceholderText(/Questions/));
+    return view;
+  };
+  let view = open({ id: 'staff-a' });
+  fireEvent.click(screen.getByRole('button', { name: 'Pin Fixture recent question' }));
+  expect(screen.getByText('Pinned')).toBeInTheDocument();
+  expect(JSON.parse(localStorage.getItem('ib.pinned.staff-a.dispatch'))).toEqual(['Fixture recent question']);
+  expect(screen.queryByText('Older shared pin')).not.toBeInTheDocument();
+  view.unmount();
+  view = open({ id: 'staff-b' });
+  expect(screen.queryByText('Pinned')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Pin Fixture recent question' })).toBeInTheDocument();
+  view.unmount();
+  open({ id: 'staff-a' });
+  expect(screen.getByText('Pinned')).toBeInTheDocument();
+  // The Pinned chip's Unpin and the Recent row's toggle.
+  expect(screen.getAllByRole('button', { name: 'Unpin Fixture recent question' })).toHaveLength(2);
+});
+
+it('answer text and controls are at least 14px', async () => {
+  localStorage.clear();
+  localStorage.setItem('ib.recents.dispatch', JSON.stringify(['Fixture recent question']));
+  localStorage.setItem('ib.pinned.staff-a.dispatch', JSON.stringify(['Fixture pinned question']));
+  vi.stubGlobal('fetch', vi.fn(async url => (url.endsWith('/query')
+    ? ok({ response: '## Fixture heading\n1. **Bold** step with `CODE-1`\n- A bullet' })
+    : ok({ actions: [{ id: 'qa', group: 'Today', label: 'Fixture quick action', prompt: 'Fixture quick prompt' }], tasks: [] }))));
+  renderAs({ id: 'staff-a' });
+  fireEvent.focus(screen.getByPlaceholderText(/Questions/));
+  await screen.findByText('Fixture quick action');
+  // tokens.css .u-label is 11px; the type scale classes under 14 are text-11/12/13.
+  const small = () => [...document.querySelectorAll('[class]')]
+    .filter(el => /(^|\s)(text-1[0-3]|sm:text-1[0-3]|u-label)(\s|$)/.test(el.getAttribute('class')));
+  expect(small()).toEqual([]);
+  ask('Fixture question');
+  await screen.findByText('Fixture heading');
+  expect(screen.getByRole('textbox', { name: 'Follow-up question' })).toBeInTheDocument();
+  expect(small()).toEqual([]);
 });

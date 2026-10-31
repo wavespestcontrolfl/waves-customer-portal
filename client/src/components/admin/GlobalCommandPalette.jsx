@@ -21,7 +21,7 @@ import {
   useImperativeHandle,
   forwardRef,
 } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
@@ -32,6 +32,7 @@ import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
 import { retainTaskReceipt } from "../../utils/ibTaskReceipts";
 import ToolActivityList from "./ToolActivityList";
+import { renderAnswerInline } from "./answerInline";
 import KnowledgeGapPrompt, { useKnowledgeGaps } from "./KnowledgeGapPrompt";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
@@ -242,8 +243,11 @@ function saveRecent(userId, prompt) {
 }
 
 // ─── Markdown renderer ──────────────────────────────────────────
+const ANSWER_STRONG = { style: { color: "#0F172A", fontWeight: 500 } };
+
 function renderMarkdown(text, onNavigate) {
   if (!text) return null;
+  const inline = { onNavigate, strong: ANSWER_STRONG };
   const lines = text.split("\n");
   const elements = [];
   let key = 0;
@@ -289,7 +293,7 @@ function renderMarkdown(text, onNavigate) {
           style={{ display: "flex", gap: 8, paddingLeft: 4, marginBottom: 3 }}
         >
           <span style={{ color: D.teal, fontSize: 11, marginTop: 5 }}>●</span>
-          <span>{renderInline(line.replace(/^[-•*]\s/, ""), onNavigate)}</span>
+          <span>{renderAnswerInline(line.replace(/^[-•*]\s/, ""), inline)}</span>
         </div>,
       );
       continue;
@@ -312,7 +316,7 @@ function renderMarkdown(text, onNavigate) {
           >
             {num}.
           </span>
-          <span>{renderInline(line.replace(/^\d+\.\s/, ""), onNavigate)}</span>
+          <span>{renderAnswerInline(line.replace(/^\d+\.\s/, ""), inline)}</span>
         </div>,
       );
       continue;
@@ -323,60 +327,11 @@ function renderMarkdown(text, onNavigate) {
     }
     elements.push(
       <div key={key++} style={{ marginBottom: 4 }}>
-        {renderInline(line, onNavigate)}
+        {renderAnswerInline(line, inline)}
       </div>,
     );
   }
   return elements;
-}
-
-// Bold and Markdown links, [label](target). The server asks the model to lead
-// with a record link: an /admin path opens in the app and closes the bar; an
-// https link opens in a new tab. Any other target (http:, javascript:, data:,
-// mailto:, //host, a backslash) stays as the literal text, and so does a link
-// whose label names any other web address (an answer can quote
-// customer-written text).
-const INLINE_TOKEN_RE = /(\[[^\]\n]+\]\([^)\s]+\)|\*\*[^*]+\*\*)/g;
-const LINK_TOKEN_RE = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/;
-const HOST_TOKEN_RE = /(?:[a-z0-9-]+\.)+[a-z]{2,}/gi;
-
-function answerLinkTarget(label, target) {
-  if (target.includes("\\")) return null;
-  if (/^\/admin(?:[/?#]|$)/i.test(target)) return { to: target };
-  let url;
-  try { url = new URL(target); } catch { return null; }
-  if (url.protocol !== "https:") return null;
-  if ((label.match(HOST_TOKEN_RE) || []).some((host) => host.toLowerCase() !== url.hostname)) return null;
-  return { href: url.href };
-}
-
-function renderInline(text, onNavigate) {
-  return text.split(INLINE_TOKEN_RE).map((part, i) => {
-    if (i % 2 === 0) return part;
-    const link = part.match(LINK_TOKEN_RE);
-    if (!link)
-      return (
-        <strong key={i} style={{ color: "#0F172A", fontWeight: 500 }}>
-          {renderInline(part.slice(2, -2), onNavigate)}
-        </strong>
-      );
-    const target = answerLinkTarget(link[1], link[2]);
-    if (!target) return part;
-    const style = { color: "inherit", textDecoration: "underline" };
-    return target.to ? (
-      <Link key={i} to={target.to} style={style}
-        onClick={(event) => {
-          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
-          onNavigate?.();
-        }}>
-        {renderInline(link[1])}
-      </Link>
-    ) : (
-      <a key={i} href={target.href} target="_blank" rel="noopener noreferrer" style={style}>
-        {renderInline(link[1])}
-      </a>
-    );
-  });
 }
 
 // ─── MAIN COMPONENT ─────────────────────────────────────────────

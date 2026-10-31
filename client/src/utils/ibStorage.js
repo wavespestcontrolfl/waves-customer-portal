@@ -3,7 +3,11 @@
  * client/src/utils/ibStorage.js
  *
  * Recents are deleted when a staff session ends (lib/adminAuth.js
- * clearStaffDeviceData, by the `ib.recents.` prefix); favorites stay.
+ * clearStaffDeviceData, by the `ib.recents.` prefix). Favorites (the bar's
+ * Pinned prompts) are kept per staff account, `ib.pinned.<staff id>.<context>`,
+ * and stay; no account, none. The older `ib.favorites.<context>` lists were
+ * shared by every login on the device: nothing reads them, and the session
+ * end deletes them.
  */
 
 const MAX_RECENTS = 5;
@@ -45,12 +49,13 @@ export function addRecent(context, prompt) {
   return next;
 }
 
-export function getFavorites(context) {
-  return read(key('favorites', context));
+export function getFavorites(context, userId) {
+  return userId ? read(key(`pinned.${userId}`, context)) : [];
 }
 
-export function toggleFavorite(context, prompt) {
-  const k = key('favorites', context);
+export function toggleFavorite(context, userId, prompt) {
+  if (!userId) return [];
+  const k = key(`pinned.${userId}`, context);
   const existing = read(k);
   const isFav = existing.includes(prompt);
   const next = isFav

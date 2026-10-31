@@ -14,9 +14,10 @@ export const STAFF_OFFLINE_PASS_KEY = 'waves_tech_offline_pass';
 // login) and the page bar's per-page recents (utils/ibStorage.js). A prompt
 // can name a customer or a private business question. The staff id is gone
 // by the time a session ends, so every login's prompts go, by key prefix.
-// Starred prompts (ib.favorites.*) are deliberate saves and stay.
+// Pinned prompts are deliberate saves kept per login (ib.pinned.<staff id>.*)
+// and stay; the older pinned lists shared by every login (ib.favorites.*) go.
 export const ASK_RECENTS_KEY = 'admin_ib_recents';
-const ASK_PROMPT_KEY_PREFIXES = [ASK_RECENTS_KEY, 'ib.recents.'];
+const ASK_PROMPT_KEY_PREFIXES = [ASK_RECENTS_KEY, 'ib.recents.', 'ib.favorites.'];
 
 export function clearStaffDeviceData() {
   for (const key of [TECH_ROUTE_SNAPSHOT_KEY, STAFF_OFFLINE_PASS_KEY]) {
