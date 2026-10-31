@@ -4065,48 +4065,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // TUESDAYS 7AM ET — Pest Insider monthly autopilot. Fires every Tuesday;
-  // runPestInsiderAutopilot's first-Tuesday ET gate + per-month idempotency
-  // keep it to one draft a month (node-cron's dom×dow semantics aren't
-  // portable, so the gate lives in code). Drafts only — admin reviews and
-  // sends manually, same contract as the weekly autopilot. runExclusive:
-  // deploy-overlap ticks must not double-draft (the idempotency check is
-  // read-then-act).
-  // =========================================================================
-  cron.schedule('0 7 * * 2', async () => {
-    try {
-      await runExclusive('pest-insider-autopilot', async () => {
-        const { runPestInsiderAutopilot } = require('./pest-insider-autopilot');
-        const result = await runPestInsiderAutopilot();
-        logger.info(`[pest-insider-autopilot] ${result.skipped ? 'skipped' : 'drafted'}: ${result.reason || result.sendId}`);
-      });
-    } catch (err) {
-      logger.error(`[pest-insider-autopilot] failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 2:15PM ET — Pest Insider proof catch-up (GATE_PEST_INSIDER_PROOF).
-  // The draft survives a failed proof send and the Tuesday autopilot stops
-  // at its already-drafted check, so this is the only retry. No-op unless
-  // the gate is on, it is day 1–10 of the ET month, and this month's issue
-  // is still a draft with no proof on record.
-  // =========================================================================
-  cron.schedule('15 14 * * *', async () => {
-    try {
-      await runExclusive('pest-insider-proof-retry', async () => {
-        const { retryPestInsiderProof } = require('./pest-insider-autopilot');
-        const result = await retryPestInsiderProof();
-        if (!result.skipped) {
-          logger.info(`[pest-insider-proof-retry] proof ${result.proofSent ? 'sent' : `not sent (${result.reason})`} for send ${result.sendId}`);
-        }
-      });
-    } catch (err) {
-      logger.error(`[pest-insider-proof-retry] failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // DAILY 2:15AM ET — Email division fact register sync. Brings the code
   // register (services/email-division/fact-register-data.js) into
   // knowledge_base: inserts missing facts, updates rows still carrying what

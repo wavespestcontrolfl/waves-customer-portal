@@ -41,14 +41,14 @@ it('clears summary loading when a queued poll supersedes dashboard re-entry', as
     return { ok: true, json: async () => data };
   }));
   render(<MemoryRouter><NewsletterPage /></MemoryRouter>);
-  await screen.findByRole('button', { name: 'Schedule (1)' });
+  await screen.findByRole('button', { name: 'History (1)' });
   fireEvent.click(screen.getByRole('button', { name: 'Automation', exact: true }));
   fireEvent.click(screen.getByRole('button', { name: 'Dashboard', exact: true }));
   await waitFor(() => expect(finishForeground).toBeTypeOf('function'));
-  await screen.findByRole('button', { name: 'Schedule (3)' });
+  await screen.findByRole('button', { name: 'History (3)' });
   await act(async () => { finishForeground({ ok: true, json: async () => ({ sends: [], counts: { sent: 2 } }) }); });
   fireEvent(window, new Event("focus"));
-  await screen.findByRole('button', { name: 'Schedule (4)' });
+  await screen.findByRole('button', { name: 'History (4)' });
 });
 
 it('shows a retryable upcoming-events error without a false empty state, then clears it after retry', async () => {
@@ -283,14 +283,12 @@ it('History re-reads campaigns when it opens, so a draft saved since the last re
         : { sends: [], counts: {} });
     }
     if (path.endsWith('/subscribers')) return response({ subscribers: [], counts: { active: 10 } });
-    if (path.endsWith('/calendar')) return response({ calendar: [] });
     return response({});
   }));
   render(<MemoryRouter><NewsletterPage /></MemoryRouter>);
-  await screen.findByRole('button', { name: 'Schedule (0)' });
-  saved = true; // e.g. a draft saved in Compose after the page's last read
-  fireEvent.click(screen.getByRole('button', { name: 'Schedule (0)' }));
-  fireEvent.click(await screen.findByRole('button', { name: /^History/ }));
+  await screen.findByRole('button', { name: 'History (0)' });
+  saved = true; // e.g. a draft the autopilot saved after the page's last read
+  fireEvent.click(screen.getByRole('button', { name: 'History (0)' }));
   expect(await screen.findByText('Synthetic saved draft')).toBeInTheDocument();
   expect(screen.queryByText(/No campaigns yet/)).not.toBeInTheDocument();
 });

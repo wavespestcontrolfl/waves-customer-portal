@@ -819,8 +819,8 @@ const TEXT_POLICIES = Object.freeze({
     // effort 'max', and community-event curation scoring rides the same
     // model/effort (event-curation.js). `effort` on a route is honored only
     // on the Anthropic leg (services/llm/call.js#dispatch); a caller that
-    // needs a lighter interactive path (the admin Compose UI) overrides it
-    // per-call rather than moving the whole policy off 'max'.
+    // needs a lighter path overrides it per-call rather than moving the
+    // whole policy off 'max'.
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: NEWSLETTER, effort: 'max' }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
