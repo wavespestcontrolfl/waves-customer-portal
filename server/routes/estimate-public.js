@@ -3280,9 +3280,9 @@ function resolveRecurringMonthlyParts(estimate, parsedData) {
   const nonDiscountableMonthly = serviceParts.nonDiscountableMonthly;
   const discountableFromServices = serviceParts.discountableBaseMonthly;
   // Misting plan rows alone leave no discountable base: the engine total IS that plan (already counted as non-discountable),
-  // so the engine-derived fallback would count the plan a second time and show savings that do not exist.
-  const mistingPlanOnly = recurringServices.length > 0
-    && recurringServices.every((svc) => recurringServiceKey(svc) === 'mosquito_misting');
+  // so the engine-derived fallback would count the plan a second time and show savings that do not exist. An empty list never
+  // reaches the summed return below, so `every` alone decides it.
+  const mistingPlanOnly = recurringServices.every((svc) => recurringServiceKey(svc) === 'mosquito_misting');
   const discountableFromFallback = mistingPlanOnly
     ? 0
     : (engineDerived > 0
