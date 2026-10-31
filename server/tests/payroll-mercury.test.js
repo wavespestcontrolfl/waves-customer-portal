@@ -91,6 +91,18 @@ describe('bells follow the admin notification rules', () => {
     }
   });
 
+  test('a re-raised month-mismatch bell reads a posted date that pg returns as a Date (Codex P2 on #7213)', async () => {
+    const raise = jest.fn(async () => ({ id: 1 }));
+    const conn = () => ({ where: () => ({ first: async () => ({ employee_name: 'Sample Employee', pay_date: '2026-09-25' }) }) });
+    conn.raw = (x) => x;
+    // pg's default DATE parser: local midnight of the stored day.
+    const postedOn = new Date(2026, 9, 1);
+    await alerts.raisePaymentAlert('month_mismatch', { id: payment.id, check_id: 'c1', amount_cents: 123456, posted_on: postedOn }, { conn, raise });
+    const [, spec] = raise.mock.calls[0];
+    expect(spec.why).toMatch(/Oct 1/);
+    expect(spec.why).not.toMatch(/posted {2}but/);
+  });
+
   test('every payment bell rings by default (bellDefault, never bell: true) with a key per payment and event', async () => {
     const raise = jest.fn(async () => ({ id: 1 }));
     const conn = () => ({ where: () => ({ first: async () => ({ employee_name: 'Sample Employee', pay_date: '2026-11-27' }) }), raw: (x) => x });

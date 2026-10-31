@@ -26,6 +26,7 @@ const { previousBusinessDayIrs } = require('./payroll-tax-calendar');
 const { createClient, MercuryError } = require('./mercury-client');
 const alerts = require('./payroll-mercury-alerts');
 const { etDateString } = require('../utils/datetime-et');
+const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OPEN_STATES = ['queued', 'requested', 'unknown', 'approved', 'sent', 'paper'];
@@ -59,8 +60,6 @@ const money = (cents) => `$${(Number(cents) / 100).toLocaleString('en-US', { min
 
 // ---- Dates (ET calendar days as YYYY-MM-DD text)
 
-const addDays = (ymd, n) => new Date(Date.parse(`${ymd}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
-const weekdayOf = (ymd) => new Date(`${ymd}T00:00:00Z`).getUTCDay();
 const dayLabel = (ymd) => new Date(`${ymd}T12:00:00Z`)
   .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
 
@@ -71,9 +70,10 @@ const dayLabel = (ymd) => new Date(`${ymd}T12:00:00Z`)
  */
 function approveBy(payDate) {
   if (payDate.slice(8, 10) === '01') return { date: previousBusinessDayIrs(payDate), rule: 'first_of_month' };
-  let day = addDays(payDate, -1);
-  while (weekdayOf(day) !== 3) day = addDays(day, -1);
-  return { date: day, rule: 'wednesday' };
+  // The Wednesday of the staff week (Monday start) that holds the day before the pay date; the one before it when
+  // that Wednesday is not earlier than the pay date.
+  const wednesday = addStaffWorkDays(staffWeekStartForWorkDate(addStaffWorkDays(payDate, -1)), 2);
+  return { date: wednesday < payDate ? wednesday : addStaffWorkDays(wednesday, -7), rule: 'wednesday' };
 }
 
 // ---- Payment view

@@ -5,6 +5,7 @@
  * A payment bell closes when the payment is settled or a new attempt starts (closePaymentBells). Sends nothing to a
  * customer or staff member. A bell never blocks payroll: every function here swallows its own error.
  */
+const { dateOnlyString } = require('../utils/date-only');
 const db = require('../models/db');
 const logger = require('./logger');
 const { fitAction, shortDateET } = require('./admin-alert-names');
@@ -91,7 +92,8 @@ const shaped = (row) => ({
   id: row.id,
   check_id: row.check_id,
   amountCents: Number(row.amount_cents),
-  postedOn: row.posted_on ? String(row.posted_on).slice(0, 10) : null,
+  // pg hands a DATE column back as a Date; dateOnlyString reads it (and text) as YYYY-MM-DD.
+  postedOn: dateOnlyString(row.posted_on),
 });
 
 // One bell for a payment event. Never throws. Returns true when a bell was written.
