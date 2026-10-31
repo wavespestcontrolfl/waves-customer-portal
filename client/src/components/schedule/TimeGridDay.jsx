@@ -361,10 +361,14 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
   // Visit labels sit at the 14px readability floor (schedule audit S9). A
   // block shorter than an hour cannot stack the time over the name at 14px,
   // so the time shares the name's row there; the title keeps the full text.
-  const compact = effectiveHeight < SLOT_HEIGHT * 2;
+  // A one-hour block has three 14px rows, and the readiness strip at its
+  // foot takes the third, so it shares the row too and the service label
+  // stays clear of the strip.
+  const readinessAtFoot = Boolean(service.readiness && onProtocol) && effectiveHeight <= SLOT_HEIGHT * 2;
+  const compact = effectiveHeight < SLOT_HEIGHT * 2 || readinessAtFoot;
   // The drive into this stop needs a one-hour block, and stays off one whose
   // foot carries the readiness strip; the tooltip always carries it.
-  const showDrive = drive && effectiveHeight >= SLOT_HEIGHT * 2 && !(service.readiness && onProtocol && effectiveHeight <= SLOT_HEIGHT * 2);
+  const showDrive = drive && effectiveHeight >= SLOT_HEIGHT * 2 && !readinessAtFoot;
 
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
