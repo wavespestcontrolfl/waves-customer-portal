@@ -65,7 +65,7 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
     const decisionId = row.id || row;
     const guard = act.buildMoveGuard({ decisionId, offer: { id: offerId, sent_at: SENT, phone_last10: PHONE.slice(-10), waves_line: '9415550199' },
       visitId, customerId, now: NOW, target: TARGET, inboundSmsLogId: inboundId, repliedAt: REPLIED,
-      expected: { date: '2040-03-05', start: '08:00', end: '10:00', status: 'confirmed' } });
+      expected: { date: '2040-03-05', start: '08:00', end: '10:00', status: 'confirmed', rule: act.sizeRuleKey({}) } });
     return { customerId, visitId, offerId, decisionId, guard };
   }
 

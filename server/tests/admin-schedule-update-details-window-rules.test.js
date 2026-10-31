@@ -699,3 +699,43 @@ describe('financialStateDrifted wiring under the write lock (source-pattern guar
     expect(refusal).toMatch(/pricing changed while saving/);
   });
 });
+
+// Size rule (owner 2026-10-31, lawn_rounds_9 only): the Edit modal re-submits isRecurring + the existing pattern with
+// spawnRecurringChildren false, which turns on the cadence rewrite of the pending children. Moving the PARENT by 7
+// days or fewer inside its round is "only this visit", so its date must not count as a cadence change: the stored round
+// anchor stays and the children keep their dates. The planner, the probe excludes and the write ask one function.
+describe('shouldRewritePendingRecurringRows — lawn rounds size rule', () => {
+  const { shouldRewritePendingRecurringRows: rewrite } = adminScheduleRouter;
+  // 2099-04-01 sits in round 3 of 2099 (2099-03-15 to 2099-04-23).
+  const parent = (extra = {}) => ({ id: 'p1', is_recurring: true, recurring_parent_id: null, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2099-04-01', ...extra });
+  const after = (before, extra) => ({ ...before, ...extra });
+
+  test('a one-off date move of the parent (7 days or fewer inside the round) is no cadence change', () => {
+    const before = parent();
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-02' }))).toBe(false);
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-08' }))).toBe(false);
+    expect(rewrite(before, after(before, { scheduled_date: '2099-03-25' }))).toBe(false);
+  });
+
+  test('8 days, a move into the next round, and an exception-measured move still rewrite', () => {
+    const before = parent();
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-09' }))).toBe(true);
+    expect(rewrite(parent({ scheduled_date: '2099-04-22' }), after(parent(), { scheduled_date: '2099-04-26' }))).toBe(true);
+    const moved = parent({ scheduled_date: '2099-04-06', date_exception: true, date_exception_cadence_date: '2099-04-01' });
+    expect(rewrite(moved, after(moved, { scheduled_date: '2099-04-09' }))).toBe(true); // 8 days from the regular date
+  });
+
+  test('a real cadence change still rewrites, even with a one-off date: pattern, weekend rule', () => {
+    const before = parent();
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-02', recurring_pattern: 'custom', recurring_interval_days: 42 }))).toBe(true);
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-02', skip_weekends: true }))).toBe(true);
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-02', weekend_shift: 'back', skip_weekends: true }))).toBe(true);
+  });
+
+  test('any other pattern keeps the date-driven rewrite for the same one-day move; no change, no rewrite', () => {
+    const custom = parent({ recurring_pattern: 'custom', recurring_interval_days: 42 });
+    expect(rewrite(custom, after(custom, { scheduled_date: '2099-04-02' }))).toBe(true);
+    expect(rewrite(parent(), after(parent(), {}))).toBe(false);
+    expect(rewrite(null, parent())).toBe(false);
+  });
+});

@@ -607,7 +607,7 @@ const { lawn9xRoundsLive } = require('../config/feature-gates');
 const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
 // Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
 // The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
-const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows, roundsRowMoveIsOneOff } = require('../services/lawn-rounds');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 
@@ -974,8 +974,11 @@ function shouldRewritePendingRecurringRows(before, after) {
   if (!before || !after) return false;
   const prev = recurringRewriteSignature(before);
   const next = recurringRewriteSignature(after);
-  return ['date', 'pattern', 'nth', 'weekday', 'intervalDays', 'skipWeekends', 'weekendShift']
-    .some((key) => prev[key] !== next[key]);
+  // Size rule (lawn_rounds_9, owner 2026-10-31): moving the parent by 7 days or fewer inside its round moves only
+  // that visit. Its date is then no cadence change, so the series keeps its round anchor and its pending children
+  // (the planner, the probe excludes and the write all ask this one function). A pattern or interval change still rewrites.
+  const keys = ['date', 'pattern', 'nth', 'weekday', 'intervalDays', 'skipWeekends', 'weekendShift'];
+  return keys.slice(Number(roundsRowMoveIsOneOff(before, after.scheduled_date))).some((key) => prev[key] !== next[key]);
 }
 
 // ADMIN_OCCUPANCY_EXCLUDE_STATUSES (which statuses do NOT occupy a slot
@@ -29613,6 +29616,8 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+// The Edit modal's cadence-rewrite decision (tests pin the lawn rounds size rule on it).
+module.exports.shouldRewritePendingRecurringRows = shouldRewritePendingRecurringRows;
 module.exports.findCompletingCardRequestVisitId = findCompletingCardRequestVisitId;
 module.exports.findEstimateScopedCommitment = findEstimateScopedCommitment;
 // The billable-amount booking gate — also consumed lazily by the IB

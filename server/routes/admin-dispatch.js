@@ -6271,6 +6271,15 @@ function planShownStop(expectVisit, rescheduleOptions) {
 // series under the collective gate, so the request must carry the operator's
 // acknowledgement of the previewed occurrence set. Answers a refusal, or null.
 async function requireSeriesMoveAck({ serviceId, newDate, body, actor, rescheduleOptions }) {
+  const preview = await Promise.resolve().then(() => SmartRebooker.previewSeriesMove(serviceId, newDate)).catch(() => null);
+  // Size rule (lawn_rounds_9 one-off): this move shifts nothing, so no acknowledgement is owed.
+  if (preview?.oneOff) {
+    // The rebooker judges the same decision on the row it moves and refuses (SCOPE_CHANGED) if the plan changed since.
+    rescheduleOptions.expectScope = 'single';
+    return null;
+  }
+  // A REAL series move is admin-only. (A one-off above never reaches the series, so a technician's own
+  // one-off takes the ordinary technician-authorized single path.)
   // Blast-radius: under this gate, a date-changing move on an
   // ungrouped recurring anchor widens to every future occurrence
   // exactly like an explicit scope='series' request — a technician
@@ -6279,13 +6288,6 @@ async function requireSeriesMoveAck({ serviceId, newDate, body, actor, reschedul
   // was the one path this route's admin-only series check missed).
   if (actor.techRole !== 'admin') {
     return moveReply(403, { error: 'Admin access required for this action', code: 'admin_required' });
-  }
-  const preview = await Promise.resolve().then(() => SmartRebooker.previewSeriesMove(serviceId, newDate)).catch(() => null);
-  // Size rule (lawn_rounds_9 one-off): this move shifts nothing, so no acknowledgement is owed.
-  if (preview?.oneOff) {
-    // The rebooker judges the same decision on the row it moves and refuses (SCOPE_CHANGED) if the plan changed since.
-    rescheduleOptions.expectScope = 'single';
-    return null;
   }
   // Bound to the previewed OCCURRENCE SET (seriesAckIds), never a count.
   const ids = Array.isArray(body.seriesAckIds) ? body.seriesAckIds.map(String) : null;

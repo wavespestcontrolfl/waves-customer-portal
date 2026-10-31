@@ -112,7 +112,8 @@ test("technician sends scope='this_only' with a changed date on their OWN recurr
   const { status, body } = await reschedule({ newDate: TARGET });
   expect(status).toBe(403);
   expect(body).toEqual({ error: 'Admin access required for this action', code: 'admin_required' });
-  expect(SmartRebooker.previewSeriesMove).not.toHaveBeenCalled();
+  // The preview is read to classify the move (a one-off is not a series move); it never reaches the technician.
+  expect(body).not.toHaveProperty('preview');
   expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
 });
 
@@ -129,4 +130,25 @@ test('control: same-date move (no widening condition) is unaffected for a techni
   const { status } = await reschedule({ newDate: TODAY, newWindow: { start: '09:00', end: '10:00' } });
   expect(status).toBe(200);
   expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+});
+
+// Size rule (owner 2026-10-31, lawn_rounds_9 only): a one-off does not touch the series, so a technician moving
+// their own assigned, ungrouped visit within its 7-day window takes the ordinary technician-authorized single path.
+test('technician: a lawn rounds one-off (preview says oneOff) is not a series move - no 403, it moves as a single move the rebooker confirms', async () => {
+  SmartRebooker.previewSeriesMove.mockResolvedValueOnce({ collective: false, oneOff: true, movableCount: 0 });
+  const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' } });
+  expect(status).toBe(200);
+  expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options).toMatchObject({ expectScope: 'single' });
+  expect(options).not.toHaveProperty('expectOccurrenceIds');
+  // the technician fence still rides the write
+  expect(options.expect).toMatchObject({ technician_id: 'tech-1' });
+});
+
+test('technician: a real series move is still admin-only, with or without an acknowledgement', async () => {
+  const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' } });
+  expect(status).toBe(403);
+  expect(body.code).toBe('admin_required');
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
 });
