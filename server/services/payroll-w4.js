@@ -22,6 +22,7 @@ const db = require('../models/db');
 const { recordAuditEvent } = require('./audit-log');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive } = require('../config/feature-gates');
+const { rollIrs } = require('./payroll-tax-calendar');
 
 const FILING_STATUSES = ['single', 'married_separately', 'married_jointly', 'head_of_household'];
 const PAY_METHODS = ['check', 'bank_transfer'];
@@ -136,8 +137,10 @@ const serializeHistoryRow = (row) => ({
 // adjustments, Tax Topic 753).
 // IRS Tax Topic 753: a W-4 claiming exemption "is valid for only the calendar
 // year in which it's furnished", and with no new W-4 by February 15 the employer
-// withholds as single with no other entries. signed_on's year stands for the year
-// the form was furnished; pay dates after Feb 15 of the next year get null.
+// withholds as single with no other entries. A February 15 that is a Saturday,
+// Sunday or legal holiday moves to the next business day (the IRS forms say so: the
+// 2021 Form W-4 asked for the new form by February 16, 2021). signed_on's year stands
+// for the year the form was furnished; pay dates after that deadline get null.
 async function currentW4For(technicianId, payDate, conn = db) {
   const day = validCalendarDate(payDate);
   if (!day) throw new Error('payDate must be a real YYYY-MM-DD date');
@@ -148,7 +151,7 @@ async function currentW4For(technicianId, payDate, conn = db) {
     .first(columns(conn));
   if (!row) return null;
   const election = serializeW4(row);
-  if (election.exempt && day > `${Number(election.signedOn.slice(0, 4)) + 1}-02-15`) return null;
+  if (election.exempt && day > rollIrs(`${Number(election.signedOn.slice(0, 4)) + 1}-02-15`)) return null;
   return election;
 }
 

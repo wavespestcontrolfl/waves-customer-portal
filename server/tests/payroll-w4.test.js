@@ -124,12 +124,20 @@ describe('currentW4For shape', () => {
     }), { raw: (sql) => sql });
     const exempt = connWith({ exempt: true, signed_on: '2026-03-01', effective_on: '2026-03-01' });
 
-    it('is still in force on February 15 of the next year', async () => {
+    // February 15, 2027 is Washington's Birthday, a legal holiday: the deadline moves to Tuesday the 16th.
+    it('is still in force through the deadline, February 16, 2027 (February 15 is a holiday)', async () => {
       expect(await currentW4For(TECH_ID, '2027-02-15', exempt)).toMatchObject({ exempt: true, signedOn: '2026-03-01' });
+      expect(await currentW4For(TECH_ID, '2027-02-16', exempt)).toMatchObject({ exempt: true });
     });
 
-    it('lapses on February 16 of the next year', async () => {
-      await expect(currentW4For(TECH_ID, '2027-02-16', exempt)).resolves.toBeNull();
+    it('lapses the day after the deadline, February 17, 2027', async () => {
+      await expect(currentW4For(TECH_ID, '2027-02-17', exempt)).resolves.toBeNull();
+    });
+
+    it('lapses on February 16 when February 15 is a business day (Tuesday, February 15, 2028)', async () => {
+      const exempt2027 = connWith({ exempt: true, signed_on: '2027-03-01', effective_on: '2027-03-01' });
+      expect(await currentW4For(TECH_ID, '2028-02-15', exempt2027)).toMatchObject({ exempt: true });
+      await expect(currentW4For(TECH_ID, '2028-02-16', exempt2027)).resolves.toBeNull();
     });
 
     it('is in force for the rest of the year it was signed', async () => {
@@ -138,7 +146,7 @@ describe('currentW4For shape', () => {
 
     it('does not lapse an election that is not exempt', async () => {
       const plain = connWith({ exempt: false, signed_on: '2026-03-01', effective_on: '2026-03-01' });
-      expect(await currentW4For(TECH_ID, '2027-02-16', plain)).toMatchObject({ exempt: false });
+      expect(await currentW4For(TECH_ID, '2027-02-17', plain)).toMatchObject({ exempt: false });
     });
   });
 
