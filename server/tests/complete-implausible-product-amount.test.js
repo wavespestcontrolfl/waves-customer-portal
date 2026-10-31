@@ -1,7 +1,9 @@
 // A technician's completion with a product amount no visit uses is refused (422, IMPLAUSIBLE_PRODUCT_AMOUNT) on a fresh
-// completion only, after the idempotency claim and before the first service write (the claim is marked failed). The office
-// (admin) keeps the advisory path in deductProductInventory (pest-stock-advisory.test.js). PostgreSQL-free: the db is a
-// recording fake; the end-to-end proofs are in complete-implausible-product-amount-postgres.test.js.
+// completion only, after the idempotency claim and before the first service write (the claim is marked failed). The limit is a
+// FIXED reviewed maximum per dimension (640 fl oz, 100 lb, 50 each; 50 of the submitted number for a unit with no known
+// dimension): no usage history is read. The office (admin) keeps the advisory path in deductProductInventory
+// (pest-stock-advisory.test.js). PostgreSQL-free: the db is a recording fake; the end-to-end proofs are in
+// complete-implausible-product-amount-postgres.test.js.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const mockCalls = [];
@@ -26,9 +28,11 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-const { freezeCompletionCeilings, deductProductInventory } = require('../services/complete-scheduled-service');
+const { vetProductAmounts, exceedsVisitLimit } = require('../services/complete-scheduled-service');
 
-const technicianImplausibleProduct = async (db, args) => (await freezeCompletionCeilings(db, args)).refusal?.body ?? null;
+const vet = async (args) => (await vetProductAmounts(require('../models/db'), args));
+const refusalBody = async (args) => (await vet(args))?.body ?? null;
+const historyReads = () => mockCalls.filter((c) => c.table === 'product_inventory_movements');
 
 const CELSIUS = '11111111-1111-4111-8111-111111111111';
 const catalog = { id: CELSIUS, name: 'Celsius WG', inventory_unit: 'lb' };
@@ -42,47 +46,88 @@ beforeEach(() => {
   mockTables.products_catalog = [catalog];
 });
 
-describe('freezeCompletionCeilings (technician refusal)', () => {
-  test('a technician over the floor (no history) is refused with the product and amount named', async () => {
-    const refusal = await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(406.25) });
-    expect(refusal).toMatchObject({
+describe('the fixed per-visit limit (technician refusal)', () => {
+  test('a technician over the limit is refused with the product and amount named', async () => {
+    expect(await refusalBody({ actor: tech, products: line(406.25) })).toMatchObject({
       code: 'IMPLAUSIBLE_PRODUCT_AMOUNT',
       productId: CELSIUS,
       productName: 'Celsius WG',
       amount: 406.25,
       error: '406.25 lb of Celsius WG is far more than one visit uses. Check the amount and submit again.',
     });
+    expect((await vet({ actor: tech, products: line(406.25) })).status).toBe(422);
   });
 
-  test('a technician over 20 times the product\'s own median is refused (history raises the ceiling above the floor)', async () => {
-    mockTables.product_inventory_movements = [10, 10, 10, 12].map((quantity) => ({ quantity, unit: 'lb' }));
-    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(201) })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
-    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(200) })).toBeNull();
+  test.each([
+    ['volume', 640, 'fl_oz', 'fl_oz'],
+    ['weight', 100, 'lb', 'lb'],
+    ['count', 50, 'each', 'each'],
+    ['weight sold in oz', 1600, 'oz', 'oz'],
+  ])('%s: at the limit passes, over it is refused', async (_name, limit, unit, inventoryUnit) => {
+    mockTables.products_catalog = [{ ...catalog, inventory_unit: inventoryUnit }];
+    expect(await vet({ actor: tech, products: line(limit, unit) })).toBeNull();
+    expect(await refusalBody({ actor: tech, products: line(limit + 1, unit) })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
   });
 
-  test('a run of tiny logged usages cannot pull the ceiling under the floor', async () => {
+  test('(a) 641 fl oz is refused however much was logged before: no usage history raises the limit', async () => {
+    mockTables.products_catalog = [{ ...catalog, inventory_unit: 'fl_oz' }];
+    mockTables.product_inventory_movements = [640, 640, 640, 640].map((quantity) => ({ quantity, unit: 'fl_oz' }));
+    expect(await refusalBody({ actor: tech, products: line(641, 'fl_oz') })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
+    expect(await vet({ actor: tech, products: line(640, 'fl_oz') })).toBeNull();
+    expect(historyReads()).toEqual([]);
+  });
+
+  test('a run of tiny logged usages cannot pull the limit down either', async () => {
     mockTables.product_inventory_movements = [0.0001, 0.0001, 0.0001].map((quantity) => ({ quantity, unit: 'lb' }));
-    const out = await freezeCompletionCeilings(require('../models/db'), { actor: tech, products: line(1) });
-    expect(out.refusal).toBeNull();
-    expect([...out.ceilings.values()]).toEqual([100]);
-    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(101) })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
+    expect(await vet({ actor: tech, products: line(1) })).toBeNull();
+    expect(historyReads()).toEqual([]);
   });
 
-  test('an amount under the ceiling is unchanged', async () => {
-    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(2) })).toBeNull();
-    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(100) })).toBeNull();
+  test('(b) a blank inventory unit in a per-area unit fails closed on the number: 51 oz/1000sf is refused, 50 passes', async () => {
+    mockTables.products_catalog = [{ ...catalog, inventory_unit: null }];
+    expect(await refusalBody({ actor: tech, products: line(51, 'oz/1000sf') })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', amount: 51 });
+    expect(await vet({ actor: tech, products: line(50, 'oz/1000sf') })).toBeNull();
+    expect(await refusalBody({ actor: tech, products: line(99999, 'oz/1000sf') })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
+  });
+
+  test('a unit with no known dimension (bags), and an amount in a unit the stock unit cannot convert, fail closed the same way', async () => {
+    mockTables.products_catalog = [{ ...catalog, inventory_unit: 'bags' }];
+    expect(await refusalBody({ actor: tech, products: line(51, 'bags') })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
+    expect(await vet({ actor: tech, products: line(50, 'bags') })).toBeNull();
+    mockTables.products_catalog = [{ ...catalog, inventory_unit: 'lb' }];
+    expect(await refusalBody({ actor: tech, products: line(51, 'oz/1000sf') })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
+    expect(await vet({ actor: tech, products: line(50, 'oz/1000sf') })).toBeNull();
+  });
+
+  test('an amount under the limit is unchanged', async () => {
+    expect(await vet({ actor: tech, products: line(2) })).toBeNull();
+    expect(await vet({ actor: tech, products: line(100) })).toBeNull();
   });
 
   test('an admin entry is never refused here (the advisory path records it and skips the stock deduction)', async () => {
-    expect(await technicianImplausibleProduct(require('../models/db'), { actor: admin, products: line(406.25) })).toBeNull();
+    expect(await vet({ actor: admin, products: line(406.25) })).toBeNull();
     expect(mockCalls.filter((c) => c.write)).toEqual([]);
   });
 
   test('a line with no amount, no known product or a non-uuid id is skipped without a query error', async () => {
-    const db = require('../models/db');
-    expect(await technicianImplausibleProduct(db, { actor: tech, products: [{ productId: CELSIUS }] })).toBeNull();
-    expect(await technicianImplausibleProduct(db, { actor: tech, products: [{ productId: 'not-a-uuid', totalAmount: 9999, amountUnit: 'lb' }] })).toBeNull();
-    expect(await technicianImplausibleProduct(db, { actor: tech, products: null })).toBeNull();
+    expect(await vet({ actor: tech, products: [{ productId: CELSIUS }] })).toBeNull();
+    expect(await vet({ actor: tech, products: [{ productId: 'not-a-uuid', totalAmount: 9999, amountUnit: 'lb' }] })).toBeNull();
+    expect(await vet({ actor: tech, products: null })).toBeNull();
+  });
+
+  test('(c) many distinct products: one catalog read, zero history reads', async () => {
+    const ids = Array.from({ length: 12 }, (_v, i) => `22222222-2222-4222-8222-${String(i).padStart(12, '0')}`);
+    mockTables.products_catalog = ids.map((id) => ({ id, name: `P${id.slice(-2)}`, inventory_unit: 'lb' }));
+    const products = ids.map((productId) => ({ productId, totalAmount: 2, amountUnit: 'lb' }));
+    expect(await vet({ actor: tech, products })).toBeNull();
+    expect(mockCalls.map((c) => c.table)).toEqual(['products_catalog', 'products_catalog']); // one query: whereIn + select
+    expect(mockCalls.filter((c) => c.table === 'products_catalog' && c.op === 'whereIn')).toHaveLength(1);
+    expect(historyReads()).toEqual([]);
+  });
+
+  test('exceedsVisitLimit is pure: the same line always gets the same answer', () => {
+    const l = { amount: 641, amountUnit: 'fl_oz', inventoryUnit: 'fl_oz' };
+    expect([exceedsVisitLimit(l), exceedsVisitLimit(l)]).toEqual([true, true]);
   });
 });
 
@@ -99,99 +144,30 @@ describe('a malformed amount is refused with a 400 for every role, and the parse
   ])('%s', async (_name, totalAmount) => {
     for (const actor of [tech, admin]) {
       const products = [{ productId: CELSIUS, totalAmount, amountUnit: 'lb' }];
-      const out = await freezeCompletionCeilings(require('../models/db'), { actor, products });
-      expect(out.refusal).toMatchObject({ status: 400, body: { code: 'INVALID_PRODUCT_AMOUNT', productId: CELSIUS } });
-      expect(out.refusal.body.error).toBe('The amount for Celsius WG is not a number. Enter the amount as a plain number and submit again.');
+      const out = await vet({ actor, products });
+      expect(out).toMatchObject({ status: 400, body: { code: 'INVALID_PRODUCT_AMOUNT', productId: CELSIUS } });
+      expect(out.body.error).toBe('The amount for Celsius WG is not a number. Enter the amount as a plain number and submit again.');
     }
   });
 
   test('a plain decimal string is parsed once and written back as the number every later reader sees', async () => {
     const products = [{ productId: CELSIUS, totalAmount: ' 12.5 ', amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: '.5', amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 3, amountUnit: 'lb' }];
-    const out = await freezeCompletionCeilings(require('../models/db'), { actor: tech, products });
-    expect(out.refusal).toBeNull();
+    expect(await vet({ actor: tech, products })).toBeNull();
     expect(products.map((p) => p.totalAmount)).toEqual([12.5, 0.5, 3]);
   });
 
   test('empty and absent amounts behave as today: not judged, not changed', async () => {
     const products = [{ productId: CELSIUS, totalAmount: '', amountUnit: 'lb' }, { productId: CELSIUS, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: null }];
-    const out = await freezeCompletionCeilings(require('../models/db'), { actor: tech, products });
-    expect(out.refusal).toBeNull();
+    expect(await vet({ actor: tech, products })).toBeNull();
     expect(products.map((p) => p.totalAmount)).toEqual(['', undefined, null]);
   });
 
-  test('a replay or resume (skip) parses and changes nothing', async () => {
+  test('a replay or resume (skip) parses and changes nothing, and reads nothing', async () => {
     const products = [{ productId: CELSIUS, totalAmount: '99999junk', amountUnit: 'lb' }];
-    expect((await freezeCompletionCeilings(require('../models/db'), { actor: tech, products, skip: true })).refusal).toBeNull();
+    expect(await vet({ actor: tech, products, skip: true })).toBeNull();
     expect(products[0].totalAmount).toBe('99999junk');
-  });
-});
-
-describe('replay and resume', () => {
-  test('skip (a replay, a resume or a packet effects phase) judges nothing, freezes nothing and reads nothing', async () => {
-    const out = await freezeCompletionCeilings(require('../models/db'), { actor: tech, products: line(406), skip: true });
-    expect(out.refusal).toBeNull();
-    expect(out.ceilings.size).toBe(0);
     expect(mockCalls).toEqual([]);
   });
 });
-
-describe('the ceiling is frozen once per completion', () => {
-  test('it is frozen for an admin too, and read once per product however many lines carry it', async () => {
-    mockTables.product_inventory_movements = [{ quantity: 1, unit: 'lb' }, { quantity: 1, unit: 'lb' }];
-    const out = await freezeCompletionCeilings(require('../models/db'), { actor: admin, products: [...line(1), ...line(30)] });
-    expect(out.refusal).toBeNull();
-    expect([...out.ceilings.values()]).toEqual([100]);
-    expect(mockCalls.filter((c) => c.table === 'product_inventory_movements' && c.op === 'select')).toHaveLength(1);
-  });
-
-  // Codex's case: two prior 1 lb rows (ceiling 100 lb); a host row of 1 lb and an add-on row of 30 lb in one completion.
-  // Saving the host row adds a 1 lb usage row, so a recomputed ceiling would be 20 lb and silently skip the add-on's stock
-  // and cost. A stateful fake db lets each saved movement join the history the next line would read.
-  const statefulTrx = (history) => {
-    const writes = [];
-    let reads = 0;
-    const trx = (table) => ({
-      where: () => ({
-        forUpdate: () => ({ first: async () => null }),
-        update: async (row) => { writes.push({ table, update: row }); return 1; },
-        where: () => ({ select: async () => { reads += 1; return history; } }),
-      }),
-      insert: (row) => ({ returning: async () => { writes.push({ table, insert: row }); history.push({ quantity: row.quantity, unit: row.unit }); return [{ id: `movement-${writes.length}`, ...row }]; } }),
-    });
-    trx.writes = writes;
-    trx.historyReads = () => reads;
-    return trx;
-  };
-  const visit = {
-    serviceProduct: { id: 'service-product-1' },
-    serviceRecord: { id: 'record-1' },
-    scheduledService: { id: 'visit-1', customer_id: 'customer-1', technician_id: 'tech-1' },
-    allowNegative: true,
-  };
-  const product = (onHand) => ({ id: CELSIUS, name: 'Celsius WG', inventory_on_hand: onHand, inventory_unit: 'lb', cost_per_unit: 2 });
-
-  test('the later line is judged against the frozen 100 lb ceiling, so its stock deduction and cost are written', async () => {
-    const history = [{ quantity: 1, unit: 'lb' }, { quantity: 1, unit: 'lb' }];
-    mockTables.product_inventory_movements = history;
-    const { ceilings, refusal } = await freezeCompletionCeilings(require('../models/db'), { actor: tech, products: [...line(1), ...line(30)] });
-    expect(refusal).toBeNull();
-    const trx = statefulTrx(history);
-    const host = await deductProductInventory(trx, { ...visit, product: product(1), productInput: { totalAmount: 1, amountUnit: 'lb' }, plausibleCeilings: ceilings });
-    const addOn = await deductProductInventory(trx, { ...visit, product: product(0), productInput: { totalAmount: 30, amountUnit: 'lb' }, plausibleCeilings: ceilings });
-    expect(host.status).toBe('deducted');
-    expect(addOn).toMatchObject({ status: 'deducted_insufficient_stock', stockBefore: 0, stockAfter: -30, deductedAmount: 30 });
-    expect(addOn.costUsed).toBeGreaterThan(0);
-    expect(trx.writes.filter((w) => w.table === 'product_inventory_movements')).toHaveLength(2);
-    expect(trx.historyReads()).toBe(0); // no deduction recomputed a ceiling
-  });
-
-  test('without the frozen map each line reads the history afresh (what freezing replaces)', async () => {
-    const history = [{ quantity: 1, unit: 'lb' }, { quantity: 1, unit: 'lb' }];
-    const trx = statefulTrx(history);
-    await deductProductInventory(trx, { ...visit, product: product(1), productInput: { totalAmount: 1, amountUnit: 'lb' } });
-    await deductProductInventory(trx, { ...visit, product: product(0), productInput: { totalAmount: 30, amountUnit: 'lb' } });
-    expect(trx.historyReads()).toBe(1); // the host line stayed in stock; the add-on overdrew and read the history
-  });
-});
-// The end-to-end proofs (422 before any write with the claim released, admin advisory path, under-ceiling unchanged, an
-// identical retry replaying after its own usage moved the ceiling) are in complete-implausible-product-amount-postgres.test.js.
+// The end-to-end proofs (422 before any write with the claim released, 400 for a malformed amount, admin advisory path,
+// under-limit unchanged, an identical retry replaying) are in complete-implausible-product-amount-postgres.test.js.

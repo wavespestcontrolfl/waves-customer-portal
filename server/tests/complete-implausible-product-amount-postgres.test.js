@@ -1,8 +1,7 @@
 /**
  * A technician's product amount no visit uses is refused (422 IMPLAUSIBLE_PRODUCT_AMOUNT) on a FRESH completion only, before
- * the first service write. A same-key replay of a committed completion is never judged: its own committed usage moves the
- * product's history (two 1 lb visits, then a 100 lb visit that passed the 100 lb floor, make a 3-row history whose median
- * puts the ceiling at 20 lb), and the identical retry must replay the success, not 422.
+ * the first service write, against a FIXED per-dimension limit (no usage history is read). A malformed amount is a 400 for every
+ * role. A same-key replay of a committed completion is never judged again and replays the success.
  * Runs the real completeScheduledService against a private migrated clone (wiring copied from
  * complete-scheduled-service-first-visit-rating-default-postgres.test.js).
  */
@@ -70,7 +69,7 @@ const postgres = SKIP ? describe.skip : describe;
 let mockPg;
 jest.setTimeout(90000);
 
-async function seedPestVisit({ priorUsage = [] } = {}) {
+async function seedPestVisit() {
   const { etDateString } = require('../utils/datetime-et');
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), productId: randomUUID(),
     serviceKey: `fixture_pest_${randomUUID().slice(0, 8)}` };
@@ -80,9 +79,6 @@ async function seedPestVisit({ priorUsage = [] } = {}) {
   await mockPg('services').insert({ id: f.catalogId, name: `Fixture General Pest Control ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
   await mockPg('products_catalog').insert({ id: f.productId, name: `Fixture Celsius WG ${f.serviceKey}`, category: 'herbicide', active: true,
     inventory_on_hand: 500, inventory_unit: 'lb' });
-  for (const quantity of priorUsage) {
-    await mockPg('product_inventory_movements').insert({ product_id: f.productId, movement_type: 'usage', quantity, unit: 'lb', stock_before: 500, stock_after: 500 - quantity });
-  }
   await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId,
     service_type: `Fixture General Pest Control ${f.serviceKey}`, scheduled_date: etDateString(), window_start: '09:00', window_end: '10:00', status: 'confirmed',
     estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false });
@@ -187,7 +183,7 @@ postgres('technician implausible product amount', () => {
   });
 
   test('an identical retry of a committed completion replays the success (a replay is never judged again)', async () => {
-    const f = await seedPestVisit({ priorUsage: [1, 1] });
+    const f = await seedPestVisit();
     try {
       const key = randomUUID();
       const first = await complete(f, { role: 'technician', totalAmount: 100, key });
