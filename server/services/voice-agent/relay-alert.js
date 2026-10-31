@@ -36,7 +36,7 @@
  */
 
 const logger = require('../logger');
-const { maskPhone } = require('./relay-protocol');
+const { maskPhone, agentName } = require('./relay-protocol');
 
 const MAX_ALERT_BODY = 480; // two-ish SMS segments; the bell/push render truncates anyway
 
@@ -671,7 +671,7 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
       action: name
         ? fitAction('Comms', name, [(n) => `review a contact's call on ${n}'s account`, (n) => `review ${n}'s contact's call`])
         : "review a contact's call on a customer account",
-      why: whyWithQuote({ lead: 'They called Sandy from a number on the account: ', quote: firstSentence(redactedWords(summary)).replace(/[.!?]+$/, '') || 'asked for a follow-up' }),
+      why: whyWithQuote({ lead: `They called ${agentName()} from a number on the account: `, quote: firstSentence(redactedWords(summary)).replace(/[.!?]+$/, '') || 'asked for a follow-up' }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
       subject: { type: 'customer', id: String(customerId) },

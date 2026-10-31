@@ -33,6 +33,7 @@
 
 const logger = require('../logger');
 const { recordGap } = require('../agent-gap-reports');
+const { agentName, maskPhone } = require('./relay-protocol');
 
 const TRANSFER_TOOL_NAME = 'transfer_to_office';
 // The intent relay-conversation.js passes on its provider-failure recovery transfer.
@@ -148,13 +149,13 @@ function buildHandoffPacket(input = {}, facts = {}) {
  * generic line.
  */
 function transferWhisper(handoff, fallbackName = '') {
-  const generic = 'Sandy transfer. The caller requested assistance; the summary was unavailable.';
+  const generic = `${agentName()} transfer. The caller requested assistance; the summary was unavailable.`;
   if (!handoff || typeof handoff !== 'object' || handoff.context_available !== true) return generic;
   const name = sanitizeSpokenName(handoff.caller_name) || sanitizeSpokenName(fallbackName) || 'an unknown number';
   const intent = lineClamp(handoff.intent, 6);
   const unresolved = lineClamp(handoff.unresolved_question, 8);
   const body = intent ? `${intent}${unresolved ? `; ${unresolved}` : ''}` : (unresolved || 'requested assistance');
-  const line = lineClamp(`Sandy transfer from ${name}: ${body}`, WHISPER_MAX_WORDS);
+  const line = lineClamp(`${agentName()} transfer from ${name}: ${body}`, WHISPER_MAX_WORDS);
   return /[.!?]$/.test(line) ? line : `${line}.`;
 }
 
@@ -437,8 +438,8 @@ function ringNoContextBell(ctx, facts) {
       } catch { /* bare tab */ }
       return require('../notification-service').notifyAdmin(
         'alert',
-        'Sandy transfer without context',
-        `A caller${facts.from ? ` from ${require('./relay-protocol').maskPhone(facts.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
+        `${agentName()} transfer without context`,
+        `A caller${facts.from ? ` from ${maskPhone(facts.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
         {
           link: `/admin/communications#tab=calls${callLogId ? `&call=${encodeURIComponent(callLogId)}` : ''}`,
           dedupeKey: `${NO_CONTEXT_BELL}:${ctx.callSid || 'unknown'}`,

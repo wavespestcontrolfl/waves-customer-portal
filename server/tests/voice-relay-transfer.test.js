@@ -167,7 +167,7 @@ describe('executeTool transfer_to_office', () => {
     expect(writeHandoff.mock.calls[1][0]).toMatchObject({ context_available: false, summary: null, tools: [] });
     await new Promise((r) => setImmediate(r)); // the bell is detached
     expect(triggerNotification).toHaveBeenCalledTimes(1);
-    expect(triggerNotification).toHaveBeenCalledWith('alert', 'Sandy transfer without context', expect.stringContaining('ask the caller to recap'), expect.objectContaining({ dedupeKey: 'sandy_transfer_no_context:CA-tx-1', bell: true, link: '/admin/communications#tab=calls' }));
+    expect(triggerNotification).toHaveBeenCalledWith('alert', 'Jennifer transfer without context', expect.stringContaining('ask the caller to recap'), expect.objectContaining({ dedupeKey: 'sandy_transfer_no_context:CA-tx-1', bell: true, link: '/admin/communications#tab=calls' }));
     expect(ctx.say).toHaveBeenCalled();
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
   });
@@ -180,7 +180,7 @@ describe('executeTool transfer_to_office', () => {
     const { ctx } = ctxFor({ writeHandoff: jest.fn().mockRejectedValueOnce(new Error('pool down')).mockResolvedValueOnce(1) });
     await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, ctx);
     await new Promise((r) => setImmediate(r));
-    expect(triggerNotification).toHaveBeenCalledWith('alert', 'Sandy transfer without context', expect.any(String),
+    expect(triggerNotification).toHaveBeenCalledWith('alert', 'Jennifer transfer without context', expect.any(String),
       expect.objectContaining({ link: '/admin/communications#tab=calls&call=call-uuid-1' }));
   });
 
@@ -215,7 +215,7 @@ describe('executeTool transfer_to_office', () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { RECOVERY_INTENT } = require('../services/voice-agent/relay-transfer');
     const { ctx } = ctxFor();
-    await executeTool('transfer_to_office', { intent: RECOVERY_INTENT, summary: 'Sandy had repeated system trouble on this call', not_supported: true }, ctx);
+    await executeTool('transfer_to_office', { intent: RECOVERY_INTENT, summary: 'Jennifer had repeated system trouble on this call', not_supported: true }, ctx);
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
     expect(mockRecordGap).not.toHaveBeenCalled();
   });
@@ -405,7 +405,7 @@ describe('pre-push hook round 9', () => {
       expect(packet[field]).toMatch(/card ending/);
     }
     expect(transfer.transferWhisper({ ...packet, context_available: true })).not.toMatch(PAN);
-    expect(transfer.transferWhisper({ ...packet, context_available: true })).toMatch(/Sandy transfer/);
+    expect(transfer.transferWhisper({ ...packet, context_available: true })).toMatch(/Jennifer transfer/);
   });
 
   test('both writes time out ⇒ abort; a timed-out UPDATE that lands LATER is reverted (P1)', async () => {
@@ -607,16 +607,16 @@ describe('whisper + AI segment', () => {
   test('≤20 words, sanitized, from the packet only', () => {
     const w = transfer.transferWhisper({ context_available: true, caller_name: 'Pat "Doe" <b>', intent: 'cancel service', unresolved_question: 'refund for June and the extra visit last week please' });
     expect(w.split(' ').length).toBeLessThanOrEqual(20);
-    expect(w).toMatch(/^Sandy transfer from Pat Doe b: cancel service; refund/);
+    expect(w).toMatch(/^Jennifer transfer from Pat Doe b: cancel service; refund/);
     expect(w).not.toMatch(/[<>"]/);
     expect(w.endsWith('.')).toBe(true);
   });
   test('falls back to the screen name, then to an unknown number', () => {
-    expect(transfer.transferWhisper({ context_available: true, intent: 'wants a person' }, 'Sam Roe')).toBe('Sandy transfer from Sam Roe: wants a person.');
-    expect(transfer.transferWhisper({ context_available: true, intent: 'wants a person' })).toBe('Sandy transfer from an unknown number: wants a person.');
+    expect(transfer.transferWhisper({ context_available: true, intent: 'wants a person' }, 'Sam Roe')).toBe('Jennifer transfer from Sam Roe: wants a person.');
+    expect(transfer.transferWhisper({ context_available: true, intent: 'wants a person' })).toBe('Jennifer transfer from an unknown number: wants a person.');
   });
   test('no context ⇒ the generic line', () => {
-    const generic = 'Sandy transfer. The caller requested assistance; the summary was unavailable.';
+    const generic = 'Jennifer transfer. The caller requested assistance; the summary was unavailable.';
     expect(transfer.transferWhisper({ context_available: false, intent: 'x' })).toBe(generic);
     expect(transfer.transferWhisper(null)).toBe(generic);
   });
