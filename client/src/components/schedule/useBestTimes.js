@@ -85,6 +85,14 @@ function addDays(ymd, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// The staff line the server sends when Google road times are stopped by a
+// spending limit (GATE_PICKER_ROAD_LIMIT_NOTICE; `road_limit.note`); nothing
+// while the gate is off, so the availability object keeps its old shape.
+const roadLimitOf = (data) => (typeof data?.road_limit?.note === 'string' && data.road_limit.note
+  ? { roadLimit: data.road_limit.note } : {});
+// The first answer's note, else the second search's (the week row, a far day).
+const withRoadLimit = (data, other) => (!data?.road_limit && other?.road_limit ? { ...data, road_limit: other.road_limit } : data);
+
 // The summary's rows, in the strip's own shape. `fits` on the verdict stays
 // three-valued here: true, false (a verified miss) or null (could not be
 // checked) — the strip must never read "unchecked" as a miss.
@@ -94,11 +102,14 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
   const p = data.picked || null;
   return {
     pickedDate: date,
+    ...roadLimitOf(data),
     days: days.map((day) => ({
       date: day.date,
       status: day.status || (day.hours?.length ? 'open' : 'full'),
       ...(day.closed === true ? { closed: true } : {}),
       ...(day.last_resort === true ? { last_resort: true } : {}),
+      // The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small tag.
+      ...(day.already_late === true ? { alreadyLate: true } : {}),
       hours: (day.hours || []).map((h) => summaryHour({ ...h, date: day.date }, scopedToTech)),
     })),
     // The best-times rows (owner 2026-10-06): 4 hours on the picked date, 4
@@ -130,12 +141,15 @@ export function normalizeOpenTimes(data, { date }) {
   if (!days) return null;
   return {
     pickedDate: date,
+    ...roadLimitOf(data),
     openTimes: { from: data.summary.open_times.from, to: data.summary.open_times.to },
     days: days.map((day) => ({
       date: day.date,
       status: day.status || (day.hours?.length ? 'open' : 'full'),
       ...(day.closed === true ? { closed: true } : {}),
       ...(day.last_resort === true ? { last_resort: true } : {}),
+      // The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small tag.
+      ...(day.already_late === true ? { alreadyLate: true } : {}),
       hours: (day.hours || []).map((h) => ({ ...summaryHour({ ...h, date: day.date }, false), rainTier: h.rain_tier ?? null })),
     })),
     best: null,
@@ -161,6 +175,7 @@ function summaryHour(h, scopedToTech) {
     stopsThatDay: h.stops_that_day ?? null,
     technicianId: h.technician?.id || null,
     technicianName: scopedToTech ? null : (h.technician?.name || null),
+    ...(h.day_already_late === true ? { dayAlreadyLate: true } : {}),
   };
 }
 
@@ -205,8 +220,8 @@ async function searchSummary(search, { date, today, pickedArgs, bestRows, rainAr
     ...rainArgs,
   }).catch(() => null);
   const weekRow = week?.summary?.best;
-  if (!weekRow || weekRow.week_covered === false) return data;
-  return { ...data, summary: { ...data.summary, best: { ...data.summary.best, week: weekRow.week || [], week_covered: true } } };
+  if (!weekRow || weekRow.week_covered === false) return withRoadLimit(data, week);
+  return { ...withRoadLimit(data, week), summary: { ...data.summary, best: { ...data.summary.best, week: weekRow.week || [], week_covered: true } } };
 }
 
 // The open-times list from today for four weeks, held while the picker stays
@@ -228,7 +243,7 @@ async function searchOpenTimes(search, { held, listKey, list, today, listTo, far
   held.set(listKey, data);
   if (!farDate) return data;
   const farDays = extra?.summary?.open_times ? extra.summary.days : [{ date: farDate, status: 'unchecked', hours: [] }];
-  return { ...data, summary: { ...data.summary, days: [...data.summary.days, ...farDays] } };
+  return { ...withRoadLimit(data, extra), summary: { ...data.summary, days: [...data.summary.days, ...farDays] } };
 }
 
 // Which box a picker draws, from GET /find-time/ui: still asking, the
@@ -238,12 +253,15 @@ const BOX_MODE = { null: 'ui', true: 'list', false: 'strip' };
 // The request fields every find-time hint search shares; `undefined` drops
 // a field from the JSON.
 function hintRequestBody({
-  arrivalWindows, moveScope, serviceId, propertyId, customerId, address, lat, lng,
+  arrivalWindows, quickMove, moveScope, serviceId, propertyId, customerId, address, lat, lng,
   durationMinutes, durationEdit, technicianId, excludeKey, sameDayFloorMin,
 }) {
   return {
     hint: true,
     arrivalWindows,
+    // Quick Move: the server decides (GATE_PICKER_ROAD_CHECK) whether it
+    // gets Edit appointment's route check.
+    quickMove: quickMove || undefined,
     moveScope: moveScope || undefined,
     // Existing-visit surfaces pass serviceId so the server ranks at
     // the VISIT's stamped address (secondary/rental properties),
@@ -297,6 +315,8 @@ export function useBestTimes({
   // technician, so the list covers every technician's route.
   openTimes,
   techPick,
+  // Quick Move's sheet (RainOutSheet): see hintRequestBody.
+  quickMove = false,
 }) {
   const [pickedByTech, setPickedByTech] = useState([]);
   // The last summary answer, with the request it answered: { data, requestKey, subjectKey }.
@@ -411,7 +431,7 @@ export function useBestTimes({
           signal: controller.signal,
           body: JSON.stringify({
             ...hintRequestBody({
-              arrivalWindows, moveScope, serviceId, propertyId, customerId, address, lat, lng,
+              arrivalWindows, quickMove, moveScope, serviceId, propertyId, customerId, address, lat, lng,
               durationMinutes, durationEdit, technicianId, excludeKey, sameDayFloorMin,
             }),
             ...extra,

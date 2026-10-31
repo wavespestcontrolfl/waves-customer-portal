@@ -4,7 +4,8 @@
  *   GET   /                  list (status/role filters, newest first, ai fields)
  *   GET   /:id                full application detail
  *   GET   /:id/stage-preview  rendered notify preview for a candidate status
- *   PATCH /:id/status         owner status transition + optional notify/resend
+ *   PATCH /:id/status         owner status transition + optional notify/resend;
+ *                             optional expected_status refuses a stale decision (409)
  *
  * Owner-only (requireAdmin): applications hold applicant PII and hiring
  * decisions. Every real transition appends to status_history — the AI
@@ -48,6 +49,36 @@ function withoutToken(row) {
     ...rest,
     interview_url: interview_token ? RecruitingComms.interviewUrlFor(interview_token) : null,
   };
+}
+
+// History names the staff member behind each stage change: `by` holds the
+// technician id the status PATCH recorded, and each such entry gains
+// `by_name` in the response (the stored history is not rewritten). A failed
+// name read leaves the entries as they are; the page then says "Staff".
+async function withHistoryActors(application) {
+  const history = Array.isArray(application && application.status_history) ? application.status_history : null;
+  const ids = [...new Set((history || []).map((entry) => entry && entry.by)
+    .filter((by) => typeof by === 'string' && UUID_RE.test(by)))];
+  if (!ids.length) return application;
+  try {
+    const staff = await db('technicians').whereIn('id', ids).select('id', 'name');
+    const names = new Map(staff.filter((row) => row.name).map((row) => [row.id, row.name]));
+    return {
+      ...application,
+      status_history: history.map((entry) => (entry && names.has(entry.by)
+        ? { ...entry, by_name: names.get(entry.by) }
+        : entry)),
+    };
+  } catch (err) {
+    logger.warn(`[admin-careers] history names unavailable (application ${application.id}): ${RecruitingComms.errorSummary(err)}`);
+    return application;
+  }
+}
+
+// Every response that carries an application: no interview token, and
+// staff names on its history.
+function presentApplication(row) {
+  return withHistoryActors(withoutToken(row));
 }
 
 router.get('/', async (req, res) => {
@@ -121,7 +152,7 @@ router.get('/:id', async (req, res) => {
       logger.warn(`[admin-careers] reply media signing failed (application ${req.params.id}): ${RecruitingComms.errorSummary(err)}`);
       replyMedia = {};
     }
-    res.json({ application: withoutToken(row), reply_media: replyMedia });
+    res.json({ application: await presentApplication(row), reply_media: replyMedia });
     // Opening the application IS reading its replies (Codex r7 P2): clear the
     // unread flags on the applicant's reply rows in both message stores so
     // the shared unread counts do not stay lit for messages the owner has
@@ -206,6 +237,14 @@ function buildStatusPatchPlan(req) {
     return { error: { code: 400, body: { error: 'Unknown status' } } };
   }
 
+  // The status the operator saw when the stage dialog opened (recruiting
+  // audit R1). Optional, so an admin tab still on the previous client keeps
+  // working; when present, applyStatusTransition refuses a stale decision.
+  const expectedStatus = req.body.expected_status ?? null;
+  if (expectedStatus !== null && !STATUSES.includes(expectedStatus)) {
+    return { error: { code: 400, body: { error: 'Unknown expected status' } } };
+  }
+
   const note = typeof req.body.note === 'string'
     ? req.body.note.trim().slice(0, MAX_NOTE_CHARS)
     : '';
@@ -222,7 +261,7 @@ function buildStatusPatchPlan(req) {
 
   return {
     plan: {
-      status, note, resend, notify,
+      status, expectedStatus, note, resend, notify,
       ...overrides,
       wantSms, wantEmail,
     },
@@ -348,6 +387,13 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan) {
   if (plan.resend && row.status !== 'interview') {
     return { row, conflict: `Cannot resend: the application is now '${row.status}', not in Interview` };
   }
+  // Same rule for every stage decision (recruiting audit R1): a dialog
+  // opened at one stage must not overwrite a newer decision another admin
+  // (or the applicant) made while it was open — e.g. turn a fresh rejection
+  // back into Interview and send the invite. Refuse; the owner re-reads.
+  if (plan.expectedStatus && row.status !== plan.expectedStatus) {
+    return { row, conflict: `Cannot move: the application is now '${row.status}', not '${plan.expectedStatus}'. Nothing was changed or sent.` };
+  }
   const { isResendOnly, isNoOp, interviewApplicable, willSend } = classifyStatusTransition(row, plan);
   if (isNoOp) return { row, interviewApplicable: false };
 
@@ -458,19 +504,19 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     if (!txResult) return res.status(404).json({ error: 'Not found' });
-    if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: withoutToken(txResult.row) });
+    if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: await presentApplication(txResult.row) });
     const { row: updated, interviewApplicable, willSend } = txResult;
 
     if (!interviewApplicable) {
-      return res.json({ application: withoutToken(updated), sent: { sms: 'not_requested', email: 'not_requested' } });
+      return res.json({ application: await presentApplication(updated), sent: { sms: 'not_requested', email: 'not_requested' } });
     }
     if (!willSend) {
       const sent = { sms: plan.wantSms ? 'disabled' : 'not_requested', email: plan.wantEmail ? 'disabled' : 'not_requested' };
-      return res.json({ application: withoutToken(updated), sent });
+      return res.json({ application: await presentApplication(updated), sent });
     }
 
     const { sent, responseRow } = await deliverStageComms(req.params.id, req.technicianId, updated, plan);
-    res.json({ application: withoutToken(responseRow), sent });
+    res.json({ application: await presentApplication(responseRow), sent });
   } catch (err) {
     logger.error(`[admin-careers] status update failed: ${RecruitingComms.errorSummary(err)}`);
     res.status(500).json({ error: 'Failed to update application' });

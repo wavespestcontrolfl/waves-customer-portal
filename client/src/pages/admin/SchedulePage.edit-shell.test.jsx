@@ -539,3 +539,19 @@ it('open times: a row on another technician\'s route books that technician (tech
   expect(screen.getByRole('dialog', { name: 'Edit appointment' }).querySelector('input[type="date"]')).toHaveValue('2035-01-03');
   expect(writes()).toHaveLength(0);
 });
+
+const repeatsSelectOf = (dialog) => [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'quarterly'));
+
+it('a lawn rounds series shows and keeps its own pattern in the Repeats select', () => {
+  const dialog = openModal({ ...service, isRecurring: true, recurringPattern: 'lawn_rounds_9' });
+  const select = repeatsSelectOf(dialog);
+  expect(select).toHaveValue('lawn_rounds_9');
+  expect([...select.options].find((o) => o.value === 'lawn_rounds_9')).toHaveTextContent('Lawn rounds (9 a year)');
+});
+
+it('the lawn rounds option is not offered to any other series', () => {
+  const dialog = openModal({ ...service, isRecurring: true, recurringPattern: 'quarterly' });
+  const select = repeatsSelectOf(dialog);
+  expect(select).toHaveValue('quarterly');
+  expect([...select.options].some((o) => o.value === 'lawn_rounds_9')).toBe(false);
+});

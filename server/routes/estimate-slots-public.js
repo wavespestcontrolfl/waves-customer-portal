@@ -544,7 +544,9 @@ router.get('/:token/available-slots', async (req, res) => {
     }
 
     try {
-      const result = await getAvailableSlots(estimate.id, opts);
+      // Offer list: the route check applies (GATE_CUSTOMER_ROUTE_CHECK). The reserve
+      // refresh and the text-offer reads below omit `offer` and see the unfiltered list.
+      const result = await getAvailableSlots(estimate.id, { ...opts, offer: true });
       return res.json(result);
     } catch (svcErr) {
       if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
@@ -670,7 +672,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       : undefined;
     try {
       const result = await findEstimateSlots(estimate.id, {
-        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences,
+        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offer: true,
       });
       return res.json(result);
     } catch (svcErr) {

@@ -7,6 +7,9 @@
  *                                                 invalid range, else the
  *                                                 scorecard payload.
  *
+ * GATE_ROUTE_ENGINE_SUMMARY (dark): the scorecard payload also carries an
+ * `engine` block (nightly auto-dispatch summary). Off = no engine key.
+ *
  * Read-only: no writes, no customer surface. Gate checked at call time on
  * every handler, matching the other GATE_*-owned admin surfaces (e.g.
  * admin-tech-out.js).
@@ -16,8 +19,22 @@ const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { routeScorecardEnabled, validDateRange, getDayScorecard } = require('../services/scheduling/day-scorecard');
+const { routeEngineSummaryLive } = require('../config/feature-gates');
+const { buildRouteEngineSummary } = require('../services/scheduling/route-engine-summary');
+const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireAdmin);
+
+// GATE_ROUTE_ENGINE_SUMMARY: the summary is a bonus block, so a failure here
+// must never break the scorecard itself.
+async function engineSummaryOrUnavailable() {
+  try {
+    return await buildRouteEngineSummary();
+  } catch (err) {
+    logger.warn(`[route-scorecard] engine summary failed: ${err.message}`);
+    return { unavailable: 'summary failed' };
+  }
+}
 
 router.get('/status', (req, res) => {
   res.json({ enabled: routeScorecardEnabled() });
@@ -31,6 +48,7 @@ router.get('/', async (req, res, next) => {
     if (!validDateRange(from, to)) return res.status(400).json({ error: 'Use a valid date range of at most 31 days.' });
     const payload = await getDayScorecard({ date_from: from, date_to: to });
     if (payload.error) return res.status(400).json({ error: payload.error });
+    if (routeEngineSummaryLive()) payload.engine = await engineSummaryOrUnavailable();
     res.json(payload);
   } catch (err) { next(err); }
   return undefined;

@@ -34,7 +34,8 @@ jest.mock('../services/lawn-grass-context', () => ({
 }));
 jest.mock('@anthropic-ai/sdk', () => {
   return class MockAnthropic {
-    constructor() {
+    constructor(opts) {
+      global.__anthropicOpts = opts;
       this.messages = {
         create: (...args) => global.__anthropicCreate(...args),
       };
@@ -220,13 +221,41 @@ describe('generatePage', () => {
       'Product: Talstar P'
     );
 
-    expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(16000);
+    // 32000 (2026-10-26): a 56-record track page hit 16000 on every retry.
+    expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(32000);
+    // Above ~21K max_tokens the SDK refuses a non-streaming call unless the
+    // client carries an explicit timeout.
+    expect(global.__anthropicOpts).toEqual({ timeout: 10 * 60 * 1000 });
     // High and medium effort both ran pages into the cap at 16000 (2026-09-28).
     expect(global.__anthropicCreate.mock.calls[0][0].output_config).toEqual({ effort: 'low' });
     expect(result.writeState).toBe('failed');
     expect(result.entry.content).toBe(existing.content);
     const contentPatch = (state.updates.knowledge_entries || []).find((u) => 'content' in u);
     expect(contentPatch).toBeUndefined();
+  });
+
+  test('an update asks for a bounded page that replaces earlier revision notes', async () => {
+    const existing = {
+      id: 'ke-2',
+      slug: 'track/sample-track',
+      content: '# Sample Track\n\n> Data reconciliation note (this revision): count rose by one.',
+      data_point_count: 2,
+      source_treatment_ids: ['o1', 'o2'],
+      stale_flag: false,
+    };
+    useDb({ knowledge_entries: [existing] });
+
+    await wiki.generatePage(
+      'track/sample-track', 'track',
+      { outcomes: [{ id: 'o1' }, { id: 'o2' }, { id: 'o3' }] },
+      'Track sample Performance'
+    );
+
+    const prompt = global.__anthropicCreate.mock.calls[0][0].messages[0].content;
+    expect(prompt).toMatch(/keep the whole page under 2000 words/);
+    expect(prompt).toMatch(/replacing any earlier revision, reconciliation or change notes/);
+    expect(prompt).toMatch(/Never drop a contradiction flag or an open review item/);
+    expect(prompt).not.toMatch(/Preserve existing content that is still supported/);
   });
 
   test('still creates a placeholder stub for a brand-new page when the AI call fails', async () => {
@@ -884,6 +913,91 @@ describe('weeklyRefreshIfDue', () => {
     expect(staleSelect).toBeTruthy();
     const whereIn = staleSelect.ops.find(([m]) => m === 'whereIn');
     expect(whereIn[1]).toEqual(['category', ['product', 'track', 'seasonal', 'condition']]);
+  });
+
+  test('GATE_LAWN_WIKI_PAUSE: the refresh keeps the stale flags current and stamps its marker, but writes no page', async () => {
+    process.env.GATE_LAWN_WIKI_PAUSE = 'true';
+    const writers = ['updateProductPage', 'updateTrackPage', 'updateSeasonalPage', 'updateConditionPage']
+      .map((m) => jest.spyOn(wiki, m).mockResolvedValue({ writeState: 'generated' }));
+    const staleSpy = jest.spyOn(wiki, 'markOutcomePagesStale').mockResolvedValue(1);
+    try {
+      const state = useDb({
+        knowledge_entries: [{
+          id: 'ke-t', slug: 'track/st-augustine', category: 'track',
+          title: 'Track st_augustine Performance', stale_flag: true,
+        }],
+        knowledge_update_log: [],
+        treatment_outcomes: (rec) => (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at')
+          ? [{ id: 'o1', vision_scored_at: new Date() }]
+          : []),
+      });
+
+      const result = await wiki.weeklyRefresh();
+
+      expect(result).toEqual({ refreshed: 0, staleFound: 0, paused: true });
+      writers.forEach((spy) => expect(spy).not.toHaveBeenCalled());
+      // Database-only steps still run, so a resume finds every stale page.
+      expect(staleSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'o1' }), { rethrow: true });
+      expect(state.updates.knowledge_entries).toContainEqual({ stale_flag: true });
+      expect(state.calls.knowledge_entries.some((rec) => rec.ops.some(([m]) => m === 'whereIn'))).toBe(false);
+      const marker = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron');
+      expect(marker.description).toMatch(/paused/);
+    } finally {
+      delete process.env.GATE_LAWN_WIKI_PAUSE;
+      writers.forEach((spy) => spy.mockRestore());
+      staleSpy.mockRestore();
+    }
+  });
+});
+
+// ── linkTreatmentOutcome page writes vs GATE_LAWN_WIKI_PAUSE ───────────────
+
+describe('linkTreatmentOutcome page writes', () => {
+  // Confirms one lawn visit and waits until its background block has either
+  // written pages or flagged them (it awaits the weather backfill first).
+  const confirmVisit = async () => {
+    const state = useDb({
+      treatment_outcomes: [],
+      service_records: [{
+        id: 'sr-1', customer_id: 'c-1', service_date: '2026-07-01',
+        service_type: 'lawn', scheduled_service_id: null, visit_number: 1,
+      }],
+      lawn_assessments: (rec, idx) => (idx === 0
+        ? [{ id: 'post-1', service_date: '2026-07-01', turf_density: 5, weed_suppression: 5, color_health: 5, fungus_control: 5, thatch_level: 5 }]
+        : [{ id: 'pre-1', service_date: '2026-06-15', turf_density: 4, weed_suppression: 4, color_health: 4, fungus_control: 4, thatch_level: 4 }]),
+      service_products: [],
+      customers: [{ id: 'c-1' }],
+      knowledge_update_log: [],
+    });
+    const seasonal = jest.spyOn(wiki, 'updateSeasonalPage').mockResolvedValue(null);
+    const others = ['updateProductPage', 'updateTrackPage'].map((m) => jest.spyOn(wiki, m).mockResolvedValue(null));
+    const stale = jest.spyOn(wiki, 'markOutcomePagesStale').mockResolvedValue(1);
+    const outcome = await wiki.linkTreatmentOutcome('sr-1');
+    for (let i = 0; i < 20 && !seasonal.mock.calls.length && !stale.mock.calls.length; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const calls = { seasonal: seasonal.mock.calls.length, stale: stale.mock.calls.map(([o]) => o) };
+    [seasonal, ...others, stale].forEach((spy) => spy.mockRestore());
+    return { state, outcome, calls };
+  };
+
+  test('with the gate unset, a confirmed visit writes its pages and flags nothing', async () => {
+    const { outcome, calls } = await confirmVisit();
+    expect(outcome).toBeTruthy();
+    expect(calls.seasonal).toBe(1);
+    expect(calls.stale).toHaveLength(0);
+  });
+
+  test('paused, the visit still records its outcome but flags its pages stale instead of writing them', async () => {
+    process.env.GATE_LAWN_WIKI_PAUSE = 'true';
+    try {
+      const { state, outcome, calls } = await confirmVisit();
+      expect(state.inserts.treatment_outcomes).toHaveLength(1);
+      expect(calls.seasonal).toBe(0);
+      expect(calls.stale).toEqual([expect.objectContaining({ id: outcome.id })]);
+    } finally {
+      delete process.env.GATE_LAWN_WIKI_PAUSE;
+    }
   });
 });
 

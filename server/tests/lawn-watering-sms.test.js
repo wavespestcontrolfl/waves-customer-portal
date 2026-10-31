@@ -537,6 +537,8 @@ describe('every lawn visit gets a watering text or an office alert', () => {
     ['water_in_conflict', ['Dylox 6.2 G Granular Insecticide', 'LESCO Three-Way Selective Herbicide'], /Dylox.*and LESCO Three-Way.*need opposite watering/],
     ['same_day_too_late', ['Dylox 6.2 G Granular Insecticide'], /Dylox.*must be watered in today/],
     ['inputs_unreadable', [], /watering settings could not be read/],
+    // The report was built, with no tech-confirmed photo read: the alert says that, not that the report failed.
+    ['no_lawn_read', [], /No lawn photo read was confirmed for this visit/],
     ['report_not_built', [], /lawn report for this visit could not be built/],
   ])('no instruction (%s): one marker, one office alert that meets the notification rules', async (reason, products, why) => {
     const h = harness({ noClaim: { reason, products } });
@@ -550,8 +552,38 @@ describe('every lawn visit gets a watering text or an office alert', () => {
     expect(spec.why).toMatch(why);
     expect(spec.why.length).toBeLessThanOrEqual(110);
     expect(opts).toMatchObject({ dedupeKey: 'lawn-watering-no-instruction:rec-1', metadata: { reason, products } });
-    expect(opts.detail).toContain(products[0] || 'could not be');
-    expect(opts.detail).toMatch(['inputs_unreadable', 'report_not_built'].includes(reason) ? /check the products logged on this visit\.$/ : /fix the product's watering rule\.$/);
+    expect(opts.detail).toContain(products[0] || (reason === 'no_lawn_read' ? 'No lawn photo read was confirmed' : 'could not be'));
+    const fix = {
+      inputs_unreadable: /check the products logged on this visit\.$/,
+      report_not_built: /check the products logged on this visit\.$/,
+      no_lawn_read: /customer got no watering text\. Text the customer the watering steps from the product labels\.$/,
+    }[reason] || /fix the product's watering rule\.$/;
+    expect(opts.detail).toMatch(fix);
+  });
+
+  // Owner 2026-10-27: a visit closed on a later day than it was worked gets no text, no alert and no
+  // technician note; the marker records why and ends the obligation for a resume.
+  test('a late close: the marker only, no text, no office alert, no technician note', async () => {
+    const h = harness({ noClaim: { reason: 'late_close', products: [] } });
+    const sendTechNotification = jest.fn(async () => ({ id: 'tn-1' }));
+    const out = await sendLawnWateringSms(h.state, { ...h.deps, sendTechNotification });
+    expect(out).toEqual({ status: 'skipped_late_close' });
+    expect(h.mergeNotes).toHaveBeenCalledTimes(1);
+    expect(h.mergeNotes).toHaveBeenCalledWith('rec-1', { lawnWateringSmsStatus: 'skipped_late_close', lawnWateringNoClaimReason: 'late_close' });
+    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'skipped_late_close' });
+    expect(h.raiseAdminAlert).not.toHaveBeenCalled();
+    expect(sendTechNotification).not.toHaveBeenCalled();
+    expect(h.sendCustomerMessage).not.toHaveBeenCalled();
+    // The marker ends the obligation: a resumed completion does nothing more.
+    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
+  });
+
+  test('a late close whose marker write fails still sends and raises nothing', async () => {
+    const h = harness({ noClaim: { reason: 'late_close', products: [] } });
+    h.deps.mergeNotes = jest.fn(async () => { throw new Error('db down'); });
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_late_close' });
+    expect(h.raiseAdminAlert).not.toHaveBeenCalled();
+    expect(h.sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('a visit that logged no product, or had no text due, raises nothing', async () => {

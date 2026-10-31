@@ -195,6 +195,26 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     await expect(deriveSecurePlanContext({ request, visitId: 'v1' })).rejects.toThrow('catalog down');
   });
 
+  test('a lawn_rounds_9 series offers prepay with 9 visits; custom/42 is unchanged and another custom interval has none', async () => {
+    mockQualifyingKeys = async () => [];
+    const lawn = { ...baseVisit, service_type: 'Lawn Care', estimated_price: '100.00', is_recurring: true };
+    setTables({ visit: { ...lawn, recurring_pattern: 'lawn_rounds_9', recurring_interval_days: null }, customer: { ...baseCustomer } });
+    const rounds = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(rounds).not.toBeNull();
+    expect(rounds.visitsPerYear).toBe(9);
+    expect(rounds.prepay).not.toBeNull();
+    expect(rounds.prepay.total).toBe(855);
+    setTables({ visit: { ...lawn, recurring_pattern: 'custom', recurring_interval_days: 42 }, customer: { ...baseCustomer } });
+    const sixWeek = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(sixWeek.visitsPerYear).toBe(9);
+    expect(sixWeek.prepay.total).toBe(rounds.prepay.total);
+    setTables({ visit: { ...lawn, recurring_pattern: 'custom', recurring_interval_days: 40 }, customer: { ...baseCustomer } });
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+    // The mint records the cadence the shared helper names for the stored pattern.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+    expect(src).toMatch(/coverageCadence: prepayCoverageCadenceForPattern\(normalizedPattern\(visit\)\)/);
+  });
+
   test('qualifier lookup failure propagates (callers fail closed, never silently $0)', async () => {
     mockQualifyingKeys = async () => { throw new Error('db down'); };
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).rejects.toThrow('db down');

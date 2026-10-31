@@ -1,3 +1,5 @@
+import { releaseInAppPush } from '../native/wavesAdminPush';
+
 // Staff data saved on the device for offline use (the technician's last
 // route, routeSnapshot.js). It carries customer names, addresses and access
 // notes, so EVERY path that ends a staff session must call
@@ -9,11 +11,28 @@ export const TECH_ROUTE_SNAPSHOT_KEY = 'waves_tech_route_snapshot';
 // another login) or an expired token never matches, so no stale profile —
 // and no stale route — opens offline.
 export const STAFF_OFFLINE_PASS_KEY = 'waves_tech_offline_pass';
+// Ask (Intelligence Bar) prompt text saved on the device: the palette's recent
+// prompts (`${ASK_RECENTS_KEY}:<staff id>`, and the older key shared by every
+// login) and the page bar's per-page recents (utils/ibStorage.js). A prompt
+// can name a customer or a private business question. The staff id is gone
+// by the time a session ends, so every login's prompts go, by key prefix.
+// Pinned prompts are deliberate saves kept per login (ib.pinned.<staff id>.*)
+// and stay; the older pinned lists shared by every login (ib.favorites.*) go.
+export const ASK_RECENTS_KEY = 'admin_ib_recents';
+const ASK_PROMPT_KEY_PREFIXES = [ASK_RECENTS_KEY, 'ib.recents.', 'ib.favorites.'];
 
 export function clearStaffDeviceData() {
+  // Waves Admin (the iOS staff app): this iPhone stops getting staff alerts.
+  void releaseInAppPush();
   for (const key of [TECH_ROUTE_SNAPSHOT_KEY, STAFF_OFFLINE_PASS_KEY]) {
     try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
   }
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i);
+      if (key && ASK_PROMPT_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) localStorage.removeItem(key);
+    }
+  } catch { /* storage unavailable */ }
 }
 
 function tokenBinding(token) {

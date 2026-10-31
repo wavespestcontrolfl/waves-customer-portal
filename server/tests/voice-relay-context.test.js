@@ -190,7 +190,7 @@ describe('GATE ON — caller recognition', () => {
     expect(p).not.toContain('You CANNOT quote prices');
     expect(p).toContain('get_pricing tool');
     expect(p).toContain('Never negotiate');
-    expect(p).toContain('your name is Sandy');
+    expect(p).toContain('your name is Jennifer');
     expect(p).toContain('never claim to be human');
     expect(p).toContain('ACCOUNT ACCESS RULES');
     expect(p).toContain("Verify, don't recite");

@@ -8,8 +8,12 @@ import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
 import { Textarea } from '../ui/Textarea';
+import { FieldDocumentBody, FieldFooter, FieldMasthead, FieldTitle } from '../FieldDocument';
 import { centsToDollars, dayLabel, defaultPayDate, lastFinishedWeekStart, weekLabel } from './payrollFormat';
 import { addStaffCalendarDays } from '../../lib/staffTimeDate';
+import TimeOffPanel from './TimeOffPanel';
+import PayLinesPanel from './PayLinesPanel';
+import './pay-runs-print.css';
 
 // Staff page, Payroll tab, "Pay runs" (owner 2026-10-25, basic payroll layer
 // 1b-2b). The portal works out each paycheck from the approved weekly hours.
@@ -22,6 +26,7 @@ const STATUS = {
   voided: { tone: 'neutral', label: 'Voided' },
 };
 const WEEK_CHOICES = 12;
+const NO_W4_NOTE = 'No W-4 on file: withheld as single, no adjustments (IRS default)';
 
 function StatusChip({ status }) {
   const known = STATUS[status] || { tone: 'neutral', label: status };
@@ -30,8 +35,12 @@ function StatusChip({ status }) {
 
 const hoursWord = hours => `${hours} h`;
 
-// The stub is printed from the page: only the stub shows on paper.
-const PRINT_CSS = '@media print { body * { visibility: hidden !important; } .pay-stub, .pay-stub * { visibility: visible !important; } .pay-stub { position: absolute; left: 0; top: 0; width: 100%; } .pay-stub-actions { display: none !important; } }';
+// Bank status of a final check (GATE_PAYROLL_BANK_MATCH): only a run read with the gate on carries it.
+function bankWords(bank) {
+  if (bank.state === 'matched') return `Bank: matched ${dayLabel(bank.date)}`;
+  if (bank.state === 'needs_pick') return 'Bank: needs your pick (Tax page, Bank Import)';
+  return 'Bank: not seen yet';
+}
 
 function StubLine({ label, value, strong = false }) {
   return <div className={`flex justify-between gap-4 py-0.5 ${strong ? 'font-medium' : ''}`}>
@@ -50,44 +59,74 @@ export function StubDialog({ call, check, onClose }) {
     return () => { live = false; };
   }, [call, check.id]);
 
-  return <Dialog open onClose={onClose} size="lg">
-    <style>{PRINT_CSS}</style>
-    <DialogHeader><DialogTitle>Pay stub for {check.name}</DialogTitle></DialogHeader>
-    <DialogBody>
+  return <Dialog open onClose={onClose} size="lg" className="pay-stub-dialog">
+    <DialogHeader className="waves-field-no-print"><DialogTitle>Pay stub for {check.name}</DialogTitle></DialogHeader>
+    <DialogBody className="pay-stub-dialog-body">
       {error && <p role="alert" className="text-ui-caption text-alert-fg">{error}</p>}
       {!stub && !error && <p role="status">Loading…</p>}
-      {stub && <div className="pay-stub grid gap-3 text-ui-body" aria-label="Pay stub">
-        <div>
-          <p className="m-0 font-medium">{stub.employer.name}</p>
-          <p className="m-0 text-ui-caption text-ink-secondary">{stub.employer.addressLine}</p>
-        </div>
-        <div>
-          <p className="m-0 font-medium">{stub.employee.name}</p>
-          {stub.employee.ssnLast4 && <p className="m-0 text-ui-caption text-ink-secondary">SSN ending {stub.employee.ssnLast4}</p>}
-          <p className="m-0 text-ui-caption text-ink-secondary">
-            Pay period {dayLabel(stub.payPeriod.start)} to {dayLabel(stub.payPeriod.end)} · Pay date {dayLabel(stub.payDate)}
-          </p>
-        </div>
-        <Table aria-label="Pay stub amounts">
-          <THead><TR><TH>Item</TH><TH align="right">This pay</TH><TH align="right">Year to date</TH></TR></THead>
-          <TBody>
-            <TR><TD>Regular pay ({stub.hours.regular} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.regularPayCents)}</TD><TD nums align="right" /></TR>
-            <TR><TD>Overtime pay ({stub.hours.overtime} h)</TD><TD nums align="right">{centsToDollars(stub.earnings.overtimePayCents)}</TD><TD nums align="right" /></TR>
-            <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
-            <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
-            <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
-            <TR><TD>Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.medicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.medicareCents)}</TD></TR>
-            {stub.taxes.additionalMedicareCents > 0 && <TR><TD>Additional Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.additionalMedicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.additionalMedicareCents)}</TD></TR>}
-            <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
-          </TBody>
-        </Table>
-        <div>
-          <StubLine label="Paid by" value={stub.payMethod === 'bank_transfer' ? 'Bank transfer' : 'Paper check'} />
-          {stub.payMethod === 'check' && <StubLine label="Check number" value={stub.checkNumber || 'Not entered'} />}
-        </div>
+      {stub && <div aria-label="Pay stub">
+        <FieldDocumentBody className="pay-stub field-document-scroll">
+          <FieldMasthead variant="staff" />
+          <FieldTitle
+            eyebrow="Payroll record"
+            title="Pay stub"
+            reference={`Pay date ${dayLabel(stub.payDate)}`}
+          />
+
+          <h2 className="field-section-heading">Employer and employee</h2>
+          <div className="field-info-grid pay-stub-meta grid sm:grid-cols-2">
+            <div>
+              <p className="m-0 font-medium">{stub.employer.name}</p>
+              <p className="m-0 text-ui-caption text-ink-secondary">{stub.employer.addressLine}</p>
+            </div>
+            <div>
+              <p className="m-0 font-medium">{stub.employee.name}</p>
+              {stub.employee.ssnLast4 && <p className="m-0 text-ui-caption text-ink-secondary">SSN ending {stub.employee.ssnLast4}</p>}
+              <p className="m-0 text-ui-caption text-ink-secondary">
+                Pay period {dayLabel(stub.payPeriod.start)} to {dayLabel(stub.payPeriod.end)} · Pay date {dayLabel(stub.payDate)}
+              </p>
+            </div>
+          </div>
+
+          <h2 className="field-section-heading">Earnings and withholding</h2>
+          <Table aria-label="Pay stub amounts" containerClassName="pay-stub-table-wrap">
+            <THead><TR><TH>Item</TH><TH align="right">This pay</TH><TH align="right">Year to date</TH></TR></THead>
+            <TBody>
+              <TR><TD>Regular pay ({stub.hours.regular} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.regularPayCents)}</TD><TD nums align="right" /></TR>
+              <TR><TD>Overtime pay ({stub.hours.overtime} h)</TD><TD nums align="right">{centsToDollars(stub.earnings.overtimePayCents)}</TD><TD nums align="right" /></TR>
+              {stub.earnings.ptoPayCents > 0 && <TR><TD>Paid time off ({stub.hours.pto} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.ptoPayCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.holidayPayCents > 0 && <TR><TD>Holiday pay ({stub.hours.holiday} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.holidayPayCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.reviewBonusCents > 0 && <TR><TD>Review bonus</TD><TD nums align="right">{centsToDollars(stub.earnings.reviewBonusCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.commissionCents > 0 && <TR><TD>Commission</TD><TD nums align="right">{centsToDollars(stub.earnings.commissionCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.healthAllowanceCents > 0 && <TR><TD>Health allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.healthAllowanceCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.lineOvertimePremiumCents > 0 && <TR><TD>Overtime on bonus, commission and allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.lineOvertimePremiumCents)}</TD><TD nums align="right" /></TR>}
+              <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
+              <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
+              <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
+              <TR><TD>Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.medicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.medicareCents)}</TD></TR>
+              {stub.taxes.additionalMedicareCents > 0 && <TR><TD>Additional Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.additionalMedicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.additionalMedicareCents)}</TD></TR>}
+              <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
+            </TBody>
+          </Table>
+          {stub.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
+
+          {stub.employerContributions && stub.employerContributions.hsaCents > 0 && <>
+            <h2 className="field-section-heading">Employer contributions</h2>
+            <div className="pay-stub-meta">
+              <StubLine label="HSA from Waves (not part of gross pay or taxes)" value={centsToDollars(stub.employerContributions.hsaCents)} />
+            </div>
+          </>}
+
+          <h2 className="field-section-heading">Payment record</h2>
+          <div className="pay-stub-meta">
+            <StubLine label="Paid by" value={stub.payMethod === 'bank_transfer' ? 'Bank transfer' : 'Paper check'} />
+            {stub.payMethod === 'check' && <StubLine label="Check number" value={stub.checkNumber || 'Not entered'} />}
+          </div>
+          <FieldFooter label="Payroll record" reference={`Pay date ${dayLabel(stub.payDate)}`} />
+        </FieldDocumentBody>
       </div>}
     </DialogBody>
-    <DialogFooter>
+    <DialogFooter className="waves-field-no-print">
       <div className="pay-stub-actions flex gap-2">
         <Button type="button" variant="secondary" onClick={onClose}>Close</Button>
         <Button type="button" disabled={!stub} onClick={() => window.print()}>Print</Button>
@@ -138,30 +177,53 @@ function Problems({ title, items }) {
 function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   if (run.checks.length === 0) return <p className="m-0">No paychecks in this run yet.</p>;
   const t = run.totals;
+  // Only a pay run drafted with time off turned on carries these figures.
+  const showPto = run.checks.some(check => check.ptoPayCents > 0);
+  const showHoliday = run.checks.some(check => check.holidayPayCents > 0);
+  const showBank = isFinal && run.checks.some(check => check.bank);
+  // Only a pay run drafted with pay lines turned on carries these figures.
+  const showLines = run.checks.some(check => check.reviewBonusCents > 0 || check.commissionCents > 0 || check.healthAllowanceCents > 0 || check.lineOvertimePremiumCents > 0);
+  const showHsa = run.checks.some(check => check.hsaEmployerCents > 0);
   return <>
     <Table aria-label="Paychecks">
       <THead><TR>
-        <TH>Employee</TH><TH align="right">Regular</TH><TH align="right">Overtime</TH><TH align="right">Rate</TH><TH align="right">Gross</TH>
+        <TH>Employee</TH><TH align="right">Regular</TH><TH align="right">Overtime</TH>
+        {showPto && <TH align="right">Paid time off</TH>}
+        {showHoliday && <TH align="right">Holiday</TH>}
+        {showLines && <TH align="right">Bonus, commission, allowance</TH>}
+        {showLines && <TH align="right">Overtime on those</TH>}
+        <TH align="right">Rate</TH><TH align="right">Gross</TH>
         <TH align="right">Federal income tax</TH><TH align="right">Social Security</TH><TH align="right">Medicare</TH><TH align="right">Net</TH>
+        {showHsa && <TH align="right">HSA from Waves</TH>}
         {isFinal && <TH>Check</TH>}
+        {showBank && <TH>Bank</TH>}
       </TR></THead>
       <TBody>
         {run.checks.map(check => <TR key={check.id}>
-          <TD>{check.name}</TD>
+          <TD>
+            {check.name}
+            {check.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
+          </TD>
           <TD nums align="right">{hoursWord(check.regularHours)}</TD>
           <TD nums align="right">{hoursWord(check.overtimeHours)}</TD>
+          {showPto && <TD nums align="right">{hoursWord(check.ptoHours)} · {centsToDollars(check.ptoPayCents)}</TD>}
+          {showHoliday && <TD nums align="right">{hoursWord(check.holidayHours)} · {centsToDollars(check.holidayPayCents)}</TD>}
+          {showLines && <TD nums align="right">{centsToDollars(check.reviewBonusCents + check.commissionCents + check.healthAllowanceCents)}</TD>}
+          {showLines && <TD nums align="right">{centsToDollars(check.lineOvertimePremiumCents)}</TD>}
           <TD nums align="right">{centsToDollars(Math.round(Number(check.hourlyRate) * 100))}</TD>
           <TD nums align="right">{centsToDollars(check.grossCents)}</TD>
           <TD nums align="right">{centsToDollars(check.federalIncomeTaxCents)}</TD>
           <TD nums align="right">{centsToDollars(check.socialSecurityCents)}</TD>
           <TD nums align="right">{centsToDollars(check.medicareCents + check.additionalMedicareCents)}</TD>
           <TD nums align="right">{centsToDollars(check.netCents)}</TD>
+          {showHsa && <TD nums align="right">{centsToDollars(check.hsaEmployerCents)}</TD>}
           {isFinal && <TD>
             <div className="grid gap-2">
               <CheckNumberCell call={call} check={check} onSaved={onSaved} />
               <div><Button variant="secondary" onClick={() => onStub(check)} aria-label={`Stub for ${check.name}`}>Stub</Button></div>
             </div>
           </TD>}
+          {showBank && <TD>{check.bank ? bankWords(check.bank) : ''}</TD>}
         </TR>)}
       </TBody>
     </Table>
@@ -353,6 +415,18 @@ export default function PayRuns({ call, onRunsChanged }) {
       key={run.id} call={call} run={run}
       onChanged={open} onMessage={setMessage} onRunsChanged={onRunsChanged}
     />}
+
+    <TimeOffPanel
+      call={call} weekStart={run ? run.weekStart : week}
+      onChanged={() => { if (run) open(run.id); }}
+    />
+
+    <PayLinesPanel
+      call={call} weekStart={run ? run.weekStart : week}
+      // A finalize pays the open lines and a void reopens them: reload when the run's status changes.
+      refreshKey={run ? `${run.id}:${run.status}` : ''}
+      onChanged={() => { if (run) open(run.id); }}
+    />
 
     {runs && runs.length === 0 && <p className="m-0">No pay runs yet.</p>}
     {runs && runs.length > 0 && <Card>

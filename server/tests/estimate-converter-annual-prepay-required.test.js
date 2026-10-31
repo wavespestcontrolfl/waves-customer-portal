@@ -148,6 +148,52 @@ describe('estimate converter annual prepay orchestration', () => {
     expect(invoiceService.voidInvoice).toHaveBeenCalledWith('invoice-1');
   });
 
+  describe('lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the term records the pattern the series is written with', () => {
+    const lawn9x = [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'every_6_weeks', visitsPerYear: 9 }];
+    afterEach(() => { delete process.env.GATE_LAWN_9X_ROUNDS; });
+
+    test('gate on: a lawn 9x prepay accept mints a lawn_rounds_9 term with 9 visits', async () => {
+      process.env.GATE_LAWN_9X_ROUNDS = '1';
+      const { EstimateConverter, renewals } = setup(lawn9x, { monthlyTotal: 75, annualTotal: 900 });
+      await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+      expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({
+        coverageServiceType: 'Lawn Care', coverageVisitCount: 9, coverageCadence: 'lawn_rounds_9',
+      }));
+    });
+
+    test('gate off: the same accept mints an every_6_weeks term, as before', async () => {
+      const { EstimateConverter, renewals } = setup(lawn9x, { monthlyTotal: 75, annualTotal: 900 });
+      await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+      expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({
+        coverageVisitCount: 9, coverageCadence: 'every_6_weeks',
+      }));
+    });
+
+    test.each(['every_6_weeks', undefined])('gate on: a caller coverage override (cadence %s) is the same plan and records lawn_rounds_9', async (cadence) => {
+      process.env.GATE_LAWN_9X_ROUNDS = '1';
+      const { EstimateConverter, renewals } = setup(lawn9x, { monthlyTotal: 75, annualTotal: 900 });
+      await expect(EstimateConverter.convertEstimate('estimate-1', {
+        ...convertOpts, coverageServiceType: 'Lawn Care', coverageVisitCount: 9, coverageCadence: cadence,
+      })).rejects.toThrow('Annual prepay term was not created');
+      expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({
+        coverageServiceType: 'Lawn Care', coverageVisitCount: 9, coverageCadence: 'lawn_rounds_9',
+      }));
+    });
+
+    test('gate on: a tree and shrub 9x accept keeps every_6_weeks', async () => {
+      process.env.GATE_LAWN_9X_ROUNDS = '1';
+      const { EstimateConverter, renewals } = setup(
+        [{ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'every_6_weeks', visitsPerYear: 9 }],
+        { monthlyTotal: 75, annualTotal: 900 },
+      );
+      await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+      expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({ coverageCadence: 'every_6_weeks' }));
+    });
+  });
+
   test('acceptance deposit credits the prepay invoice: create carries depositCredit, the ledger consumes exactly the applied amount, and the term records the GROSS prepay', async () => {
     const deposits = {
       acquireEstimateDepositLedgerLock: jest.fn().mockResolvedValue(undefined),

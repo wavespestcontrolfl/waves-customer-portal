@@ -11,6 +11,11 @@ import {
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
+import { MISTING_LEGEND_KEYS, mistingLayoutCountsLine } from '../lib/mistingLayoutCounts';
+import { pumpLoad, pumpNotice } from '../lib/mistingLayoutLimits';
+import { mistingRefillLine } from '../lib/mistingPlanText';
+import { MISTING_SWATCH } from '../components/estimate/MistingLegend';
+import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { FieldDocument, FieldMasthead, FieldTitle } from '../components/FieldDocument';
 import { ACCEPT_MODE_LABELS, NextSteps, acceptanceModeOf, mailtoHref, resolveDocNextSteps } from './estimateDocumentNextSteps';
@@ -232,13 +237,30 @@ export default function EstimateProposalDocument({ data, token }) {
   // documents keep it: there the claim is true.
   const intelligence = authoredProposal ? null : (estimate.intelligence || null);
 
+  // The misting system plan's own facts, from the page's pricing section (/data pricing.services, key mosquito_misting): the
+  // refill line prints under the plan's line and the install's "21 nozzles · 2 risers" under the install's line (owner
+  // 2026-10-30, items D and the install detail). Empty for every estimate without the plan, so nothing else changes.
+  const mistingSection = (Array.isArray(data?.pricing?.services) ? data.pricing.services : []).find((section) => section?.key === 'mosquito_misting') || null;
+  const mistingRefillText = mistingRefillLine(mistingSection?.refill);
+  const mistingInstallDetails = new Map(
+    (mistingSection?.oneTimeContribution?.items || [])
+      .filter((row) => row?.label && row?.detail)
+      .map((row) => [row.label, row.detail]),
+  );
+  const isMistingPlanLine = (item) => !!mistingSection && item?.frequency !== 'one_time' && /^Mosquito Misting Service Plan\b/.test(String(item?.description || ''));
+
   // Failed-image accounting for the render pipeline (parity with
   // ServiceReportDocument): the satellite snapshot is the one remote image;
   // if it fails it drops itself and reports through the counter the
   // renderer reads.
   const [satelliteFailed, setSatelliteFailed] = useState(false);
+  // Saved misting layout sketch (GATE_MISTING_LAYOUT_DESIGNER, /data `mistingLayout`): a remote image counted the
+  // same way, in the satellite photo's place. Absent key = the satellite photo and its count, exactly as before.
+  const [mistingFailed, setMistingFailed] = useState(false);
+  const mistingLayout = data?.mistingLayout?.imageUrl ? data.mistingLayout : null;
   if (typeof window !== 'undefined') {
-    window.__WAVES_PDF_IMAGE_FAILURES = satelliteFailed ? 1 : 0;
+    // A saved misting layout takes the satellite photo's place, so the photo is neither shown nor counted then.
+    window.__WAVES_PDF_IMAGE_FAILURES = mistingLayout ? (mistingFailed ? 1 : 0) : (satelliteFailed ? 1 : 0);
   }
 
   // Distinct service stacks across the proposal lines. Commercial estimates
@@ -265,7 +287,7 @@ export default function EstimateProposalDocument({ data, token }) {
   const correctiveWork = Array.isArray(proposal?.correctiveWork) ? proposal.correctiveWork : [];
   const responsibilities = Array.isArray(proposal?.customerResponsibilities)
     ? proposal.customerResponsibilities : [];
-  const termRows = commercialTermRows(proposal?.commercialTerms);
+  const termRows = commercialTermRows(proposal?.commercialTerms, { recurring: Number(totals.annualRecurring) > 0 });
   // Document mode classifies the normalized proposal rows it actually prints.
   // An explicit false matters too: the ordinary page may classify a different
   // current service mix than a retained proposal itemization. Older payloads
@@ -426,6 +448,40 @@ export default function EstimateProposalDocument({ data, token }) {
     || String(estimate.id || '').split('-')[0].toUpperCase()
     || '';
 
+  // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (server /data `mistingLayout`, document render only;
+  // absent with the gate off, no saved layout, no misting system, or a layout drawn for another address). The drawing is
+  // plain; its title, counts, legend and concept note sit in the estimate card around it (the estimate template's card
+  // and inner box). It takes the satellite photo's place in the document, same position, and the separate satellite photo
+  // is not shown then. A layout image that fails to load drops the whole card and counts as a failed image.
+  // Over what one pump runs (Pynamite: 60 nozzles, 120 with a Zone Kit): every nozzle plus every riser, from the saved counts.
+  const mistingPumpNotice = mistingLayout ? pumpNotice(pumpLoad(mistingLayout.counts?.nozzles, mistingLayout.counts?.risers)) : null;
+  const misting = mistingLayout && !mistingFailed ? (
+    <div className="doc-keep" data-testid="doc-misting-layout" style={estimateCard({ padding: 16, marginBottom: 0, marginTop: 14 })}>
+      <SectionHeader>Proposed misting layout</SectionHeader>
+      <div style={estimateInnerBox({ marginTop: 8, padding: 6 })}>
+        <img
+          src={mistingLayout.imageUrl}
+          alt={`Proposed misting layout for ${mistingLayout.address || estimate.address || 'the property'}`}
+          style={{ display: 'block', width: '100%', maxHeight: 640, objectFit: 'contain', borderRadius: 8 }}
+          onError={() => setMistingFailed(true)}
+        />
+      </div>
+      <p style={{ margin: '8px 0 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{mistingLayoutCountsLine(mistingLayout.counts)}</p>
+      {mistingPumpNotice ? (
+        <p data-testid="doc-misting-pump-notice" style={{ margin: '4px 0 0', fontSize: 11.5, lineHeight: 1.5, fontWeight: 700, color: mistingPumpNotice.level === 'red' ? '#B91C1C' : '#92400E' }}>{mistingPumpNotice.text}</p>
+      ) : null}
+      <ul data-testid="doc-misting-legend" aria-label="Legend" style={{ listStyle: 'none', margin: '6px 0 0', padding: 0, display: 'flex', flexWrap: 'wrap', gap: '3px 16px' }}>
+        {MISTING_LEGEND_KEYS.map((k) => (
+          <li key={k.key} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, lineHeight: 1.4, color: MUTED }}>
+            <i aria-hidden="true" style={{ display: 'inline-block', flexShrink: 0, boxSizing: 'content-box', width: 8, height: 8, ...MISTING_SWATCH[k.key] }} />
+            {k.label}
+          </li>
+        ))}
+      </ul>
+      <p style={{ margin: '6px 0 0', fontSize: 11, lineHeight: 1.5, color: MUTED }}>Concept layout — final placement at the design visit and install.</p>
+    </div>
+  ) : null;
+
   return (
     <FieldDocument className="estimate-document-v1" sheetClassName="doc-page">
       <style>{`
@@ -446,6 +502,19 @@ export default function EstimateProposalDocument({ data, token }) {
         }
       `}</style>
       <div className="doc-keep" data-testid="doc-letterhead"><FieldMasthead /></div>
+      {data?.adminDraftPreview === true ? (
+        <div
+          className="doc-keep estimate-document-draft-mark"
+          data-testid="estimate-document-draft-mark"
+          style={{
+            margin: '0 0 14px', padding: '8px 12px', border: '2px solid var(--field-gold)',
+            background: 'var(--field-soft)', color: 'var(--field-navy)', fontSize: 14, fontWeight: 700,
+            lineHeight: 1.35, letterSpacing: '0.04em', textAlign: 'center',
+          }}
+        >
+          DRAFT — INTERNAL PREVIEW · NOT SENT TO CUSTOMER
+        </div>
+      ) : null}
       <FieldTitle
         eyebrow={authoredProposal ? 'Service proposal' : 'Service estimate'}
         title={docTitle}
@@ -567,6 +636,12 @@ export default function EstimateProposalDocument({ data, token }) {
                     <span style={{ minWidth: 0, color: INK }}>
                       {item.description || 'Service'}
                       {showsLineBasis(item) ? <span style={{ display: 'block', color: MUTED }}>{formatLineBasis(item)}</span> : ''}
+                      {isMistingPlanLine(item) && mistingRefillText ? (
+                        <span data-testid="doc-misting-refill" style={{ display: 'block', color: MUTED }}>{mistingRefillText}</span>
+                      ) : ''}
+                      {item.frequency === 'one_time' && mistingInstallDetails.get(item.description) ? (
+                        <span data-testid="doc-misting-install-detail" style={{ display: 'block', color: MUTED }}>{mistingInstallDetails.get(item.description)}</span>
+                      ) : ''}
                       {monthlyAverage?.byLine.get(item) && !applicationMonths ? (
                         <span data-monthly-average-line="" style={{ display: 'block', color: MUTED, fontVariantNumeric: 'tabular-nums' }}>
                           {monthlyText(monthlyAverage.byLine.get(item).monthly)}
@@ -738,7 +813,7 @@ export default function EstimateProposalDocument({ data, token }) {
                 ))}
               </div>
             ) : null}
-            {estimate.satelliteUrl && !satelliteFailed ? (
+            {mistingLayout ? misting : estimate.satelliteUrl && !satelliteFailed ? (
               <img
                 src={resolveApiAssetUrl(estimate.satelliteUrl)}
                 alt={`Satellite view of ${estimate.address || 'the property'}`}
@@ -748,6 +823,9 @@ export default function EstimateProposalDocument({ data, token }) {
             ) : null}
           </div>
         ) : null}
+
+        {/* No "How your price was built" block to hold it: the layout still prints, here. */}
+        {!intelligence ? misting : null}
 
         {/* GATE_ESTIMATE_LAWN_LIMITS: what the lawn program can and can't fix (server copy, /data `lawnLimits`; absent unless a recurring lawn estimate). */}
         {data?.lawnLimits?.heading && Array.isArray(data.lawnLimits.paragraphs) && data.lawnLimits.paragraphs.length > 0 ? (

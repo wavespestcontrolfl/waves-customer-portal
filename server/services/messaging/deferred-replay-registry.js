@@ -1547,6 +1547,12 @@ const REGISTRY = {
     async recheck(meta) {
       // A contract signed/voided/expired overnight must not be reminded.
       try {
+        // The Mark accepted consumer notice (GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND): a text held overnight is not
+        // sent once the kill switch is thrown.
+        if (meta.origin_entry_point === 'manual_accept_consumer_notice'
+          && !require('../../config/feature-gates').manualAcceptConsumerNoticeSendLive()) {
+          return { eligible: false, reason: 'gate-off' };
+        }
         if (!meta.contract_id) return { eligible: true };
         const contract = await db('customer_contracts')
           .where({ id: meta.contract_id })
@@ -1756,22 +1762,6 @@ const REGISTRY = {
         if (err.code !== '42P01') throw err;
       }
       logger.info(`[deferred-replay] v2 invite for promoter ${meta.promoter_id} terminally blocked — cooldown reservation released`);
-    },
-  },
-
-  project_report_hold_release_deferred: {
-    async onTerminal(meta) {
-      // The queued report text provably never delivered. If the email leg
-      // carried the release the record stays honest; an SMS-only release
-      // must fall back onto the operator's radar — restore the hold so the
-      // payment-settled sweep re-attempts inside the window.
-      if (!meta.project_id || meta.email_delivered === true) return;
-      await db('projects').where({ id: meta.project_id, report_hold_status: 'released' }).update({
-        report_hold_status: 'held',
-        report_hold_last_error: 'Deferred report SMS terminally blocked — release reverted for retry',
-        updated_at: new Date(),
-      });
-      logger.warn(`[deferred-replay] project ${meta.project_id} report release reverted to held — deferred SMS terminally blocked with no delivered email leg`);
     },
   },
 };

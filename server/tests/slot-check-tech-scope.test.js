@@ -1,7 +1,7 @@
-// Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode): the admin
+// Second technician (GATE_MULTI_TECH_CONFIRM, hour or capacity mode): the admin
 // overlap hint counts only the named technician's rows plus unassigned ones,
 // matching the edit/reschedule saves' route check and the picker strip.
-// Gate off, capacity off or no technician named = tech-blind, as before.
+// Gate off or no technician named = tech-blind, as before.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -40,5 +40,17 @@ test('gate on: technician B is not warned about technician A, but unassigned row
 test('gate off: tech-blind whatever technician is named', () => {
   delete process.env.GATE_MULTI_TECH_CONFIRM;
   process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  expect(probe('tech-b')).toEqual(['tech-a-visit', 'tech-b-visit', 'unassigned-visit']);
+});
+
+test('gate on, capacity OFF (hour mode, owner 2026-10-30): technician B is not warned about technician A either', () => {
+  process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+  delete process.env.GATE_SCHEDULING_CAPACITY;
+  expect(probe('tech-b')).toEqual(['tech-b-visit', 'unassigned-visit']);
+});
+
+test('gate off, capacity off (production today): tech-blind', () => {
+  delete process.env.GATE_MULTI_TECH_CONFIRM;
+  delete process.env.GATE_SCHEDULING_CAPACITY;
   expect(probe('tech-b')).toEqual(['tech-a-visit', 'tech-b-visit', 'unassigned-visit']);
 });

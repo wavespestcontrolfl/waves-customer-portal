@@ -395,3 +395,117 @@ describe('email links', () => {
     }
   });
 });
+
+describe('AI citations dropped after a content change', () => {
+  const lost = (id, extra = {}) => ({
+    id,
+    page_url: 'https://www.wavespestcontrol.com/pest-control/seasonal-pest-calendar-sarasota-fl/',
+    bucket: 'decay_refresh',
+    deployed_at: new Date('2026-10-27T18:00:00Z'),
+    ai_change_pre: { from: '2026-10-13', to: '2026-10-26', answers: 60, cites: 11, siteCites: 30 },
+    ai_change_post: JSON.stringify({ from: '2026-10-29', to: '2026-11-12', answers: 58, cites: 2, siteCites: 29 }),
+    ...extra,
+  });
+
+  test('compose: null when nothing was lost — a quiet day sends nothing', () => {
+    expect(digest.composeAiChangeLossAlert([])).toBeNull();
+    expect(digest.composeAiChangeLossAlert(undefined)).toBeNull();
+  });
+
+  test('compose: one FIX email lists page, bucket, deploy date, cites with answer counts, site-wide change', () => {
+    const out = digest.composeAiChangeLossAlert([lost(1)]);
+    expect(out.subject).toBe('FIX: AI citations dropped after a content change — https://www.wavespestcontrol.com/pest-control/seasonal-pest-calendar-sarasota-fl/');
+    expect(out.text).toContain('decay_refresh');
+    expect(out.text).toContain('changed 2026-10-27');
+    expect(out.text).toContain('11 of 60 answers before, 2 of 58 after');
+    expect(out.text).toContain('site-wide 50% before, 50% after');
+  });
+
+  test('compose: several rows share one email; page text is HTML-escaped', () => {
+    const out = digest.composeAiChangeLossAlert([lost(1), lost(2, { page_url: '<b>x</b>' })]);
+    expect(out.subject).toBe('FIX: AI citations dropped after 2 content changes');
+    expect(out.html).not.toContain('<b>x</b>');
+    expect(out.html).toContain('&lt;b&gt;x&lt;/b&gt;');
+  });
+
+  // Routes the impact table to a recording stand-in, everything else to makeDb.
+  function legDb({ rows, markers = [] }) {
+    const base = makeDb({ markers });
+    const state = { stamped: null, whereIn: null, filters: [] };
+    const fakeDb = (table) => {
+      if (table !== 'content_optimization_impact') return base(table);
+      const q = {
+        where: (c, v) => { state.filters.push(['where', c, v]); return q; },
+        whereNull: (c) => { state.filters.push(['null', c]); return q; },
+        whereIn: (c, ids) => { state.whereIn = ids; return q; },
+        orderBy: () => q,
+        select: async () => (state.filters.length ? rows : []),
+        update: async (patch) => { state.stamped = patch; return rows.length; },
+        whereNotNull: () => q,
+        whereRaw: () => q,
+        then: (res) => Promise.resolve([]).then(res),
+      };
+      return q;
+    };
+    fakeDb.state = state;
+    fakeDb.base = base;
+    return fakeDb;
+  }
+  const run = (fakeDb) => digest.sendImpactDigestsIfDue({ db: fakeDb, sendgrid, tracker: { pausedBuckets: async () => [] } });
+
+  afterEach(() => { delete process.env.GATE_AI_CHANGE_CHECK; });
+
+  test('needs GATE_AI_CHANGE_CHECK: with it off nothing is read or sent', async () => {
+    const fakeDb = legDb({ rows: [lost(1)] });
+    const out = await run(fakeDb);
+    expect(out.aiChange).toEqual({ skipped: 'ai-gate-off' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('with both gates on: sends one email for all lost rows, then stamps exactly those rows', async () => {
+    process.env.GATE_AI_CHANGE_CHECK = 'true';
+    const fakeDb = legDb({ rows: [lost(1), lost(2, { page_url: 'https://www.wavespestcontrol.com/b/' })] });
+    const out = await run(fakeDb);
+    expect(out.aiChange).toMatchObject({ sent: true, count: 2 });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne.mock.calls[0][0].subject).toBe('FIX: AI citations dropped after 2 content changes');
+    expect(fakeDb.state.filters).toEqual(expect.arrayContaining([['where', 'ai_change_verdict', 'lost'], ['null', 'ai_change_alerted_at']]));
+    expect(fakeDb.state.whereIn).toEqual([1, 2]);
+    expect(fakeDb.state.stamped.ai_change_alerted_at).toBeInstanceOf(Date);
+  });
+
+  test('digest gate off: the alert is shadow-logged and the rows stay un-stamped for after the flip', async () => {
+    process.env.GATE_AI_CHANGE_CHECK = 'true';
+    process.env.GATE_IMPACT_DIGEST = 'false';
+    const fakeDb = legDb({ rows: [lost(1)] });
+    const out = await run(fakeDb);
+    expect(out.aiChange).toMatchObject({ skipped: 'gated' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(fakeDb.state.stamped).toBeNull();
+  });
+
+  test('at most one email a day: a recent marker holds the rows back', async () => {
+    process.env.GATE_AI_CHANGE_CHECK = 'true';
+    const fakeDb = legDb({ rows: [lost(1)], markers: [{ email_key: 'impact-ai-change-lost', last_sent_at: new Date() }] });
+    const out = await run(fakeDb);
+    expect(out.aiChange).toEqual({ skipped: 'not-due' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(fakeDb.state.stamped).toBeNull();
+  });
+
+  test('no lost rows: quiet, nothing sent', async () => {
+    process.env.GATE_AI_CHANGE_CHECK = 'true';
+    const fakeDb = legDb({ rows: [] });
+    const out = await run(fakeDb);
+    expect(out.aiChange).toEqual({ skipped: 'none-lost' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a failed send leaves the rows un-stamped so the next tick retries', async () => {
+    process.env.GATE_AI_CHANGE_CHECK = 'true';
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 500 }));
+    const fakeDb = legDb({ rows: [lost(1)] });
+    await expect(run(fakeDb)).rejects.toThrow('aiChange:send_failed');
+    expect(fakeDb.state.stamped).toBeNull();
+  });
+});

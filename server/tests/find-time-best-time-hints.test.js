@@ -32,7 +32,7 @@ jest.mock('../utils/datetime-et', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
-  adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
+  adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; req.technicianId = 'staff-admin'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
   // find-time is admin-only (ADMIN-BUG-R07); this suite only ever exercises
   // the admin path (techRole set to 'admin' above), so requireAdmin passes.
@@ -325,6 +325,69 @@ test.each([undefined, false, true])('existing-visit arrival routing requires exp
   const opts = findAvailableSlots.mock.calls[0][0];
   if (arrivalWindows === true) expect(opts.arrivalWindow).toEqual({ serviceId: 'svc-1', unit: true, alone: false });
   else expect(opts).not.toHaveProperty('arrivalWindow');
+});
+
+// Owner 2026-10-26: Quick Move used the gap check (no start after 4 PM, and
+// straight-line drive only). With GATE_PICKER_ROAD_CHECK it asks for the
+// route check Edit appointment uses, driven on Google this week.
+test.each([false, true])('Quick Move gets the route check on Google only with GATE_PICKER_ROAD_CHECK: %s', async (gateOn) => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  if (gateOn) process.env.GATE_PICKER_ROAD_CHECK = 'true';
+  const db = require('../models/db');
+  db.raw = jest.fn(sql => sql);
+  db.mockReturnValue({
+    where: () => ({
+      leftJoin: () => ({
+        first: async () => ({
+          lat: 27.55, lng: -82.4,
+          address_line1: '100 Fixture Street', city: 'Parrish', state: 'FL', zip: '34219',
+          visit_customer_id: 'fixture-customer', visit_profile_label: null,
+        }),
+      }),
+    }),
+  });
+  try {
+    const res = await post({ ...BASE, serviceId: 'svc-1', hint: true, quickMove: true });
+    expect(res.status).toBe(200);
+    const opts = findAvailableSlots.mock.calls[0][0];
+    if (gateOn) {
+      expect(opts.arrivalWindow).toEqual(expect.objectContaining({ serviceId: 'svc-1', unit: true, alone: false }));
+      expect(opts.pickerRoadCheck).toBe(true);
+      // Counted against the staff user who asked, on one budget per request
+      // that the request's close aborts (picker-road-spend.js).
+      expect(opts.roadSpender).toBe('staff-admin');
+      expect(opts.pickerBudget).toMatchObject({ traffic: 0, plain: 0, refused: null });
+      expect(opts.pickerBudget.signal).toBeInstanceOf(AbortSignal);
+    } else {
+      expect(opts).not.toHaveProperty('arrivalWindow');
+      expect(opts).not.toHaveProperty('pickerRoadCheck');
+      expect(opts).not.toHaveProperty('pickerBudget');
+    }
+  } finally {
+    delete process.env.GATE_PICKER_ROAD_CHECK;
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
+});
+
+// Under GATE_SCHEDULING_CAPACITY the pickers list the capacity engine's hours,
+// which the road check does not drive: it stays off, so a listed hour and its
+// live check never disagree (Codex #6881 pre-push audit).
+test('the picker road check stays off under GATE_SCHEDULING_CAPACITY', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  process.env.GATE_PICKER_ROAD_CHECK = 'true';
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const { pickerRoadCheckLive } = jest.requireActual('../services/scheduling/arrival-route');
+  try {
+    expect(pickerRoadCheckLive()).toBe(false);
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    expect(pickerRoadCheckLive()).toBe(true);
+  } finally {
+    delete process.env.GATE_PICKER_ROAD_CHECK;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+  }
 });
 
 // ── Picked-hour scoring ──────────────────────────────────────────────

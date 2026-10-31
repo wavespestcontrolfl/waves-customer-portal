@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
+const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
 const { stampLeadFunnelRow, bridgeLeadFunnelStage, LEAD_STATUS_TO_FUNNEL_STAGE } = require('../services/lead-funnel-bridge');
 // A wizard re-run of the same inquiry inside this window lands as a
 // 'duplicate' of the prior open lead instead of a second 'new' one.
@@ -126,6 +127,14 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
+// customQuoteReason the engine stamps on every top dressing line (estimate-engine.js).
+const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
+// Reasons the office prices by hand: a keyed quote-on-request product and top
+// dressing (quote-only since 2026-10-29, owner). Both reuse the existing
+// quote_on_request customer message and office notice; no new copy.
+function isPricedByTeamReason(reason) {
+  return reason === 'quote_on_request' || reason === TOP_DRESSING_QUOTE_ONLY_REASON;
+}
 const {
   isCommercialProperty,
   normalizePropertyType,
@@ -1172,6 +1181,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services: bodyServices, attribution,
     } = req.body || {};
+    // Optional self-reported "How did you hear about us?" (+ the AI follow-up
+    // prompt): fixed allowlist, unknown values silently dropped, never required.
+    const wizardHeardAbout = heardAboutFromBody(req.body);
     // Keyed quote (C2): a catalog service_key expands SERVER-SIDE into the
     // exact engine request for that product (plus the few site-collected
     // options the engine needs, e.g. lawn grass type), so the site never
@@ -2114,6 +2126,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
       || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null);
+    const quoteIsPricedByTeam = isPricedByTeamReason(quoteRequiredReason);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     // `let`: a ZERO rodent-setup decision (decided under the draft row lock
@@ -2145,7 +2158,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const serviceInterest = keyedLabel || buildPublicQuoteServiceInterest(services);
     const leadServiceKey = keyedService ? keyedService.service_key : null;
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
-    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
+    // leads.gclid is varchar(200) (migration 20260401000110), unlike the other click ids.
+    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 200) : null;
     const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
     const gbraid = attr?.gbraid ? String(attr.gbraid).slice(0, 255) : null;
     const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
@@ -2284,6 +2298,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (fbc) updateFields.fbc = fbc;
       if (fbp) updateFields.fbp = fbp;
       if (anonId) updateFields.anon_id = anonId;
+      // Self-reported "How did you hear about us?" — fills an EMPTY answer
+      // only, never replaces one already recorded (the property-lookup stage
+      // may have stored it; staff may have corrected it). One statement, so
+      // the answer and its prompt are judged on the same pre-write row.
+      Object.assign(updateFields, heardAboutFillIfEmpty(db, wizardHeardAbout));
       const RETURNING = ['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'];
       const ownRow = () => db('leads')
         .where({ id: leadId })
@@ -2441,6 +2460,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         fbc,
         fbp,
         anon_id: anonId,
+        heard_about: wizardHeardAbout.heardAbout,
+        heard_about_prompt: wizardHeardAbout.heardAboutPrompt,
         extracted_data: duplicateOfLeadId
           ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
           : extractedData,
@@ -3557,10 +3578,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       await NotificationService.notifyAdmin(
         'new_lead',
         quoteRequired
-          ? (quoteRequiredReason === 'quote_on_request' ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
+          ? (quoteIsPricedByTeam ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
           : `Calculator quote: ${contactFirstName} ${contactLastName}`,
         `${quoteRequired
-          ? (quoteRequiredReason === 'quote_on_request'
+          ? (quoteIsPricedByTeam
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
@@ -4169,7 +4190,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         service: manualQuoteLine?.service || null,
         reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
         service_interest: serviceInterest,
-        message: quoteRequiredReason === 'quote_on_request'
+        message: quoteIsPricedByTeam
           ? (keyedService?.service_key === 'mosquito_misting_system'
             ? 'Mosquito misting systems are designed and priced on site — we\'ll call to schedule your free design visit.'
             : `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`)
@@ -4439,6 +4460,7 @@ module.exports._internals = {
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   quoteOnRequestEstimate,
+  isPricedByTeamReason,
   isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
   findExistingCustomerByContact,

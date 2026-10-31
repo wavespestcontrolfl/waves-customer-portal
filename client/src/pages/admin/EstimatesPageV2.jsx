@@ -30,7 +30,8 @@ import { useIntelligenceBarActions } from "../../hooks/useIntelligenceBarPageDat
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
-  classifyEstimate,
+  canSendEstimate,
+  classifyEstimateForPipeline,
   getUrgencyIndicator,
   detectCompetitor,
 } from "./EstimatePage";
@@ -67,7 +68,11 @@ import {
   DialogBody,
   DialogHeader,
   DialogTitle,
+  Field,
   Input,
+  Select,
+  TablePagination,
+  TableToolbar,
   UiSurface,
   cn,
 } from "../../components/ui";
@@ -99,6 +104,7 @@ import {
   Pencil,
 } from "lucide-react";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
+import EstimateSoldByRow from "../../components/admin/EstimateSoldByRow";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -270,7 +276,7 @@ function v3ChipMatches(e, chip) {
   if (chip === "low_margin") return (e.pricingRisk?.lowMarginCount || 0) > 0;
   if (chip === "risk_type_review") return !!e.riskTypeNeedsReview;
   if (chip === "archived") return !!e.archivedAt;
-  if (chip === "drafts") return e.status === "draft";
+  if (chip === "drafts") return e.status === "draft" || e.status === "send_failed";
   if (chip === "open")
     return (
       e.status === "scheduled" || e.status === "sent" || e.status === "viewed"
@@ -886,21 +892,6 @@ function estimateViewMenuItems(estimate, { onPdfError, onViewAcceptance }) {
         onClick: () => onViewAcceptance(estimate),
       },
   ];
-}
-function canSendEstimate(estimate) {
-  // Rows without a share token (quote-wizard mirrors, legacy imports) have no
-  // customer link to send — the SMS/email would carry a literal /estimate/null.
-  // The server now refuses these too (assertEstimateSendable); hiding the
-  // affordance keeps the operator from hitting that error blind.
-  if (!String(estimate?.token || "").trim()) return false;
-  return estimateAmountDisplay(estimate).value > 0;
-}
-function classifyEstimateForPipeline(estimate) {
-  if (estimate?.archivedAt) return classifyEstimate(estimate);
-  if (estimate?.status === "draft") {
-    return canSendEstimate(estimate) ? "ready_to_send" : "needs_estimate";
-  }
-  return classifyEstimate(estimate);
 }
 function fmtPct(value) {
   if (value == null || Number.isNaN(Number(value))) return "—";
@@ -1801,9 +1792,173 @@ function useEstimateDeepLinkHighlight({ targetId, token, rows }) {
   }, [activeId]);
   return activeId;
 }
+
+const ESTIMATE_TABLE_PAGE_SIZES = [25, 50, 100, 500];
+
+function estimateMatchesTableSearch(estimate, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return [
+    estimate.customerName,
+    estimate.address,
+    estimate.customerEmail,
+    estimate.customerPhone,
+    shortEstimateRef(estimate.id),
+  ].some((value) =>
+    String(value || "")
+      .toLowerCase()
+      .includes(q),
+  );
+}
+
+function estimateTableSortFn(sortKey, enabled = true) {
+  if (!enabled) return estimateTableSortFn("newest");
+  if (sortKey === "v3") return v3SortFn;
+  if (sortKey === "oldest") {
+    return (a, b) => new Date(a.createdAt) - new Date(b.createdAt);
+  }
+  if (sortKey === "amount-desc" || sortKey === "amount-asc") {
+    const direction = sortKey === "amount-desc" ? -1 : 1;
+    return (a, b) =>
+      direction *
+      (estimateAmountDisplay(a).value - estimateAmountDisplay(b).value);
+  }
+  return (a, b) => new Date(b.createdAt) - new Date(a.createdAt);
+}
+
+function useEstimateTablePaging(
+  rows,
+  enabled,
+  initialPageSize,
+  deepLinkEstimateId,
+  deepLinkToken,
+) {
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(initialPageSize);
+  const pagedDeepLinkTokenRef = useRef(null);
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  useEffect(() => {
+    if (!enabled) return;
+    setPage((current) => Math.min(Math.max(1, current), totalPages));
+  }, [enabled, totalPages]);
+  useEffect(() => {
+    if (
+      !enabled ||
+      !deepLinkEstimateId ||
+      pagedDeepLinkTokenRef.current === deepLinkToken
+    )
+      return;
+    const targetIndex = rows.findIndex(
+      (estimate) => String(estimate.id) === String(deepLinkEstimateId),
+    );
+    if (targetIndex >= 0) {
+      pagedDeepLinkTokenRef.current = deepLinkToken;
+      setPage(Math.floor(targetIndex / pageSize) + 1);
+    }
+  }, [deepLinkEstimateId, deepLinkToken, enabled, pageSize, rows]);
+  const displayedRows = enabled
+    ? rows.slice((page - 1) * pageSize, page * pageSize)
+    : rows;
+  const changePageSize = useCallback((nextPageSize) => {
+    setPageSize(nextPageSize);
+    setPage(1);
+  }, []);
+  return {
+    page,
+    setPage,
+    pageSize,
+    changePageSize,
+    totalPages,
+    displayedRows,
+  };
+}
+
+function EstimateTableControls({
+  enabled,
+  search,
+  onSearchChange,
+  sort,
+  onSortChange,
+  sortOptions,
+  onReset,
+  canReset,
+  children,
+}) {
+  if (!enabled) return null;
+  return (
+    <div className="mb-3 grid gap-2">
+      <TableToolbar
+        label="Estimates"
+        search={search}
+        onSearchChange={onSearchChange}
+        searchPlaceholder="Search loaded estimates"
+        onReset={onReset}
+        canReset={canReset}
+      >
+        {children}
+        <Field label="Sort" className="w-48">
+          <Select
+            aria-label="Estimates sort"
+            value={sort}
+            onChange={(event) => onSortChange(event.target.value)}
+          >
+            {sortOptions.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </TableToolbar>
+      <p className="text-ui-caption text-ink-secondary">
+        Search, sorting, and page counts apply to the loaded estimates.
+      </p>
+    </div>
+  );
+}
+
+function estimateTableSortOptions(prioritySortEnabled) {
+  return prioritySortEnabled
+    ? [{ key: "v3", label: "Action priority" }, ...MOBILE_SORT_OPTIONS]
+    : MOBILE_SORT_OPTIONS;
+}
+
+function estimateTableControlsChanged(search, filter, dateRange, sort) {
+  return (
+    Boolean(search.trim()) ||
+    filter !== "all" ||
+    dateRange !== "all" ||
+    sort !== "newest"
+  );
+}
+
+function EstimateLoadedScopeNote({
+  enabled = true,
+  truncated,
+  metrics = false,
+}) {
+  if (!enabled || !truncated) return null;
+  return (
+    <div
+      role="status"
+      className="mb-3 px-3 py-2 rounded-sm border-hairline border-zinc-300 bg-zinc-50 text-ui-body text-ink-secondary"
+    >
+      {metrics
+        ? "Showing the most recent estimates only — the list hit its size cap, so these KPIs may undercount older offers."
+        : "Showing the most recent estimates only — the loaded list hit its size cap. Search, filters, and page counts apply to this set."}
+    </div>
+  );
+}
+
+function EstimateTablePagination({ enabled, loading = false, error, ...props }) {
+  if (!enabled || loading || error) return null;
+  return <TablePagination {...props} />;
+}
+
 function EstimatePipelineViewV2({
   deepLinkEstimateId = null,
   deepLinkToken = 0,
+  tableControlsEnabled = false,
 }) {
   const openMessages = useCustomerSms();
   const sendEstimateFromPipeline = useEstimateSend();
@@ -1817,6 +1972,7 @@ function EstimatePipelineViewV2({
   const [filter, setFilter] = useState("all");
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
+  const [sort, setSort] = useState("newest");
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -2003,11 +2159,11 @@ function EstimatePipelineViewV2({
   );
   const markEstimateAccepted = useCallback(
     async (e) => {
-      // A commercial proposal win auto-creates the customer when none is linked
-      // and, in invoice mode, builds the first invoice from the proposal lines.
+      // A commercial proposal win auto-creates the customer when none is linked.
+      // It makes no invoice: each visit bills when it is completed.
       const proposalInvoiceMode = !!e.isCommercialProposal && !!e.billByInvoice;
       const confirmMsg = proposalInvoiceMode
-        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
+        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. No invoice is created now: each visit is billed once when it is completed, including any one-time work booked on it. The customer is NOT texted and NOT auto-scheduled.`
         : e.isCommercialProposal
           ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
           : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
@@ -2021,11 +2177,6 @@ function EstimatePipelineViewV2({
         const notes = [];
         if (result?.createdCustomer?.id) {
           notes.push("A new customer record was created from the proposal.");
-        }
-        if (result?.proposalInvoice?.invoiceNumber) {
-          notes.push(
-            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(result.proposalInvoice.total || 0).toFixed(2)} was created.`,
-          );
         }
         if (result?.warnings?.length) notes.push(...result.warnings);
         if (notes.length) window.alert(`Marked won:\n\n${notes.join("\n")}`);
@@ -2099,27 +2250,24 @@ function EstimatePipelineViewV2({
     ...e,
     _class: classifyEstimateForPipeline(e),
   }));
+  const sortOptions = estimateTableSortOptions(v3Flag);
   const sorted = [...classified].sort(
-    (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
+    estimateTableSortFn(sort, tableControlsEnabled),
   );
   const filtered = sorted
     .filter((e) => estimateMatchesFilter(e, filter))
-    .filter((e) => {
-      const q = search.trim().toLowerCase();
-      if (!q) return true;
-      const ref = shortEstimateRef(e.id).toLowerCase();
-      return (
-        (e.customerName || "").toLowerCase().includes(q) ||
-        (e.address || "").toLowerCase().includes(q) ||
-        (e.customerEmail || "").toLowerCase().includes(q) ||
-        (e.customerPhone || "").includes(q) ||
-        ref.includes(q)
-      );
-    });
+    .filter((e) => estimateMatchesTableSearch(e, search));
+  const paging = useEstimateTablePaging(
+    filtered,
+    tableControlsEnabled,
+    25,
+    deepLinkEstimateId,
+    deepLinkToken,
+  );
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
-    rows: filtered,
+    rows: paging.displayedRows,
   });
   if (loading) {
     return (
@@ -2235,19 +2383,14 @@ function EstimatePipelineViewV2({
 
       <div className="grid gap-4 items-start grid-cols-1">
         <div className="min-w-0">
-          {estimatesTruncated && (
-            <div
-              role="status"
-              className="mb-3 px-3 py-2 rounded-sm border-hairline border-zinc-300 bg-zinc-50 text-ui-body text-ink-secondary"
-            >
-              Showing the most recent estimates only — the list hit its size
-              cap, so these KPIs may undercount older offers.
-            </div>
-          )}
+          <EstimateLoadedScopeNote truncated={estimatesTruncated} metrics />
           <PipelineAnalytics
             estimates={estimates}
             activeFilter={filter}
-            onFilterChange={setFilter}
+            onFilterChange={(nextFilter) => {
+              setFilter(nextFilter);
+              paging.setPage(1);
+            }}
             dateRange={dateRange}
             onDateRangeChange={setDateRange}
           />
@@ -2256,7 +2399,34 @@ function EstimatePipelineViewV2({
           {/* Search — name / address / phone / email / reference. Sits
               under the Needs Attention strip so the operator can drill
               from "Going cold > 48h" into a specific customer fast. */}
-          <div className="mb-3 relative">
+          <EstimateTableControls
+            enabled={tableControlsEnabled}
+            search={search}
+            onSearchChange={(value) => {
+              setSearch(value);
+              paging.setPage(1);
+            }}
+            sort={sort}
+            onSortChange={(value) => {
+              setSort(value);
+              paging.setPage(1);
+            }}
+            sortOptions={sortOptions}
+            onReset={() => {
+              setSearch("");
+              setFilter("all");
+              setDateRange("all");
+              setSort("newest");
+              paging.setPage(1);
+            }}
+            canReset={estimateTableControlsChanged(
+              search,
+              filter,
+              dateRange,
+              sort,
+            )}
+          />
+          <div hidden={tableControlsEnabled} className="mb-3 relative">
             {" "}
             <Input
               type="search"
@@ -2297,7 +2467,7 @@ function EstimatePipelineViewV2({
             </div>
           ) : (
             <div className="flex flex-col gap-2">
-              {filtered.map((e) => {
+              {paging.displayedRows.map((e) => {
                 const urgency = getUrgencyIndicator(e);
                 const competitor = detectCompetitor(e.notes || e.description);
                 const source = SOURCE_ICON[e.source];
@@ -2434,6 +2604,7 @@ function EstimatePipelineViewV2({
                         {e.address || "—"}
                         {e.serviceInterest ? ` · ${e.serviceInterest}` : ""}
                       </div>{" "}
+                      <EstimateSoldByRow estimate={e} onChanged={refreshEstimates} />
                     </div>
                     {/* Call + text + send-estimate trailing buttons — matches the
                      CustomersPageV2 list row's icon trio. Send is shown for
@@ -2441,7 +2612,7 @@ function EstimatePipelineViewV2({
                      accepted/declined/expired hide it. */}
                     {(e.customerPhone ||
                       estimateHasLawnLine(e) ||
-                      (["draft", "sent", "viewed"].includes(e.status) &&
+                      (SEND_ACTION_STATUSES.includes(e.status) &&
                         canSend)) && (
                       <div className="flex gap-1.5">
                         <LawnOutlineQuickButton
@@ -2532,7 +2703,7 @@ function EstimatePipelineViewV2({
                             <FilePlus2 size={16} strokeWidth={1.75} />{" "}
                           </Button>
                         )}
-                        {["draft", "sent", "viewed"].includes(e.status) &&
+                        {SEND_ACTION_STATUSES.includes(e.status) &&
                           canSend && (
                             <Button
                               type="button"
@@ -2545,11 +2716,13 @@ function EstimatePipelineViewV2({
                                   window.alert("Send failed: " + err.message);
                                 }
                               }}
-                              aria-label={`${e.status === "draft" ? "Send" : "Resend"} estimate to ${e.customerName || "customer"}`}
+                              aria-label={`${sendActionVerb(e.status)} estimate to ${e.customerName || "customer"}`}
                               title={
                                 e.status === "draft"
                                   ? "Review recipient and send estimate"
-                                  : "Review recipient and resend estimate"
+                                  : e.status === "send_failed"
+                                    ? "The last send failed. Review recipient and send again"
+                                    : "Review recipient and resend estimate"
                               }
                               className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                             >
@@ -2645,7 +2818,8 @@ function EstimatePipelineViewV2({
                         <Flag size={16} strokeWidth={1.75} aria-hidden />{" "}
                       </Button>{" "}
                       <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1 sm:flex-none">
-                        {e.status === "draft" && canSend && (
+                        {(e.status === "draft" || e.status === "send_failed") &&
+                          canSend && (
                           <Button
                             size="sm"
                             variant="primary"
@@ -2659,7 +2833,7 @@ function EstimatePipelineViewV2({
                               }
                             }}
                           >
-                            Send
+                            {sendActionVerb(e.status)}
                           </Button>
                         )}
 
@@ -2733,20 +2907,24 @@ function EstimatePipelineViewV2({
                               />
                               Schedule
                             </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              className="w-full sm:w-auto whitespace-nowrap"
-                              onClick={() => sendBookingLink(e)}
-                              disabled={!e.customerPhone}
-                              title={
-                                e.customerPhone
-                                  ? "Text the customer a link to self-schedule"
-                                  : "No phone on file"
-                              }
-                            >
-                              Send Booking
-                            </Button>
+                            {/* The server's verdict: recurring-only and invoice-mode
+                                offers never take a booking link. */}
+                            {e.bookingLinkEligible === true && (
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                className="w-full sm:w-auto whitespace-nowrap"
+                                onClick={() => sendBookingLink(e)}
+                                disabled={!e.customerPhone}
+                                title={
+                                  e.customerPhone
+                                    ? "Text the customer a link to self-schedule"
+                                    : "No phone on file"
+                                }
+                              >
+                                Send Booking
+                              </Button>
+                            )}
                           </>
                         )}
 
@@ -2814,7 +2992,8 @@ function EstimatePipelineViewV2({
                               onClick: () => toggleBillByInvoice(e),
                             },
                             (e.status === "sent" || e.status === "viewed") &&
-                              canSend && {
+                              canSend &&
+                              e.bookingLinkEligible === true && {
                                 key: "send-booking",
                                 label: "Send booking link",
                                 icon: (
@@ -2880,6 +3059,45 @@ function EstimatePipelineViewV2({
                                 <ClipboardList size={16} strokeWidth={1.75} />
                               ),
                               onClick: () => setOutlineTarget(e),
+                            },
+                            // GATE_TS_OUTLINE: the server marks an estimate with a Tree & Shrub line.
+                            e.treeShrubOutlineAvailable && {
+                              key: "tree-shrub-outline",
+                              label: "Tree & Shrub service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "tree_shrub",
+                                }),
+                            },
+                            // GATE_PEST_OUTLINE: the server marks an estimate with a recurring pest line.
+                            e.pestOutlineAvailable && {
+                              key: "pest-outline",
+                              label: "Pest service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "pest_control",
+                                }),
+                            },
+                            // GATE_MOSQUITO_OUTLINE: the server marks an estimate with a recurring mosquito program row.
+                            e.mosquitoOutlineAvailable && {
+                              key: "mosquito-outline",
+                              label: "Mosquito service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "mosquito",
+                                }),
                             },
                             {
                               key: "proposal",
@@ -2968,6 +3186,18 @@ function EstimatePipelineViewV2({
               })}
             </div>
           )}
+          <EstimateTablePagination
+            enabled={tableControlsEnabled}
+            label="Estimates"
+            page={paging.page}
+            totalPages={paging.totalPages}
+            total={filtered.length}
+            pageSize={paging.pageSize}
+            onPageChange={paging.setPage}
+            onPageSizeChange={paging.changePageSize}
+            itemLabel="loaded estimates"
+            pageSizeOptions={ESTIMATE_TABLE_PAGE_SIZES}
+          />
         </div>{" "}
       </div>
       {customerPanelId && (
@@ -3073,7 +3303,8 @@ function mobileMatchesDate(createdAt, dateKey, nowTs) {
     return nowTs - ts <= 30 * MS_DAY;
   return true;
 }
-function mobileSortFn(sortKey) {
+function mobileSortFn(sortKey, tableControlsEnabled = false) {
+  if (tableControlsEnabled) return estimateTableSortFn(sortKey);
   switch (sortKey) {
     case "oldest":
       return (a, b) => new Date(a.createdAt) - new Date(b.createdAt);
@@ -3085,6 +3316,24 @@ function mobileSortFn(sortKey) {
     default:
       return (a, b) => new Date(b.createdAt) - new Date(a.createdAt);
   }
+}
+function mobileMatchesSearch(estimate, search, tableControlsEnabled) {
+  if (tableControlsEnabled) return estimateMatchesTableSearch(estimate, search);
+  const query = search.trim().toLowerCase();
+  return (
+    !query ||
+    (estimate.customerName || "").toLowerCase().includes(query) ||
+    shortEstimateRef(estimate.id).toLowerCase().includes(query)
+  );
+}
+function mobileFilterOptions(v3Flag, filterCounts) {
+  return (v3Flag ? V3_CHIPS : PIPELINE_AND_RISK_FILTERS).map((item) => ({
+    ...item,
+    label:
+      item.key === "all"
+        ? `All (${filterCounts.all || 0})`
+        : `${item.label} (${filterCounts[item.key] || 0})`,
+  }));
 }
 
 // Short 6-char ref derived from UUID. estimates.id is a UUID (no human-readable
@@ -3168,6 +3417,7 @@ function mobileStatusClass(status) {
   if (status === "accepted") return "text-zinc-900";
   if (
     status === "draft" ||
+    status === "send_failed" ||
     status === "scheduled" ||
     status === "sent" ||
     status === "viewed"
@@ -3182,6 +3432,14 @@ function mobileStatusClass(status) {
 // Tokenless rows (quote-wizard mirrors / legacy imports, the same set
 // canSendEstimate hides) are excluded too: "edit in place" means updating the
 // customer's existing link, and these rows have no link to keep stable.
+// Statuses whose row offers Send: an unsent draft, a send the server parked as
+// send_failed (POST /:id/send admits it again), and a live offer to resend.
+const SEND_ACTION_STATUSES = ["draft", "send_failed", "sent", "viewed"];
+function sendActionVerb(status) {
+  if (status === "draft") return "Send";
+  if (status === "send_failed") return "Retry sending";
+  return "Resend";
+}
 const EDITABLE_ESTIMATE_STATUSES = [
   "draft",
   "scheduled",
@@ -3250,6 +3508,7 @@ function ViewErrorNote({ message, className }) {
 // non-interactive avoids nesting buttons and links inside a role="button" row.
 export function MobileEstimateRow({
   estimate,
+  onSoldByChanged,
   onCreateFromAddress,
   onOpenCustomerPanel,
   onSend,
@@ -3496,6 +3755,7 @@ export function MobileEstimateRow({
               </span>{" "}
             </div>
           )}
+          <EstimateSoldByRow estimate={estimate} onChanged={onSoldByChanged} />
         </div>
         {estimate.customerPhone && (
           <Button
@@ -3565,13 +3825,10 @@ export function MobileEstimateRow({
               onClick: () =>
                 navigate(`/admin/estimates?editEstimateId=${estimate.id}`),
             },
-            ["draft", "sent", "viewed"].includes(estimate.status) &&
+            SEND_ACTION_STATUSES.includes(estimate.status) &&
               canSend && {
                 key: "send",
-                label:
-                  estimate.status === "draft"
-                    ? "Send estimate"
-                    : "Resend estimate",
+                label: `${sendActionVerb(estimate.status)} estimate`,
                 icon: <Send size={16} strokeWidth={1.75} />,
                 onClick: async () => {
                   try {
@@ -3584,7 +3841,8 @@ export function MobileEstimateRow({
               },
             (estimate.status === "sent" ||
               estimate.status === "viewed" ||
-              (estimate.status === "accepted" && !estimate.archivedAt)) && {
+              (estimate.status === "accepted" && !estimate.archivedAt)) &&
+              estimate.bookingLinkEligible === true && {
               key: "send-booking",
               label: "Send booking link",
               icon: <CalendarCheck size={16} strokeWidth={1.75} />,
@@ -3628,6 +3886,30 @@ export function MobileEstimateRow({
               label: "Lawn service outline",
               icon: <ClipboardList size={16} strokeWidth={1.75} />,
               onClick: () => onLawnOutline?.(estimate),
+            },
+            // GATE_TS_OUTLINE: the same composer, opened on the Tree & Shrub outline.
+            estimate.treeShrubOutlineAvailable && {
+              key: "tree-shrub-outline",
+              label: "Tree & Shrub service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "tree_shrub" }),
+            },
+            // GATE_PEST_OUTLINE: the same composer, opened on the Pest Control outline.
+            estimate.pestOutlineAvailable && {
+              key: "pest-outline",
+              label: "Pest service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "pest_control" }),
+            },
+            // GATE_MOSQUITO_OUTLINE: the same composer, opened on the Mosquito outline.
+            estimate.mosquitoOutlineAvailable && {
+              key: "mosquito-outline",
+              label: "Mosquito service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "mosquito" }),
             },
             {
               key: "audit",
@@ -3701,10 +3983,12 @@ function EstimatesMobileListView({
   onCreateFromAddress,
   deepLinkEstimateId = null,
   deepLinkToken = 0,
+  tableControlsEnabled = false,
 }) {
   const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [estimates, setEstimates] = useState([]);
+  const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
@@ -3727,8 +4011,11 @@ function EstimatesMobileListView({
     const requestId = ++estimatesRequestRef.current;
     setError(null);
     fetchEstimatePipelineRows(activeFilterRef.current)
-      .then(({ rows }) => {
-        if (requestId === estimatesRequestRef.current) setEstimates(rows);
+      .then(({ rows, truncated }) => {
+        if (requestId === estimatesRequestRef.current) {
+          setEstimates(rows);
+          setEstimatesTruncated(!!truncated);
+        }
       })
       .catch((err) => {
         if (requestId === estimatesRequestRef.current) setError(err);
@@ -3747,11 +4034,11 @@ function EstimatesMobileListView({
   }, [filter, refreshEstimates, estimatesRefresh]);
   const markEstimateAccepted = useCallback(
     async (e) => {
-      // A commercial proposal win auto-creates the customer when none is linked
-      // and, in invoice mode, builds the first invoice from the proposal lines.
+      // A commercial proposal win auto-creates the customer when none is linked.
+      // It makes no invoice: each visit bills when it is completed.
       const proposalInvoiceMode = !!e.isCommercialProposal && !!e.billByInvoice;
       const confirmMsg = proposalInvoiceMode
-        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
+        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. No invoice is created now: each visit is billed once when it is completed, including any one-time work booked on it. The customer is NOT texted and NOT auto-scheduled.`
         : e.isCommercialProposal
           ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
           : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
@@ -3765,11 +4052,6 @@ function EstimatesMobileListView({
         const notes = [];
         if (result?.createdCustomer?.id) {
           notes.push("A new customer record was created from the proposal.");
-        }
-        if (result?.proposalInvoice?.invoiceNumber) {
-          notes.push(
-            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(result.proposalInvoice.total || 0).toFixed(2)} was created.`,
-          );
         }
         if (result?.warnings?.length) notes.push(...result.warnings);
         if (notes.length) window.alert(`Marked won:\n\n${notes.join("\n")}`);
@@ -3907,7 +4189,6 @@ function EstimatesMobileListView({
   }, []);
   const groups = useMemo(() => {
     const now = Date.now();
-    const q = search.trim().toLowerCase();
     const classified = estimates.map((e) => ({
       ...e,
       _class: classifyEstimateForPipeline(e),
@@ -3923,21 +4204,17 @@ function EstimatesMobileListView({
         mobileMatchesDate(e.createdAt, dateFilter, now),
       );
     }
-    if (q) {
-      list = list.filter((e) => {
-        const name = (e.customerName || "").toLowerCase();
-        const ref = shortEstimateRef(e.id).toLowerCase();
-        return name.includes(q) || ref.includes(q);
-      });
-    }
+    list = list.filter((e) =>
+      mobileMatchesSearch(e, search, tableControlsEnabled),
+    );
     const useV3Sort = v3Flag && sort === "v3";
     list = useV3Sort
       ? [...list].sort(v3SortFn)
-      : [...list].sort(mobileSortFn(sort));
+      : [...list].sort(mobileSortFn(sort, tableControlsEnabled));
 
-    // v3 sort breaks day-grouping (status rank wins, not date), so collapse
-    // to a single group preserving the sorted order.
-    if (useV3Sort) return [[0, list]];
+    // Preview sorts and v3 priority ranking must remain global before paging,
+    // rather than being regrouped into date buckets that change their order.
+    if (tableControlsEnabled || useV3Sort) return [[0, list]];
 
     // Otherwise group by createdAt day; sort=oldest reverses group order.
     const byDay = new Map();
@@ -3954,7 +4231,15 @@ function EstimatesMobileListView({
       sort === "oldest" ? a[0] - b[0] : b[0] - a[0],
     );
     return sortedGroups;
-  }, [estimates, search, filter, dateFilter, sort, v3Flag]);
+  }, [
+    estimates,
+    search,
+    filter,
+    dateFilter,
+    sort,
+    tableControlsEnabled,
+    v3Flag,
+  ]);
   const filterCounts = useMemo(() => {
     if (v3Flag) return v3ChipCounts(estimates);
     const counts = {
@@ -3971,6 +4256,7 @@ function EstimatesMobileListView({
     }
     return counts;
   }, [estimates, v3Flag]);
+  const filterOptions = mobileFilterOptions(v3Flag, filterCounts);
 
   // Reset filter when the v3 flag flips; keep chronological ordering stable.
   useEffect(() => {
@@ -3979,10 +4265,18 @@ function EstimatesMobileListView({
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
   const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
+  const sortOptions = estimateTableSortOptions(v3Flag);
+  const paging = useEstimateTablePaging(
+    flat,
+    tableControlsEnabled,
+    25,
+    deepLinkEstimateId,
+    deepLinkToken,
+  );
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
-    rows: flat,
+    rows: paging.displayedRows,
   });
   return (
     // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
@@ -3992,7 +4286,55 @@ function EstimatesMobileListView({
           now that the mobile estimates list renders under the shared tabs;
           the list owns only its search/filter row and rows below. */}
       {/* Search + Add/filter row — mirrors Customers mobile block. */}
-      <div className="mb-3">
+      <EstimateTableControls
+        enabled={tableControlsEnabled}
+        search={search}
+        onSearchChange={(value) => {
+          setSearch(value);
+          paging.setPage(1);
+        }}
+        sort={sort}
+        onSortChange={(value) => {
+          setSort(value);
+          paging.setPage(1);
+        }}
+        sortOptions={sortOptions}
+        onReset={() => {
+          setSearch("");
+          setFilter("all");
+          setDateFilter("all");
+          setSort("newest");
+          paging.setPage(1);
+        }}
+        canReset={estimateTableControlsChanged(
+          search,
+          filter,
+          dateFilter,
+          sort,
+        )}
+      >
+        <MobileChipSheet
+          label="Filter"
+          value={filter}
+          onChange={(value) => {
+            setFilter(value);
+            paging.setPage(1);
+          }}
+          options={filterOptions}
+          title="Filter estimates"
+        />
+        <MobileChipSheet
+          label="Date"
+          value={dateFilter}
+          onChange={(value) => {
+            setDateFilter(value);
+            paging.setPage(1);
+          }}
+          options={MOBILE_DATE_FILTERS}
+          title="Filter by date"
+        />
+      </EstimateTableControls>
+      <div hidden={tableControlsEnabled} className="mb-3">
         {" "}
         <Input
           type="search"
@@ -4009,15 +4351,7 @@ function EstimatesMobileListView({
             label="Filter"
             value={filter}
             onChange={setFilter}
-            options={(v3Flag ? V3_CHIPS : PIPELINE_AND_RISK_FILTERS).map(
-              (f) => ({
-                ...f,
-                label:
-                  f.key === "all"
-                    ? `All (${filterCounts.all || 0})`
-                    : `${f.label} (${filterCounts[f.key] || 0})`,
-              }),
-            )}
+            options={filterOptions}
             title="Filter estimates"
           />{" "}
           <MobileChipSheet
@@ -4046,6 +4380,10 @@ function EstimatesMobileListView({
           />{" "}
         </div>{" "}
       </div>
+      <EstimateLoadedScopeNote
+        enabled={tableControlsEnabled}
+        truncated={estimatesTruncated}
+      />
       {error && (
         <div className="mb-3 border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-ui-body">
           Failed to load estimates: {error.message || String(error)}
@@ -4090,10 +4428,11 @@ function EstimatesMobileListView({
         </Card>
       ) : (
         <div className="flex flex-col gap-2">
-          {flat.map((e) => (
+          {paging.displayedRows.map((e) => (
             <MobileEstimateRow
               key={e.id}
               estimate={e}
+              onSoldByChanged={refreshEstimates}
               highlighted={String(e.id) === String(highlightId)}
               onCreateFromAddress={onCreateFromAddress}
               onOpenCustomerPanel={setCustomerPanelId}
@@ -4122,6 +4461,21 @@ function EstimatesMobileListView({
           ))}
         </div>
       )}
+
+      <EstimateTablePagination
+        enabled={tableControlsEnabled}
+        loading={loading}
+        error={error}
+        label="Estimates"
+        page={paging.page}
+        totalPages={paging.totalPages}
+        total={flat.length}
+        pageSize={paging.pageSize}
+        onPageChange={paging.setPage}
+        onPageSizeChange={paging.changePageSize}
+        itemLabel="loaded estimates"
+        pageSizeOptions={ESTIMATE_TABLE_PAGE_SIZES}
+      />
 
       {customerPanelId && (
         <CustomerEstimatesPanel
@@ -4172,6 +4526,7 @@ function EstimatesWorkspace() {
   const isMobile = useIsMobile(768);
   const [searchParams, setSearchParams] = useSearchParams();
   const [newLeadRequest, setNewLeadRequest] = useState(0);
+  const tableControlsEnabled = searchParams.get("tableControls") === "1";
   const readLeadPrefill = useCallback((params) => {
     // `leadId` predates the consolidated Pipeline and has two meanings:
     // old lead-alert links use it to select a lead, while estimate-builder
@@ -4388,6 +4743,7 @@ function EstimatesWorkspace() {
           <EstimatesMobileListView
             deepLinkEstimateId={deepLink.id}
             deepLinkToken={deepLink.token}
+            tableControlsEnabled={tableControlsEnabled}
             onCreateFromAddress={(addr) => {
               setPrefill({
                 leadId: "",
@@ -4406,6 +4762,7 @@ function EstimatesWorkspace() {
           <EstimatePipelineViewV2
             deepLinkEstimateId={deepLink.id}
             deepLinkToken={deepLink.token}
+            tableControlsEnabled={tableControlsEnabled}
           />
         ))}
       {activeTab === "new" && (

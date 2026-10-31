@@ -61,6 +61,14 @@ describe("110-gallon tank reference", () => {
 
   it("uses the server tank amount and includes safety documents in the printable sheet", () => {
     const { container } = render(<ProtocolTankSheet plan={fixture()} calibration={calibration} safetyRules={["Test seasonal restriction"]} />);
+    const screenDocument = container.querySelector(".waves-field-document-body");
+    const printDocument = document.querySelector(".protocol-print-sheet .waves-field-document");
+    for (const surface of [screenDocument, printDocument]) {
+      expect(within(surface).getByRole("heading", { level: 1, name: "110-gallon tank mixing reference" })).toBeInTheDocument();
+      expect(within(surface).getByText("Controlled staff document")).toBeInTheDocument();
+      expect(surface.querySelector("img")).toBeNull();
+      expect(surface.querySelector('a[href^="tel:"], a[href^="mailto:"]')).toBeNull();
+    }
     expect(within(container).getByText("12.5 oz / 110 gal")).toBeInTheDocument();
     const printed = within(document.querySelector(".protocol-print-sheet"));
     expect(printed.getByText("12.5 oz / 110 gal")).toBeInTheDocument();
@@ -69,7 +77,10 @@ describe("110-gallon tank reference", () => {
     expect(printed.getByText("Test seasonal restriction")).toBeInTheDocument();
     expect(printed.getByText("Product label")).toHaveAttribute("href", "https://example.com/label.pdf");
     const print = vi.spyOn(window, "print").mockImplementation(() => {});
-    fireEvent.click(screen.getByRole("button", { name: "Print mixing reference" }));
+    const printButton = screen.getByRole("button", { name: "Print mixing reference" });
+    expect(screenDocument).not.toContainElement(printButton);
+    expect(printButton.closest(".waves-field-no-print")).not.toBeNull();
+    fireEvent.click(printButton);
     expect(print).toHaveBeenCalledOnce();
   });
 

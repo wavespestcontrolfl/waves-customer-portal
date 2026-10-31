@@ -57,8 +57,8 @@ beforeAll(async () => {
 afterAll(async () => {
   if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 });
-beforeEach(() => { mockDb.mockClear(); delete process.env.GATE_BID_DESK; });
-afterEach(() => { delete process.env.GATE_BID_DESK; });
+beforeEach(() => { mockDb.mockClear(); delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_DESK_AUTO_DATES; });
+afterEach(() => { delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_DESK_AUTO_DATES; });
 
 describe('gate off', () => {
   test('the job, the reminders and the backfill do nothing and touch no table', async () => {
@@ -89,6 +89,30 @@ describe('gate off', () => {
     expect(res.status).toBe(200);
     expect(res.body.flags).not.toHaveProperty('bid_desk');
     mockDb.mockReset();
+  });
+});
+
+describe('GATE_BID_DESK_AUTO_DATES', () => {
+  const { bidDeskAutoDatesLive } = require('../config/feature-gates');
+
+  test('it is dark by default and strict: only the exact string "true", and only with the Bid Desk on', () => {
+    expect(bidDeskAutoDatesLive()).toBe(false);
+    process.env.GATE_BID_DESK = 'true';
+    expect(bidDeskAutoDatesLive()).toBe(false);
+    for (const value of ['true ', '1', 'TRUE', 'on', 'yes']) {
+      process.env.GATE_BID_DESK_AUTO_DATES = value;
+      expect(bidDeskAutoDatesLive()).toBe(false);
+    }
+    process.env.GATE_BID_DESK_AUTO_DATES = 'true';
+    expect(bidDeskAutoDatesLive()).toBe(true);
+    delete process.env.GATE_BID_DESK;
+    expect(bidDeskAutoDatesLive()).toBe(false);
+  });
+
+  test('with it off, the Bid Desk on closes nothing and touches no table', async () => {
+    process.env.GATE_BID_DESK = 'true';
+    expect(await service.closeLapsedBids()).toBe(0);
+    expect(mockDb).not.toHaveBeenCalled();
   });
 });
 

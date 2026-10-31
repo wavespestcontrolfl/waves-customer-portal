@@ -27,13 +27,13 @@ describe('costGuidePriceRange (precision-first canonical phrases)', () => {
   test('no allowlisted key is a monthly/yearly plan total — the card shows per-application or per-job prices (read from the feed row unit)', () => {
     const units = new Map(computePublicPricingRanges({ refresh: true }).services.map((row) => [row.key, row.unit]));
     const planTotals = [...units].filter(([, unit]) => /\bper (?:month|year)\b/.test(unit)).map(([key]) => key);
-    expect(planTotals).toEqual(expect.arrayContaining(['tree_shrub_care']));
+    expect(planTotals).toEqual(expect.arrayContaining(['trap_only_retainer']));
     expect(PHRASES.filter(([, keys]) => keys.some((key) => planTotals.includes(key)))).toEqual([]);
     expect(costGuidePriceRange(cost({ primary_keyword: 'tree and shrub care cost' }))).toBeNull();
     // A kept list loses a plan-total key too (checked against the live feed's unit).
-    expect(applyCostGuidePriceRange(cost(), { price_range: ['tree_shrub_care', 'palm_injection'] }).price_range)
+    expect(applyCostGuidePriceRange(cost(), { price_range: ['trap_only_retainer', 'palm_injection'] }).price_range)
       .toEqual(['palm_injection']);
-    expect(applyCostGuidePriceRange(cost(), { price_range: ['tree_shrub_care'] })).not.toHaveProperty('price_range');
+    expect(applyCostGuidePriceRange(cost(), { price_range: ['trap_only_retainer'] })).not.toHaveProperty('price_range');
   });
 
   test.each(PHRASES)('"%s" gets its rows bare, with a city/state/year suffix, and as a "how much does … cost" question', (phrase, keys) => {

@@ -27,7 +27,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(addETDays(REFERENCE, offset));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let CP; let V; let U; let U2; let L; let M; let N; let T; let R2; let TIED; let VISIT;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let CP; let V; let U; let U2; let L; let M; let N; let T; let P; let R2; let TIED; let VISIT;
   const inv = {};
   const tokens = [];
 
@@ -53,8 +53,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const admin = { role: 'admin', context: 'platform', actionContext: { isAdmin: true } };
   const read = (name, input, actionContext = {}) => execute(name, input, { ...admin, actionContext: { isAdmin: true, ...actionContext } });
   const json = (value) => JSON.stringify(value);
-  // Record ids are random UUIDs, and one can hold "4111" by chance (a v4
-  // UUID's third group opens with 4: "…-4111-…", CI 2026-10-03). The PAN
+  // Record ids are random UUIDs, and one can hold "4111" or "4242" by chance
+  // (a v4 UUID's third group opens with 4: "…-4111-…", CI 2026-10-03; any
+  // group can hold the digits: "…-7424258c2df3", CI 2026-10-26). The PAN
   // checks read the result with its ids set aside; a card number in free
   // text is never UUID-shaped.
   const withoutIds = (text) => text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>');
@@ -167,6 +168,18 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const prepayInvoice = await invoice('t_prepay', T, { total: 600, status: 'paid', paid_at: REFERENCE });
     const [term] = await db('annual_prepay_terms').insert({ customer_id: T, prepay_invoice_id: prepayInvoice.id, status: 'active', term_start: day(-30), term_end: day(335), prepay_amount: 600 }).returning('id');
     inv.prepayTermId = term.id || term;
+    // Annual prepays charged after the first visit: the year's draft carries the approval day as its due date until
+    // the release dates it, so a year still waiting is not overdue; one whose charge failed after the visit (pay link
+    // sent) is.
+    P = await customer(`Afterfirst${run}`, `Visit${run}`);
+    for (const [key, status, invoiceStatus] of [['p_waiting', 'awaiting_first_visit', 'draft'], ['p_failed', 'delivered_fallback', 'sent']]) {
+      const year = await invoice(key, P, { total: 368, status: invoiceStatus, due_date: day(-3) });
+      const estimateId = uid();
+      await db('estimates').insert({ id: estimateId, customer_id: P, status: 'accepted',
+        estimate_data: json({ prepayAutoChargeJob: { invoice_id: year.id, status, deferred_to_first_visit: true } }) });
+      await db('annual_prepay_terms').insert({ customer_id: P, source_estimate_id: estimateId, prepay_invoice_id: year.id, status: 'payment_pending',
+        term_start: day(30), term_end: day(395), prepay_amount: 368 });
+    }
     // Conflicting tender evidence: the invoice says bank, its processing payments row says card. And sibling rows that
     // would crowd this invoice's own payment out of a limited history.
     R2 = await customer(`Mixed${run}`, `Tender${run}`);
@@ -852,7 +865,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const spaced = ['4111    1111    1111    1111', '4111\n        1111\n        1111\n        1111', '4111\t1111\t1111\t1111', '4111 \t\n  - 1111  . \n 1111 /   1111'];
     for (const [n, number] of spaced.entries()) await invoice(`q_wide_${n}`, Q, { total: 5, title: `Paid ${number} thanks` });
     const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
-    expect(text).not.toMatch(/4111|1111/);
+    expect(withoutIds(text)).not.toMatch(/4111|1111/);
     expect((text.match(/Paid \[number\] thanks/g) || []).length).toBe(spaced.length);
     // An ISO date-time (space-separated) is still left alone.
     await invoice('q_wide_date', Q, { total: 5, title: 'Seen 2026-10-02 14:05:10 ok' });
@@ -939,6 +952,17 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const list = await withBrokenColumn('collections_flags', 'released_at', () => read('get_customer_invoices', { customer_id: A, limit: 50 }));
     expect(list.error).toBeUndefined();
     expect(by(list, 'credited')).toMatchObject({ collectible: true, balance_due: 100, dispute_hold: null });
+  });
+
+  test('a year charged after its first visit is not overdue while it waits: the row, the summary, the overdue filter and the detail', async () => {
+    const list = await read('get_customer_invoices', { customer_id: P });
+    expect(by(list, 'p_waiting')).toMatchObject({ collectible: true, balance_due: 368, overdue: false });
+    expect(by(list, 'p_failed')).toMatchObject({ collectible: true, balance_due: 368, overdue: true });
+    expect(list.account_summary.overdue_count).toBe(1);
+    const filtered = await read('get_customer_invoices', { customer_id: P, status: 'overdue' });
+    expect(filtered.invoices.map((row) => row.id)).toEqual([inv.p_failed.id]);
+    expect((await read('get_invoice_detail', { invoice_id: inv.p_waiting.id })).invoice).toMatchObject({ overdue: false });
+    expect((await read('get_invoice_detail', { invoice_id: inv.p_failed.id })).invoice).toMatchObject({ overdue: true });
   });
 
   test('annual prepay linkage resolves through the term\'s prepay_invoice_id when the invoice has no term id of its own', async () => {
@@ -1070,7 +1094,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     outputs.push(json(await read('get_customer_invoices', { customer_id: A, include_archived: true, limit: 50 })));
     const all = outputs.join('\n');
     expect(all).not.toMatch(/example\.com/);
-    expect(all).not.toMatch(/4242/);
+    expect(withoutIds(all)).not.toMatch(/4242/);
     expect(all).not.toMatch(/@/);
     for (const token of tokens) expect(all).not.toContain(token);
     expect(all).not.toMatch(/client_secret/);

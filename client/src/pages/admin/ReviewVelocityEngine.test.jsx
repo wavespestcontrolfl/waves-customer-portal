@@ -39,6 +39,45 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("Outreach dashboard when only the analytics read fails", () => {
+  it("shows the failure with a Retry and dashes, never zeros, while candidates stay usable", async () => {
+    let analyticsDown = true;
+    const fetch = vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("outreach-candidates")) {
+        return response({ customers: [customer], reviewSequencesEnabled: true });
+      }
+      if (path.includes("outreach-analytics")) {
+        return analyticsDown
+          ? response({ error: "Synthetic analytics outage" }, 503)
+          : response({
+              funnel: { sent: 12, reviewed: 3, conversionRate: 25 },
+              googleByLocation: [{ locationId: "sarasota", reviews: 4 }],
+              byChannel: [{ channel: "sms", sent: 12, reviewed: 3 }],
+              byTemplate: [],
+              velocity: [],
+            });
+      }
+      return response({ items: [] });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(<ReviewVelocityEngine />);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Outreach numbers could not be loaded: Synthetic analytics outage");
+    const landed = screen.getByText("Reviews Landed").parentElement;
+    expect(landed).toHaveTextContent("—");
+    expect(screen.queryByText("No sends yet")).toBeNull();
+    expect(screen.queryByText("No Google reviews in the last 90 days yet.")).toBeNull();
+    expect(screen.getByText("In Pipeline").parentElement).toHaveTextContent("1");
+
+    analyticsDown = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getByText("Reviews Landed").parentElement).toHaveTextContent("4");
+  });
+});
+
 describe("Review outreach interactions", () => {
   it("opens the shared customer sheet and preserves the edited template payload", async () => {
     const fetch = vi.fn(async (url, options = {}) => {

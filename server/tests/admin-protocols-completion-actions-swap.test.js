@@ -169,3 +169,63 @@ describe('/completion-actions on a December visit', () => {
     expect(mockLoadActive).not.toHaveBeenCalled();
   });
 });
+
+// A visit on a 9x rounds series (recurring_pattern lawn_rounds_9, scheduledServiceId) gets the chips of the step of its ROUND, with the
+// round's variant (April's 9x bag, February's 1.0 lb N bag) and the real date's weed lines; every other visit keeps the calendar-month
+// step it had (a legacy 9x April visit still shows the 12x bag here: that gap is not part of the rounds work).
+describe('/completion-actions on a 9x rounds visit', () => {
+  const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+  const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
+  const F44 = 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer';
+  const ROUNDS_CATALOG = [
+    ...CATALOG,
+    { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_p: 0, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' },
+    { id: 'dim', name: DIMENSION, aliases: [], analysis_n: 18, analysis_p: 0, analysis_k: 10, default_rate_per_1000: 2.78, rate_unit: 'lb' },
+    { id: 'f44', name: F44, aliases: [], analysis_n: 44, analysis_p: 0, analysis_k: 0, default_rate_per_1000: 2.27, rate_unit: 'lb' },
+    { id: 'cel', name: 'Celsius WG', aliases: [], default_rate_per_1000: 0.085, rate_unit: 'oz' },
+    { id: 'cer', name: 'Certainty Turf Herbicide', aliases: [], default_rate_per_1000: 0.028, rate_unit: 'oz' },
+  ];
+  beforeEach(() => {
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'products_catalog' ? readQuery(ROUNDS_CATALOG) : base(table)));
+  });
+  const withVisit = (date, extra = {}) => { visit = { ...visit, scheduled_date: date, recurring_pattern: 'lawn_rounds_9', ...extra }; };
+  const weedRaws = (body) => rawsOf(body).filter((raw) => /^(Celsius|Certainty|Blindside|LESCO 90\/10)/.test(raw)).map((raw) => raw.split(' — ')[0]);
+
+  test('round 3 (Mar 20, client month 3): the 4.17 lb February bag, the 1.0 lb N objective and March\'s weed lines', async () => {
+    withVisit('2027-03-20');
+    const body = await actions({ track: 'st_augustine', month: '3' });
+    expect(body.month).toBe('Feb');
+    expect(rawsOf(body)).toContain(`${F24} — 4.17 lb per 1,000 sq ft (1.0 lb N), spreader`);
+    expect(rawsOf(body).join('\n')).not.toContain('3.1 lb per 1,000 sq ft (0.75 lb N)');
+    expect(body.visit.objective.startsWith('N rate: 1.0 lb N.')).toBe(true);
+    expect(weedRaws(body)).toEqual(['Celsius WG', 'Certainty Turf Herbicide', 'LESCO 90/10 Nonionic Surfactant', 'Blindside Herbicide']);
+  });
+
+  test('round 2 (Mar 10, St. Augustine): April\'s 9x Dimension bag and February\'s green-up Celsius alone', async () => {
+    withVisit('2027-03-10');
+    const body = await actions({ track: 'st_augustine', month: '3' });
+    expect(body.month).toBe('Apr');
+    expect(rawsOf(body)).toContain(`${DIMENSION} — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader`);
+    expect(rawsOf(body).join('\n')).not.toContain(F44);
+    expect(body.visit.objective.startsWith('N rate: 0.5 lb N.')).toBe(true);
+    expect(weedRaws(body)).toEqual(['Celsius WG']);
+  });
+
+  test('a 12x February visit keeps the 3.1 lb bag; a legacy 9x (custom 42) April visit keeps the 12x bag, as before', async () => {
+    withVisit('2027-02-10', { recurring_pattern: 'monthly' });
+    const feb = await actions({ track: 'st_augustine', month: '2' });
+    expect(rawsOf(feb)).toContain(`${F24} — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader`);
+    withVisit('2027-04-09', { recurring_pattern: 'custom', recurring_interval_days: 42 });
+    const apr = await actions({ track: 'st_augustine', month: '4' });
+    expect(apr.month).toBe('Apr');
+    expect(rawsOf(apr).join('\n')).toContain(F44);
+    expect(rawsOf(apr).join('\n')).not.toContain(DIMENSION);
+  });
+
+  test('without scheduledServiceId the chips are the calendar month\'s, whatever the visit is', async () => {
+    withVisit('2027-03-20');
+    const body = await actions({ track: 'st_augustine', month: '3', scheduledServiceId: undefined });
+    expect(body.month).toBe('Mar');
+  });
+});

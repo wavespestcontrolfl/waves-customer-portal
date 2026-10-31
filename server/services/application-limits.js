@@ -198,13 +198,13 @@ const isBermudaProgramRow = (limit) => limit.match_value === BERMUDA_PROGRAM;
 // A row whose property is unknown (no visit, or a visit with no property) cannot be proven
 // elsewhere, so it still counts. No option, no change.
 // GATE_LAWN_TROUBLE_AREAS: `place` narrows the history to one place of the lawn. A row with no place on
-// record (every row before the gate, and every whole-lawn row) counts at EVERY place, so it stays in.
+// record (every row before the gate, and every whole-lawn row) counts at EVERY place, so it stays in. A row
+// names its places as a list (treated_places): one application on the Front and the Back counts at each.
 // Ignored unless the gate is live, so a caller cannot change a gate-off read by passing one.
 function scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId, place } = {}, table) {
   if (place && require('../config/feature-gates').lawnTroubleAreasLive()) {
-    query.where(function placedHereOrUnplacedInLawn() {
-      this.whereNull(`${table}.treated_place`).orWhere(`${table}.treated_place`, place);
-    });
+    const places = require('./lawn-trouble-areas').placesSql(table);
+    query.whereRaw(`(${places} IS NULL OR ? = ANY(${places}))`, [place]);
   }
   if (propertyId) {
     // The row's treated property is the one frozen on the ledger when it was written (an address

@@ -14,7 +14,8 @@
  * Shapes removed (each becomes "[removed]"):
  *  - PEM blocks (-----BEGIN ... -----), to the END line or to the end of the text
  *  - known token prefixes: sk-/sk_, pk_, rk_, whsec_, ghp_/gho_/ghu_/ghs_/ghr_,
- *    github_pat_, xox[abprs]-, AKIA/ASIA access key ids, AIza keys, SG. keys
+ *    github_pat_, xox[abprs]-, AKIA/ASIA access key ids, Google keys (AIza... and the newer
+ *    AQ. + 50 characters), SG. keys
  *  - "Bearer <token>"
  *  - JWTs (three base64url parts, the first starting eyJ)
  *  - the value of a credential-named query parameter inside a URL
@@ -66,6 +67,7 @@ const PREFIXED_RES = [
   /\bxox[abeprs]-[A-Za-z0-9-]{10,}/g,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
   /\bAIza[0-9A-Za-z_-]{35}/g,
+  /\bAQ\.[0-9A-Za-z_-]{40,}/g, // Google key bound to a service account (AI Studio, "AQ." + 50 characters)
   /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
 ];
 // "Bearer <token>": a long token always; a short one when it looks like a token

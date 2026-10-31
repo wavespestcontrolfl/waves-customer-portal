@@ -266,6 +266,40 @@ describe('watering preview equals the report banner (real buildReportV1Data)', (
     });
   });
 
+  // Owner 2026-10-27: a visit worked on an earlier day and completed now gets no steps, so the sheet shows none,
+  // exactly as the completion freezes none (lawn-watering-late-close.js).
+  test('a visit worked on an earlier day previews no steps, as the completion freezes none', async () => {
+    // Part of GATE_LAWN_WATERING_EVERY_VISIT (needs the SMS and rule gates).
+    const keys = ['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_EVERY_VISIT'];
+    const before = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    for (const k of keys) process.env[k] = 'true';
+    try {
+      await lateCloseCase();
+    } finally {
+      for (const k of keys) { if (before[k] === undefined) delete process.env[k]; else process.env[k] = before[k]; }
+    }
+  });
+
+  async function lateCloseCase() {
+    const { service, knex } = fixtureFor([WATER_IN_ROW], CONFIRMED_PREFS);
+    // Arrived Sep 29 at 2 PM, the day it was scheduled; completed Sep 30 at 2:40 PM.
+    const visits = [{ id: SERVICE, 'scheduled_services.id': SERVICE, customer_id: 'cust-lawn-w1', scheduled_date: '2026-09-29', arrived_at: '2026-09-29T18:00:00Z', status: 'completed', service_type: 'Lawn Care Treatment Program' }];
+    const lateKnex = (table) => (table === 'scheduled_services' ? makeKnex({ scheduled_services: visits })(table) : knex(table));
+    lateKnex.raw = knex.raw;
+    const out = {};
+    const data = await buildReportV1Data({ ...service, arrived_at: '2026-09-29T18:00:00Z' }, 'token-w1', lateKnex, { wateringInstructionOut: out });
+    expect(out.lateClose).toBe(true);
+    expect(data.reportV2.banner).toBeUndefined();
+    const preview = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: [WATER_IN_ROW.id], knex: lateKnex, now: NOW });
+    expect(preview.ok).toBe(true);
+    expect(preview.state).toBeNull();
+    expect(preview.lines).toEqual([]);
+    expect(preview.sentence).toBeNull();
+    // The same visit arrived the day it closes previews its steps.
+    const sameDay = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: [WATER_IN_ROW.id], knex, now: NOW });
+    expect(sameDay.state).toBe('water_in');
+  }
+
   test('the response says which inputs are provisional', async () => {
     const { preview } = await both([HOLD_ROW], CONFIRMED_PREFS);
     expect(preview.asOf).toBe(NOW.toISOString());

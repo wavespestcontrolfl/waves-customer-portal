@@ -148,33 +148,34 @@ export function useDispatchAlerts() {
     setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current));
   }, []);
 
+  const loadAlerts = useCallback(async (isCancelled = () => false) => {
+    if (isCancelled()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await hydrate(isCancelled);
+      if (isCancelled()) return;
+      setLoading(false);
+    } catch (err) {
+      if (isCancelled()) return;
+      setError(err.message || 'Failed to load alerts');
+      setLoading(false);
+    }
+  }, [hydrate]);
+  const retryAlerts = useCallback(() => loadAlerts(), [loadAlerts]);
+
   // ---- initial hydration ----
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        // Merge with current state instead of overwriting. The socket
-        // subscription mounts concurrently with this fetch, so a
-        // dispatch:alert broadcast can land while the GET is in
-        // flight. If we just setAlerts(fetched), that broadcast's
-        // row gets dropped — the GET response was generated from an
-        // earlier DB snapshot. Codex P1 on PR #306.
-        //
-        // Dedupe by id — see mergeHydration (live fields win over the
-        // enriched snapshot; resolved cards stay gone).
-        await hydrate(() => cancelled);
-        if (cancelled) return;
-        setLoading(false);
-      } catch (err) {
-        if (cancelled) return;
-        setError(err.message || 'Failed to load alerts');
-        setLoading(false);
-      }
-    })();
+    // Merge with current state instead of overwriting. The socket
+    // subscription mounts concurrently with this fetch, so a
+    // dispatch:alert broadcast can land while the GET is in flight.
+    // Dedupe by id and preserve resolved tombstones via hydrate.
+    loadAlerts(() => cancelled);
     return () => {
       cancelled = true;
     };
-  }, [hydrate]);
+  }, [loadAlerts]);
 
   // ---- socket subscription ----
   useEffect(() => {
@@ -278,5 +279,13 @@ export function useDispatchAlerts() {
     return res.json();
   }, [markResolved, hydrate]);
 
-  return { alerts, loading, error, resolveAlert, clearAlerts, decideNotClosedOut };
+  return {
+    alerts,
+    loading,
+    error,
+    retryAlerts,
+    resolveAlert,
+    clearAlerts,
+    decideNotClosedOut,
+  };
 }

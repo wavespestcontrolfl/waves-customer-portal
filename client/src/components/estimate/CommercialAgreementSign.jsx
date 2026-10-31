@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { COLORS } from '../../theme-brand';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../../constants/business';
 import { estimateCard } from './cardStyles';
+import CommercialFirstVisitPicker, { firstVisitLabel } from './CommercialFirstVisitPicker';
 import { W } from './tokens';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -18,12 +19,28 @@ export const SIGN_BUTTON_LABEL = 'Accept & sign agreement';
  * Commercial Pest Service Agreement and returns its signing URL; this page
  * then hands the customer to that existing signing page. Signing is not
  * acceptance: the copy says Waves follows up to schedule, and promises no
- * payment, visit or start date.
+ * payment, visit or start date. With GATE_COMMERCIAL_FIRST_VISIT on and an
+ * eligible proposal, the customer picks the first visit after signing
+ * instead (CommercialFirstVisitPicker); booking it is the acceptance.
  */
-export default function CommercialAgreementSign({ token, commercialAgreement }) {
+// `firstVisit` is /data's cta.commercialFirstVisit (GATE_COMMERCIAL_FIRST_VISIT), absent with the gate off: 'pick' turns
+// the signed state into the first-visit picker, 'booked' shows the booked visit, and 'after_signing' tells an unsigned
+// customer they pick the visit next.
+export default function CommercialAgreementSign({ token, commercialAgreement, firstVisit = null, onFirstVisitBooked = null }) {
   const inFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // Back from the signing page through the browser's history: a bfcache restore keeps the busy state set before the
+  // page left, so the button works again.
+  useEffect(() => {
+    const onPageShow = (event) => {
+      if (!event.persisted) return;
+      inFlight.current = false;
+      setBusy(false);
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
   if (!commercialAgreement) return null;
   const { canSign, state, reason } = commercialAgreement;
 
@@ -56,10 +73,18 @@ export default function CommercialAgreementSign({ token, commercialAgreement }) 
   );
 
   if (state === 'signed') {
+    if (firstVisit?.state === 'pick') {
+      return <CommercialFirstVisitPicker token={token} durationMinutes={firstVisit.durationMinutes} onBooked={onFirstVisitBooked} />;
+    }
+    const bookedLabel = firstVisit?.state === 'booked' ? firstVisitLabel(firstVisit.visit) : null;
     return (
       <div data-glass="card" data-testid="commercial-agreement-signed" style={estimateCard()}>
         <div style={heading}>Service agreement signed</div>
-        <div style={body}>Thank you for signing. Our team will follow up to schedule your first visit.</div>
+        <div style={body}>
+          {bookedLabel
+            ? <>Thank you for signing. Your first visit is booked for {bookedLabel}.</>
+            : 'Thank you for signing. Our team will follow up to schedule your first visit.'}
+        </div>
       </div>
     );
   }
@@ -83,7 +108,9 @@ export default function CommercialAgreementSign({ token, commercialAgreement }) 
       <div style={body}>
         {state === 'awaiting'
           ? 'Your service agreement is ready for your signature. Pick up where you left off.'
-          : 'Review and sign the Commercial Pest Service Agreement online. No payment is due when you sign, and our team will follow up to schedule your first visit.'}
+          : (firstVisit?.state === 'after_signing'
+            ? 'Review and sign the Commercial Pest Service Agreement online. No payment is due when you sign. Then you pick the day and time of your first visit.'
+            : 'Review and sign the Commercial Pest Service Agreement online. No payment is due when you sign, and our team will follow up to schedule your first visit.')}
       </div>
       <button
         type="button"

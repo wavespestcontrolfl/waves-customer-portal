@@ -26,7 +26,7 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { anthropicText, geminiText } = require('./llm/call');
+const { anthropicText, geminiText, dispatch, rejectCall } = require('./llm/call');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
@@ -41,13 +41,22 @@ const PROMPT_VERSION = 'lawn-diagnostic-v0.7';
 const MAX_PROMPT_IMAGES = 5;
 
 // ── Multi-model pipeline config (env-overridable, no new SDK deps) ─────────────
-// Perception = Gemini Flash (vision); Challenge = Claude Opus 4.8 (the adversarial
+// Perception = Gemini Flash (vision), OpenAI backup on a miss; Challenge = Claude Opus 4.8 (the adversarial
 // reasoner — pinned independently of the app-wide FLAGSHIP, which stays Opus 4.7);
 // Writer = GPT-5.5 (OpenAI Responses API). Each is reached by direct REST / SDK,
 // mirroring the existing property-lookup / lawn-assessment integrations.
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+// Perception backup (owner 2026-10-29, "sure add it"; ROUTES.lawnDiagnosisPerceptionBackup
+// documents the ruling): when the Gemini read misses for any reason, the lawn photo lane's
+// OpenAI model reads the same photos with the same prompt. It runs through the adapter, so
+// it is recorded under lawn_diag_vision and carries its own deadline; the Gemini primary
+// stays a raw fetch. The route is read at call time (perceiveWithOpenAI): many suites mock
+// config/models without ROUTES and still load this module through other services.
+const PERCEPTION_BACKUP_TIMEOUT_MS = 120 * 1000;
+// Reasoning tokens count against the Responses cap; leave room for the observations JSON.
+const PERCEPTION_BACKUP_MAX_TOKENS = 4096;
 // Anthropic challenge model comes from the central registry (server/config/models.js),
 // never a hardcoded ID here — shares the app-wide model swap/check workflow.
 const LAWN_CHALLENGE_MODEL = MODELS.LAWN_CHALLENGE;
@@ -521,23 +530,24 @@ async function runDiagnosis(context = {}) {
   }
 }
 
-/**
- * STAGE 1 — perception (Gemini Flash). Photos → visible observations only (no cause).
- * Returns { ok, observations, overall_notes, model, reason }. Never throws.
- */
-async function runPerception(context = {}) {
-  if (!GEMINI_KEY) return { ok: false, reason: 'no_gemini_key' };
-  const photos = (context.photos || []).filter((photo) => photo && photo.data).slice(0, MAX_PROMPT_IMAGES);
-  if (!photos.length) return { ok: false, reason: 'no_photos' };
+// The observations list of a perception reply (either provider's JSON), or [].
+function perceptionObservations(parsed) {
+  return Array.isArray(parsed?.observations)
+    ? parsed.observations.filter((obs) => obs && typeof obs === 'object')
+    : [];
+}
 
+// The Gemini read: the primary. Same request as before the backup existed. Never throws.
+async function perceiveWithGemini(photos, season) {
+  if (!GEMINI_KEY) return { ok: false, reason: 'no_gemini_key' };
   try {
     const parts = [
       ...photos.map((photo) => ({ inline_data: { mime_type: photo.mimeType || 'image/jpeg', data: photo.data } })),
-      { text: `${PERCEPTION_PROMPT}\n\nReport observations for the ${photos.length} photo(s) above. Season: ${context.season || 'unknown'}.` },
+      { text: `${PERCEPTION_PROMPT}\n\nReport observations for the ${photos.length} photo(s) above. Season: ${season || 'unknown'}.` },
     ];
     const resp = await fetch(geminiUrl(LAWN_VISION_MODEL), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
       // Room for a "thinking" Flash model to reason AND emit the observations JSON.
       body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 2048 } }),
     });
@@ -549,9 +559,7 @@ async function runPerception(context = {}) {
     // The shared parser joins every answer part and skips thought parts.
     const text = geminiText(data);
     const parsed = parseLooseJson(text);
-    const observations = Array.isArray(parsed?.observations)
-      ? parsed.observations.filter((obs) => obs && typeof obs === 'object')
-      : [];
+    const observations = perceptionObservations(parsed);
     if (!observations.length) return { ok: false, reason: 'no_observations' };
     return {
       ok: true,
@@ -563,6 +571,63 @@ async function runPerception(context = {}) {
     logger.error(`[lawn-diagnostic-prompt] runPerception failed: ${err.message}`);
     return { ok: false, reason: 'error' };
   }
+}
+
+// The backup read (OpenAI, through the adapter, which records the call and enforces the
+// deadline). A reply with no observations flips its recorded row. Never throws, even if
+// dispatch() does.
+async function perceiveWithOpenAI(photos, season) {
+  const route = MODELS.ROUTES && MODELS.ROUTES.lawnDiagnosisPerceptionBackup;
+  if (!route) return { ok: false, reason: 'no_route' };
+  let result;
+  try {
+    result = await dispatch(route, {
+      text: `${PERCEPTION_PROMPT}\n\nReport observations for the ${photos.length} attached photo(s). Season: ${season || 'unknown'}.`,
+      images: photos.map((photo) => ({ data: photo.data, mimeType: photo.mimeType || 'image/jpeg' })),
+      jsonMode: true,
+      maxTokens: PERCEPTION_BACKUP_MAX_TOKENS,
+      timeoutMs: PERCEPTION_BACKUP_TIMEOUT_MS,
+      laneId: 'lawn_diag_vision',
+    });
+  } catch (err) {
+    logger.error(`[lawn-diagnostic-prompt] runPerception OpenAI backup threw: ${err.message}`);
+    return { ok: false, reason: 'error' };
+  }
+  if (!result || !result.ok) return { ok: false, reason: (result && result.reason) || 'error' };
+  const observations = perceptionObservations(result.json);
+  if (!observations.length) {
+    rejectCall(result, 'no_observations');
+    return { ok: false, reason: 'no_observations' };
+  }
+  return {
+    ok: true,
+    observations,
+    overall_notes: typeof result.json.overall_notes === 'string' ? result.json.overall_notes : '',
+    model: route.model,
+  };
+}
+
+/**
+ * STAGE 1 — perception. Photos → visible observations only (no cause). Gemini reads
+ * first; any miss (no key, an HTTP error such as the spend-cap 429, a failed request,
+ * no observations) hands the same photos to the OpenAI backup.
+ * Returns { ok, observations, overall_notes, model, reason }. Never throws.
+ * `model` names the model that actually read the photos. On a backup read
+ * `primaryReason` says why Gemini missed; when both miss, `reason` stays Gemini's
+ * (the ladder's fallback_reason) and `backupReason` is OpenAI's.
+ */
+async function runPerception(context = {}) {
+  const photos = (context.photos || []).filter((photo) => photo && photo.data).slice(0, MAX_PROMPT_IMAGES);
+  if (!photos.length) return { ok: false, reason: 'no_photos' };
+  const primary = await perceiveWithGemini(photos, context.season);
+  if (primary.ok) return primary;
+  const backup = await perceiveWithOpenAI(photos, context.season);
+  if (backup.ok) {
+    logger.warn(`[lawn-diagnostic-prompt] runPerception: Gemini missed (${primary.reason}); the OpenAI backup read the photos`);
+    return { ...backup, primaryReason: primary.reason };
+  }
+  logger.warn(`[lawn-diagnostic-prompt] runPerception: Gemini missed (${primary.reason}) and the OpenAI backup missed (${backup.reason})`);
+  return { ok: false, reason: primary.reason, backupReason: backup.reason };
 }
 
 // Provenance for the adversarial layer — so a later "this report looks too generic" or

@@ -210,3 +210,124 @@ describe('reaction recognizers stay linear on adversarial input', () => {
     expect(isSmsReaction(`Liked \u201c${'a'.repeat(1600)}\u201d`)).toBe(true); // a full-length quoted text still counts
   });
 });
+
+describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', () => {
+  const { courtesyTailWould, courtesyTailShadowMetadata } = require('../services/sms-intent');
+  const { courtesyTailMode } = require('../config/feature-gates');
+  const GATE = 'GATE_SMS_COURTESY_TAIL';
+  const saved = process.env[GATE];
+  afterEach(() => {
+    if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved;
+  });
+  const setGate = (v) => { if (v === undefined) delete process.env[GATE]; else process.env[GATE] = v; };
+
+  // Texts only the NEW rule closes.
+  const NEWLY_CLOSED = ['Perfect. Go browns', 'Thanks! Enjoy the weekend', 'Great, have a good one, Go Browns', 'Thanks. Go browns', 'Great, enjoy the weekend', 'Perfect. Go browns, have a great day', 'Thanks. Go browns, thanks again', 'Great! Roll tide', 'Awesome, take care'];
+  // Already closed by the strict rule (true in every gate state).
+  const ALREADY_CLOSED = ['Great, have a good one', 'Perfect. Have a good one', 'Thanks! Appreciate you', 'Awesome, appreciate you'];
+  const STAYS_OPEN = [
+    'Perfect, can you also do the back yard',
+    'Great, but the gate is locked',
+    'Thanks, the code is 1234',
+    'Perfect. When are you coming',
+    'Ok, my dog will be out',
+    'Thanks, I paid the invoice',
+    'Perfect. Go browns?',
+    'Thanks. See you at 5',
+    'Thanks, email me at a@b.co',
+    'Thanks. Visit www.example.com',
+    'Ok. Go browns',
+    'Thanks. One two three four five six seven',
+    'Perfect. Ants are back',
+    'Thanks. We are out of town',
+    'Perfect. Go browns \u{1F43C}',
+    // Codex P1 (pre-push audit): unknown prose in the tail is actionable
+    'Thanks. You missed the backyard',
+    'Thanks. Cockroaches everywhere',
+    'Thanks. My card was charged twice',
+    'Thanks. Go check the yard',
+    'Thanks. Go figure',
+    'Perfect. See you Tuesday',
+    'Awesome! Talk soon buddy',
+    'Perfect. Go browns, have a great day, take care',
+    'Perfect. Go browns, please call',
+  ];
+
+  it('mode reader: only shadow and true (trimmed, any case) are on', () => {
+    setGate(undefined); expect(courtesyTailMode()).toBe('off');
+    setGate(''); expect(courtesyTailMode()).toBe('off');
+    setGate('1'); expect(courtesyTailMode()).toBe('off');
+    setGate(' Shadow '); expect(courtesyTailMode()).toBe('shadow');
+    setGate('TRUE'); expect(courtesyTailMode()).toBe('true');
+  });
+
+  it('the pure rule says true for the new class and false for everything else, any gate state', () => {
+    for (const mode of [undefined, 'shadow', 'true']) {
+      setGate(mode);
+      for (const t of NEWLY_CLOSED) expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, true]);
+      for (const t of [...ALREADY_CLOSED, ...STAYS_OPEN]) expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, false]);
+    }
+  });
+
+  it('off (unset or other): isCourtesyOnly is the strict rule', () => {
+    for (const mode of [undefined, 'off', 'yes', '1']) {
+      setGate(mode);
+      for (const t of NEWLY_CLOSED) expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
+      for (const t of ALREADY_CLOSED) expect(isCourtesyOnly(t, { awaitingAnswer: false })).toBe(true);
+      for (const t of STAYS_OPEN) expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
+    }
+  });
+
+  it('shadow: every isCourtesyOnly result equals the off result', () => {
+    const all = [...NEWLY_CLOSED, ...ALREADY_CLOSED, ...STAYS_OPEN, 'Thanks!', 'Ok', '\u{1F44D}', '', null, undefined];
+    for (const awaitingAnswer of [true, false]) {
+      setGate(undefined);
+      const off = all.map((t) => isCourtesyOnly(t, { awaitingAnswer }));
+      setGate('shadow');
+      expect(all.map((t) => isCourtesyOnly(t, { awaitingAnswer }))).toEqual(off);
+    }
+    setGate('shadow');
+    expect(isCourtesyOnly('Perfect. Go browns')).toBe(false); // default awaitingAnswer = true
+  });
+
+  it('true: the new class closes; the rest stays open; an open question keeps everything open', () => {
+    setGate('true');
+    for (const t of [...NEWLY_CLOSED, ...ALREADY_CLOSED]) expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
+    for (const t of STAYS_OPEN) expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
+    for (const t of [...NEWLY_CLOSED, ...ALREADY_CLOSED, ...STAYS_OPEN]) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]);
+      expect([t, isCourtesyOnly(t)]).toEqual([t, false]);
+      expect(courtesyTailWould(t, { awaitingAnswer: true })).toBe(false);
+    }
+  });
+
+  it('true: the 10-24 real case closes ("Perfect. Go browns" and "Perfect. Go Browns!")', () => {
+    setGate('true');
+    expect(isCourtesyOnly('Perfect. Go browns', { awaitingAnswer: false })).toBe(true);
+    expect(isCourtesyOnly('Perfect. Go Browns!', { awaitingAnswer: false })).toBe(true);
+  });
+
+  it('the TAIL must be a recognized sign-off; a denylist word inside one still blocks it', () => {
+    for (const t of ['Thanks. Go Cowboys', 'Thanks. Happy Thanksgiving', 'Thanks. Stay safe, god bless', 'Thanks. Good luck', 'Thanks. Good luck, take care']) {
+      expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, true]);
+    }
+    for (const t of ['Thanks. Go dogs', 'Thanks. Go rangers', 'Thanks. Have a good gate', 'Thanks. Go']) {
+      expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, false]);
+    }
+  });
+
+  it('shadow metadata: stamped only in shadow and only when the rule says true', () => {
+    expect(courtesyTailShadowMetadata('shadow', true)).toEqual({ courtesyTailWould: true });
+    expect(courtesyTailShadowMetadata('shadow', false)).toEqual({});
+    expect(courtesyTailShadowMetadata('off', true)).toEqual({});
+    expect(courtesyTailShadowMetadata('true', true)).toEqual({});
+    expect(courtesyTailShadowMetadata(undefined, true)).toEqual({});
+    expect(courtesyTailShadowMetadata('shadow', 'yes')).toEqual({});
+  });
+
+  it('the webhook spreads the shadow stamp into both the sms_log and the messages metadata', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/twilio-webhook.js'), 'utf8');
+    expect(src.match(/\.\.\.courtesyTailMetadata/g)).toHaveLength(2);
+    expect(src).toContain("courtesyTailShadowMetadata('shadow',");
+  });
+});

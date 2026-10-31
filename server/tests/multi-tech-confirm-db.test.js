@@ -138,10 +138,6 @@ describeDb('tech-aware confirm scope on real PostgreSQL', () => {
       await expect(adminProbe('09:00', '10:00')).resolves.toEqual([ROW_A]);
       await expect(adminProbe('09:00', '10:00', { technicianId: TECH_B })).resolves.toEqual([ROW_A]);
       await expect(adminProbe('15:00', '16:00', { technicianId: TECH_A })).resolves.toEqual([ROW_B]);
-      // Gate alone (capacity off) is also tech-blind.
-      delete process.env.GATE_SCHEDULING_CAPACITY;
-      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
-      await expect(adminProbe('09:00', '10:00', { technicianId: TECH_B })).resolves.toEqual([ROW_A]);
     });
 
     test('scope on: a stop on another technician\'s route no longer reads as an overlap; unassigned and same-technician stops still do', async () => {
@@ -155,8 +151,9 @@ describeDb('tech-aware confirm scope on real PostgreSQL', () => {
     });
   });
 
-  test('gate on but capacity mode off: scope is not applied (offer side is tech-blind too)', async () => {
+  // Owner 2026-10-30: the gate alone scopes in hour mode (same-hour-techs-db.test.js has the full set).
+  test('gate on, capacity mode off: scope IS applied (hour mode, two technicians can share an hour)', async () => {
     process.env.GATE_MULTI_TECH_CONFIRM = 'true';
-    await expect(probe('09:00', '10:00', { technicianId: TECH_B })).resolves.toEqual([ROW_A]);
+    await expect(probe('09:00', '10:00', { technicianId: TECH_B })).resolves.toEqual([]);
   });
 });

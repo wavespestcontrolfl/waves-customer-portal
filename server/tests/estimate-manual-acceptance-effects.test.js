@@ -24,7 +24,8 @@ jest.mock('../services/proposal-win', () => ({
   ensureCustomerForProposalWin: jest.fn(),
   promoteLinkedCustomerForProposalWin: jest.fn(),
   flagProposalCustomerCommercialIfTaxable: jest.fn(),
-  createProposalAcceptanceInvoice: jest.fn(),
+  recordProposalBuildingUse: jest.fn(),
+  assertProposalTermsMatchPayer: jest.fn(),
 }));
 
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -1560,6 +1561,56 @@ describe('the post-commit plan (pure)', () => {
     ]);
   });
 
+  test('the Florida consumer notice step is planned only with its gate on, after the termite agreement', () => {
+    expect(Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: accepted, conversion }).some((s) => s.step === 'consumer_notice')).toBe(false);
+    const plan = Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: accepted, conversion, consumerNoticeLive: true, consumerNoticeSends: true });
+    expect(plan.map((s) => s.step).slice(-2)).toEqual(['termite_agreement', 'consumer_notice']);
+    expect(plan.find((s) => s.step === 'consumer_notice')).toEqual({ step: 'consumer_notice', sends: true });
+    // A carded accept carries the masked recipients the card shows.
+    const carded = Effects.planPostCommit({
+      billingTerm: 'standard', acceptedEstimate: accepted, conversion, consumerNoticeLive: true, consumerNoticeSends: true,
+      consumerNoticeRecipients: { email: 'pat@example.com', phone: '+19415550100' },
+    });
+    expect(carded.find((s) => s.step === 'consumer_notice')).toEqual({ step: 'consumer_notice', sends: true, to_email: 'p***@example.com', to_phone: '***00' });
+    const noCustomer = Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: { id: 'est-1', customer_id: null }, conversion: null, consumerNoticeLive: true });
+    expect(noCustomer.some((s) => s.step === 'consumer_notice')).toBe(false);
+  });
+
+  test('the consumer notice step hands the accepted estimate to the sender without waiting on it', async () => {
+    const notice = require('../services/estimate-consumer-notice');
+    let release;
+    const send = jest.spyOn(notice, 'sendManualAcceptConsumerNotice').mockImplementation(() => new Promise((r) => { release = r; }));
+    try {
+      await Effects.POST_COMMIT_STEPS.consumer_notice.run({ step: 'consumer_notice' }, { acceptedEstimate: { id: 'est-9', customer_id: 'cust-1' } });
+      expect(send).toHaveBeenCalledWith({ estimateId: 'est-9', customerId: 'cust-1', expected: null });
+      // A carded accept hands over the pinned target, which the sender checks again before delivery.
+      const target = { estimate_id: 'est-9', customer_id: 'cust-1', contract_id: null, email_key: 'k', phone_key: null };
+      await Effects.POST_COMMIT_STEPS.consumer_notice.run({ step: 'consumer_notice', target }, { acceptedEstimate: { id: 'est-9', customer_id: 'cust-1' } });
+      expect(send).toHaveBeenLastCalledWith({ estimateId: 'est-9', customerId: 'cust-1', expected: target });
+      release({ sent: true });
+    } finally {
+      send.mockRestore();
+    }
+  });
+
+  test('a consumer notice step whose pinned target changed is skipped, and the office bell is raised instead', async () => {
+    const notice = require('../services/estimate-consumer-notice');
+    const send = jest.spyOn(notice, 'sendManualAcceptConsumerNotice').mockResolvedValue({ sent: true });
+    const skipped = jest.spyOn(notice, 'alertManualAcceptConsumerNoticeSkipped').mockResolvedValue();
+    const resolve = jest.spyOn(Effects.POST_COMMIT_STEPS.consumer_notice, 'resolveTarget').mockResolvedValue({ email_key: 'new' });
+    try {
+      const warnings = [];
+      await Effects.runPostCommit([{ step: 'consumer_notice', sends: true, target: { email_key: 'old' } }], {
+        acceptedEstimate: { id: 'est-9', customer_id: 'cust-1' }, warnings,
+      });
+      expect(send).not.toHaveBeenCalled();
+      expect(skipped).toHaveBeenCalledWith({ estimateId: 'est-9', customerId: 'cust-1' });
+      expect(warnings).toEqual([`${Effects.STEP_LABELS.consumer_notice}: what it acts on changed after the accept. Complete it by hand.`]);
+    } finally {
+      send.mockRestore(); skipped.mockRestore(); resolve.mockRestore();
+    }
+  });
+
   test('an annual prepay accept never plans the membership email', () => {
     const plan = Effects.planPostCommit({ billingTerm: 'prepay_annual', acceptedEstimate: accepted, conversion });
     expect(plan.some((s) => s.step === 'membership_email')).toBe(false);
@@ -1626,6 +1677,7 @@ describe('round 7: every post-commit step resolves its target in the dry run and
       tierUpgradeNotification: { title: 'c' }, planRateReviewNotification: { title: 'd' },
     },
     termiteProgram: true,
+    consumerNoticeLive: true,
   };
 
   test('plan-level: every step the plan can list declares resolveTarget and run, and the table has no other step', () => {

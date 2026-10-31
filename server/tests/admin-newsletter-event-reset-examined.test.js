@@ -37,7 +37,8 @@ function mockEventsTable() {
     const q = {};
     ['where', 'whereIn', 'select'].forEach((method) => { q[method] = jest.fn(() => q); });
     q.first = jest.fn(async () => ({ id: EVENT_UUID, admin_status: 'approved' }));
-    q.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
+    // update(patch, ['id']) is the bulk route's returning form.
+    q.update = jest.fn(async (patch, returning) => { updates.push(patch); return returning ? [{ id: EVENT_UUID }] : 1; });
     q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     return q;
   });
@@ -100,5 +101,47 @@ describe('operator return-to-pending marks the event examined', () => {
     const statusWrite = updates.find((u) => u.admin_status === 'pending');
     expect(statusWrite.curated_at).toEqual({ __raw: 'COALESCE(curated_at, now())' });
     expect(statusWrite.approved_via).toBe('operator_reset');
+  });
+});
+
+// Audit 2026-10-30 NEWS-04: an oversized selection was cut to 50 ids and the
+// inbox still reported every selected event as updated.
+describe('bulk event writes never process part of a request silently', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const post = (baseUrl, path, body) => fetch(`${baseUrl}/admin/newsletter${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const ids = (n) => Array.from({ length: n }, (_, i) => `2b0fcf1c-2a8e-4d3e-9b5a-${String(i).padStart(12, '0')}`);
+
+  test('bulk action refuses more than 50 ids instead of updating the first 50', async () => {
+    const updates = mockEventsTable();
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/events/bulk-action', { action: 'approve', ids: ids(51) });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/at most 50/);
+    });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('bulk action returns the ids it actually updated', async () => {
+    mockEventsTable();
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/events/bulk-action', { action: 'approve', ids: [EVENT_UUID, ids(1)[0]] });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ success: true, updated: 1, updatedIds: [EVENT_UUID] });
+    });
+  });
+
+  test('merge refuses more than 50 duplicates instead of merging the first 50', async () => {
+    const updates = mockEventsTable();
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/events/merge', { primaryId: EVENT_UUID, duplicateIds: ids(51) });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/at most 50/);
+    });
+    expect(updates).toHaveLength(0);
   });
 });

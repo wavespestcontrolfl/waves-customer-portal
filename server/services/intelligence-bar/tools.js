@@ -338,7 +338,8 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
 service_type is a catalog name, but the words the user says also work ("pre-slab termite treatment"): one close catalog service books as that service, and when several are close the tool lists them, so ask the user which and propose again with the exact name. A service that is not in the catalog cannot be booked.
-price: the visit price in dollars when the user states one; it rides the resolved catalog service, quote-required services included. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
+price: the visit price in dollars when the user states one; it rides the resolved catalog service, quote-required services included. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.
+property_id: a customer with more than one active property needs one — the tool lists their properties (code property_choice_required); ask the user which (offer_choices works) and propose again with that property_id. The card shows the address.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -352,6 +353,7 @@ price: the visit price in dollars when the user states one; it rides the resolve
         customer_request: { type: 'string', description: 'Re-service visits only ("Pest Control Re-Service" / "Lawn Care Re-Service"): why the customer asked for it, as the user told you (e.g. "ants back in the kitchen since the weekend"). The technician sees it on the job card as why the visit was booked. Put the reason HERE, not in notes. Omit when the user gave no reason; never invent one.' },
         price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
         price_confirmed: { type: 'boolean', description: 'Set true ONLY after the user explicitly confirmed the stated price in reply to a price_read_back question (the stated price differed from the catalog price). Never set it on the first proposal.' },
+        property_id: { type: 'string', format: 'uuid', description: 'Which of the customer\'s saved properties the visit is at (from get_customer_detail\'s properties). Needed when the customer has more than one active property: the tool lists them and asks. Omit for a customer with one property.' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
     },
@@ -1312,7 +1314,7 @@ async function queryRevenue(input) {
       // total would overstate revenue by the consumed credit.
       db.raw('SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as total_revenue'),
       db.raw('COUNT(*) as total_invoices'),
-      db.raw("SUM(CASE WHEN status = 'overdue' THEN GREATEST(total - COALESCE(credit_applied, 0), 0) ELSE 0 END) as overdue_amount"),
+      db.raw("SUM(CASE WHEN status = 'overdue' THEN GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) ELSE 0 END) as overdue_amount"),
     ).first();
 
   return {
@@ -3638,6 +3640,50 @@ async function ibBookingOverlapRows(scheduledDate, timeWindow, technicianId = nu
   }));
 }
 
+// Which saved property the visit is at (the Schedule screen's "Service
+// address" picker, same GATE_EDIT_APPT_ADDRESS switch and the same
+// customer-properties.bookingPropertyStamp check). A named property returns
+// its stamp, which the route pins and shows on the card. With no property
+// named, a customer with two or more active properties is asked which one
+// (the sole-property anchor would leave the visit with no address); one
+// property, or the switch off, keeps the sole-property anchor as before.
+const BOOKING_PROPERTY_CHANGED_ERROR = 'The visit\'s address changed after the card was shown (edited, removed or deactivated) — nothing was booked. Ask again for a fresh confirmation card.';
+async function ibBookingPropertyProposal(customerId, propertyId) {
+  const addressSwitchOn = require('../../config/feature-gates').isEnabled('editApptAddress');
+  const CustomerProperties = require('../customer-properties');
+  if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
+    if (!addressSwitchOn) return { error: 'Choosing the visit\'s address is not enabled — omit property_id.', code: 'booking_property_not_enabled' };
+    try {
+      return { stamp: await CustomerProperties.bookingPropertyStamp({ customerId, propertyId: String(propertyId) }) };
+    } catch (err) {
+      if (err?.code === 'INVALID_BOOKING_PROPERTY') return { error: `${err.message} That property_id is not one of this customer's active, fully addressed properties — nothing was proposed.`, code: 'invalid_booking_property' };
+      throw err;
+    }
+  }
+  if (!addressSwitchOn) return { stamp: null };
+  const properties = await db('customer_properties').where({ customer_id: customerId, active: true })
+    .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
+    .select('id', 'is_primary', 'label', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  if (properties.length < 2) return { stamp: null };
+  return {
+    error: `This customer has ${properties.length} active properties. Ask the user which one this visit is at, then propose again with that property_id. Nothing was proposed.`,
+    code: 'property_choice_required',
+    properties: properties.map((p) => ({
+      property_id: p.id,
+      address: [[p.address_line1, p.address_line2].filter(Boolean).join(' '), p.city, [p.state, p.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+      ...(p.label ? { label: p.label } : {}),
+      primary: p.is_primary === true,
+    })),
+  };
+}
+
+// The card's address line for a pinned property stamp.
+function bookingPropertyLabel(stamp) {
+  if (!stamp) return null;
+  return [[stamp.service_address_line1, stamp.service_address_line2].filter(Boolean).join(' '), stamp.service_address_city,
+    `${stamp.service_address_state} ${stamp.service_address_zip}`].filter(Boolean).join(', ');
+}
+
 async function ibBookingOverlapProposal(scheduledDate, timeWindow, technicianId = null) {
   const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow, technicianId);
   return overlap == null ? null : overlap.length > 0;
@@ -3705,6 +3751,31 @@ function ibBookingWindowRefusal(timeWindow) {
     throw err;
   }
   return null;
+}
+
+// The commit-time property: none named → null (the sole-property anchor
+// applies). A named one must match the stamp the card pinned
+// (_booking_property, set by the route), re-read under the booking lock; a
+// named property with no pin was never shown on a card and is refused.
+// Compared field by field: the pin round-trips through ib_pending_actions
+// (jsonb, which reorders keys), so a serialized comparison would refuse an
+// unchanged property.
+const BOOKING_PROPERTY_FIELDS = ['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city',
+  'service_address_state', 'service_address_zip', 'lat', 'lng'];
+const sameBookingProperty = (a, b) => BOOKING_PROPERTY_FIELDS.every((f) => String(a?.[f] ?? '') === String(b?.[f] ?? ''));
+async function lockedBookingProperty(trx, customerId, input) {
+  if (input.property_id === undefined || input.property_id === null || input.property_id === '') return null;
+  const changed = () => Object.assign(new Error('booking_property_changed'), { bookingPropertyChanged: true });
+  if (!input._booking_property || !require('../../config/feature-gates').isEnabled('editApptAddress')) throw changed();
+  let live;
+  try {
+    live = await require('../customer-properties').bookingPropertyStamp({ customerId, propertyId: String(input.property_id) }, trx, { lock: true });
+  } catch (err) {
+    if (err?.code === 'INVALID_BOOKING_PROPERTY') throw changed();
+    throw err;
+  }
+  if (!sameBookingProperty(live, input._booking_property)) throw changed();
+  return live;
 }
 
 async function createAppointment(input, actionContext = {}) {
@@ -3844,7 +3915,25 @@ async function createAppointment(input, actionContext = {}) {
   // still never blocks the booking.
   let appointment;
   let overlapAdvisory = null;
+  let routeAdvisories = [];
   try {
+  // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
+  // runs): an ADMIN's booking buys them BEFORE the transaction, so the
+  // route number and route check below read the same Google road times the
+  // Edit dialog's check does. A technician's Intelligence Bar never buys.
+  // A named property books at the card's property stamp (lockedBookingProperty
+  // re-reads the same one), so its pin is the one priced; else the customer's.
+  const namedProperty = input.property_id !== undefined && input.property_id !== null && input.property_id !== '';
+  const bookingPin = namedProperty ? input._booking_property : { lat: customer?.latitude, lng: customer?.longitude };
+  if (actionContext.isAdmin === true && actionContext.technicianId && technician_id && win.start
+    && bookingPin?.lat != null && bookingPin?.lng != null) {
+    await require('../scheduling/save-road-buy').buyRoadsBeforeSave({
+      spender: actionContext.technicianId, date: dateStr, technicianId: technician_id,
+      windowStart: win.start, windowEnd,
+      prospective: { lat: bookingPin.lat, lng: bookingPin.lng,
+        estimated_duration_minutes: 60, service_type },
+    });
+  }
   await db.transaction(async (trx) => {
     // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
     // occupancy lock + tech-blind probe FIRST, before the comms key (rung
@@ -3929,11 +4018,16 @@ async function createAppointment(input, actionContext = {}) {
     // ran before this transaction opened.
     await assertAssignableTechnician(technician_id, { conn: trx, date: dateStr });
     const discountStamps = await bookingDiscountStamps(trx, lockedBooking.pricing);
+    // The property the card named, re-read FOR SHARE under this transaction
+    // (as the Schedule POST does): an edit, removal or deactivation since the
+    // card refuses rather than booking a stale address.
+    const propertyStamp = await lockedBookingProperty(trx, customer_id, input);
     const [created] = await trx('scheduled_services').insert({
       customer_id,
-      // Sole-active-property anchor for the visit-group stamp below —
-      // see customer-properties.soleActivePropertyId (GH codex r3).
-      property_id: await require('../customer-properties').soleActivePropertyId(customer_id, trx),
+      // The chosen property's stamp, else the sole-active-property anchor for
+      // the visit-group stamp below — see
+      // customer-properties.soleActivePropertyId (GH codex r3).
+      ...(propertyStamp || { property_id: await require('../customer-properties').soleActivePropertyId(customer_id, trx) }),
       scheduled_date: dateStr,
       service_type,
       technician_id,
@@ -3973,6 +4067,24 @@ async function createAppointment(input, actionContext = {}) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
+    // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
+    // when off): the booked visit's technician day is numbered first in the
+    // order the arrival-window check certifies (inside this transaction; needs
+    // GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check Edit's
+    // save runs, on the road times the pickers already bought. Placement
+    // first: the check reads the visit where it is saved, so an unplaced visit
+    // can read late in a stale order. ADVISORY ONLY: its result is a warning in
+    // the tool result and is kept out of the pinned "no overlap" comparison
+    // above, so it can never refuse or roll back the booking; only a real
+    // overlap refuses, as before.
+    {
+      const routeCheck = require('../scheduling/staff-save-route-check');
+      await routeCheck.placeStaffSavedVisit(trx, { serviceId: created.id, source: 'intelligence_bar' });
+      routeAdvisories = await routeCheck.staffSaveRouteWarnings(trx, {
+        serviceId: created.id, date: dateStr, windowStart: created.window_start, windowEnd: created.window_end,
+        technicianId: created.technician_id,
+      });
+    }
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the
@@ -4032,6 +4144,9 @@ async function createAppointment(input, actionContext = {}) {
     }
     if (err && err.bookingPriceChanged) {
       return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
+    }
+    if (err && err.bookingPropertyChanged) {
+      return { error: BOOKING_PROPERTY_CHANGED_ERROR, preview_changed: true };
     }
     if (err && err.bookingOverlapNew) {
       return { error: BOOKING_NEW_OVERLAP_ERROR, preview_changed: true };
@@ -4189,7 +4304,7 @@ async function createAppointment(input, actionContext = {}) {
 
   // One `warning` key — both the reminder failure and the occupancy advisory
   // must survive when they coincide (the card renders result.warning).
-  const warnings = [reminderWarning, overlapAdvisory].filter(Boolean);
+  const warnings = [reminderWarning, overlapAdvisory, ...routeAdvisories].filter(Boolean);
   return {
     success: true,
     ...(warnings.length ? { warning: warnings.join(' ') } : {}),
@@ -4368,6 +4483,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
   let overlapAdvisory = null;
+  let routeAdvisories = [];
   // A package visit 1 with a live visit 2: the card shows one visit, so the
   // bar does not move it (ib-write-tools: the card shows everything the
   // commit does). The Schedule screen moves both.
@@ -4375,6 +4491,16 @@ async function rescheduleAppointment(input, actionContext = {}) {
     return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   }
   let thrownRefusal = null;
+  // Road times for the landing hour (GATE_SAVE_ROAD_BUY; unset = nothing
+  // runs): an ADMIN's move buys them BEFORE the transaction, so the route
+  // number and route check below read the same Google road times the Edit
+  // dialog's check does. A technician's Intelligence Bar never buys.
+  if (actionContext.isAdmin === true && actionContext.technicianId && probeWindowStart && probeWindowEnd) {
+    await require('../scheduling/save-road-buy').buyRoadsForVisitSave({
+      spender: actionContext.technicianId, serviceId: appointment_id,
+      changes: { scheduled_date: dateStr, window_start: probeWindowStart, window_end: probeWindowEnd },
+    });
+  }
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -4483,6 +4609,23 @@ async function rescheduleAppointment(input, actionContext = {}) {
         });
         overlapAdvisory = again.length ? slotOverlapWarning(dateStr) : null;
       }
+      // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
+      // when off): the moved visit's technician day is numbered first in the
+      // order the arrival-window check certifies (inside this transaction;
+      // needs GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check
+      // Edit's save runs, on the road times the pickers already bought.
+      // Placement first: the check reads the visit where it is saved, so a
+      // moved visit not yet placed can read late in a stale order. ADVISORY
+      // ONLY: a route result is a warning in the tool result and never
+      // refuses the move.
+      if (updatedRows && probeWindowStart && probeWindowEnd) {
+        const routeCheck = require('../scheduling/staff-save-route-check');
+        await routeCheck.placeStaffSavedVisit(trx, { serviceId: appointment_id, source: 'intelligence_bar' });
+        routeAdvisories = await routeCheck.staffSaveRouteWarnings(trx, {
+          serviceId: appointment_id, date: dateStr, windowStart: probeWindowStart, windowEnd: probeWindowEnd,
+          technicianId: committedTechId,
+        });
+      }
   }).catch((err) => {
     // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
     thrownRefusal = require('./outcomes').moveRefusalFromThrown(err);
@@ -4584,8 +4727,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
     // ONE warning key (card renders result.warning only): advisory overlap
     // note + lifecycle-cleanup + group-repair + audit-append failures
     // COMBINE, never overwrite.
-    ...(overlapAdvisory || lifecycleWarning || groupWarning || auditWarning
-      ? { warning: [overlapAdvisory, lifecycleWarning, groupWarning, auditWarning].filter(Boolean).join(' ') }
+    ...(overlapAdvisory || routeAdvisories.length || lifecycleWarning || groupWarning || auditWarning
+      ? { warning: [overlapAdvisory, ...routeAdvisories, lifecycleWarning, groupWarning, auditWarning].filter(Boolean).join(' ') }
       : {}),
   };
 }
@@ -5380,7 +5523,7 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho, ibBookingPropertyProposal, bookingPropertyLabel,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.

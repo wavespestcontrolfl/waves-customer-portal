@@ -107,6 +107,8 @@ it('shows a refund as a refund', async () => {
 it('Save year posts the typed amounts: a blank amount as 0, a blank carry-in as null (the default), a typed 0 kept', async () => {
   render(<ReturnTab />);
   await screen.findByLabelText('Other income');
+  // Wait for the loaded year to populate the form before editing it.
+  await waitFor(() => expect(screen.getByLabelText('Section 179 carried in')).toHaveValue('1500'));
   fireEvent.change(screen.getByLabelText('Other income'), { target: { value: '1200.50' } });
   fireEvent.change(screen.getByLabelText('Filing status'), { target: { value: 'mfj' } });
   fireEvent.change(screen.getByLabelText('QBI loss carried in'), { target: { value: '0' } });

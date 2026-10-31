@@ -5,14 +5,17 @@ import {
   adminTableViewCatalogKey,
   createAdminTableViewScope,
   normalizeAdminTableViewState,
-  readAdminTableViewCatalog,
   readAdminTableViewCurrent,
-  writeAdminTableViewCatalog,
   writeAdminTableViewCurrent,
 } from "../lib/adminTableViewStorage";
+import {
+  mutateSavedViewCatalog,
+  readSavedViewCatalog,
+} from "../lib/adminTableViewCatalog";
 
 const MAX_VIEWS = 20;
 const MAX_NAME_LENGTH = 64;
+const CATALOG_CHANNEL = "waves-admin-table-view-catalog";
 
 function browserStorage() {
   try {
@@ -26,9 +29,6 @@ function initializeRuntime(scope, defaults, normalize, initialState) {
   const loadedCurrent = scope.available
     ? readAdminTableViewCurrent(browserStorage(), scope.storageKey, defaults, normalize)
     : { current: normalizeAdminTableViewState(defaults, defaults, normalize), error: null };
-  const loadedCatalog = scope.available
-    ? readAdminTableViewCatalog(browserStorage(), scope.storageKey, defaults, normalize)
-    : { views: [], error: null };
   let initial = loadedCurrent.current;
   if (typeof initialState === "function") {
     try {
@@ -42,8 +42,11 @@ function initializeRuntime(scope, defaults, normalize, initialState) {
     token: scope.token,
     available: scope.available,
     storageKey: scope.storageKey,
-    record: { current: initial, views: loadedCatalog.views },
-    error: loadedCurrent.error || loadedCatalog.error,
+    record: { current: initial, views: [] },
+    currentError: loadedCurrent.error,
+    catalogError: null,
+    actionError: null,
+    catalogLoading: scope.available,
   };
 }
 
@@ -57,8 +60,13 @@ function createViewId(views) {
   return `view-${Date.now().toString(36)}-${views.length}`;
 }
 
-function withCatalog(runtime, views, error) {
-  return { ...runtime, record: { ...runtime.record, views }, error };
+function catalogOptions(runtime, defaults, normalize) {
+  return {
+    storageKey: runtime.storageKey,
+    storage: browserStorage(),
+    defaults,
+    normalize,
+  };
 }
 
 export function useAdminTableViews({ tableId, enabled, defaults, normalize, initialState }) {
@@ -66,9 +74,16 @@ export function useAdminTableViews({ tableId, enabled, defaults, normalize, init
   const scope = createAdminTableViewScope({ enabled, tableId, user });
   const runtimeRef = useRef(null);
   const renderIdRef = useRef(0);
+  const catalogRequestRef = useRef(0);
+  const applyRequestRef = useRef(0);
+  const scopeGenerationRef = useRef(0);
+  const channelRef = useRef(null);
   const [, render] = useState(0);
 
   if (!runtimeRef.current || runtimeRef.current.token !== scope.token) {
+    catalogRequestRef.current += 1;
+    applyRequestRef.current += 1;
+    scopeGenerationRef.current += 1;
     runtimeRef.current = initializeRuntime(scope, defaults, normalize, initialState);
   }
   const runtime = runtimeRef.current;
@@ -91,39 +106,84 @@ export function useAdminTableViews({ tableId, enabled, defaults, normalize, init
     publish({
       ...current,
       record: { ...current.record, current: nextState },
-      error: saved
-        ? (current.error === ADMIN_TABLE_VIEW_STORAGE_ERROR ? null : current.error)
-        : ADMIN_TABLE_VIEW_STORAGE_ERROR,
+      currentError: saved ? null : ADMIN_TABLE_VIEW_STORAGE_ERROR,
     });
   }, [defaults, normalize, publish, scope.token]);
 
-  const mutateCatalog = useCallback(async (captured, mutation) => {
-    try {
-      const locks = globalThis.navigator?.locks;
-      if (typeof locks?.request !== "function") throw new Error("Web Locks unavailable");
-      return await locks.request(
-        `waves-admin-table-views:${captured.storageKey}`,
-        { mode: "exclusive" },
-        () => {
-          const active = runtimeRef.current;
-          if (!active || active.token !== captured.token
-            || active.storageKey !== captured.storageKey) return false;
-          const loaded = readAdminTableViewCatalog(browserStorage(), captured.storageKey, defaults, normalize);
-          if (loaded.error) throw new Error(ADMIN_TABLE_VIEW_STORAGE_ERROR);
-          const result = mutation(loaded.views);
-          const error = result.error || (
-            writeAdminTableViewCatalog(browserStorage(), captured.storageKey, result.views)
-              ? null : ADMIN_TABLE_VIEW_STORAGE_ERROR
-          );
-          publish(withCatalog(active, error ? loaded.views : result.views, error));
-          return !error;
-        },
-      );
-    } catch {
-      const active = runtimeRef.current;
-      if (active?.token === captured.token) publish({ ...active, error: ADMIN_TABLE_VIEW_STORAGE_ERROR });
+  const refreshViews = useCallback(async () => {
+    const captured = runtimeRef.current;
+    if (!captured?.available || captured.token !== scope.token) return false;
+    const requestId = ++catalogRequestRef.current;
+    publish({ ...captured, catalogLoading: true });
+    const options = catalogOptions(captured, defaults, normalize);
+    const loaded = await readSavedViewCatalog(options);
+    const active = runtimeRef.current;
+    if (!active || active.token !== captured.token
+      || active.storageKey !== captured.storageKey
+      || catalogRequestRef.current !== requestId) return false;
+    if (loaded.error) {
+      publish({ ...active, catalogLoading: false, catalogError: ADMIN_TABLE_VIEW_STORAGE_ERROR });
       return false;
     }
+    publish({
+      ...active,
+      record: { ...active.record, views: loaded.views },
+      catalogLoading: false,
+      catalogError: null,
+    });
+    return true;
+  }, [defaults, normalize, publish, scope.token]);
+
+  const mutateCatalog = useCallback(async (captured, mutation) => {
+    const scopeGeneration = scopeGenerationRef.current;
+    const requestId = ++catalogRequestRef.current;
+    const options = catalogOptions(captured, defaults, normalize);
+    const result = await mutateSavedViewCatalog(options, (views) => {
+      const active = runtimeRef.current;
+      if (!active || active.token !== captured.token
+        || active.storageKey !== captured.storageKey
+        || scopeGenerationRef.current !== scopeGeneration) return { cancelled: true };
+      return mutation(views);
+    });
+    const committed = !result.error && !result.cancelled;
+    if (committed) {
+      try { channelRef.current?.postMessage({ storageKey: captured.storageKey }); } catch { /* optional notification */ }
+    }
+    const active = runtimeRef.current;
+    if (scopeGenerationRef.current !== scopeGeneration
+      || !active || active.token !== captured.token
+      || active.storageKey !== captured.storageKey) return false;
+    if (catalogRequestRef.current !== requestId) {
+      if (result.error === ADMIN_TABLE_VIEW_STORAGE_ERROR) {
+        publish({ ...active, catalogError: result.error, actionError: null });
+      } else if (result.error) {
+        publish({ ...active, actionError: result.error });
+      } else if (committed) {
+        publish({ ...active, actionError: null });
+      }
+      return committed;
+    }
+    if (result.cancelled) return false;
+    if (result.error) {
+      const views = result.error === ADMIN_TABLE_VIEW_STORAGE_ERROR
+        ? active.record.views : result.views;
+      publish({
+        ...active,
+        record: { ...active.record, views },
+        catalogLoading: false,
+        catalogError: result.error === ADMIN_TABLE_VIEW_STORAGE_ERROR ? result.error : null,
+        actionError: result.error === ADMIN_TABLE_VIEW_STORAGE_ERROR ? null : result.error,
+      });
+      return false;
+    }
+    publish({
+      ...active,
+      record: { ...active.record, views: result.views },
+      catalogLoading: false,
+      catalogError: null,
+      actionError: null,
+    });
+    return true;
   }, [defaults, normalize, publish]);
 
   const saveView = useCallback(async (value) => {
@@ -156,50 +216,95 @@ export function useAdminTableViews({ tableId, enabled, defaults, normalize, init
     });
   }, [mutateCatalog, scope.token]);
 
-  const applyView = useCallback((id) => {
+  const applyView = useCallback(async (id) => {
     const current = runtimeRef.current;
     if (!current?.available || current.token !== scope.token) return null;
-    const loaded = readAdminTableViewCatalog(browserStorage(), current.storageKey, defaults, normalize);
+    const applyId = ++applyRequestRef.current;
+    const catalogRequestId = ++catalogRequestRef.current;
+    publish({ ...current, catalogLoading: true });
+    const options = catalogOptions(current, defaults, normalize);
+    const loaded = await readSavedViewCatalog(options);
+    const active = runtimeRef.current;
+    if (!active || active.token !== current.token
+      || active.storageKey !== current.storageKey
+      || applyRequestRef.current !== applyId) return null;
+    const ownsCatalogPublication = catalogRequestRef.current === catalogRequestId;
     if (loaded.error) {
-      publish({ ...current, error: ADMIN_TABLE_VIEW_STORAGE_ERROR });
+      if (ownsCatalogPublication) {
+        publish({ ...active, catalogLoading: false, catalogError: ADMIN_TABLE_VIEW_STORAGE_ERROR });
+      }
       return null;
     }
     const view = loaded.views.find((candidate) => candidate.id === id);
     if (!view) {
-      publish({ ...current, record: { ...current.record, views: loaded.views }, error: "That saved view is no longer available." });
+      publish({
+        ...active,
+        record: {
+          ...active.record,
+          views: ownsCatalogPublication ? loaded.views : active.record.views,
+        },
+        catalogLoading: ownsCatalogPublication ? false : active.catalogLoading,
+        catalogError: ownsCatalogPublication ? null : active.catalogError,
+        actionError: "That saved view is no longer available.",
+      });
       return null;
     }
     const state = normalizeAdminTableViewState({ ...view.state, page: 1, scrollTop: 0 }, defaults, normalize);
-    const saved = writeAdminTableViewCurrent(browserStorage(), current.storageKey, state);
+    const saved = writeAdminTableViewCurrent(browserStorage(), active.storageKey, state);
     publish({
-      ...current,
-      record: { ...current.record, current: state, views: loaded.views },
-      error: saved ? null : ADMIN_TABLE_VIEW_STORAGE_ERROR,
+      ...active,
+      record: {
+        ...active.record,
+        current: state,
+        views: ownsCatalogPublication ? loaded.views : active.record.views,
+      },
+      catalogLoading: ownsCatalogPublication ? false : active.catalogLoading,
+      currentError: saved ? null : ADMIN_TABLE_VIEW_STORAGE_ERROR,
+      catalogError: ownsCatalogPublication ? null : active.catalogError,
+      actionError: null,
     });
     return state;
   }, [defaults, normalize, publish, scope.token]);
 
   const clearError = useCallback(() => {
     const current = runtimeRef.current;
-    if (current?.token === scope.token && current.error) publish({ ...current, error: null });
+    if (current?.token === scope.token
+      && (current.currentError || current.catalogError || current.actionError)) {
+      publish({ ...current, currentError: null, catalogError: null, actionError: null });
+    }
   }, [publish, scope.token]);
 
   useEffect(() => {
     if (!scope.available) return undefined;
+    const requestRefresh = () => { void refreshViews(); };
     const onStorage = (event) => {
-      if (event.key !== adminTableViewCatalogKey(scope.storageKey)) return;
-      const current = runtimeRef.current;
-      if (!current || current.token !== scope.token) return;
-      const loaded = readAdminTableViewCatalog(browserStorage(), scope.storageKey, defaults, normalize);
-      publish({
-        ...current,
-        record: { ...current.record, views: loaded.views },
-        error: loaded.error || current.error,
-      });
+      if (event.key === adminTableViewCatalogKey(scope.storageKey)) requestRefresh();
     };
+    const onMessage = (event) => {
+      if (event.data?.storageKey === scope.storageKey) requestRefresh();
+    };
+    let channel = null;
+    try {
+      if (typeof globalThis.BroadcastChannel === "function") {
+        channel = new globalThis.BroadcastChannel(CATALOG_CHANNEL);
+        channel.addEventListener("message", onMessage);
+      }
+    } catch { /* focus and dialog refresh remain available */ }
+    channelRef.current = channel;
     window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, [defaults, normalize, publish, scope.available, scope.storageKey, scope.token]);
+    window.addEventListener("focus", requestRefresh);
+    requestRefresh();
+    return () => {
+      catalogRequestRef.current += 1;
+      applyRequestRef.current += 1;
+      scopeGenerationRef.current += 1;
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", requestRefresh);
+      if (channelRef.current === channel) channelRef.current = null;
+      try { channel?.removeEventListener("message", onMessage); } catch { /* ignore */ }
+      try { channel?.close(); } catch { /* ignore */ }
+    };
+  }, [refreshViews, scope.available, scope.storageKey]);
 
   return {
     state: runtime.record.current,
@@ -208,8 +313,10 @@ export function useAdminTableViews({ tableId, enabled, defaults, normalize, init
     saveView,
     removeView,
     applyView,
-    error: runtime.error,
+    refreshViews,
+    error: runtime.actionError || runtime.catalogError || runtime.currentError,
     clearError,
+    catalogLoading: runtime.catalogLoading,
     available: runtime.available,
     storageKey: runtime.storageKey,
   };

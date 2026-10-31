@@ -81,6 +81,17 @@ const SECTIONS = [
       { rank: 1, text: 'Rodent trapping includes the setup visit and the trap checks listed on your estimate. Extra trap checks beyond those are quoted separately.' },
     ],
   },
+  // The misting system (owner 2026-10-30, item F). Unlike the sections above, it prints ONLY when the estimate includes the
+  // misting system (`signals.misting`), so every other estimate's page is unchanged.
+  {
+    key: 'misting',
+    heading: 'If your estimate includes a misting system',
+    lines: [
+      { rank: 1, text: 'The date you pick is your first monthly service visit.' },
+      { rank: 1, text: 'We call you to book the install day.' },
+      { rank: 1, text: 'The install charge is on your first invoice.' },
+    ].map((line) => ({ ...line, when: (s) => s.misting === true })),
+  },
 ];
 
 // The commercial page (owner 2026-10-24): an authored commercial proposal reads this page instead of the residential
@@ -95,9 +106,10 @@ const COMMERCIAL_SECTIONS = [
     lines: [
       { rank: 1, text: 'We set your service day and time with you, around your business hours.' },
       { rank: 1, text: 'There is no deposit.' },
-      // Only while the proposal's own term, renewal and cancellation agree with the agreement (or are blank): a
-      // proposal with authored custom terms (24 months, month-to-month) must not contradict itself, so the line drops.
-      { rank: 2, when: (s) => s.termsMatchAgreement === true, text: "Your service agreement runs 12 months and renews each year. Either side can cancel with 30 days' written notice." },
+      // Only for a proposal with a recurring service (a one-time-only proposal has no agreement term), and only while
+      // the proposal's own term, renewal and cancellation agree with the agreement (or are blank): a proposal with
+      // authored custom terms (24 months, month-to-month) must not contradict itself, so the line drops.
+      { rank: 2, when: (s) => s.termsMatchAgreement === true && s.recurring === true, text: "Your service agreement runs 12 months and renews each year. Either side can cancel with 30 days' written notice." },
       { rank: 3, text: 'We can send a certificate of insurance and name your business as an additional insured on request.' },
     ],
   },
@@ -222,11 +234,37 @@ function termsMatchAgreement(proposal) {
   }
 }
 
+// The proposal prices a recurring service (the figure online signing keys on). Fails closed: an unreadable answer is false.
+function proposalIsRecurring(proposal) {
+  try {
+    return Number(require('./estimate-proposal').computeProposalTotals(proposal).annualRecurring) > 0;
+  } catch {
+    return false;
+  }
+}
+
 function estimateSignals(estimate, proposal) {
   if (isKnownCommercial(proposal)) {
-    return { planTerms: false, commercial: true, families: proposalServiceFamilies(proposal), termsMatchAgreement: termsMatchAgreement(proposal) };
+    return {
+      planTerms: false, commercial: true, families: proposalServiceFamilies(proposal),
+      termsMatchAgreement: termsMatchAgreement(proposal), recurring: proposalIsRecurring(proposal),
+    };
   }
-  return { planTerms: planTermsApply(estimate, proposal) };
+  // `misting` is set only when the estimate carries the misting system, so the signals of every other estimate are unchanged.
+  return { planTerms: planTermsApply(estimate, proposal), ...(estimateIncludesMisting(estimate) ? { misting: true } : {}) };
+}
+
+// Does the estimate include the mosquito misting system (the plan or its install)? The mapper's own stored-shape reader, so the
+// page agrees with the gate and acceptance refusals about what a misting estimate is. Fails closed: an unreadable answer is false.
+function estimateIncludesMisting(estimate) {
+  try {
+    return require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesMosquitoMisting(
+      estimate?.estimate_data,
+      { pricingAuthority: estimate?.pricing_authority || null },
+    ) === true;
+  } catch {
+    return false;
+  }
 }
 
 // The page for one estimate, untrimmed. `proposal` = normalizeProposal(estimate).

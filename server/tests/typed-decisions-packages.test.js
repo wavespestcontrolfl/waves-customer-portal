@@ -8,7 +8,7 @@ describe('typed-decision packages', () => {
   const ids = Object.keys(PACKAGES);
 
   test('ships the three foundation packages', () => {
-    expect(ids.sort()).toEqual(['call_gate_checks.v1', 'call_judge.v2', 'call_judge.v3', 'call_judge.v4', 'photo_privacy.v1', 'sms_courtesy.v1', 'sms_reschedule.v1', 'sms_solicitation.v1', 'visit_access.v1', 'voicemail.v1']);
+    expect(ids.sort()).toEqual(['ask_waves_safety.v1', 'call_gate_checks.v1', 'call_judge.v2', 'call_judge.v3', 'call_judge.v4', 'call_judge.v5', 'lawn_result_timing.v1', 'photo_privacy.v1', 'sms_courtesy.v1', 'sms_reschedule.v1', 'sms_solicitation.v1', 'visit_access.v1', 'voicemail.v1']);
   });
 
   test.each(ids)('%s: id is <capability>.v<version> and shape is complete', (id) => {
@@ -34,6 +34,36 @@ describe('typed-decision packages', () => {
       expect(q.type).toBe('noul');
       expect(q.instructions).toMatch(/^Does the photo show /);
     }
+  });
+
+  test('ask_waves_safety.v1 reads one chat reply with two yes/no questions, wording kept in the package only', () => {
+    const pkg = PACKAGES['ask_waves_safety.v1'];
+    expect(pkg.capability).toBe('ask_waves_safety');
+    expect(pkg.stateShape).toEqual(['visitor_message', 'reply']);
+    expect(Object.keys(pkg.questions)).toEqual(['safety_claim', 'access_timing']);
+    for (const q of Object.values(pkg.questions)) {
+      expect(q.type).toBe('noul');
+      expect(q.criteria.true).toEqual(expect.any(String));
+      expect(q.criteria.false).toEqual(expect.any(String));
+    }
+    // the three false flags the replay found on safe replies are named in the criteria
+    expect(pkg.questions.safety_claim.criteria.false).toMatch(/our products are EPA-registered/);
+    expect(pkg.questions.safety_claim.criteria.false).toMatch(/your technician follows the label/);
+    expect(pkg.questions.access_timing.criteria.false).toMatch(/come back Tuesday at 10 AM/);
+    expect(pkg.questions.access_timing.criteria.false).toMatch(/once everything is dry/);
+  });
+
+  test('lawn_result_timing.v1 asks one yes/no about one sentence and names the recheck sentence as a false case', () => {
+    const pkg = PACKAGES['lawn_result_timing.v1'];
+    expect(pkg.capability).toBe('lawn_result_timing');
+    expect(pkg.stateShape).toEqual(['sentence']);
+    expect(Object.keys(pkg.questions)).toEqual(['states_result_timing']);
+    const q = pkg.questions.states_result_timing;
+    expect(q.type).toBe('noul');
+    expect(q.instructions).toBe("This is one sentence from a lawn service report. Does it say or imply WHEN a treatment's RESULT will be seen?");
+    expect(q.criteria.true).toMatch(/"soon", "quickly", "right away", "by your next visit"/);
+    expect(q.criteria.false).toMatch(/instructions about watering, irrigation or mowing/);
+    expect(q.criteria.false).toMatch(/we'll check the progress at your next visit in six weeks/);
   });
 
   test('call_gate_checks.v1 asks one yes/no per dark call gate, over the same call state as call_judge', () => {

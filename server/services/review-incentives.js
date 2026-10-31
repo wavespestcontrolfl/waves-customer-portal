@@ -1243,6 +1243,25 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       });
       manualAttributionIntentId = intent?.id || null;
     }
+    // Mirror the sync paths' _markCustomerLeftReview on EVERY manual
+    // attribution touch: this customer verifiably left a review, so future
+    // review ASKS must stop (the completion-SMS bundler and review-request
+    // suppression both read has_left_google_review). Runs even for
+    // missing_technician repairs where the customer link is unchanged — the
+    // flag can still be false there from an older import. The WRITE is
+    // unconditional even when the loaded row already showed true (GH codex
+    // #3483 r10): the loaded flag may be a click-auto stamp a concurrent
+    // sole-basis reversal is about to clear — skipping the write here would
+    // leave that clear standing although THIS attribution now independently
+    // proves the customer reviewed. Always restamping review_marked_at means
+    // the reversal's conditional clear either sees the bumped stamp and
+    // no-ops, or is overwritten by this later mark — a human attribution
+    // touch is meant to claim ownership either way. In THIS transaction: a
+    // committed link can never leave flag-only ask checks eligible, and a
+    // failed mark rolls the attribution back for the admin to retry.
+    await trx('customers')
+      .where({ id: customerId })
+      .update({ has_left_google_review: true, review_marked_at: new Date() });
     return count;
   });
   if (autoReplyParkedPosted) {
@@ -1266,38 +1285,20 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     }
   }
 
-  // Mirror the sync paths' _markCustomerLeftReview on EVERY manual
-  // attribution touch: this customer verifiably left a review, so future
-  // review ASKS must stop (the completion-SMS bundler and review-request
-  // suppression both read has_left_google_review). Runs even for
-  // missing_technician repairs where the customer link is unchanged — the
-  // flag can still be false there from an older import or a prior mark
-  // failure. The WRITE is unconditional even when the loaded row already
-  // showed true (GH codex #3483 r10): the loaded flag may be a click-auto
-  // stamp a concurrent sole-basis reversal is about to clear — skipping the
-  // write here would leave that clear standing although THIS attribution now
-  // independently proves the customer reviewed. Always restamping
-  // review_marked_at means the reversal's conditional clear either sees the
-  // bumped stamp and no-ops, or is overwritten by this later mark — a human
-  // attribution touch is meant to claim ownership either way. Only the
-  // activity_log insert stays guarded on the loaded row so repeat repairs
-  // don't spam the log. Best-effort — a marking hiccup must not fail
-  // attribution.
-  const wasMarkedAtLoad = customer.has_left_google_review === true;
-  try {
-    await conn('customers')
-      .where({ id: customerId })
-      .update({ has_left_google_review: true, review_marked_at: new Date() });
-    if (!wasMarkedAtLoad) {
+  // The mark itself committed with the relink above. Only its activity_log
+  // entry stays here, guarded on the loaded row so repeat repairs don't spam
+  // the log, and best-effort — a log hiccup must not fail attribution.
+  if (customer.has_left_google_review !== true) {
+    try {
       await conn('activity_log').insert({
         customer_id: customerId,
         admin_user_id: attrs.adminId || null,
         action: 'review_manual_marked',
         description: 'Manual review match — customer marked as having left a Google review; review asks stop.',
       });
+    } catch (markErr) {
+      logger.warn(`[review-incentives] review_manual_marked log failed for customer ${customerId}: ${markErr.message}`);
     }
-  } catch (markErr) {
-    logger.warn(`[review-incentives] has_left_google_review mark failed for customer ${customerId}: ${markErr.message}`);
   }
 
   // Thank-you sequence ONLY when the customer link actually changed: the
@@ -1629,6 +1630,8 @@ function toCsv(rows = []) {
 module.exports = {
   POLICY_KEY,
   DEFAULT_POLICY,
+  // The payout sources the Reviews page shows and pays; payroll imports the same (payroll-review-bonuses.js).
+  PAYOUT_ELIGIBLE_SOURCES,
   getPolicy,
   savePolicy,
   createPayoutForReviewRequest,

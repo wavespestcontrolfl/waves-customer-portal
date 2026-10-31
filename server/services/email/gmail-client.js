@@ -267,6 +267,11 @@ function ownAddress() {
   return sanitizeHeaderValue(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
 }
 
+// The From header of every message this client sends (the Intelligence Bar's compose_email card shows it).
+function fromHeader() {
+  return `Waves Pest Control <${ownAddress()}>`;
+}
+
 // options.timeoutMs (optional) aborts the request: the error is classified
 // like any other post-request failure (outcomeUnknown), never retried blindly.
 const sendRequestOptions = (options) => ({ retry: false, timeout: (options && options.timeoutMs) || undefined });
@@ -288,7 +293,7 @@ function buildRawMessage(to, subject, body, inReplyTo) {
   if (!safeTo) throw new Error('Recipient (to) is required');
   const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
   const headers = [
-    `From: Waves Pest Control <${ownAddress()}>`,
+    `From: ${fromHeader()}`,
     `To: ${safeTo}`,
     `Subject: ${encodeHeaderUtf8(subject)}`,
     'MIME-Version: 1.0',
@@ -530,6 +535,7 @@ module.exports = {
   ensureLabel,
   getThread,
   ownAddress,
+  fromHeader,
   getMessageLabels,
   listAllMessages,
   modifyLabels,

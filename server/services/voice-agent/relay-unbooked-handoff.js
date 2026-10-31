@@ -31,7 +31,7 @@
 const logger = require('../logger');
 const { maskSid } = require('../twilio-failure-alerts');
 const { toE164, isLikelyE164 } = require('../../utils/phone');
-const { whereNotSandboxCall } = require('./relay-protocol');
+const { whereNotSandboxCall, agentName } = require('./relay-protocol');
 
 const STAMP_KEY = 'relay_unbooked_alerted_at';
 const MAX_LEAD_SUMMARY = 700;
@@ -94,7 +94,7 @@ async function writeHandoffLead(db, facts, summary) {
   if (!isLikelyE164(phone)) return null;
   const { createLeadFromExtraction } = require('../lead-from-extraction');
   const fields = facts.estimateFields || {};
-  const text = `Inbound voice call (Sandy call ended without a booking). ${summary || 'No transcript captured.'}`.slice(0, MAX_LEAD_SUMMARY);
+  const text = `Inbound voice call (${agentName()} call ended without a booking). ${summary || 'No transcript captured.'}`.slice(0, MAX_LEAD_SUMMARY);
   const result = await createLeadFromExtraction(
     {
       first_name: fields.first_name || null,
@@ -120,7 +120,7 @@ async function writeHandoffLead(db, facts, summary) {
   await db('lead_activities').insert({
     lead_id: result.leadId,
     activity_type: 'ai_triage',
-    description: 'Sandy call ended without a booking; lead created from the call',
+    description: `${agentName()} call ended without a booking; lead created from the call`,
     performed_by: 'AI Voice Agent',
     metadata: JSON.stringify({ source: 'sandy_unbooked', call_sid: facts.callSid }),
   }).catch((err) => logger.warn(`[voice-relay] unbooked lead activity failed callSid=${maskSid(facts.callSid)}: ${err.message}`));

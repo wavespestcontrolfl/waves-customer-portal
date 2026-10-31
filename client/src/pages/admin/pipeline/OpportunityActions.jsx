@@ -11,6 +11,7 @@ import {
   cn,
 } from "../../../components/ui";
 import { PIPELINE_STAGES } from "./pipelineStages";
+import { leadServiceAddress } from "../../../utils/format-address";
 
 function appendParam(params, key, value) {
   if (value !== null && value !== undefined && value !== "") params.set(key, value);
@@ -21,7 +22,11 @@ function createEstimateUrl(opportunity) {
   params.set("tab", "new");
   appendParam(params, "leadId", opportunity.leadId);
   appendParam(params, "customerId", opportunity.customerId);
-  appendParam(params, "address", opportunity.address);
+  appendParam(params, "address", leadServiceAddress({
+    address: opportunity.address,
+    city: opportunity.addressCity,
+    zip: opportunity.addressZip,
+  }));
   appendParam(params, "customerName", opportunity.name === "Unknown Customer" ? "" : opportunity.name);
   appendParam(params, "customerPhone", opportunity.phone);
   appendParam(params, "customerEmail", opportunity.email);

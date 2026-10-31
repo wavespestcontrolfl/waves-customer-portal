@@ -427,8 +427,11 @@ function leadsWonFrom(plan) {
 function messagesFromPlan({ plan, converts }) {
   const messages = [];
   const email = plan.find((s) => s.step === 'membership_email');
+  const notice = plan.find((s) => s.step === 'consumer_notice' && s.sends === true);
+  const noticeChannels = notice ? [notice.to_email && `email ${notice.to_email}`, notice.to_phone && `text ${notice.to_phone}`].filter(Boolean) : [];
+  const noticeSends = noticeChannels.length > 0;
   if (!converts) {
-    messages.push({ kind: 'none', will_send: false, text: 'No email or text: a one-time estimate only changes status here' });
+    messages.push({ kind: 'none', will_send: false, text: noticeSends ? 'No membership email: a one-time estimate only changes status here' : 'No email or text: a one-time estimate only changes status here' });
   } else if (!email) {
     messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email for this plan' });
   } else if (email.will_send === true) {
@@ -440,6 +443,15 @@ function messagesFromPlan({ plan, converts }) {
     messages.push({ kind: 'none', will_send: false, text: EMAIL_SKIP_TEXT[email.reason] || 'No "membership started" email' });
   }
   messages.push({ kind: 'none', will_send: false, text: 'No welcome text now (Mark accepted skips it). Booking the first visit later on the calendar may send it' });
+  // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND: a termite estimate whose customer has no signed notice gets it by email and text.
+  if (noticeSends) {
+    messages.push({
+      kind: 'consumer_notice', will_send: true, template: 'consumer_notice.fdacs_13692',
+      text: `${noticeChannels.join(' and ').replace(/^./, (c) => c.toUpperCase())}: the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first or the address changes before it goes out; a text after 8 PM waits until 8 AM and then goes to the phone on file`,
+    });
+  } else if (notice) {
+    messages.push({ kind: 'none', will_send: false, text: 'No Florida consumer notice: no email or phone it can go to. The office is notified to send it by hand' });
+  }
   return messages;
 }
 
@@ -460,6 +472,10 @@ function effectRefusal(effects) {
     return refuse(`This accept would also ${what}, and the bar can\'t show that on a card, so it can\'t accept this estimate from here yet.`, 'side_effect_outside_plan');
   }
   const plan = effectOf(effects, 'post_commit')?.plan || [];
+  // The notice will go out but where could not be read: the card cannot name the recipients, so it refuses.
+  if (plan.some((s) => s.step === 'consumer_notice' && s.sends === true && s.to_email === undefined && s.to_phone === undefined)) {
+    return refuse('Could not read where the Florida consumer notice would be sent — try again.', 'consumer_notice_recipients_unread');
+  }
   const email = plan.find((s) => s.step === 'membership_email');
   if (email && (email.reason === 'prefs_unreadable' || email.reason === 'unknown')) {
     return refuse("Could not verify the customer's email settings — try again.", 'prefs_unavailable');
@@ -681,7 +697,7 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     customer_messages: messages,
     notifies_customer: messages.some((m) => m.will_send),
     // The approved email decision rides through delivery.
-    membership_email: messages.some((m) => m.will_send) ? 'send' : 'skip',
+    membership_email: messages.some((m) => m.kind === 'email' && m.will_send) ? 'send' : 'skip',
     // Approval binds the whole effect list (its fingerprint) and the pins.
     effects_key: AcceptEffects.effectsFingerprint(effects),
     pins,

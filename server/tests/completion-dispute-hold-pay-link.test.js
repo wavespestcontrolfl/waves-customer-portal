@@ -146,7 +146,7 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(src.slice(d, src.indexOf(') {', d))).toMatch(/&& !invoiceSenderOwnsPayLink/);
   });
 
-  test('the completion/report SMS drops the pay link (and so the past-due line, the with-invoice lane and the invoice-delivery mark)', () => {
+  test('the completion/report SMS drops the pay link (and so the with-invoice lane and the invoice-delivery mark)', () => {
     const i = src.indexOf('const allowCompletionInvoiceLinkBase =');
     const end = src.indexOf('const allowCompletionInvoiceLink = ', i);
     const base = src.slice(i, end);
@@ -154,7 +154,6 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(base).toMatch(/&& !payLinkHeldByDisputeHold/);
     // Every pay-link decision downstream keys off allowCompletionInvoiceLink.
     const after = src.slice(end);
-    expect(after).toMatch(/completionPastDueLine = \(invoiceCreated && payUrl && allowCompletionInvoiceLink/);
     expect(after).toMatch(/payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink \? payUrl : null/);
     expect(after).toMatch(/\} else if \(invoiceCreated && payUrl && allowCompletionInvoiceLink\) \{/);
   });

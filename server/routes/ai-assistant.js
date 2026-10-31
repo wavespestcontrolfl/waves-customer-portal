@@ -12,6 +12,7 @@ const { portalConversationIdentifier, runPortalTurn } = require('../services/ai-
 const logger = require('../services/logger');
 const { resolveSessionScope, isSecondarySelection } = require('../services/account-properties');
 const assistantTools = require('../services/ai-assistant/tools');
+const { closeAlertsWhenHandled: closePortalInboxAlerts } = require('../services/portal-inbox');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
 const { withLockedRouteDecisions, innerJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
@@ -30,8 +31,10 @@ function parseJson(value, fallback) {
   }
 }
 
+// technicians has one `name` column (no first_name / last_name), so reading those
+// always fell through to the staff email.
 function actorName(req) {
-  return [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ')
+  return req.technician?.name
     || req.technician?.email
     || req.technicianId
     || 'Admin';
@@ -322,21 +325,33 @@ router.get('/admin/escalations', adminAuthenticate, requireTechOrAdmin, async (r
   } catch (err) { next(err); }
 });
 
+// Statuses ai_escalations really uses (pending, claimed by staff, resolved, dismissed).
+const ESCALATION_STATUSES = ['pending', 'claimed', 'resolved', 'dismissed'];
+
 // PUT /api/ai/admin/escalations/:id — claim, resolve, or dismiss
 router.put('/admin/escalations/:id', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
     const { status, resolution_notes, claimed_by } = req.body;
+    if (status !== undefined && !ESCALATION_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${ESCALATION_STATUSES.join(', ')}` });
+    }
     const updates = { status, updated_at: new Date() };
     if (claimed_by) updates.claimed_by = claimed_by;
     if (resolution_notes) updates.resolution_notes = resolution_notes;
 
     const [esc] = await db('ai_escalations').where('id', req.params.id).update(updates).returning('*');
+    if (!esc) return res.status(404).json({ error: 'Escalation not found' });
 
     // If resolved, also close the conversation
     if (status === 'resolved' && esc.conversation_id) {
       await db('agent_sessions').where('id', esc.conversation_id).update({
         status: 'resolved', resolved_by: 'human', updated_at: new Date(),
       });
+    }
+
+    // GATE_PORTAL_INBOX: a finished hand-off also closes its bell alerts.
+    if (status === 'resolved' || status === 'dismissed') {
+      await closePortalInboxAlerts('escalationId', esc.id, { technicianId: req.technicianId, role: req.techRole });
     }
 
     res.json({ escalation: esc });

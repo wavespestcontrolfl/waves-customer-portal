@@ -7,8 +7,10 @@
  * run leaves that cache stale, so the claimed drive saving may no longer exist.
  * index.js hands `config.startPointFor` (a lookup over the same cache) to the
  * apply; apply.js's move guard calls assertScoredStartPoints on the move
- * transaction, after the tech-day locks, for the source and the receiving
- * technician. Gate-aware through assertStartPointUnchanged: gate off, no query.
+ * transaction, after the tech-day locks, for the source technician (for an
+ * unassigned visit, the one whose day its current placement was scored on,
+ * `config.sourceDayTechnicianId`) and the receiving technician. Gate-aware
+ * through assertStartPointUnchanged: gate off, no query.
  *
  * A caller that hands no lookup scored from the office and is not fenced.
  * The coordinates are a staff home address: never put them in an error or log.

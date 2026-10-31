@@ -100,6 +100,18 @@ const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
 const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-gate');
+const getSameQuestionRefresh = lazy('same-question-refresh', './same-question-refresh');
+
+// GATE_SAME_QUESTION_CHECK, read at call time. A whole-module feature-gates
+// mock without the reader, or a load failure, reads as off (shadow only).
+function sameQuestionCheckOn() {
+  try {
+    const gates = require('../../config/feature-gates');
+    return typeof gates.sameQuestionCheckLive === 'function' && gates.sameQuestionCheckLive() === true;
+  } catch (_) {
+    return false;
+  }
+}
 const getGithubClient = lazy('github-client', '../content-astro/github-client');
 
 // Bounds for the session-level page-edit lock held across a citability
@@ -235,7 +247,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -253,7 +265,7 @@ class AutonomousRunner {
     const t1 = Date.now();
     let opp;
     try {
-      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}) });
+      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}), ...(onlyIds ? { onlyIds } : {}) });
     } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
       return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
@@ -521,6 +533,77 @@ class AutonomousRunner {
         });
         await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
         return finalized;
+      }
+
+      // 2d-bis. Same-question check (owner 2026-10-30, GATE_SAME_QUESTION_CHECK):
+      //     does a live post already hold every topic word of this brief's
+      //     keyword in its title / slug / primary keyword? Gate OFF = SHADOW:
+      //     the verdict is recorded on run.topic_targeting_result.same_question
+      //     and logged, and the run goes on. Gate ON = the new-post row is
+      //     skipped by design, and ONE refresh of the owner page is queued that
+      //     adds the question as an answer section (same-question-refresh.js).
+      //     The rule is deterministic and runs on the corpus already loaded;
+      //     a fault in it never blocks or holds the row.
+      let sameQuestion = null;
+      try {
+        if (topicIndex && typeof topicGate.evaluateSameQuestion === 'function') {
+          sameQuestion = topicGate.evaluateSameQuestion(candidate, { index: topicIndex });
+        }
+      } catch (err) {
+        logger.warn(`[autonomous-runner] same-question check failed for ${opp.id}: ${err.message}`);
+        run.topic_targeting_result = { ...(run.topic_targeting_result || {}), same_question: { mode: 'error', error: String(err.message).slice(0, 200) } };
+      }
+      if (sameQuestion) {
+        const enforce = sameQuestionCheckOn();
+        const record = {
+          mode: enforce ? 'on' : 'shadow',
+          would_block: sameQuestion.would_block === true,
+          reason: sameQuestion.reason,
+          owner_url: sameQuestion.owner?.url || null,
+          tokens: sameQuestion.tokens || [],
+          source: sameQuestion.source || null,
+        };
+        run.topic_targeting_result = { ...(run.topic_targeting_result || {}), same_question: record };
+        if (record.would_block) {
+          logger.info(`[autonomous-runner] same-question ${enforce ? 'BLOCK' : 'shadow'} for ${opp.id}: tokens=${record.tokens.join('+')} owner=${record.owner_url}`);
+        }
+        if (record.would_block && enforce) {
+          // The question is the text the match was made on: evaluateSameQuestion
+          // falls back from the keyword to the working title, then the slug,
+          // and the queued answer block must be about that, not about a
+          // keyword with no topic words in it.
+          const question = String(sameQuestion.source_text || '').trim();
+          try {
+            // A shadow-mode blog run records what it would do and queues
+            // nothing: the refresh it would create may run live.
+            if (run.shadow_mode) {
+              record.refresh = { queued: false, reason: 'shadow_mode' };
+            } else {
+              const refreshQueue = getSameQuestionRefresh();
+              if (!refreshQueue) throw new Error('same_question_refresh_unavailable');
+              record.refresh = await refreshQueue.enqueueOwnerRefresh({
+                owner: sameQuestion.owner,
+                tokens: sameQuestion.tokens,
+                question,
+                sourceOpportunityId: opp.id,
+                sourceRunId: run.id || null,
+              });
+            }
+          } catch (err) {
+            // The block stands (it is deterministic and correct); only the
+            // rewrite is lost, and the replay script can find it again.
+            logger.error(`[autonomous-runner] same-question refresh enqueue failed for ${opp.id}: ${err.message}`);
+            record.refresh = { queued: false, reason: `enqueue_error:${String(err.message).slice(0, 120)}` };
+          }
+          const skipReason = `topic_targeting:${topicGate.CODES?.SAME_QUESTION_LIVE || 'TOPIC_SAME_QUESTION_LIVE'}`;
+          const finalized = await finalize(run, t0, {
+            outcome: 'skipped_gate_fail',
+            skip_reason: skipReason,
+            reviewer_notes: `${(sameQuestion.findings || []).map((f) => `${f.code}: ${f.message}`).join(' | ')} | owner refresh: ${record.refresh.queued ? 'queued' : record.refresh.reason}`,
+          });
+          await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
+          return finalized;
+        }
       }
     }
 
@@ -1866,6 +1949,24 @@ class AutonomousRunner {
     }
   }
 
+  // The rows whose terminal draft is pushed and usable, best score first
+  // (terminal-writer awaitingTerminalDrafts `written`; a row whose brief is
+  // past its age limit is not listed, it is briefed again). With an
+  // actionType (a scoped pass), only that lane's rows: the run that waited
+  // for the draft carries the lane its claim was fenced to. Gate off, kill
+  // switch off or any read failure: none (the batch claims by score as before).
+  async _writtenTerminalDraftIds(actionType = null) {
+    const terminalWriter = require('./terminal-writer');
+    if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return [];
+    try {
+      const { written } = await terminalWriter.awaitingTerminalDrafts();
+      return written.filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
+      return [];
+    }
+  }
+
   async _runDailyInner({ limit = null, actionType = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
     // A single transient failure (e.g. a flaky agent dispatch) used to abort
@@ -1923,8 +2024,25 @@ class AutonomousRunner {
     // read-only peek so an empty lane reserves nothing; the rest of the batch
     // claims by score as before. Kill: AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS=0.
     let reservedLeft = actionType ? 0 : await this._claimableBackfillSlots(batchLimit);
+    // Written terminal drafts first (owner rulings 2026-10-26 and 2026-10-29).
+    // The claim orders by score, so a row whose draft was pushed waited
+    // behind higher-scored rows that still had none, each looked at and
+    // deferred again, and the batch limit ran out first. Every pass spends
+    // its first slots on the rows whose draft is written: each claim is
+    // scoped to the ones not yet taken (best score first, every claim rule
+    // still applies), inside the same batch limit; then the reserved
+    // backfill slots, then score order. A scoped pass takes its own lane's
+    // drafts: the 1 PM blog catch-up the blog drafts (2026-10-29: a deploy
+    // cut the 9 AM batch after two claims, and the catch-up, by score, spent
+    // all ten slots on blog rows with no draft while four blog drafts
+    // waited). The blog fallback keeps taking the drafts left: its claims
+    // carry the blog lane, so a non-blog draft id among them matches nothing
+    // and the slot returns. No written draft = the batch as before.
+    // Kill: AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST=false.
+    let draftIds = await this._writtenTerminalDraftIds(actionType);
     for (let i = 0; i < slotBudget; i += 1) {
-      const reserve = reservedLeft > 0 && !scopedActionType;
+      const drafts = draftIds.length > 0;
+      const reserve = !drafts && reservedLeft > 0 && !scopedActionType;
       if (reserve) reservedLeft -= 1;
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
       // through to claimNext; spread conditionally so the unscoped daily
@@ -1932,8 +2050,19 @@ class AutonomousRunner {
       const run = await this.runNext({
         excludeIds: [...failedOppIds],
         ...(scopedActionType ? { actionType: scopedActionType } : {}),
+        ...(drafts ? { onlyIds: [...draftIds] } : {}),
         ...(reserve ? { bucket: CITABILITY_BACKFILL_BUCKET } : {}),
       });
+      if (drafts) {
+        // None of them is claimable now (deferred, held by a claim rule):
+        // the slot returns to the general pool, as an empty reserved slot does.
+        if (run.outcome === 'skipped_no_opportunity') {
+          draftIds = [];
+          i -= 1;
+          continue;
+        }
+        draftIds = draftIds.filter((id) => id !== run.opportunity_id);
+      }
       if (reserve && run.outcome === 'skipped_no_opportunity') {
         // Claimed away since the peek: the slot returns to the general pool.
         reservedLeft = 0;

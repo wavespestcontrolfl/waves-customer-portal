@@ -54,6 +54,8 @@ export default function IntegrationHealthSection() {
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState(null);
+  // A failed "Refresh checks" request. The list it could not refresh stays up.
+  const [checkError, setCheckError] = useState(null);
 
   const load = useCallback(() => {
     setError(null);
@@ -67,11 +69,21 @@ export default function IntegrationHealthSection() {
     load();
   }, [load]);
 
+  // "Try again" after a failed read: show "Loading" until the new read lands.
+  const retry = () => {
+    setLoading(true);
+    load();
+  };
+
   const runCheck = async () => {
     setChecking(true);
+    setCheckError(null);
     try {
       await adminFetch("/admin/token-health/check", { method: "POST" });
       await load();
+    } catch (err) {
+      // load() reports its own failure; this is the check request itself.
+      setCheckError(err.message);
     } finally {
       setChecking(false);
     }
@@ -87,7 +99,7 @@ export default function IntegrationHealthSection() {
   if (error) {
     return (
       <UiSurface>
-        <ActionFeedback error className="min-h-20">
+        <ActionFeedback error onRetry={retry} className="min-h-20">
           Failed to load integrations: {error}
         </ActionFeedback>
       </UiSurface>
@@ -106,6 +118,7 @@ export default function IntegrationHealthSection() {
           {checking ? "Checking..." : "Refresh checks"}
         </Button>
       </div>
+      {checkError && <ActionFeedback error>Failed to refresh checks: {checkError}</ActionFeedback>}
 
       {Object.entries(groups).map(([category, integrations]) => {
         const categoryId = `integration-category-${category.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;

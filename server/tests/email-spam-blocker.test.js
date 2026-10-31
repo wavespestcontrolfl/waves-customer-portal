@@ -422,6 +422,8 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
   test('blockSpamSender returns before any lookup or Gmail filter for a government sender', async () => {
     await blockSpamSender({ id: 1, from_address: 'licensing@fdacs.gov' });
     await blockSpamSender({ id: 2, from_address: 'News@FreshFromFlorida.com' });
+    // A public bid portal is a government sender (VendorLink, inbox replay 2026-10-28).
+    await blockSpamSender({ id: 3, from_address: 'vendorlink@myvendorlink.com' });
     expect(db).not.toHaveBeenCalled();
   });
 
@@ -489,7 +491,10 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
     expect(increment).toHaveBeenCalledWith('blocked_count', 1);
   });
 
-  test('reconcileStaleAutoBlocks unwinds an automatic block on a government sender', async () => {
+  test.each([
+    ['a government sender', 'licensing@fdacs.gov'],
+    ['VendorLink, a public bid portal (inbox replay 2026-10-28)', 'vendorlink@myvendorlink.com'],
+  ])('reconcileStaleAutoBlocks unwinds an automatic block on %s', async (_label, address) => {
     const del = jest.fn(async () => 1);
     db.mockImplementation((table) => {
       if (table === 'blocked_email_senders') {
@@ -497,10 +502,10 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
           where: jest.fn(() => chain),
           whereRaw: jest.fn(() => chain),
           select: jest.fn(async () => [
-            { id: 'g1', email_address: 'licensing@fdacs.gov' },
+            { id: 'g1', email_address: address },
             { id: 'b2', email_address: 'stranger@junk.example' },
           ]),
-          first: jest.fn(async () => ({ id: 'g1', reason: 'spam_auto', email_address: 'licensing@fdacs.gov', gmail_filter_id: null })),
+          first: jest.fn(async () => ({ id: 'g1', reason: 'spam_auto', email_address: address, gmail_filter_id: null })),
           del,
         };
         return chain;

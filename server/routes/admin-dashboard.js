@@ -31,6 +31,13 @@ const callbackSourceTechLive = () => {
   return typeof gates.callbackSourceTechLive === 'function' && gates.callbackSourceTechLive();
 };
 
+// GATE_TECH_OPEN_TIME and GATE_TECH_COST_RATES (L11b), same call-time lookup and missing-reader-is-off rule.
+const openTimeBridgeLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.techOpenTimeLive === 'function' && gates.techOpenTimeLive() === true
+    && typeof gates.techCostRatesLive === 'function' && gates.techCostRatesLive() === true;
+};
+
 // Server-side gate for the AI chart builder. The client hides the panel behind
 // the same flag, but the endpoints must enforce it too — otherwise any admin who
 // knows the route could reach the LLM + SQL sandbox while it's dark-launched.
@@ -161,12 +168,32 @@ function etDayStart(dateStr) { return `${dateStr}T00:00:00`; }
 // pipeline_stage is what distinguishes a customer from a lead.
 function whereRealCustomer(qb) { return qb.whereIn('pipeline_stage', CUSTOMER_STAGES); }
 
+// Internal test customers' payments are not business revenue: the shared rule
+// in services/internal-test-customers.js, which the Intelligence Bar revenue
+// path applies too. NOT EXISTS rather than a join, so a payer statement
+// settlement (customer_id NULL; DECISIONS.md 2026-06-21 payer P3) stays in
+// every business-wide cash total. The P&L (services/pnl-report.js) is the
+// books and keeps this cash, so its received line can differ by these rows.
+function whereNotInternalTestCustomer(qb, customerIdColumn) {
+  if (INTERNAL_TEST_CUSTOMERS.length === 0) return qb;
+  return qb.whereNotExists(function () {
+    this.select(db.raw('1'))
+      .from('customers as itc')
+      .whereColumn('itc.id', customerIdColumn)
+      .whereIn(
+        db.raw("LOWER(COALESCE(itc.first_name, '') || ' ' || COALESCE(itc.last_name, ''))"),
+        INTERNAL_TEST_CUSTOMERS,
+      );
+  });
+}
+
 async function paidRevenueTotal(from, to) {
   const [ledger, paidInvoiceGaps] = await Promise.all([
     db('payments')
       .where({ status: 'paid' })
       .where('payment_date', '>=', from)
       .where('payment_date', '<=', to)
+      .modify(whereNotInternalTestCustomer, 'payments.customer_id')
       .sum('amount as total')
       .first(),
     applyETTimestampWindow(
@@ -177,7 +204,8 @@ async function paidRevenueTotal(from, to) {
           this.select(db.raw('1'))
             .from('payments as p')
             .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id');
-        }),
+        })
+        .modify(whereNotInternalTestCustomer, 'i.customer_id'),
       'i.paid_at',
       from,
       to,
@@ -202,6 +230,7 @@ async function paidRevenueDaily(from, to) {
       .where({ status: 'paid' })
       .where('payment_date', '>=', from)
       .where('payment_date', '<=', to)
+      .modify(whereNotInternalTestCustomer, 'payments.customer_id')
       .select(db.raw("payment_date::date as date"), db.raw("SUM(amount) as total"))
       .groupByRaw("payment_date::date")
       .orderBy('date'),
@@ -213,7 +242,8 @@ async function paidRevenueDaily(from, to) {
           this.select(db.raw('1'))
             .from('payments as p')
             .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id');
-        }),
+        })
+        .modify(whereNotInternalTestCustomer, 'i.customer_id'),
       'i.paid_at',
       from,
       to,
@@ -670,7 +700,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         .whereNull('paid_at').whereNotIn('status', ['void', 'cancelled', 'draft'])
         .select(
           db.raw("COUNT(*) as open_count"),
-          db.raw("SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as open_total"),
+          db.raw("SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)) as open_total"),
           db.raw("AVG(EXTRACT(EPOCH FROM ((NOW() AT TIME ZONE 'America/New_York') - (created_at AT TIME ZONE 'America/New_York'))) / 86400) as avg_days_open"),
           db.raw("COUNT(*) FILTER (WHERE due_date < (NOW() AT TIME ZONE 'America/New_York')::date) as overdue_count")
         ).first();
@@ -1320,6 +1350,42 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
       };
     } catch { /* job_costs absent — headline COGS only */ }
 
+    // Vehicle fixed cost the gross profit above already carries in its drive
+    // cost (vehicle cost cards, GATE_TECH_COST_RATES): the same service_records
+    // rows and window, so the bridge takes exactly that out of the vehicle
+    // overhead and it counts once. Its own guarded read, so an environment
+    // before the column's migration still gets the bridge.
+    let vehicleFixedInCogs = 0;
+    try {
+      const v = await db('service_records')
+        .where('service_date', '>=', monthStart).where('service_date', '<=', today)
+        .whereNotNull('revenue')
+        .sum({ v: 'vehicle_fixed_cost' })
+        .first();
+      vehicleFixedInCogs = Number(v.v); // NULL sum = none; the bridge reads it as 0
+    } catch { /* vehicle_fixed_cost absent — nothing allocated */ }
+
+    // Open time (L11b, GATE_TECH_OPEN_TIME + GATE_TECH_COST_RATES): the labor cost of the paid technician
+    // minutes the month's finished days (the month start through yesterday) left unbooked. Its own guarded
+    // read: a failure leaves the bridge without the row, as it is without the gates.
+    let openTime = null;
+    if (openTimeBridgeLive()) {
+      try {
+        const yesterday = etDateString(addETDays(now, -1));
+        if (yesterday >= monthStart) {
+          const { computeOpenTime } = require('../services/open-time');
+          const ot = await computeOpenTime(db, { from: monthStart, to: yesterday, today });
+          openTime = {
+            amount: Math.round(ot.totals.openCostCents) / 100,
+            days: ot.totals.days,
+            openMinutes: ot.totals.openMinutes,
+          };
+        }
+      } catch (err) {
+        logger.error(`[admin-dashboard] ebitda-bridge open time failed (${err.code || err.name})`);
+      }
+    }
+
     const bridge = buildEbitdaBridge({
       revenue: parseFloat(fin?.rev) || 0,
       grossProfit: parseFloat(fin?.gp) || 0,
@@ -1327,9 +1393,12 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
       overhead,
       cogsSplit,
       monthFraction,
+      allocated: { vehicle: vehicleFixedInCogs },
+      ...(openTime ? { openTime: openTime.amount } : {}),
     });
     res.json({
       ...bridge,
+      ...(openTime ? { openTime } : {}),
       period: { from: monthStart, to: today, label: 'Month to date', elapsedDays, daysInMonth },
       jobs: parseInt(fin?.jobs || 0, 10),
       uncostedRevenue: Math.round((parseFloat(fin?.uncosted) || 0) * 100) / 100,
@@ -1926,9 +1995,16 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
 // Custom lookback: an operator-chosen START date through today (?from=YYYY-MM-DD).
 // Window end is always today, so every "as of now" metric stays valid — no
 // historical end. Null unless `from` is a valid ET date not in the future.
+// A supplied `from` must be a real calendar date: one that only looks like a
+// date (2026-09-31) would reach the date binds of every query on the route.
+// The picker only sends real dates, so this guards the API boundary; the
+// operational error reaches the shared error handler as a 400.
 function parseCustomRange(query) {
-  const from = typeof query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : null;
-  if (!from) return null;
+  if (query.from === undefined) return null;
+  const from = validCalendarDate(query.from);
+  if (!from) {
+    throw Object.assign(new Error('from must be a valid YYYY-MM-DD calendar date'), { statusCode: 400, isOperational: true });
+  }
   const today = etDateString();
   return { from: from > today ? today : from };
 }
@@ -2522,3 +2598,4 @@ module.exports = router;
 // computeCoreKpis is reused by the daily KPI snapshot cron (services/kpi-snapshot.js)
 // so the recorded trend reads the exact same numbers as the live dashboard tiles.
 module.exports.computeCoreKpis = computeCoreKpis;
+module.exports._internals = { paidRevenueTotal, paidRevenueDaily };

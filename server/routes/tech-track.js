@@ -728,6 +728,16 @@ router.post('/:id/rain-out', async (req, res, next) => {
       scope: scope === 'route' ? 'route' : 'job',
       target,
       notifyCustomer: notifyCustomer !== false,
+      // Fences the WRITE itself, not just the ownsTrackedVisit pre-read above:
+      // commit() merges this into the rebooker's options.expect (technician_id
+      // is part of the atomic UPDATE predicate), so a dispatch reassignment
+      // landing between that read and the write makes the write miss and 409
+      // with nothing sent. A recurring date move still shifts its series
+      // (GATE_COLLECTIVE_SERIES_ANCHOR, owner ruling 2026-10-28); that series
+      // write is fenced to the same technician through expectAnchor, so the
+      // reassignment race is closed on both paths.
+      requireAssignedTechnicianId: req.technicianId,
+      allowSeriesForAssignedTechnician: true,
       // Authenticated tech quick-move tap — the moved SMS is exempt from
       // the 8AM-8PM send window (operator-initiated, not machine-initiated).
       operatorInitiated: true,
@@ -735,9 +745,25 @@ router.post('/:id/rain-out', async (req, res, next) => {
     // commit() collects every moved row's route-quality dates for its caller
     // to flush once (codex #4295 r4 P2) — without this a Quick Move from the
     // tech portal refreshed nothing. Best-effort, after the move committed.
-    if (result.ok && Array.isArray(result.qualityDates) && result.qualityDates.length) {
+    // The board broadcasts below add their dates to the SAME Set, so the
+    // route quality refresh stays ONE flush.
+    if (result.ok) {
+      const dispatchAssignment = require('../services/dispatch-assignment');
+      const qualityDates = new Set(Array.isArray(result.qualityDates) ? result.qualityDates : []);
+      // Re-render any other operator's open Dispatch Board: one job update per
+      // successfully moved stop, covered grouped members included (same as the
+      // admin-dispatch rain-out twin). A stop whose series effects pass
+      // already broadcast it (boardBroadcastBySeriesEffects) is skipped.
+      for (const moved of result.results || []) {
+        if (!moved.ok || moved.boardBroadcastBySeriesEffects) continue;
+        try {
+          await dispatchAssignment.emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId, qualityDates });
+        } catch (err) {
+          logger.error(`[tech-track] quick move board broadcast failed for ${moved.id}: ${err.message}`);
+        }
+      }
       try {
-        await require('../services/dispatch-assignment').flushDispatchQualityDates(new Set(result.qualityDates));
+        await dispatchAssignment.flushDispatchQualityDates(qualityDates);
       } catch (err) {
         logger.error(`[tech-track] quick move route quality refresh failed: ${err.message}`);
       }
@@ -1619,8 +1645,6 @@ const {
   saveTreatmentZoneMap,
   deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
-  describeReusableTreatmentZone,
-  reuseLastTreatmentZone,
 } = require('../services/treatment-zone-maps');
 const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
 const { traceCaptureBlockPayload } = require('../services/service-report/trace-eligibility');
@@ -1816,105 +1840,6 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
     return res.json({ suggestion });
   } catch (err) {
     logger.error(`[tech-track] treatment zone suggest failed: ${err.message}`);
-    return next(err);
-  }
-});
-
-// "Same as last visit" (GATE_TRACE_REUSE, dark): the Fast Complete report flow
-// copies the customer's last saved spray trace onto the open visit with one
-// tap, when the visit's own coordinates fall inside that trace's footprint.
-// The server picks the source trace itself (treatment-zone-maps.js,
-// findReusableTreatmentZone); a client never names a zone.
-const TRACE_REUSE_SVC_COLUMNS = ['id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type', 'property_id'];
-const TRACE_REUSE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, trace_exists: 409, no_reusable_trace: 409, reuse_in_progress: 409, visit_changed: 409, service_not_assigned: 403, not_found: 404, trace_image_copy_failed: 502 };
-
-// GET /api/tech/services/:id/treatment-zone/last — is there a trace to reuse,
-// and how big? No path points: the sheet only needs the size and the day.
-router.get('/:id/treatment-zone/last', async (req, res, next) => {
-  try {
-    if (!featureGates.traceReuseLive() || !featureGates.isEnabled('treatmentZoneMap')) {
-      return res.json({ available: false });
-    }
-    const svc = await db('scheduled_services').where({ id: req.params.id }).first(...TRACE_REUSE_SVC_COLUMNS);
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (!technicianVisitRowInScope(req, svc)) {
-      return res.status(403).json({ error: 'Not assigned to this service' });
-    }
-    return res.json(await describeReusableTreatmentZone(svc));
-  } catch (err) {
-    logger.error(`[tech-track] treatment zone last fetch failed: ${err.message}`);
-    return next(err);
-  }
-});
-
-// POST /api/tech/services/:id/treatment-zone/reuse — body { expectedPropertyId?,
-// openVisitOnly? }, the save route's own fence fields. Saves a copy of the
-// last trace onto this visit through saveTreatmentZoneMap, so the property
-// fence, the completed-visit refusal and the capture check all apply.
-// A copy reads and re-uploads pictures, so the route has its own tight limit
-// (one tap per visit is the honest cadence; Codex security P2 r7 on #6175).
-const traceReuseOn = () => featureGates.traceReuseLive() && featureGates.isEnabled('treatmentZoneMap');
-const traceReuseLimiter = require('express-rate-limit')({
-  windowMs: 60 * 1000,
-  max: 12,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
-  // Dark means absent: with either gate off the limiter neither counts nor
-  // answers, so the route says 404 every time, never 429 (Codex P2 r8 on #6175).
-  skip: () => !traceReuseOn(),
-  message: { error: 'Too many copies at once. Trace this visit by hand.', code: 'reuse_rate_limited' },
-});
-router.post('/:id/treatment-zone/reuse', traceReuseLimiter, async (req, res, next) => {
-  try {
-    if (!featureGates.traceReuseLive() || !featureGates.isEnabled('treatmentZoneMap')) {
-      return res.status(404).json({ error: 'Not enabled' });
-    }
-    const svc = await db('scheduled_services').where({ id: req.params.id }).first(...TRACE_REUSE_SVC_COLUMNS);
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (!technicianVisitRowInScope(req, svc)) {
-      return res.status(403).json({ error: 'Not assigned to this service' });
-    }
-    const body = req.body && typeof req.body === 'object' ? req.body : {};
-    const fenced = Object.prototype.hasOwnProperty.call(body, 'expectedPropertyId');
-    if (fenced && String(body.expectedPropertyId ?? '') !== String(svc.property_id ?? '')) {
-      return res.status(409).json({
-        error: 'This visit moved to another property. Close it and reopen it from the schedule.',
-        code: 'visit_property_changed',
-      });
-    }
-    // The write guards are the server's, never the caller's: the copy is bound
-    // to the property this request read (so a visit that moves during the
-    // image copy is refused under the lock) and to an open visit, whatever
-    // the body says or leaves out. The body's own property is only the stale-
-    // sheet check above (pre-push P1).
-    const row = await reuseLastTreatmentZone({
-      visit: svc,
-      // The write reads the visit again under its lock, inside this caller's
-      // own scope (a visit reassigned or edited during the image copy).
-      actor: req,
-      technicianId: req.technicianId,
-      expectedPropertyId: svc.property_id ?? null,
-      openVisitOnly: true,
-    }).catch((err) => {
-      if (TRACE_REUSE_REFUSALS[err?.code]) return { refused: err };
-      throw err;
-    });
-    if (row?.refused) {
-      return res.status(TRACE_REUSE_REFUSALS[row.refused.code]).json({ error: row.refused.message, code: row.refused.code });
-    }
-
-    // The reused map renders on the report like a hand trace: same stale-PDF
-    // rule as the save route.
-    const completedRecord = await db('service_records')
-      .where({ scheduled_service_id: svc.id })
-      .orderBy('created_at', 'desc')
-      .first('id');
-    if (completedRecord) await invalidateServiceReportPdfCache(completedRecord.id);
-
-    return res.json({ treatmentZone: row });
-  } catch (err) {
-    logger.error(`[tech-track] treatment zone reuse failed: ${err.message}`);
     return next(err);
   }
 });

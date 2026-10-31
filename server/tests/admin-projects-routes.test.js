@@ -1,7 +1,4 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
-// The hold-arming guard under test sits behind the report-payment-hold gate,
-// which is read once at module load — enable it before any require.
-process.env.GATE_WDO_REPORT_PAYMENT_HOLD = 'true';
 
 const mockS3Send = jest.fn();
 const mockAnthropicCreate = jest.fn();
@@ -1716,49 +1713,6 @@ describe('admin projects routes', () => {
       ]));
       expect(body.missing.map(item => item.key)).not.toContain('photos');
       expect(body.missing.map(item => item.key)).not.toContain('recommendations');
-      expect(projectRead.update).not.toHaveBeenCalled();
-    });
-  });
-
-  test('hold-until-paid refuses a pre-treatment certificate with missing soft fields even under an override', async () => {
-    // The automatic release revalidates every required certificate field with
-    // no operator present, and the interactive override is not persisted — so
-    // arming a hold over missing fields would collect payment and then never
-    // deliver. The route must refuse the hold at preview time instead.
-    const projectRead = chain({
-      first: jest.fn().mockResolvedValue({
-        id: 'cert-1',
-        customer_id: 'customer-1',
-        project_type: 'pre_treatment_termite_certificate',
-        project_date: '2026-07-17',
-        findings: { treatment_address: '123 Slab Ct', applicator_name: 'Adam Benetti', treatment_time: '08:40', warranty_type: 'Builder 1-year, renewable yearly to year 5' },
-        sent_at: null,
-        status: 'draft',
-      }),
-    });
-    const customerRead = chain({
-      first: jest.fn().mockResolvedValue({ id: 'customer-1', first_name: 'Van', last_name: 'Lee', email: 'van@example.com' }),
-    });
-    db.mockImplementation((table) => {
-      if (table === 'projects') return projectRead;
-      if (table === 'customers') return customerRead;
-      throw new Error(`Unexpected table query: ${table}`);
-    });
-
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/projects/cert-1/send-with-invoice`, {
-        method: 'POST',
-        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dry_run: true,
-          hold_report_until_paid: true,
-          override_reason: 'Thin draft, customer needs it today',
-        }),
-      });
-      const body = await res.json();
-      expect(res.status).toBe(422);
-      expect(body.code).toBe('hold_requires_complete_certificate');
-      expect(body.missing.length).toBeGreaterThan(0);
       expect(projectRead.update).not.toHaveBeenCalled();
     });
   });

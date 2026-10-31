@@ -149,9 +149,18 @@ function targetForRun(run) {
   const draft = parseJsonObject(run.draft_payload);
   const frontmatter = draft.frontmatter || {};
   const isNewPage = String(run.action_type || '') === 'new_supporting_blog';
+  // A multi-domain page's canonical is a template ("{{siteUrl}}/slug/") that
+  // each build resolves; stored on the draft it is not a URL. Skip any value
+  // with an unresolved {{token}} so resolveTargetForRun falls back to the
+  // brief's target_url instead of the live check throwing "Failed to parse
+  // URL" (and the merged run parking) on every tick.
+  const concrete = (value) => {
+    const s = String(value || '').trim();
+    return s.includes('{{') ? '' : s;
+  };
   const url = (isNewPage
-    ? String(frontmatter.canonical || '').trim()
-    : String(draft.page_url || draft.target_url || frontmatter.canonical || '').trim()) || null;
+    ? concrete(frontmatter.canonical)
+    : (concrete(draft.page_url) || concrete(draft.target_url) || concrete(frontmatter.canonical))) || null;
   return {
     url,
     keyword: frontmatter.primary_keyword || null,
@@ -1517,6 +1526,19 @@ async function maybeAutoMerge(run, pr) {
       }
       return { pending: true, transient, reason: `codex_review_pending: ${err.message}${err.p2BarReason ? ` (p2 bar: ${err.p2BarReason})` : ''}` };
     }
+  }
+
+  // 2a. The astro repo's brand-isolation job must have passed on this head: a
+  //     hub brand/link leaking onto a spoke is invisible to the hub preview and
+  //     to Codex. After the Codex gate so remediation still runs on findings.
+  try {
+    await publisher.assertBrandIsolationClear(pr);
+  } catch (err) {
+    if (err?.code === 'BRAND_ISOLATION_REQUIRED' || err?.code === 'BRAND_ISOLATION_LOOKUP_FAILED') {
+      logger.info(`[autonomous-pr-poller] auto-merge blocked for run ${run.id} PR #${pr.number}: ${err.message}`);
+      return { pending: true, ...(err.transient ? { transient: true } : {}), reason: err.reason };
+    }
+    throw err; // unexpected — retry next tick
   }
 
   // 2b. Hub-only kill switch (mirrors mergeAstro's assertOpenPublishPrIsHubOnly,

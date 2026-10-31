@@ -741,7 +741,7 @@ describe('aeo_question_gap lane fence (kill-switch contract)', () => {
     await queue.claimNext({});
     const [sql] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM opportunity_queue route_fence/);
-    expect(sql).toMatch(/route_fence\.bucket = 'aeo_question_gap' OR opportunity_queue\.bucket = 'aeo_question_gap'/);
+    expect(sql).toMatch(/route_fence\.bucket IN \('aeo_question_gap', 'same_question_refresh'\) OR opportunity_queue\.bucket IN \('aeo_question_gap', 'same_question_refresh'\)/);
     expect(sql).toContain("intercept_brief'->>'slug'");
     const q = peekChain();
     db.mockImplementation(() => q);
@@ -824,5 +824,64 @@ describe('release() — superseded citability claims cannot return to pending', 
       expect.stringContaining("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')"),
       ['superseded_by_ordinary_page_edit'],
     );
+  });
+});
+
+describe('same_question_refresh lane fence (kill-switch + cooldown contract, GATE_SAME_QUESTION_CHECK)', () => {
+  // The runner queues owner-page rewrites only while the gate is on; gate off
+  // must also stop queued rows from being claimed. The row shares the aeo
+  // question route fence, so the 28-day page cooldown applies to it too.
+  const OLD = process.env.GATE_SAME_QUESTION_CHECK;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_SAME_QUESTION_CHECK; else process.env.GATE_SAME_QUESTION_CHECK = OLD;
+  });
+  const peekChain = () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return q;
+  };
+
+  test('gate off: a pending same_question_refresh row is neither claimed nor peeked', async () => {
+    delete process.env.GATE_SAME_QUESTION_CHECK;
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    expect(db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s))[0]).toContain(`AND bucket <> 'same_question_refresh'`);
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters).toEqual(expect.arrayContaining([['not', 'bucket', 'same_question_refresh']]));
+  });
+
+  test('gate on: claimable, and the claim carries the question route fence + cooldown for the bucket', async () => {
+    process.env.GATE_SAME_QUESTION_CHECK = 'true';
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    const [sql] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
+    expect(sql).not.toContain(`AND bucket <> 'same_question_refresh'`);
+    expect(sql).toMatch(/opportunity_queue\.bucket IN \('aeo_question_gap', 'same_question_refresh'\) AND route_fence\.status = 'done'/);
+    expect(sql).toMatch(/opportunity_queue\.bucket NOT IN \('aeo_question_gap', 'same_question_refresh'\)/);
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters).not.toEqual(expect.arrayContaining([['not', 'bucket', 'same_question_refresh']]));
+  });
+
+  test('releaseDisabledSameQuestionReservations only narrows the query while the gate is off', () => {
+    const q = { whereRaw: jest.fn(() => q) };
+    process.env.GATE_SAME_QUESTION_CHECK = 'true';
+    queue._internals.releaseDisabledSameQuestionReservations(q);
+    expect(q.whereRaw).not.toHaveBeenCalled();
+    delete process.env.GATE_SAME_QUESTION_CHECK;
+    queue._internals.releaseDisabledSameQuestionReservations(q);
+    expect(q.whereRaw).toHaveBeenCalledWith(`NOT (bucket = 'same_question_refresh' AND status = 'pending')`);
   });
 });

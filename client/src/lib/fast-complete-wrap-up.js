@@ -8,6 +8,7 @@ import {
   REVIEW_TIMING_DEFAULT,
   completionTimeOnSiteBody,
   customReviewTimeProblem,
+  reviewOptOutFields,
   reviewDelayMinutesOf,
   reviewScheduledForOf,
 } from './completion-review-timing';
@@ -73,12 +74,13 @@ const reviewMarkerFields = ({ reviewMarker, willReview }) => (reviewMarker && wi
 // The body fragment. Untouched it is the four customer-text flags the sheets always posted; every
 // other key appears only when the tech changed it (the next-visit note: lib/completion-next-visit-note.js). `adjusted` is the admin's typed minutes ('' for
 // anyone else): blank sends nothing (the server measures check-in to Complete), a number overrides.
-export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming, noPayLink, reviewMarker, nextVisitNote, nextVisit }) {
+export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, firstAsk, reviewOptOutReason, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming, noPayLink, reviewMarker, nextVisitNote, nextVisit }) {
   const timing = { willReview, reviewTiming, reviewCustomAt };
   return {
     sendCompletionSms: sendSms,
     includePayLink: payLinkPosted({ noPayLink, willInvoice, sendSms, includePayLink }),
     requestReview: willReview,
+    ...reviewOptOutFields({ firstAsk, willReview, reviewOptOutReason }),
     ...reviewMarkerFields({ reviewMarker, willReview }),
     ...timingFields(timing, omitAutoTiming),
     ...completionTimeOnSiteBody({ backfill: false, adjustedMinutes: adjusted, elapsed: '', preparing: true }),

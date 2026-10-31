@@ -27,7 +27,9 @@ function whereNotW2(query, alias = 't') {
 }
 
 // Finalized pay checks with a pay date in [sd, ed] ('YYYY-MM-DD'), oldest first.
-async function loadFinalizedW2Checks(conn, sd, ed) {
+// timeOff (GATE_PAYROLL_TIME_OFF) also selects the paid time off and holiday
+// minutes; gate off, the new columns are never read.
+async function loadFinalizedW2Checks(conn, sd, ed, { timeOff = false } = {}) {
   return conn('payroll_checks')
     .where('status', 'finalized')
     .where('pay_date', '>=', sd)
@@ -35,6 +37,7 @@ async function loadFinalizedW2Checks(conn, sd, ed) {
     .orderBy([{ column: 'pay_date' }, { column: 'week_start' }, { column: 'employee_name' }, { column: 'id' }])
     .select(
       ...W2_CHECK_COLUMNS,
+      ...(timeOff ? ['pto_minutes', 'holiday_minutes'] : []),
       conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"),
     );

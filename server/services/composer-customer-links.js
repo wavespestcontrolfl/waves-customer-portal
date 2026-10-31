@@ -820,7 +820,7 @@ const ANY_SCHEME = { anyScheme: true };
 const IMMEDIATE_ONLY_LINK_KINDS = [
   {
     // A project report page (WDO / specialty) shows the customer's name,
-    // address and findings, can flip to a 402 payment hold, and only /sms
+    // address and findings, and only /sms
     // binds it to the recipient's account — same class as a service report.
     label: 'Project report',
     fragment: /\/report\/project\//i,
@@ -1547,9 +1547,8 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
 
 // Project reports (WDO / specialty; long vanity or full-token form): the
 // public viewer's own lookup (extractProjectReportTokenLookup — a 12-hex
-// prefix must resolve to exactly one project, as /data does), never a
-// payment-held report (the page answers 402 with a pay card, not the
-// report), then the account binding — a household shares its projects.
+// prefix must resolve to exactly one project, as /data does), then the
+// account binding — a household shares its projects.
 async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) {
   for (const run of linkRuns(ctx.runs, PROJECT_REPORT_RUN_RE)) {
     const segment = canonicalPortalToken(run, ctx.hosts, PROJECT_REPORT_PATH_RE);
@@ -1563,9 +1562,6 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
     // (GH Codex #3893 r1 + r3 P1).
     if (!issuedProjectReport(project)) {
       return refuseSend('This project report is no longer viewable — remove the link before sending.');
-    }
-    if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
-      return refuseSend('This project report is on a payment hold — the page shows a pay card, not the report. Remove the link before sending.');
     }
     const bad = await onRecipientAccount(project.customer_id, 'project report link');
     if (bad) return bad;
@@ -2489,7 +2485,8 @@ async function buildCardRequestLink(visit) {
     service_type: visit.service_type || 'service',
     date_line: card.dateLineFor(visit.scheduled_date),
     secure_link: result.secureUrl,
-    cancel_fee_line: card.cancelFeeLine(),
+    // The funnel's own fee clause ('' on a recurring-plan visit).
+    cancel_fee_line: result.cancelFeeLine || '',
   };
   // The base render is the live kill-switch check, exactly as in the
   // funnel; only then the plan-choice overlay, honoring the EXISTING
@@ -2882,9 +2879,6 @@ async function buildReceiptLink(customerIds, recipientId = null) {
   };
 }
 
-// A project whose public viewer would answer 402 (pay card) instead of the
-// report — reports-public heldReportPaymentContext's own set.
-const PROJECT_REPORT_HELD_STATUSES = ['held', 'releasing'];
 // Reports that have been issued: the same status set project-report-links
 // numbers vanity paths over — AND delivery evidence: completing a project-
 // backed visit mints report_token and closes the project even when the
@@ -2911,7 +2905,7 @@ const issuedProjectReport = (project) => Boolean(project)
 // The columns the eligibility predicates read — never `*`: projects carries
 // multi-MB blobs (wdo_signature, property_profile, wdo_history) that the
 // list route also skips, and a Quick Link scan may touch 15 rows (r16 P2).
-const PROJECT_REPORT_LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
+const PROJECT_REPORT_LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token'];
 // What the line and toast read for the ONE chosen project: the title scrub
 // (projectTitle — findings' and archived filings' recorded fees) and the
 // vanity path (report_token, customer_id, id).
@@ -2991,32 +2985,24 @@ async function linkableProjectReport(lookup) {
 
 /**
  * Project report link — the account's newest issued project report (WDO /
- * specialty; a household shares them like service reports), skipping one on
- * a payment hold (its page is a pay card until the invoice settles). The
+ * specialty; a household shares them like service reports). The
  * vanity path the report emails use (projectReportPathForProject); the
  * token is the project's permanent report_token, nothing minted.
  */
 async function buildProjectReportLink(customerIds) {
-  const PAGE = 15;
-  let pick = null;
-  for (let offset = 0; ; offset += PAGE) {
-    // The eligibility scan carries only what the pick needs; the chosen
-    // project's title fields are loaded once below (r16 P2).
-    const rows = await db('projects')
-      .select('id', 'customer_id', 'report_hold_status')
-      .whereIn('customer_id', customerIds)
-      .whereIn('status', PROJECT_REPORT_STATUSES)
-      .whereNotNull('sent_at')
-      .whereRaw(PROJECT_REPORT_NOT_LEGACY_SQL)
-      .whereNotNull('report_token')
-      // Newest issued first; ties by creation — projects.id is a random
-      // UUID, not a chronological key (r8 P2).
-      .orderByRaw('sent_at DESC, created_at DESC, id DESC')
-      .offset(offset)
-      .limit(PAGE);
-    pick = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;
-    if (pick || rows.length < PAGE) break;
-  }
+  // The eligibility scan carries only what the pick needs; the chosen
+  // project's title fields are loaded once below (r16 P2).
+  const pick = await db('projects')
+    .select('id', 'customer_id')
+    .whereIn('customer_id', customerIds)
+    .whereIn('status', PROJECT_REPORT_STATUSES)
+    .whereNotNull('sent_at')
+    .whereRaw(PROJECT_REPORT_NOT_LEGACY_SQL)
+    .whereNotNull('report_token')
+    // Newest issued first; ties by creation — projects.id is a random
+    // UUID, not a chronological key (r8 P2).
+    .orderByRaw('sent_at DESC, created_at DESC, id DESC')
+    .first();
   if (!pick) return { url: null, line: '', reason: 'No project report on this account yet' };
   const project = await db('projects').where({ id: pick.id }).first(...PROJECT_REPORT_TITLE_COLUMNS);
   if (!project) return { url: null, line: '', reason: 'No project report on this account yet' };
@@ -3033,7 +3019,7 @@ async function buildProjectReportLink(customerIds) {
     url,
     line: `Here is your ${title} report: ${url}\n\n`,
     // Immediate sends only — /sms binds the report to the recipient's
-    // account and re-checks the payment hold.
+    // account.
     immediateOnly: true,
     projectReport: { id: project.id, title, projectType: project.project_type || null, projectDate: dateOnly(project.project_date) },
   };

@@ -1241,6 +1241,7 @@ describe('weekly timesheet approval safety', () => {
       { table: 'time_entry_daily_summary', label: 'dailyLocks', thenValue: approvedDailies },
       { table: 'time_entries', label: 'entryLocks', thenValue: approvedEntries },
       { table: 'payroll_checks', label: 'paidCheck', firstValue: undefined },
+      { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
       { table: 'time_entries', label: 'entriesUpdate', thenValue: 1 },
       { table: 'time_entry_daily_summary', label: 'dailyUpdate', thenValue: 1 },
       { table: 'time_weekly_summary', label: 'weeklyUpdate', thenValue: 1 },
@@ -1276,7 +1277,7 @@ describe('weekly timesheet approval safety', () => {
     });
 
     expect(detail.weekly).toMatchObject({ id: 'weekly-1', status: 'pending' });
-    expect(transactionSpecs[4].updatePayload.approval_notes).toBe(`[unlock] ${reason}`);
+    expect(transactionSpecs[5].updatePayload.approval_notes).toBe(`[unlock] ${reason}`);
     expect(logger.info).toHaveBeenCalledWith('[timesheet-approval] Week unlocked', {
       weekStart: '2020-01-06',
       technicianId: 'tech-1',

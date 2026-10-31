@@ -47,12 +47,13 @@ describe('system layout of the extraction prompt', () => {
     const single = buildExtractionPrompt('', '', '', { bookableServiceNames: CATALOG });
     const { system } = buildExtractionPromptParts('', '', '', { bookableServiceNames: CATALOG });
     const rules = single.slice(single.indexOf('═══ EXTRACTION RULES ═══'));
-    // The two lines that name the call date point at the user message instead of carrying it.
-    const dateFree = (line) => !line.includes('"today" = ') && !line.includes('the day is TODAY (');
+    // The three lines that name the call date point at the user message instead of carrying it.
+    const dateFree = (line) => !line.includes('"today" = ') && !line.includes('the day is TODAY (') && !line.includes('the CALL DATE itself (');
     const ruleLines = rules.split('\n').filter((line) => line.trim() && dateFree(line));
     expect(ruleLines.length).toBeGreaterThan(150);
     for (const line of ruleLines) expect(system).toContain(line);
     expect(system).toContain('"today" = the "Call date in Eastern Time" given in the user message.');
+    expect(system).toContain('which is the CALL DATE itself (the "Call date in Eastern Time" given in the user message)');
     expect(system).toContain('BOOKABLE SERVICE CATALOG');
     expect(system).toContain('- Waves Assessment');
   });
@@ -163,5 +164,50 @@ describe('extractCallDataV2 request', () => {
     process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = '1';
     await run();
     expect(bodies[0].instructions).toBeUndefined();
+  });
+});
+
+describe('prompt v32: the day/time conflict rule and billing_choice, in both layouts', () => {
+  const { DAY_TIME_CONFLICT_RULE } = require('../services/prompts/appointment-confirmed-rules');
+  const oneMessage = buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
+  const { system } = buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
+
+  test('this is the v33 cohort, one hash per layout', () => {
+    expect(PROMPT_VERSION).toBe('v33');
+    expect(PROMPT_HASH).toMatch(/^v33-[a-f0-9]{12}$/);
+    expect(APS_PROMPT_HASH).toMatch(/^v33a-[a-f0-9]{12}$/);
+    expect(SYSTEM_PROMPT_HASH).toMatch(/^v33s-[a-f0-9]{12}$/);
+    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v33b-[a-f0-9]{12}$/);
+    expect(new Set([PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH]).size).toBe(4);
+  });
+
+  test('the day/time conflict rule is in the one-message prompt, the system part and the gate-on prompts', () => {
+    for (const text of [oneMessage, system, buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-10-29', { agentProposedSlotCommitment: true }),
+      buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', { agentProposedSlotCommitment: true }).system]) {
+      expect(text).toContain(DAY_TIME_CONFLICT_RULE);
+    }
+    expect(buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS).user).not.toContain('DAY/TIME CONFLICT');
+  });
+
+  test('billing_choice: the prompt gives the field, its two plans, the caller-only bar and the evidence pin', () => {
+    for (const text of [oneMessage, system]) {
+      expect(text).toContain('- billing_choice: the billing plan the CALLER chose for a RECURRING plan');
+      expect(text).toContain('"annual_prepay" when the caller chose to pay for the year up front ("we\'ll prepay for the year"');
+      expect(text).toContain('"per_application" when the caller chose to be billed each application or visit ("just bill each application"');
+      expect(text).toContain('Staff explaining, offering or recommending the options is NOT a choice');
+      expect(text).toContain('null when no choice was made, it is unclear, or no recurring plan was discussed');
+      expect(text).toContain('pin the caller\'s own choice sentence to /service_request/billing_choice with speaker "caller"');
+      expect(text).toContain('- service_request.billing_choice (when non-null — the CALLER\'s own sentence choosing that plan; speaker must be "caller")');
+    }
+  });
+
+  test('billing_choice sits in the SERVICE REQUEST section, before the price object', () => {
+    expect(oneMessage.indexOf('- billing_choice:')).toBeGreaterThan(oneMessage.indexOf('SERVICE REQUEST:'));
+    expect(oneMessage.indexOf('- billing_choice:')).toBeLessThan(oneMessage.indexOf('- price: The PRIMARY price'));
+  });
+
+  test('the output contract the model is given carries billing_choice', () => {
+    const schema = require('../schemas/call-extraction.model-output.schema.json');
+    expect(JSON.stringify(schema)).toContain('"billing_choice"');
   });
 });

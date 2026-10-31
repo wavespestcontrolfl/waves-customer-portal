@@ -248,3 +248,165 @@ it("does not restore a dismissed alert from an older refresh bundle", async () =
   await act(async () => { finishHistory(response({ posts: [] })); });
   expect(screen.queryByText("Synthetic failure alert")).not.toBeInTheDocument();
 });
+
+// Route overrides on top of the base fixture: a handler returns a Response, or
+// undefined to fall through to the base fixture.
+function routeFetch(handlers) {
+  fetch.mockImplementation(async (url, options = {}) => {
+    const path = String(url).replace(/^\/api/, "");
+    for (const [match, handler] of handlers) {
+      if (path.startsWith(match)) {
+        const result = handler(options, path);
+        if (result) return result;
+      }
+    }
+    return response(fixtureFor(url, options));
+  });
+}
+const unavailable = () => response({}, 503);
+
+describe("Social media stale copy, failed reads and dismissal", () => {
+  it("keeps a failed alert dismissal visible with a failure toast, then clears it on success", async () => {
+    let deletes = 0;
+    routeFetch([["/admin/social-media/alerts", (options) => {
+      if (options.method === "DELETE") return ++deletes === 1 ? unavailable() : response({});
+      return response({ active: true, alert: { message: "Synthetic failure alert", raised_at: "2026-09-24T00:00:00Z" } });
+    }]]);
+    renderPage();
+    await screen.findByText("Synthetic failure alert");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(await screen.findByText("Failed to dismiss alert: HTTP 503")).toBeInTheDocument();
+    expect(screen.queryByText("Alert dismissed")).not.toBeInTheDocument();
+    expect(screen.getByText("Synthetic failure alert")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(await screen.findByText("Alert dismissed")).toBeInTheDocument();
+    expect(screen.queryByText("Synthetic failure alert")).not.toBeInTheDocument();
+  });
+
+  it("drops the campaign preview when its source changes and keeps caption edits otherwise", async () => {
+    renderPage();
+    await screen.findByText("Local Campaign");
+    const saveBody = () => JSON.parse(fetch.mock.calls.filter(([url]) => url.endsWith("/campaign-builder/save")).at(-1)[1].body);
+    fireEvent.click(screen.getByRole("button", { name: "Generate Drafts" }));
+    const caption = await screen.findByDisplayValue("Synthetic Facebook draft");
+    fireEvent.change(caption, { target: { value: "Edited caption" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Draft" }));
+    await waitFor(() => expect(saveBody().preview.drafts.facebook).toBe("Edited caption"));
+    expect(saveBody().city).toBe("Sarasota");
+
+    fireEvent.change(screen.getByDisplayValue("Sarasota"), { target: { value: "Bradenton" } });
+    expect(screen.queryByDisplayValue("Edited caption")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Draft" })).toBeDisabled();
+    const saves = () => fetch.mock.calls.filter(([url]) => url.endsWith("/campaign-builder/save")).length;
+    expect(saves()).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate Drafts" }));
+    await screen.findByDisplayValue("Synthetic Facebook draft");
+    fireEvent.click(screen.getByRole("button", { name: "Save Draft" }));
+    await waitFor(() => expect(saves()).toBe(2));
+    expect(saveBody().city).toBe("Bradenton");
+  });
+
+  it("does not restore the saved preview when the form changed while the save was pending", async () => {
+    let release;
+    routeFetch([["/admin/social-media/campaign-builder/save", () => new Promise((resolve) => { release = resolve; })]]);
+    renderPage();
+    await screen.findByText("Local Campaign");
+    fireEvent.click(screen.getByRole("button", { name: "Generate Drafts" }));
+    await screen.findByDisplayValue("Synthetic Facebook draft");
+    fireEvent.click(screen.getByRole("button", { name: "Save Draft" }));
+    await waitFor(() => expect(release).toBeTypeOf("function"));
+    fireEvent.change(screen.getByDisplayValue("Sarasota"), { target: { value: "Venice" } });
+    const savedPreview = fixtureFor("/admin/social-media/campaign-builder/preview", { method: "POST" });
+    await act(async () => { release(response({ success: true, preview: savedPreview })); });
+    expect(screen.getByRole("button", { name: "Save Draft" })).toBeDisabled();
+  });
+
+  it("ignores a campaign preview that returns after the form changed", async () => {
+    let release;
+    routeFetch([["/admin/social-media/campaign-builder/preview", () => new Promise((resolve) => { release = resolve; })]]);
+    renderPage();
+    await screen.findByText("Local Campaign");
+    fireEvent.click(screen.getByRole("button", { name: "Generate Drafts" }));
+    await waitFor(() => expect(release).toBeTypeOf("function"));
+    fireEvent.change(screen.getByDisplayValue("Sarasota"), { target: { value: "Venice" } });
+    await act(async () => { release(response(fixtureFor("/admin/social-media/campaign-builder/preview", { method: "POST" }))); });
+    expect(screen.queryByDisplayValue("Synthetic Facebook draft")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Generate Drafts" })).toBeEnabled();
+  });
+
+  it("does not publish captions generated for an earlier title, link or description", async () => {
+    const previewFixture = { facebook: "Termite facebook caption", instagram: "", linkedin: "", gbp: "" };
+    routeFetch([
+      ["/admin/social-media/preview", () => response(previewFixture)],
+      ["/admin/social-media/publish", () => response({ platforms: [] })],
+    ]);
+    renderPage(["/admin/social-media?tab=compose"]);
+    const title = await screen.findByPlaceholderText("Blog post title or topic...");
+    const publish = () => screen.getByRole("button", { name: "Publish All" });
+    for (const [placeholder, value] of [
+      ["Blog post title or topic...", "Bradenton lawn guide"],
+      ["Brief description or excerpt...", "Lawn tips"],
+      ["https://www.wavespestcontrol.com/blog/...", "https://example.test/lawn"],
+    ]) {
+      fireEvent.change(title, { target: { value: "Sarasota termite" } });
+      fireEvent.click(screen.getByRole("button", { name: "Generate AI Preview" }));
+      await screen.findByDisplayValue("Termite facebook caption");
+      expect(publish()).toBeEnabled();
+      fireEvent.change(screen.getByPlaceholderText(placeholder), { target: { value } });
+      expect(screen.queryByDisplayValue("Termite facebook caption")).not.toBeInTheDocument();
+      expect(publish()).toBeDisabled();
+    }
+    expect(fetch.mock.calls.some(([url]) => url.endsWith("/social-media/publish"))).toBe(false);
+  });
+
+  it("shows an unavailable state with retry for Graphics and Competitors, and keeps the empty state for an empty read", async () => {
+    let healthy = false;
+    routeFetch([
+      ["/admin/social-media/review-graphics", () => (healthy ? response({ candidates: [], saved: [] }) : unavailable())],
+      ["/admin/social-media/competitor-swipe", () => (healthy ? response({ profiles: [], posts: [], patterns: [] }) : unavailable())],
+    ]);
+    renderPage(["/admin/social-media?tab=reviews"]);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Review graphics unavailable: HTTP 503");
+    expect(screen.queryByText("No eligible unsaved 5-star reviews found.")).not.toBeInTheDocument();
+    healthy = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("No eligible unsaved 5-star reviews found.")).toBeInTheDocument();
+
+    healthy = false;
+    fireEvent.click(screen.getByRole("button", { name: "Competitors" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Competitor swipe file unavailable: HTTP 503");
+    healthy = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Copyable Patterns")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows an unknown autonomous studio status as unavailable, never as not enabled", async () => {
+    let healthy = false;
+    routeFetch([["/admin/social-media/autonomous/status", () => (healthy ? undefined : unavailable())]]);
+    renderPage();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Autonomous studio status unavailable: HTTP 503");
+    expect(screen.getByText("Status unknown")).toBeInTheDocument();
+    expect(screen.queryByText("Not fully enabled")).not.toBeInTheDocument();
+    healthy = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Autonomous")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("renders saved draft channel strings as neutral targets and keeps real failures red", async () => {
+    routeFetch([["/admin/social-media/history", () => response({ posts: [
+      { id: "draft", title: "Saved draft", status: "draft", created_at: "2026-10-30T12:00:00Z", platforms_posted: ["facebook", "instagram"] },
+      { id: "sent", title: "Sent post", status: "failed", created_at: "2026-10-30T12:00:00Z", platforms_posted: [{ platform: "gbp", success: false }] },
+    ] })]]);
+    renderPage(["/admin/social-media?tab=history"]);
+    await screen.findByText("Saved draft");
+    const channel = (name) => screen.getByText(name).closest("span");
+    expect(channel("facebook")).toHaveTextContent(/^facebook$/);
+    expect(channel("instagram")).toHaveTextContent(/^instagram$/);
+    // Only the real gbp failure keeps the failure rendering.
+    expect(screen.queryByText(/(facebook|instagram): No/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/gbp: No/).length).toBeGreaterThan(0);
+  });
+});

@@ -43,14 +43,14 @@ export default function ToolActivityList({ items, variant = "dark" }) {
         border: `1px solid ${border}`,
         borderRadius: 8,
         fontFamily: "Roboto, Arial, sans-serif",
-        fontSize: dark ? 13 : 14,
+        fontSize: 14,
         lineHeight: 1.5,
         color: text,
       }}
     >
       <div
         style={{
-          fontSize: 13,
+          fontSize: 14,
           letterSpacing: "0.04em",
           textTransform: "uppercase",
           color: muted,
@@ -88,7 +88,7 @@ export default function ToolActivityList({ items, variant = "dark" }) {
                   color: muted,
                   fontVariantNumeric: "tabular-nums",
                   flexShrink: 0,
-                  fontSize: 13,
+                  fontSize: 14,
                 }}
               >
                 {duration}

@@ -85,6 +85,7 @@ const SERVICE_KEY_TO_COPY = {
   one_time_lawn: 'one_time_lawn',
   rodent_inspection: 'rodent_inspection',
   rodent_sanitation: 'rodent_sanitation',
+  rodent_dead_animal_removal: 'rodent_dead_animal_removal',
   rodent_bait_setup: 'rodent_bait_setup',
   termite_bait: 'termite_bait',
   bora_care: 'bora_care',

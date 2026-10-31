@@ -225,6 +225,9 @@ function normalizeProductName(name) {
 const PRODUCT_EXPECTATION_CLASS = new Map([
   ['taurus sc', 'non_repellent'],
   ['alpine wsg', 'non_repellent'],
+  // The catalog row is Atticus Antapex WSG since 2026-10-26 (owner); visit lines
+  // recorded before keep the name 'Alpine WSG', so both stay mapped.
+  ['atticus antapex wsg', 'non_repellent'],
   // codex P2 2026-09-29 (round 2): the CATALOG's canonical products_catalog.name
   // is "Atticus Talak" (migration 20260712100000_catalog_label_rate_backfill.js,
   // and every other seed/backfill migration that touches this row) —
@@ -276,6 +279,7 @@ function classifyProductExpectation(product = {}) {
 const PRODUCT_ACTIVE_INGREDIENT = new Map([
   ['taurus sc', 'fipronil'],
   ['alpine wsg', 'dinotefuran'],
+  ['atticus antapex wsg', 'dinotefuran'],
   ['atticus talak', 'bifenthrin'],
   ['atticus talak 7.9 f', 'bifenthrin'],
   ['demand cs', 'lambda-cyhalothrin'],
@@ -426,7 +430,7 @@ function igrLabelDuration(products) {
 // Stored targets also come as keys (`ghost_ant`, `ants_general`): an
 // underscore is a word character, so the ant pattern needs it as a space.
 const antTargetWords = (targets) => (Array.isArray(targets) ? targets.map((t) => String(t ?? '').replace(/[_-]+/g, ' ')) : targets);
-const NO_ROACH_TIMEFRAME_PRODUCTS = new Set(['alpine wsg'].map(normalizeProductName));
+const NO_ROACH_TIMEFRAME_PRODUCTS = new Set(['alpine wsg', 'atticus antapex wsg'].map(normalizeProductName));
 function noLabelRoachTimeframe(product) {
   return NO_ROACH_TIMEFRAME_PRODUCTS.has(normalizeProductName(product?.name))
     && !hasAntTargetEvidence({ targets: antTargetWords(product?.targets) });

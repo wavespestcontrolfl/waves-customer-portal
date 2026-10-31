@@ -784,9 +784,12 @@ const RETIRE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  * dialed callback — the same called-back SQL (calledBackSql) that keeps a bell from ringing.
  * Runs on the 2-minute call-alert cron; idempotent (a done bell is not
  * selected again). Never re-opens: a retired bell stays done.
+ * This module is the ONE owner of missed-call bells (the relevance sweep has no
+ * missed-call class). GATE_ALERT_CONTACT_CLOSE adds the contact clauses below
+ * (closeContactedMissedCalls): off = exactly the retirements above.
  */
 async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
-  const retired = await retireOpenMissedCalls({
+  let retired = await retireOpenMissedCalls({
     clause: `NOT ${calledBackSql({ retire: true })}`,
     resolution: 'The caller got through on a later call',
     limit,
@@ -794,28 +797,39 @@ async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
   // Visit underway (GATE_MISSED_CALL_VISIT_UNDERWAY): a separate reason, so the
   // office can see why the bell closed. Off: this block does nothing.
   const underway = visitUnderwaySql();
-  if (!underway) return retired;
-  return retired + await retireOpenMissedCalls({
-    clause: underway,
-    resolution: VISIT_UNDERWAY_RESOLUTION,
-    limit,
-  });
+  if (underway) {
+    retired += await retireOpenMissedCalls({
+      clause: underway,
+      resolution: VISIT_UNDERWAY_RESOLUTION,
+      limit,
+    });
+  }
+  return retired + await closeContactedMissedCalls();
 }
 
-async function retireOpenMissedCalls({ clause, resolution, limit }) {
-  const rows = await db('notifications')
+// Open customer_missed_call bells, joined to their call (bell age inside the
+// retire window). The one base query for every retirement here.
+function openMissedCallBells() {
+  return db('notifications')
     .join('call_log', db.raw("call_log.id::text = notifications.metadata->'payload'->>'callLogId'"))
     .where({ 'notifications.recipient_type': 'admin', 'notifications.category': 'missed_call' })
     .whereRaw("notifications.metadata->>'triggerKey' = 'customer_missed_call'")
     .whereNull('notifications.done_at')
-    .where('notifications.created_at', '>', new Date(Date.now() - RETIRE_WINDOW_MS))
+    .where('notifications.created_at', '>', new Date(Date.now() - RETIRE_WINDOW_MS));
+}
+
+async function retireOpenMissedCalls({ clause, resolution, limit }) {
+  const rows = await openMissedCallBells()
     .whereRaw(clause)
     .distinct('call_log.id')
     .limit(limit);
-  if (!rows.length) return 0;
+  return supersedeCalls(rows.map((r) => r.id), resolution);
+}
+
+async function supersedeCalls(callLogIds, resolution) {
   const NotificationService = require('./notification-service');
   let retired = 0;
-  for (const { id } of rows) {
+  for (const id of [...new Set(callLogIds)]) {
     retired += Number(await NotificationService.supersedeMissedCallAdmin({
       callLogId: id,
       resolution,
@@ -824,8 +838,130 @@ async function retireOpenMissedCalls({ clause, resolution, limit }) {
   return retired;
 }
 
+// GATE_ALERT_CONTACT_CLOSE (owner 2026-10-24: customer-contact bells "should close
+// automatically"; approved 2026-10-26). Beside the called-back proof above
+// (calledBackSql, kept as it is), a missed-call bell closes once, AFTER the call
+// began (callStartedAtSql, the SQL form of call-timeline.js callStartedAt: a row
+// inserted after the call was over is backed out to its real start):
+//  - a person's text reached the caller (operatorReplySql + smsDeliveredSql,
+//    minus a proactive draft), by the call's customer, or by the caller's phone
+//    only when the text or the call carries no customer id (people can share a
+//    phone: a text to another customer on this number is not contact);
+//  - a visit was booked for the call's customer (the new-lead class's live
+//    top-level booking predicate, whereLiveBooking);
+//  - a quote was handed off to the call's customer (handedOffWithin +
+//    whereEstimateCustomerOwnership, never sent_at).
+// Gate off = nothing here runs. 'shadow' = what would close is recorded in
+// audit_log (once per bell per class per ET day) and nothing is retired.
+// 'true' = retired through supersedeMissedCallAdmin like the clauses above.
+// read_at is never evidence. Sends nothing to anyone.
+const CONTACT_CLAUSES = [
+  {
+    resolution: 'A person texted the caller after the call',
+    clause: (q) => {
+      const { callStartedAtSql } = require('./sms-pending-conversations');
+      const { phoneIdentitySql } = require('./sms-response-policy');
+      const { operatorReplySql, smsDeliveredSql } = require('./staff-contact');
+      const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+      const { withoutProactiveDraft } = require('./call-commitments');
+      const callerKey = phoneIdentitySql('call_log.from_phone');
+      return q.whereExists(function personTextAfterCall() {
+        excludeUnresolvedSendReservations(this.select(1).from('sms_log as os').where('os.direction', 'outbound'), 'os')
+          .whereRaw(operatorReplySql('os')).whereRaw(smsDeliveredSql('os'))
+          .modify(withoutProactiveDraft)
+          .whereRaw(`os.created_at > ${callStartedAtSql('call_log')}`)
+          .where((w) => w.whereRaw('os.customer_id = call_log.customer_id')
+            .orWhereRaw(`${callerKey} <> '' AND ${phoneIdentitySql('os.to_phone')} = ${callerKey}
+              AND (os.customer_id IS NULL OR call_log.customer_id IS NULL)`));
+      });
+    },
+  },
+  {
+    resolution: 'A visit was booked after the call',
+    clause: (q) => {
+      const { callStartedAtSql } = require('./sms-pending-conversations');
+      const { whereLiveBooking } = require('./admin-alert-relevance');
+      return q.whereExists(function visitBookedAfterCall() {
+        whereLiveBooking(this.select(1).from('scheduled_services')
+          .whereRaw('scheduled_services.customer_id = call_log.customer_id')
+          .whereRaw(`scheduled_services.created_at > ${callStartedAtSql('call_log')}`));
+      });
+    },
+  },
+  {
+    resolution: 'An estimate was sent after the call',
+    // handedOffWithin takes a boundary value, not a column: candidates are paged
+    // with the call's start, then each page is asked the promise lane's own question.
+    clause: (q) => q.whereRaw('call_log.customer_id IS NOT NULL'),
+    narrow: async (rows) => {
+      const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
+      const kept = [];
+      for (const row of rows) {
+        const started = new Date(row.started_at);
+        if (Number.isNaN(started.getTime())) continue;
+        if (await whereEstimateCustomerOwnership(handedOffWithin(db('estimates'), started), row.customer_id).first('estimates.id')) kept.push(row);
+      }
+      return kept;
+    },
+  },
+];
+// The candidate set is bounded by RETIRE_WINDOW_MS (7 days of open bells), so each
+// run walks ALL of it, clause by clause, in keyset pages ordered by bell id: a page
+// of rows that match nothing (a quote candidate with no hand-off, a shadow row
+// already audited) can never hide the rows after it. The ceiling is only a safety
+// valve against a runaway table; hitting it is logged.
+const CONTACT_PAGE_SIZE = 200;
+const CONTACT_RUN_CEILING = 5000;
+
+async function closeContactedMissedCalls() {
+  const mode = require('../config/feature-gates').alertContactCloseMode();
+  if (mode === 'off') return 0;
+  const { callStartedAtSql } = require('./sms-pending-conversations');
+  let closed = 0;
+  for (const { clause, resolution, narrow } of CONTACT_CLAUSES) {
+    try {
+      let cursor = null;
+      let seen = 0;
+      for (;;) {
+        const page = await openMissedCallBells().modify(clause)
+          .modify((q) => { if (cursor) q.where('notifications.id', '>', cursor); })
+          .select('notifications.id as notification_id', 'call_log.id as call_id', 'call_log.customer_id', db.raw(`${callStartedAtSql('call_log')} as started_at`))
+          .orderBy('notifications.id', 'asc')
+          .limit(CONTACT_PAGE_SIZE);
+        if (!page.length) break;
+        cursor = page[page.length - 1].notification_id;
+        seen += page.length;
+        const matched = narrow ? await narrow(page) : page;
+        if (matched.length) closed += await closeContactPage(mode, matched, resolution);
+        if (page.length < CONTACT_PAGE_SIZE) break;
+        if (seen >= CONTACT_RUN_CEILING) {
+          logger.warn(`[missed-call-bell] contact close stopped at ${seen} candidates (${resolution}); the rest wait for the next run`);
+          break;
+        }
+      }
+    } catch (err) {
+      logger.warn(`[missed-call-bell] contact close skipped (${resolution}): ${require('./notification-service').safeErrorSummary(err)}`);
+    }
+  }
+  return closed;
+}
+
+// `true` retires the matched bells; `shadow` only records them (audit_log).
+async function closeContactPage(mode, rows, resolution) {
+  if (mode === 'true') return supersedeCalls(rows.map((r) => r.call_id), resolution);
+  const { etDateString } = require('../utils/datetime-et');
+  const { auditAlertWouldClose } = require('./audit-log');
+  const judgedAt = new Date().toISOString();
+  await auditAlertWouldClose({
+    et_day: etDateString(),
+    items: rows.map((r) => ({ notification_id: r.notification_id, alert_class: 'missed_call', reason: resolution, judged_at: judgedAt })),
+  });
+  return 0;
+}
+
 module.exports = {
   retireCalledBackMissedCalls,
+  closeContactedMissedCalls,
   missedCallEligible,
   missedCallShapeEligible,
   isEmptyVoicemailRecording,
@@ -837,6 +973,7 @@ module.exports = {
   outcomeUnanswered,
   calledBackSql,
   visitUnderwaySql,
+  VISIT_UNDERWAY_RESOLUTION,
   CALLED_BACK_SQL,
   UNKNOWN_CALLER_MIN_SECONDS,
   // Exported so missed-call-text-back.js shares the exact same "what counts

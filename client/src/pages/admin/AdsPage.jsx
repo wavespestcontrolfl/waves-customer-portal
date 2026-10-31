@@ -9,6 +9,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import AdsGapRulePanel from "../../components/admin/AdsGapRulePanel";
 import {
   Badge as UiBadge,
   Button,
@@ -21,7 +22,7 @@ import {
   TR,
   UiSurface,
 } from "../../components/ui";
-import { etDateString } from "../../lib/timezone";
+import { etDateString, formatETDateTime } from "../../lib/timezone";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 const PPCDashboardPage = lazy(() => import("./PPCDashboardPage"));
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -148,6 +149,25 @@ function Badge({ mode }) {
     </UiBadge>
   );
 }
+// Google stores campaign_type as an AdvertisingChannelType enum digit
+// (google-ads-api enums.AdvertisingChannelType). Unmapped digits stay hidden.
+const GOOGLE_CHANNEL_TYPES = {
+  2: "Search",
+  3: "Display",
+  4: "Shopping",
+  6: "Video",
+  8: "Local",
+  9: "Smart",
+  10: "Performance Max",
+  11: "Local Services",
+  14: "Demand Gen",
+};
+function campaignSubtitle(c) {
+  const type = /^\d+$/.test(String(c.campaign_type ?? ""))
+    ? GOOGLE_CHANNEL_TYPES[Number(c.campaign_type)]
+    : c.campaign_type;
+  return [c.target_area, type].filter(Boolean).join(" • ");
+}
 function roasColor(roas) {
   if (roas >= 4) return "#15803D";
   if (roas >= 2) return "#A16207";
@@ -238,12 +258,16 @@ function OverviewTab() {
         {" "}
         <KpiCard label="7-Day Ad Spend" value={fmt(total7.spend)} />{" "}
         <KpiCard
-          label="7-Day Revenue"
+          label="Reported value (7d)"
           value={fmt(total7.value)}
           color={"#15803D"}
+          sub={{
+            text: "Google/Meta conversion value, not booked revenue",
+            color: "#71717A",
+          }}
         />{" "}
         <KpiCard
-          label="Blended ROAS"
+          label="Reported ROAS (7d)"
           value={
             total7.spend > 0
               ? (total7.value / total7.spend).toFixed(1) + "x"
@@ -278,29 +302,22 @@ function OverviewTab() {
                 <TH className="text-right u-nums">Mode</TH>
                 <TH className="text-right u-nums">Budget</TH>
                 <TH className="text-right u-nums">7d Spend</TH>
-                <TH className="text-right u-nums">7d Revenue</TH>
-                <TH className="text-right u-nums">ROAS</TH>
+                <TH className="text-right u-nums">7d reported value</TH>
+                <TH className="text-right u-nums">Reported ROAS</TH>
                 <TH className="text-right u-nums">CPA</TH>
                 <TH className="text-right u-nums">Conv</TH>
-                <TH className="text-right u-nums">Trend</TH>
               </TR>
             </THead>
             <TBody>
               {campaigns.map((c) => {
                 const p = c.last7d || {};
-                const trendIcon =
-                  c.last7d?.roas > (c.last30d?.roas || 0) * 1.05
-                    ? ""
-                    : c.last7d?.roas < (c.last30d?.roas || 0) * 0.8
-                      ? ""
-                      : "";
                 return (
                   <TR key={c.id}>
                     <TD>
                       {" "}
                       <div>{c.campaign_name}</div>{" "}
                       <div className="text-ui-body text-ink-secondary">
-                        {c.target_area} • {c.campaign_type}
+                        {campaignSubtitle(c)}
                       </div>{" "}
                     </TD>
                     <TD className="text-right u-nums">
@@ -325,9 +342,6 @@ function OverviewTab() {
                       {p.cpa ? fmtDec(p.cpa) : "—"}
                     </TD>
                     <TD className="text-right u-nums">{p.conversions || 0}</TD>
-                    <TD className="text-right u-nums text-ui-body">
-                      {trendIcon}
-                    </TD>
                   </TR>
                 );
               })}
@@ -1629,95 +1643,145 @@ function CapacityTab() {
     orange: "#92400E",
     red: "#991B1B",
   };
-  const modeEmoji = {
-    base: "",
-    spent: "",
-    stop: "",
-  };
-  const areaLabels = {
-    all: "ALL AREAS",
-    "Lakewood Ranch": "LWR",
-    Parrish: "Parrish",
-    Sarasota: "Sarasota",
-    Venice: "Venice",
-  };
+  const modeLabel = { base: "Base", spent: "Spent", stop: "Stop" };
+  const triggerLabel = { auto: "Auto", manual: "Manual", advisor: "Advisor" };
+  const whenET = (value) =>
+    formatETDateTime(value, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  const perDay = (n) => (n == null ? "—" : `${fmtDec(n)}/day`);
+  const all = (data.heatmap || {}).all || {};
+  const campaigns = data.campaigns || [];
+  const changes = data.recentChanges || [];
   return (
     <div className="flex flex-col [gap:20px]">
+      <AdsGapRulePanel />
       {" "}
       <div className="text-ui-body text-ink-secondary">
-        Capacity & Ad Budget Status — Week View
+        Capacity and ad budget — next 14 days
       </div>
-      {Object.entries(data.heatmap || {}).map(([area, info]) => (
-        <UiCard key={area} className="p-6">
-          {" "}
-          <div className="flex justify-between items-center [margin-bottom:16px]">
-            {" "}
-            <div>
-              {" "}
+      {campaigns.map((c) => {
+        const last = c.lastChange;
+        return (
+          <UiCard key={c.id} className="p-6">
+            <div className="flex flex-wrap items-center [gap:10px]">
               <div className="text-ui-body font-medium text-zinc-900">
-                {areaLabels[area] || area}
-              </div>{" "}
-              <div className="text-ui-body text-ink-secondary">
-                {info.techs} tech{info.techs !== 1 ? "s" : ""}
-              </div>{" "}
-            </div>{" "}
-            <div className="text-ui-body text-zinc-900">
-              {info.weeklyUtilization}% weekly
-              <span className="text-ink-secondary text-ui-body [margin-left:8px]">
-                {info.weeklyBooked}/{info.weeklySlots}
-              </span>{" "}
-            </div>{" "}
+                {c.campaign_name}
+              </div>
+              <Badge mode={c.budget_mode} />
+            </div>
+            <div className="text-ui-body text-zinc-900 [margin-top:6px]">
+              Today's budget {perDay(c.daily_budget_current)} (base{" "}
+              {perDay(c.daily_budget_base)})
+            </div>
+            <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+              {last
+                ? `Latest change: ${whenET(last.created_at)} — ${modeLabel[last.previous_mode] || last.previous_mode} → ${modeLabel[last.new_mode] || last.new_mode} — ${last.reason || "no reason logged"}`
+                : "No budget changes logged yet"}
+            </div>
+          </UiCard>
+        );
+      })}
+      <UiCard className="p-6">
+        {" "}
+        <div className="flex justify-between items-center [margin-bottom:16px]">
+          {" "}
+          <div className="text-ui-body text-ink-secondary">
+            {all.techs || 0} tech{all.techs !== 1 ? "s" : ""}
           </div>{" "}
-          {/* Seven fixed columns: each keeps room for "Sep 9" / "SPENT" at
-              the caption floor, and the row scrolls sideways on phones
-              instead of letting day labels collide (Codex round 4). */}
-          <div className="overflow-x-auto">
-            <div className="grid [grid-template-columns:repeat(7,_minmax(84px,_1fr))] [gap:8px]">
-              {(info.days || []).map((day, i) => {
-                const color = zoneColors[day.colorZone] || "#71717A";
-                return (
+          <div className="text-ui-body text-zinc-900">
+            {all.weeklyUtilization || 0}% of 14 days
+            <span className="text-ink-secondary text-ui-body [margin-left:8px]">
+              {all.weeklyBooked || 0}/{all.weeklySlots || 0}
+            </span>{" "}
+          </div>{" "}
+        </div>{" "}
+        {/* Seven columns, two rows (two weeks): each keeps room for "Sep 9"
+            at the caption floor, and the row scrolls sideways on phones
+            instead of letting day labels collide (Codex round 4). */}
+        <div className="overflow-x-auto">
+          <div className="grid [grid-template-columns:repeat(7,_minmax(84px,_1fr))] [gap:8px]">
+            {(all.days || []).map((day) => {
+              const color = zoneColors[day.colorZone] || "#71717A";
+              return (
+                <div
+                  key={day.date}
+                  data-testid="capacity-day"
+                  style={{
+                    background: color + "15",
+                    border: `1px solid ${color}44`,
+                  }}
+                  className="rounded-md [padding:12px_6px] box-border text-center [min-width:0px]"
+                >
+                  {" "}
+                  <div className="text-ui-body font-medium text-ink-secondary [margin-bottom:4px]">
+                    {day.dayName}
+                    {day.isSunday && (
+                      <span className="text-zinc-900 text-ui-body">*</span>
+                    )}
+                  </div>{" "}
+                  <div className="text-ui-body text-ink-secondary [margin-bottom:8px]">
+                    {day.dayLabel}
+                  </div>{" "}
                   <div
-                    key={i}
                     style={{
-                      background: color + "15",
-                      border: `1px solid ${color}44`,
+                      color,
                     }}
-                    className="rounded-md [padding:12px_6px] box-border text-center [min-width:0px]"
+                    className="text-ui-body font-medium [margin-bottom:4px]"
                   >
-                    {" "}
-                    <div className="text-ui-body font-medium text-ink-secondary [margin-bottom:4px]">
-                      {day.dayName}
-                    </div>{" "}
-                    <div className="text-ui-body text-ink-secondary [margin-bottom:8px]">
-                      {day.dayLabel}
-                    </div>{" "}
-                    <div
-                      style={{
-                        color,
-                      }}
-                      className="text-ui-body font-medium [margin-bottom:4px]"
-                    >
-                      {day.utilizationPct}%
-                    </div>{" "}
-                    <div className="text-ui-body text-ink-secondary [margin-bottom:6px]">
-                      {day.booked}/{day.slots}
-                    </div>{" "}
-                    <div className="text-ui-body">
-                      {modeEmoji[day.budgetMode] || ""}{" "}
-                      <span className="font-medium text-ui-body text-ink-secondary">
-                        {day.budgetMode?.toUpperCase()}
-                      </span>
-                      {day.isSunday && (
-                        <span className="text-zinc-900 text-ui-body">*</span>
-                      )}
-                    </div>{" "}
-                  </div>
-                );
-              })}
-            </div>{" "}
+                    {day.utilizationPct}%
+                  </div>{" "}
+                  <div className="text-ui-body text-ink-secondary">
+                    {day.booked}/{day.slots}
+                  </div>{" "}
+                </div>
+              );
+            })}
+          </div>{" "}
+        </div>
+      </UiCard>
+      <UiCard className="p-6">
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+          Recent budget changes
+        </div>
+        {changes.length === 0 ? (
+          <div className="text-ui-body text-ink-secondary">
+            No budget changes logged yet
           </div>
-        </UiCard>
-      ))}
+        ) : (
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH>When (ET)</TH>
+                  <TH>Change</TH>
+                  <TH>Why</TH>
+                  <TH>Who</TH>
+                  <TH>Sent to Google</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {changes.map((ch, i) => (
+                  <TR key={`${ch.created_at}-${i}`}>
+                    <TD>{whenET(ch.created_at)}</TD>
+                    <TD>
+                      {modeLabel[ch.previous_mode] || ch.previous_mode} →{" "}
+                      {modeLabel[ch.new_mode] || ch.new_mode} (
+                      {perDay(ch.previous_budget)} → {perDay(ch.new_budget)})
+                    </TD>
+                    <TD>{ch.reason}</TD>
+                    <TD>{triggerLabel[ch.trigger] || ch.trigger}</TD>
+                    <TD>{ch.google_ads_updated ? "Yes" : "No"}</TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        )}
+      </UiCard>
       {/* Legend */}
       <UiCard className="[padding:16px]">
         {" "}
@@ -1725,25 +1789,22 @@ function CapacityTab() {
           {" "}
           <span>
             <span className="inline-block [width:10px] [height:10px] rounded-xs bg-green-700 [margin-right:6px]" />
-            0–70% Green (full ads)
+            70% or less: full budget
           </span>{" "}
           <span>
-            <span className="inline-block [width:10px] [height:10px] rounded-xs bg-amber-200 [margin-right:6px]" />
-            71–85% Yellow (may cap)
-          </span>{" "}
-          <span>
+            <span className="inline-block [width:10px] [height:10px] rounded-xs bg-amber-200 [margin-right:3px]" />
             <span className="inline-block [width:10px] [height:10px] rounded-xs bg-amber-800 [margin-right:6px]" />
-            86–95% Orange (capped)
+            71–95%: keeps the current budget
           </span>{" "}
           <span>
             <span className="inline-block [width:10px] [height:10px] rounded-xs bg-alert-fg [margin-right:6px]" />
-            96–100% Red (soft-stop)
+            over 95%: 1% of budget
           </span>{" "}
         </div>{" "}
         <div className="text-ui-body text-ink-secondary [margin-top:10px]">
           {" "}
-          <span className="text-zinc-900">*</span>Sunday runs at full power
-          based on Monday's capacity (no time-of-day check)
+          <span className="text-zinc-900">*</span>On Sundays the rule checks
+          Monday. Other days it checks today before 2 PM and tomorrow after.
         </div>{" "}
       </UiCard>{" "}
     </div>

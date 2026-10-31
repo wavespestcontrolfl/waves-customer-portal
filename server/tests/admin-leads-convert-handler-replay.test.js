@@ -211,12 +211,13 @@ const FULL_LEAD = () => ({
   first_name: 'Robin', last_name: 'Sample', phone: '+19415550142', email: 'robin@example.test', address: '12 Sample Way', city: 'Venice', zip: '34285',
 });
 
-test('the page path is unchanged: its claim carries only the handled rule, with or without a changed lead', async () => {
+test('the page path claims with the handled rule and a live customer only, with or without a changed lead', async () => {
   const claim = claimOf(FULL_LEAD());
   leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return true; });
   expect((await viaPage(BODY)).status).toBe(200);
-  // One grouped where (not handled, or the very close the page saw) and nothing else.
-  expect(claim.calls).toEqual([['where', 'fn']]);
+  // One grouped where (not handled, or the very close the page saw) and the customer still live.
+  expect(claim.calls).toEqual([['where', 'fn'], ['whereExists', 'customers']]);
+  expect(claim.existsSubs[0].conds).toEqual([['where', 'id', CUST], ['whereNull', 'deleted_at']]);
   // A lead edited, converted and linked elsewhere since the page loaded still converts from the page, as before.
   tables.leads = { ...FULL_LEAD(), updated_at: new Date('2099-01-01T12:09:00Z'), converted_at: new Date(), customer_id: 'other' };
   leadAttribution.markConverted.mockImplementationOnce(convertsRow(tables.leads));
@@ -263,7 +264,7 @@ test('a card for a lead that had a customer link pins that link', async () => {
   expect((await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED })).status).toBe(409);
 });
 
-test('a customer deleted or merged away before the bar\u2019s write converts nothing (409); the page is unaffected', async () => {
+test('a customer deleted or merged away converts nothing, from the bar or the page', async () => {
   // Deleted before the handler reads it: the bar's customer read excludes deleted rows.
   tables.customers = { id: CUST, deleted_at: new Date() };
   const early = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
@@ -281,15 +282,27 @@ test('a customer deleted or merged away before the bar\u2019s write converts not
   const late = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
   expect(late.status).toBe(409);
   expect(late.json.error).toMatch(/changed since the page loaded/);
-  // The page reads the customer exactly as before (no deleted_at condition) and adds no EXISTS.
+  // The page refuses a deleted customer the same way: its read excludes deleted rows.
   seed();
   tables.customers = { id: CUST, deleted_at: new Date() };
   const customerReads = [];
   const real = db.getMockImplementation();
   db.mockImplementation((table) => { const q = real(table); if (table === 'customers') customerReads.push(q); return q; });
-  leadAttribution.markConverted.mockImplementationOnce(async () => true);
-  expect((await viaPage(BODY)).status).toBe(200);
-  expect(customerReads[0].conds).toEqual([['where', 'id', CUST]]);
+  leadAttribution.markConverted.mockClear();
+  expect(await viaPage(BODY)).toEqual({ status: 404, json: { error: 'Customer not found' } });
+  expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+  expect(customerReads[0].conds).toEqual([['where', 'id', CUST], ['whereNull', 'deleted_at']]);
+  // ...and a delete that lands after the page's read, before the UPDATE, misses the claim's EXISTS.
+  seed();
+  leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => {
+    tables.customers = { id: CUST, deleted_at: new Date() };
+    const claim = claimOf(row);
+    opts.onlyIfIdentity(claim.q);
+    return claim.wins();
+  });
+  const pageLate = await viaPage(BODY);
+  expect(pageLate.status).toBe(409);
+  expect(pageLate.json.error).toMatch(/changed since the page loaded/);
 });
 
 // ── the customer snapshot and the approved estimate set in the claim ───────────────────────────
@@ -362,7 +375,7 @@ describe('estimates tagged with the lead (no linked estimate)', () => {
     const claim = claimOf(FULL_LEAD());
     leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return true; });
     expect((await viaPage(BODY)).status).toBe(200);
-    expect(claim.calls).toEqual([['where', 'fn']]);
+    expect(claim.calls).toEqual([['where', 'fn'], ['whereExists', 'customers']]);
   });
 });
 

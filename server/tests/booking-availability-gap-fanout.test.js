@@ -150,54 +150,18 @@ describe('buildBookingAvailability — gap fan-out', () => {
     expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ expectedMinutes: expect.any(Number), packEnds: true }));
   });
 
-  // MERGE NOTE (round 5, reconciling with #4663's GATE_BOOKING_LUNCH_BLOCK):
-  // #4663 was built on the pre-packed-ends fan-out (every grid hour up to
-  // latest_start_min), so its own version of this scenario expected a
-  // fallback fan-out into the free afternoon hours when the packed position
-  // collided with lunch. That is exactly the hole-making full fan-out the
-  // packed-ends fix (this branch, owner bug report 2026-09-23) replaced —
-  // reviving it here would silently reintroduce the bug that fix closed.
-  // Packed-ends still offers ONLY its one earliest position for a trailing
-  // gap; the lunch admission rule (GATE_BOOKING_LUNCH_BLOCK, unset by
-  // default) now governs whether THAT ONE position is blocked, not whether
-  // a fallback fan-out runs (there is none — see the "no fallback fan-out"
-  // comment on the fan-out block in booking.js).
-  test('packed-ends: a trailing gap\'s one packed position collides with lunch — offers nothing (GATE_BOOKING_LUNCH_BLOCK=true)', async () => {
-    // Gap opens 11:10 (snaps to 12:00 = lunch) and runs long enough to hold
-    // starts through 15:30 — but this is a TRAILING gap (insertion.after_stop_id
-    // set, no before_stop_id from the default gapSlot helper), so packing
-    // restricts the fan-out to its one earliest position. That position
-    // lands in lunch AND the gate is on, so the gap offers nothing — no
-    // fallback fan-out.
-    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
-    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
-    try {
-      findAvailableSlots.mockResolvedValue({
-        slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
-        total_feasible: 1,
-      });
-      const availability = await build();
-      expect(availability.days).toEqual([]);
-    } finally {
-      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
-    }
-  });
-
-  test('packed-ends: the same trailing gap\'s one packed position (noon) IS offered once GATE_BOOKING_LUNCH_BLOCK is unset (default) — still only that one position, never the afternoon fan-out', async () => {
-    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
-    delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-    try {
-      findAvailableSlots.mockResolvedValue({
-        slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
-        total_feasible: 1,
-      });
-      const availability = await build();
-      expect(startTimes(availability)).toEqual(['12:00']);
-    } finally {
-      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
-    }
+  // Packed-ends offers ONLY its one earliest position for a trailing gap —
+  // there is no fallback fan-out into the free afternoon hours (see the
+  // "no fallback fan-out" comment on the fan-out block in booking.js; the
+  // hole-making full fan-out was replaced by the packed-ends fix, owner bug
+  // report 2026-09-23).
+  test('packed-ends: a trailing gap\'s one packed position (noon) IS offered — still only that one position, never the afternoon fan-out', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
+      total_feasible: 1,
+    });
+    const availability = await build();
+    expect(startTimes(availability)).toEqual(['12:00']);
   });
 
   test('packed-ends: a trailing gap offers its one earliest packed start; an occupied hour elsewhere in the gap is never even attempted', async () => {
@@ -221,30 +185,9 @@ describe('buildBookingAvailability — gap fan-out', () => {
     const availability = await build();
     // Earliest packed (ceil 11:10 -> 12:00) and latest packed (floor 15:30
     // -> 15:00) both survive — a middle gap tries both ends independently,
-    // unlike the single-end trailing/leading case. Noon is no longer
-    // dropped by default now that GATE_BOOKING_LUNCH_BLOCK is unset
-    // (owner ruling 2026-09-23, #4663) — see the next test for the gate-on
-    // case, where the earliest position still collides with lunch.
+    // unlike the single-end trailing/leading case. Noon is a normal hour
+    // (owner ruling 2026-09-23, #4663).
     expect(startTimes(availability)).toEqual(['12:00', '15:00']);
-  });
-
-  test('packed-ends: the same middle gap\'s earliest position collides with lunch and is dropped once GATE_BOOKING_LUNCH_BLOCK is on, but the latest position is unaffected', async () => {
-    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
-    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
-    try {
-      findAvailableSlots.mockResolvedValue({
-        slots: [gapSlot('11:10', {
-          latest_start_min: 15 * 60 + 30,
-          insertion: { after_stop_id: 'stop-1', before_stop_id: 'stop-2' },
-        })],
-        total_feasible: 1,
-      });
-      const availability = await build();
-      expect(startTimes(availability)).toEqual(['15:00']);
-    } finally {
-      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
-    }
   });
 
   test('packed-ends: a leading gap (day-open before, real stop after) offers ONLY its latest packed start', async () => {
@@ -300,8 +243,7 @@ describe('buildBookingAvailability — gap fan-out', () => {
     });
     const availability = await build();
     // Keep the full day so a search result is also valid at confirmation.
-    // Includes 12:00: GATE_BOOKING_LUNCH_BLOCK is unset (default) in this
-    // suite, so noon is a normal offerable hour (owner ruling 2026-09-23).
+    // Includes 12:00: noon is a normal offerable hour (owner ruling 2026-09-23).
     expect(startTimes(availability)).toEqual(['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00']);
   });
 
@@ -317,24 +259,6 @@ describe('buildBookingAvailability — gap fan-out', () => {
     expect(startTimes(availability)).toEqual([
       '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00',
     ]);
-  });
-
-  test('the same open day drops noon when GATE_BOOKING_LUNCH_BLOCK is true', async () => {
-    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
-    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
-    try {
-      findAvailableSlots.mockResolvedValue({
-        slots: [gapSlot('09:00', { stops_that_day: 0 })],
-        total_feasible: 1,
-      });
-      const availability = await build('', { expandOpenDays: true });
-      expect(startTimes(availability)).toEqual([
-        '09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00', '17:00',
-      ]);
-    } finally {
-      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
-    }
   });
 });
 

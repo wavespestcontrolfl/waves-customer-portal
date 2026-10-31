@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/epa-product-label', () => ({ ...jest.requireActual('../services/epa-product-label'), currentEpaSourceStatus: jest.fn() }));
+jest.mock('../services/epa-product-label', () => ({ ...jest.requireActual('../services/epa-product-label'), checkEpaSource: jest.fn() }));
 
 const jobCard = require('../services/job-card');
 
@@ -626,8 +626,8 @@ describe('mixForProduct', () => {
     ['2026-09-04', null, null, false, 'No property pin on file — no forecast'],
     ['2026-09-04', 27.4, -82.5, true, 'Current EPA label could not be verified — try again'],
   ])('mix source checks run only when the verdict can use them (%s, %s)', async (date, lat, lng, shouldCheck, reason) => {
-    const sourceCheck = require('../services/epa-product-label').currentEpaSourceStatus;
-    sourceCheck.mockReset().mockResolvedValue('unavailable');
+    const sourceCheck = require('../services/epa-product-label').checkEpaSource;
+    sourceCheck.mockReset().mockResolvedValue({ status: 'unavailable', checkedAt: 0 });
     process.env.GATE_LABEL_PIPELINE = 'true';
     try {
       const reviewed = { ...product, name: 'Synthetic label product', epa_reg_number: '123-456', formulation: 'SC' };
@@ -1114,6 +1114,42 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     }
   });
 
+  // Owner 2026-10-29 ("i just want to warn techs"): with the rain rules on, weather never withholds a guide
+  // mix. A missing forecast shows it; an open label review (the label, not the weather) still withholds it.
+  test('with the rain rules on, the T&S guide shows a mix when only the forecast is missing, not when a label review is open', async () => {
+    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
+    process.env.GATE_PROTOCOL_SOP = 'true';
+    process.env.GATE_SPRAY_RAIN_RULES = 'true';
+    const sourceCheck = require('../services/epa-product-label').checkEpaSource;
+    try {
+      const guide = async (oil) => {
+        const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' }, products_catalog: [oil] });
+        const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+        const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null, recordSprayRainShadow: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+        return card.protocol.procedure.fieldGuide.products.tritek;
+      };
+      const oil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: '2027-12-01' };
+      const shown = await guide(oil);
+      expect(shown.mix).toEqual([1.28, 1.28]);
+      expect(shown.summary).not.toMatch(/Mix withheld/);
+      // An approved review whose facts are conditional stays open: it withholds the mix whatever the forecast.
+      sourceCheck.mockReset().mockResolvedValue({ status: 'current', checkedAt: 0 });
+      process.env.GATE_LABEL_PIPELINE = 'true';
+      const conditional = { status: 'conditional', value: null, quote: 'Do not apply if rain is expected (sites vary).', page: 3 };
+      const reviewed = { ...oil };
+      reviewed.label_weather_review = { active: { status: 'approved', source: { registration: '48813-1' }, productSnapshot: require('../services/product-label-weather').labelProductSnapshot(reviewed),
+        facts: { minTempF: conditional, maxTempF: conditional, maxWindMph: conditional, rainFreeHours: conditional } } };
+      const held = await guide(reviewed);
+      expect(held.mix).toBeNull();
+      expect(held.summary).toMatch(/Mix withheld/);
+    } finally {
+      delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE;
+      delete process.env.GATE_PROTOCOL_SOP;
+      delete process.env.GATE_SPRAY_RAIN_RULES;
+      delete process.env.GATE_LABEL_PIPELINE;
+    }
+  });
+
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
     const deps = { getRecentCalls: async () => [] };
     const away = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(true), property_preferences: prefs }), deps);
@@ -1425,7 +1461,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   });
 
   // GATE_SPRAY_RAIN_RULES (owner 2026-10-26, plan page "Visit-Day Rain Rule"): off is today's strip,
-  // shadow records the rain-rule verdict without changing the strip, true shows it.
+  // shadow records the rain-rule verdict without changing the strip, true shows it and keeps recording.
+  // Owner 2026-10-29: the rain rules warn and never hold.
   describe('rain rules on the readiness poll', () => {
     const talstar = { id: 't', name: 'Talstar P', category: 'insecticide', epa_reg_number: '91234-145', label_verified_at: '2026-07-12', active: true };
     const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' }] } };
@@ -1455,19 +1492,33 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(recordSprayRainShadow).toHaveBeenCalledTimes(1);
       const [arg] = recordSprayRainShadow.mock.calls[0];
       expect(arg.live).toEqual({ hold: false, issue: { kind: 'weather', status: 'unknown', label: 'Weather unknown' } });
-      expect(arg.shadow.issue).toEqual({ kind: 'weather', status: 'hold', label: 'Rain hold · label' });
-      expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'hold', source: 'label', at: '10 am' })]);
+      expect(arg.shadow.issue).toEqual({ kind: 'weather', status: 'caution', label: 'Rain very likely 10 am · Talstar P' });
+      expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'caution', level: 'warning', source: 'label', at: '10 am' })]);
       expect(arg.serviceInstant.toISOString()).toBe('2026-09-04T14:00:00.000Z');
       // A failed record never takes the poll down.
       const failing = jest.fn(async () => { throw new Error('relation does not exist'); });
       expect(weather(await poll(85, { recordSprayRainShadow: failing }))).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
     });
 
-    test('true: above 60% at the start is a caution, above 80% a hold, 60% or less no chip', async () => {
+    test('true: above 60% at the start is a caution, above 80% the Warning level, 60% or less no chip', async () => {
       process.env.GATE_SPRAY_RAIN_RULES = 'true';
-      expect(weather(await poll(65))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 10 am · label: no spraying in rain' });
-      expect(weather(await poll(85))).toEqual({ kind: 'weather', status: 'hold', label: 'Rain hold · label' });
-      expect(weather(await poll(60))).toBeNull();
+      const recordSprayRainShadow = jest.fn(async () => null);
+      expect(weather(await poll(65, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 10 am · Talstar P' });
+      expect(weather(await poll(85, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain very likely 10 am · Talstar P' });
+      expect(weather(await poll(60, { recordSprayRainShadow }))).toBeNull();
+    });
+
+    test('true: the record keeps counting, with the live check on both sides and nothing held', async () => {
+      process.env.GATE_SPRAY_RAIN_RULES = 'true';
+      const recordSprayRainShadow = jest.fn(async () => null);
+      await poll(85, { recordSprayRainShadow });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(recordSprayRainShadow).toHaveBeenCalledTimes(1);
+      const [arg] = recordSprayRainShadow.mock.calls[0];
+      const issue = { kind: 'weather', status: 'caution', label: 'Rain very likely 10 am · Talstar P' };
+      expect(arg.live).toEqual({ hold: false, issue });
+      expect(arg.shadow.issue).toEqual(issue);
+      expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'caution', reason: 'rain 85% at 10 am — label: no spraying during rain' })]);
     });
 
     test('an add-on\'s product takes its add-on\'s Waves rule, not the visit\'s (Codex P2)', async () => {
@@ -1485,7 +1536,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(weather(await card({}, onHost))).toBeNull();
       const viaAddon = { ...protocols, tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Talus IGR 0.5 fl oz/gal for whitefly/scale nymphs' }] } };
       expect(weather(await card({ 'scheduled_service_addons as a': [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }] }, viaAddon)))
-        .toEqual({ kind: 'weather', status: 'hold', label: 'Rain hold · Waves rule' });
+        .toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning · Talus IGR' });
     });
   });
 

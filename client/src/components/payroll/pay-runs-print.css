@@ -1,0 +1,41 @@
+.pay-stub .pay-stub-meta,
+.pay-stub .pay-stub-meta * {
+  font-size: var(--field-meta-size) !important;
+}
+
+@media print {
+  body:has(.pay-stub) {
+    overflow: visible !important;
+  }
+
+  body:has(.pay-stub) > :not(:has(.pay-stub)) {
+    display: none !important;
+  }
+
+  body:has(.pay-stub) [role='dialog']:has(.pay-stub) {
+    position: static !important;
+    display: block !important;
+    padding: 0 !important;
+  }
+
+  body:has(.pay-stub) [role='dialog']:has(.pay-stub) > .absolute {
+    display: none !important;
+  }
+
+  .pay-stub-dialog {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
+    border: 0 !important;
+  }
+
+  .pay-stub-dialog-body {
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  .pay-stub-table-wrap {
+    overflow: visible !important;
+  }
+}

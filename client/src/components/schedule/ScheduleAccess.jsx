@@ -167,10 +167,13 @@ function WrongCodeConfirm({ line, actions, onDone }) {
   );
 }
 
+// Rows in Details → Access are split by a bottom hairline only. Preflight is
+// off, so the style is set explicitly (border-solid) with every other side at
+// 0; `border-hairline` would draw a full box with the code against its edge.
 function SheetLine({ line, actions, confirming, onConfirming }) {
   const label = [line.label, lineTag(line)].filter(Boolean).join(' · ');
   return (
-    <div className="py-2 border-b border-hairline border-zinc-200">
+    <div className="py-2 border-0 border-b-hairline border-solid border-zinc-200">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-ink-secondary" style={{ fontSize: 14, color: line.unconfirmed ? WARN.text : undefined }}>{label}</div>
@@ -187,7 +190,7 @@ function AcceptedRow({ row, panel }) {
   const label = ACCESS_KIND_LABELS[row.kind] || 'Access code';
   const block = panel ? undefined : 'block';
   return (
-    <div className={panel ? 'mt-1' : 'py-2 border-b border-hairline border-zinc-200'}>
+    <div className={panel ? 'mt-1' : 'py-2 border-0 border-b-hairline border-solid border-zinc-200'}>
       <div className={panel ? 'flex items-baseline gap-2 flex-wrap' : ''}>
         <span className="text-ink-secondary" style={{ fontSize: 14, display: block }}>{label}</span>
         {row.code && <span className="font-mono font-medium text-zinc-900" style={{ fontSize: panel ? 15 : 18, display: block }}>{row.code}</span>}

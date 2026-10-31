@@ -896,7 +896,9 @@ async function flagMissingGeo(service) {
       action: await audit.namedVisitAction(service.customer_id,
         [(who) => `fix the address pin for ${who}'s visit`, (who) => `fix ${who}'s address pin`],
         'fix the address pin on a visit'),
-      why: `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
+      why: service.routeOnly === true
+        ? `The ${shortDateET(`${date}T12:00:00Z`)} visit has no map pin, so its route cannot be checked until its address pin is fixed.`
+        : `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
       severity: 'needs-you',
       link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(service.id)}`,
       subject: { type: 'visit', id: String(service.id) },
@@ -982,8 +984,9 @@ function stillLiveOn(row, date) {
   return !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === date
     && row.customer_active !== false && !row.customer_deleted_at
     // Locked, excluded or customer-confirmed after pass 1: eligibility denies
-    // it outright, so it is no longer skipped for its pin (r21, r24 P2).
-    && !heldOutOfAutoDispatch(row);
+    // it outright, so it is no longer skipped for its pin (r21, r24 P2). A visit that is not a
+    // recurring child (GATE_ROUTE_WARNING_DETAIL) keeps its notice: the pin serves its route check.
+    && !(require('../scheduling/route-warning-detail').pinServesRouteCheckOnly(row) ? null : heldOutOfAutoDispatch(row));
 }
 
 async function stillMissingPin(run, picked) {
@@ -1004,6 +1007,16 @@ async function stillMissingPin(run, picked) {
 }
 
 async function raiseMissingGeoNotices(run) {
+  // GATE_ROUTE_WARNING_DETAIL: visits in the next week the run never loads (one-time, rodent, project,
+  // locked or confirmed) join the same lane when they have no pin. Read failure = the lane as before.
+  if (require('../scheduling/route-warning-detail').routeWarningDetailLive()) {
+    try {
+      const known = new Set([...run.missingGeoWanted.map((row) => String(row.id)), ...run.pinOkIds]);
+      run.missingGeoWanted.push(...await audit.nearTermPinlessVisits(run.nowDate, known));
+    } catch (err) {
+      logger.warn(`[auto-dispatch] near-term pin read failed: ${err.message}`);
+    }
+  }
   if (!run.missingGeoWanted.length) return;
   try {
     // Re-read every wanted visit BEFORE the budget picks, so a visit fixed
@@ -1128,7 +1141,8 @@ async function evaluateServiceForRun(service, run) {
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
     // GATE_AUTO_DISPATCH_ROAD_CHECK: the run's one road-time reader (null = off).
-    roadTravel: run.roadTravel,
+    // ..._AT_APPLY: null here in apply mode; pass 2 sets it (holdBeforeRoadCheck).
+    roadTravel: roadCheck.pass1Travel(config, run.roadTravel),
     // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='true': the candidate search uses
     // find-time's arrival-window engine (candidate-slots.js); pass 2 reuses
     // this ctx, so the re-check before a move searches the same way.
@@ -1274,6 +1288,30 @@ function sundayBudget(config) {
   };
 }
 
+// The cap-held reason's note for a grouped visit (its whole visit moves together).
+function groupedNote(unitSize) {
+  return unitSize > 1 ? `, grouped visit of ${unitSize}` : '';
+}
+
+// GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28): before the live
+// re-evaluation, a move the per-run cap already holds is logged as cap-held
+// without one, so no road check is bought for it. Any other move gets the
+// run's road reader, so Google is asked only for a move about to be written.
+// True = held and logged. Gate off (or a dry run): does nothing.
+async function holdBeforeRoadCheck(pm, run) {
+  const { config, totals, runId } = run;
+  if (!roadCheck.deferredToApply(config)) return false;
+  if (totals.changed < config.maxChangesPerRun) {
+    pm.ctx.roadTravel = run.roadTravel;
+    return false;
+  }
+  const unitSize = await unitMoveSize(pm.service, pm.result.best);
+  totals.recommended++; // same as the cap-held path in applyPlannedMove
+  noteUnmoved(run, pm.service, 'MAX_CHANGES_REACHED');
+  await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${pm.result.improvement}${groupedNote(unitSize)})`, ...pm.result.audit });
+  return true;
+}
+
 // Pass 2 for one planned move: the supersession check, the apply-time guard
 // recheck, a live re-evaluation and the per-run cap, then the apply and its
 // audit. Resolves to `fresh` — the live re-evaluation — for the failure
@@ -1302,6 +1340,8 @@ async function applyPlannedMove(pm, run, attempt) {
     return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: limited.reason_code, reason_description: limited.reason_description, ...pm.result.audit });
   }
 
+  if (await holdBeforeRoadCheck(pm, run)) return null;
+
   const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
   attempt.fresh = fresh;
   noteEvaluation(run, pm.service, fresh, pm.ctx);
@@ -1317,8 +1357,7 @@ async function applyPlannedMove(pm, run, attempt) {
   if (totals.changed + unitSize > config.maxChangesPerRun) {
     totals.recommended++; // cap-held but still a valid move — count it in the summary
     noteUnmoved(run, pm.service, 'MAX_CHANGES_REACHED');
-    const grouped = unitSize > 1 ? `, grouped visit of ${unitSize}` : '';
-    return audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${grouped})`, ...fresh.audit });
+    return audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${groupedNote(unitSize)})`, ...fresh.audit });
   }
 
   // DAY RULES: past the run's Sunday budget a Sunday move is held like a
@@ -1335,13 +1374,12 @@ async function applyPlannedMove(pm, run, attempt) {
   const checked = await moveCheck.checkMove({ service: pm.service, best: fresh.best, run });
   // A model call takes up to two minutes: the customer's stored day, time and
   // blackout preferences are hard rules, so they are read again after it,
-  // whatever the verdict. Changed: the visit stays, no person is told about a
-  // proposal scored on the old ones, and the next run scores it on the new
-  // ones. (The write reads them once more on its own transaction: apply.js.)
+  // whatever the verdict. Changed: the visit stays, and the next run scores
+  // it on the new ones. (The write reads them once more on its own
+  // transaction: apply.js.)
   // The check itself did not work: never a green run, whatever follows.
   if (checked && checked.broke) run.guardReadDegraded = true;
   if (checked && await preferencesChanged(pm)) {
-    moveCheck.dropNotice(run.proofreader, pm.service);
     noteUnmoved(run, pm.service, 'SUPERSEDED_DURING_RUN');
     return audit.logDecision(runId, {
       action: 'no_change', service: pm.service, reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The customer\'s scheduling preferences changed while the move was checked', ...fresh.audit, constraints: { ...fresh.audit.constraints, proofreader: checked.audit },
@@ -1369,6 +1407,9 @@ async function applyPlannedMove(pm, run, attempt) {
     // The start points this move (and any SLOT_TAKEN fallback) was scored from:
     // the run's cache. The move guard refuses when a Team-tab edit changed one.
     startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(pm.ctx, technicianId),
+    // An unassigned visit's current day was scored on this technician's route
+    // (candidate-slots.js currentDayTechs), so their start point is fenced too.
+    sourceDayTechnicianId: (fresh.current && fresh.current.day_technician_id) || null,
     ...moveCheck.writeOptions(checked, {
       alternateCandidates: run.sundays.fallbacks(pm.service, fresh.rankedCandidates),
       rescore: async () => {
@@ -1484,6 +1525,17 @@ async function runPassTwo(run) {
   }
 }
 
+// The run log's day-move rule, worded for the guard mode that is really in
+// force. Legacy keeps the flat lock boundary; tiers and flex do not use it.
+function describeGuardRule(guardMode, lockBoundary, today) {
+  if (guardMode === 'flex') {
+    const floor = shiftDateStr(today, routeTiers.MIN_DESTINATION_DAYS_OUT);
+    return `flex: frozen under ${flexTier.FLEX_TIER_FREEZE_HOURS}h, day moves on or after ${floor}`;
+  }
+  if (guardMode === 'tiers') return `tiers: day moves from ${routeTiers.TIER2_MIN_DAYS_OUT} days out`;
+  return `lock>${lockBoundary}`;
+}
+
 async function runAutoDispatch(opts = {}) {
   const config = await withDayRules(getAutoDispatchConfig(opts));
   const triggeredBy = opts.triggeredBy || 'cron';
@@ -1497,7 +1549,7 @@ async function runAutoDispatch(opts = {}) {
   // Cards an earlier run held but never summarized get their own push; this
   // run's cards are held under its id for its summary push.
   await require('../tech-visit-notifications').beginAutoDispatchRun(runId);
-  logger.info(`[auto-dispatch] run ${runId} mode=${config.mode} lock>${lockBoundary} lookahead<=${lookaheadEnd}`);
+  logger.info(`[auto-dispatch] run ${runId} mode=${config.mode} ${describeGuardRule(config.guardMode, lockBoundary, today)} lookahead<=${lookaheadEnd}`);
 
   let runStatus = 'completed';
   let runError = null;
@@ -1604,11 +1656,10 @@ async function runAutoDispatch(opts = {}) {
   await needsPerson.raiseNotices(run.needsPerson, {
     nowDate: run.nowDate, clearedIds: run.clearedIds, scanComplete: !runError && run.conflictScanComplete === true,
   });
-  await moveCheck.raiseNotices(run.proofreader);
   // Every check of the night broke: one notice that the tool is stopped, and
   // why (owner audit 2026-10-22, finding 1). Best-effort; never throws.
   await checkDown.noteRun(run.proofreader, { enabled: config.proofreaderEnabled === true, nowDate: run.nowDate });
-  runStatus = moveCheck.statusAfterNotices(run.proofreader, runStatus, noticesClosed);
+  runStatus = moveCheck.statusAfterNotices(runStatus, noticesClosed);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {
@@ -1624,4 +1675,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule } };

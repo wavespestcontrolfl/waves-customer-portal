@@ -1488,12 +1488,6 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
       }
     }
     if (reviewNotRecorded) throw reviewNotRecorded;
-    // A settled invoice may be gating a payment-held WDO report — nudge
-    // the release sweep like the single-invoice path does (codex r22 P3);
-    // the 60s interval remains the fallback.
-    try {
-      require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
-    } catch { /* interval-backed */ }
   }
 
   // ACH failure-state reset BEFORE the mirror (codex r3 P1, same ordering
@@ -2048,6 +2042,9 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
 
       const fallbackInvoiceUpdates = {
         status: 'paid',
+        // A part payment recorded earlier on this invoice is part of the bill this settlement completes: total below carries it, and the
+        // column (money received on a still-open invoice) resets, so the paid invoice reads as the whole bill.
+        amount_paid: 0,
         paid_at: new Date().toISOString(),
         processor: 'stripe',
         stripe_payment_intent_id: piId,
@@ -2057,7 +2054,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       // account credit so the invoice keeps its real total instead of collapsing
       // to the reduced cash amount while credit_applied remains.
       if (chargedTotal !== null) {
-        fallbackInvoiceUpdates.total = Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100;
+        fallbackInvoiceUpdates.total = Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0) + (Number(lockedInvoice.amount_paid) || 0)) * 100) / 100;
       }
       if (details.paymentMethod) fallbackInvoiceUpdates.payment_method = details.paymentMethod;
       if (details.cardBrand) fallbackInvoiceUpdates.card_brand = details.cardBrand;
@@ -2171,14 +2168,17 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // Update invoices table
   const invoiceUpdates = {
     status: 'paid',
+    // Money received by hand earlier (a part payment) is part of the bill this payment completes: total below carries it, and the column
+    // resets because it holds money received on a still-open invoice. Both read the old row inside the one UPDATE.
+    amount_paid: 0,
     paid_at: new Date().toISOString(),
     stripe_charge_id: paymentIntent.latest_charge || null,
   };
   // chargedTotal is CASH taken (amount due + surcharge); add back the row's own
-  // applied account credit IN SQL (the matched invoice isn't in this outer scope)
-  // so the invoice keeps its real total (credit + cash), not just the cash.
+  // applied account credit and part payments IN SQL (the matched invoice isn't in this outer scope)
+  // so the invoice keeps its real total (credit + earlier parts + cash), not just the cash.
   if (chargedTotal !== null) {
-    invoiceUpdates.total = db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [chargedTotal]);
+    invoiceUpdates.total = db.raw('ROUND((? + COALESCE(credit_applied, 0) + COALESCE(amount_paid, 0))::numeric, 2)', [chargedTotal]);
   }
   if (details.paymentMethod) invoiceUpdates.payment_method = details.paymentMethod;
   if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
@@ -2354,9 +2354,6 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
     });
     ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
-    // Fire-and-forget: a settled invoice may be gating a payment-held WDO
-    // report — nudge the release sweep (60s interval is the fallback).
-    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
   }
 
   // ── Bell + push for the admin team ──
@@ -3626,6 +3623,8 @@ async function handleChargeRefunded(charge) {
   // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
   let feeRefundFencedInLock = false;
+  // Full refunds that terminalized an invoice paid partly by hand (single or combined): the office is told after commit (alertMixedRefund).
+  const mixedRefunds = [];
   const refundedPayment = await db.transaction(async (trx) => {
     // Chokepoint B (Codex #4971 r4 P1): the renewal parent-decision gate is
     // this transaction's FIRST lock — the refund stamp below (and the credit
@@ -3821,6 +3820,8 @@ async function handleChargeRefunded(charge) {
                 .where({ id: invId })
                 .whereIn('status', ['paid', 'processing'])
                 .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+              const combinedHandCents = await handPartsPaidCents(trx, invId);
+              if (combinedHandCents > 0) mixedRefunds.push({ invoiceId: invId, handCents: combinedHandCents });
             } else {
               const resolvedReinstated = await trx('stripe_orphan_charges')
                 .where({ resolved: false, source: 'combined_pay_webhook' })
@@ -4062,6 +4063,9 @@ async function handleChargeRefunded(charge) {
       if (invId && invoiceOwned) {
         const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
         await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+        // Part of this bill was paid by hand (a part payment): the card refund cannot return it, so the office decides.
+        const handCents = await handPartsPaidCents(trx, invId);
+        if (handCents > 0) mixedRefunds.push({ invoiceId: invId, handCents });
         // Pre-settlement refund: charge.refunded arrived before payment_intent.succeeded
         // wrote the payments row (the update above hit 0 rows → pmt is null), but the
         // invoice still resolved + was marked 'refunded'. The later succeeded handler
@@ -4095,6 +4099,7 @@ async function handleChargeRefunded(charge) {
   // was stamped, and no refund email/notification may fire for money
   // Stripe kept (the refund.failed handler already notified the office).
   if (feeRefundFencedInLock) return;
+  for (const mixed of mixedRefunds) await alertMixedRefund(mixed, { chargeId, refundId });
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,
@@ -6464,10 +6469,11 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
-        // `amount` is the ACH cash (already reduced by applied credit); add the
-        // row's credit_applied back IN SQL so total stays the real value — else the
-        // succeeded handler recomputes amount due off the collapsed total.
-        total: db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [amount]),
+        // `amount` is the ACH cash (already reduced by applied credit and by any part payment); add the
+        // row's credit_applied and amount_paid back IN SQL so total stays the real value — else the
+        // succeeded handler recomputes amount due off the collapsed total. amount_paid itself stays (the invoice is
+        // not paid yet; a failed ACH reopens it with the part payment still on it).
+        total: db.raw('ROUND((? + COALESCE(credit_applied, 0) + COALESCE(amount_paid, 0))::numeric, 2)', [amount]),
         // The unacknowledged-ack sweep ages candidates on updated_at; an
         // old invoice whose ACH began today must date from THIS
         // transition, or the 3-day ceiling silently excludes it and a
@@ -6703,7 +6709,7 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     .where('updated_at', '<', olderThan)
     .orderBy('updated_at', 'asc')
     .limit(limit)
-    .select('id', 'stripe_payment_intent_id', 'invoice_number', 'total', 'credit_applied');
+    .select('id', 'stripe_payment_intent_id', 'invoice_number', 'total', 'credit_applied', 'amount_paid');
   const stripeClient = rows.length ? getStripe() : null;
   for (const row of rows) {
     // ACH-evidence gate: status='processing' + a PI is NOT proof of a bank
@@ -6762,7 +6768,7 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     // (sendAchProcessing's own fallback is the gross total).
     const cashAmount = combinedAllocationForAck
       ? require('../services/pay-combined').allocationTotalCents(combinedAllocationForAck) / 100
-      : Math.round((Number(row.total || 0) - Number(row.credit_applied || 0)) * 100) / 100;
+      : invoiceAmountDue(row);
     logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken; email ${priorEmailAttempt ? 'already attempted — SMS-only' : 'never attempted — both legs'})`);
     await dispatchAchProcessingAcknowledgment({
       invoiceId: row.id,
@@ -6831,6 +6837,133 @@ async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
 }
 
 /**
+ * Office alert for a monthly-autopay charge whose PaymentIntent is canceled
+ * before the month is collected (billing audit 2026-10-30, finding 2).
+ *
+ * Monthly dues have no invoice by design. The canceled flip in the handler
+ * below takes the row out of every reader that could recover the month: the
+ * retry sweep and the failed-payment balances read 'failed' only, and the
+ * month's already-collected check reads 'paid'/'processing'. Later months
+ * carry their own billed_month, so nothing ever collects this one. Two rows
+ * reach that flip: a bank payment still 'processing', and a 'failed' row
+ * still on its retry ladder (a declined card PI stays open in Stripe until
+ * someone cancels it there; each retry rung mints a fresh PI). None of our
+ * code cancels either (prepaid-pi-guard refuses a PI with money in flight;
+ * the retry sweep never cancels at Stripe; billing-cron's card-authentication
+ * cancel leaves its row 'failed' and is skipped here), so a person in Stripe
+ * or Stripe itself did it: charging again could undo a deliberate cancel, so
+ * this does NOT arm a retry. It rings the office once per PaymentIntent to
+ * collect the month (or decide not to). No message goes to the customer, and nothing is
+ * charged.
+ *
+ * Guards: monthly_autopay PIs only; never invoice-linked PIs (they reopen
+ * through the invoice lane); a row no other row superseded; a 'failed' row
+ * only while armed (next_retry_at set) and never one parked on card
+ * authentication (the flip leaves it 'failed'); no ring when another row
+ * already collected the month. Runs BEFORE the flip: a throw 500s the
+ * webhook, and the redelivery still finds the row as it was; the dedupe key
+ * keeps a redelivery from ringing twice.
+ */
+// What the alert says for each row the canceled flip ends. A row in any other state is not this alert's.
+const CANCELED_DUES_COPY = {
+  processing: {
+    why: 'was canceled at Stripe before it cleared',
+    what: 'was canceled at Stripe while the bank payment was still processing',
+  },
+  failed: {
+    why: 'was canceled at Stripe, so its retries stopped',
+    what: 'had failed and was waiting for its next automatic retry; canceling it at Stripe stopped the retries',
+  },
+};
+
+async function alertCanceledMonthlyAutopay(paymentIntent, row) {
+  const copy = row && CANCELED_DUES_COPY[row.status];
+  if (!copy || row.superseded_by_payment_id || paymentIntent.metadata?.type !== 'monthly_autopay') return;
+  const rowMeta = parsePaymentMeta(row);
+  // A failed row only while armed, never one parked on card authentication (the flip keeps it 'failed').
+  if (row.status === 'failed' && (!row.next_retry_at || String(rowMeta.requires_action) === 'true')) return;
+  const piId = paymentIntent.id;
+  if (await db('invoices').where({ stripe_payment_intent_id: piId }).first()) return;
+
+  const { findCollectedMonthlyPayment, monthKeyOf } = require('../services/retry-collectibility');
+  const month = rowMeta.billed_month || monthKeyOf(row.payment_date);
+  const customerId = row.customer_id;
+  if (month) {
+    const [year, mon] = month.split('-').map(Number);
+    const lastDay = String(new Date(Date.UTC(year, mon, 0)).getUTCDate()).padStart(2, '0');
+    const window = { monthKey: month, monthStart: `${month}-01`, monthEnd: `${month}-${lastDay}` };
+    if (await findCollectedMonthlyPayment(customerId, window, { excludePaymentId: row.id })) {
+      logger.info(`[stripe-webhook] Monthly autopay PI ${piId} canceled, but ${month} is already collected — no office alert`);
+      return;
+    }
+  }
+
+  // The dues themselves, not the attempt's total: a card attempt's amount includes its card fee, and
+  // any new charge adds its own. Legacy rows without base_amount_cents subtract the stored fee.
+  const amount = (Number(row.base_amount_cents)
+    || Math.round(parseFloat(row.amount) * 100) - (Number(row.surcharge_amount_cents) || 0)) / 100;
+  const monthLabel = month
+    ? new Date(`${month}-15T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+    : '';
+  const monthWords = monthLabel || 'that month';
+  const dollars = Number.isFinite(amount)
+    ? `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : '';
+  const duesPayment = [monthLabel, dollars, 'dues payment'].filter(Boolean).join(' ');
+  const customer = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
+  const { raiseAdminAlert } = require('../services/admin-alert-compose');
+  const { fullName, fitAction } = require('../services/admin-alert-names');
+  const name = fullName(customer) || 'this customer';
+  const alert = await raiseAdminAlert('billing', {
+    area: 'Billing',
+    action: fitAction('Billing', name, [
+      (who) => `collect ${who}'s canceled dues`,
+      (who) => `review ${who}'s canceled dues`,
+    ]),
+    why: `The ${duesPayment} ${copy.why}; the month is unpaid.`,
+    severity: 'needs-you',
+    // Customer 360 holds Charge now, the one office action that records the month as paid.
+    link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+    subject: { type: 'customer', id: customerId },
+    // Nothing closes this alert automatically: a person marks it done once it is handled.
+    doneWhen: 'collected_and_marked_done',
+    who: 'person',
+  }, {
+    // A needs-you money item must ring: with GATE_ADMIN_BELL_POLICY on, billing is not
+    // allowlisted, and bell: true is the sanctioned site-level opt-in (as autopay-sca-parked.js).
+    bell: true,
+    // Customer 360's Charge now bills monthly_rate for the month picked in its month list (this month
+    // or the 2 before it), stamped billed_month, the stamp every dues-coverage reader (the cron,
+    // monthlyDuesCollected at plan-visit completion) trusts. An invoice made by hand carries no
+    // dues-month stamp (create() strips it), so a plan visit of that month completed later could mint
+    // the month's dues again.
+    detail: `${name}'s ${duesPayment} ${copy.what}, so it was not collected. Nothing else has paid ${monthWords}, and nothing will retry it on its own. To collect it, pick ${monthWords} in the month list beside Charge now on the customer's page: that charge records ${monthWords} as paid. An invoice made by hand does not mark ${monthWords} as paid (a plan visit in ${monthWords} completed later could bill it again), so check the customer's invoices before billing it another way. Marking this done only closes this alert: it records nothing on the account. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
+    dedupeKey: `autopay-canceled:${customerId}:${piId}`,
+    metadata: {
+      customer_id: customerId,
+      stripe_payment_intent_id: piId,
+      payment_id: row.id,
+      payment_status: row.status,
+      billed_month: month,
+      source: 'payment_intent.canceled',
+    },
+  });
+  if (!alert) {
+    // notifyAdmin swallows a failed insert and returns null. Throw so the webhook 500s and Stripe
+    // redelivers BEFORE the canceled flip; returning would let the flip take the month out of every
+    // recovery reader with no alert anywhere.
+    throw new Error(`office alert for canceled monthly autopay PI ${piId} was not filed (customer ${customerId}, payment ${row.id})`);
+  }
+  const { logAutopay } = require('../services/autopay-log');
+  await logAutopay(customerId, 'charge_canceled', {
+    amountCents: Math.round(amount * 100),
+    paymentId: row.id,
+    details: { source: 'autopay_canceled', stripe_payment_intent_id: piId, billed_month: month, payment_status: row.status },
+  }).catch(() => {});
+  logger.warn(`[stripe-webhook] Monthly autopay PI ${piId} canceled (${row.status}) — ${monthWords} unpaid; office alerted, no retry armed`);
+}
+
+/**
  * payment_intent.canceled — Stale or admin-cancelled PI. Mark payment cancelled.
  */
 async function handlePaymentIntentCanceled(paymentIntent) {
@@ -6849,6 +6982,14 @@ async function handlePaymentIntentCanceled(paymentIntent) {
     await handleDepositIntentCanceled(paymentIntent);
     return;
   }
+
+  // Read BEFORE the flip (as the payment_failed path does): after it, a dues
+  // charge canceled mid-processing or mid-retry looks like any other canceled row.
+  const rowBeforeCancel = await db('payments')
+    .where({ stripe_payment_intent_id: piId })
+    .whereIn('status', ['processing', 'failed'])
+    .first();
+  await alertCanceledMonthlyAutopay(paymentIntent, rowBeforeCancel);
 
   // No .catch — a failed write must propagate so the event is retried.
   await db('payments')
@@ -7051,6 +7192,46 @@ function lockedInvoiceOwedToWonDispute(invoice, disputedPi) {
   return !pi || (!!disputedPi && pi === disputedPi);
 }
 
+// Money the office received by hand on an invoice: part payments still standing in the ledger (not undone). A card settlement folds it
+// into the paid flip and zeroes amount_paid; a reversal of that settlement (a dispute reopen) gives it back, or the customer would be
+// asked again for money already received (partial payments, owner 2026-10-29).
+const HAND_PARTS_PAID_WHERE = "metadata->>'invoice_id' = CAST(? AS text) AND metadata->>'partial_payment' = 'true' AND status = 'paid'";
+function handPartsPaidSql(trx, invoiceId) {
+  return trx.raw(`(SELECT COALESCE(SUM(amount), 0) FROM payments WHERE ${HAND_PARTS_PAID_WHERE})`, [invoiceId]);
+}
+async function handPartsPaidCents(trx, invoiceId) {
+  const result = await trx.raw(`SELECT COALESCE(SUM(ROUND(amount * 100)), 0) AS cents FROM payments WHERE ${HAND_PARTS_PAID_WHERE}`, [invoiceId]);
+  return Number(result?.rows?.[0]?.cents) || 0;
+}
+
+// A full card refund (from the Stripe dashboard; the portal refuses one) on an invoice paid partly by hand: the invoice reads refunded,
+// but the hand part stays recorded as received. The office decides whether to return it too or bill again. Nothing goes to the customer.
+async function alertMixedRefund({ invoiceId, handCents }, { chargeId, refundId }) {
+  try {
+    const inv = await db('invoices').where({ id: invoiceId }).first('invoice_number');
+    const label = inv?.invoice_number ? `Invoice ${inv.invoice_number}` : 'An invoice';
+    const dollars = `$${(handCents / 100).toFixed(2)}`;
+    const { raiseAdminAlert } = require('../services/admin-alert-compose');
+    await raiseAdminAlert('billing', {
+      area: 'Billing',
+      action: 'Check a refund on an invoice paid partly by hand',
+      why: `${label} was refunded by card in Stripe, but ${dollars} paid by hand is still on record.`,
+      severity: 'needs-you',
+      link: `/admin/invoices?invoice=${encodeURIComponent(invoiceId)}`,
+      subject: { type: 'invoice', id: invoiceId },
+      // Nothing closes this automatically: a person returns the money or bills again, then marks it done.
+      doneWhen: 'refund_checked_and_marked_done',
+      who: 'person',
+    }, {
+      bell: true,
+      detail: `The card payment on ${label.toLowerCase().startsWith('an ') ? 'this invoice' : label} was fully refunded in Stripe, so the invoice now reads refunded. ${dollars} was paid by hand on it earlier and is still recorded as received. Return that money too, or bill the customer again, then mark this done. Nothing was sent to the customer. Stripe charge ${chargeId}${refundId ? `, refund ${refundId}` : ''}.`,
+      dedupeKey: `mixed-refund:${invoiceId}:${refundId || chargeId}`,
+    });
+  } catch (err) {
+    logger.error(`[stripe-webhook] mixed refund alert failed for invoice ${invoiceId}: ${err.message}`);
+  }
+}
+
 // The facts the remove compares the locked invoice against, or null when this
 // payment carries no card surcharge in an invoice total.
 async function cardSurchargeShape(trx, invoice, payment) {
@@ -7064,7 +7245,8 @@ async function cardSurchargeShape(trx, invoice, payment) {
     totalCents: Math.round((Number(invoice.total) || 0) * 100),
     creditCents: Math.round((Number(invoice.credit_applied) || 0) * 100),
     settledTotalCents: Math.round((Number(paymentRow.amount) || 0) * 100)
-      + Math.round((Number(invoice.credit_applied) || 0) * 100),
+      + Math.round((Number(invoice.credit_applied) || 0) * 100)
+      + await handPartsPaidCents(trx, invoice.id),
   };
 }
 
@@ -7336,6 +7518,7 @@ async function handleDisputeCreated(dispute) {
           await trx('invoices').where({ id: feeInvoice.id }).update({
             status: 'overdue',
             paid_at: null,
+            amount_paid: handPartsPaidSql(trx, feeInvoice.id),
             stripe_payment_intent_id: null,
             stripe_charge_id: null,
             updated_at: trx.fn.now(),
@@ -7580,6 +7763,7 @@ async function handleDisputeCreated(dispute) {
           await trx('invoices').where({ id: reopenInvoiceId }).update({
             status: 'overdue',
             paid_at: null,
+            amount_paid: handPartsPaidSql(trx, reopenInvoiceId),
             stripe_payment_intent_id: null,
             stripe_charge_id: null,
             updated_at: trx.fn.now(),
@@ -7787,6 +7971,8 @@ async function handleDisputeCreated(dispute) {
         await trx('invoices').where({ id: invoice.id }).update({
           status: 'overdue',
           paid_at: null,
+          // Hand part payments the settlement folded in are still received: they come off what is owed again.
+          amount_paid: handPartsPaidSql(trx, invoice.id),
           // Clear the PI linkage: the pay page and card-on-file paths
           // treat a lingering non-canceled intent as "payment already in
           // progress" and would refuse re-collection on the reopened
@@ -8241,6 +8427,7 @@ async function handleDisputeClosed(dispute) {
                 .update({
                   status: 'paid',
                   paid_at: new Date().toISOString(),
+                  amount_paid: 0,
                   stripe_payment_intent_id: row.stripe_payment_intent_id || null,
                   stripe_charge_id: row.stripe_charge_id || null,
                 });
@@ -8315,7 +8502,7 @@ async function handleDisputeClosed(dispute) {
                 await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
                 await trx('invoices')
                   .where({ id: invId })
-                  .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: trx.fn.now() });
+                  .update({ status: 'overdue', paid_at: null, amount_paid: handPartsPaidSql(trx, invId), stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: trx.fn.now() });
               });
             }
             // Refund-shaped term sync (codex r4 P1): lost money cancels the
@@ -8540,6 +8727,7 @@ async function handleDisputeClosed(dispute) {
             await trx('invoices').where({ id: wonInvoice.id }).update({
               status: 'paid',
               paid_at: new Date().toISOString(),
+              amount_paid: 0,
               stripe_payment_intent_id: feePi,
               stripe_charge_id: payment.stripe_charge_id || null,
             });
@@ -8560,6 +8748,7 @@ async function handleDisputeClosed(dispute) {
             await trx('invoices').where({ id: lostInvoice.id }).update({
               status: 'overdue',
               paid_at: null,
+              amount_paid: handPartsPaidSql(trx, lostInvoice.id),
               stripe_payment_intent_id: null,
               stripe_charge_id: null,
               updated_at: trx.fn.now(),
@@ -8645,6 +8834,8 @@ async function handleDisputeClosed(dispute) {
           await trx('invoices').where({ id: invoice.id }).update({
             status: 'paid',
             paid_at: new Date().toISOString(),
+            // The paid state again: the hand parts the reopen gave back are folded into the settled total once more.
+            amount_paid: 0,
             // Restore the linkage the reopen cleared — the disputed PI's
             // funds are what settle this invoice again.
             stripe_payment_intent_id: payment.stripe_payment_intent_id || null,
@@ -8745,6 +8936,8 @@ async function handleDisputeClosed(dispute) {
             await trx('invoices').where({ id: lostInvoice.id }).update({
               status: 'overdue',
               paid_at: null,
+              // Hand part payments still received come off what is owed again (closed(lost) can arrive before created).
+              amount_paid: handPartsPaidSql(trx, lostInvoice.id),
               // Same PI-linkage clear as dispute-created: a lingering
               // non-canceled intent blocks the pay page / card-on-file
               // re-collection paths with "payment already in progress".

@@ -55,6 +55,7 @@ function patternLabel(pattern) {
   if (p === 'biweekly' || p === 'bi-weekly') return 'bi-weekly plan';
   if (p === 'weekly') return 'weekly plan';
   if (p === 'annual' || p === 'yearly') return 'annual plan';
+  if (p === 'lawn_rounds_9') return 'lawn rounds (9 a year) plan';
   return `${p} plan`;
 }
 

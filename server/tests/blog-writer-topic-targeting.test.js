@@ -27,15 +27,6 @@ function makeDbMock({ post = null, updateResult = 1 } = {}) {
   return dbMock;
 }
 
-// Termite post built around "Advion" (a proper noun); Advion is also named
-// across pest-control posts, so only a same-category frequency finds the owner.
-const ADVION_PROSE = 'Technicians place Advion where pests travel. Most Advion placements last a season.';
-const TERMITE_ADVION = { url: '/termite/advion-termite-bait/', body: `---\ntitle: Advion Termite Bait Stations\nslug: /termite/advion-termite-bait/\nprimary_keyword: advion termite bait stations\ncategory: termite\n---\n${ADVION_PROSE}\n## How Advion stations work\n## When Advion beats liquid\n` };
-const PEST_ADVION = ['advion-ant-gel', 'advion-roach-gel', 'advion-rodent-safety'].map((leaf) => ({
-  url: `/pest-control/${leaf}/`,
-  body: `---\ntitle: ${leaf.replace(/-/g, ' ')}\nslug: /pest-control/${leaf}/\nprimary_keyword: ${leaf.replace(/-/g, ' ')}\ncategory: pest-control\n---\n${ADVION_PROSE}\n`,
-}));
-
 function load({ ideas = [], corpus = [IN_WALL], corpusError = null, post = null, updateResult = 1 }) {
   jest.resetModules();
   const dbMock = makeDbMock({ post, updateResult });
@@ -50,32 +41,7 @@ function load({ ideas = [], corpus = [IN_WALL], corpusError = null, post = null,
   return { writer, dbMock, dispatch };
 }
 
-const IDEAS = [
-  { title: 'WDO Inspection Near Tampa: What to Expect', keyword: 'wdo inspection tampa', tag: 'termite', slug: 'wdo-inspection-tampa', city: 'Sarasota' },
-  { title: 'What a WDO Inspection Actually Covers', keyword: 'wdo inspection checklist', tag: 'termite', slug: 'wdo-inspection-tampa', city: 'Sarasota' },
-  { title: 'New-Construction Pest Control in Florida', keyword: 'new construction pest control', tag: 'pest control', slug: 'new-construction-pest-control-florida', city: 'Bradenton' },
-  { title: 'Your New Lakewood Ranch Home Came With Taexx', keyword: 'taexx system lakewood ranch', tag: 'pest control', slug: 'lakewood-ranch-taexx', city: 'Lakewood Ranch' },
-  { title: 'Ghost Ants in Sarasota Kitchens: Why They Keep Coming Back', keyword: 'ghost ants sarasota kitchen', tag: 'pest control', slug: 'ghost-ants-sarasota-kitchens', city: 'Sarasota' },
-  // Hook (PR codex r11 push): owned entity ONLY in the meta description.
-  { title: 'New-Home Pest Control in Bradenton: The First Year', keyword: 'new home pest control bradenton', tag: 'pest control', slug: 'new-home-pest-control-bradenton', city: 'Bradenton', meta_description: 'What the Taexx tubes in a new build actually do, and what they miss.' },
-];
-
-describe('blog-writer idea lane — topic-targeting gate', () => {
-  test('rejects out-of-area (title OR slug), statewide-only, and owned-entity ideas; keeps the localized one', async () => {
-    const { writer, dbMock } = load({ ideas: IDEAS });
-    const accepted = await writer.generateNewIdeas(5);
-    expect(accepted.map((a) => a.title)).toEqual(['Ghost Ants in Sarasota Kitchens: Why They Keep Coming Back']);
-    expect(dbMock._inserts.map((r) => r.slug)).toEqual(['ghost-ants-sarasota-kitchens']);
-  });
-
-  test('ownership is judged in the category the idea TAG maps to (termite Advion idea vs a termite owner, despite pest-control Advion posts)', async () => {
-    const { writer } = load({
-      ideas: [{ title: 'Advion Station Costs for Sarasota Homes', keyword: 'advion station cost', tag: 'Termites', slug: 'advion-station-costs-sarasota', city: 'Sarasota' }],
-      corpus: [IN_WALL, TERMITE_ADVION, ...PEST_ADVION],
-    });
-    await expect(writer.generateNewIdeas(1)).resolves.toEqual([]);
-  });
-
+describe('blog-writer row → category', () => {
   test('row → category is the publisher\'s own normalizeCategory (explicit category wins, then tag); an unmapped tag is null = conservative all-corpus ownership', () => {
     const { writer } = load({ ideas: [] });
     const { BLOG_TAGS, categoryForRow } = writer._internals;
@@ -86,19 +52,6 @@ describe('blog-writer idea lane — topic-targeting gate', () => {
       'Fleas & Ticks': 'pest-control', 'Stinging Insects': null, Spiders: 'pest-control', 'Bed Bugs': 'pest-control',
       'Lawn Disease': 'lawn-care', 'Lawn Pests': 'lawn-care', 'Lawn Care': 'lawn-care', 'Pest Control': 'pest-control',
     });
-  });
-
-  test('fails closed with no LLM spend when the live corpus is unavailable', async () => {
-    const { writer, dbMock, dispatch } = load({ ideas: IDEAS, corpusError: 'github_down' });
-    await expect(writer.generateNewIdeas(5)).resolves.toEqual([]);
-    expect(dispatch).not.toHaveBeenCalled();
-    expect(dbMock._inserts).toEqual([]);
-  });
-
-  test('fails closed on an empty corpus', async () => {
-    const { writer, dispatch } = load({ ideas: IDEAS, corpus: [] });
-    await expect(writer.generateNewIdeas(5)).resolves.toEqual([]);
-    expect(dispatch).not.toHaveBeenCalled();
   });
 });
 

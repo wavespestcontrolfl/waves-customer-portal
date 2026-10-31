@@ -13,7 +13,7 @@
  * What commits is never decided twice. planPostCommit() is the ONE pure
  * function that decides the work after the commit (group follow-up transfer,
  * property link, lead won, membership email, welcome text, termite agreement,
- * admin bells); the dry run lists its steps and the real run executes them
+ * Florida consumer notice, admin bells); the dry run lists its steps and the real run executes them
  * (runPostCommit).
  *
  * Effects carry no clocks and no generated ids, so two runs over the same
@@ -642,11 +642,22 @@ function membershipEmailStep({ conversion, billingTerm, emailInputs }) {
   };
 }
 
+// GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND: `sends` and the masked recipients are read on a carded accept (null on
+// the page's own accept, where the step decides when it runs).
+function consumerNoticeStep({ sends, recipients }) {
+  return {
+    step: 'consumer_notice',
+    sends: sends ?? null,
+    ...(recipients ? { to_email: maskEmail(recipients.email), to_phone: maskPhone(recipients.phone) } : {}),
+  };
+}
+
 // The work after the commit, as an ordered list of steps (pure). Inputs are
 // the committed-state facts: the accepted row, the conversion result and the
 // recipient facts. A step is listed whenever the page attempts it.
 function planPostCommit({
   billingTerm, acceptedEstimate, conversion, proposalCustomer = null, emailInputs = null, termiteProgram = null,
+  consumerNoticeLive, consumerNoticeSends, consumerNoticeRecipients,
 }) {
   const customerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
   const steps = [
@@ -657,6 +668,8 @@ function planPostCommit({
   if (billingTerm !== 'prepay_annual' && conversion?.membershipEmail) steps.push(membershipEmailStep({ conversion, billingTerm, emailInputs }));
   if (conversion?.welcomeSms) steps.push({ step: 'welcome_sms' });
   if (customerId) steps.push({ step: 'termite_agreement', applies: termiteProgram });
+  // Gate off: no step, the plan unchanged.
+  if (customerId && consumerNoticeLive) steps.push(consumerNoticeStep({ sends: consumerNoticeSends, recipients: consumerNoticeRecipients }));
   for (const [bell, field] of BELLS) {
     if (conversion?.[field]) steps.push({ step: 'admin_bell', bell, title: String(conversion[field].title || '') });
   }
@@ -712,6 +725,7 @@ const STEP_LABELS = {
   membership_email: 'The membership email was not sent',
   welcome_sms: 'The welcome text was not sent',
   termite_agreement: 'The termite agreement was not created',
+  consumer_notice: 'The Florida consumer notice was not sent',
   admin_bell: 'The office notification was not posted',
 };
 const SKIPPED_STEP_SUFFIX = ': what it acts on changed after the accept. Complete it by hand.';
@@ -920,6 +934,20 @@ const POST_COMMIT_STEPS = {
       }
     },
   },
+  consumer_notice: {
+    // The estimate and customer the FDACS-13692 is sent for, the open notice it would resend and the hashed email
+    // and phone it would go to (the card shows them masked).
+    async resolveTarget(database, facts) {
+      return require('./estimate-consumer-notice').consumerNoticeTarget(database, facts.acceptedEstimate.id, customerIdOf(facts));
+    },
+    async run(step, ctx) {
+      // Detached like the termite agreement: the send (and its bell on failure) never holds the accept's response.
+      // A carded accept hands over its pinned target; the sender checks it again right before delivery.
+      const { sendManualAcceptConsumerNotice } = require('./estimate-consumer-notice');
+      void sendManualAcceptConsumerNotice({ estimateId: ctx.acceptedEstimate.id, customerId: customerIdOf(ctx), expected: step.target || null, ...(ctx.database ? { conn: ctx.database } : {}) })
+        .catch((err) => logger.warn(`[estimate-manual-acceptance] consumer notice send failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
+    },
+  },
   admin_bell: {
     // The estimate and the bell.
     async resolveTarget(_database, facts) {
@@ -946,6 +974,14 @@ const sameTarget = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(can
 // address on file changed after the card): the receipt says it was
 // suppressed, never "complete it by hand" (codex #6113 r28).
 function skippedStepWarning(ctx, step) {
+  // A skipped consumer notice is a legal step left undone: the office bell says so (the response warning alone is
+  // gone once the card closes). Detached, like the send itself.
+  if (step.step === 'consumer_notice') {
+    const { alertManualAcceptConsumerNoticeSkipped } = require('./estimate-consumer-notice');
+    void alertManualAcceptConsumerNoticeSkipped({
+      estimateId: ctx.acceptedEstimate.id, customerId: customerIdOf(ctx), ...(ctx.database ? { conn: ctx.database } : {}),
+    });
+  }
   if (!Array.isArray(ctx.warnings)) return;
   if (step.step === 'membership_email') {
     ctx.warnings.push(membershipEmailWarning(null, 'recipient_changed'));

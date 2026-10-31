@@ -139,3 +139,35 @@ describe('PUT /admin/customers/:id — contact-family reconciliation', () => {
     expect(revokeRemovedContactRefreshSessions).not.toHaveBeenCalled();
   });
 });
+
+// Customers audit C13: the additional service contacts take the primary
+// contact's normalization and refuse a changed bad value as a field error,
+// before anything is written. The editor posts every slot, so a stored value
+// echoed unchanged is never re-judged.
+describe('PUT /admin/customers/:id — service-contact values', () => {
+  test.each([
+    ['a short phone', { serviceContact2Phone: '555-12' }, 'serviceContact2Phone', '555-12 is not a valid phone number for Service contact 2.'],
+    ['an impossible US number', { serviceContactPhone: '(041) 555-0303' }, 'serviceContactPhone', '(041) 555-0303 is not a valid US phone number. The area code cannot start with 0 or 1, and a US number has ten digits.'],
+    ['a malformed email', { serviceContact3Email: 'not-an-email' }, 'serviceContact3Email', 'Enter a valid email address for Service contact 3.'],
+    ['a name over 100 characters', { serviceContact2Name: 'x'.repeat(101) }, 'serviceContact2Name', 'Service contact 2 name must be 100 characters or fewer.'],
+    ['an email over 150 characters', { serviceContact2Email: `${'a'.repeat(140)}@example.com` }, 'serviceContact2Email', 'Service contact 2 email must be 150 characters or fewer.'],
+    ['a phone sent as a number', { serviceContact2Phone: 9415550404 }, 'serviceContact2Phone', 'Service contact 2 phone must be text.'],
+  ])('%s is refused as a field error and nothing is written', async (_label, body, field, error) => {
+    const response = await saveCustomer(body);
+    expect(response).toMatchObject({ status: 400, body: { error, field, code: 'INVALID_SERVICE_CONTACT' } });
+    expect(mockState.patches).toEqual([]);
+  });
+
+  test('a formatted phone and email are stored like the primary contact\'s', async () => {
+    const response = await saveCustomer({ serviceContact2Phone: '(941) 555-0404', serviceContact2Email: ' Pat@Example.com ' });
+    expect(response.status).toBe(200);
+    expect(mockState.patches[0]).toMatchObject({ service_contact2_phone: '+19415550404', service_contact2_email: 'pat@example.com' });
+  });
+
+  test('a stored legacy value echoed unchanged, or a cleared slot, never blocks the save', async () => {
+    mockState.initial.service_contact3_phone = '12345';
+    mockState.locked.service_contact3_phone = '12345';
+    expect((await saveCustomer({ lastName: 'Renamed', serviceContact3Phone: '12345' })).status).toBe(200);
+    expect((await saveCustomer({ serviceContactName: '', serviceContactPhone: '', serviceContactEmail: '' })).status).toBe(200);
+  });
+});

@@ -30,8 +30,18 @@
  * items (unmatched) and Shipped emails with no item names ring nothing.
  *
  * Shipped and Delivered emails are joined by the Track link's shipmentId
- * only (every real pair carries it); a Shipped email without one is
- * skipped. The rows also hand the shipment to a person for good: a late
+ * (a Shipped email without one is skipped), but the id is not always the
+ * same in the two emails: the 2026-10 Gentrol order's Shipped and Delivered
+ * emails carried different ids, and the Delivered one had already stocked
+ * the box. So, when the order has exactly ONE authenticated Shipped email,
+ * its items are also settled by the order's authenticated Delivered lines
+ * under other shipment ids (deliveredElsewhere): each delivered line's
+ * quantity is spent at most once across the shipment's items, and only the
+ * uncovered quantity rings. An order with two or more authenticated Shipped
+ * emails (a split order) is ambiguous and never suppressed this way. A bell
+ * already rung for a shipment that proves delivered under the same rule is
+ * closed (closeDeliveredUndeliveredBells). The rows also hand the shipment
+ * to a person for good: a late
  * Delivered email for it is never auto-logged (receipt-processor.js), so
  * the box can't be counted twice.
  */
@@ -116,6 +126,76 @@ async function shipmentSettled(conn, shipmentId) {
   return candidates.some((email) => parseAmazonDeliveredEmail(email)?.shipmentId === shipmentId && authenticated(email));
 }
 
+// Delivered-email line statuses: the line exists because a Delivered email
+// named the item, so the box arrived. Whether it was stocked, held (its own
+// "not added" bell asks a person) or ruled equipment, someone already has it.
+const DELIVERED_LINE_STATUSES = [
+  'logged', 'possible_duplicate', 'unmatched', 'needs_size', 'size_mismatch',
+  'agent_pending', 'agent_ignored', 'agent_equipment', 'agent_unsure',
+];
+
+const normalizeTitle = (title) => String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// One item identity for both sides: the same normalized listing title. Never
+// the product alone: the matcher maps a single bottle and a multipack to one
+// catalog product, and a line's quantity counts ordered items, not units.
+function sameItem(a, b) {
+  const title = normalizeTitle(a.title);
+  return Boolean(title) && title === normalizeTitle(b.title);
+}
+
+// True when the order has exactly one authenticated Shipped email and it
+// carries this shipment id. Two or more (a split order) is ambiguous.
+async function soleShippedShipment(conn, orderNumber, shipmentId) {
+  const like = `%${likeLiteral(orderNumber)}%`;
+  const emails = await conn('emails')
+    .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'authentication_results')
+    .whereRaw('LOWER(from_address) = ?', [AMAZON_SHIPPED_FROM]).whereRaw('subject ILIKE ?', ['Shipped:%'])
+    .where((named) => named.whereRaw('body_text LIKE ?', [like]).orWhereRaw('body_html LIKE ?', [like]));
+  const shipped = emails.filter((email) => authenticated(email)).map((email) => parseAmazonShippedEmail(email))
+    .filter((parsed) => parsed?.orderNumber === orderNumber);
+  return shipped.length === 1 && shipped[0].shipmentId === shipmentId;
+}
+
+/**
+ * How much of each shipped item the order's Delivered lines under OTHER
+ * shipment ids have not covered. wanted: [{ title, quantity }];
+ * returns the missing quantity per index, 0 when covered.
+ *
+ * Evidence is used only for an order with exactly one authenticated Shipped
+ * email (soleShippedShipment); otherwise every item is missing in full, as
+ * if no Delivered line existed. A Delivered line counts when it has a
+ * Delivered-line status and came from an authenticated Delivered email; its
+ * quantity is spent at most once, across all of the wanted items. An item
+ * with no readable quantity needs one unit.
+ */
+async function deliveredElsewhere(conn, { orderNumber, shipmentId, wanted }) {
+  const missing = wanted.map((item) => item.quantity || 1);
+  if (!orderNumber || orderNumber === UNKNOWN_ORDER || !wanted.length) return missing;
+  const lines = await conn('purchase_receipt_lines')
+    .where({ vendor: VENDOR, order_number: orderNumber }).whereNot('shipment_key', shipmentId)
+    .whereIn('status', DELIVERED_LINE_STATUSES)
+    .select('email_id', 'raw_title', 'quantity');
+  if (!lines.length) return missing;
+  if (!(await soleShippedShipment(conn, orderNumber, shipmentId))) return missing;
+  const emails = await conn('emails')
+    .select('id', 'from_address', 'authentication_results')
+    .whereIn('id', [...new Set(lines.map((line) => line.email_id).filter(Boolean))])
+    .whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%']);
+  const proven = new Set(emails.filter((email) => authenticated(email)).map((email) => String(email.id)));
+  const budget = lines.filter((line) => proven.has(String(line.email_id)))
+    .map((line) => ({ title: line.raw_title, left: Number(line.quantity) || 0 }));
+  return wanted.map((item, index) => {
+    for (const line of budget.filter((entry) => entry.left > 0 && sameItem(entry, item))) {
+      const take = Math.min(line.left, missing[index]);
+      line.left -= take;
+      missing[index] -= take;
+      if (!missing[index]) break;
+    }
+    return missing[index];
+  });
+}
+
 async function stockedItems(items, conn) {
   const stocked = [];
   for (const [index, item] of items.entries()) {
@@ -125,8 +205,26 @@ async function stockedItems(items, conn) {
   return stocked;
 }
 
+// The ONE evaluation of a Shipped email's whole item list, used by the alert
+// pass and the closer alike: its stocked items and, for each, the quantity
+// no Delivered line has covered (deliveredElsewhere's single-shipment gate
+// and shared budget run over ALL of them together).
+async function evaluateShipment(conn, parsed) {
+  const stocked = await stockedItems(parsed.items, conn);
+  const missing = stocked.length
+    ? await deliveredElsewhere(conn, {
+      orderNumber: parsed.orderNumber, shipmentId: parsed.shipmentId,
+      wanted: stocked.map(({ item }) => ({ title: item.title, quantity: item.quantity })),
+    })
+    : [];
+  return { stocked, missing };
+}
+
 async function ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promised, trx }) {
-  const what = stocked.map(({ item, product }) => (item.quantity ? `${product.name} ×${item.quantity}` : product.name)).join(', ');
+  const what = stocked.map(({ item, product, remaining }) => {
+    const quantity = remaining || item.quantity;
+    return quantity ? `${product.name} ×${quantity}` : product.name;
+  }).join(', ');
   const due = promised ? ` (due ${formatETDate(promised)})` : '';
   const body = `Amazon shipped ${what} on ${formatETDate(new Date(email.received_at))}${due} but never sent a delivery confirmation, `
     + "so it wasn't added. If it arrived, log it by hand.";
@@ -155,12 +253,18 @@ async function alertIfUndelivered(email, { notifyAdmin, now, since }, conn) {
     await lockShipment(trx, VENDOR, parsed.shipmentId);
     // A Delivered email for it may have been processed since the check above.
     if (await shipmentSettled(trx, parsed.shipmentId)) return null;
-    await trx('purchase_receipt_lines').insert(stocked.map(({ item, lineNo, product }) => ({
+    // Its Delivered email may carry another shipment id: items that email
+    // already covers are not undelivered.
+    const { missing } = await evaluateShipment(trx, parsed);
+    const owed = stocked.map((row, index) => ({ ...row, missing: missing[index], remaining: row.item.quantity ? missing[index] : undefined }))
+      .filter((row) => row.missing > 0);
+    if (!owed.length) return null;
+    await trx('purchase_receipt_lines').insert(owed.map(({ item, lineNo, product }) => ({
       vendor: VENDOR, order_number: parsed.orderNumber || UNKNOWN_ORDER, shipment_key: parsed.shipmentId, line_no: lineNo,
       email_id: email.id, raw_title: item.title, quantity: item.quantity ?? 0, product_id: product.id, status: 'no_delivery_email',
     })));
-    await ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promised, trx });
-    return { shipmentId: parsed.shipmentId, orderNumber: parsed.orderNumber, titles: stocked.map(({ item }) => item.title) };
+    await ringUndeliveredBell(notifyAdmin, { email, parsed, stocked: owed, promised, trx });
+    return { shipmentId: parsed.shipmentId, orderNumber: parsed.orderNumber, titles: owed.map(({ item }) => item.title) };
   });
 }
 
@@ -189,4 +293,43 @@ async function alertUndeliveredShipments({ since, now = Date.now(), notifyAdmin 
   return result;
 }
 
-module.exports = { alertUndeliveredShipments, alertAfter };
+const UNDELIVERED_CLOSER = 'purchase-receipts';
+
+/**
+ * Closes "Amazon delivery not confirmed" bells whose shipment turned out to
+ * be delivered. It re-reads the bell's Shipped email and runs the alert
+ * pass's own evaluation (evaluateShipment) over the whole item list; the
+ * bell closes only when nothing is missing. A bell with any item still
+ * missing stays open. Failure is the caller's to log.
+ */
+async function closeDeliveredUndeliveredBells(conn = db) {
+  const { openToCloser, doneColumns } = require('../notification-service')._private;
+  const open = await conn('notifications')
+    .where({ recipient_type: 'admin' }).whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", ['purchase-receipt-undelivered:%'])
+    .select('id', conn.raw("metadata->>'shipmentId' AS shipment_id"));
+  const closable = [];
+  for (const bell of open) {
+    if (!bell.shipment_id) continue;
+    const held = await conn('purchase_receipt_lines')
+      .where({ vendor: VENDOR, shipment_key: bell.shipment_id, status: 'no_delivery_email' })
+      .first('email_id');
+    if (!held?.email_id) continue;
+    // Judge the WHOLE shipment from its own Shipped email, exactly as the alert pass does.
+    const email = await conn('emails')
+      .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html').where({ id: held.email_id }).first();
+    const parsed = email && parseAmazonShippedEmail(email);
+    if (parsed?.shipmentId !== bell.shipment_id) continue;
+    const { stocked, missing } = await evaluateShipment(conn, parsed);
+    if (!stocked.length) continue;
+    if (missing.every((left) => left <= 0)) closable.push(bell.id);
+  }
+  if (!closable.length) return 0;
+  await openToCloser(conn('notifications').where({ recipient_type: 'admin' }).whereIn('id', closable), UNDELIVERED_CLOSER)
+    .update(doneColumns({
+      by: UNDELIVERED_CLOSER, resolution: 'The delivery email arrived under another shipment id; the items are accounted for', keepExisting: true, conn,
+    }));
+  return closable.length;
+}
+
+module.exports = { alertUndeliveredShipments, alertAfter, deliveredElsewhere, evaluateShipment, closeDeliveredUndeliveredBells };

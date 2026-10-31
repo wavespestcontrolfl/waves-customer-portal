@@ -65,7 +65,9 @@
  * A tip written for this feature (`sourcedOnly`, owner 2026-10-24, part 4)
  * exists only behind the gate: with it off, the picker never lists it and
  * the freeze drops it, so its words reach no report until the gate flips.
- * Its `copy` is the sourced text.
+ * Its `copy` is the sourced text, so the picker and the freeze also drop it
+ * from the day a fact it cites expires (`expiresOn`; showMonths repeats every
+ * year, an expiry does not).
  *
  * A tip may name its Waves post, `blog: { path: '/{category}/{slug}/' }`
  * (owner 2026-10-24, decisions 2 and 6): behind the same gate the office
@@ -305,18 +307,27 @@ const TIPS = Object.freeze([
   {
     id: 'light_warm_bulbs', group: 'lighting', label: 'LED porch bulbs',
     pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'bulb', 'led', 'spiders', 'moths'], lines: ['pest', 'mosquito'], season: 'all',
-    sources: [{ fact: 'fact-tip-led-bulbs-insect-attraction', label: 'Ecology and Evolution, 2016', url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/' }],
-    copy: "Go LED on the porch. In a 2016 field study, LED bulbs drew about four times fewer insects than incandescent bulbs and about half as many as compact fluorescents, and warm versus cool white made no difference. Fewer insects at the door means fewer spiders and geckos following them.",
+    // Owner 2026-10-26, "say both": the LED finding every source agrees on
+    // (Wakefield 2016), then UF/IFAS Extension Sarasota County (2023) on the
+    // warm-white LEDs it calls best outdoors.
+    sources: [
+      { fact: 'fact-tip-led-bulbs-insect-attraction', label: 'Ecology and Evolution, 2016', url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/' },
+      { fact: 'fact-tip-led-warm-white-ifas', label: 'UF/IFAS', url: 'https://blogs.ifas.ufl.edu/sarasotaco/2023/08/17/shining-a-spotlight-on-exterior-lighting/' },
+    ],
+    blog: { path: '/pest-control/why-spiders-come-back-after-treatment/' },
+    copy: "Go LED on the porch. In a 2016 field study, LEDs drew about four times fewer insects than incandescent bulbs and about half as many as compact fluorescents. UF/IFAS says the best LEDs outdoors are warm white, below 3600K. Fewer insects at the door means fewer spiders and geckos following them.",
   },
   {
     id: 'light_motion_sensor', group: 'lighting', label: 'Lights on a motion sensor',
     pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'sensor', 'timer'], lines: ['pest', 'mosquito'], season: 'all',
+    blog: { path: '/pest-control/why-spiders-come-back-after-treatment/' },
     copy: "Every hour the porch light runs is another hour insects collect at the door. A motion sensor gives you light when you walk up and dark the rest of the night — by morning the difference at the threshold is obvious.",
   },
   {
     id: 'light_aim_away', group: 'lighting', label: 'Aim landscape lights away',
     pests: ['Spiders'], keywords: ['landscape', 'uplight', 'spotlight', 'entry'], lines: ['pest'], season: 'all',
     sources: [{ fact: 'fact-tip-led-bulbs-insect-attraction', label: 'Ecology and Evolution, 2016', url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/' }],
+    blog: { path: '/pest-control/why-spiders-come-back-after-treatment/' },
     copy: "Uplights pointed back at the walls gather insects at the entries every night. Turning them out toward the yard moves that crowd away from the door, and LED bulbs draw fewer insects to begin with.",
   },
 
@@ -1498,6 +1509,26 @@ const TIPS = Object.freeze([
     sources: [{ fact: 'fact-tip-lawn-skip-after-rain', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH025' }],
     copy: "Got a good rain the day before your watering day? UF/IFAS says that with at least half an inch of rain, you don't need to water that day.",
   },
+  // Dated and local (sourcedOnly, owner 2026-10-26). SWFWMD's order runs
+  // through 2027-03-31 (read 2026-10-26). The fact's expiresOn (2027-04-01)
+  // retires the tip: the picker and the freeze drop it from that day, and no
+  // month list repeats next year. It names a weekday, so it shows only where
+  // the yard's own jurisdiction was read and follows the district's standard
+  // table: Manatee County and Bradenton, unincorporated Sarasota County (also
+  // its year-round Resolution 2022-234), the City of Sarasota and North Port.
+  // Never listed: the City of Venice (even numbers Tuesday, odd Thursday),
+  // Palmetto and the island cities, Nokomis, Osprey, Laurel, North Venice and
+  // Englewood (city limits not read), and Charlotte (the order covers only
+  // portions of the county). The copy claims nothing for a yard on reclaimed
+  // water alone.
+  {
+    id: 'lawn_watering_day', group: 'lawn', label: 'Your watering day',
+    keywords: ['watering day', 'water shortage', 'restrictions', 'sprinkler', 'irrigation', 'timer', 'once a week'], lines: ['lawn'], season: 'all',
+    yard: { county: ['Manatee', 'Sarasota'], city: ['bradenton', 'lakewood ranch', 'parrish', 'myakka city', 'duette', 'sarasota', 'siesta key', 'lake sarasota', 'north port'], irrigation: 'system' },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-watering-day', label: 'SWFWMD', url: 'https://www.swfwmd.state.fl.us/business/epermitting/district-water-restrictions' }],
+    copy: "Unless your sprinklers run only on reclaimed water, the water-shortage order lets you water an established lawn one day a week. It currently runs through March 31, 2027. If your house number ends in 0 or 1, your day is Monday; 2 or 3, Tuesday; 4 or 5, Wednesday; 6 or 7, Thursday; 8 or 9, Friday.",
+  },
   {
     id: 'lawn_soil_moisture_sensor', group: 'lawn', label: 'A soil moisture sensor pays off',
     keywords: ['sensor', 'timer', 'irrigation', 'sprinkler', 'controller'], lines: ['lawn'], season: 'all',
@@ -1832,6 +1863,13 @@ const TIPS = Object.freeze([
     sources: [{ fact: 'fact-tip-palmetto-bugs-weather', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN298' }],
     copy: "The big palmetto bugs live outdoors. UF/IFAS says American cockroaches wander inside looking for food and water or to get away from extreme weather, so you may see more around extreme weather.",
   },
+  {
+    id: 'fa_flood_rafts', group: 'fire_ants', label: 'Fire ants float in a flood',
+    keywords: ['flood', 'floodwater', 'storm', 'hurricane', 'fire ants', 'float'], lines: ['pest'], season: 'wet',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-fa-flood-rafts', label: 'CDC', url: 'https://www.cdc.gov/niosh/docs/2025-106/pdfs/2025-106.pdf' }],
+    copy: "After a flood, watch for floating clumps of fire ants. The CDC says fire ants are often disturbed during hurricanes and floods and can cling together and float along in floodwaters, and that things lifted off the ground may be covered in ants, so look before you pick up debris.",
+  },
 ]);
 
 // Deep-frozen: the registry is the screened source of customer copy, and
@@ -1892,11 +1930,13 @@ function registryLineFor(serviceLine) {
 function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [], sourced = false, yard = null } = {}) {
   const line = registryLineFor(serviceLine);
   const season = seasonForDate(date);
-  // Behind GATE_TECH_TIP_SOURCES a tip that does not fit this yard, or this
-  // visit's month, is left out of every list, search included.
+  // Behind GATE_TECH_TIP_SOURCES a tip that does not fit this yard, this
+  // visit's month, or (a sourcedOnly tip) the day its facts are live, is left
+  // out of every list, search included.
   const month = monthForDate(date);
+  const day = etDay(date);
   const fits = (tip) => (sourced
-    ? yardMatches(tip.yard, yard) && (!tip.showMonths || tip.showMonths.includes(month))
+    ? yardMatches(tip.yard, yard) && (!tip.showMonths || tip.showMonths.includes(month)) && tipAvailable(tip, { sourced, day })
     : !tip.sourcedOnly);
   const TIPS_HERE = TIPS.filter(fits);
   // Within a group the best fit leads: this visit's confirmed findings, then
@@ -1920,7 +1960,6 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   // freeze (a sourced tip's sourcedCopy and its citations), so the
   // technician approves exactly what the customer reads; off, the
   // registry's own entries.
-  const day = etDay(date);
   const shown = (tip) => (sourced ? sourcedView(tip, day) : tip);
   const allGroups = forService.length ? [{ ...FOR_SERVICE_GROUP, primary: true, tips: forService }, ...groups] : groups;
   return {
@@ -1985,6 +2024,19 @@ function citationsFor(tip, day) {
   }));
 }
 
+// Whether a tip may be offered or frozen on `day` (no tip, no). A tip written
+// for tips with facts (`sourcedOnly`) needs the gate, and every fact it cites
+// unexpired that day: its words are the fact's, and an expired fact leaves
+// nothing to print. Every other tip is available as before.
+function tipAvailable(tip, { sourced, day }) {
+  if (!tip) return false;
+  if (!tip.sourcedOnly) return true;
+  return sourced && (tip.sources || []).every((source) => {
+    const fact = FACTS_BY_SLUG.get(source.fact);
+    return Boolean(fact) && !(fact.expiresOn && fact.expiresOn <= day);
+  });
+}
+
 /**
  * Resolve picked ids to frozen entries. Unknown ids are dropped — the client
  * never supplies copy, so an unrecognised id has nothing to print. Duplicates
@@ -1999,8 +2051,9 @@ function resolveTipIds(ids, { sourced = false, date = new Date() } = {}) {
   for (const raw of Array.isArray(ids) ? ids : []) {
     const id = String(raw || '').trim();
     const tip = TIPS_BY_ID.get(id);
-    // A tip written for tips with facts never freezes with the gate off.
-    if (!tip || seen.has(id) || (tip.sourcedOnly && !sourced)) continue;
+    // A tip written for tips with facts never freezes with the gate off, or
+    // once a fact it cites has expired.
+    if (seen.has(id) || !tipAvailable(tip, { sourced, day })) continue;
     seen.add(id);
     // The link is a snapshot, never the registry's own object — a caller
     // that edits its payload must not edit the registry for every later call.
@@ -2047,16 +2100,18 @@ function freezeTechTips(input, { sourced = false, date = new Date() } = {}) {
   const dropped = [];
   // Nothing the tech was told would print may vanish silently: an id the
   // library no longer has (retired between picker load and completion, or
-  // an out-of-date client) and any pick past the cap are reported so the
-  // completion route can refuse with an actionable message.
+  // an out-of-date client, or a tip with facts once a fact it cites has
+  // expired) and any pick past the cap are reported so the completion route
+  // can refuse with an actionable message.
   const kept = new Set(tips.map((t) => t.id));
   const seenIds = new Set();
+  const day = etDay(date);
   for (const raw of Array.isArray(input.ids) ? input.ids : []) {
     const id = String(raw || '').trim();
     if (!id || seenIds.has(id)) continue;
     seenIds.add(id);
     if (kept.has(id)) continue;
-    dropped.push({ id, violations: [TIPS_BY_ID.has(id) ? 'over_cap' : 'unknown_tip'] });
+    dropped.push({ id, violations: [tipAvailable(TIPS_BY_ID.get(id), { sourced, day }) ? 'over_cap' : 'unknown_tip'] });
   }
   // Never truncated: an over-long line is rejected as `too_long` so the
   // tech rewrites it, rather than a silently shortened sentence printing.

@@ -24,6 +24,9 @@ const { etDateString } = require('../utils/datetime-et');
 // Marks a contract issued from the estimate page: the signing page reads it to offer
 // "Back to your estimate". A notice staff issued by hand never carries it.
 const SNAPSHOT_SOURCE = 'estimate_consumer_notice';
+// Marks a notice issued after the office's Mark accepted (GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND). It is sent by
+// email and text, so the signing page offers no way back to an estimate.
+const MANUAL_ACCEPT_SOURCE = 'manual_accept_consumer_notice';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
 // Every termite treatment family the estimate classifiers return (recurringServiceKey, classifyServiceFamilyText and the
 // seeder's serviceKeyFor), commercial bait monitoring included. Rodent bait and inspections are not termite treatments.
@@ -124,7 +127,11 @@ function todayUs() {
 // one issued now (same form version, name, representative and date); otherwise it is cancelled and replaced.
 // `blockedFor(trx, lockedEstimate)` is the route's eligibility re-run on the estimate row locked here (the same
 // check the commercial agreement issuer runs): true = the estimate is no longer open for online signing.
-async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db, blockedFor = async () => false }) {
+// `source`, `actorType` and `gateLive` default to the estimate page; the Mark accepted send passes its own.
+async function ensureEstimateConsumerNotice({
+  estimate, req = {}, conn = db, blockedFor = async () => false,
+  source = SNAPSHOT_SOURCE, actorType = 'customer', gateLive = () => require('../config/feature-gates').estimateConsumerNoticeLive(),
+}) {
   if (!estimate.customer_id) return refusal(409, 'no_account', CALL_US);
   const { renderDocumentTemplate, buildCustomerDocumentContext, lockActiveVersionForIssue, jsonb } = require('./document-template-library');
   const { documentContractExpiresAt, hashContractToken, mintContractToken, publicContractUrl } = require('./contracts');
@@ -137,9 +144,9 @@ async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db, blo
   if (!template || !version) return refusal(409, 'template_unavailable', CALL_US);
 
   const token = mintContractToken();
-  const actor = { actor_type: 'customer', actor_id: null, ip: req.ip || null, user_agent: req.get ? (req.get('user-agent') || null) : null };
-  const addEvent = (trx, row, eventType, metadata, actorType = 'customer') => trx('customer_contract_events').insert({
-    contract_id: row.id, customer_id: row.customer_id, event_type: eventType, ...actor, actor_type: actorType, metadata: jsonb(metadata, {}),
+  const actor = { actor_type: actorType, actor_id: null, ip: req.ip || null, user_agent: req.get ? (req.get('user-agent') || null) : null };
+  const addEvent = (trx, row, eventType, metadata, eventActor = actorType) => trx('customer_contract_events').insert({
+    contract_id: row.id, customer_id: row.customer_id, event_type: eventType, ...actor, actor_type: eventActor, metadata: jsonb(metadata, {}),
   });
 
   const outcome = await conn.transaction(async (trx) => {
@@ -163,7 +170,7 @@ async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db, blo
     const context = buildCustomerDocumentContext(customer, {
       service: { name: SERVICE_NAME },
       issuer: { name: representative, date: todayUs() },
-      estimate: { id: locked.id, source: SNAPSHOT_SOURCE },
+      estimate: { id: locked.id, source },
     });
     const rendered = renderDocumentTemplate({ template, version, context });
     if (rendered.unresolvedVariables.length) {
@@ -175,21 +182,21 @@ async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db, blo
     const existing = await trx('customer_contracts')
       .where({ customer_id: customer.id, contract_type: 'document_template', document_template_key: CONSUMER_NOTICE_TEMPLATE_KEY })
       .whereIn('status', OPEN_STATUSES)
-      .whereRaw("document_variables_snapshot -> 'estimate' ->> 'source' = ?", [SNAPSHOT_SOURCE])
+      .whereRaw("document_variables_snapshot -> 'estimate' ->> 'source' = ?", [source])
       .orderByRaw('created_at DESC')
       .forUpdate()
       .first();
     // The gate is read again after the last lock and before any write: a request that waited on the locks while
     // the kill switch was thrown must create nothing.
-    if (!require('../config/feature-gates').estimateConsumerNoticeLive()) return refusal(404, 'not_available', 'Estimate not found');
-    const meta = { source: SNAPSHOT_SOURCE, estimateId: locked.id };
+    if (!gateLive()) return refusal(404, 'not_available', 'Estimate not found');
+    const meta = { source, estimateId: locked.id };
     // Reused only when it is the same form version (its title and signer disclosure too) and reads exactly the same.
     if (existing && existing.document_template_version_id === version.id && existing.contract_text_snapshot === rendered.body) {
       await trx('customer_contracts').where({ id: existing.id }).update({
         status: 'sent', share_token_hash: hashContractToken(token), share_token_expires_at: expiresAt, shared_at: now, updated_at: now,
       });
       await addEvent(trx, existing, 'share_link_created', { ...meta, expiresAt: expiresAt.toISOString() });
-      return { ok: true, status: 200 };
+      return { ok: true, status: 200, contractId: existing.id };
     }
     if (existing) {
       await trx('customer_contracts').where({ id: existing.id }).whereIn('status', OPEN_STATUSES).update({
@@ -203,18 +210,279 @@ async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db, blo
       .returning('*');
     await addEvent(trx, row, 'created_from_document_template', { ...meta, templateKey: template.template_key, templateVersionId: version.id });
     await addEvent(trx, row, 'share_link_created', { ...meta, expiresAt: expiresAt.toISOString() });
-    return { ok: true, status: 201 };
+    return { ok: true, status: 201, contractId: row.id };
   });
 
   return outcome.ok ? { ...outcome, signingUrl: publicContractUrl(token) } : outcome;
 }
 
+// Where a send would go, read the way Document Requests delivery reads it (document-contract-delivery.js
+// recipientFor/validatePreparedChannel): the newest open notice's recipient, else the customer's; no email when the
+// customer turned email off; a text only to the phone on file. '' = that channel does not go out.
+async function consumerNoticeRecipients(conn, customerId) {
+  const customer = await conn('customers').where({ id: customerId }).first('email', 'phone');
+  const open = await conn('customer_contracts')
+    .where({ customer_id: customerId, contract_type: 'document_template', document_template_key: CONSUMER_NOTICE_TEMPLATE_KEY })
+    .whereIn('status', OPEN_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first('id', 'recipient_email', 'recipient_phone');
+  const prefs = await conn('notification_prefs').where({ customer_id: customerId }).first('email_enabled');
+  const email = String(open?.recipient_email || customer?.email || '').trim().toLowerCase();
+  const phone = String(open?.recipient_phone || customer?.phone || '').trim();
+  const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+  const phoneOnFile = lastTen(phone).length === 10 && lastTen(phone) === lastTen(customer?.phone);
+  return { contractId: open?.id || null, email: prefs?.email_enabled === false ? '' : email, phone: phoneOnFile ? phone : '' };
+}
+
+// The pinned form of those recipients (the Intelligence Bar card binds them): ids and hashed addresses only.
+async function consumerNoticeTarget(conn, estimateId, customerId) {
+  const { recipientKey } = require('./estimate-accept-effects');
+  const r = await consumerNoticeRecipients(conn, customerId);
+  return {
+    estimate_id: String(estimateId), customer_id: String(customerId), contract_id: r.contractId ? String(r.contractId) : null,
+    email_key: r.email ? recipientKey(r.email) : null, phone_key: r.phone ? recipientKey(r.phone) : null,
+  };
+}
+
+// What the Intelligence Bar card says about the notice, read inside the accept: `sends` (a termite line and no
+// signed notice) and, when it sends, the recipients. Savepoints, so a failed read never aborts the accept; an
+// unreadable state reads as "sends" with no recipients, which the card refuses rather than hide a text.
+async function consumerNoticeCardFacts(trx, estimate, customerId) {
+  const read = (fn) => (trx.isTransaction ? trx.transaction((sp) => fn(sp)) : fn(trx));
+  try {
+    const sends = estimateNeedsConsumerNotice(estimate) && (await read((c) => consumerNoticeState(customerId, c))) !== 'signed';
+    return { sends, recipients: sends ? await read((c) => consumerNoticeRecipients(c, customerId)) : null };
+  } catch {
+    return { sends: true, recipients: null };
+  }
+}
+
+// What the office reads on the bell when the notice did not go out, by refusal or delivery code.
+const SEND_FAILURE_WHY = {
+  no_representative: 'No active office name to print on the form, so it was not sent.',
+  template_unavailable: 'The notice form is not available, so it was not sent.',
+  customer_unavailable: 'The customer record could not be used, so the notice was not sent.',
+  not_delivered: 'Neither the email nor the text went out.',
+  recipient_changed: 'The email or phone changed after the accept card was confirmed, so nothing was sent.',
+};
+
+// One bell per estimate. The daily catch-up reads the same key: an estimate the office was told about is theirs.
+const NOT_SENT_ALERT_KEY_PREFIX = 'manual-accept-consumer-notice:';
+
+async function alertNoticeNotSent(estimate, reason, conn = db) {
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  const { fitAction, lookupCustomerName } = require('./admin-alert-names');
+  const name = (await lookupCustomerName(conn, estimate.customer_id)) || 'the customer';
+  await raiseAdminAlert('estimate', {
+    area: 'Estimates',
+    action: fitAction('Estimates', name, [
+      (who) => `send ${who} the Florida consumer notice`,
+      (who) => `send ${who} the consumer notice`,
+    ]),
+    why: SEND_FAILURE_WHY[reason] || 'The notice could not be sent after the accept.',
+    severity: 'needs-you',
+    link: `/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`,
+    subject: { type: 'estimate', id: String(estimate.id) },
+    doneWhen: 'consumer_notice_signed',
+    who: 'person',
+  }, {
+    // A treatment for a wood-destroying organism cannot start without the signed form: this must ring.
+    bell: true,
+    dedupeKey: `${NOT_SENT_ALERT_KEY_PREFIX}${estimate.id}`,
+    detail: 'The office marked a termite estimate accepted and the customer has no signed Florida consumer notice (FDACS-13692) on file. Send it from Document Requests or upload the signed paper form before the first treatment.',
+    metadata: { estimateId: estimate.id, customerId: estimate.customer_id, reason },
+  });
+}
+
+// After the office's Mark accepted commits (GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND, owner 2026-10-26): a termite
+// estimate whose customer has no signed notice gets one by email and text. An open, unsigned notice from any source is
+// resent with a fresh link; otherwise one is issued. Nothing is sent when the gate is off, the estimate is not an
+// accepted termite estimate or a notice is already signed. A refusal or a delivery that reached no channel rings
+// the office bell. Never throws. `customerId` is the accept's committed customer: a failed first read can still
+// name them on the bell. `expected` is the Intelligence Bar card's pinned target (consumerNoticeTarget): the notice
+// and the recipients it was approved for, checked again right before delivery.
+async function sendManualAcceptConsumerNotice({ estimateId, customerId = null, expected = null, conn = db }) {
+  const { manualAcceptConsumerNoticeSendLive } = require('../config/feature-gates');
+  if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off' };
+  let estimate = null;
+  try {
+    estimate = await conn('estimates').where({ id: estimateId }).first();
+    const skipped = await manualAcceptSkip(estimate, conn);
+    if (skipped) return { skipped };
+    const notice = await manualAcceptNoticeContract(estimate, conn, manualAcceptConsumerNoticeSendLive);
+    if (!notice.contractId) return notice;
+    // The kill switch is read once more right before anything goes out: a send that waited on reads while the gate
+    // was turned off sends nothing (a notice issued in between stays open, unsent, as one issued from the page).
+    if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off', contractId: notice.contractId };
+    const result = await deliverManualAcceptNotice(notice.contractId, expected);
+    if (result.reason) await alertNoticeNotSent(estimate, result.reason, conn);
+    return result;
+  } catch (err) {
+    logger.warn(`[estimate-consumer-notice] manual-accept send failed for estimate ${estimateId}: ${err.code || err.message}`);
+    const subject = estimate || { id: estimateId, customer_id: customerId };
+    await alertNoticeNotSent(subject, 'error', conn).catch(() => {});
+    return { sent: false, reason: 'error' };
+  }
+}
+
+// Why the send does not apply, or null: not an accepted estimate with a customer, no termite line, or signed already.
+async function manualAcceptSkip(estimate, conn) {
+  if (!estimate || estimate.status !== 'accepted' || !estimate.customer_id) return 'not_applicable';
+  if (!estimateNeedsConsumerNotice(estimate)) return 'no_termite_line';
+  if (await findConsumerNotice(conn, estimate.customer_id, { onOrBefore: etDateString() })) return 'already_signed';
+  return null;
+}
+
+// The notice to send: the customer's newest open one (any source), else one issued now. { contractId } or the
+// issuer's answer: a refusal the office must finish rings the bell here; signed or gone in between is a quiet skip.
+async function manualAcceptNoticeContract(estimate, conn, gateLive) {
+  const open = await conn('customer_contracts')
+    .where({ customer_id: estimate.customer_id, contract_type: 'document_template', document_template_key: CONSUMER_NOTICE_TEMPLATE_KEY })
+    .whereIn('status', OPEN_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first('id');
+  if (open?.id) return { contractId: open.id, reused: true };
+  const issued = await ensureEstimateConsumerNotice({
+    estimate,
+    conn,
+    source: MANUAL_ACCEPT_SOURCE,
+    actorType: 'system',
+    gateLive,
+    // The locked row must still be the accepted estimate.
+    blockedFor: async (_trx, locked) => locked.status !== 'accepted',
+  });
+  if (issued.ok) return { contractId: issued.contractId, reused: false };
+  if (issued.code === 'already_signed' || issued.code === 'not_available') return { skipped: issued.code };
+  await alertNoticeNotSent(estimate, issued.code, conn);
+  return { sent: false, reason: issued.code };
+}
+
+// Email and text the notice. `expected` (a carded accept) binds the notice it saw and the recipients it showed: a
+// different open notice sends nothing, only the channels it named go out, and delivery itself refuses a recipient
+// that changed. `reason` is set whenever the office must finish it.
+async function deliverManualAcceptNotice(contractId, expected) {
+  if (expected && expected.contract_id !== null && expected.contract_id !== String(contractId)) {
+    return { sent: false, reason: 'recipient_changed', contractId };
+  }
+  const channels = expected ? ['email', 'sms'].filter((c) => (c === 'email' ? expected.email_key : expected.phone_key)) : ['email', 'sms'];
+  if (!channels.length) return { sent: false, reason: 'not_delivered', contractId };
+  const { deliverDocumentRequestChannels } = require('./document-contract-delivery');
+  // 'system': the send window holds a late text until 8 AM instead of sending it at night.
+  const delivery = await deliverDocumentRequestChannels(contractId, { actorType: 'system' }, {
+    channels,
+    smsEntryPoint: 'manual_accept_consumer_notice',
+    ...(expected ? { expectedRecipientKeys: { email: expected.email_key, sms: expected.phone_key } } : {}),
+  });
+  // A changed recipient is said even when the other channel went out: the office confirms who has the link.
+  if ((delivery.deliveries || []).some((d) => d.code === 'RECIPIENT_CHANGED')) return { sent: delivery.ok, reason: 'recipient_changed', contractId };
+  if (!delivery.ok) return { sent: false, reason: 'not_delivered', contractId };
+  return { sent: true, contractId, channels: delivery.deliveries.filter((d) => d.ok).map((d) => d.channel) };
+}
+
+// The Intelligence Bar accept skipped the send because its pinned target changed after the commit (runPostCommit):
+// nothing goes out, and the office is told to finish it. Never throws.
+async function alertManualAcceptConsumerNoticeSkipped({ estimateId, customerId, conn = db }) {
+  try {
+    await alertNoticeNotSent({ id: estimateId, customer_id: customerId }, 'recipient_changed', conn);
+  } catch (err) {
+    logger.warn(`[estimate-consumer-notice] skip alert failed for estimate ${estimateId}: ${err.code || err.message}`);
+  }
+}
+
+// When the deploy that turned GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND on in prod went live. A phone sale accepted before
+// then never had a send to lose; whether those customers get the notice is the owner's separate call, so the catch-up
+// below never reaches them. A no-op once its 21-day window starts after this.
+const MANUAL_ACCEPT_SEND_LIVE_SINCE = new Date('2026-10-26T11:33:50Z');
+// The live send runs seconds after the accept commits; a younger accept may still have its send in flight.
+const CATCH_UP_GRACE_MS = 60 * 60 * 1000;
+const CATCH_UP_PAGE_SIZE = 50;
+
+// Daily catch-up (scheduler, the 6:10 AM ET document lifecycle run; GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE): the
+// Mark accepted send runs detached after the commit, so a restart in between loses it with no bell. This re-runs that
+// send for an office accept from the last `sinceDays` when nothing shows the customer got a notice since the accept (no
+// email_sent or sms_sent event on a 13692 Document Request from the accept on) and the office was never told (no bell
+// under the send's per-estimate dedupe key). The send decides the rest, as it does at accept time: a notice signed since,
+// or no termite line, sends nothing; a refusal or a failed delivery rings the bell, which takes the estimate out of the
+// next run. The whole window is read a page at a time: an estimate the send passes over stays in the window, so a cap on
+// rows read would leave an older lost send behind enough of them. One send per customer a run: the notice covers all
+// their estimates, and a second send would rotate the link the first one carried. `limit` caps the sends per run.
+async function reconcileManualAcceptConsumerNotices({ now = new Date(), sinceDays = 21, limit = 25 } = {}) {
+  const { manualAcceptConsumerNoticeSendLive, manualAcceptConsumerNoticeReconcileLive } = require('../config/feature-gates');
+  if (!manualAcceptConsumerNoticeReconcileLive() || !manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off' };
+  const since = new Date(Math.max(now.getTime() - sinceDays * 24 * 60 * 60 * 1000, MANUAL_ACCEPT_SEND_LIVE_SINCE.getTime()));
+  const before = new Date(now.getTime() - CATCH_UP_GRACE_MS);
+  const results = { checked: 0, sent: 0, skipped: 0, failed: 0 };
+  const customersSent = new Set();
+  let last = null;
+  let more = since < before;
+  while (more && results.sent + results.failed < limit) {
+    const page = await db('estimates')
+      .where({ status: 'accepted', price_locked_by: 'manual_accept' })
+      .whereNotNull('customer_id')
+      .where('accepted_at', '>=', since)
+      .where('accepted_at', '<', before)
+      .whereExists(function customerOnFile() {
+        this.select(db.raw('1')).from('customers as c').whereRaw('c.id = estimates.customer_id').whereNull('c.deleted_at');
+      })
+      .whereNotExists(function officeTold() {
+        this.select(db.raw('1')).from('notifications as n')
+          .where('n.recipient_type', 'admin')
+          .whereRaw("n.metadata->>'dedupeKey' = (? || estimates.id::text)", [NOT_SENT_ALERT_KEY_PREFIX]);
+      })
+      .whereNotExists(function noticeDeliveredSinceAccept() {
+        this.select(db.raw('1')).from('customer_contract_events as e')
+          .join('customer_contracts as cc', 'cc.id', 'e.contract_id')
+          .whereRaw('e.customer_id = estimates.customer_id')
+          .where({ 'cc.contract_type': 'document_template', 'cc.document_template_key': CONSUMER_NOTICE_TEMPLATE_KEY })
+          .whereIn('e.event_type', ['email_sent', 'sms_sent'])
+          .whereRaw('e.created_at >= estimates.accepted_at');
+      })
+      // Newest accept first. The next page starts below the last row read, compared in the database so the
+      // timestamp keeps its microseconds.
+      .modify((q) => {
+        if (last) q.whereRaw('(estimates.accepted_at, estimates.id) < (select e2.accepted_at, e2.id from estimates e2 where e2.id = ?)', [last.id]);
+      })
+      .orderBy([{ column: 'accepted_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .limit(CATCH_UP_PAGE_SIZE)
+      .select('id', 'customer_id');
+    more = page.length === CATCH_UP_PAGE_SIZE;
+    last = page[page.length - 1];
+    for (const estimate of page) {
+      if (results.sent + results.failed >= limit) break;
+      results.checked += 1;
+      if (customersSent.has(String(estimate.customer_id))) {
+        results.skipped += 1;
+        continue;
+      }
+      const result = await sendManualAcceptConsumerNotice({ estimateId: estimate.id, customerId: estimate.customer_id });
+      if (result.skipped) {
+        results.skipped += 1;
+        continue;
+      }
+      customersSent.add(String(estimate.customer_id));
+      if (result.sent) results.sent += 1;
+      else results.failed += 1;
+    }
+  }
+  if (results.sent || results.failed) {
+    logger.info(`[estimate-consumer-notice] catch-up: ${results.checked} checked, ${results.sent} sent, ${results.skipped} skipped, ${results.failed} failed`);
+  }
+  return results;
+}
+
 module.exports = {
   SNAPSHOT_SOURCE,
+  MANUAL_ACCEPT_SOURCE,
   REQUIRED_MESSAGE,
   estimateNeedsConsumerNotice,
   consumerNoticeState,
   consumerNoticeCtaFor,
   consumerNoticeBlocksAccept,
   ensureEstimateConsumerNotice,
+  consumerNoticeRecipients,
+  consumerNoticeTarget,
+  consumerNoticeCardFacts,
+  sendManualAcceptConsumerNotice,
+  alertManualAcceptConsumerNoticeSkipped,
+  reconcileManualAcceptConsumerNotices,
 };

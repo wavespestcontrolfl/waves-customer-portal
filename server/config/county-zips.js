@@ -22,7 +22,8 @@
 //
 // So: tax & compliance share THESE; everyone else stays separate on purpose.
 // Consumers keep their own return-value format (tax → 'Manatee'; compliance →
-// 'manatee_county') and county coverage (only tax uses LEE_ZIPS / COLLIER_ZIPS).
+// 'manatee_county') and county coverage (only tax uses LEE_ZIPS / COLLIER_ZIPS /
+// DESOTO_ZIPS).
 
 const MANATEE_ZIPS = ['34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209', '34210',
   '34211', '34212', '34219', '34221', '34222', '34243', '34250', '34251', '34280', '34281', '34282'];
@@ -74,4 +75,9 @@ const LEE_ZIPS = ['33901', '33903', '33904', '33905', '33907', '33908', '33909',
 const COLLIER_ZIPS = ['34102', '34103', '34104', '34105', '34108', '34109', '34110', '34112', '34113', '34114',
   '34116', '34117', '34119', '34120', '34140', '34141', '34142', '34145'];
 
-module.exports = { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS, SERVICE_AREA_COUNTY_ZIPS };
+// DeSoto County (Arcadia 34265, 34266, 34269; Fort Ogden 34267; Nocatee 34268).
+// 33865 (Ona) is left out: it is mostly Hardee County. Tax reads this set only
+// with GATE_TAX_SERVICE_COUNTY on (TaxCalculator.inferCountyFromZip).
+const DESOTO_ZIPS = ['34265', '34266', '34267', '34268', '34269'];
+
+module.exports = { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS, DESOTO_ZIPS, SERVICE_AREA_COUNTY_ZIPS };

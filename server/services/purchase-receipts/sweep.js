@@ -52,7 +52,7 @@ const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-delivery-parser');
 const { processReceiptLine, parseMultipack, PACK_CLAIM_RE } = require('./receipt-processor');
-const { alertUndeliveredShipments } = require('./undelivered-shipments');
+const { alertUndeliveredShipments, closeDeliveredUndeliveredBells } = require('./undelivered-shipments');
 const siteOne = require('./siteone-invoices');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { raiseAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
@@ -433,6 +433,7 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   totals.errors.push(...errors);
   await processSiteOneInvoices({ floor, since, now, notifyAdmin, totals });
   await closeLoggedDeliveryBells().catch((err) => logger.warn(`[purchase-receipts] close pass failed: ${err.message}`));
+  await closeDeliveredUndeliveredBells().catch((err) => logger.warn(`[purchase-receipts] undelivered close pass failed: ${err.message}`));
   return totals;
 }
 

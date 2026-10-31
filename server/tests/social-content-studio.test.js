@@ -1260,3 +1260,55 @@ describe('fixedCardIsFallback (Codex r3 on #3987: alert scope)', () => {
     expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: false, engineEnabled: true })).toBe(false); // GBP-only run
   });
 });
+
+describe('engineGbpCardIsFallback: campaign GBP card beside an engine scene', () => {
+  const metaScene = 'https://cdn.example.com/scene.jpg';
+  const gbpCard = 'https://cdn.example.com/gbp-card.png';
+  const metaCard = 'https://cdn.example.com/meta-card.png';
+  // Mirrors runAutonomousLocked: the engine branch tracks the GBP card only
+  // when engineGbpCardIsFallback says so; the else branch tracks every card.
+  const alertFires = ({ engineProduced, engineEnabled, suggestedLink, results }) => {
+    const cardIsFallback = Studio.fixedCardIsFallback({
+      isCampaignRun: true, engineProduced, creativeEligible: true, engineEnabled,
+    });
+    const urls = new Set();
+    if (engineProduced) {
+      if (cardIsFallback && Studio.engineGbpCardIsFallback(suggestedLink)) urls.add(gbpCard);
+    } else if (cardIsFallback) {
+      urls.add(metaCard);
+      urls.add(gbpCard);
+    }
+    return Studio.legacyCardShipped(results, urls, engineProduced ? metaScene : metaCard);
+  };
+  const gbpShipped = { platform: 'gbp', success: true, imageUrl: gbpCard };
+
+  test('(a) engine scene on Meta + GBP card + no live link: no alert (designed GBP path)', () => {
+    expect(Studio.engineGbpCardIsFallback(null)).toBe(false);
+    expect(Studio.engineGbpCardIsFallback('')).toBe(false);
+    expect(alertFires({
+      engineProduced: true, engineEnabled: true, suggestedLink: null,
+      results: [{ platform: 'facebook', success: true, imageUrl: metaScene }, gbpShipped],
+    })).toBe(false);
+  });
+
+  test('(b) engine scene + GBP card + linked page whose hero fetch returned nothing: alert still fires', () => {
+    expect(Studio.engineGbpCardIsFallback('https://www.wavespestcontrol.com/blog/post/')).toBe(true);
+    expect(alertFires({
+      engineProduced: true, engineEnabled: true, suggestedLink: 'https://www.wavespestcontrol.com/blog/post/',
+      results: [{ platform: 'facebook', success: true, imageUrl: metaScene }, gbpShipped],
+    })).toBe(true);
+  });
+
+  test('(c) engine off or failed: the legacy card on Meta still alerts, with or without a link', () => {
+    for (const suggestedLink of [null, 'https://www.wavespestcontrol.com/blog/post/']) {
+      expect(alertFires({
+        engineProduced: false, engineEnabled: false, suggestedLink,
+        results: [{ platform: 'facebook', success: true, imageUrl: metaCard }],
+      })).toBe(true);
+      expect(alertFires({
+        engineProduced: false, engineEnabled: true, suggestedLink,
+        results: [{ platform: 'facebook', success: true, imageUrl: metaCard }, gbpShipped],
+      })).toBe(true);
+    }
+  });
+});

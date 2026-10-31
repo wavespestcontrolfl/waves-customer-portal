@@ -178,6 +178,19 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     expect(TaxCalculator.calculateTax).not.toHaveBeenCalled();
   });
 
+  // The commercial first visit (commercial-first-visit.js) previews the visit's invoice as of after a taxable
+  // proposal's win, which marks the customer commercial: the same preview as a commercial row, through the
+  // calculator's own isCommercial option (it re-reads the still-residential row).
+  test('assumeCommercial: a residential row previews as the commercial invoice the win will lead to', async () => {
+    const residential = { ...COMMERCIAL_CUSTOMER, property_type: 'residential' };
+    mockCreateDb({ customer: residential });
+    const preview = await InvoiceService.previewInvoiceTotals({
+      customerId: 'cust-1', customer: residential, amount: FEE, title: 'Commercial Pest Control', assumeCommercial: true,
+    });
+    expect(TaxCalculator.calculateTax).toHaveBeenCalledWith('cust-1', 'Commercial Pest Control', FEE, expect.objectContaining({ isCommercial: true }));
+    expect(preview.tax_amount).toBe(Math.round(FEE * 0.065 * 100) / 100);
+  });
+
   test('business customer without explicit taxRate: tax goes through TaxCalculator', async () => {
     const business = { ...COMMERCIAL_CUSTOMER, property_type: 'business' };
     const inserted = mockCreateDb({ customer: business });

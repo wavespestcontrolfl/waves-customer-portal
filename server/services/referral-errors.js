@@ -25,4 +25,14 @@ const PHONE_COLLISION_MESSAGE =
   "Referral sharing isn't connected to this account yet. Text or call us and we'll link it for you.";
 const PHONE_COLLISION_CODE = 'referral_phone_in_use';
 
-module.exports = { isPromoterPhoneCollision, PHONE_COLLISION_MESSAGE, PHONE_COLLISION_CODE, PHONE_UNIQUE_CONSTRAINT };
+// The same number already enrolled under another spelling (enrollPromoter's
+// digit check). Shaped like the Postgres unique violation, so every caller's
+// isPromoterPhoneCollision path handles it the same way. No phone in the text.
+function promoterPhoneInUseError() {
+  const err = new Error(`duplicate key value violates unique constraint "${PHONE_UNIQUE_CONSTRAINT}"`);
+  err.code = '23505';
+  err.constraint = PHONE_UNIQUE_CONSTRAINT;
+  return err;
+}
+
+module.exports = { isPromoterPhoneCollision, promoterPhoneInUseError, PHONE_COLLISION_MESSAGE, PHONE_COLLISION_CODE, PHONE_UNIQUE_CONSTRAINT };

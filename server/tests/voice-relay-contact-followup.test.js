@@ -33,7 +33,7 @@ test('rings one needs-you bell on the customer, naming them and quoting the requ
   const [category, headline, why, opts] = notifyAdmin.mock.calls[0];
   expect(category).toBe('alert');
   expect(headline).toBe("Comms — review a contact's call on Pat Example's account");
-  expect(why).toBe('They called Sandy from a number on the account: “Asked what time the lawn tech is coming today”');
+  expect(why).toBe('They called Jennifer from a number on the account: “Asked what time the lawn tech is coming today”');
   expect(opts).toMatchObject({
     bell: true,
     dedupeKey: 'sandy-contact-followup:CA-contact-1',

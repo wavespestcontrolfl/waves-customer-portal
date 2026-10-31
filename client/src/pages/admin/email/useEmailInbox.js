@@ -192,11 +192,13 @@ export default function useEmailInbox(active, clearDraftResult) {
         const r = await adminFetch(
           `/api/admin/email/message/${encodeURIComponent(id)}`,
         );
-        // GET /message/:id already marked it read server-side; hand openEmail
-        // the read state so it does not toggle it back (codex P2).
+        // GET /message/:id marks it read (Gmail first) and answers the read
+        // state it reached, so openEmail does not toggle it back (codex P2).
+        // An email Gmail would not mark comes back unread, and openEmail's
+        // own read request retries it with visible feedback.
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const email = await r.json();
-        if (!cancelled && request === messageSequenceRef.current) await openEmail({ ...email, is_read: true });
+        if (!cancelled && request === messageSequenceRef.current) await openEmail(email);
       } catch {
         if (!cancelled && request === messageSequenceRef.current) setMessageState({ loading: false, error: true });
       }

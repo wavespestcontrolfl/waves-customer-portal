@@ -30,7 +30,8 @@ const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
 const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence, isActivePlanCustomer, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { findCustomersAtAddress } = require('./customer-address-match');
-const { computeMembershipContext } = require('./estimate-membership-context');
+const { computeMembershipContext, membershipScopeArgs } = require('./estimate-membership-context');
+const { autoFillSoldBy } = require('./estimate-sold-by');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
@@ -93,7 +94,14 @@ function estimateViewUrl(token) {
 function estimateEditVersion(row) {
   // Repeat opens do not change the offer. Keep first-view status/data and
   // every delivery/selection field in the witness so those still require review.
-  const { view_count: _viewCount, last_viewed_at: _lastViewedAt, ...content } = row;
+  // Sold by (GATE_COMMISSION_SOLD_BY) is who sold, not part of the offer: setting it must not
+  // invalidate an open edit, and the witness stays what it was before the columns existed.
+  const {
+    view_count: _viewCount, last_viewed_at: _lastViewedAt,
+    sold_by_technician_id: _soldBy, sold_by_source: _soldBySource, sold_by_lead_id: _soldByLead,
+    sold_by_set_by: _soldBySetBy, sold_by_set_at: _soldBySetAt,
+    ...content
+  } = row;
   return crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex');
 }
 
@@ -2158,6 +2166,11 @@ async function resolveEstimateWritePayload({
       trustedEstimateData.inputs.isRecurringCustomer = 'YES';
     }
   }
+  // The estimate tool's tick list (current prices, estimated margins) is a
+  // staff-only preview: never stored on the estimate.
+  if (trustedEstimateData.result && typeof trustedEstimateData.result === 'object') {
+    delete trustedEstimateData.result.currentServiceTierOffer;
+  }
   // Freeze the WaveGuard membership card onto the estimate, computed from the
   // SAME repriced data + prior services, so the customer-facing card reflects
   // exactly what was priced/charged and never re-derives from mutable service
@@ -2178,20 +2191,21 @@ async function resolveEstimateWritePayload({
         // PLAN is still bounded to the quoted street (codex #3338 r8): a
         // multi-property customer's other-property series must never be
         // frozen (or later repriced) by a primary-address estimate.
-        ...(groupedEstimate
-          ? (perPropertyStreetScope
-            ? { streetScope: perPropertyStreetScope }
-            : { excludeExistingRows: true })
-          : (perPropertyStreetScope
-            ? { extensionStreetScope: perPropertyStreetScope }
-            : {})),
         // This lane resolves property scope, so it may freeze an
         // existing-service extension plan — but only when the quoted street
         // actually resolved (no parsed street = no way to bound the plan =
         // review-bell fallback, fail closed). Agent lanes (IB estimate
         // tools, estimator engine) pass no scope and deliberately stay
         // plan-less (codex #3338 r7).
-        freezeExtensionPlan: !!perPropertyStreetScope,
+        ...membershipScopeArgs({ groupedEstimate, perPropertyStreetScope }),
+        // The current services staff ticked and unticked in the estimate
+        // tool; absent = the automatic plan.
+        extensionPick: Array.isArray(body.tierExtensionKeys)
+          ? {
+            ticked: body.tierExtensionKeys.filter((key) => typeof key === 'string'),
+            unticked: [].concat(body.tierExtensionKeptKeys || []).filter((key) => typeof key === 'string'),
+          }
+          : undefined,
       });
       if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
       else delete trustedEstimateData.membershipSnapshot;
@@ -2554,7 +2568,7 @@ async function createOrReuseAdminEstimate({
           }
           clearEstimatePricingCache(existingEstimate.id);
           return {
-            estimate: updated,
+            estimate: await autoFillSoldBy(trx, updated, { now }),
             reused: true,
             memberLinkageWarning,
             pricingFallbackReason: pricingOut.fallbackReason || null,
@@ -2596,7 +2610,7 @@ async function createOrReuseAdminEstimate({
     }
 
     return {
-      estimate: created,
+      estimate: await autoFillSoldBy(trx, created, { now }),
       reused: false,
       memberLinkageWarning,
       pricingFallbackReason: pricingOut.fallbackReason || null,
@@ -3851,7 +3865,7 @@ async function reviseAdminEstimate({
         }
       }
     }
-    return row;
+    return autoFillSoldBy(trx, row, { now });
   });
   if (!updated) {
     throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);

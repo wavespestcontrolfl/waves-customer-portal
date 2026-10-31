@@ -739,6 +739,8 @@ function mapProduct(product, vendorPricing = []) {
     irrigationNotes: product.irrigation_notes || null,
     postApplicationWatering: product.post_application_watering || null,
     mowHoldDays: product.mow_hold_days ?? null,
+    // Shown on the Bid kit product list under "Products proposed for bid work" (owner 2026-10-28).
+    bidList: product.bid_list === true,
     localRuleSensitivity: product.local_rule_sensitivity === true,
   };
 }
@@ -792,6 +794,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_lesco_10_0_22', 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
   ['v13_lesco_44_0_0', 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
   ['v13_lesco_0_0_24', 'LESCO Black Out 0-0-24 AM Spar-TECH', 'fertilizer', 'fertilizer'],
+  ['v13_nutra_tech_k_acetate', 'LESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer', 'fertilizer', 'potassium support'],
   ['v13_tetrino', 'Tetrino Insecticide', 'pesticide', 'insecticide'],
   ['v13_arena', 'Arena 50 WDG', 'pesticide', 'insecticide'],
   ['v13_talak', 'Atticus Talak 7.9 F', 'pesticide', 'insecticide'],
@@ -3181,6 +3184,35 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
   }
 });
 
+// GET/POST /restock-requests/:id/siteone-email — preview and send the pickup
+// order email to SiteOne for an open request (owner 2026-10-26, dark behind
+// GATE_SITEONE_EMAIL_ORDER). Owner-only: it emails a vendor and orders stock, and
+// STAFF_INVENTORY_REQUEST above lists neither path, so the router's requireAdmin covers both.
+// A refusal answers 409 + a machine `code`; a gate that is off answers 404.
+const siteOneEmailOrder = () => require('../services/procurement/vendor-order-email');
+const siteOneEmailError = (err, res, next) => {
+  if (err && err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
+  return next(err);
+};
+router.get('/restock-requests/:id/siteone-email', async (req, res, next) => {
+  try {
+    if (!featureGates.siteOneEmailOrderLive()) return res.status(404).json({ error: 'Not found' });
+    res.json({ preview: await siteOneEmailOrder().previewOrderEmail(req.params.id) });
+  } catch (err) { siteOneEmailError(err, res, next); }
+});
+router.post('/restock-requests/:id/siteone-email', async (req, res, next) => {
+  try {
+    if (!featureGates.siteOneEmailOrderLive()) return res.status(404).json({ error: 'Not found' });
+    const actor = (req.technician && (req.technician.name || req.technician.email)) || null;
+    const result = await siteOneEmailOrder().sendOrderEmail(req.params.id, { actor, actorId: req.technicianId, version: req.body && req.body.version });
+    // IDs only, no addresses (PII).
+    const fields = { requestId: req.params.id, technicianId: req.technicianId, emailId: result.email.id, messageId: result.messageId };
+    if (result.reconcile || !result.requestMarked) logger.error('siteone order email sent but not fully recorded, reconcile', { ...fields, requestMarked: result.requestMarked });
+    else logger.info('siteone order email sent', fields);
+    res.json(result);
+  } catch (err) { siteOneEmailError(err, res, next); }
+});
+
 // ── Helper: per-oz price of a vendor_pricing row (null when size unknown) ──
 // Rederives from the CURRENT price + quantity first: legacy approval paths
 // update price/quantity without refreshing normalized_unit_price/price_per_oz,
@@ -3510,6 +3542,16 @@ function postApplicationWateringPatch(body, actor) {
   return { value: JSON.stringify(checked.rule) };
 }
 
+// products_catalog.bid_list — an admin ticks a product to print it on the Bid kit product list under "Products proposed for bid
+// work" (owner 2026-10-28). A real true or false only: anything else is a 400 before any write. Returns { skip } when the body
+// does not mention the field, { error } for a 400, else { value }.
+function bidListFlag(body) {
+  const raw = body?.bidList;
+  if (raw === undefined) return { skip: true };
+  if (typeof raw !== 'boolean') return { error: 'Invalid bidList: must be true or false' };
+  return { value: raw };
+}
+
 // products_catalog.mow_hold_days — the days the product LABEL says to hold off
 // mowing after an application. Validated on every admin save: an integer 1..14
 // (a whole-number string is accepted), or null / '' to clear. Anything else is a
@@ -3713,6 +3755,9 @@ router.put('/:id', async (req, res, next) => {
     const mowHoldPatch = mowHoldDaysPatch(req.body);
     if (mowHoldPatch.error) return res.status(400).json({ error: mowHoldPatch.error });
     if (!mowHoldPatch.skip) upd.mow_hold_days = mowHoldPatch.value;
+    const bidListPatch = bidListFlag(req.body);
+    if (bidListPatch.error) return res.status(400).json({ error: bidListPatch.error });
+    if (!bidListPatch.skip) upd.bid_list = bidListPatch.value;
     // The inline editor sends containerSize alone, and scoreVendorRows treats
     // a positive unit_size_oz as authoritative (Codex #3974 r3 P1): a
     // container edit without an explicit unitSizeOz re-derives it from the

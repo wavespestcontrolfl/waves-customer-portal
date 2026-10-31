@@ -353,6 +353,7 @@ export default function CustomerPropertiesPanelV2({
                   {labelEdit?.id === p.id ? (
                     <Input
                       aria-label={`Label for ${p.address_line1}`}
+                      data-modal-escape-owned="true"
                       autoFocus
                       value={labelEdit.value}
                       maxLength={PROPERTY_LABEL_MAX}

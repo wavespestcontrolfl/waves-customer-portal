@@ -1,7 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 // visitPrefsRow: the series notice reads the anchor visit's prefs row through
 // the saved property (app property scope, PR 3); a plain row = the profile.
-jest.mock('../services/appointment-reminders', () => ({ safeSendAppointment: jest.fn(), visitPrefsRow: jest.fn(async () => ({})) }));
+jest.mock('../services/appointment-reminders', () => ({ safeSendAppointment: jest.fn(), visitPrefsRow: jest.fn(async () => ({})), buildServiceLabel: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
@@ -164,6 +164,62 @@ describe('recurring confirmation describes the recorded placement policy', () =>
       serviceId: 'visit-1', newDate: '2099-01-01', newWindow: { start: '09:00', end: '10:00' },
     });
     expect(render).toHaveBeenCalledWith(templateKey, expect.objectContaining({ first_name: 'Test' }), expect.any(Object));
+    render.mockRestore();
+  });
+
+  // Owner 2026-10-26: the placement text names the anchor's service.
+  test.each([
+    ['a mosquito anchor', 'Monthly Mosquito Control Service', 'Monthly Mosquito Control Service', 'Monthly Mosquito Control Service'],
+    ['a junk service type', 'I6TSOQXQWTGW6UMLL2XATXDU', 'I6TSOQXQWTGW6UMLL2XATXDU', 'visit'],
+  ])('placement text for %s passes service_name', async (_name, serviceType, label, expected) => {
+    const templates = require('../routes/admin-sms-templates');
+    const reminders = require('../services/appointment-reminders');
+    const render = jest.spyOn(templates, 'getTemplate').mockResolvedValue('Synthetic confirmation');
+    reminders.buildServiceLabel.mockResolvedValue(label);
+    reminders.safeSendAppointment.mockImplementation(async (_customer, _prefs, message) => {
+      await message({ name: 'Test' });
+      return false;
+    });
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        scheduled_services: { customer_id: 'customer-1', scheduled_date: '2099-01-01', window_start: '09:00', service_type: serviceType },
+        customers: { id: 'customer-1', first_name: 'Test' },
+        notification_prefs: {},
+      }[table]),
+    }));
+    await applySeriesMoveEffects({
+      result: { seriesMoveId: null, notifyRequested: true, rescheduledOccurrences: [], futurePlacementDays: 3 },
+      serviceId: 'visit-1', newDate: '2099-01-01', newWindow: { start: '09:00', end: '10:00' },
+    });
+    expect(render).toHaveBeenCalledWith('appointment_recurring_placement_confirmed',
+      expect.objectContaining({ service_name: expected }), expect.any(Object));
+    render.mockRestore();
+  });
+
+  test('the series-moved copy is rendered without a service lookup', async () => {
+    const templates = require('../routes/admin-sms-templates');
+    const reminders = require('../services/appointment-reminders');
+    const render = jest.spyOn(templates, 'getTemplate').mockResolvedValue('Synthetic confirmation');
+    reminders.buildServiceLabel.mockClear();
+    reminders.safeSendAppointment.mockImplementation(async (_customer, _prefs, message) => {
+      await message({ name: 'Test' });
+      return false;
+    });
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        scheduled_services: { customer_id: 'customer-1', scheduled_date: '2099-01-01', window_start: '09:00', service_type: 'Quarterly Pest Control Service' },
+        customers: { id: 'customer-1', first_name: 'Test' },
+        notification_prefs: {},
+      }[table]),
+    }));
+    await applySeriesMoveEffects({
+      result: { seriesMoveId: null, notifyRequested: true, rescheduledOccurrences: [], futurePlacementDays: null },
+      serviceId: 'visit-1', newDate: '2099-01-01', newWindow: { start: '09:00', end: '10:00' },
+    });
+    expect(render.mock.calls[0][1]).not.toHaveProperty('service_name');
+    expect(reminders.buildServiceLabel).not.toHaveBeenCalled();
     render.mockRestore();
   });
 });

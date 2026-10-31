@@ -170,10 +170,10 @@ List up to ${MAX_CANDIDATES} plausible real street names (with their suffix, e.g
 Return ONLY JSON: {"candidates": ["...", "..."]}`;
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${RECOVERY_MODEL()}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${RECOVERY_MODEL()}:generateContent`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: { response_mime_type: 'application/json', temperature: 0.2 },

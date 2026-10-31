@@ -707,6 +707,7 @@ describe('product facts for the pest writer', () => {
     expect(pests('Taurus SC')).toEqual(['ants']);
     expect(pests('Atticus Talak')).toEqual(['spiders', 'crawling insects']);
     expect(pests('Alpine WSG')).toEqual(['ants', 'roaches']);
+    expect(pests('Atticus Antapex WSG')).toEqual(['ants', 'roaches']);
     expect(pests('Gentrol IGR')).toEqual(['roaches']);
     expect(pests('Gentrol Complete EC3')).toEqual(['roaches']);
     expect(pests('Advion Evolution Cockroach Gel Bait')).toEqual(['roaches']);

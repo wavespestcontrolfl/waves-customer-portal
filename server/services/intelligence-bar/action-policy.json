@@ -151,6 +151,38 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "list_agent_review_drafts": {
+    "module": "agent-review-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
+  "approve_agent_review_draft": {
+    "module": "agent-review-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "revise_agent_review_draft": {
+    "module": "agent-review-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "ignore_agent_review_draft": {
+    "module": "agent-review-tools.js",
+    "domain": "comms",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "canonical_conflicts": {
     "module": "seo-tools.js",
     "domain": "seo",
@@ -1951,9 +1983,25 @@
     "approval": null,
     "scope": "broad"
   },
+  "search_quick_links": {
+    "module": "customer-link-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "send_autopay_setup_link": {
     "module": "customer-link-tools.js",
     "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "compose_email": {
+    "module": "compose-email-tools.js",
+    "domain": "email",
     "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",
@@ -2183,6 +2231,14 @@
     "approval": "ui_confirm",
     "scope": "none"
   },
+  "schedule_sms": {
+    "module": "schedule-sms-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "void_invoice": {
     "module": "void-invoice-tools.js",
     "domain": "customers",
@@ -2190,5 +2246,21 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "resolve_dispatch_alert": {
+    "module": "dispatch-alert-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "unblock_sender": {
+    "module": "unblock-sender-tools.js",
+    "domain": "email",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "route_wide"
   }
 }

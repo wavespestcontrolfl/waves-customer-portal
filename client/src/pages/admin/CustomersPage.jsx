@@ -589,6 +589,8 @@ function CustomerIntelligenceTab() {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
+          flexWrap: "wrap",
+          gap: 8,
         }}
       >
         {" "}
@@ -608,7 +610,7 @@ function CustomerIntelligenceTab() {
             border: `1px solid ${D.teal}`,
             background: "transparent",
             color: D.teal,
-            fontSize: 12,
+            fontSize: 14,
             cursor: "pointer",
             opacity: scanPending ? 0.5 : 1,
           }}
@@ -680,10 +682,11 @@ function CustomerIntelligenceTab() {
               {" "}
               <div
                 style={{
-                  fontSize: 13,
+                  fontSize: 14,
                   fontWeight: 500,
                   color: D.heading,
                   marginBottom: 4,
+                  overflowWrap: "anywhere",
                 }}
               >
                 {o.first_name} {o.last_name} — {o.outreach_type?.toUpperCase()}{" "}
@@ -691,7 +694,7 @@ function CustomerIntelligenceTab() {
               </div>{" "}
               <div
                 style={{
-                  fontSize: 12,
+                  fontSize: 14,
                   color: D.text,
                   lineHeight: 1.6,
                   marginBottom: 8,
@@ -699,11 +702,12 @@ function CustomerIntelligenceTab() {
                   background: D.card,
                   borderRadius: 6,
                   fontStyle: "italic",
+                  overflowWrap: "anywhere",
                 }}
               >
                 "{o.message_content}"
               </div>{" "}
-              <div style={{ display: "flex", gap: 6 }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {" "}
                 <button
                   onClick={() =>
@@ -718,7 +722,7 @@ function CustomerIntelligenceTab() {
                     border: "none",
                     background: D.green,
                     color: "#fff",
-                    fontSize: 11,
+                    fontSize: 14,
                     fontWeight: 500,
                     cursor: "pointer",
                     opacity:
@@ -746,7 +750,7 @@ function CustomerIntelligenceTab() {
                     border: `1px solid ${D.border}`,
                     background: "transparent",
                     color: D.muted,
-                    fontSize: 11,
+                    fontSize: 14,
                     cursor: "pointer",
                     opacity:
                       !isAdmin ||
@@ -789,7 +793,7 @@ function CustomerIntelligenceTab() {
             <div style={{ fontSize: 16, fontWeight: 500, color: D.green }}>
               Upsell Opportunities ({upsells.length})
             </div>{" "}
-            <div style={{ fontSize: 13, color: D.muted }}>
+            <div style={{ fontSize: 14, color: D.muted }}>
               Potential:{" "}
               <span style={{ color: D.green, fontFamily: MONO }}>
                 ${data.upsellTotalMonthly}/mo
@@ -818,7 +822,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "left",
                       borderBottom: `1px solid ${D.border}`,
@@ -829,7 +833,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "left",
                       borderBottom: `1px solid ${D.border}`,
@@ -840,7 +844,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "left",
                       borderBottom: `1px solid ${D.border}`,
@@ -851,7 +855,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "right",
                       borderBottom: `1px solid ${D.border}`,
@@ -862,7 +866,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "right",
                       borderBottom: `1px solid ${D.border}`,
@@ -873,7 +877,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "center",
                       borderBottom: `1px solid ${D.border}`,
@@ -890,7 +894,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 13,
+                        fontSize: 14,
                         color: D.heading,
                         borderBottom: `1px solid ${D.border}`,
                       }}
@@ -900,7 +904,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 12,
+                        fontSize: 14,
                         color: D.muted,
                         borderBottom: `1px solid ${D.border}`,
                       }}
@@ -910,7 +914,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 12,
+                        fontSize: 14,
                         color: D.teal,
                         borderBottom: `1px solid ${D.border}`,
                       }}
@@ -920,7 +924,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 13,
+                        fontSize: 14,
                         color: D.green,
                         textAlign: "right",
                         fontFamily: MONO,
@@ -932,7 +936,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 12,
+                        fontSize: 14,
                         color: D.muted,
                         textAlign: "right",
                         fontFamily: MONO,
@@ -958,7 +962,7 @@ function CustomerIntelligenceTab() {
                           border: "none",
                           background: D.teal,
                           color: "#fff",
-                          fontSize: 10,
+                          fontSize: 14,
                           cursor: "pointer",
                           opacity: pendingActions[`upsell:${u.id}`] ? 0.5 : 1,
                         }}
@@ -1017,7 +1021,30 @@ const STAGE_PIN_COLORS = {
   churned: "#C0392B",
 };
 
-function CustomerMap({ customers: _ignored, onSelect }) {
+// A marker needs a real stored coordinate pair. null/undefined must not coerce
+// to 0 and a (0, 0) pair is the "never located" placeholder, not a customer.
+function storedCoordinates(c) {
+  if (c?.lat == null || c?.lng == null || c.lat === "" || c.lng === "") return null;
+  const lat = Number(c.lat);
+  const lng = Number(c.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  if (lat === 0 && lng === 0) return null;
+  return { lat, lng };
+}
+
+const NO_MAP_ROWS = [];
+
+function hasMappableAddress(c) {
+  const text = [c?.address, c?.city].filter(Boolean).join(", ");
+  return text.replace(/[,\s]/g, "").length >= 5;
+}
+
+// The Directory loads the rows (every page of its current search/filters, up
+// to its cap) and passes them in; `total` is the server's match count. Markers
+// come from stored coordinates only: this component makes no customer request
+// and no geocoder call, so a customer is "mapped" only when a marker exists.
+function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
   const markersRef = useRef([]);
@@ -1025,18 +1052,13 @@ function CustomerMap({ customers: _ignored, onSelect }) {
   const [mapError, setMapError] = useState(null);
   const [filterTier, setFilterTier] = useState("all");
   const [filterStage, setFilterStage] = useState("all");
-  const [stats, setStats] = useState({ total: 0, mapped: 0, unmapped: 0 });
+  const [stats, setStats] = useState({
+    mapped: 0,
+    notLocated: 0,
+    noAddress: 0,
+  });
   const [selectedPin, setSelectedPin] = useState(null);
-  const [customers, setCustomers] = useState([]);
-
-  // Load ALL customers for the map (not paginated)
-  useEffect(() => {
-    adminFetch("/admin/customers?limit=5000")
-      .then((data) =>
-        setCustomers(Array.isArray(data) ? data : data.customers || []),
-      )
-      .catch(() => {});
-  }, []);
+  const customers = Array.isArray(rows) ? rows : NO_MAP_ROWS;
 
   // Load Google Maps script
   useEffect(() => {
@@ -1091,7 +1113,8 @@ function CustomerMap({ customers: _ignored, onSelect }) {
 
   // Build map + markers
   useEffect(() => {
-    if (!mapReady || !mapRef.current || !window.google?.maps) return;
+    if (!mapReady || !mapRef.current || !window.google?.maps) return undefined;
+    let fitTimer = null;
     try {
       // Init map centered on Bradenton/LWR area
       if (!mapInstance.current) {
@@ -1128,46 +1151,11 @@ function CustomerMap({ customers: _ignored, onSelect }) {
       markersRef.current.forEach((m) => m.setMap(null));
       markersRef.current = [];
 
-      // Geocode + place markers
-      const geocoder = new window.google.maps.Geocoder();
+      // Place markers from stored coordinates only (no geocoding).
       let mapped = 0,
-        unmapped = 0;
+        notLocated = 0,
+        noAddress = 0;
       const bounds = new window.google.maps.LatLngBounds();
-      const infoWindow = new window.google.maps.InfoWindow();
-
-      const mappable = filtered.filter((c) => c.address || c.city);
-
-      mappable.forEach((c, idx) => {
-        const address = [c.address, c.city, c.state, c.zip]
-          .filter(Boolean)
-          .join(", ");
-        if (!address || address.replace(/,\s*/g, "").length < 5) {
-          unmapped++;
-          return;
-        }
-
-        // Use lat/lng if available, otherwise geocode
-        if (c.lat && c.lng) {
-          placeMarker(c, { lat: parseFloat(c.lat), lng: parseFloat(c.lng) });
-          mapped++;
-          bounds.extend({ lat: parseFloat(c.lat), lng: parseFloat(c.lng) });
-        } else if (idx < 200) {
-          // limit geocoding to 200 to avoid quota
-          geocoder.geocode({ address: address + ", FL" }, (results, status) => {
-            if (status === "OK" && results[0]) {
-              const pos = results[0].geometry.location;
-              placeMarker(c, pos);
-              bounds.extend(pos);
-              if (mapped + unmapped >= Math.min(mappable.length, 200)) {
-                mapInstance.current.fitBounds(bounds, 50);
-              }
-            }
-          });
-          mapped++;
-        } else {
-          unmapped++;
-        }
-      });
 
       function placeMarker(c, position) {
         const color =
@@ -1190,17 +1178,28 @@ function CustomerMap({ customers: _ignored, onSelect }) {
 
         marker.addListener("click", () => {
           setSelectedPin(c);
-          infoWindow.close();
         });
 
         markersRef.current.push(marker);
       }
 
-      unmapped += filtered.length - mappable.length;
-      setStats({ total: filtered.length, mapped, unmapped });
+      filtered.forEach((c) => {
+        const position = storedCoordinates(c);
+        if (position) {
+          placeMarker(c, position);
+          mapped++;
+          bounds.extend(position);
+        } else if (hasMappableAddress(c)) {
+          notLocated++;
+        } else {
+          noAddress++;
+        }
+      });
+
+      setStats({ mapped, notLocated, noAddress });
 
       if (mapped > 0) {
-        setTimeout(() => {
+        fitTimer = setTimeout(() => {
           if (bounds.getNorthEast().equals(bounds.getSouthWest())) {
             mapInstance.current.setCenter(bounds.getCenter());
             mapInstance.current.setZoom(14);
@@ -1213,6 +1212,9 @@ function CustomerMap({ customers: _ignored, onSelect }) {
       console.error("[CustomerMap] Error:", e);
       setMapError(e.message);
     }
+    return () => {
+      if (fitTimer) clearTimeout(fitTimer);
+    };
   }, [mapReady, filtered]);
 
   if (!MAPS_KEY) {
@@ -1238,7 +1240,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
         >
           Map unavailable
         </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted }}>
+        <div style={{ fontSize: 14, color: D.muted }}>
           Customer addresses are still available in the Directory.
         </div>{" "}
       </div>
@@ -1268,8 +1270,8 @@ function CustomerMap({ customers: _ignored, onSelect }) {
         >
           Map Error
         </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted }}>{mapError}</div>{" "}
-        <div style={{ fontSize: 11, color: D.muted, marginTop: 8 }}>
+        <div style={{ fontSize: 14, color: D.muted }}>{mapError}</div>{" "}
+        <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
           Ensure Maps JavaScript API is enabled in Google Cloud Console.
         </div>{" "}
       </div>
@@ -1288,7 +1290,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
         }}
       >
         {" "}
-        <div style={{ fontSize: 13, color: D.muted }}>Loading map...</div>{" "}
+        <div style={{ fontSize: 14, color: D.muted }}>Loading map...</div>{" "}
       </div>
     );
   }
@@ -1315,7 +1317,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
             border: `1px solid ${D.border}`,
             borderRadius: 8,
             color: D.text,
-            fontSize: 12,
+            fontSize: 14,
           }}
         >
           {" "}
@@ -1336,7 +1338,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
             border: `1px solid ${D.border}`,
             borderRadius: 8,
             color: D.text,
-            fontSize: 12,
+            fontSize: 14,
           }}
         >
           {" "}
@@ -1347,8 +1349,13 @@ function CustomerMap({ customers: _ignored, onSelect }) {
           <option value="at_risk">At Risk</option>{" "}
           <option value="churned">Churned</option>{" "}
         </select>{" "}
-        <div style={{ fontSize: 12, color: D.muted }}>
-          {stats.mapped} mapped · {stats.unmapped} no address
+        <div style={{ fontSize: 14, color: D.muted }}>
+          {loading
+            ? "Loading customers…"
+            : `${stats.mapped} mapped · ${stats.notLocated} not on the map yet · ${stats.noAddress} no address`}
+          {!loading && Number(total) > customers.length
+            ? ` · Showing ${customers.length} of ${total} customers`
+            : ""}
         </div>
         {/* Legend */}
         <div
@@ -1356,7 +1363,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
             display: "flex",
             gap: 10,
             marginLeft: "auto",
-            fontSize: 11,
+            fontSize: 14,
             color: D.muted,
           }}
         >
@@ -1423,16 +1430,16 @@ function CustomerMap({ customers: _ignored, onSelect }) {
                 >
                   {selectedPin.firstName} {selectedPin.lastName}
                 </div>{" "}
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
                   {selectedPin.address} {selectedPin.city}
                 </div>{" "}
-                <div style={{ fontSize: 12, color: D.muted }}>
+                <div style={{ fontSize: 14, color: D.muted }}>
                   {selectedPin.phone}
                 </div>
                 {selectedPin.tier && selectedPin.tier !== 'Commercial' && selectedPin.tier !== 'One-Time' && (
                   <div
                     style={{
-                      fontSize: 11,
+                      fontSize: 14,
                       color: TIER_PIN_COLORS[selectedPin.tier] || D.teal,
                       fontWeight: 500,
                       marginTop: 4,
@@ -1452,7 +1459,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
                     color: "#fff",
                     border: "none",
                     borderRadius: 6,
-                    fontSize: 11,
+                    fontSize: 14,
                     fontWeight: 500,
                     cursor: "pointer",
                   }}

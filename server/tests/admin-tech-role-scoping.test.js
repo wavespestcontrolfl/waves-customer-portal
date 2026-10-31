@@ -14,7 +14,7 @@
  *    technician touches a visit assigned to someone else, before any
  *    side effect runs.
  *  - Customer endpoints with no tech surface (comms/timeline/credits/
- *    pipeline view/stage/tags/interactions/follow-up) are requireAdmin.
+ *    pipeline view/stage) are requireAdmin.
  *  - Tech-surface customer endpoints (360 detail, cards) 404 for customers
  *    with no visit assigned to the requesting tech.
  *  - The list/search endpoint strips financial/CRM fields from rows for
@@ -318,10 +318,6 @@ describe('customer routes: requireAdmin on non-tech surfaces', () => {
     ['GET', '/api/admin/customers/cust-own/schedule-estimates'],
     ['GET', '/api/admin/customers/cust-own/properties'],
     ['PUT', '/api/admin/customers/cust-own/stage'],
-    ['POST', '/api/admin/customers/cust-own/tags'],
-    ['DELETE', '/api/admin/customers/cust-own/tags/vip'],
-    ['POST', '/api/admin/customers/cust-own/interactions'],
-    ['POST', '/api/admin/customers/cust-own/follow-up'],
   ];
 
   test.each(adminOnly)('%s %s → 403 for a technician token', async (method, path) => {

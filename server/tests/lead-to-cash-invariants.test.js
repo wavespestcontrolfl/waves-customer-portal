@@ -41,6 +41,9 @@ jest.mock('../services/stale-visit-sweep', () => ({ _private: { findStaleVisits:
 jest.mock('../services/estimate-conversion-guard', () => ({ convertedOpenEstimatesQuery: jest.fn() }));
 jest.mock('../config/completion-lane-registry', () => ({ ALL_LISTS: { A: ['known_key', 'gone_key'] }, classifyCatalogRow: jest.fn() }));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
+jest.mock('../services/customer-properties', () => ({
+  customersWithStreetLineHoldingLocality: jest.fn(), customersWithUnpinnedSavedAddress: jest.fn(), customersWithIncompleteAddress: jest.fn(),
+}));
 jest.mock('../services/completion-record-invariants', () => {
   const keys = ['completed_visit_without_record', 'duplicate_completed_records_per_visit',
     'completed_record_without_report_token', 'completed_visit_without_completed_at',
@@ -64,6 +67,7 @@ const staleSweep = require('../services/stale-visit-sweep');
 const { convertedOpenEstimatesQuery } = require('../services/estimate-conversion-guard');
 const { classifyCatalogRow } = require('../config/completion-lane-registry');
 const { getCloseoutStatus } = require('../services/closeout-status');
+const { customersWithStreetLineHoldingLocality, customersWithUnpinnedSavedAddress, customersWithIncompleteAddress } = require('../services/customer-properties');
 const { runPredicate } = require('../services/completion-record-invariants');
 const {
   runLeadToCashInvariantSweep, DETECTORS, _private: { runDetectors, composeReport, SEND_MARKER_KEY, SAMPLE_IDS, CLOSEOUT_VISIT_CAP },
@@ -321,6 +325,17 @@ describe('detector adapters', () => {
     const out = await byKey('stale_open_visits').run({ now: NOW });
     expect(staleSweep._private.findStaleVisits).toHaveBeenCalledWith(NOW);
     expect(out).toEqual({ count: 1, ids: ['s1'], detail: { pending: 1 } });
+  });
+
+  test.each([
+    ['street_line_holds_locality', customersWithStreetLineHoldingLocality],
+    ['saved_address_without_pin', customersWithUnpinnedSavedAddress],
+    ['address_missing_city_or_zip', customersWithIncompleteAddress],
+  ])('%s reports its finder\'s customer ids on the shared db', async (key, finder) => {
+    finder.mockResolvedValue(['c1', 'c2']);
+    const out = await byKey(key).run({ now: NOW });
+    expect(finder).toHaveBeenCalledWith(db);
+    expect(out).toEqual({ count: 2, ids: ['c1', 'c2'] });
   });
 
   test('converted_open_estimates selects ids from the guard\'s own query builder', async () => {

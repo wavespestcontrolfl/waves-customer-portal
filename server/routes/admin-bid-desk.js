@@ -9,8 +9,7 @@ const checklist = require('../services/bid-desk/checklist');
 const { TYPES: SOLICITATION_TYPES } = require('../models/migrations/20261023130000_bid_desk_checklist');
 const { daysLeft } = require('../services/bid-desk/rules');
 const { parseETDateTime, validCalendarDate, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
-const { openAdminAlertKeys, closeAdminAlertKeys } = require('../services/admin-alert-episodes');
-const { OPEN_STATUSES } = require('../services/bid-desk/rules');
+const { closeDoneAlerts } = require('../services/bid-desk/close-alerts');
 
 // Bid Desk (GATE_BID_DESK, dark). Staff-only list, detail and decisions for bid invites found in the email table.
 // Nothing here sends a message to anyone; a due date only becomes "confirmed" when the operator types or confirms it.
@@ -183,52 +182,6 @@ function withDateAliases(value) {
   };
 }
 
-// Notifications whose condition a successful save has met leave the bell (docs/admin-notifications.md 4.3).
-async function closeDoneAlerts(conn, bidId, before, after) {
-  const prefixes = [];
-  const reason = [];
-  // Every bell on a closed SAM.gov notice asks for a decision, not a date (addendumSpec), so confirming a date leaves
-  // them open.
-  const keep = [];
-  if (after.due_confirmed && (before.needs_date_confirmation || !before.due_confirmed) && !after.needs_date_confirmation) {
-    prefixes.push(`bid-desk:addendum:${bidId}:`);
-    reason.push('due_date_confirmed');
-    keep.push(...(after.source_active === false ? [`bid-desk:addendum:${bidId}:sam:`] : []));
-  }
-  // A changed or cleared date retires the reminders sent for the old one.
-  const dateOf = (row) => (row.due_at ? new Date(row.due_at).getTime() : null);
-  if (dateOf(before) !== dateOf(after)) {
-    prefixes.push(`bid-desk:remind:${bidId}:`);
-    reason.push('due_date_changed');
-  }
-  // GATE_BID_CHECKLIST reminders: a changed or cleared date retires the reminder sent for the old one. This cleanup
-  // is NOT behind the gate: the gate stops NEW reminders only, and a bell rung while it was on must still close when
-  // the date changes or the bid is decided after it is turned off (turning it back on cannot repair a bell left open).
-  const at = (row, key) => (row[key] ? new Date(row[key]).getTime() : null);
-  if (at(before, 'questions_due_at') !== at(after, 'questions_due_at')) {
-    prefixes.push(`bid-desk:remind-questions:${bidId}:`);
-    reason.push('questions_date_changed');
-  }
-  if (at(before, 'job_walk_at') !== at(after, 'job_walk_at')) {
-    prefixes.push(`bid-desk:remind-jobwalk:${bidId}:`);
-    reason.push('job_walk_date_changed');
-  }
-  if (before.status === 'new' && after.status !== 'new') {
-    prefixes.push(`bid-desk:new:${bidId}`);
-    reason.push('bid_decided');
-  }
-  if (OPEN_STATUSES.includes(before.status) && !OPEN_STATUSES.includes(after.status)) {
-    prefixes.push(`bid-desk:new:${bidId}`, `bid-desk:addendum:${bidId}:`, `bid-desk:remind:${bidId}:`);
-    prefixes.push(`bid-desk:remind-questions:${bidId}:`, `bid-desk:remind-jobwalk:${bidId}:`);
-    reason.push('bid_closed');
-    keep.length = 0;
-  }
-  if (!prefixes.length) return 0;
-  const keys = (await Promise.all([...new Set(prefixes)].map((prefix) => openAdminAlertKeys(conn, prefix)))).flat()
-    .filter((key) => !keep.some((prefix) => key.startsWith(prefix)));
-  return closeAdminAlertKeys(conn, keys, reason.join(','));
-}
-
 function present(row, extra = {}) {
   return { ...row, days_left: daysLeft(row.due_at), ...extra };
 }
@@ -354,6 +307,41 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
+// The Bid desk's save step (the page's Save decision and date edits, and the bell's No bid / Bid buttons in
+// services/bid-desk/alert-buttons.js, so a tap has the page's checks). The read, the write, the fresh read and the
+// closing of done alerts run under one bid-row lock: intake and the owed-bell delivery lock the same row, so an
+// addendum is either before this save (and the version fence refuses it) or after it (and its bell is never closed
+// by this save). `precheck(bid)` may refuse under that lock, before anything is written.
+async function saveBidUpdate(trx, bidId, value, { precheck = null } = {}) {
+  const bid = await trx('bid_opportunities').where({ id: bidId }).forUpdate().first(columnsFor());
+  if (!bid) return { status: 404, body: { error: 'Not found' } };
+  const refusal = precheck ? precheck(bid) : null;
+  if (refusal) return refusal;
+  // A linked estimate must exist (the foreign key would also refuse it, with a worse answer).
+  if (value.estimateId && !(await trx('estimates').where({ id: value.estimateId }).first('id'))) {
+    return { status: 400, body: { error: 'That estimate does not exist' } };
+  }
+  const built = buildPatch(bid, value);
+  if (built.error) return built.error;
+  const { patch, fenced } = built;
+
+  const written = await trx('bid_opportunities').where({ id: bid.id })
+    .modify((q) => { if (fenced) q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]); })
+    .update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
+  if (!written) return { status: 409, body: { error: DATE_CHANGED } };
+  const updated = await trx('bid_opportunities').where({ id: bid.id }).first(columnsFor());
+  try {
+    await trx.raw('SAVEPOINT bid_desk_close_alerts');
+    await closeDoneAlerts(trx, bid.id, bid, updated);
+    await trx.raw('RELEASE SAVEPOINT bid_desk_close_alerts');
+  } catch (err) {
+    // The save stands; an alert left open is closed by hand. Class and code only (row values stay out of logs).
+    await trx.raw('ROLLBACK TO SAVEPOINT bid_desk_close_alerts').catch(() => {});
+    logger.warn(`[bid-desk] closing done alerts for ${bid.id} failed: ${err?.name || 'Error'}${err?.code ? ` ${err.code}` : ''}`);
+  }
+  return { status: 200, body: { ok: true, bid: present(updated) } };
+}
+
 router.patch('/:id', async (req, res, next) => {
   try {
     if (!UUID.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
@@ -362,36 +350,7 @@ router.patch('/:id', async (req, res, next) => {
     const { error, value: raw } = (live ? checklistPatchSchema : patchSchema).validate(req.body || {});
     if (error) return res.status(400).json({ error: 'Invalid bid update' });
     const value = live ? withDateAliases(raw) : raw;
-    // The read, the write, the fresh read and the closing of done alerts run under one bid-row lock: intake and the
-    // owed-bell delivery lock the same row, so an addendum is either before this save (and the version fence refuses
-    // it) or after it (and its bell is never closed by this save).
-    const outcome = await db.transaction(async (trx) => {
-      const bid = await trx('bid_opportunities').where({ id: req.params.id }).forUpdate().first(columnsFor());
-      if (!bid) return { status: 404, body: { error: 'Not found' } };
-      // A linked estimate must exist (the foreign key would also refuse it, with a worse answer).
-      if (value.estimateId && !(await trx('estimates').where({ id: value.estimateId }).first('id'))) {
-        return { status: 400, body: { error: 'That estimate does not exist' } };
-      }
-      const built = buildPatch(bid, value);
-      if (built.error) return built.error;
-      const { patch, fenced } = built;
-
-      const written = await trx('bid_opportunities').where({ id: bid.id })
-        .modify((q) => { if (fenced) q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]); })
-        .update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
-      if (!written) return { status: 409, body: { error: DATE_CHANGED } };
-      const updated = await trx('bid_opportunities').where({ id: bid.id }).first(columnsFor());
-      try {
-        await trx.raw('SAVEPOINT bid_desk_close_alerts');
-        await closeDoneAlerts(trx, bid.id, bid, updated);
-        await trx.raw('RELEASE SAVEPOINT bid_desk_close_alerts');
-      } catch (err) {
-        // The save stands; an alert left open is closed by hand. Class and code only (row values stay out of logs).
-        await trx.raw('ROLLBACK TO SAVEPOINT bid_desk_close_alerts').catch(() => {});
-        logger.warn(`[bid-desk] closing done alerts for ${bid.id} failed: ${err?.name || 'Error'}${err?.code ? ` ${err.code}` : ''}`);
-      }
-      return { status: 200, body: { ok: true, bid: present(updated) } };
-    });
+    const outcome = await db.transaction((trx) => saveBidUpdate(trx, req.params.id, value));
     res.status(outcome.status).json(outcome.body);
   } catch (err) {
     next(err);
@@ -497,3 +456,5 @@ router.delete('/:id/checklist/:itemId', requireChecklist, async (req, res, next)
 });
 
 module.exports = router;
+// The save step, for the bell's bid buttons (services/bid-desk/alert-buttons.js).
+module.exports.saveBidUpdate = saveBidUpdate;

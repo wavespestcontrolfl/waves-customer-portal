@@ -13,10 +13,6 @@
 process.env.GATE_ADMIN_BELL_POLICY = 'true'; // read once, when feature-gates loads
 const { randomUUID } = require('crypto');
 
-// The legacy senders are retired in production; the run requires it.
-jest.mock('../services/invoice-followups', () => ({ latePaymentCheckerRetiredLive: () => true }));
-jest.mock('../services/workflows/balance-reminder', () => ({ latePaymentCheckRetired: async () => true }));
-
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 

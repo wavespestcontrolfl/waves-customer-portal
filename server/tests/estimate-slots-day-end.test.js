@@ -31,6 +31,8 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   zoneRouteDaysLive: jest.fn(() => false),
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
+  // The same-hour technician scope (GATE_MULTI_TECH_CONFIRM) reads the real call-time reader.
+  multiTechConfirmLive: jest.requireActual('../config/feature-gates').multiTechConfirmLive,
 }));
 
 const db = require('../models/db');
@@ -147,44 +149,18 @@ describe('findEstimateSlots — customer-facing day end', () => {
 
   // Codex r4 P2 on #4663: getSlotDebug classifies find-time's raw output
   // directly — it never runs the live path's filterCollidingSlots (which
-  // applies slotWindowFitsDay, the lunch-gate choke point), so a noon slot
-  // the gate hides from the customer used to still show up in the debug
-  // view. getSlotDebug now runs its classified slots through the same
-  // slotWindowFitsDay filter.
-  describe('gate on: getSlotDebug hides a noon slot the live path would also hide', () => {
-    const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
-    let previous;
-    beforeEach(() => { previous = process.env[ENV_KEY]; });
-    afterEach(() => {
-      if (previous === undefined) delete process.env[ENV_KEY];
-      else process.env[ENV_KEY] = previous;
+  // applies slotWindowFitsDay). It runs its classified slots through the
+  // same slotWindowFitsDay filter; noon is a normal hour (owner ruling
+  // 2026-09-23), so a 12:00 candidate is kept.
+  test('getSlotDebug keeps a 12:00 candidate', async () => {
+    findAvailableSlots.mockResolvedValueOnce({
+      slots: [
+        { date: '2027-05-20', start_time: '12:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 2, stops_that_day: 1 },
+      ],
+      evaluated: 1,
+      total_feasible: 1,
     });
-
-    test('a 12:00 candidate is dropped from getSlotDebug\'s slots while the gate is on', async () => {
-      findAvailableSlots.mockResolvedValueOnce({
-        slots: [
-          { date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 4, stops_that_day: 3 },
-          { date: '2027-05-20', start_time: '12:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 2, stops_that_day: 1 },
-        ],
-        evaluated: 2,
-        total_feasible: 2,
-      });
-      process.env[ENV_KEY] = 'true';
-      const result = await getSlotDebug('est-dayend-1', { windowDays: 1 });
-      expect(result.slots.some((s) => s.windowStart === '09:00')).toBe(true);
-      expect(result.slots.some((s) => s.windowStart === '12:00')).toBe(false);
-    });
-
-    test('gate unset (default): the same 12:00 candidate is kept', async () => {
-      findAvailableSlots.mockResolvedValueOnce({
-        slots: [
-          { date: '2027-05-20', start_time: '12:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 2, stops_that_day: 1 },
-        ],
-        evaluated: 1,
-        total_feasible: 1,
-      });
-      const result = await getSlotDebug('est-dayend-1', { windowDays: 1 });
-      expect(result.slots.some((s) => s.windowStart === '12:00')).toBe(true);
-    });
+    const result = await getSlotDebug('est-dayend-1', { windowDays: 1 });
+    expect(result.slots.some((s) => s.windowStart === '12:00')).toBe(true);
   });
 });

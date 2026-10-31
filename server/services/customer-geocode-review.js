@@ -341,4 +341,6 @@ module.exports = { reviewEnabled, effectiveCustomer, addressSnapshot, reviewRevi
   reviewedCustomerLocation, withCustomerReviewWriteFence, effectiveReview, blocksAutomaticGeocode,
   needsCoordinatePairRepair,
   filterServiceReviewBlocks, reviewedServiceLocation, serviceReviewDecision, serviceReviewContexts,
-  excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId };
+  excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId,
+  // A primary saved address `p` that is the customer `c`'s address and pinned: its pin is the customer's effective pin.
+  PRIMARY_HAS_PIN_SQL };

@@ -18,13 +18,14 @@
     {
       "router": "server/index.js",
       "mount": "/",
-      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast and yard-calendar share one handler, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing. The reservicePhotosPreParserGuard entry is the re-service photos twin of it (GATE_RESERVICE_PHOTOS + GATE_VISIT_PREP_PHOTOS, token and visit-id shape, multipart only), acting only on /:token/visits/:visitId/photos (always next() or 404). The visitPrepPreParserGuard entry is the visit-prep photos sub-gate + token-shape check (GATE_VISIT_PREP_PHOTOS) mounted ahead of the shared body parsers so a dark or malformed photos request 404s before any parse (always next() or 404). The mapImagePreGuard entry is the estimate map-image proxy's pre-limiter guard (GET/HEAD /api/estimates/:token/map/(satellite|overlay) only, case-insensitive): it stamps no-store/CORP/no-referrer headers and answers the generic 404 for the overlay while GATE_ESTIMATE_SHOW_YOUR_WORK is dark, before the global limiter (always next() or 404). The commercialAgreementPreGuard entry is the commercial proposal signing route's pre-limiter guard (POST /api/estimates/:token/commercial-agreement only, case-insensitive): it stamps no-store/noindex/no-referrer headers and answers the generic 404 while GATE_COMMERCIAL_PROPOSAL_SIGN is dark, before the global limiter (always next() or 404). The consumerNoticePreGuard entry is the estimate page's Florida consumer notice route's pre-limiter guard (POST /api/estimates/:token/consumer-notice only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_ESTIMATE_CONSUMER_NOTICE is dark, before the global limiter (always next() or 404). The serviceAgreementPreGuard entry is the accepted estimate page's residential service agreement route's pre-limiter guard (POST /api/estimates/:token/service-agreement only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_ESTIMATE_SERVICE_AGREEMENT is dark, before the global limiter (always next() or 404). The /api/booking/preferred-time entry is the /book \"Can't find a time?\" request's pre-router guard (GATE_BOOK_PREFERRED_TIME): it stamps no-store/noindex/no-referrer and answers the generic 404 for every method while the gate is dark, ahead of cors(), the global limiter and the body parsers (always next() or 404). The /api/admin/auth/login/mfa entry is the staff two-step code step's pre-router guard (GATE_ADMIN_MFA): it stamps no-store/noindex/no-referrer and answers the generic 404 while the gate is dark, ahead of cors(), the global limiter, the login limiter and the body parsers (always next() or 404).",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast and yard-calendar share one handler, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. Its estimate twin (/api/public/estimate-assessment, the \"Book a free Waves Assessment first\" page) stamps no-store and answers the generic 404 while GATE_ESTIMATE_ASSESSMENT_FIRST is dark or the token is not estimate-token shaped, before the limiter and body parsers (always next() or 404). The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing. The reservicePhotosPreParserGuard entry is the re-service photos twin of it (GATE_RESERVICE_PHOTOS + GATE_VISIT_PREP_PHOTOS, token and visit-id shape, multipart only), acting only on /:token/visits/:visitId/photos (always next() or 404). The visitPrepPreParserGuard entry is the visit-prep photos sub-gate + token-shape check (GATE_VISIT_PREP_PHOTOS) mounted ahead of the shared body parsers so a dark or malformed photos request 404s before any parse (always next() or 404). The mapImagePreGuard entry is the estimate map-image proxy's pre-limiter guard (GET/HEAD /api/estimates/:token/map/(satellite|overlay) only, case-insensitive): it stamps no-store/CORP/no-referrer headers and answers the generic 404 for the overlay while GATE_ESTIMATE_SHOW_YOUR_WORK is dark, before the global limiter (always next() or 404). The commercialAgreementPreGuard entry is the commercial proposal signing route's pre-limiter guard (POST /api/estimates/:token/commercial-agreement only, case-insensitive): it stamps no-store/noindex/no-referrer headers and answers the generic 404 while GATE_COMMERCIAL_PROPOSAL_SIGN is dark, before the global limiter (always next() or 404). The commercialFirstVisitPreGuard entry is the commercial first-visit picker's pre-limiter guard (POST /api/estimates/:token/first-visit and /first-visit/availability only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_COMMERCIAL_FIRST_VISIT is dark, before the global limiter (always next() or 404). The consumerNoticePreGuard entry is the estimate page's Florida consumer notice route's pre-limiter guard (POST /api/estimates/:token/consumer-notice only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_ESTIMATE_CONSUMER_NOTICE is dark, before the global limiter (always next() or 404). The serviceAgreementPreGuard entry is the accepted estimate page's residential service agreement route's pre-limiter guard (POST /api/estimates/:token/service-agreement only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_ESTIMATE_SERVICE_AGREEMENT is dark, before the global limiter (always next() or 404). The /api/booking/preferred-time entry is the /book \"Can't find a time?\" request's pre-router guard (GATE_BOOK_PREFERRED_TIME): it stamps no-store/noindex/no-referrer and answers the generic 404 for every method while the gate is dark, ahead of cors(), the global limiter and the body parsers (always next() or 404). The /api/admin/auth/login/mfa entry is the staff two-step code step's pre-router guard (GATE_ADMIN_MFA): it stamps no-store/noindex/no-referrer and answers the generic 404 while the gate is dark, ahead of cors(), the global limiter, the login limiter and the body parsers (always next() or 404).",
       "routes": [
         "USE / (inline function#1fe36153)",
         "USE /api/admin/auth/login/mfa (inline function#6bca0a9b)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
         "USE /api/booking/preferred-time (inline function#7df2f03e)",
         "USE /api/estimates (commercialAgreementPreGuard#e5a34636)",
+        "USE /api/estimates (commercialFirstVisitPreGuard#43d317cd)",
         "USE /api/estimates (contactPhonePreGuard#69762e2c)",
         "USE /api/estimates (consumerNoticePreGuard#0a953129)",
         "USE /api/estimates (mapImagePreGuard#f8502fdf)",
@@ -36,6 +37,7 @@
         "USE /api/public/appointment (visitPrepPreParserGuard#0755b055)",
         "USE /api/public/careers (inline function#1ef2d7c2)",
         "USE /api/public/careers/interview (inline function#656a8908)",
+        "USE /api/public/estimate-assessment (inline function#eea2a7d3)",
         "USE /api/public/inspection (inline function#ae857f75)",
         "USE /api/public/lawn-assessment (inline function#8e4982f2)",
         "USE /api/public/mcp (inline function#6af8a3db)",
@@ -231,7 +233,7 @@
     {
       "router": "server/routes/estimate-public.js",
       "mount": "/api/estimates",
-      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag; commercial-agreement is the same contract behind GATE_COMMERCIAL_PROPOSAL_SIGN; consumer-notice is the same contract behind GATE_ESTIMATE_CONSUMER_NOTICE; service-agreement is the same contract behind GATE_ESTIMATE_SERVICE_AGREEMENT (accepted estimates only)",
+      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag; commercial-agreement is the same contract behind GATE_COMMERCIAL_PROPOSAL_SIGN; first-visit and first-visit/availability are the same contract behind GATE_COMMERCIAL_FIRST_VISIT (owner 2026-10-26 decision page choice 1B: a signed commercial proposal's customer books the first visit; open, signed estimates only); consumer-notice is the same contract behind GATE_ESTIMATE_CONSUMER_NOTICE; service-agreement is the same contract behind GATE_ESTIMATE_SERVICE_AGREEMENT (accepted estimates only)",
       "routes": [
         "GET /api/estimates/:token",
         "GET /api/estimates/:token/data",
@@ -243,6 +245,8 @@
         "POST /api/estimates/:token/bundle-inquiry",
         "POST /api/estimates/:token/change-request",
         "POST /api/estimates/:token/commercial-agreement",
+        "POST /api/estimates/:token/first-visit/availability",
+        "POST /api/estimates/:token/first-visit",
         "POST /api/estimates/:token/consumer-notice",
         "POST /api/estimates/:token/extension-request",
         "POST /api/estimates/:token/measurement-review",
@@ -471,6 +475,17 @@
         "POST /api/public/inspection/:token/availability",
         "POST /api/public/inspection/:token/find-slots",
         "POST /api/public/inspection/:token/waitlist"
+      ]
+    },
+    {
+      "router": "server/routes/estimate-assessment-public.js",
+      "mount": "/api/public/estimate-assessment",
+      "reason": "\"Book a free Waves Assessment first\" from an open estimate (owner 2026-10-26, decision page choice 3A; dark behind GATE_ESTIMATE_ASSESSMENT_FIRST): the estimate share token is the bearer, with the same viewability and call-side gates as /api/estimates/:token/data; it books one free assessment at the estimate customer's own address on file and never changes the address",
+      "routes": [
+        "USE /api/public/estimate-assessment (inline function#fbd7ced3)",
+        "GET /api/public/estimate-assessment/:token",
+        "POST /api/public/estimate-assessment/:token",
+        "POST /api/public/estimate-assessment/:token/find-slots"
       ]
     },
     {

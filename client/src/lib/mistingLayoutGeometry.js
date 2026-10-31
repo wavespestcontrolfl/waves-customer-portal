@@ -6,14 +6,18 @@
 // everywhere on the staff screens.
 //
 // Rules (concept layout only, final placement is set at the design visit):
-//   1. Anchors first: one nozzle at every vertex of every line. A vertex within the
+//   1. Anchors first: one nozzle at a vertex of every line. A vertex within the
 //      minimum spacing (3 ft) of an anchor already placed merges into it (the first one
 //      kept), so a closed loop's repeated first and last vertex, and two lines that touch,
-//      share one nozzle.
-//   2. Then each line is walked as stretches between consecutive anchors, and each stretch
-//      of L ft gets ceil(L / spacing) - 1 evenly spaced interior nozzles, so no gap along a
-//      line exceeds the spacing (10 ft) by construction. Interior points of one stretch are
-//      at least spacing / 2 from each other and from its anchors.
+//      share one nozzle. A corner closer than half the spacing (5 ft), measured along the
+//      line, to the previous kept nozzle of the same line, or to the line's last point, is
+//      dropped: a roofline with 3 to 6 ft jogs (a garage, an entry) gets one nozzle there,
+//      not one per step. The first and last point of a line always keep theirs.
+//   2. Then each line is walked as stretches between consecutive anchors (a stretch can run
+//      past dropped corners), and each stretch of L ft along the line gets
+//      ceil(L / spacing) - 1 evenly spaced interior nozzles, so no gap along a line exceeds
+//      the spacing (10 ft) by construction. Interior points of one stretch are at least
+//      spacing / 2 from each other and from its anchors, along the line.
 //   3. If an interior point would land within the minimum spacing of a nozzle that already
 //      exists (a line crossing mid-segment), the stretch is split at that nozzle, which
 //      becomes an anchor of this line too, and both halves are refilled. Nothing is dropped
@@ -66,6 +70,29 @@ function lineId(line, index) {
   return line && line.id !== undefined && line.id !== null ? String(line.id) : String(index);
 }
 
+// Evenly spaced interior points along a path (points with x, y): ceil(length / spacing) - 1 of them,
+// each with its arc position `t` and the index `j` of the path edge it falls on.
+function evenPointsAlong(path, spacingPx) {
+  const cum = [0];
+  for (let i = 1; i < path.length; i += 1) cum.push(cum[i - 1] + distance(path[i - 1], path[i]));
+  const len = cum[cum.length - 1];
+  const gaps = Math.max(1, Math.ceil(len / spacingPx - EPS));
+  const candidates = [];
+  for (let k = 1; k < gaps; k += 1) {
+    const t = (len * k) / gaps;
+    let j = 0;
+    while (j + 2 < path.length && cum[j + 1] <= t) j += 1;
+    const f = cum[j + 1] > cum[j] ? (t - cum[j]) / (cum[j + 1] - cum[j]) : 0;
+    candidates.push({
+      t,
+      j,
+      x: path[j].x + (path[j + 1].x - path[j].x) * f,
+      y: path[j].y + (path[j + 1].y - path[j].y) * f,
+    });
+  }
+  return { cum, candidates };
+}
+
 /** Length of a cleaned polyline in feet. */
 export function polylineFeet(points, lat, zoom, samePointFt = SAME_POINT_FT) {
   const ftPerPx = feetPerPixel(lat, zoom);
@@ -98,6 +125,8 @@ export function placeNozzles(lines, options = {}) {
   const ftPerPx = feetPerPixel(lat, zoom);
   const spacingPx = spacingFt / ftPerPx;
   const minPx = Math.min(minSpacingFt, spacingFt / 2) / ftPerPx;
+  const cornerMergeFt = Number(options.cornerMergeFt) >= 0 ? Number(options.cornerMergeFt) : spacingFt / 2;
+  const cornerPx = Math.max(cornerMergeFt / ftPerPx, minPx);
   const samePx = SAME_POINT_FT / ftPerPx;
 
   const cleaned = (Array.isArray(lines) ? lines : []).map((line, lineIndex) => ({
@@ -109,8 +138,19 @@ export function placeNozzles(lines, options = {}) {
   const placed = [];
   const tooClose = (p) => placed.find((n) => distance(n, p) < minPx - EPS) || null;
 
-  // 1. Anchors: every vertex of every line, merging near-duplicates into the first one kept.
-  const vertexAnchor = cleaned.map((line, lineIndex) => line.points.map((pt, i) => {
+  // 1. Anchors: a nozzle at every vertex, except a corner that sits within cornerPx (along the line)
+  // of the previous kept nozzle or of the line's last point. A vertex within the minimum spacing of
+  // a nozzle already placed merges into it (the first one kept). vertexAnchor[line][i] is null for a
+  // dropped corner.
+  const arcs = cleaned.map((line) => {
+    const out = [0];
+    for (let i = 1; i < line.points.length; i += 1) out.push(out[i - 1] + distance(line.points[i - 1], line.points[i]));
+    return out;
+  });
+  // The nozzle for vertex i of a line: an existing one within the minimum spacing, else a new corner.
+  const anchorAt = (lineIndex, i) => {
+    const line = cleaned[lineIndex];
+    const pt = line.points[i];
     const near = tooClose(pt);
     if (near) return near;
     const anchor = {
@@ -127,22 +167,45 @@ export function placeNozzles(lines, options = {}) {
     };
     placed.push(anchor);
     return anchor;
-  }));
+  };
+  const vertexAnchor = cleaned.map((line, lineIndex) => {
+    const total = arcs[lineIndex][line.points.length - 1] || 0;
+    let lastKept = 0;
+    return line.points.map((pt, i) => {
+      const arc = arcs[lineIndex][i];
+      const endpoint = i === 0 || i === line.points.length - 1;
+      if (!endpoint && (arc - lastKept < cornerPx - EPS || total - arc < cornerPx - EPS)) return null;
+      lastKept = arc;
+      return anchorAt(lineIndex, i);
+    });
+  });
 
-  // 2 and 3. Fill one stretch between two nozzles. Returns the nozzles strictly between them,
-  // in order (new interior nozzles, and existing ones the stretch was split at).
-  const fillStretch = (a, b, meta, seen) => {
-    const len = distance(a, b);
-    const gaps = Math.max(1, Math.ceil(len / spacingPx - EPS));
-    const candidates = [];
-    for (let k = 1; k < gaps; k += 1) {
-      candidates.push({ x: a.x + ((b.x - a.x) * k) / gaps, y: a.y + ((b.y - a.y) * k) / gaps });
+  // 2 and 3. Fill one stretch between two nozzles. `path` is the line from `a` to `b` (past any
+  // dropped corners); each path point carries `seg`, the line segment that starts there. Returns the
+  // nozzles strictly between a and b, in order (new interior nozzles, and existing ones the stretch
+  // was split at). A path that bends (it runs past dropped corners) can double back on itself, so a
+  // point could land within the minimum spacing of a nozzle the stretch cannot split at; it returns
+  // null then, and the caller keeps those corners instead.
+  const fillStretch = (a, b, path, meta, seen) => {
+    const { cum, candidates } = evenPointsAlong(path, spacingPx);
+    const bent = path.length > 2;
+    if (bent) {
+      for (let c = 1; c < candidates.length; c += 1) {
+        if (distance(candidates[c - 1], candidates[c]) < minPx - EPS) return null;
+      }
     }
     for (let c = 0; c < candidates.length; c += 1) {
       const blocker = tooClose(candidates[c]);
+      if (bent && blocker && (seen.has(blocker) || blocker === a || blocker === b)) return null;
       if (blocker && !seen.has(blocker) && blocker !== a && blocker !== b) {
         const nextSeen = new Set(seen).add(blocker);
-        return [...fillStretch(a, blocker, meta, nextSeen), blocker, ...fillStretch(blocker, b, meta, nextSeen)];
+        const { j, t } = candidates[c];
+        // Split the path where the candidate was, through the blocker.
+        const before = [...path.slice(0, j + 1).filter((_, i) => cum[i] < t - EPS || i === 0), { x: blocker.x, y: blocker.y, seg: path[j].seg }];
+        const after = [{ x: blocker.x, y: blocker.y, seg: path[j].seg }, ...path.slice(j + 1).filter((_, i) => cum[j + 1 + i] > t + EPS)];
+        const first = fillStretch(a, blocker, before, meta, nextSeen);
+        const second = first && fillStretch(blocker, b, after, meta, nextSeen);
+        return second ? [...first, blocker, ...second] : null;
       }
     }
     // No blocker (or a degenerate one already used to split this stretch): place the points.
@@ -155,7 +218,7 @@ export function placeNozzles(lines, options = {}) {
         kind: meta.line.kind,
         lineIndex: meta.lineIndex,
         lineId: meta.line.id,
-        segmentIndex: meta.segment,
+        segmentIndex: path[pt.j].seg,
         vertexIndex: null,
         corner: false,
       };
@@ -164,21 +227,53 @@ export function placeNozzles(lines, options = {}) {
     });
   };
 
-  const lineStats = cleaned.map((line, lineIndex) => {
+  // Walk one line from kept nozzle to kept nozzle and fill each stretch. Returns the nozzles in walking order.
+  const walkLine = (line, lineIndex) => {
     const pts = line.points;
     const anchors = vertexAnchor[lineIndex];
-    let px = 0;
+    const keptAt = [];
+    anchors.forEach((a, i) => { if (a) keptAt.push(i); });
     // Nozzles along the line in walking order (a shared anchor can appear twice on a loop).
-    const sequence = anchors.length ? [anchors[0]] : [];
-    for (let i = 0; i + 1 < pts.length; i += 1) {
-      px += distance(pts[i], pts[i + 1]);
-      if (anchors[i] === anchors[i + 1]) continue;
-      const meta = { line, lineIndex, segment: i, count: 0 };
-      sequence.push(...fillStretch(anchors[i], anchors[i + 1], meta, new Set()), anchors[i + 1]);
+    const sequence = keptAt.length ? [anchors[keptAt[0]]] : [];
+    for (let k = 0; k + 1 < keptAt.length;) {
+      const ia = keptAt[k];
+      const ib = keptAt[k + 1];
+      const a = anchors[ia];
+      const b = anchors[ib];
+      // A hairpin that comes back to the same nozzle needs a fill only when it is longer than a gap.
+      if (a === b && arcs[lineIndex][ib] - arcs[lineIndex][ia] <= spacingPx + EPS) {
+        k += 1;
+        continue;
+      }
+      const path = [{ x: a.x, y: a.y, seg: ia }];
+      for (let j = ia + 1; j < ib; j += 1) path.push({ x: pts[j].x, y: pts[j].y, seg: j });
+      path.push({ x: b.x, y: b.y, seg: ib - 1 });
+      const mark = placed.length;
+      const fill = fillStretch(a, b, path, { line, lineIndex, segment: ia, count: 0 }, new Set());
+      if (fill) {
+        sequence.push(...fill, b);
+        k += 1;
+      } else {
+        // The bent stretch cannot be filled cleanly: undo it and keep its corners instead.
+        placed.length = mark;
+        const restored = [];
+        for (let j = ia + 1; j < ib; j += 1) {
+          anchors[j] = anchorAt(lineIndex, j);
+          restored.push(j);
+        }
+        keptAt.splice(k + 1, 0, ...restored);
+      }
     }
+    return sequence;
+  };
+
+  const lineStats = cleaned.map((line, lineIndex) => {
+    const pts = line.points;
+    const total = arcs[lineIndex][pts.length - 1] || 0;
+    const sequence = walkLine(line, lineIndex);
     // A loop is a line whose last vertex is back on its first (within the minimum spacing).
     const closed = pts.length >= 4 && distance(pts[0], pts[pts.length - 1]) <= Math.max(minPx, samePx);
-    return { id: line.id, kind: line.kind, closed, lengthFt: px * ftPerPx, nozzleCount: 0, keys: sequence.map((n) => n.key) };
+    return { id: line.id, kind: line.kind, closed, lengthFt: total * ftPerPx, nozzleCount: 0, keys: sequence.map((n) => n.key) };
   });
 
   const accepted = placed;
@@ -223,21 +318,26 @@ export function computeTotals(lineStats, nozzles) {
 }
 
 /**
- * Staff edits on top of the automatic placement: delete, move, add.
- * `edits` = { removed: string[] of nozzle keys, moved: { [key]: {x, y} }, added: nozzle objects }.
+ * Staff edits on top of the automatic placement: delete, move, add, aim.
+ * `edits` = { removed: string[] of nozzle keys, moved: { [key]: {x, y} }, added: nozzle objects,
+ *             aimed: { [key]: heading in degrees } }.
+ * `aimed` is the manual spray direction of an automatic nozzle (an added nozzle carries its own `aim`).
+ * A nozzle with a manual aim comes back with `aim` set; without one it has no `aim` at all.
  * Keys are unique within one placement only. Edits are valid for the lines they were made on;
  * when the lines change, placement is redone and the caller discards the edits.
  */
 export function applyNozzleEdits(nozzles, edits = {}) {
   const removed = new Set(edits.removed || []);
   const moved = edits.moved || {};
+  const aimed = edits.aimed || {};
+  const withAim = (n) => (Number.isFinite(aimed[n.key]) ? { ...n, aim: aimed[n.key] } : n);
   const untouched = [];
   const byKey = new Map();
   (nozzles || []).forEach((n) => {
     if (removed.has(n.key)) return;
     const m = moved[n.key];
-    if (m && validPoint(m)) byKey.set(n.key, { ...n, x: m.x, y: m.y, edited: true });
-    else untouched.push(n);
+    if (m && validPoint(m)) byKey.set(n.key, withAim({ ...n, x: m.x, y: m.y, edited: true }));
+    else untouched.push(withAim(n));
   });
   // Most recently edited last, so a tap on overlapping nozzles takes the newest first.
   const movedOut = Object.keys(moved).filter((k) => byKey.has(k)).map((k) => byKey.get(k));

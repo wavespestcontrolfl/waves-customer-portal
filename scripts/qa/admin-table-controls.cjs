@@ -1,5 +1,5 @@
 "use strict";
-/* global document, localStorage, navigator, getComputedStyle */
+/* global document, localStorage, navigator, indexedDB, getComputedStyle */
 // Synthetic frontend-only proof. All API requests are intercepted; unknown
 // routes, external requests, sockets, and provider actions cannot reach a server.
 const assert = require("node:assert/strict");
@@ -8,7 +8,8 @@ const path = require("node:path");
 const { webkit } = require("playwright");
 const { previewServer, launchBrowser, evidence, waitForFonts } = require("./browser");
 const root = path.resolve(__dirname, "../..");
-const output = path.join(root, ".tmp/admin-table-controls");
+const savedViewsScenario = process.argv.includes("--saved-views");
+const output = path.join(root, savedViewsScenario ? ".tmp/admin-table-views" : ".tmp/admin-table-controls");
 // Default to this PR's Bid Desk checks; opt into the companion Customers
 // scenario with --customers or both pages with --all once that UI is present.
 const checkCustomers = process.argv.includes("--customers") || process.argv.includes("--all");
@@ -37,8 +38,28 @@ function fixtures(url, method, report) {
     const limit = Number(url.searchParams.get("limit") || 500), page = Number(url.searchParams.get("page") || 1);
     return { customers: rows.slice((page - 1) * limit, page * limit), total: rows.length, totalPages: Math.ceil(rows.length / limit), page, limit };
   }
+  const customerMatch = url.pathname.match(/^\/api\/admin\/customers\/(customer-\d+)(?:\/([^/]+))?$/);
+  if (customerMatch) {
+    const customer = customers.find((row) => row.id === customerMatch[1]);
+    if (!customer) return undefined;
+    const related = {
+      "collection-holds": { holds: [] }, "contact-notification-prefs": { live: false, contacts: [] },
+      activity: { enabled: false }, comms: { comms: [], composerComms: [] },
+      timeline: { timeline: [], missingSources: [] }, properties: { properties: [] },
+      "autopay-state": { recent_events: [] }, credits: { credits: [], balance: 0 },
+    };
+    if (customerMatch[2]) return related[customerMatch[2]];
+    return { customer: { ...customer, address: { line1: "100 Example Lane", city: "Example City", state: "FL", zip: "34201" } },
+      notificationPrefs: {}, preferences: {}, healthScore: { overall_score: 82 },
+      billingSummary: { complete: true, openBalance: 0, overdueBalance: 0, overdueCount: 0 },
+      invoices: [], cards: [], paymentMethodConsents: [], contracts: [], photos: [], customerDiscounts: [], complianceRecords: [],
+      nutrientLedger: {}, services: [], payments: [], scheduled: [], upcomingScheduled: [], accountProperties: [], annualPrepayTerms: [] };
+  }
+  if (/^\/api\/admin\/customer-geocodes\/customer-\d+$/.test(url.pathname)) return { enabled: false };
+  const bidMatch = url.pathname.match(/^\/api\/admin\/bid-desk\/(bid-\d+)$/);
+  if (bidMatch) return { bid: bids.find((bid) => bid.id === bidMatch[1]), emails: [], extras: null };
   switch (url.pathname) {
-    case "/api/admin/auth/me": return { id: "fixture-admin", role: "admin", name: "Fixture operator" };
+    case "/api/admin/auth/me": return { id: report.userId || "fixture-admin", role: "admin", name: "Fixture operator" };
     case "/api/admin/feature-flags": return { flags: { bid_desk: true } };
     case "/api/admin/notifications/unread-count": return { count: 0 };
     case "/api/admin/communications/unread-count": return { count: 0, conversations: 0 };
@@ -47,6 +68,9 @@ function fixtures(url, method, report) {
     case "/api/admin/call-recordings/commitments/sms": return { commitments: [], enabled: true, has_more: false };
     case "/api/admin/customer-geocodes": return { enabled: false };
     case "/api/admin/bid-desk/": return { bids };
+    case "/api/admin/payers": return { payers: [] };
+    case "/api/admin/communications/numbers": return { numbers: [] };
+    case "/api/admin/document-templates": return { templates: [] };
     default: return undefined;
   }
 }
@@ -81,6 +105,22 @@ async function screenshot(page, report, name) {
   report.screenshots.push(filename);
 }
 
+async function captureFailure(page, report, error) {
+  report.failure = {
+    message: error?.message || String(error),
+    url: page.url(),
+    ...(await page.evaluate(() => ({
+      readyState: document.readyState,
+      title: document.title,
+      bodyText: (document.body?.innerText || "").slice(0, 4000),
+      adminMain: document.getElementById("admin-main")?.innerText.slice(0, 2000) || "",
+    })).catch((diagnosticError) => ({ diagnosticError: diagnosticError.message }))),
+  };
+  await screenshot(page, report, "failure").catch((screenshotError) => {
+    report.failure.screenshotError = screenshotError.message;
+  });
+}
+
 async function columns(page, report, label, optional, selector) {
   const toolbar = page.getByRole("region", { name: `${label} controls`, exact: true });
   const trigger = toolbar.getByRole("button", { name: "Columns", exact: true });
@@ -101,9 +141,9 @@ async function columns(page, report, label, optional, selector) {
 }
 
 async function exerciseCustomers(page, server, report) {
-  await page.goto(`${server.baseUrl}/admin/customers`);
+  await page.goto(`${server.baseUrl}/admin/customers`, { waitUntil: "commit" });
   const customerSearch = page.getByRole("searchbox", { name: "Customers search" });
-  await customerSearch.waitFor();
+  await customerSearch.waitFor({ timeout: 120000 });
   await page.getByRole("button", { name: "Open Customer Example 001 customer profile", exact: true }).waitFor();
   await waitForFonts(page);
   report.geometry.push(await geometry(page, "Customers"));
@@ -138,9 +178,9 @@ async function exerciseCustomers(page, server, report) {
 }
 
 async function exerciseBids(page, server, report) {
-  await page.goto(`${server.baseUrl}/admin/bids`);
+  await page.goto(`${server.baseUrl}/admin/bids`, { waitUntil: "commit" });
   const bidSearch = page.getByRole("searchbox", { name: "Bid Desk search" });
-  await bidSearch.waitFor();
+  await bidSearch.waitFor({ timeout: 120000 });
   await page.getByRole("button", { name: "Open Example project 001", exact: true }).waitFor();
   await waitForFonts(page);
   report.geometry.push(await geometry(page, "Bid Desk"));
@@ -175,6 +215,287 @@ async function exerciseBids(page, server, report) {
   assert.equal(await page.getByRole("searchbox", { name: "Bid Desk search" }).count(), 0, "Bid fallback hides shared controls");
 }
 
+const savedViewSpecs = {
+  customers: { label: "Customers", path: "/admin/customers", optional: "Property", column: '.customer-directory-table th[data-column="property"]', row: "Open Customer Example 026 customer profile", record: "Open Customer Example 032 customer profile", total: "3", away: "Bids" },
+  bids: { label: "Bid Desk", path: "/admin/bids", optional: "Buyer", column: '.bid-desk-table td[data-label="Buyer"]', row: "Open Example project 026", record: "Open Example project 032", total: "2", away: "Customers" },
+};
+
+async function assertScroll(page, top, storageKey, stage) {
+  try {
+    await page.waitForFunction((expected) => Math.abs(document.getElementById("admin-main").scrollTop - expected) < 2, top);
+  } catch (error) {
+    const state = await page.locator("#admin-main").evaluate((node, key) => ({
+      actual: node.scrollTop,
+      maximum: node.scrollHeight - node.clientHeight,
+      stored: JSON.parse(localStorage.getItem(key) || "null")?.current?.scrollTop,
+    }), storageKey);
+    throw new Error(`Scroll restore failed at ${stage}: expected ${top}, actual ${state.actual}, stored ${state.stored}, maximum ${state.maximum}`, { cause: error });
+  }
+}
+
+async function recordScroll(page, report, storageKey, stage) {
+  const state = await page.locator("#admin-main").evaluate((node, input) => ({
+    stage: input.stage,
+    actual: node.scrollTop,
+    maximum: node.scrollHeight - node.clientHeight,
+    stored: JSON.parse(localStorage.getItem(input.key) || "null")?.current?.scrollTop,
+  }), { key: storageKey, stage });
+  report.scrollTrace = [...(report.scrollTrace || []), state];
+}
+
+async function openViews(page, label) {
+  await page.getByRole("button", { name: `${label} saved views`, exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: `${label} saved views`, exact: true });
+  await dialog.waitFor();
+  return dialog;
+}
+
+async function exerciseSavedViews(page, context, server, report, kind) {
+  const spec = savedViewSpecs[kind], url = `${server.baseUrl}${spec.path}?savedViews=1`;
+  const storageKey = `waves_admin_table_views:v1:fixture-admin:admin:${kind}`;
+  const readinessStartedAt = Date.now();
+  await page.goto(url, { waitUntil: "commit" });
+  const search = page.getByRole("searchbox", { name: `${spec.label} search`, exact: true });
+  const toolbar = page.getByRole("region", { name: `${spec.label} controls`, exact: true });
+  const pager = page.getByRole("navigation", { name: `${spec.label} pagination`, exact: true });
+  // A fresh Vite process must transform the full admin module graph before
+  // React can issue its first fixture request. Keep later interaction waits
+  // strict, but give that one observable startup boundary its own budget.
+  await search.waitFor({ timeout: 120000 });
+  report.readiness = { ...report.readiness, [kind]: Date.now() - readinessStartedAt };
+  await search.fill("Example");
+  await pager.getByRole("combobox").selectOption("25");
+  await pager.getByText(`Page 1 of ${spec.total}`, { exact: true }).waitFor();
+  await toolbar.getByRole("button", { name: "Columns", exact: true }).click();
+  const columnDialog = page.getByRole("dialog", { name: `${spec.label} columns`, exact: true });
+  await columnDialog.getByRole("checkbox", { name: spec.optional, exact: true }).uncheck();
+  await page.keyboard.press("Escape");
+  await columnDialog.waitFor({ state: "hidden" });
+  await pager.getByRole("button", { name: "Next page", exact: true }).click();
+  await page.getByRole("button", { name: spec.row, exact: true }).waitFor();
+  await pager.getByText(`Page 2 of ${spec.total}`, { exact: true }).waitFor();
+  await waitForFonts(page);
+  const requestsBeforeScroll = report.customerQueries.length;
+  const top = await page.locator("#admin-main").evaluate((node) => {
+    node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 400 }));
+    node.scrollTo({ top: Math.min(400, node.scrollHeight - node.clientHeight), behavior: "instant" });
+    return node.scrollTop;
+  });
+  assert.ok(top > 100, "Fixture supplies a meaningful scroll position");
+  await page.waitForFunction(({ key, top }) => Math.abs(JSON.parse(localStorage.getItem(key)).current.scrollTop - top) < 2, { key: storageKey, top });
+  assert.equal(report.customerQueries.length, requestsBeforeScroll, "Scrolling does not refetch Customers");
+  await page.reload();
+  await pager.getByText(`Page 2 of ${spec.total}`, { exact: true }).waitFor();
+  await page.getByRole("button", { name: spec.row, exact: true }).waitFor();
+  assert.equal(await search.inputValue(), "Example");
+  assert.equal(await pager.getByRole("combobox").inputValue(), "25");
+  assert.equal(await page.locator(spec.column).count(), 0);
+  await assertScroll(page, top, storageKey, `${kind} reload`);
+  await screenshot(page, report, `${kind}-restored`);
+
+  // Open an actual record and return. The record's own scrolling must not
+  // replace the position saved for this list.
+  const row = page.getByRole("button", { name: spec.record, exact: true });
+  await row.evaluate((node) => node.scrollIntoView({ block: "center", behavior: "instant" }));
+  const beforeRecord = await page.locator("#admin-main").evaluate((node) => node.scrollTop);
+  assert.ok(beforeRecord > 100, "Record-return proof starts at a meaningful list position");
+  await page.waitForFunction(({ key, top: expected }) => {
+    const saved = JSON.parse(localStorage.getItem(key) || "null")?.current?.scrollTop;
+    return Math.abs(saved - expected) < 2;
+  }, { key: storageKey, top: beforeRecord });
+  await recordScroll(page, report, storageKey, `${kind} before record`);
+  await row.evaluate((node, key) => {
+    globalThis.__tableViewPointer = null;
+    node.addEventListener("pointerdown", () => {
+      const main = document.getElementById("admin-main");
+      globalThis.__tableViewPointer = {
+        stage: "record pointerdown",
+        actual: main.scrollTop,
+        maximum: main.scrollHeight - main.clientHeight,
+        stored: JSON.parse(localStorage.getItem(key) || "null")?.current?.scrollTop,
+      };
+    }, { capture: true, once: true });
+  }, storageKey);
+  await row.click();
+  if (kind === "customers") await page.getByRole("tab", { name: "Details", exact: true }).waitFor();
+  else await page.getByRole("button", { name: "Close", exact: true }).waitFor();
+  report.scrollTrace.push(await page.evaluate(() => globalThis.__tableViewPointer));
+  await recordScroll(page, report, storageKey, `${kind} record visible`);
+  await page.locator("#admin-main").evaluate((node) => node.scrollTo({ top: 200, behavior: "instant" }));
+  await recordScroll(page, report, storageKey, `${kind} record scrolled`);
+  await page.getByRole("button", { name: kind === "customers" ? "All customers" : "Close", exact: true }).click();
+  await pager.getByText(`Page 2 of ${spec.total}`, { exact: true }).waitFor();
+  await recordScroll(page, report, storageKey, `${kind} list visible`);
+  await assertScroll(page, beforeRecord, storageKey, `${kind} record return`);
+
+  // Exercise a real shell link and browser Back, including the shell's own
+  // pathname scroll reset and a new table component instance.
+  // A phone has no side menu (owner 2026-10-29): a bottom tab goes straight
+  // there, any other page through page search, so Back returns to this table.
+  let finder;
+  if (report.width === 390) {
+    const tab = page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: spec.away, exact: true });
+    if (await tab.count()) await tab.click();
+    else {
+      await page.getByRole("button", { name: "Search pages", exact: true }).click();
+      finder = page.getByRole("dialog", { name: "Go to a page", exact: true });
+      await finder.getByRole("searchbox").fill(spec.away);
+      await finder.getByRole("link", { name: new RegExp(`^${spec.away}`) }).first().click();
+    }
+  } else {
+    await page.getByRole("link", { name: spec.away, exact: true }).click();
+  }
+  await page.waitForURL((location) => location.pathname !== spec.path);
+  if (finder) await finder.waitFor({ state: "hidden" });
+  await page.goBack();
+  await search.waitFor();
+  await pager.getByText(`Page 2 of ${spec.total}`, { exact: true }).waitFor();
+  await assertScroll(page, beforeRecord, storageKey, `${kind} route return`);
+
+  // A second tab starts before the save, reproducing the stale-catalog case.
+  const other = await context.newPage();
+  other.on("pageerror", (error) => report.errors.push(error.message));
+  await other.goto(url);
+  const otherSearch = other.getByRole("searchbox", { name: `${spec.label} search`, exact: true });
+  await otherSearch.waitFor();
+  await other.getByRole("navigation", { name: `${spec.label} pagination`, exact: true })
+    .getByText(`Page 2 of ${spec.total}`, { exact: true }).waitFor();
+  await other.getByRole("button", { name: spec.row, exact: true }).waitFor();
+  const dialog = await openViews(page, spec.label);
+  await dialog.getByRole("textbox", { name: "View name", exact: true }).fill("Working list");
+  await screenshot(page, report, `${kind}-save-view`);
+  await dialog.getByRole("button", { name: "Save current view", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  await pager.getByText(`Page 2 of ${spec.total}`, { exact: true }).waitFor();
+  await otherSearch.fill("No matching sample");
+  assert.equal(await otherSearch.inputValue(), "No matching sample");
+  await pager.getByRole("combobox").selectOption("50");
+  await search.fill("No matching sample");
+  await openViews(page, spec.label);
+  await dialog.getByRole("combobox", { name: `${spec.label} saved view`, exact: true }).selectOption({ label: "Working list" });
+  await dialog.getByRole("button", { name: "Use view", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  await pager.getByText(`Page 1 of ${spec.total}`, { exact: true }).waitFor();
+  await page.getByRole("button", {
+    name: kind === "customers" ? "Open Customer Example 001 customer profile" : "Open Example project 001", exact: true,
+  }).waitFor();
+  assert.equal(await pager.getByRole("combobox").inputValue(), "25");
+  assert.equal(await search.inputValue(), "Example");
+  assert.equal(await page.locator(spec.column).count(), 0);
+  report.geometry.push(await geometry(page, spec.label));
+  await screenshot(page, report, `${kind}-applied-view`);
+  await openViews(page, spec.label);
+  await dialog.getByRole("combobox").selectOption({ label: "Working list" });
+  await dialog.getByRole("button", { name: "Delete view", exact: true }).click();
+  await dialog.getByText("View deleted.", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await otherSearch.fill("Example");
+  const otherDialog = await openViews(other, spec.label);
+  await otherDialog.getByText("No saved views yet.", { exact: true }).waitFor();
+  await openViews(page, spec.label);
+  await dialog.getByRole("textbox", { name: "View name", exact: true }).fill("Concurrent first");
+  await otherDialog.getByRole("textbox", { name: "View name", exact: true }).fill("Concurrent second");
+  const firstSave = dialog.getByRole("button", { name: "Save current view", exact: true });
+  const secondSave = otherDialog.getByRole("button", { name: "Save current view", exact: true });
+  await Promise.all([firstSave.click({ trial: true }), secondSave.click({ trial: true })]);
+
+  // Keep a real catalog readwrite transaction active. The chained reads hold
+  // the object store's transaction queue until the harness explicitly stops
+  // adding requests, so both tabs contend on the same primitive as production.
+  await other.evaluate(({ databaseName, storeName, key }) => new Promise((ready, reject) => {
+    const open = indexedDB.open(databaseName);
+    open.onerror = () => reject(open.error || new Error("Catalog database did not open"));
+    open.onsuccess = () => {
+      const database = open.result;
+      let released = false;
+      let transaction;
+      try {
+        transaction = database.transaction(storeName, "readwrite");
+      } catch (error) {
+        database.close();
+        reject(error);
+        return;
+      }
+      const store = transaction.objectStore(storeName);
+      const completed = new Promise((resolveComplete, rejectComplete) => {
+        transaction.oncomplete = () => { database.close(); resolveComplete(); };
+        transaction.onabort = () => {
+          database.close();
+          rejectComplete(transaction.error || new Error("Held catalog transaction aborted"));
+        };
+      });
+      globalThis.releaseCatalogTransaction = () => { released = true; return completed; };
+      const keepAlive = () => {
+        const read = store.get(key);
+        read.onsuccess = () => { if (!released) keepAlive(); };
+      };
+      keepAlive();
+      ready();
+    };
+  }), { databaseName: "waves-admin-table-views", storeName: "catalogs", key: storageKey });
+  await Promise.all([
+    firstSave.click(),
+    secondSave.click(),
+  ]);
+  await Promise.all([
+    page.waitForFunction(() => [...document.querySelectorAll("button")]
+      .some((button) => button.textContent.trim() === "Save current view" && button.disabled)),
+    other.waitForFunction(() => [...document.querySelectorAll("button")]
+      .some((button) => button.textContent.trim() === "Save current view" && button.disabled)),
+  ]);
+  assert.equal(await dialog.isVisible(), true, "First save stays pending behind the catalog transaction");
+  assert.equal(await otherDialog.isVisible(), true, "Second save stays pending behind the catalog transaction");
+  assert.equal(await firstSave.isDisabled(), true);
+  assert.equal(await secondSave.isDisabled(), true);
+  await other.evaluate(() => globalThis.releaseCatalogTransaction());
+  await Promise.all([dialog.waitFor({ state: "hidden" }), otherDialog.waitFor({ state: "hidden" })]);
+  const verifier = await context.newPage();
+  verifier.on("pageerror", (error) => report.errors.push(error.message));
+  await verifier.goto(url);
+  await verifier.getByRole("searchbox", { name: `${spec.label} search`, exact: true }).waitFor();
+  const durableNames = await verifier.evaluate(({ databaseName, storeName, key }) => new Promise((resolve, reject) => {
+    const open = indexedDB.open(databaseName);
+    open.onupgradeneeded = () => open.transaction.abort();
+    open.onerror = () => reject(open.error || new Error("Catalog database did not reopen"));
+    open.onsuccess = () => {
+      const database = open.result;
+      try {
+        const transaction = database.transaction(storeName, "readonly");
+        const read = transaction.objectStore(storeName).get(key);
+        let names = [];
+        read.onsuccess = () => {
+          names = Array.isArray(read.result?.views)
+            ? read.result.views.map((view) => view.name).sort()
+            : [];
+        };
+        transaction.oncomplete = () => { database.close(); resolve(names); };
+        transaction.onabort = () => { database.close(); reject(transaction.error || read.error); };
+      } catch (error) {
+        database.close();
+        reject(error);
+      }
+    };
+  }), { databaseName: "waves-admin-table-views", storeName: "catalogs", key: storageKey });
+  assert.deepEqual(durableNames, ["Concurrent first", "Concurrent second"]);
+  await verifier.close();
+  await other.close();
+
+  report.userId = "fixture-other-admin";
+  await page.reload();
+  await search.waitFor();
+  assert.equal(await search.inputValue(), "", "A different verified account starts with its own defaults");
+  assert.equal(await pager.getByRole("combobox").inputValue(), "100");
+  await openViews(page, spec.label);
+  await dialog.getByText("No saved views yet.", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  report.userId = "fixture-admin";
+  await page.goto(`${server.baseUrl}${spec.path}`);
+  await search.waitFor();
+  assert.equal(await search.inputValue(), "", "Default-off route does not restore preview preferences");
+  assert.equal(await page.getByRole("button", { name: `${spec.label} saved views`, exact: true }).count(), 0);
+  report.savedViews = { ...report.savedViews, [kind]: { reload: true, recordReturn: true, routeReturn: true, namedViews: true, crossTab: true, concurrentSaves: true, accountIsolation: true, previewOff: true } };
+}
+
 (async () => {
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), passed: false, scenarios: [] };
@@ -192,13 +513,22 @@ async function exerciseBids(page, server, report) {
           const page = await context.newPage();
           page.setDefaultTimeout(15000);
           page.setDefaultNavigationTimeout(60000);
-          await page.addInitScript(() => {
+          await context.addInitScript(() => {
             localStorage.setItem("waves_admin_token", "synthetic-local-token");
             localStorage.setItem("waves_admin_user", JSON.stringify({ id: "fixture-admin", role: "admin", name: "Fixture operator" }));
             if (navigator.serviceWorker) navigator.serviceWorker.register = async () => ({ scope: "synthetic" });
+            Object.defineProperty(navigator, "sendBeacon", { configurable: true, value: () => true });
+            const browserFetch = globalThis.fetch.bind(globalThis);
+            globalThis.fetch = (resource, options) => {
+              const requestUrl = typeof resource === "string" ? resource : resource.url;
+              if (new URL(requestUrl, location.origin).pathname === "/api/admin/usage/track") {
+                return Promise.resolve(new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }));
+              }
+              return browserFetch(resource, options);
+            };
           });
           page.on("pageerror", (error) => scenario.errors.push(error.message));
-          await page.route("**/*", (route) => {
+          await context.route("**/*", (route) => {
             const request = route.request(), url = new URL(request.url());
             if (url.origin !== server.baseUrl || url.pathname.startsWith("/socket.io")) return route.abort();
             if (!url.pathname.startsWith("/api/")) return route.continue();
@@ -206,10 +536,20 @@ async function exerciseBids(page, server, report) {
             if (body === undefined) scenario.unmatched.push(`${request.method()} ${url.pathname}`);
             return route.fulfill({ status: body === undefined ? 404 : 200, contentType: "application/json", body: JSON.stringify(body ?? { error: "Unexpected synthetic request" }) });
           });
-          if (checkCustomers) await exerciseCustomers(page, server, scenario);
-          if (checkBids) await exerciseBids(page, server, scenario);
-          assert.deepEqual(scenario.errors, []);
-          assert.deepEqual(scenario.unmatched, []);
+          try {
+            if (savedViewsScenario) {
+              if (checkCustomers) await exerciseSavedViews(page, context, server, scenario, "customers");
+              if (checkBids) await exerciseSavedViews(page, context, server, scenario, "bids");
+            } else {
+              if (checkCustomers) await exerciseCustomers(page, server, scenario);
+              if (checkBids) await exerciseBids(page, server, scenario);
+            }
+            assert.deepEqual(scenario.errors, []);
+            assert.deepEqual(scenario.unmatched, []);
+          } catch (error) {
+            await captureFailure(page, scenario, error);
+            throw error;
+          }
           await context.close();
         }
       } finally { await browser.close(); }

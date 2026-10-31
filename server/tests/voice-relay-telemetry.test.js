@@ -696,7 +696,7 @@ describe('version stamps', () => {
   test('no profile ⇒ null profile id and the env default voice', () => {
     const stamps = new RelayConversation({ callSid: 'CA-v-2', from: '+19415551234', send: jest.fn() })._versionStamps();
     expect(stamps.relay_profile_id).toBeNull();
-    expect(stamps.voice_id).toBe('21m00Tcm4TlvDq8ikWAM');
+    expect(stamps.voice_id).toBe('g7LVvkPWALzPxOQbF6OE');
     expect(stamps.stt_language).toBe('en-US');
   });
 

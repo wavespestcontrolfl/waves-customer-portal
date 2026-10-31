@@ -4,7 +4,7 @@
 // block, what stays the same); a legacy notice keeps the original page.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -26,7 +26,7 @@ function renderWith(body) {
 
 const legacy = { firstName: 'Testcust', currentPrice: '$39', newPrice: '$42', cadenceLabel: 'month', effectiveDate: 'December 10, 2026', supportPhone: '(941) 555-0100' };
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('PriceChangeNoticePage v2', () => {
   it('renders an annual rate review notice from the frozen letter', async () => {
@@ -66,32 +66,6 @@ describe('PriceChangeNoticePage v2', () => {
   it('a legacy notice keeps the original page', async () => {
     renderWith(legacy);
     expect(await screen.findByRole('heading', { level: 1, name: 'An update to your recurring service' })).toBeInTheDocument();
-  });
-
-  it('uses a factual fallback title when a sparse review has no rate lines', async () => {
-    renderWith({ ...legacy, review: { costBlock: '', hasPrepay: false, lines: [] } });
-    expect(await screen.findByRole('heading', { level: 1, name: 'Your rates are changing' })).toBeInTheDocument();
-    expect(document.body.textContent).not.toContain('undefined');
-  });
-
-  it('renders the notice as a printable Field document while keeping controls outside it', async () => {
-    const print = vi.fn();
-    vi.stubGlobal('print', print);
-    renderWith(legacy);
-
-    const title = await screen.findByRole('heading', { level: 1, name: 'An update to your recurring service' });
-    const documentBody = title.closest('.waves-field-document-body');
-    expect(documentBody).toHaveClass('field-document-scroll', 'price-change-document');
-    expect(within(documentBody).getAllByText('Waves Pest Control').length).toBeGreaterThan(0);
-    expect(within(documentBody).getAllByText('Price change notice').length).toBeGreaterThan(0);
-
-    const tools = screen.getByRole('region', { name: 'Document tools' });
-    expect(documentBody).not.toContainElement(tools);
-    expect(tools.parentElement).toHaveClass('waves-field-no-print');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Download PDF' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Print' }));
-    expect(print).toHaveBeenCalledTimes(2);
   });
 
   it.each([

@@ -296,6 +296,17 @@ describe('manual reconcile atomicity', () => {
     }));
   });
 
+  test('a part payment that commits while the reconcile waits for its lock is seen on the locked row: 409, nothing booked', async () => {
+    // The pre-lock read owed $100; the office recorded a $40 part payment before this transaction got the invoice. Booking the old
+    // $100 and zeroing amount_paid would collect the part twice (pre-push P0).
+    db.__state.onLock = (staged) => { staged.invoice.amount_paid = 40; };
+    const { status, body } = await post('/api/admin/payments-reconcile/reconcile', { invoiceId: 'inv-1', collectedVia: 'cash' });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/changed to \$60\.00 while it was being reconciled/);
+    expect(db.__state.invoice.status).not.toBe('paid');
+    expect(db.__state.payments).toHaveLength(0);
+  });
+
   test('an active payment plan completes on the SAME trx as the reconcile settlement', async () => {
     db.__state.paymentPlans = [
       { id: 'plan-1', invoice_id: 'inv-1', status: 'active' },

@@ -77,6 +77,10 @@ function chain({ result = [], first, returning } = {}) {
 }
 function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
+  // runPending always opens with the reopened-invoice revival read on
+  // `invoice_followup_sequences as s` (nothing to revive here), then the batch.
+  const batch = tableQueues.get('invoice_followup_sequences as s');
+  if (batch) tableQueues.set('invoice_followup_sequences as s', [chain({ result: [] }), ...batch]);
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
     if ((!queue || !queue.length) && table === 'customer_dunning_schedules') return chain({ result: [] });

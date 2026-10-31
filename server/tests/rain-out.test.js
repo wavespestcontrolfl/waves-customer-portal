@@ -320,6 +320,172 @@ describe('rain-out service', () => {
     });
   });
 
+  // Owner 2026-10-28: techs move visits from their own app. Behind
+  // GATE_TECH_MOVE_ROUTE_TIMES the "Later today" choices are the hours the
+  // technician's route can keep, each with its added drive minutes.
+  describe('getOptions: route-checked same-day hours (GATE_TECH_MOVE_ROUTE_TIMES)', () => {
+    const findTime = require('../services/scheduling/find-time');
+    const blackout = require('../services/scheduling/blackout-dates');
+    const slot = (start, detour, extra = {}) => ({
+      date: '2026-06-11', technician: { id: 'tech-1', name: 'T' }, start_time: start, end_time: start, detour_minutes: detour, ...extra,
+    });
+    let finder;
+    let blackoutSpy;
+    // A visit not under way by default: the stop the tech is at keeps the guesses.
+    const sameDay = async (overrides = {}) => {
+      SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed', ...overrides }) }),
+          chain({ rows: [] }),
+        ],
+      });
+      const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+      expect(options.ok).toBe(true);
+      return options.sameDay;
+    };
+
+    beforeEach(() => {
+      // 14:00Z = 10:00 ET: the guesses are 12:00 and 14:00; the earliest route hour is 11:00.
+      jest.useFakeTimers({ now: new Date('2026-06-11T14:00:00Z') });
+      finder = jest.spyOn(findTime, 'findAvailableSlots').mockResolvedValue({ slots: [] });
+      blackoutSpy = jest.spyOn(blackout, 'isBlackoutDate').mockResolvedValue(false);
+    });
+    afterEach(() => {
+      delete process.env.GATE_TECH_MOVE_ROUTE_TIMES;
+      finder.mockRestore();
+      blackoutSpy.mockRestore();
+      jest.useRealTimers();
+    });
+
+    test('gate off: the +2h and +4h guesses, the finder is never asked', async () => {
+      const options = await sameDay();
+      expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+      expect(options.every((o) => o.driveMinutes === undefined)).toBe(true);
+      expect(finder).not.toHaveBeenCalled();
+    });
+
+    test('gate on: feasible hours with added drive, lowest drive first, at most 4, none before now + 60 min', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [
+        slot('10:00', 1), // starts before now + 60 min (11:00): dropped
+        slot('11:00', 20.4),
+        slot('12:00', 5),
+        slot('13:00', 12.6),
+        slot('13:00', 30), // same hour: the lower drive wins
+        slot('14:00', 5), // ties 12:00 on drive: later start second
+        slot('15:00', 2),
+        slot('16:00', 40),
+        slot('13:30', 0), // not on the hour: dropped
+        slot('17:00', 0), // past the last same-day start: dropped
+        slot('12:00', 0, { date: '2026-06-12' }), // another day: dropped
+      ] });
+      const options = await sameDay();
+      expect(options.map((o) => [o.window.start, o.driveMinutes])).toEqual([['15:00', 2], ['12:00', 5], ['14:00', 5], ['13:00', 13]]);
+      expect(options[0]).toEqual(expect.objectContaining({
+        kind: 'same_day', date: '2026-06-11', window: { start: '15:00', end: '16:00' }, label: 'Later today', display: 'Today, 3:00 PM-4:00 PM',
+      }));
+      // The finder is asked for this visit's technician, today, one-hour blocks, the free estimate only.
+      expect(finder).toHaveBeenCalledWith(expect.objectContaining({
+        technicianId: 'tech-1', dateFrom: '2026-06-11', dateTo: '2026-06-11', durationMinutes: 60,
+        excludeServiceIds: ['svc-1'], arrivalWindow: { serviceId: 'svc-1' }, providerTravel: false,
+        includeWeekends: true,
+        // Every hourly start from the lead-time floor, continuing from the current stop.
+        everyStepStart: true, earliestStartMin: expect.any(Number), fromActiveStop: true,
+      }));
+      expect(finder.mock.calls[0][0].pickerRoadCheck).toBeUndefined();
+    });
+
+    test('gate on: an hour with no drive number is offered last, without driveMinutes', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [slot('11:00', null), slot('12:00', 9)] });
+      const options = await sameDay();
+      expect(options.map((o) => [o.window.start, o.driveMinutes])).toEqual([['12:00', 9], ['11:00', undefined]]);
+    });
+
+    test('gate on: rounds now + 60 min up to the next hour', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      jest.setSystemTime(new Date('2026-06-11T14:10:00Z')); // 10:10 ET: first hour is 12:00
+      finder.mockResolvedValue({ slots: [slot('11:00', 1), slot('12:00', 8)] });
+      const options = await sameDay();
+      expect(options.map((o) => o.window.start)).toEqual(['12:00']);
+    });
+
+    test('gate on: a blackout today offers nothing and never asks the finder', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      blackoutSpy.mockResolvedValue(true);
+      expect(await sameDay()).toEqual([]);
+      expect(finder).not.toHaveBeenCalled();
+    });
+
+    // Codex #6932 r4: the visit's saved service location, as the staff finder reads it.
+    test('gate on: a visit at a secondary property searches from its own pin, not the customer\'s home', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+      await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice', lat: 27.1, lng: -82.3 });
+      expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.1, lng: -82.3 }));
+    });
+
+    test('gate on: a stamped address with no pin is resolved from the geocode cache only', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      const dayStops = require('../services/scheduling/day-stops');
+      const resolve = jest.spyOn(dayStops, 'resolveServiceLocation').mockResolvedValue({ lat: 27.2, lng: -82.35, source: 'address_geocoded_now' });
+      try {
+        finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+        await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice', service_address_zip: '34285' });
+        expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ address_line1: '9 Rental Way', zip: '34285' }), undefined, { cacheOnly: true });
+        expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.2, lng: -82.35 }));
+        // No cached pin: the route cannot be judged, so the guesses stay and no finder runs.
+        resolve.mockResolvedValue({ lat: null, lng: null, source: null });
+        finder.mockClear();
+        const options = await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice' });
+        expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+        expect(finder).not.toHaveBeenCalled();
+      } finally {
+        resolve.mockRestore();
+      }
+    });
+
+    test('gate on: no stamped address searches from the customer\'s pin', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+      await sameDay();
+      expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.4 }));
+    });
+
+    test('gate on: the route is judged full today, so no same-day hour is offered (no unchecked guess)', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [], rejections_by_date: { '2026-06-11': { arrival_window: 2, route_unverified: 1 } } });
+      expect(await sameDay()).toEqual([]);
+    });
+
+    test.each([
+      ['no refusal at all', { slots: [] }],
+      ['only route_unverified refusals', { slots: [], rejections_by_date: { '2026-06-11': { route_unverified: 3 } } }],
+    ])('gate on: no hour with %s, so the route was not judged and the guesses stay', async (_name, answer) => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue(answer);
+      expect((await sameDay()).map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+    });
+
+    test.each(['on_site', 'en_route'])('gate on: moving the stop the tech is at (%s) keeps the guesses and asks no finder', async (status) => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      expect((await sameDay({ status })).map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+      expect(finder).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['throws', () => finder.mockRejectedValue(new Error('boom'))],
+      ['returns an error', () => finder.mockResolvedValue({ error: 'lat/lng required', slots: [] })],
+    ])('gate on: the finder %s, so the +2h and +4h guesses are offered', async (_name, arrange) => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      arrange();
+      const options = await sameDay();
+      expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+      expect(options.every((o) => o.driveMinutes === undefined)).toBe(true);
+    });
+  });
+
   describe('commit — single job', () => {
     function wireSingle() {
       wireDb({
@@ -381,6 +547,21 @@ describe('rain-out service', () => {
       expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1' });
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    // GATE_SAVE_ROAD_BUY: only the admin dispatch route passes a spender; the rebooker
+    // buys the move's road times before its transaction. A technician passes none.
+    test('an admin Quick Move hands the rebooker its staff spender; a technician\'s hands none', async () => {
+      wireSingle();
+      const args = { serviceId: 'svc-1', technicianId: 'tech-1', reasonCode: 'weather_rain', scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } }, notifyCustomer: false };
+      await RainOut.commit({ ...args, roadSpender: 'staff-1' });
+      expect(SmartRebooker.reschedule).toHaveBeenLastCalledWith(
+        'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
+        expect.objectContaining({ overlapAdvisory: true, placeInRoute: true, roadSpender: 'staff-1' }));
+      wireSingle();
+      await RainOut.commit(args);
+      expect(SmartRebooker.reschedule.mock.lastCall[5]).not.toHaveProperty('roadSpender');
     });
 
     test('an ABSENT v2 template row falls back to the legacy row with legacy variables', async () => {
@@ -833,6 +1014,9 @@ describe('rain-out service', () => {
       );
       // Series path replaces the single move entirely.
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      // The shared effects pass owns the board broadcast; callers that emit per
+      // stop (the tech Quick Move route) read this marker and skip the stop.
+      expect(result.results.find((r) => r.id === 'svc-1')).toMatchObject({ ok: true, boardBroadcastBySeriesEffects: true });
       // Sibling effects (reminder sync, board, conflict card) run through the
       // shared durable pass — marker-fenced and reconciled — with the text
       // OFF (Quick Move's own moved-SMS is the customer notice); nothing runs
@@ -860,7 +1044,7 @@ describe('rain-out service', () => {
     // forces every OTHER wantsSeriesShift precondition to be irrelevant: a
     // restricted (technician) caller NEVER takes the series branch, full
     // stop, and always lands on the single-job path with its own CAS.
-    test('a technician-scoped call (requireAssignedTechnicianId set) never takes the series branch even though every other series-shift condition holds', async () => {
+    test('a technician-scoped call (requireAssignedTechnicianId set) never takes the series branch by default, even though every other series-shift condition holds', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
       SmartRebooker.reschedule.mockResolvedValueOnce({ id: 'svc-1', visitMove: null });
@@ -877,6 +1061,41 @@ describe('rain-out service', () => {
           expect: { technician_id: 'tech-1' },
         }),
       );
+    });
+
+    // The tech-portal Quick Move (owner ruling 2026-10-28) keeps the series
+    // shift, fenced to the technician through the series writer's own
+    // expectAnchor (rebooker assertAnchorPin).
+    test('allowSeriesForAssignedTechnician: the series branch stays reachable and its anchor pin carries the technician', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00' }],
+      });
+
+      const result = await RainOut.commit({ ...DAY_MOVE_ARGS, requireAssignedTechnicianId: 'tech-1', allowSeriesForAssignedTechnician: true });
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][5].expectAnchor).toEqual({
+        scheduled_date: '2026-06-11', window_start: '09:00', technician_id: 'tech-1',
+      });
+      expect(result.results[0]).toMatchObject({ id: 'svc-1', ok: true, boardBroadcastBySeriesEffects: true });
+    });
+
+    test('allowSeriesForAssignedTechnician: a series refusal falls back to the single write, which keeps the technician fence and refuses too', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      const stale = Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409 });
+      SmartRebooker.rescheduleSeries.mockRejectedValueOnce(stale);
+      SmartRebooker.reschedule.mockRejectedValueOnce(stale);
+
+      const result = await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true, requireAssignedTechnicianId: 'tech-1', allowSeriesForAssignedTechnician: true });
+
+      expect(result.ok).toBe(false);
+      expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual(expect.objectContaining({ technician_id: 'tech-1' }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
     });
 
     test('gate on: a REPLAYED series result runs the (idempotent) shared effects pass; Quick Move\'s own moved-SMS is CLAIMED on the row first — a winner that already concluded it means no second text', async () => {
@@ -1996,7 +2215,7 @@ describe('rain-out service', () => {
   describe('getOptions', () => {
     test('attaches NWS rain chances to day options and counts the remaining route', async () => {
       SmartRebooker.findRescheduleOptions.mockResolvedValue([
-        { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+        { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120, dayAlreadyLate: true },
         { date: '2026-06-13', displayDate: 'Sat, Jun 13', suggestedWindow: { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' }, score: 100 },
       ]);
       getDailyRainOutlook.mockResolvedValue({
@@ -2017,11 +2236,16 @@ describe('rain-out service', () => {
       expect(SmartRebooker.findRescheduleOptions).toHaveBeenCalledWith(
         // travelGap: the customer-facing sheet applies GATE_SLOT_TRAVEL_GAP;
         // admin reschedule-options stay overlap-only (advisory saves).
-        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true },
+        // caller: GATE_ROUTE_CHECK_STAFF_LISTS buys Google road times for an
+        // admin caller only; this tech caller stays on the estimate.
+        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' } },
       );
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
       expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20 });
+      // GATE_ROUTE_CHECK_LATE_DAYS: the rebooker's already-late mark rides to the sheet; a clean day has no key.
+      expect(options.days[0].dayAlreadyLate).toBe(true);
+      expect(options.days[1]).not.toHaveProperty('dayAlreadyLate');
       // Day options are booked as on-the-hour 1-hour slots, not the rebooker's
       // wider 2-3h suggestedWindow, and the display is re-derived to match.
       expect(options.days[0].window).toEqual({ start: '08:00', end: '09:00' });
@@ -2031,6 +2255,27 @@ describe('rain-out service', () => {
       expect(options.service.hasPhone).toBe(true);
       // Chips hidden in both sheets while the gate is dark.
       expect(options.extraReasonsEnabled).toBe(false);
+    });
+
+    test('passes the caller through for the office route (admin) and the tech route, and none for no caller', async () => {
+      const wire = () => {
+        SmartRebooker.findRescheduleOptions.mockReset().mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+        });
+      };
+      wire();
+      await RainOut.getOptions('svc-1', { caller: { isAdmin: true, technicianId: 'tech-9' } });
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toEqual({ isAdmin: true, technicianId: 'tech-9' });
+      wire();
+      await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toEqual({ isAdmin: false, technicianId: 'tech-1' });
+      wire();
+      await RainOut.getOptions('svc-1');
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toBeNull();
     });
 
     test('each option carries the hourly rain chance for its own window; the day number is only the fallback', async () => {
@@ -2127,7 +2372,7 @@ describe('rain-out service', () => {
       }
     });
 
-    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark; owner
+    // Second technician (GATE_MULTI_TECH_CONFIRM, dark; owner
     // 2026-10-03 "Moves"): commit keeps the visit's technician and the
     // rebooker's probe counts only that route plus unassigned rows, so the
     // sheet's warning must not name the OTHER technician's stop. Gate off:
@@ -4281,5 +4526,39 @@ describe('commit summary — visit-covered members are not separate stops (local
     ]);
     expect(out).toMatchObject({ ok: true, movedCount: 1, coveredCount: 1, failedCount: 1, overlapCount: 1, overlapWarnings: ['w1'] });
     expect(summarizeCommitResults([{ id: 'x', ok: false, error: 'boom' }])).toMatchObject({ ok: false, reason: 'boom', movedCount: 0, coveredCount: 0, failedCount: 1 });
+  });
+});
+
+// Codex #6881 r3: the pickers' Google road times (GATE_PICKER_ROAD_CHECK)
+// are staff-only — the generic slot check asks for them only for an admin,
+// counts them against that admin (picker-road-spend.js), and gives the whole
+// batch ONE budget (pre-push audit: 25 concurrent checks must not each get
+// the per-request limit or buy a shared leg twice).
+describe('checkSlots: paid road times are staff-only', () => {
+  const SERVICE = '11111111-1111-4111-8111-111111111111';
+  const OTHER = '33333333-3333-4333-8333-333333333333';
+  const TECH = '22222222-2222-4222-8222-222222222222';
+  test.each([true, false])('admin caller %s', async (isAdmin) => {
+    const arrival = require('../services/scheduling/arrival-route');
+    const routing = jest.spyOn(arrival, 'arrivalWindowRoutingEnabled').mockReturnValue(true);
+    const check = jest.spyOn(arrival, 'checkArrivalPlacement').mockResolvedValue({ feasible: true });
+    try {
+      const { checkSlots } = require('../services/rain-out');
+      const out = await checkSlots({
+        targets: [SERVICE, OTHER].map((serviceId) => ({ date: '2035-01-02', window: { start: '09:00', end: '10:00' }, serviceId, technicianId: TECH })),
+        caller: { isAdmin, technicianId: TECH },
+      });
+      expect(out.ok).toBe(true);
+      const calls = check.mock.calls.map(([opts]) => opts);
+      expect(calls).toHaveLength(2);
+      // One budget for the whole batch.
+      expect(calls[0].pickerBudget).toMatchObject({ traffic: 0, plain: 0 });
+      expect(calls[1].pickerBudget).toBe(calls[0].pickerBudget);
+      if (isAdmin) expect(calls.every((opts) => opts.roads === true && opts.roadSpender === TECH)).toBe(true);
+      else expect(calls.every((opts) => opts.roads === false && opts.roadSpender === null)).toBe(true);
+    } finally {
+      routing.mockRestore();
+      check.mockRestore();
+    }
   });
 });

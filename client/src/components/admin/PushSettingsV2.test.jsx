@@ -39,3 +39,17 @@ it('blocks saving after a failed preference read, then preserves saved opt-outs 
     method: 'PUT', body: JSON.stringify({ preferences: [...saved.preferences, ...saved.bellCategories] }),
   })));
 });
+
+it('inside Waves Admin, points to iPhone Settings instead of the browser push switch', async () => {
+  window.webkit = { messageHandlers: { wavesAdmin: { postMessage: vi.fn() } } };
+  try {
+    global.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ preferences: [], bellCategories: [] }) }));
+    render(<PushSettingsV2 />);
+    expect(await screen.findByText('Push notifications on this iPhone')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Enable' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Disable' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Send test' })).toBeInTheDocument();
+  } finally {
+    delete window.webkit;
+  }
+});

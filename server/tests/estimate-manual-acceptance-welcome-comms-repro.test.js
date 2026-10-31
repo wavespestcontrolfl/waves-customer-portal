@@ -43,7 +43,8 @@ jest.mock('../services/proposal-win', () => ({
   ensureCustomerForProposalWin: jest.fn(),
   promoteLinkedCustomerForProposalWin: jest.fn(),
   flagProposalCustomerCommercialIfTaxable: jest.fn(),
-  createProposalAcceptanceInvoice: jest.fn(),
+  recordProposalBuildingUse: jest.fn(),
+  assertProposalTermsMatchPayer: jest.fn(),
 }));
 // Post-commit helpers the service lazy-requires; stubbed so the unit test
 // never touches the DB.

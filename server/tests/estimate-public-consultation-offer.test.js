@@ -78,6 +78,11 @@ jest.mock('../config/feature-gates', () => ({
   estimateConsultationOfferLive: () => process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
   leadInspectionLinkLive: () => process.env.GATE_LEAD_INSPECTION_LINK === 'true',
   commercialProposalSignLive: () => false,
+  commercialFirstVisitLive: () => false,
+  estimateAssessmentFirstLive: () => process.env.GATE_ESTIMATE_ASSESSMENT_FIRST === 'true',
+  // The PDF render pass reads both misting layout gates (GATE_MISTING_LAYOUT_DESIGNER); off here.
+  mosquitoMistingLive: () => false,
+  mistingLayoutDesignerLive: () => false,
   estimateConsumerNoticeLive: () => false,
   estimateServiceAgreementLive: () => false,
 }));
@@ -215,6 +220,53 @@ afterAll(() => {
   else process.env.GATE_ESTIMATE_CONSULTATION_OFFER = originalOfferGate;
   if (originalInspectionGate === undefined) delete process.env.GATE_LEAD_INSPECTION_LINK;
   else process.env.GATE_LEAD_INSPECTION_LINK = originalInspectionGate;
+});
+
+// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST): when it is offered it replaces this lead-only
+// offer, and the probe for the old one never runs. The offer's own eligibility is estimate-assessment-public.test.js's.
+describe('GET /:token/data — assessmentFirst replaces the consultation offer', () => {
+  afterEach(() => {
+    delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST;
+    jest.restoreAllMocks();
+  });
+
+  test('gate on and offered: assessmentFirst rides the payload, no consultationOffer and no probe', async () => {
+    process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
+    const offer = jest.spyOn(require('../routes/estimate-assessment-public')._internals, 'assessmentFirstFor')
+      .mockResolvedValue({ url: '/estimate/sampletoken/assessment' });
+    const row = estimateRow();
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`)).json();
+      expect(body.assessmentFirst).toEqual({ url: '/estimate/sampletoken/assessment' });
+      expect(Object.prototype.hasOwnProperty.call(body, 'consultationOffer')).toBe(false);
+      expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
+    });
+    expect(offer.mock.calls[0][1]).toMatchObject({ open: true });
+  });
+
+  test('gate on but nothing to offer: the consultation offer is unchanged', async () => {
+    process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
+    jest.spyOn(require('../routes/estimate-assessment-public')._internals, 'assessmentFirstFor').mockResolvedValue(null);
+    const row = estimateRow();
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`)).json();
+      expect(Object.prototype.hasOwnProperty.call(body, 'assessmentFirst')).toBe(false);
+      expect(body.consultationOffer).toEqual({ url: expect.stringContaining('/inspection/') });
+    });
+  });
+
+  test('gate off: nothing new, and the offer is never asked', async () => {
+    const offer = jest.spyOn(require('../routes/estimate-assessment-public')._internals, 'assessmentFirstFor');
+    const row = estimateRow();
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`)).json();
+      expect(Object.prototype.hasOwnProperty.call(body, 'assessmentFirst')).toBe(false);
+    });
+    expect(offer).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /:token/data — consultationOffer wiring', () => {

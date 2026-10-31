@@ -1985,15 +1985,17 @@ export default function ReviewsPage() {
       {/* ====================== TAB: REVIEWS ====================== */}
       {activeTab === "reviews" && (
         <div>
-          {/* Loading state */}
-          {loading && (
+          {/* Loading + error pages are for the FIRST load only. A refresh (a
+              filter or search change, a visible-page refresh) keeps the list,
+              the filter bar and every unsaved reply editor mounted. */}
+          {loading && !data && (
             <div className="text-ink-secondary p-[60px] text-center text-ui-body">
               Loading reviews...
             </div>
           )}
 
           {/* Error state */}
-          {!loading && error && (
+          {!loading && error && !data && (
             <div className="text-alert-fg p-[60px] text-center">
               {" "}
               <div className="text-ui-body mb-[12px]">
@@ -2009,8 +2011,22 @@ export default function ReviewsPage() {
           )}
 
           {/* Reviews content */}
-          {!loading && !error && data && (
+          {data && (
             <>
+              {!loading && error && (
+                <div
+                  role="alert"
+                  className="border-hairline border-zinc-200 text-alert-fg rounded-md mb-[14px] text-ui-body flex flex-wrap items-center justify-between gap-[8px] p-[12px]"
+                >
+                  <span>
+                    Could not refresh reviews: {error}. The list below is
+                    from the last successful load.
+                  </span>
+                  <Button onClick={loadData} variant="secondary">
+                    Retry
+                  </Button>
+                </div>
+              )}
               {fallbackLocations.length > 0 && (
                 <div className="border-hairline border-zinc-200 text-zinc-900 rounded-md mb-[14px] text-ui-body">
                   {fallbackLocations.map((l) => l.name).join(", ")} currently
@@ -2114,8 +2130,10 @@ export default function ReviewsPage() {
                   placeholder="Search reviews..."
                   className="flex-[1_1_180px] min-w-[160px]"
                 />{" "}
-                <span className="text-ui-body text-ink-secondary">
-                  {filtered.length} review{filtered.length !== 1 ? "s" : ""}
+                <span className="text-ui-body text-ink-secondary" role="status">
+                  {loading
+                    ? "Updating..."
+                    : `${filtered.length} review${filtered.length !== 1 ? "s" : ""}`}
                 </span>{" "}
               </Card>
               {/* Reviews feed */}

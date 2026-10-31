@@ -145,6 +145,62 @@ describe('w2PayrollToCSV', () => {
   });
 });
 
+describe('w2PayrollToCSV with paid time off (GATE_PAYROLL_TIME_OFF)', () => {
+  const second = { ...CHECK, employee_name: 'Sample Second', week_start: '2026-09-21', pay_date: '2026-10-02', regular_minutes: '1200.00', overtime_minutes: '0.00' };
+  const withOff = (check, pto, holiday) => ({ ...check, pto_minutes: pto, holiday_minutes: holiday });
+
+  test('adds Paid Time Off Hours and Holiday Hours right after Overtime Hours, and the totals row foots them', () => {
+    const lines = csv.w2PayrollToCSV([withOff(CHECK, '600.00', '0.00'), withOff(second, '90.50', '480.00')], { timeOff: true }).split('\n');
+    expect(lines[0]).toBe('Employee,Week Start,Week End,Pay Date,Regular Hours,Overtime Hours,Paid Time Off Hours,Holiday Hours,Gross Wages,Federal Income Tax Withheld,Employee Social Security,Employee Medicare (incl. Additional Medicare),Employer Social Security,Employer Medicare,FUTA,Florida Reemployment Tax,Net Pay');
+    expect(lines[1]).toBe('Sample Employee,2026-09-14,2026-09-20,2026-09-25,40.00,1.50,10.00,0.00,1000.00,90.00,62.00,15.00,62.00,14.50,6.00,2.70,833.00');
+    // 90.5 min = 1.508 h -> 1.51; 480 min = 8.00
+    expect(lines[2]).toBe('Sample Second,2026-09-21,2026-09-27,2026-10-02,20.00,0.00,1.51,8.00,1000.00,90.00,62.00,15.00,62.00,14.50,6.00,2.70,833.00');
+    expect(lines[3]).toBe('TOTAL,,,,60.00,1.50,11.51,8.00,2000.00,180.00,124.00,30.00,124.00,29.00,12.00,5.40,1666.00');
+    expect(lines[0].split(',')).toHaveLength(lines[3].split(',').length);
+  });
+
+  test('a check without time-off figures reads as zero hours; no checks gives zero totals', () => {
+    const lines = csv.w2PayrollToCSV([CHECK], { timeOff: true }).split('\n');
+    expect(lines[1].split(',').slice(4, 8)).toEqual(['40.00', '1.50', '0.00', '0.00']);
+    expect(csv.w2PayrollToCSV([], { timeOff: true }).split('\n')[1]).toBe('TOTAL,,,,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00');
+  });
+
+  test('gate off (no option, or false) is byte for byte today\'s, even when a row carries time off', () => {
+    const plain = csv.w2PayrollToCSV([CHECK, second]);
+    expect(csv.w2PayrollToCSV([withOff(CHECK, '600.00', '60.00'), second], { timeOff: false })).toBe(plain);
+    expect(csv.w2PayrollToCSV([CHECK, second], {})).toBe(plain);
+    expect(plain).not.toMatch(/Paid Time Off|Holiday/);
+  });
+});
+
+describe('loadFinalizedW2Checks columns', () => {
+  const { loadFinalizedW2Checks, W2_CHECK_COLUMNS } = require('../services/tax-package-w2');
+  const fakeConn = () => {
+    const seen = {};
+    const chain = new Proxy(() => {}, {
+      get: (_t, key) => {
+        if (key === 'then') return undefined;
+        if (key === 'select') return (...cols) => { seen.cols = cols; return Promise.resolve([]); };
+        return () => chain;
+      },
+    });
+    const conn = () => chain;
+    conn.raw = (sql) => sql;
+    return { conn, seen };
+  };
+
+  test('reads pto_minutes and holiday_minutes only with the time-off option; the shared column list is unchanged', async () => {
+    const off = fakeConn();
+    await loadFinalizedW2Checks(off.conn, '2026-01-01', '2026-12-31');
+    expect(off.seen.cols.filter((c) => /pto|holiday/.test(String(c)))).toEqual([]);
+    const on = fakeConn();
+    await loadFinalizedW2Checks(on.conn, '2026-01-01', '2026-12-31', { timeOff: true });
+    expect(on.seen.cols).toEqual(expect.arrayContaining(['pto_minutes', 'holiday_minutes']));
+    expect(W2_CHECK_COLUMNS).not.toContain('pto_minutes');
+    expect(W2_CHECK_COLUMNS).not.toContain('holiday_minutes');
+  });
+});
+
 describe('generateReadme', () => {
   test('gate off is today\'s text', () => {
     const off = csv.generateReadme(2026, null);

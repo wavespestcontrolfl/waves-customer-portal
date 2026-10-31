@@ -135,11 +135,9 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/customer-dunning/send.js', // GATED: the customer-level schedule (invoice_followup_customer); send-now passes holdExempt 'operator'
       'services/invoice-followups.js', // GATED: Day 3-90 ladder (invoice_followup_sequence); send-now passes holdExempt 'operator'
       'services/invoice.js', // EXEMPT: the invoice sender itself (invoice_send_via_sms): its own default-on hold check
-      'services/late-payment-checker.js', // GATED: late_payment_checker / late_payment_checker_microdeposit
       'services/messaging/billing-text-verdict.js', // NOT A SENDER: the #5440 visit-summary fold's yes/no verdict (policy lookup keys). The text that carries the pay link is visit-completion-summary.js, gated below
       'services/previsit-balance-reminder.js', // GATED: previsit_balance_reminder
       'services/price-change-notices.js', // EXEMPT: an operator-confirmed price-change notice, no pay link
-      'services/workflows/balance-reminder.js', // GATED: balance_reminder_workflow / balance_reminder_late_payment_check
     ]);
   });
 
@@ -173,7 +171,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     ]);
     // thank-you / receipt texts carry no pay link (a payment was just received)
     const NON_PAY_LINK_ENTRY_POINTS = ['invoice_followup_thank_you', 'balance_reminder_payment_received'];
-    for (const file of ['services/customer-dunning/send.js', 'services/invoice-followups.js', 'services/late-payment-checker.js',
+    for (const file of ['services/customer-dunning/send.js', 'services/invoice-followups.js',
       'services/previsit-balance-reminder.js', 'services/workflows/balance-reminder.js']) {
       const literals = [...read(file).matchAll(/entryPoint:\s*['"]([a-z_]+)['"]/g)].map((m) => m[1]);
       expect(literals.length).toBeGreaterThan(0);
@@ -181,9 +179,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
         expect([file, [...gated, ...NON_PAY_LINK_ENTRY_POINTS].includes(literal)]).toEqual([file, true]);
       }
     }
-    // late-payment-checker passes its entry point through a variable: every value it is given is gated
-    const checkerValues = [...read('services/late-payment-checker.js').matchAll(/entryPoint:\s*'([a-z_]+)'/g)].map((m) => m[1]);
-    expect(checkerValues.sort()).toEqual(['late_payment_checker', 'late_payment_checker_microdeposit']);
   });
 
   test('every file that consults the rail guard for a billing reminder is classified', () => {
@@ -191,11 +186,9 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/billing-reminder-delivery.js', // gated via its senders' boundaries; a suppressed leg is RELEASED (no failed row), episode stays open
       'services/collections/outbound-voice/collections-conversation.js', // EXEMPT: customer-requested pay link (holdExempt 'customer')
       'services/invoice-followups.js', // GATED (early consult + both boundaries); send-now = holdExempt 'operator'
-      'services/late-payment-checker.js', // GATED
       'services/messaging/billing-email-replay-eligibility.js', // replay eligibility: waits with holdDefer
       'services/messaging/deferred-replay-registry.js', // queued replays: disputeHoldRecheck waits (retryAt), sends after release
       'services/previsit-balance-reminder.js', // GATED
-      'services/workflows/balance-reminder.js', // GATED
     ]);
   });
 
@@ -205,9 +198,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/customer-dunning/schedule.js', // verdict helper only (isTerminalEmailRefusal, for the told / held disposition)
       'services/customer-dunning/send.js', // verdict helper only (isTerminalEmailRefusal)
       'services/invoice-followups.js', // verdict helpers only
-      'services/late-payment-checker.js', // verdict helpers only
       'services/previsit-balance-reminder.js', // sendReminderChannels: a suppressed leg is released, episode stays open
-      'services/workflows/balance-reminder.js', // sendReminderChannels: same
     ]);
   });
 
@@ -216,9 +207,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     const dunning = Hold.HOLD_GATED_DUNNING_EMAIL_TEMPLATES;
     expect(dunning).toBe(require('../services/billing-email-no-replay').SENDER_RENDERED_TEMPLATES);
     for (const templateKey of Object.values(InvoiceFollowUps.FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID)) expect(dunning.has(templateKey)).toBe(true);
-    const balanceKeys = [...read('services/workflows/balance-reminder.js').matchAll(/templateKey:\s*"(billing_late_payment_\d+_day)"/g)].map((m) => m[1]);
-    expect(balanceKeys).toHaveLength(5);
-    for (const templateKey of balanceKeys) expect(dunning.has(templateKey)).toBe(true);
     expect(read('services/microdeposit-verification-email.js')).toMatch(/TEMPLATE_KEY = 'payment\.microdeposit_verification'/);
     expect(dunning.has('payment.microdeposit_verification')).toBe(true);
     expect(read('services/previsit-balance-reminder.js')).toMatch(/EMAIL_TEMPLATE_KEY = 'billing\.previsit_balance'/);
@@ -257,7 +245,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/invoice-email.js', // the invoice email itself: its own provider-boundary hold check
       'services/invoice-followups.js', // GATED by template
       'services/microdeposit-verification-email.js', // GATED by template
-      'services/workflows/balance-reminder.js', // GATED by template
     ]);
   });
 
@@ -266,9 +253,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     const RELEASES = {
       'services/billing-reminder-delivery.js': /isHoldSuppression\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(entry\)/,
       'services/invoice-followups.js': /heldByDisputeHold\(sendResult\)[\s\S]{0,400}releaseHeldReservation\(smsLedger\)/,
-      'services/late-payment-checker.js': /isHoldSuppression\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(ledger\)/,
       'services/previsit-balance-reminder.js': /isHoldSuppression\(result\)\) await ContactLedger\.releaseHeldReservation\(smsLedger\)/,
-      'services/workflows/balance-reminder.js': /isHoldSuppression\(sendResult\)\) \{[\s\S]{0,400}releaseHeldReservation\(ledgerEntry\)/,
     };
     for (const [file, pattern] of Object.entries(RELEASES)) expect([file, pattern.test(read(file))]).toEqual([file, true]);
     expect(read('services/invoice-followups.js')).toMatch(/if \(heldByDisputeHold\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(ledger\);\s*return true;/);
@@ -295,9 +280,15 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
       'services/completion-balance-sweep.js', // off-session charge sweep
       'services/customer-credit.js', // account-credit auto-apply (D9): a money lane
       'services/intelligence-bar/billing-reader-tools.js', // read-only owner reporting: names an active dispute hold; sends and charges nothing
+      'services/invoice-followups.js', // Auto Pay hold charge mode (GATE_AUTOPAY_HOLD_TIMEOUT=charge): its charge candidates mirror the charge's dispute-only refusal; the reminder ladder reads the messaging predicate (pinned below)
       'services/termite-annual-renewal-charge.js', // renewal charge / lapse / withdrawal (its pay-link legs read the messaging predicate)
       'services/termite-annual-signature-charge.js', // signature charge
     ]);
+    // invoice-followups.js is a messaging module too: the dispute-only readers stay in its two charge-mode checks
+    // (the charge-mode candidate rule in staleAutopayHoldClause and disputeHoldBlocksCharge before the quote), so a
+    // new read anywhere else in the file fails here until it is classified.
+    expect(read('services/invoice-followups.js').match(/customerHasActiveCollectionHold\w*|collectionHoldInvoiceIds|disputeHoldExistsSql|activeDisputeHolds/g))
+      .toEqual(['disputeHoldExistsSql', 'customerHasActiveCollectionHoldChecked']);
   });
 
   test('the old dispute-only messaging name is gone: one shared predicate, messagingHeldByCollectionHold', () => {

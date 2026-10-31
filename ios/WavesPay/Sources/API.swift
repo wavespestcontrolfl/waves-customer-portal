@@ -12,6 +12,15 @@ enum API {
         return URL(string: s)!
     }
 
+    // The portal the staff pages load from: the API base without its path
+    // (https://portal.wavespestcontrol.com/api → https://portal.wavespestcontrol.com).
+    static var portalOrigin: URL {
+        var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)!
+        comps.path = ""
+        comps.query = nil
+        return comps.url!
+    }
+
     struct ValidatedHandoff: Decodable {
         let invoice_id: String
         let customer_name: String?
@@ -25,6 +34,22 @@ enum API {
         // Present only when surcharge is enabled; the credit total includes 2.9%.
         let surcharge_cents: Int?
         let credit_total_cents: Int?
+        // What the customer pays for: the invoice's service lines and the
+        // totals rows down to the amount due. Older servers send neither.
+        let invoice_number: String?
+        let items: [Item]?
+        let adjustments: [Adjustment]?
+
+        struct Item: Decodable {
+            let description: String
+            // Nil when the rows do not add up to the charge: names only.
+            let amount_cents: Int?
+        }
+
+        struct Adjustment: Decodable {
+            let label: String        // "Account credit applied"
+            let amount_cents: Int    // negative for a deduction
+        }
     }
 
     struct PaymentIntentResponse: Decodable {
@@ -75,10 +100,30 @@ enum API {
 
         var errorDescription: String? {
             switch self {
-            case .http(let code, let body): return "HTTP \(code): \(body)"
+            case .http(let code, let body): return Self.message(status: code, body: body)
             case .network(let e): return "Network error: \(e.localizedDescription)"
             case .decoding(let e): return "Decoding error: \(e.localizedDescription)"
-            case .unauthorized: return "Session expired — please sign in again."
+            case .unauthorized: return "This payment timed out. Close this and tap Tap to Pay again."
+            }
+        }
+
+        // The terminal routes answer { error, code }. The common codes get a
+        // next step; any other shows the server's own text, not raw JSON.
+        private static func message(status: Int, body: String) -> String {
+            struct ServerError: Decodable { let error: String?; let code: String? }
+            let parsed = body.data(using: .utf8).flatMap { try? JSONDecoder().decode(ServerError.self, from: $0) }
+            switch parsed?.code {
+            case "expired", "handoff_reissue_required", "signature_invalid":
+                return "This payment link expired. Close this and tap Tap to Pay again."
+            case "invoice_amount_changed":
+                return "The invoice total changed. Close this and tap Tap to Pay again."
+            case "TOKEN_EXPIRED":
+                return "This payment timed out. Close this and tap Tap to Pay again."
+            case "staff_session_revoked", "TOKEN_REVOKED":
+                return "Your sign-in ended. Sign in again on the portal page, then tap Tap to Pay again."
+            default:
+                if let text = parsed?.error, !text.isEmpty { return text }
+                return "HTTP \(status): \(body)"
             }
         }
     }
@@ -157,7 +202,9 @@ enum API {
         guard let http = resp as? HTTPURLResponse else {
             throw APIError.http(0, "No response")
         }
-        if http.statusCode == 401 { throw APIError.unauthorized }
+        // A 401 that names its cause (a bad link, an ended sign-in) keeps the
+        // body so the message can say which; a bare 401 is an expired token.
+        if http.statusCode == 401 && !jsonHasField(data, "code") { throw APIError.unauthorized }
         if !(200..<300).contains(http.statusCode) {
             let bodyString = String(data: data, encoding: .utf8) ?? ""
             throw APIError.http(http.statusCode, bodyString)
@@ -169,6 +216,11 @@ enum API {
             throw APIError.decoding(error)
         }
     }
+}
+
+private func jsonHasField(_ data: Data, _ field: String) -> Bool {
+    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+    return json[field] != nil
 }
 
 private extension String {

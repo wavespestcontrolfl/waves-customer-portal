@@ -392,10 +392,20 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
     }
   });
 
-  test('November and December carry the owner-approved wording (2026-10-08): no sedge in November, a potassium feeding in December', () => {
+  test('November and December carry the owner-approved wording (2026-10-08, December revised 2026-10-26): no sedge in November, a potassium feeding in December', () => {
     expect(PROGRAM_DETAIL_V13[11].whyNow).toBe('November is cool and dry. The lawn gets a feeding to carry it into winter, and mapped large patch areas are treated.');
-    expect(PROGRAM_DETAIL_V13[12].whyNow).toBe('December brings cooler spells. A feeding with extra potassium helps the lawn handle cold and dry weather, and we treat any large patch and weed spots.');
+    expect(PROGRAM_DETAIL_V13[12].whyNow).toBe('December brings cooler spells. The December feeding carries extra potassium for the cool, dry season, and we treat any large patch and weed spots.');
     expect(PROGRAM_DETAIL_V13[11].whyNow).not.toMatch(/sedge/i);
+  });
+
+  // Owner 2026-10-26 (decision D3-A): three lines restated to match v13. July has no whole-lawn pass by design
+  // (June, August and September do, under the same summer limits); October treats mapped large patch areas
+  // before rings show; December's potassium carries no benefit claim (UF/IFAS: it helps only where soil is short).
+  test('July, October and December say what the v13 step does (owner 2026-10-26)', () => {
+    expect(PROGRAM_DETAIL_V13[7].whyNow).toBe('July is a scouting visit with no whole-lawn pass. We inspect the whole lawn and treat problem spots only, such as caterpillars, leaf spot, mole cricket tunnels or chinch bugs.');
+    expect(PROGRAM_DETAIL_V13[7].whyNow).not.toMatch(/fertilizer limits mean/i);
+    expect(PROGRAM_DETAIL_V13[10].whyNow).toMatch(/mapped areas get a preventive treatment and we treat any active spots\.$/);
+    expect(PROGRAM_DETAIL_V13[12].whyNow).not.toMatch(/helps the lawn handle/i);
   });
 
   test('the copy names no product, brand, active ingredient or rate', () => {

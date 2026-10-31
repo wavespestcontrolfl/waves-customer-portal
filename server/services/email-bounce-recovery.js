@@ -85,6 +85,26 @@ function isHardBounceEvent(ev) {
   return false;
 }
 
+/**
+ * GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a send that failed because the
+ * recipient's domain has no mail server. SendGrid files it as a "blocked"
+ * bounce ("unable to get mx info: ..."), which isHardBounceEvent rightly
+ * leaves to the sender-retry rail for real IP blocks; a dead domain is a bad
+ * address, so the webhook sends it to people instead (the bounced-contact
+ * alert and the recording re-check card), never to an automatic correction
+ * or resend (recovery and the rescue both can repair a domain on their own).
+ * Only the blocked events the retry rail would claim: a hard bounce keeps
+ * its own path. A temporary DNS failure is not one (call-email-checks.js
+ * isNoMailServerReason). Suppression is not widened:
+ * recordEmailSuppressionForEvent still keys on isHardBounceEvent.
+ */
+function isNoMailServerEvent(ev) {
+  const { callEmailChecksLive, isNoMailServerReason } = require('./call-email-checks');
+  if (!callEmailChecksLive()) return false;
+  if (!require('./transactional-email-provider-retry').isProviderBlockedEvent(ev)) return false;
+  return isNoMailServerReason(ev?.reason || ev?.response || '');
+}
+
 function parseJsonArray(value) {
   if (Array.isArray(value)) return value;
   if (typeof value === 'string') {
@@ -1097,6 +1117,9 @@ async function alertRecoveryResendUncertain(row) {
   }, {
     detail: `Bounce recovery ${row.id} (original email ${row.original_message_id}): the worker died after starting the provider send to the corrected address, with no outcome recorded. Check whether the customer received it; the system will not re-send it, so send it by hand if it did not arrive.`,
     dedupeKey: `bounce-recovery-resend-uncertain:${row.id}`,
+    // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to ring. This one
+    // rings unless the owner silences the category.
+    bellDefault: true,
     metadata: { recovery_id: row.id, original_message_id: row.original_message_id, customer_id: row.customer_id || null },
   });
   if (!raised) throw new Error('the uncertain-resend alert was not recorded');
@@ -1636,6 +1659,7 @@ module.exports = {
   recoveryEnabled,
   minConfidence,
   isHardBounceEvent,
+  isNoMailServerEvent,
   isRecoveryMessage,
   decideRecoveryAction,
   asmGroupIdForStream,

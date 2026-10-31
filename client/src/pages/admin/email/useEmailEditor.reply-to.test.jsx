@@ -39,3 +39,14 @@ it("manual reply targets From, ignoring the stored Reply-To", async () => {
   // Expected (server draft rule, email-actions.js): reply_to || from_address.
   expect(body.to).toBe("customer@example.com");
 });
+
+it("an immediate reply names the replied-to email so the server can add In-Reply-To", async () => {
+  const email = { id: "e2", from_address: "customer@example.com", subject: "Question", gmail_thread_id: "t2" };
+  const { result } = renderHook(() => useEmailEditor("u1"));
+  await act(async () => { result.current.setReplyDraft(email.id, "Yes, Tuesday works."); });
+  await act(async () => { await result.current.handleReply(email, async () => {}); });
+
+  const sends = adminFetch.mock.calls.filter(([path, opts]) => path === "/api/admin/email/send" && opts?.method === "POST");
+  expect(sends).toHaveLength(1);
+  expect(JSON.parse(sends[0][1].body)).toMatchObject({ threadId: "t2", replyEmailId: "e2" });
+});

@@ -128,6 +128,39 @@ function requiresTermiteBond(templateKey) {
   return templateKey === 'service_renewal';
 }
 
+// OWNER RULING (2026-10-29, "fix estimate email"): the estimate_sent
+// follow-up ("did your estimate land? any questions?") stops once the
+// customer accepts; 19 of 90 in 60 days had gone to customers who already
+// had. Read at delivery, so every accept path counts (public accept,
+// one-tap, Mark accepted): the estimate whose send enrolled this episode
+// (metadata.estimate_id, also when the accept landed mid-send, before the
+// enrollment existed), or any estimate for this customer or address
+// accepted since the episode began (another estimate in the same send, or
+// an enrollment without the stamp: queued before it, or a manual trigger).
+async function estimateAcceptedForFollowUp(enrollment) {
+  const estimateId = enrollment.metadata?.estimate_id || null;
+  const email = String(enrollment.email || '').trim().toLowerCase();
+  // Without a customer or an address the "since" half has no one to match,
+  // and an empty group would match every customer's accepted estimate.
+  const since = enrollment.enrolled_at && (enrollment.customer_id || email) ? enrollment.enrolled_at : null;
+  if (!estimateId && !since) return false;
+  const accepted = await db('estimates')
+    .whereNotNull('accepted_at')
+    .where((q) => {
+      if (estimateId) q.orWhere('id', estimateId);
+      if (since) {
+        q.orWhere((episode) => episode
+          .where('accepted_at', '>=', since)
+          .where((who) => {
+            if (enrollment.customer_id) who.orWhere('customer_id', enrollment.customer_id);
+            if (email) who.orWhereRaw('lower(trim(customer_email)) = ?', [email]);
+          }));
+      }
+    })
+    .first('id');
+  return !!accepted;
+}
+
 async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend }) {
   if (testRecipient) return null;
   // A billing send checks suppression for the CURRENT billing recipient,
@@ -148,6 +181,10 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     if (bond?.termite_renewal_date) return null;
     return blockSendAndCancelEnrollment({ enrollment, sendId,
       reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
+  }
+  if (template.key === 'estimate_sent' && await estimateAcceptedForFollowUp(enrollment)) {
+    return blockSendAndCancelEnrollment({ enrollment, sendId,
+      reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' });
   }
   return null;
 }
@@ -333,6 +370,9 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   // role): the step's dispatch-time contact recheck reads it back (codex
   // #6363 r10 P1). Absent for the holder's and third-party addresses.
   const recipientRole = require('./customer-contact').isServiceContactRole(context.recipientRole) ? String(context.recipientRole) : null;
+  // The estimate whose send enrolled this episode (estimate_sent): the
+  // delivery check reads it back (estimateAcceptedForFollowUp).
+  const estimateId = context.estimateId ? String(context.estimateId) : null;
 
   // Customer-linked enrollment mutations serialize with a concurrent
   // merge-undo (r21): the undo's active-enrollment absence probe runs
@@ -406,7 +446,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
         last_name: fresh.last_name || customer.last_name || null,
       };
     }
-    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId, recipientRole });
+    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId, recipientRole, estimateId });
   };
   if (!customer.id) return runEnrollment(dbh);
   if (dbh.isTransaction) {
@@ -467,7 +507,7 @@ async function enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, con
   }
 }
 
-async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId, recipientRole = null }) {
+async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId, recipientRole = null, estimateId = null }) {
   const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });
@@ -516,10 +556,15 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
   // ambiguous between the target row and EXCLUDED and fails the insert.
   // The recipient_role stamp (whose address this episode mails — codex
   // #6363 r10 P1) is this episode's fact too: set when the enqueue resolved
-  // an on-location contact, dropped otherwise.
-  const stamps = { ...(leadId ? { lead_id: leadId } : {}), ...(recipientRole ? { recipient_role: recipientRole } : {}) };
+  // an on-location contact, dropped otherwise. So is estimate_id: the
+  // estimate whose send started this episode, never a prior episode's.
+  const stamps = {
+    ...(leadId ? { lead_id: leadId } : {}),
+    ...(recipientRole ? { recipient_role: recipientRole } : {}),
+    ...(estimateId ? { estimate_id: estimateId } : {}),
+  };
   reactivatePayload.metadata = dbh.raw(
-    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role') || ?::jsonb",
+    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role' - 'estimate_id') || ?::jsonb",
     [JSON.stringify(stamps)],
   );
   if (existing) {

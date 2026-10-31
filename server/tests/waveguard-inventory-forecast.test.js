@@ -117,11 +117,11 @@ test.each([
 });
 
 test.each([
-  ['per_visit', {}, false],
+  ['per_visit', {}, true],
   ['one_time', {}, false],
   ['per_application', {}, true],
   ['one_time', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, true],
-])('forecast counts a lingering-tier visit on an explicit %s lane only when the program predicate applies (assignment %j → counted %s) (codex #4365 r7 P2)', async (billingMode, appointmentAssignment, counted) => {
+])('forecast counts a lingering-tier visit on an explicit %s lane only when the program predicate applies (per_visit with a tier is a program, owner 2026-10-26) (assignment %j → counted %s) (codex #4365 r7 P2)', async (billingMode, appointmentAssignment, counted) => {
   visits = readQuery([{ id: 'visit-lane', scheduled_date: '2030-01-10', first_name: 'Ada', last_name: 'Lovelace' }]);
   buildPlanForService.mockResolvedValue({
     propertyGate: { serviceTier: 'Silver', billingMode },
@@ -157,7 +157,7 @@ test('non-program lanes are excluded in SQL before the limit when the column exi
   const calls = laneWhereClause(visits);
   expect(calls).toEqual([
     ['whereNull', 'c.billing_mode'],
-    ['orWhereNotIn', 'c.billing_mode', ['per_visit', 'one_time']],
+    ['orWhereNotIn', 'c.billing_mode', ['one_time']],
     ['orWhere', expect.any(Function)],
     ['whereNotNull', 'ss.lawn_protocol_key'],
     ['whereNotNull', 'ss.lawn_protocol_version'],

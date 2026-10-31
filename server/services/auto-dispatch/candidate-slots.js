@@ -41,6 +41,7 @@ const { findAvailableSlots } = require('../scheduling/find-time');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
+const { LAWN_ROUNDS_9, roundOf } = require('../lawn-rounds');
 const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
@@ -48,9 +49,11 @@ const { routeCost, clusterShare } = require('./route-model');
 const { techStartPointsLive, techStartPoint, START_COLUMNS } = require('../scheduling/tech-start-point');
 const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
-const { applyAssignable } = require('../technician-eligibility');
+const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { currentConflict } = require('./current-conflict');
 const { capacityEnabled } = require('../scheduling/policy');
+const territory = require('../territory');
+const logger = require('../logger');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -193,8 +196,8 @@ const DAY_STOP_KEY_COLUMNS = ['scheduled_services.scheduled_date', 'scheduled_se
 // The ROUTE-SCORING input (routeCost/clusterShare) for a set of tech-days, in
 // ONE query (Codex r1: no per-tech-day serial reads): every OTHER stop (never
 // one of `excludeIds`) on any of `dates` assigned to one of `technicianIds`
-// or to no technician — Waves runs one active field tech, so an unassigned
-// row is work that same tech still serves (Codex r1). Separate from the
+// or to no technician — an unassigned row is a stop someone serves that day,
+// so it counts on every technician's day (Codex r1). Separate from the
 // SLOT_TAKEN pre-filter, which asks the writer's own probe (below). Active
 // stops only: cancelled/completed/skipped/rescheduled excluded in SQL, a
 // no_show row or an expired estimate-slot hold dropped by isActiveRouteStop,
@@ -235,30 +238,39 @@ async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
   return loadDayStopRows(db, { technicianIds: technicianId ? [technicianId] : [], dates: [dateStr], excludeIds });
 }
 
-// The technician whose day an UNASSIGNED visit sits on (Codex pre-push P1):
-// eligible recurring visits can carry technician_id NULL, and every
+// The technicians whose day an UNASSIGNED visit could sit on (Codex pre-push
+// P1): eligible recurring visits can carry technician_id NULL, and every
 // candidate is scored on its tech's stops plus the unassigned ones, so the
-// current placement must read the same single-tech day — not an empty one,
-// which would score a well-clustered unassigned visit as a lone HQ round
-// trip and let any candidate clear the threshold. Waves runs one active
-// field technician: the only assignable one (technician-eligibility.js's
-// applyAssignable). Anything else — none, several, an unreadable table —
-// FAILS CLOSED (Codex r7): scoring the current day on the unassigned rows
-// alone would understate it the same way, so the evaluation is skipped
-// (CURRENT_DAY_TECH_UNRESOLVED), never guessed.
+// current placement must read a technician's day the same way — not an
+// empty one, which would score a well-clustered unassigned visit as a lone
+// HQ round trip and let any candidate clear the threshold. One assignable
+// technician (technician-eligibility.js's applyAssignable): theirs. Several
+// (the second technician, owner 2026-10-25): those who could take the visit
+// that date by the rules every candidate already passes — not absent or off
+// that weekday (absentTechDays, the seam find-time skips tech-days through)
+// and not switched off for its category (the `deactivated` HARD filter in
+// candidateFromSlot); when that leaves nobody, all of them, as one
+// technician's day is read whether or not they work it. None, or an
+// unreadable read, FAILS CLOSED (Codex r7): scoring the current day on the
+// unassigned rows alone would understate it the same way, so the evaluation
+// is skipped (CURRENT_DAY_TECH_UNRESOLVED), never guessed.
 const CURRENT_DAY_TECH_UNRESOLVED = 'CURRENT_DAY_TECH_UNRESOLVED';
-async function resolveCurrentDayTech(db, service) {
-  if (service.technician_id) return service.technician_id;
-  let techs;
+async function currentDayTechs(service, ctx, dateStr, category) {
+  if (service.technician_id) return [service.technician_id];
+  let ids;
+  let away = new Set();
   try {
-    techs = await applyAssignable(db('technicians')).select('technicians.id');
+    const techs = await applyAssignable(ctx.db('technicians')).select('technicians.id');
+    ids = Array.isArray(techs) ? techs.map((t) => t.id) : [];
+    if (ids.length > 1) away = await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: ids });
   } catch (err) {
-    throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'Assignable technicians could not be read for an unassigned visit', err);
+    throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'The technicians who could work an unassigned visit\'s day could not be read', err);
   }
-  if (!Array.isArray(techs) || techs.length !== 1) {
-    throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'No single assignable technician for an unassigned visit\'s day');
+  if (!ids.length) {
+    throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'No assignable technician for an unassigned visit\'s day');
   }
-  return techs[0].id;
+  const able = ids.filter((id) => !away.has(`${id}:${dateStr}`) && ctx.capabilityFor(id, category) !== 'deactivated');
+  return able.length ? able : ids;
 }
 
 // An error that abandons ONE visit's evaluation (the orchestrator records a
@@ -708,7 +720,7 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     // The legacy neighbors above exclude only this row, so a grouped visit's
     // detour is measured against its own siblings (move-rules.js drive floor).
     ...(await legacyGroupBlindField(service, ctx)),
-    ...(await sharedModelCurrentPlacement(service, geo, ctx, dateStr)),
+    ...(await sharedModelCurrentPlacement(service, geo, ctx, dateStr, category)),
     ...(await currentConflictField(service, ctx)),
   };
 }
@@ -745,28 +757,46 @@ async function readCurrentConflict(service, ctx) {
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL: the current placement's numbers from the
 // SAME inputs and functions every candidate gets (scoreOnSharedModel) — the
-// same day model (the visit's technician, or for an unassigned visit the
-// single active one, plus unassigned rows; active stops only; the visit's
-// own group excluded), so detour, route minutes, stop count and cluster
-// share all describe one stop list (Codex r1: stops_that_day counted the
-// legacy list). Overrides the legacy fields above; gate off returns {} so the
-// legacy object is byte-for-byte unchanged.
-async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
+// same day model (a technician's stops plus unassigned rows; active stops
+// only; the visit's own group excluded), so detour, route minutes, stop count
+// and cluster share all describe one stop list (Codex r1: stops_that_day
+// counted the legacy list). The day is the visit's technician's. An
+// unassigned visit is scored on each day it could sit on (currentDayTechs)
+// and keeps the one it adds the least drive to, the owner's "closest route
+// that day" for a visit with no technician (pick-technician.js, 2026-10-03),
+// so a move must save drive against the best of them; `day_technician_id`
+// names that day's technician for the start-point fence (apply.js
+// makeMoveGuard). Overrides the legacy fields above; gate off returns {} so
+// the legacy object is byte-for-byte unchanged.
+async function sharedModelCurrentPlacement(service, geo, ctx, dateStr, category) {
   if (!autoDispatchSharedModelLive()) return {};
   const { excludeIds, siblings } = await groupContextFor(service, ctx);
-  const dayTech = await resolveCurrentDayTech(ctx.db, service);
-  const stops = await loadDayStops(ctx.db, { technicianId: dayTech, dateStr, excludeIds });
-  await loadStartPoints(ctx, [dayTech]);
-  // The unit as it stands: every member at its stored window and route_order
-  // (route-model's groupUnit sequences it, as a candidate's is).
-  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(service.window_start) ?? DAY_OPEN, siblings), homeFor(ctx, dayTech)) : null;
-  return {
-    ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
-    stops_that_day: stops.length + 1,
-    same_area_share: clusterShare(stops, geo),
-    model: 'shared_v1',
-    [ROAD_LEGS]: roadLegsOf(cost, dateStr, hhmmToMin(service.window_start) ?? DAY_OPEN),
-  };
+  const dayTechs = await currentDayTechs(service, ctx, dateStr, category);
+  const days = await Promise.all(dayTechs.map((technicianId) => loadDayStops(ctx.db, { technicianId, dateStr, excludeIds })));
+  await loadStartPoints(ctx, dayTechs);
+  const startMin = hhmmToMin(service.window_start) ?? DAY_OPEN;
+  return leastDrive(dayTechs.map((dayTech, i) => {
+    const stops = days[i];
+    // The unit as it stands: every member at its stored window and route_order
+    // (route-model's groupUnit sequences it, as a candidate's is).
+    const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, startMin, siblings), homeFor(ctx, dayTech)) : null;
+    return {
+      ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
+      stops_that_day: stops.length + 1,
+      same_area_share: clusterShare(stops, geo),
+      model: 'shared_v1',
+      [ROAD_LEGS]: roadLegsOf(cost, dateStr, startMin),
+      ...(service.technician_id ? {} : { day_technician_id: dayTech }),
+    };
+  }));
+}
+
+// The placement the visit adds the least drive to; a tie keeps the first
+// technician by id, so the answer never depends on row order.
+function leastDrive(placements) {
+  const drive = (p) => (Number.isFinite(p.detour_minutes) ? p.detour_minutes : Infinity);
+  return placements.slice().sort((a, b) => (drive(a) - drive(b))
+    || String(a.day_technician_id).localeCompare(String(b.day_technician_id)))[0];
 }
 
 // Rows find-time ignores when it looks for free slots. A visit that overlaps
@@ -784,7 +814,7 @@ async function movingUnitIds(service, ctx) {
 // null (and a tally in `drops`) when a filter drops it. Also the filter every
 // added same-day hour (conflictSameDaySlots) passes.
 function candidateFromSlot(slot, {
-  service, prefs, ctx, category, siblingDates, drops,
+  service, prefs, ctx, category, siblingDates, drops, territoryTechId = null,
 }) {
   // HARD: find-time (findAvailableSlots) shares ONE admission bound across
   // every caller once GATE_SCHEDULING_CAPACITY is on — scheduling/policy.js
@@ -811,6 +841,9 @@ function candidateFromSlot(slot, {
   // HARD (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has a
   // technician stays with that technician. An unassigned visit is not filtered.
   if (ctx.keepTech === true && service.technician_id && String(techId) !== String(service.technician_id)) { drops.other_tech++; return null; }
+  // HARD (GATE_TERRITORY_NIGHT_RUN, territoryTechnicianForVisit): an unassigned pest / termite
+  // visit goes only to the technician who owns its ZIP.
+  if (territoryTechId && String(techId) !== String(territoryTechId)) { drops.other_territory++; return null; }
   const cap = ctx.capabilityFor(techId, category);
   if (cap === 'deactivated') { drops.deactivated++; return null; }                    // HARD: tech turned off for this category
   return {
@@ -911,6 +944,17 @@ function searchWindow(service, ctx) {
     if (dateFrom < dueFrom) dateFrom = dueFrom;
     if (dateTo > dueTo) dateTo = dueTo;
   }
+  // A lawn_rounds_9 visit never leaves its round: a ±3 day hand-off or a ±5
+  // day flex move off the first or last days of a round would land in the next
+  // round, leaving this one empty and that one with two. A window that
+  // collapses is handled by the caller (dateFrom > dateTo).
+  if (service.recurring_pattern === LAWN_ROUNDS_9) {
+    const round = roundOf(toDateStr(service.recurring_dispatch_due_date) || toDateStr(service.scheduled_date));
+    if (round) {
+      if (dateFrom < round.start) dateFrom = round.start;
+      if (dateTo > round.end) dateTo = round.end;
+    }
+  }
   return { dateFrom, dateTo };
 }
 
@@ -971,6 +1015,67 @@ function searchSummary(dateFrom, dateTo, slots, searchedDates) {
   for (const d of searchedDates || []) open[d] = 0;
   for (const slot of slots) if (slot && slot.date in open) open[slot.date] += 1;
   return { date_from: dateFrom, date_to: dateTo, open_starts_by_date: open };
+}
+
+/**
+ * TERRITORY (GATE_TERRITORY_NIGHT_RUN, owner 2026-10-30, build 7): the technician who owns
+ * an UNASSIGNED pest, mosquito, rodent or termite visit's ZIP, or null: gate off, a visit
+ * with a technician, a lawn visit, a Waves Assessment, a ZIP with no territory technician,
+ * or an unreadable territory (logged). The line is the line map's own catalog-first read
+ * (line-technician liveServiceLine: "Top Dress" is lawn by its catalog row, an assessment
+ * has no line), never the name-only scheduling category. The place is the visit's service
+ * ZIP, else its map position, else the customer row. Gates are read off the module at call
+ * time: a partial feature-gates mock reads off.
+ */
+async function territoryTechnicianForVisit(service, geo) {
+  const gates = require('../../config/feature-gates');
+  if (typeof gates.territoryNightRunLive !== 'function' || !gates.territoryNightRunLive()) return null;
+  if (service.technician_id) return null;
+  try {
+    const { liveServiceLine } = require('../scheduling/line-technician');
+    const line = await liveServiceLine(null, {
+      serviceId: service.service_id || null, serviceKey: service.service_key_snapshot || null, serviceType: service.service_type || null,
+    });
+    if (!territory.TERRITORY_LINES.includes(line)) return null;
+    return await territory.territoryTechnicianFor(null, {
+      zip: service.service_address_zip || null,
+      lat: geo ? geo.lat : null,
+      lng: geo ? geo.lng : null,
+      customerId: service.customer_id || null,
+    });
+  } catch (err) {
+    logger.warn(`[auto-dispatch] territory unreadable for visit ${service.id} (no area rule): ${err.message}`);
+    return null;
+  }
+}
+
+// Two restricted members that name different territory technicians: no slot can satisfy both.
+const NO_SINGLE_TERRITORY = 'no-single-territory';
+
+/**
+ * The territory restriction for the whole moving unit (Codex r1 P2 on #7182): a grouped
+ * move gives every member the slot's technician, so each unassigned pest / termite member
+ * must land in its own territory. One territory technician shared by every restricted
+ * member = that technician; two different ones = NO_SINGLE_TERRITORY (every candidate
+ * drops and the stop keeps its place); none = null. The apply-time member guard checks the
+ * same rule against the committed rows (apply.js assertInOwnTerritory).
+ */
+async function unitTerritoryTechnician(service, geo, ctx) {
+  const own = await territoryTechnicianForVisit(service, geo);
+  const siblingIds = ((ctx.groupContext && ctx.groupContext.siblings) || []).map((sib) => sib.id);
+  if (!siblingIds.length) return own;
+  const gates = require('../../config/feature-gates');
+  if (typeof gates.territoryNightRunLive !== 'function' || !gates.territoryNightRunLive()) return own;
+  const db = ctx.db || require('../../models/db');
+  const rows = await db('scheduled_services').whereIn('id', siblingIds)
+    .select('id', 'technician_id', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'service_address_zip', 'lat', 'lng');
+  const named = new Set(own ? [String(own)] : []);
+  for (const row of rows) {
+    const tech = await territoryTechnicianForVisit(row, row.lat != null && row.lng != null ? { lat: row.lat, lng: row.lng } : null);
+    if (tech) named.add(String(tech));
+  }
+  if (named.size > 1) return NO_SINGLE_TERRITORY;
+  return named.size ? [...named][0] : null;
 }
 
 async function findValidCandidateSlots(service, prefs, baseCtx) {
@@ -1051,7 +1156,12 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // better available" rather than an opaque NO_VALID_SLOT.
   // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
-  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0, ...(ctx.keepTech === true ? { other_tech: 0 } : {}) };
+  const territoryTechId = await unitTerritoryTechnician(service, geo, ctx);
+  const drops = {
+    blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0,
+    ...(ctx.keepTech === true ? { other_tech: 0 } : {}),
+    ...(territoryTechId ? { other_territory: 0 } : {}),
+  };
   // The current placement is read first: a visit in overlap also gets every
   // free same-day hour (conflictSameDaySlots), through the same filters.
   const current = await computeCurrentPlacement(service, prefs, ctx);
@@ -1060,7 +1170,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // re-checks both authoritatively, grouped members' derived starts included).
   const admitted = flexRules.admit(slots.concat(await conflictSameDaySlots(service, current, slots, findTimeArgs)), drops);
   const hard = {
-    service, prefs, ctx, category, siblingDates, drops,
+    service, prefs, ctx, category, siblingDates, drops, territoryTechId,
   };
   const candidates = admitted.map((slot) => candidateFromSlot(slot, hard)).filter(Boolean);
 
@@ -1077,11 +1187,12 @@ module.exports = {
   CURRENT_DAY_TECH_UNRESOLVED,
   findValidCandidateSlots,
   computeCurrentPlacement,
+  territoryTechnicianForVisit,
   inBlackout,
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
+    candidateFromSlot, unitTerritoryTechnician, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

@@ -123,12 +123,11 @@ postgres('customer-level overdue reminders: one customer through a whole episode
       doNotFake: ['setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'nextTick',
         'queueMicrotask', 'performance', 'hrtime', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback'],
     });
-    for (const key of ['GATE_DUNNING_LADDER_90', 'GATE_DUNNING_CUSTOMER_SCHEDULE', 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST', 'GATE_BALANCE_REMINDER_LEGACY_OFF']) saved[key] = process.env[key];
+    for (const key of ['GATE_DUNNING_LADDER_90', 'GATE_DUNNING_CUSTOMER_SCHEDULE', 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST']) saved[key] = process.env[key];
     saved.pay = FeatureGates.gates.payIncludeBalance;
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     process.env.GATE_DUNNING_CUSTOMER_SCHEDULE = 'true';
     delete process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST;
-    delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
     FeatureGates.gates.payIncludeBalance = true;
     expect(FeatureGates.dunningCustomerScheduleLive()).toBe(true);
 
@@ -148,7 +147,7 @@ postgres('customer-level overdue reminders: one customer through a whole episode
 
   afterAll(async () => {
     jest.useRealTimers();
-    for (const key of ['GATE_DUNNING_LADDER_90', 'GATE_DUNNING_CUSTOMER_SCHEDULE', 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST', 'GATE_BALANCE_REMINDER_LEGACY_OFF']) {
+    for (const key of ['GATE_DUNNING_LADDER_90', 'GATE_DUNNING_CUSTOMER_SCHEDULE', 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST']) {
       if (saved[key] === undefined) delete process.env[key];
       else process.env[key] = saved[key];
     }
@@ -182,7 +181,7 @@ postgres('customer-level overdue reminders: one customer through a whole episode
       t.uuid('payer_id');
       t.uuid('scheduled_service_id');
       t.string('scheduled_send_error');
-      t.string('token'); t.string('title'); t.decimal('total', 10, 2); t.decimal('credit_applied', 10, 2);
+      t.string('token'); t.string('title'); t.decimal('total', 10, 2); t.decimal('credit_applied', 10, 2); t.decimal('amount_paid', 10, 2).notNullable().defaultTo(0);
       t.string('stripe_payment_intent_id'); t.date('service_date'); t.date('due_date'); t.string('invoice_number');
     });
     await app.schema.createTable('invoice_followup_sequences', (t) => {
@@ -374,7 +373,11 @@ postgres('customer-level overdue reminders: one customer through a whole episode
     }));
   }
   const ledgerCount = async (customerId) => Number((await app('collections_contact_ledger').where({ customer_id: customerId }).count('* as n').first()).n);
-  const noAlerts = () => expect(mockNotify).not.toHaveBeenCalled();
+  // The one alert promotion itself raises (a new combined schedule, owner 2026-10-29) is expected in every
+  // episode; "no alerts" means none beyond it.
+  const startedKey = /^customer-dunning-started:/;
+  const alertsBeyondStart = () => mockNotify.mock.calls.filter((call) => !startedKey.test(call[3]?.dedupeKey || ''));
+  const noAlerts = () => expect(alertsBeyondStart()).toEqual([]);
 
   // ══ the episode ═══════════════════════════════════════════════════════════
   describe('one customer, one episode, in order', () => {
@@ -430,6 +433,8 @@ postgres('customer-level overdue reminders: one customer through a whole episode
         B: { status: 'active', step_index: 0, touches_sent: 0, next_touch_at: time(Followups.computeNextTouchAt(B_SENT, 0)), claimed: false },
       });
       noAlerts();
+      // promotion told the office once, and sent the customer nothing
+      expect(mockNotify.mock.calls.filter((call) => startedKey.test(call[3].dedupeKey))).toHaveLength(1);
     });
 
     test('2. the first combined step is due: ONE reminder (email + text) names 2 invoices, and the schedule advances', async () => {

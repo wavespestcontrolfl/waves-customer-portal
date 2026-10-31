@@ -114,6 +114,15 @@ function sanitizeViews(value, defaults, normalize) {
   return views;
 }
 
+export function normalizeAdminTableViewCatalog(record, defaults, normalize) {
+  return {
+    version: ADMIN_TABLE_VIEW_VERSION,
+    views: isObject(record) && record.version === ADMIN_TABLE_VIEW_VERSION
+      ? sanitizeViews(record.views, defaults, normalize)
+      : [],
+  };
+}
+
 export function readAdminTableViewCurrent(storage, storageKey, defaults, normalize) {
   const loaded = readStoredValue(storage, storageKey);
   return {
@@ -125,7 +134,7 @@ export function readAdminTableViewCurrent(storage, storageKey, defaults, normali
 export function readAdminTableViewCatalog(storage, storageKey, defaults, normalize) {
   const loaded = readStoredValue(storage, adminTableViewCatalogKey(storageKey));
   return {
-    views: sanitizeViews(loaded.value?.views, defaults, normalize),
+    views: normalizeAdminTableViewCatalog(loaded.value, defaults, normalize).views,
     error: loaded.error,
   };
 }

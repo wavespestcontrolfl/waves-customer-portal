@@ -1590,7 +1590,6 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
             logger.warn(`[recurring-cof] sweep term sync after credit coverage failed for ${invoice.id} — deferring: ${e.message}`);
             continue;
           }
-          require('./project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
         }
         await resolve('paid', { reason: 'already_settled' });
         continue;

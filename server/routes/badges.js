@@ -84,7 +84,13 @@ async function evaluateBadges(customerId) {
   const memberSince = memberSinceStr ? new Date(memberSinceStr + 'T12:00:00') : null;
   const memberDays = memberSince && !isNaN(memberSince) ? Math.floor((now - memberSince) / (1000 * 60 * 60 * 24)) : 0;
   const tier = customer.waveguard_tier || 'Bronze';
-  const totalVisits = services.length;
+  // Visits are completed service DAYS, not records: a pest + lawn stop, or
+  // two completion records for one appointment, is one visit (the same rule
+  // as the portal's visit counts).
+  const visitDayKey = (s) => (s.service_date instanceof Date
+    ? s.service_date.toISOString().slice(0, 10)
+    : String(s.service_date || '').slice(0, 10));
+  const totalVisits = new Set(services.map(visitDayKey).filter(Boolean)).size;
   const totalReferrals = referrals.length;
   const paidPayments = payments.filter(p => p.status === 'paid');
   const failedPayments = payments.filter(p => p.status === 'failed' && !p.superseded_by_payment_id && !isNeverAttemptedHoldDeferral(p));
@@ -121,7 +127,9 @@ async function evaluateBadges(customerId) {
   }
 
   // Lawn visits count
-  const lawnVisits = services.filter(s => s.service_type.toLowerCase().includes('lawn care')).length;
+  const lawnVisits = new Set(services
+    .filter(s => s.service_type.toLowerCase().includes('lawn care'))
+    .map(visitDayKey).filter(Boolean)).size;
 
   // Consecutive on-time payments (12 consecutive)
   const sortedPaid = paidPayments.sort((a, b) => new Date(a.payment_date || a.created_at) - new Date(b.payment_date || b.created_at));

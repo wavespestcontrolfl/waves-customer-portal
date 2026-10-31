@@ -416,19 +416,26 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   let returnScheduledInsert;
   let fencedCustomer;
   let loadedCustomer;
+  // The idempotent-replay lookup's answer (null = no earlier booking at this start), and the live visit behind it,
+  // linked to another estimate: a replay check that filters by source_estimate_id finds nothing for this one.
+  let replayExisting = null;
 
   function trxTable(table) {
     if (table === 'self_booked_appointments') {
       let counting = false;
+      // A replay lookup bound to this booking's own estimate (whereExists on its linked visit) finds nothing:
+      // replayExisting belongs to another estimate.
+      let boundToEstimate = false;
       const b = {
         where: () => b,
         whereNot: () => b,
         // Effective-date day-cap predicate (SELF_BOOKING_EFFECTIVE_DATE_SQL)
         whereRaw: () => b,
+        whereExists: () => { boundToEstimate = true; return b; },
         modify(fn) { fn(b); return b; },
         count: () => { counting = true; return b; },
-        // replay lookup → none; global day-cap count → 0 (under cap)
-        first: () => Promise.resolve(counting ? { count: 0 } : null),
+        // replay lookup → none unless a test sets replayExisting; global day-cap count → 0 (under cap)
+        first: () => Promise.resolve(counting ? { count: 0 } : (boundToEstimate ? null : replayExisting)),
         insert: () => ({ returning: () => Promise.resolve([{ id: 'sb-1' }]) }),
       };
       return b;
@@ -450,15 +457,22 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     }
     if (table === 'scheduled_services') {
       let counting = false;
+      const wheres = [];
       const b = {
         leftJoin: () => b,
-        where: () => b,
+        where: (...args) => { wheres.push(args); return b; },
         whereNotIn: () => b,
         whereRaw: () => b,
+        modify(fn) { fn(b); return b; },
         // The day cap counts VOICE bookings off this table too (they write no
         // self_booked_appointments row) — none here, so the cap is unchanged.
         count: () => { counting = true; return b; },
-        first: () => Promise.resolve(counting ? { count: 0 } : null), // conflict re-check → free
+        // conflict re-check → free; the replay's live-visit check → a live visit behind replayExisting.
+        first: () => {
+          if (counting) return Promise.resolve({ count: 0 });
+          const replayCheck = wheres.some(([arg]) => arg && typeof arg === 'object' && 'self_booking_id' in arg);
+          return Promise.resolve(replayCheck && replayExisting ? { id: 'visit-behind-replay' } : null);
+        },
         // Global tech-blind probe (shared occupancy module, round 3): its
         // chain tails with .select(...).orderBy(...) and resolves rows —
         // empty here, so the probe passes and the flow reaches the insert.
@@ -601,6 +615,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     jest.clearAllMocks();
     capturedScheduledInsert = undefined;
     returnScheduledInsert = false;
+    replayExisting = null;
     fencedCustomer = { ...CUST };
     loadedCustomer = { ...CUST };
     mockOwnershipTables();
@@ -637,6 +652,121 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     expect(capturedScheduledInsert).toBeDefined();
     return capturedScheduledInsert;
   }
+
+  // The commercial first visit (GATE_COMMERCIAL_FIRST_VISIT, services/commercial-first-visit.js): the one PAID internal
+  // booking. billing prices the visit only when it is not a callback; estimateGuard refuses inside the transaction,
+  // under its own lock, before the insert.
+  describe('paid internal visit + estimate guard (commercial first visit)', () => {
+    const firstVisitPayload = (visit = {}) => callbackPayload({
+      source: 'commercial_proposal_first_visit',
+      callbackVisit: {
+        serviceKey: 'pest_control', serviceId: null, serviceType: 'Commercial Pest Control', durationMinutes: 60,
+        isCallback: false, dedupeLane: false, billing: { estimatedPrice: 81.67 }, ...visit,
+      },
+    });
+    function captureRaws() {
+      const raws = [];
+      const runTransaction = db.transaction.getMockImplementation();
+      db.transaction.mockImplementation((fn) => runTransaction((trx) => {
+        const raw = trx.raw;
+        trx.raw = jest.fn((...args) => { raws.push(args); return raw(...args); });
+        return fn(trx);
+      }));
+      return raws;
+    }
+
+    test('billing on a non-callback internal visit stamps the per-visit price and invoices on completion', async () => {
+      await expect(createSelfBooking(firstVisitPayload())).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toMatchObject({
+        is_callback: false, estimated_price: 81.67, create_invoice_on_complete: true, service_id: null, service_type: 'Commercial Pest Control',
+      });
+    });
+
+    test('without billing an internal visit stays free (the assessment shape)', async () => {
+      await expect(createSelfBooking(firstVisitPayload({ billing: undefined }))).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toMatchObject({ is_callback: false, create_invoice_on_complete: false });
+      expect(capturedScheduledInsert.estimated_price).not.toBe(81.67);
+    });
+
+    test('billing never prices a callback: a re-service stays free whatever it carries', async () => {
+      const laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+      try {
+        const row = await runCallbackToScheduledInsert({
+          callbackVisit: { ...callbackPayload().callbackVisit, billing: { estimatedPrice: 81.67 } },
+        });
+        expect(row).toMatchObject({ is_callback: true, create_invoice_on_complete: false });
+        expect(row.estimated_price).not.toBe(81.67);
+      } finally { laneSpy.mockRestore(); }
+    });
+
+    test.each([
+      ['booked', 'ALREADY_BOOKED'],
+      ['ineligible', 'ESTIMATE_CHANGED'],
+    ])('a %s verdict refuses with %s before the insert', async (verdict, code) => {
+      const revalidate = jest.fn().mockResolvedValue(verdict);
+      await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID, revalidate } })))
+        .resolves.toMatchObject({ ok: false, status: 409, code });
+      expect(revalidate).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('an ok verdict books, under the per-estimate lock, re-checked on the booking transaction itself', async () => {
+      const raws = captureRaws();
+      const revalidate = jest.fn().mockResolvedValue('ok');
+      await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID, revalidate } }))).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toMatchObject({ estimated_price: 81.67 });
+      expect(raws.some(([sql, bindings]) => /pg_advisory_xact_lock/.test(sql) && bindings?.[0] === 'estimate-booking-guard' && bindings?.[1] === EST_ID)).toBe(true);
+      expect(typeof revalidate.mock.calls[0][0]).toBe('function');
+    });
+
+    // Codex #6869 P1: the offer was built at customerBookingLocation's fallback for a customer with no saved pin, so
+    // the commit re-derives that fallback (and stamps it on the visit) instead of failing its own location fence.
+    // Both estimate-page bookings (an estimateGuard) offer at customerBookingLocation: the paid first visit and the free
+    // estimate assessment (no billing).
+    const okGuard = () => ({ estimateId: EST_ID, revalidate: jest.fn().mockResolvedValue('ok') });
+    test.each([
+      ['the paid first visit', {}],
+      ['the free estimate assessment', { billing: undefined, serviceKey: 'lawn_inspection', serviceType: 'Waves Assessment', dedupeLane: false }],
+    ])('%s: a customer with no saved pin books at the canonical fallback its offer used, stamped on the visit', async (_label, visit) => {
+      loadedCustomer = { ...CUST, latitude: null, longitude: null };
+      fencedCustomer = { ...loadedCustomer };
+      const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+      try {
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG }, estimateGuard: okGuard(), ...visit })))
+          .rejects.toThrow(SENTINEL);
+        expect(capturedScheduledInsert).toMatchObject({ lat: LAT, lng: LNG, service_address_line1: CUST.address_line1 });
+      } finally { geocodeSpy.mockRestore(); }
+    });
+
+    test('the fence still holds: a fallback that moved since the offer refuses', async () => {
+      loadedCustomer = { ...CUST, latitude: null, longitude: null };
+      fencedCustomer = { ...loadedCustomer };
+      const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.5, lng: -82.4 });
+      try {
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG }, estimateGuard: okGuard() })))
+          .resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+        expect(capturedScheduledInsert).toBeUndefined();
+      } finally { geocodeSpy.mockRestore(); }
+    });
+
+    // Pre-push audit P0: two signed proposals for one customer, booked at the same start.
+    test('a paid booking never replays another estimate\'s booking at the same start; a free assessment still replays its own', async () => {
+      replayExisting = { id: 'sb-other', confirmation_code: 'WAV-1' };
+      await expect(createSelfBooking(firstVisitPayload({ estimateGuard: okGuard() }))).rejects.toThrow(SENTINEL);
+      // Not a replay: the booking went on to insert its own priced visit.
+      expect(capturedScheduledInsert).toMatchObject({ estimated_price: 81.67, create_invoice_on_complete: true });
+      capturedScheduledInsert = undefined;
+      await expect(createSelfBooking(firstVisitPayload({ billing: undefined, serviceKey: 'lawn_inspection', serviceType: 'Waves Assessment' })))
+        .resolves.toMatchObject({ ok: true, body: { replayed: true } });
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('a guard with no re-check function fails closed', async () => {
+      await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID } })))
+        .resolves.toMatchObject({ ok: false, status: 409, code: 'ESTIMATE_CHANGED' });
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+  });
 
   test("someone ELSE's estimate UUID books UNLINKED (no source_estimate_id stamp) with a warn", async () => {
     const row = await runToScheduledInsert({ source_estimate_id: OTHER_EST });
@@ -835,6 +965,98 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     }
   });
 
+  // GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30): with capacity mode off, the primary visit is numbered by the
+  // dispatcher's placement in the same transaction, right after the insert. A stub on the package follow-up (the next
+  // statement) stops the flow after the placement, so each case also proves the booking went on past it.
+  describe('GATE_ROUTE_CHECK_BOOKING_SAVES: the primary visit gets its stop number', () => {
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const GATES = ['GATE_ROUTE_CHECK_BOOKING_SAVES', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY', 'GATE_BOOK_CAPACITY_COMMIT'];
+    let savedEnv;
+    let placeSpy;
+    let followUpSpy;
+    let laneSpy;
+    beforeEach(() => {
+      savedEnv = Object.fromEntries(GATES.map(name => [name, process.env[name]]));
+      GATES.forEach(name => { delete process.env[name]; });
+      returnScheduledInsert = true;
+      placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue([1]);
+      followUpSpy = jest.spyOn(require('../services/package-followup-booking'), 'ensurePackageFollowUpVisit')
+        .mockImplementation(async () => { throw new Error(SENTINEL); });
+      // The callback lane's open-callback read (re-service / inspection) is not under test here.
+      laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+    });
+    afterEach(() => {
+      placeSpy.mockRestore();
+      followUpSpy.mockRestore();
+      laneSpy.mockRestore();
+      GATES.forEach(name => {
+        if (savedEnv[name] === undefined) delete process.env[name];
+        else process.env[name] = savedEnv[name];
+      });
+    });
+    const gateOn = () => {
+      process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    };
+    const stopsAfterPlacement = async (payload) => {
+      await expect(createSelfBooking(payload)).rejects.toThrow(SENTINEL);
+      expect(followUpSpy).toHaveBeenCalledTimes(1);
+    };
+
+    test.each([
+      ['/book', 'self_booking', () => confirmPayload(mintSlotOfferField(offerPayload()))],
+      ['the re-service page', 'reservice', () => callbackPayload()],
+      ['the inspection page', 'inspection', () => callbackPayload({ callbackVisit: { ...callbackPayload().callbackVisit, isCallback: false } })],
+    ])('gate on, capacity off: %s places the new visit once, on the booking transaction, with source %s', async (_name, source, payload) => {
+      gateOn();
+      await stopsAfterPlacement(payload());
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy).toHaveBeenCalledWith(expect.any(Function), { serviceId: 'scheduled-1', staffSave: true, source });
+      // Placed before the package follow-up books visit 2: the primary visit only.
+      expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(followUpSpy.mock.invocationCallOrder[0]);
+    });
+
+    test.each([
+      ['/book', undefined, 'self_booking'],
+      ['the re-service page', { serviceKey: 'pest_re_service' }, 'reservice'],
+      ['the inspection page', { serviceKey: 'lawn_inspection', isCallback: false }, 'inspection'],
+      ['the commercial first-visit page', { isCallback: false, dedupeLane: false, estimateGuard: { estimateId: 'est-1' } }, 'commercial_first_visit'],
+    ])('the placement source names the page: %s', (_name, callbackVisit, source) => {
+      expect(require('../routes/booking')._internals.bookingPlacementSource(callbackVisit)).toBe(source);
+    });
+
+    test('gate off: the placement is never called', async () => {
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+      await stopsAfterPlacement(confirmPayload(mintSlotOfferField(offerPayload())));
+      expect(placeSpy).not.toHaveBeenCalled();
+    });
+
+    test('a placement that throws is one logged line and the booking goes on', async () => {
+      gateOn();
+      placeSpy.mockRejectedValueOnce(new Error('route boom'));
+      await stopsAfterPlacement(confirmPayload(mintSlotOfferField(offerPayload())));
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('(self_booking): route boom'));
+    });
+
+    test('a visit the capacity check numbered is not placed a second time', async () => {
+      gateOn();
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+      const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue({ options: { prospective: { lat: LAT, lng: LNG } } });
+      const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity').mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
+      const persistSpy = jest.spyOn(arrivalRoute, 'persistArrivalOrder').mockResolvedValue(undefined);
+      const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+      try {
+        await stopsAfterPlacement(confirmPayload(mintSlotOfferField(offerPayload())));
+        expect(persistSpy).toHaveBeenCalledTimes(1);
+        expect(placeSpy).not.toHaveBeenCalled();
+      } finally {
+        prepareSpy.mockRestore(); verifySpy.mockRestore(); persistSpy.mockRestore(); conflictSpy.mockRestore();
+      }
+    });
+  });
+
   test('the production booking contract rejects an infeasible whole-route re-check as SLOT_TAKEN', async () => {
     const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
     const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
@@ -913,6 +1135,61 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
       else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
     }
+  });
+
+  // The re-service route rebuilds availability at one pin and passes it as
+  // callbackVisit.expectedLocation. createSelfBooking re-reads the customer, so
+  // a pin moved BEFORE its own snapshot would otherwise compare B with B.
+  describe('re-service expectedLocation fence (capacity off, the production state)', () => {
+    const withGates = async (fn) => {
+      const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+      const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+      process.env.GATE_SCHEDULING_CAPACITY = 'false';
+      process.env.GATE_BOOK_CAPACITY_COMMIT = 'false';
+      const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+      const laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+      try { await fn({ conflictSpy }); } finally {
+        conflictSpy.mockRestore(); laneSpy.mockRestore();
+        if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+        else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+        if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+        else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+      }
+    };
+    const visitAt = (location) => ({
+      serviceKey: 'pest_re_service',
+      serviceId: 'eeee4444-ff55-4666-8777-aaaa8888bbbb',
+      serviceType: 'Pest Control Re-Service',
+      durationMinutes: 30,
+      expectedLocation: location,
+    });
+
+    test('a pin moved between the availability rebuild and the booking snapshot is refused; nothing is booked', async () => {
+      await withGates(async ({ conflictSpy }) => {
+        const moved = { latitude: LAT + 0.02, longitude: LNG - 0.02 };
+        loadedCustomer = { ...CUST, ...moved };
+        fencedCustomer = { ...loadedCustomer };
+        await expect(createSelfBooking(callbackPayload({
+          callbackVisit: visitAt({ lat: LAT, lng: LNG }),
+        }))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+        expect(conflictSpy).not.toHaveBeenCalled();
+        expect(capturedScheduledInsert).toBeUndefined();
+      });
+    });
+
+    test('an unchanged pin books as before', async () => {
+      await withGates(async () => {
+        loadedCustomer = { ...CUST, latitude: LAT, longitude: LNG };
+        fencedCustomer = { ...loadedCustomer };
+        const row = await (async () => {
+          await expect(createSelfBooking(callbackPayload({
+            callbackVisit: visitAt({ lat: LAT, lng: LNG }),
+          }))).rejects.toThrow(SENTINEL);
+          return capturedScheduledInsert;
+        })();
+        expect(row).toMatchObject({ is_callback: true });
+      });
+    });
   });
 
   test('a re-service address changed while its missing pin resolves is refused under the customer fence', async () => {

@@ -1974,8 +1974,9 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // county at flat 7%. The single derivation still feeds both the
       // frozen backfillMintTaxRate and the live mint (round-10 contract),
       // and the returned rate is bounded to what the resume validator
-      // accepts (finite, 0 <= rate < 1).
-      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*\{ database: db, skipCustomerExemption: visitIsPayerBilled \},\s*\n\s*\);/);
+      // accepts (finite, 0 <= rate < 1). The visit's saved property names the
+      // county (GATE_TAX_SERVICE_COUNTY: the surtax is due where the work is done).
+      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*\{ database: db, skipCustomerExemption: visitIsPayerBilled, propertyId: svc\.property_id \|\| undefined \},\s*\n\s*\);/);
       // Payer authority at the freeze (pre-push P0): the payer resolves
       // BEFORE the rate derivation; an exempt payer freezes 0, a non-exempt
       // payer's rate excludes the service customer's certificate.
@@ -2353,7 +2354,9 @@ describe('completion route wiring (source contracts)', () => {
   });
 
   test('backfill invoices stay due near-term instead of minting instantly overdue', () => {
-    expect(source).toMatch(/dueDate: isBackfillCompletion \? etDateString\(\) : serviceDateOnly\(record\.service_date\)/);
+    expect(source).toMatch(/dueDate: proposalTermsDue \|\| \(isBackfillCompletion \? etDateString\(\) : serviceDateOnly\(record\.service_date\)\)/);
+    // An invoice-mode proposal's Net term (owner 2026-10-30) counts from today on a backfill too, never the old visit day.
+    expect(source).toMatch(/proposalTermsDueDate\(\s*db, svc\.source_estimate_id, isBackfillCompletion \? etDateString\(\) : serviceDateOnly\(record\.service_date\),\s*\)/);
   });
 
   test('backfill suppresses the decline notice and the payer AP send', () => {
@@ -2368,7 +2371,7 @@ describe('completion route wiring (source contracts)', () => {
     // for non-backfill completions. Invoice minting is untouched
     // (shouldInvoice runs earlier), so a backfill invoice still mints, open
     // and uncharged, for operator collection.
-    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationBilling \|\| apptCardOneTimeCharge \|\| extendedChargeCandidate\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
+    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationCharge \|\| apptCardOneTimeCharge \|\| extendedChargeCandidate\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
     // autoChargedReceiptPending starts false and is only ever set inside the
     // gated rail — no charge, no combined receipt claim.
     expect(source).toMatch(/let autoChargedReceiptPending = false;/);
@@ -2433,7 +2436,7 @@ describe('completion route wiring (source contracts)', () => {
     // due-cents ceiling rides beside the subtotal cap; the annual stamp is
     // validated against the LIVE term, never taken at face value.
     expect(source).toMatch(/refuseWhenDunningStopped: true,/);
-    expect(source).toMatch(/maxAuthorizedChargeCents: Math\.max\(0, Math\.round\(\(Number\(invoice\.total \|\| 0\) - Number\(invoice\.credit_applied \|\| 0\)\) \* 100\)\),/);
+    expect(source).toMatch(/maxAuthorizedChargeCents: Math\.round\(require\('\.\.\/services\/invoice-helpers'\)\.invoiceAmountDue\(invoice\) \* 100\),/);
     const laneSource = fs.readFileSync(path.join(__dirname, '../services/billing-lane.js'), 'utf8');
     expect(laneSource).toMatch(/annualPrepayCoversVisit\(fullSvc, dbConn, \{ throwOnError: true \}\)/);
     // Round 5-6: entry keys on the FULL candidate (no-cost + unresolved
@@ -2771,12 +2774,13 @@ describe('completion route wiring (source contracts)', () => {
 
   test('backfill never credits a referral — no $25 to either party, no referrer SMS/email', () => {
     // creditReferralOnFirstService posts real account credits to BOTH the
-    // referrer and the referee AND messages the referrer, so the quiet path
-    // must not reach it. The guard also protects the reward's single-use
-    // idempotency: firing here would burn it on a visit nobody announced.
-    // The ONE carve-out is the issued-invoice closeout (GitHub r12 P1 #4127):
-    // the invoice event proves the service happened, so the credits post —
-    // with the referrer's SMS / email suppressed (notify: false).
+    // referrer and the referee (and the referrer's thank-you email follows at
+    // the next 9:00 AM ET), so the quiet path must not reach it. The guard also
+    // protects the reward's single-use idempotency: firing here would burn it
+    // on a visit nobody announced. The ONE carve-out is the issued-invoice
+    // closeout (GitHub r12 P1 #4127): the invoice event proves the service
+    // happened, so the credits post, and the referrer gets the 9:00 AM email
+    // like every credit (owner 2026-10-29).
     expect(source).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && \(!isBackfillCompletion \|\| !!issuedInvoiceCloseout\);/);
     const referralBlock = source.match(/if \(referralVisitPerformed && !packetEffects\) \{([\s\S]*?)\n {4}\}/);
     expect(referralBlock).not.toBeNull();
@@ -2817,7 +2821,7 @@ describe('completion route wiring (source contracts)', () => {
       'if (!isBackfillCompletion\n      && invoice?.id && !alreadyPaid && !invoice.payer_id',
       // completion saved-card / ACH auto-charge (per-application OR the
       // appointment-card one-time lane — one shared rail, one backfill gate)
-      'if (!isBackfillCompletion\n      && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed',
+      'if (!isBackfillCompletion\n      && (perApplicationCharge || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed',
       // appointment-card one-time lane derivation (read-only, but its
       // backfill-skip log reads isBackfillCompletion so it must sit after
       // the re-derivation too)
@@ -2934,7 +2938,7 @@ describe('completion route wiring (source contracts)', () => {
     // WOULD have happened (payer-billed + gate + NET terms) — including the
     // operator's re-attach path (attachment exists only at create, so:
     // void + re-create to consolidate, or send individually to the AP).
-    expect(source).toMatch(/if \(isBackfillCompletion && invoice\?\.payer_id && !invoice\.payer_statement_id\) \{[\s\S]{0,400}isEnabled\('payerStatements'\)[\s\S]{0,400}\['net15', 'net30'\]\.includes\(payerRow\?\.payment_terms\)[\s\S]{0,600}payer-statement accrual SKIPPED[\s\S]{0,400}void \+ re-create/);
+    expect(source).toMatch(/if \(isBackfillCompletion && invoice\?\.payer_id && !invoice\.payer_statement_id\) \{[\s\S]{0,400}isEnabled\('payerStatements'\)[\s\S]{0,400}require\('\.\/payer'\)\.isNetPaymentTerm\(payerRow\?\.payment_terms\)[\s\S]{0,600}payer-statement accrual SKIPPED[\s\S]{0,400}void \+ re-create/);
 
     // createFromService threads the option through to create() untouched.
     const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
@@ -2945,7 +2949,7 @@ describe('completion route wiring (source contracts)', () => {
     // And create() honors it at BOTH accrual sites: the NET-terms preflight
     // transaction wrap and the statement get-or-create/attach itself.
     expect(invoiceSource).toMatch(/if \(!skipAccrual && database === db && require\("\.\.\/config\/feature-gates"\)\.isEnabled\("payerStatements"\)\) \{/);
-    expect(invoiceSource).toMatch(/if \(!skipAccrual\s*\n\s*&& resolvedPayerId\s*\n\s*&& \['net15', 'net30'\]\.includes\(resolvedPaymentTerms\)/);
+    expect(invoiceSource).toMatch(/if \(!skipAccrual\s*\n\s*&& resolvedPayerId\s*\n\s*&& PayerService\.isNetPaymentTerm\(resolvedPaymentTerms\)/);
     // Attachment is create-only — payer_statement_id is stamped exclusively
     // from the accrual result on the insert, so skipping accrual IS staying
     // off every statement (nothing later attaches an existing invoice).

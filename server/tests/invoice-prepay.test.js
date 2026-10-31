@@ -171,6 +171,30 @@ describe('invoice-prepay helpers', () => {
       expect(visits.map((v) => v.amount)).toEqual([132, 132]);
     });
 
+    it('a lawn_rounds_9 term lists its covered visits on the round calendar (not 42-day math)', () => {
+      const { lawnRoundDate } = require('../services/lawn-rounds');
+      const visits = buildCoverageVisits(
+        {
+          term_start: '2026-06-16',
+          term_end: '2027-06-15',
+          coverage_visit_count: 9,
+          coverage_cadence: 'lawn_rounds_9',
+          coverage_service_type: 'Lawn Care',
+        },
+        900,
+        { today: '2026-01-01' },
+      );
+      expect(visits.map((v) => v.date)).toEqual(Array.from({ length: 9 }, (_, i) => lawnRoundDate('2026-06-16', i)));
+      expect(visits.map((v) => v.amount)).toEqual(Array(9).fill(100));
+      // The every-6-weeks term for the same dates is unchanged.
+      const sixWeek = buildCoverageVisits(
+        { term_start: '2026-06-16', term_end: '2027-06-15', coverage_visit_count: 9, coverage_cadence: 'every_6_weeks', coverage_service_type: 'Lawn Care' },
+        900,
+        { today: '2026-01-01' },
+      );
+      expect(sixWeek.map((v) => v.date).slice(0, 3)).toEqual(['2026-06-16', '2026-07-28', '2026-09-08']);
+    });
+
     it('returns an empty array when coverage is not configured', () => {
       expect(buildCoverageVisits({ term_start: '2026-06-20' }, 528)).toEqual([]);
       expect(buildCoverageVisits(null, 528)).toEqual([]);

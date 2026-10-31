@@ -109,8 +109,10 @@ function firstName(row = {}) {
   return /^[a-z][a-z'-]{1,24}$/i.test(first || '') ? first : '';
 }
 
+// technicians has one `name` column (no first_name / last_name), so reading those
+// always fell through to the staff email.
 function actorName(req) {
-  return [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ')
+  return req.technician?.name
     || req.technician?.email
     || req.technicianId
     || 'Admin';
@@ -715,7 +717,7 @@ async function loadAdTasks() {
       const roas = cost > 0 ? value / cost : null;
       return { ...campaign, cost, conversions, value, roas };
     })
-    .filter((row) => row.budget_mode === 'stop' || (row.cost >= 50 && row.conversions < 1) || (row.cost >= 75 && row.roas != null && row.roas < 1.5))
+    .filter((row) => (row.cost >= 50 && row.conversions < 1) || (row.cost >= 75 && row.roas != null && row.roas < 1.5))
     .sort((a, b) => b.cost - a.cost)
     .slice(0, 10);
 
@@ -724,14 +726,14 @@ async function loadAdTasks() {
     tasks: rows.map((row) => task({
       id: `ad_campaign:${row.id}`,
       agentId: 'ads',
-      title: row.budget_mode === 'stop' ? `Campaign stopped: ${row.campaign_name}` : `Review spend: ${row.campaign_name}`,
+      title: `Review spend: ${row.campaign_name}`,
       summary: [
         row.campaign_type,
         row.target_area,
         `$${Math.round(row.cost)} spent in 7d`,
         `${Math.round(row.conversions)} conv`,
       ].filter(Boolean).join(' · '),
-      priority: row.budget_mode === 'stop' || (row.cost >= 100 && row.conversions < 1) ? 'high' : 'medium',
+      priority: row.cost >= 100 && row.conversions < 1 ? 'high' : 'medium',
       source: 'ad_campaigns',
       sourceLabel: 'PPC',
       sourceId: row.id,
@@ -957,6 +959,9 @@ function buildAgents(tasks, sources) {
       ...agent,
       status,
       openTasks: actionable.length,
+      // Every loaded task of this agent, info rows included — the same unit as
+      // feed rows, so the feed can say how many of them its window shows.
+      totalTasks: agentTasks.length,
       needsApproval,
       highPriority: critical + high,
       lastActivityAt: latestDate(agentTasks),
@@ -1103,6 +1108,8 @@ router.get('/control/hub', (_req, res) => {
       queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: require('../config/feature-gates').llmCostTrackingLive(), verification: false,
       // GATE_TYPED_DECISIONS: the Typed review tab exists only while the lane is live.
       typed: require('../config/feature-gates').typedDecisionsLive(),
+      // GATE_DATA_HYGIENE_UI: the Hygiene review tab exists only while the gate is on.
+      hygiene: require('../config/feature-gates').isEnabled('dataHygieneReviewUi') === true,
     },
     areas: modelSwitchboard.AREAS,
   });
@@ -1178,38 +1185,55 @@ router.get('/queue', async (_req, res, next) => {
   } catch (err) { return next(err); }
 });
 
-router.get('/overview', async (_req, res) => {
-  const [loaded, leadConversion] = await Promise.all([
-    loadOverviewSources(),
-    loadLeadConversionDetails(),
-  ]);
+const OVERVIEW_FEED_LIMIT = 80;
 
-  const sources = loaded.map((item) => item.source);
-  const generatedTasks = sortTasks(loaded.flatMap((item) => item.tasks)).slice(0, 120);
-  const stateApplied = await applyTaskStates(generatedTasks);
-  const tasks = sortTasks(stateApplied.tasks).slice(0, 80);
+router.get('/overview', async (_req, res, next) => {
+  try {
+    // Lead details are optional enrichment: a failed read degrades that panel
+    // only, never the whole Overview.
+    const [loaded, leadConversion] = await Promise.all([
+      loadOverviewSources(),
+      loadLeadConversionDetails().catch((err) => {
+        logger.warn(`[admin-agents] lead conversion details failed: ${err.message}`);
+        return { unavailable: true, metrics: {} };
+      }),
+    ]);
 
-  const agents = buildAgents(tasks, sources);
-  res.json({
-    generatedAt: new Date().toISOString(),
-    summary: {
-      agents: agents.length,
-      activeAgents: agents.filter((agent) => agent.status !== 'idle').length,
-      blockedAgents: agents.filter((agent) => agent.status === 'blocked').length,
-      // 'info' items are activity, not workload — excluded from open/approval
-      // counts (they still render in the task feed itself).
-      openTasks: tasks.filter((item) => item.status !== 'info').length,
-      hiddenTasks: stateApplied.hiddenCount,
-      needsApproval: tasks.filter((item) => ['needs_review', 'approval'].includes(item.status)).length,
-      highPriority: tasks.filter((item) => item.status !== 'info' && (item.priority === 'critical' || item.priority === 'high')).length,
-    },
-    agents,
-    tasks,
-    sources,
-    agentDetails: {
-      lead_conversion: leadConversion,
-    },
-  });
+    const sources = loaded.map((item) => item.source);
+    // Every source loader is bounded on its own, so this list is "what the
+    // sources loaded". KPIs and agent statuses use all of it; only the feed
+    // below is cut to the top OVERVIEW_FEED_LIMIT.
+    const stateApplied = await applyTaskStates(sortTasks(loaded.flatMap((item) => item.tasks)));
+    const allTasks = sortTasks(stateApplied.tasks);
+    const tasks = allTasks.slice(0, OVERVIEW_FEED_LIMIT);
+
+    const agents = buildAgents(allTasks, sources);
+    res.json({
+      generatedAt: new Date().toISOString(),
+      summary: {
+        agents: agents.length,
+        activeAgents: agents.filter((agent) => agent.status !== 'idle').length,
+        blockedAgents: agents.filter((agent) => agent.status === 'blocked').length,
+        // 'info' items are activity, not workload — excluded from open/approval
+        // counts (they still render in the task feed itself).
+        openTasks: allTasks.filter((item) => item.status !== 'info').length,
+        hiddenTasks: stateApplied.hiddenCount,
+        needsApproval: allTasks.filter((item) => ['needs_review', 'approval'].includes(item.status)).length,
+        highPriority: allTasks.filter((item) => item.status !== 'info' && (item.priority === 'critical' || item.priority === 'high')).length,
+        shownTasks: tasks.length,
+        totalTasks: allTasks.length,
+        truncated: allTasks.length > tasks.length,
+      },
+      agents,
+      tasks,
+      sources,
+      agentDetails: {
+        lead_conversion: leadConversion,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.post('/tasks/:taskId/state', async (req, res, next) => {

@@ -754,14 +754,12 @@ describe('closeout-status: Agent D findings', () => {
     expect(facts.comms).toMatchObject({ state: 'done', reason: 'project_report_delivered' });
   });
 
-  test('project report on payment hold → pending on_hold; failed delivery → failed; legacy_sent → done; no token → pending', () => {
+  test('project report failed delivery → failed; legacy_sent → done; no token → pending', () => {
     const base = closedOutInputs({
       record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: {} },
       delivery: null,
     });
     const proj = (o) => ({ id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'not_sent', ...o });
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'held' }) }).facts.reportDelivery)
-      .toMatchObject({ state: 'pending', reason: 'project_report_on_hold', reportHoldStatus: 'held' });
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'failed' }) }).facts.reportDelivery.state).toBe('failed');
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'legacy_sent' }) }).facts.reportDelivery.state).toBe('done');
     expect(deriveCloseoutFacts({ ...base, project: proj({ report_token: null }) }).facts.report)
@@ -807,16 +805,12 @@ describe('closeout-status: Agent D findings', () => {
     expect(facts.invoice).toMatchObject({ state: 'pending', reason: 'frozen_required_mint_not_minted', amount: 120, ruleSource: 'frozen_record', livePrediction: 'covered_membership' });
   });
 
-  test('project report payment hold wins over delivery_status sent; partial honors the channel ledger; released + sent is done', () => {
+  test('project report partial delivery honors the channel ledger', () => {
     const base = closedOutInputs({
       record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: { completionSmsStatus: 'sent' } },
       delivery: null,
     });
     const proj = (o) => ({ id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'sent', ...o });
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'held' }) }).facts.reportDelivery)
-      .toMatchObject({ state: 'pending', reason: 'project_report_on_hold', reportHoldStatus: 'held' });
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'releasing' }) }).facts.reportDelivery.state).toBe('pending');
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'released' }) }).facts.reportDelivery.state).toBe('done');
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { email: { ok: true }, sms: { ok: false } } }) }).facts.reportDelivery)
       .toMatchObject({ state: 'done', reason: 'project_delivery_partial', channelOk: { email: true, sms: false } });
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { email: { ok: false }, sms: { ok: false } } }) }).facts.reportDelivery)
@@ -870,6 +864,38 @@ describe('closeout-status: Agent D findings', () => {
     expect(run({ technician: null, technicianLookupFailed: true })).toMatchObject({ state: 'unknown', reason: 'technicians_lookup_failed' });
     expect(run({ technician: null })).toMatchObject({ state: 'pending', reason: 'no_technician_on_visit' });
     expect(deriveCloseoutFacts(closedOutInputs()).facts.license).toMatchObject({ state: 'not_required', reason: 'catalog_no_license_required' });
+  });
+
+  test('license fact reads DATE columns the way pg returns them (Date objects), not as weekday text', () => {
+    // pg parses a DATE column to a local-midnight Date. String(date).slice(0, 10)
+    // read "Mon May 31" vs "Sat Oct 24", so a license valid to 2027 failed on
+    // every visit day whose weekday name sorts after the expiry's (10-26 sweep).
+    const req = baseRequirements({ requiresLicense: true, licenseCategory: 'GHP' });
+    const tech = (expiry) => ({ id: 'tech-1', fl_applicator_license: 'JF123456', license_expiry: expiry, license_categories: ['GHP', 'L&O', 'Termite'] });
+    const run = (expiry, serviceDate) => deriveCloseoutFacts(closedOutInputs({
+      requirements: req,
+      visit: { ...closedOutInputs().visit, technician_id: 'tech-1', scheduled_date: serviceDate },
+      record: { ...closedOutInputs().record, service_date: serviceDate },
+      technician: tech(expiry),
+    })).facts.license;
+    // A Saturday visit, a license that runs to a Monday the next spring.
+    expect(run(new Date(2027, 4, 31), new Date(2026, 9, 24)))
+      .toMatchObject({ state: 'done', reason: 'technician_licensed', licenseExpiry: '2027-05-31', judgedAt: '2026-10-24' });
+    // Every weekday of one week reads the same verdict.
+    for (let day = 19; day <= 25; day += 1) {
+      expect(run(new Date(2027, 4, 31), new Date(2026, 9, day)).state).toBe('done');
+    }
+    // A license that really expired before the visit still fails.
+    expect(run(new Date(2026, 7, 31), new Date(2026, 8, 1)))
+      .toMatchObject({ state: 'failed', reason: 'technician_license_expired_at_visit', licenseExpiry: '2026-08-31', judgedAt: '2026-09-01' });
+    // ISO strings keep working.
+    expect(run('2027-05-31', '2026-10-24').state).toBe('done');
+  });
+
+  test('a follow-up child with a pg Date scheduled_date reports an ISO day', () => {
+    const required = { suggestion: { required: true, days: 14 }, frozen: true };
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: required, followupChild: { id: 'svc-2', status: 'confirmed', scheduled_date: new Date(2026, 8, 12) } })).facts.followUp)
+      .toMatchObject({ state: 'done', childScheduledDate: '2026-09-12' });
   });
 
   test('comms vocabulary: sending → pending, blocked → not_required (consent), skipped_recap → done; immediate-path sentSmsAt is read', () => {

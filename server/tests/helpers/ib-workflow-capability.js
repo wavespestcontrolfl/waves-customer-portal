@@ -18,7 +18,8 @@
  */
 const { CAPABILITY_GAPS, asList } = require('../fixtures/ib-workflows/execution-matrix');
 
-const BUILT_GAPS = new Set();
+// create_appointment_property_pin: create_appointment takes property_id (2026-10-28).
+const BUILT_GAPS = new Set(['create_appointment_property_pin']);
 
 const unbuiltGaps = (c) => asList(c.requires).filter((key) => !BUILT_GAPS.has(key));
 

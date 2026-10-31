@@ -516,6 +516,21 @@ function isCitabilityBackfillBrief(brief) {
     && Array.isArray(s.citability_gaps) && s.citability_gaps.length > 0;
 }
 
+// same_question_refresh briefs (same-question-refresh.js) are page-anchored
+// refreshes queued by the topic-targeting gate when a new post's question is
+// already answered by a live post: that match (gsc_signal.same_question with
+// the owner page and the question words, plus the unanswered_queries entry the
+// refresh agent answers) IS the provenance, and a page-only row carries no GSC
+// numbers by construction. Same anti-spoofing key (persisted gsc_signal.bucket)
+// and presence rule as isCitabilityBackfillBrief: a brief that lost its match
+// still hard-fails no_gsc_signal.
+function isSameQuestionRefreshBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'same_question_refresh'
+    && !!s.same_question && !!s.same_question.owner_url
+    && Array.isArray(s.unanswered_queries) && s.unanswered_queries.length > 0;
+}
+
 function checkGscSignalAttached(_draft, brief) {
   if (isOperatorAuthoredBrief(brief)) {
     return { ok: true, reason: 'operator_authored_brief' };
@@ -531,6 +546,9 @@ function checkGscSignalAttached(_draft, brief) {
   }
   if (isCitabilityBackfillBrief(brief)) {
     return { ok: true, reason: 'citability_backfill_scan_evidence' };
+  }
+  if (isSameQuestionRefreshBrief(brief)) {
+    return { ok: true, reason: 'same_question_refresh_evidence' };
   }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
@@ -2367,7 +2385,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkMetaDescriptionComplete, checkSerpBriefAttached, checkGscSignalAttached,
-  isOperatorAuthoredBrief, isCompetitorGapBrief, isAeoQuestionGapBrief, isCitabilityBackfillBrief,
+  isOperatorAuthoredBrief, isCompetitorGapBrief, isAeoQuestionGapBrief, isCitabilityBackfillBrief, isSameQuestionRefreshBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,

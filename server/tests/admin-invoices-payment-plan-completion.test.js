@@ -21,6 +21,8 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The Undo marker recordManualPayment writes with the payment (invoice-manual-payment-undo.js reads it back).
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 'audit-1') }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technicianId = 'admin-1';
@@ -43,9 +45,6 @@ jest.mock('../services/billing-pause', () => ({
 }));
 jest.mock('../services/review-request', () => ({
   enrollForPaidInvoice: jest.fn(async () => undefined),
-}));
-jest.mock('../services/project-report-hold', () => ({
-  scheduleHoldReleaseSweep: jest.fn(),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({
   syncTermForInvoicePayment: jest.fn(async () => undefined),
@@ -119,7 +118,8 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'paid' } : { ...INVOICE })),
       update: jest.fn(() => ({ returning: jest.fn(async () => [paidRow]) })),
     });
-    trxPayments = makeRecorder();
+    // The payments insert is chained to returning('id') so the Undo marker can name the ledger row.
+    trxPayments = makeRecorder({ insert: jest.fn(() => Object.assign(Promise.resolve(1), { returning: jest.fn(async () => [{ id: 'pay-1' }]) })) });
     trxPlans = makeRecorder();
     trxCustomers = makeRecorder({ first: jest.fn(async () => ({ id: INVOICE.customer_id })) });
     trx = jest.fn((table) => {

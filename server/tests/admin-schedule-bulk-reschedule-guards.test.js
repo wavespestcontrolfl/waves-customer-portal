@@ -1074,3 +1074,111 @@ test('a DATE-ONLY move of an end-less row probes its DERIVED end (never skipped)
   const rawCall = probe.whereRaw.mock.calls.find(([sql]) => /window_start </.test(sql));
   expect(rawCall[1]).toEqual(['12:00', 60, '10:00']);
 });
+
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): a
+// moved row also gets the arrival-window route check as a SECOND advisory
+// probe, its warning rides the same overlapWarnings list, and its technician's
+// day is numbered inside the write transaction. Never blocks the move.
+describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const arrivalRoute = require('../services/scheduling/arrival-route');
+  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2099-01-15. Review the route before driving it.';
+  let routeSpy;
+  let placeSpy;
+  beforeEach(() => {
+    routeSpy = jest.spyOn(occupancy, 'findConflictingVisits').mockImplementation(async (args) => (args.arrivalWindow
+      ? [{ id: args.arrivalWindow.serviceId, conflict_reason: 'arrival_window', warning: ROUTE_WARNING }] : []));
+    placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(null);
+  });
+  afterEach(() => {
+    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    routeSpy.mockRestore();
+    placeSpy.mockRestore();
+  });
+  const probeClear = () => chain({ select: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([]) });
+  const run = (svcExtra = {}, payload = { scheduledDate: '2099-01-15', windowStart: '10:00' }) => {
+    const updateChain = chain();
+    const trx = wireTrx({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', ...svcExtra }) }),
+        probeClear(),
+        updateChain,
+      ],
+      reschedule_log: [chain()],
+    });
+    return bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload }).then((res) => ({ ...res, trx, updateChain }));
+  };
+
+  test('gate off: no route check, no route number, no routeWarnings key', async () => {
+    const { body } = await run({ technician_id: 'tech-1' });
+    expect(body.updated).toEqual(['svc-1']);
+    expect(body.overlapWarnings).toEqual([]);
+    expect(body).not.toHaveProperty('routeWarnings');
+    expect(routeSpy).not.toHaveBeenCalled();
+    expect(placeSpy).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the moved row is checked on cached road times, the warning comes back as routeWarnings (never as an overlap), the move commits, the row is numbered in the transaction', async () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const { body, trx, updateChain } = await run({ technician_id: 'tech-1' });
+    expect(body.updated).toEqual(['svc-1']);
+    expect(body.failed).toEqual([]);
+    expect(body.overlapWarnings).toEqual([]);
+    expect(body.routeWarnings).toEqual([{ id: 'svc-1', warning: ROUTE_WARNING }]);
+    expect(updateChain.update).toHaveBeenCalled();
+    expect(routeSpy).toHaveBeenCalledTimes(1);
+    expect(routeSpy.mock.calls[0][0]).toMatchObject({
+      db: trx, date: '2099-01-15', windowStart: '10:00', windowEnd: '11:00', excludeServiceIds: ['svc-1'],
+      arrivalWindow: { serviceId: 'svc-1', roads: 'cache' },
+    });
+    expect(placeSpy).toHaveBeenCalledTimes(1);
+    expect(placeSpy.mock.calls[0][0]).toBe(trx);
+    expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'svc-1', staffSave: true, lateDays: true, source: 'bulk_reschedule' });
+    // Placement first, then the route warning (Codex P1 on 9837f0c3d4): the check reads the row where it is saved.
+    expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(routeSpy.mock.invocationCallOrder[0]);
+  });
+
+  test('gate on: a row whose slot did not change is not route-checked or numbered', async () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const { body } = await run({ technician_id: 'tech-1', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00' });
+    expect(body.updated).toEqual(['svc-1']);
+    expect(body.overlapWarnings).toEqual([]);
+    expect(body.routeWarnings).toEqual([]);
+    expect(routeSpy).not.toHaveBeenCalled();
+    expect(placeSpy).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a failed route read never fails the move', async () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    routeSpy.mockRejectedValue(new Error('route read broke'));
+    const { body } = await run({ technician_id: 'tech-1' });
+    expect(body.updated).toEqual(['svc-1']);
+    expect(body.failed).toEqual([]);
+    expect(body.overlapWarnings).toEqual([]);
+    expect(body.routeWarnings).toEqual([]);
+  });
+
+  test('gate on: a real overlap and a route result on the same row stay in their own lists', async () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const updateChain = chain();
+    wireTrx({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', technician_id: 'tech-1' }) }),
+        chain({ select: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([{
+          id: 'svc-other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00',
+          status: 'confirmed', technician_id: null, service_type: 'Pest Control',
+        }]) }),
+        updateChain,
+      ],
+      reschedule_log: [chain()],
+    });
+    const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15', windowStart: '10:00' } });
+    expect(body.overlapWarnings).toEqual([{ id: 'svc-1', warning: expect.stringContaining('overlaps another appointment') }]);
+    expect(body.routeWarnings).toEqual([{ id: 'svc-1', warning: ROUTE_WARNING }]);
+  });
+});

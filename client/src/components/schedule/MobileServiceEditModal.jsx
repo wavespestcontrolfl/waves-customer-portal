@@ -1,6 +1,6 @@
-import { showScheduleSaveNotice } from './ScheduleSaveNotice';
+import { seriesScopeSaveNotice, showScheduleSaveNotice } from './ScheduleSaveNotice';
 // Service-line edit sheet opened from MobileCheckoutSheet per IMG_3730.
-// Lets the tech adjust the scheduled service mid-visit: tier (billing
+// Lets the tech adjust the scheduled service mid-visit: tier (visit
 // cadence label), price override, staff assignment, duration, notes.
 //
 // Save → PUT /admin/schedule/:id/update-details (same endpoint the V1
@@ -9,7 +9,7 @@ import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // checkout sheet's totals reflect the change.
 
 import { createPortal } from 'react-dom';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { X, ChevronRight, Check } from 'lucide-react';
 import { apiErrorMessage } from './seriesMove';
 import AutoDispatchLockBox, { autoDispatchLockSeed } from './AutoDispatchLockBox';
@@ -30,34 +30,73 @@ function adminFetch(path, options = {}) {
   });
 }
 
-// Billing-cadence variants the tech can swap to at the door. These map to
+// Visit-cadence variants the tech can swap to at the door. These map to
 // serviceType strings the server already recognises (matches the pattern
 // used by estimate-converter + services-dropdown). Keeping the labels
 // short and Square-style — the full marketing names live elsewhere.
+// "Monthly" is a visit cadence, never a billing term (owner ruling 2026-09-01:
+// never bill monthly). Visits stamped by the old "Billed Monthly" label still
+// match the monthly pattern; "Bi-Monthly" does not.
 const TIER_OPTIONS = [
-  { key: 'monthly',    label: 'Billed Monthly',       subtitle: 'Monthly visits',       duration: 30, pattern: /monthly/i },
+  { key: 'monthly',    label: 'Monthly',              subtitle: 'Monthly visits',       duration: 30, pattern: /^(?!.*bi[-\s]?monthly).*monthly/i },
   { key: 'bimonthly',  label: 'Bi-Monthly',           subtitle: 'Every 2 months',       duration: 30, pattern: /bi[-\s]?monthly/i },
   { key: 'quarterly',  label: 'Quarterly',            subtitle: '4 visits per year',    duration: 30, pattern: /quarterly/i },
   { key: 'semiannual', label: 'Semiannual',           subtitle: '2 visits per year',    duration: 45, pattern: /semi[-\s]?annual/i },
   { key: 'one_time',   label: 'One-Time Service',     subtitle: 'Single visit',         duration: 60, pattern: /(one[-\s]?time|single|initial)/i },
 ];
 
-function detectTier(serviceType) {
-  if (!serviceType) return 'monthly';
+// A visit's repeat (scheduled_services.recurring_pattern) as the tier it is.
+// Repeats with no row here (weekly, every 4 months, annual, custom…) have none.
+const PATTERN_TIERS = {
+  monthly: 'monthly',
+  monthly_nth_weekday: 'monthly',
+  seasonal_feb_oct: 'monthly',
+  bimonthly: 'bimonthly',
+  quarterly: 'quarterly',
+  semiannual: 'semiannual',
+  one_time: 'one_time',
+};
+
+function inSeries(service) {
+  return !!(service?.isRecurring || service?.recurringParentId || service?.recurring_parent_id);
+}
+
+// The tier the sheet opens on: the cadence the visit's label names, else its
+// repeat (the day feed's label usually drops the cadence: "Pest Control"),
+// else One-Time for a visit with no series. null when no row fits, and then
+// no row is selected.
+function detectTier(service) {
+  const serviceType = service?.serviceType || '';
   for (const opt of TIER_OPTIONS) {
     if (opt.pattern.test(serviceType)) return opt.key;
   }
-  return 'monthly';
+  const pattern = service?.recurringPattern || service?.recurring_pattern;
+  if (pattern) return PATTERN_TIERS[pattern] || null;
+  return inSeries(service) ? null : 'one_time';
 }
 
+// The label without its cadence, so a new pick reads "<base> — <tier>": an
+// old "Billed Monthly" goes whole, and so does the em dash the sheet's own
+// stamp leaves behind.
 function baseServiceName(serviceType) {
   if (!serviceType) return 'Service';
   return serviceType
-    .replace(/\b(monthly|bi[-\s]?monthly|quarterly|semi[-\s]?annual|one[-\s]?time|single|initial)\b/gi, '')
+    .replace(/\b((billed\s+)?monthly|bi[-\s]?monthly|quarterly|semi[-\s]?annual|one[-\s]?time|single|initial)\b/gi, '')
     .replace(/\s{2,}/g, ' ')
-    .replace(/[-|–]\s*$/g, '')
+    .replace(/[-|–—]\s*$/g, '')
     .trim() || serviceType;
 }
+
+// The Price field as the save posts it (undefined = no price is sent).
+function parsePriceInput(value) {
+  return value !== '' && !isNaN(parseFloat(value)) ? parseFloat(value) : undefined;
+}
+
+// Edit appointment's two price/service scopes, posted as priceServiceScope.
+const PRICE_SCOPE_OPTIONS = [
+  { key: 'this_only', label: 'This appointment only' },
+  { key: 'following', label: 'This and following appointments' },
+];
 
 export default function MobileServiceEditModal({
   desktopVisible = false,
@@ -66,10 +105,10 @@ export default function MobileServiceEditModal({
   onClose,
   onSaved,
 }) {
-  const [tier, setTier] = useState(() => detectTier(service?.serviceType));
+  const [tier, setTier] = useState(() => detectTier(service));
   // The tier the sheet opened with — only a tier the tech actually changes
   // may rewrite the stored service type (see handleSave).
-  const initialTier = useRef(detectTier(service?.serviceType));
+  const initialTier = useRef(detectTier(service));
   const [price, setPrice] = useState(() => {
     const p = service?.estimatedPrice;
     return p != null ? String(p) : '';
@@ -85,6 +124,34 @@ export default function MobileServiceEditModal({
   // box's value and the value it opened with; the server acts only on a flip.
   const autoDispatchLockedSeed = autoDispatchLockSeed(service);
   const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
+  // "Apply price change to": the choice Edit appointment offers, under the
+  // same conditions — a BASE-series row (boosters share recurring_parent_id
+  // but carry is_recurring=false and their own pricing; one-offs have no
+  // series), the server's go-ahead (series-summary canScopeSheetPrice: dark
+  // behind GATE_SERVICE_SHEET_PRICE_SCOPE + GATE_EDIT_APPT_PRICE_SERVICE_SCOPE),
+  // and a price that differs from the one the sheet opened with. Fails closed
+  // like Edit appointment: while the summary loads, or when it cannot be read,
+  // there is no choice and the save posts no scope. This visit only is the
+  // default: a series-wide reprice is an explicit pick, never a default.
+  const openedPrice = useRef(parsePriceInput(service?.estimatedPrice != null ? String(service.estimatedPrice) : ''));
+  const serviceHasSeries = inSeries(service);
+  const isBaseSeriesRow = !!(service?.isRecurring ?? service?.is_recurring);
+  const [seriesSummary, setSeriesSummary] = useState(null);
+  const [priceScope, setPriceScope] = useState('this_only');
+  const priceScopeLabelId = useId();
+  useEffect(() => {
+    if (!service?.id || !serviceHasSeries || !isBaseSeriesRow) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/schedule/${service.id}/series-summary`)
+      .then((data) => { if (!cancelled && data?.series) setSeriesSummary(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [service?.id, serviceHasSeries, isBaseSeriesRow]);
+  const currentPrice = parsePriceInput(price);
+  const priceChanged = currentPrice !== undefined
+    && (openedPrice.current === undefined || Math.abs(currentPrice - openedPrice.current) >= 0.005);
+  const priceScopeActive = serviceHasSeries && isBaseSeriesRow
+    && seriesSummary?.canScopeSheetPrice === true && priceChanged;
 
   const baseName = useMemo(() => baseServiceName(service?.serviceType), [service?.serviceType]);
   const headerTitle = service?.serviceType || 'Service';
@@ -111,13 +178,14 @@ export default function MobileServiceEditModal({
     setError(null);
     setSharedStopAsk(false);
     const tierOpt = TIER_OPTIONS.find((o) => o.key === tier);
-    // A plain price/notes/staff edit used to re-label the visit as
-    // "<base> — Billed Monthly" (the default tier) on every save. The stored
+    // A plain price/notes/staff edit used to re-label the visit with the
+    // default tier on every save (then labelled "Billed Monthly"). The stored
     // service type is only rewritten when the tech picked a different tier;
-    // otherwise the key is omitted and the server keeps what it has.
+    // otherwise the key is omitted and the server keeps what it has, an old
+    // "<base> — Billed Monthly" stamp included (it still opens as Monthly).
     const tierChanged = tier !== initialTier.current;
     const nextServiceType = tierChanged && tierOpt ? `${baseName} — ${tierOpt.label}` : undefined;
-    const parsedPrice = price !== '' && !isNaN(parseFloat(price)) ? parseFloat(price) : undefined;
+    const parsedPrice = parsePriceInput(price);
     try {
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: 'PUT',
@@ -135,6 +203,9 @@ export default function MobileServiceEditModal({
           notes,
           estimatedPrice: parsedPrice,
           price: parsedPrice != null ? String(parsedPrice) : undefined,
+          // Only while the choice is on screen; the same pick rides the
+          // shared-stop re-save below (handleSave(comboMove)).
+          priceServiceScope: priceScopeActive ? priceScope : undefined,
           comboMove: comboMove || undefined,
         }),
       });
@@ -160,6 +231,8 @@ export default function MobileServiceEditModal({
       if (savedWarnings.length) {
         showScheduleSaveNotice(`Saved.\n\n${savedWarnings.join('\n\n')}`);
       }
+      const scopeNotice = seriesScopeSaveNotice(result);
+      if (scopeNotice) showScheduleSaveNotice(scopeNotice);
       onSaved?.();
     } catch (e) {
       // A technician change on a stop shared by two or more services is
@@ -316,12 +389,62 @@ export default function MobileServiceEditModal({
           </div>
         </div>
 
+        {/* Price scope — series visits only, once the price changed */}
+        {priceScopeActive && (
+          <div>
+            <div
+              id={priceScopeLabelId}
+              className="uppercase tracking-label font-medium text-ink-tertiary"
+              style={{ fontSize: 11, padding: '18px 16px 10px' }}
+            >
+              Apply price change to
+            </div>
+            <div role="radiogroup" aria-labelledby={priceScopeLabelId}>
+              {PRICE_SCOPE_OPTIONS.map((opt) => {
+                const selected = priceScope === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => setPriceScope(opt.key)}
+                    className="w-full flex items-center gap-3 bg-white border-b border-hairline border-zinc-200 active:bg-zinc-50 text-left u-focus-ring"
+                    style={{ padding: '14px 16px' }}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div
+                        className="font-medium text-zinc-900 truncate"
+                        style={{ fontSize: 15 }}
+                      >
+                        {opt.label}
+                      </div>
+                    </div>
+                    <span
+                      aria-hidden
+                      className="shrink-0 flex items-center justify-center rounded-full"
+                      style={{
+                        width: 22,
+                        height: 22,
+                        background: selected ? '#18181B' : 'transparent',
+                        border: selected ? 'none' : '1.5px solid #D4D4D8',
+                      }}
+                    >
+                      {selected && <Check size={14} className="text-white" strokeWidth={3} />}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Staff */}
         <button
           type="button"
           onClick={() => setShowStaffPicker((v) => !v)}
           className="w-full bg-white border-b border-hairline border-zinc-200 flex items-center gap-3 text-left active:bg-zinc-50 u-focus-ring"
-          style={{ padding: '14px 16px' }}
+          style={{ padding: '14px 16px', ...(priceScopeActive ? { marginTop: 18 } : null) }}
         >
           <span
             aria-hidden

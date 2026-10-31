@@ -5,6 +5,8 @@ import useModalFocus from '../hooks/useModalFocus';
 import { useBiometricLock } from './BiometricGate';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 import { isNativeApp, nativePushConnectionState, requestNativePushPermission } from '../native/nativePush.js';
+import { isWavesAdminApp } from '../native/platform';
+import { setInAppBadge } from '../native/wavesAdminPush';
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { captureNativeBadgeUpdate } from '../native/nativeBadge';
 import { UNREAD_CHANGED_EVENT } from '../hooks/useUnreadConversations';
@@ -42,6 +44,8 @@ function staffRoleFromToken() {
 // ordering; without a stamp the seq write is skipped and ordering
 // advances on the next stamped call. Never rejects; fire-and-forget.
 async function syncAppBadge(count, at) {
+  // Waves Admin (the iOS staff app) sets its own icon badge.
+  if (setInAppBadge(count)) return;
   if (typeof navigator === 'undefined' || !('setAppBadge' in navigator)) return;
   const apply = async () => {
     try {
@@ -154,6 +158,92 @@ function DoneButton({ onDone, color, tall }) {
   );
 }
 
+// The note shown when a stale alert is refused (409 'changed'), shared by the
+// Reopen and row-button paths.
+const CHANGED_NOTE = 'That alert changed \u2014 the list was refreshed.';
+
+// Buttons the server set on an open persisted admin row (`actions`: an array of
+// { id, label, prompt? }). Never on a `live:` row or a customer bell.
+function actionsFor(n, type) {
+  if (!canMarkDone(n, type) || !Array.isArray(n.actions)) return [];
+  return n.actions.filter((a) => a && typeof a.id === 'string' && a.id && typeof a.label === 'string' && a.label);
+}
+
+// Row buttons: their own click and key handling, never the row's (the row
+// would navigate to its link and mark itself read). First button = primary,
+// the rest secondary. A button with a `prompt` asks first: its first tap swaps
+// the row's buttons for the prompt, [label] and Cancel; the second tap sends.
+// `onRun(e, action)` resolves 'done' | 'refreshed' | 'failed'.
+function RowActions({ actions, color, tall, marginTop, onRun }) {
+  const [confirmId, setConfirmId] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const busyRef = useRef(false);
+  const busy = busyId !== null;
+  const confirming = confirmId ? actions.find((a) => a.id === confirmId) : null;
+
+  const style = (primary) => ({
+    padding: tall ? '0 14px' : '6px 12px', minHeight: tall ? 44 : undefined, minWidth: tall ? 44 : undefined,
+    borderRadius: 6, fontSize: 14, fontWeight: 600, cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1,
+    background: primary ? '#18181B' : '#FFFFFF', color: primary ? '#FFFFFF' : '#18181B',
+    border: `1px solid ${primary ? '#18181B' : '#D4D4D8'}`,
+  });
+
+  const send = async (e, action) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusyId(action.id);
+    setFailed(false);
+    let outcome = 'failed';
+    try { outcome = await onRun(e, action); } catch { /* shown as the inline error */ }
+    busyRef.current = false;
+    setBusyId(null);
+    setConfirmId(null);
+    setFailed(outcome === 'failed');
+  };
+
+  const tap = (e, action) => {
+    if (action.prompt && typeof action.prompt === 'string') {
+      e.stopPropagation();
+      e.preventDefault();
+      if (!busyRef.current) setConfirmId(action.id);
+      return;
+    }
+    send(e, action);
+  };
+
+  const button = (action, primary, onClick, label) => (
+    <button key={action.id} type="button" className="waves-focus-ring" disabled={busy}
+      onClick={onClick} onKeyDown={(e) => e.stopPropagation()} style={style(primary)}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div role="group" aria-label="Alert actions" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}
+      style={{ marginTop }}>
+      {confirming && (
+        <div style={{ fontSize: 14, lineHeight: 1.4, color, marginBottom: 8 }}>{confirming.prompt}</div>
+      )}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {confirming ? (
+          <>
+            {button(confirming, true, (e) => send(e, confirming), busyId === confirming.id ? '\u2026' : confirming.label)}
+            <button type="button" className="waves-focus-ring" disabled={busy}
+              onClick={(e) => { e.stopPropagation(); e.preventDefault(); setConfirmId(null); }}
+              onKeyDown={(e) => e.stopPropagation()} style={style(false)}>Cancel</button>
+          </>
+        ) : actions.map((a, i) => button(a, i === 0, (e) => tap(e, a), busyId === a.id ? '\u2026' : a.label))}
+      </div>
+      {failed && (
+        <div role="alert" style={{ marginTop: 8, fontSize: 14, lineHeight: 1.4, color }}>Couldn&apos;t do that. Try again.</div>
+      )}
+    </div>
+  );
+}
+
 function FullText({ text, color, marginTop }) {
   const [shown, setShown] = useState(false);
   return (
@@ -196,6 +286,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [doneError, setDoneError] = useState(null);
   const [doneNext, setDoneNext] = useState(null); // the server's cursor for older done rows
   const [doneNote, setDoneNote] = useState(null); // short inline note after a stale Reopen
+  const [actionNote, setActionNote] = useState(null); // status note after a row button (top of the list)
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
   // hides itself once the user grants permission.
@@ -228,10 +319,15 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const requestJson = (path, options = {}) => {
     if (type !== 'admin') return api.request(path, options);
     return fetch(`${API_BASE}${path}`, { ...options, headers: getHeaders() })
-      .then((r) => {
+      .then(async (r) => {
         if (!r.ok) {
           const err = new Error(`Request failed (${r.status})`);
           err.status = r.status;
+          // The error body carries the server's reason (e.g. a row button's 409 code).
+          try {
+            const data = await r.json();
+            if (data && typeof data === 'object') err.data = data;
+          } catch { /* no JSON body */ }
           throw err;
         }
         return r.json();
@@ -334,7 +430,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   // "Enable push" strip. Admins get operational Web Push. In the native
   // customer app this strip supplies recovery if automatic permission setup
   // did not connect. Customer web stays strip-free.
-  const showPushStrip = (type === 'admin' || isNativeApp()) && !pushOn;
+  // Web Push does not run inside the Waves Admin app's web view, so the
+  // strip there could only fail; staff alerts stay in the home-screen app.
+  const showPushStrip = (type === 'admin' || isNativeApp()) && !pushOn && !isWavesAdminApp();
   useEffect(() => {
     if (!open) return;
     if (type === 'admin') {
@@ -455,6 +553,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setOpen(!open);
   };
 
+  // The row-button status note lasts until the panel closes or another action runs.
+  useEffect(() => { if (!open) setActionNote(null); }, [open]);
+
   // Full dialog contract via the shared hook: move focus into the panel,
   // trap Tab/Shift+Tab inside it, close on Escape, and restore focus to the
   // bell on close (same as the other portal dialogs). Merge its ref with the
@@ -500,6 +601,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const markDone = async (e, n) => {
     e.stopPropagation();
     e.preventDefault();
+    setActionNote(null);
     try {
       await requestJson(`${basePath}/${n.id}/done`, { method: 'PUT', body: JSON.stringify({ version: n.version }) });
     } catch (err) {
@@ -509,6 +611,35 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setNotifications(prev => prev.filter(x => x.id !== n.id));
     if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
     fetchCount();
+  };
+
+  // A row button the server set on this row (RowActions): same content fence
+  // as Done. Success removes the row like Done and shows the server's message;
+  // a 409 re-reads the list with a note; any other failure keeps the row and
+  // RowActions shows the inline error. Resolves 'done' | 'refreshed' | 'failed'.
+  const runAction = async (e, n, action) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setActionNote(null);
+    let d;
+    try {
+      d = await requestJson(
+        `${basePath}/${encodeURIComponent(n.id)}/actions/${encodeURIComponent(action.id)}`,
+        { method: 'POST', body: JSON.stringify({ version: n.version }) },
+      );
+    } catch (err) {
+      if (err?.status !== 409) return 'failed';
+      loadNotifications();
+      const message = typeof err.data?.message === 'string' && err.data.message ? err.data.message : null;
+      setActionNote(err.data?.error === 'changed' ? CHANGED_NOTE : message || 'That alert was already handled.');
+      return 'refreshed';
+    }
+    if (d?.success === false) return 'failed';
+    setNotifications(prev => prev.filter(x => x.id !== n.id));
+    if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
+    fetchCount();
+    if (typeof d?.message === 'string' && d.message) setActionNote(d.message);
+    return 'done';
   };
 
   const doneSeqRef = useRef(0);
@@ -555,7 +686,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     } catch (err) {
       if (err?.status === 409) {
         loadDone();
-        setDoneNote('That alert changed \u2014 the list was refreshed.');
+        setDoneNote(CHANGED_NOTE);
         return;
       }
       setDoneError('reopen');
@@ -615,6 +746,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     // Customer palette = glass tokens (#04395E ink, #0A7EC2 accent) — the
     // old marketing navy/#009CDE rendered inside the glassed portal panel.
     : { bg: CUSTOMER_SURFACE.surface, border: CUSTOMER_SURFACE.border, text: CUSTOMER_SURFACE.text, muted: CUSTOMER_SURFACE.muted, teal: '#0A7EC2', unreadBg: 'rgba(10,126,194,0.10)', white: '#FFFFFF', badge: '#C8102E' };
+
+  const actionNoteEl = type === 'admin' && actionNote && (
+    <div role="status" style={{ padding: '10px 20px', fontSize: 14, lineHeight: 1.4, color: colors.text, borderBottom: `1px solid ${colors.border}` }}>{actionNote}</div>
+  );
 
   const moreControl = type === 'admin' && !loading && !loadFailed && hasMore && (
     <div style={{ padding: '16px 20px', textAlign: 'center' }}>
@@ -809,6 +944,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             {/* Notification list — overscroll containment keeps the sheet's
                 scroll from chaining to the page behind it on iOS. */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
+              {tab === 'account' && actionNoteEl}
               {loading && <div style={{ padding: 40, textAlign: 'center', color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted, fontSize: 14 }}>Loading…</div>}
               {!loading && loadFailed && tab === 'account' && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
@@ -835,6 +971,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 const chip = digestKindChip(n);
                 const report = reportLinkFor(n);
                 const fullText = fullTextFor(n, type);
+                const actions = actionsFor(n, type);
                 return (
                 <div key={n.id}
                   role={href ? 'link' : undefined}
@@ -902,6 +1039,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                         }}>Full report</button>
                     )}
                     {fullText && <FullText text={fullText} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} />}
+                    {actions.length > 0 && <RowActions tall marginTop={8} actions={actions} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onRun={(e, a) => runAction(e, n, a)} />}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                       <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted }}>
                         {timeAgo(n.created_at)}
@@ -973,6 +1111,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
             {/* Notification List */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
+              {actionNoteEl}
               {loading && <div style={{ padding: 40, textAlign: 'center', color: colors.muted }}>Loading...</div>}
               {!loading && loadFailed && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
@@ -1006,6 +1145,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     const report = reportLinkFor(n);
                     const fullText = fullTextFor(n, type);
                     const title = displayTitle(n);
+                    const actions = actionsFor(n, type);
                     return (
                     <div key={n.id}
                       role={href ? 'link' : undefined}
@@ -1064,6 +1204,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                             }}>Full report</button>
                         )}
                         {fullText && <FullText text={fullText} marginTop={4} color={colors.text} />}
+                        {actions.length > 0 && <RowActions marginTop={6} actions={actions} color={colors.text} onRun={(e, a) => runAction(e, n, a)} />}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
                           <div style={{ fontSize: 11, color: colors.muted }}>
                             {timeAgo(n.created_at)}
@@ -1141,4 +1282,4 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
 
 // Pure helpers, exported for focused unit tests (avoids a full component
 // render just to pin the prefix strip / chip / focus-link logic).
-export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor };
+export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor, actionsFor };

@@ -614,30 +614,10 @@ router.get('/:token', async (req, res, next) => {
       // closed (credit_unverifiable) instead of offering Zelle on an unseen credit.
       creditWillCoverAnchor = null;
     }
-    if (isInvoiceCollectibleStatus(data.status) && !data.payer_id && !creditWillCoverAnchor) {
-      const PayCombined = require('../services/pay-combined');
-      const siblings = await PayCombined.combinedEligibleSiblings(data, {
-        reusePaymentIntentId: data.stripe_payment_intent_id || null,
-        onPayerResolved: () => { payerOwnedLive = true; },
-      });
-      if (siblings?.length) {
-        const prevTotalCents = siblings.reduce((sum, inv) => sum + PayCombined.amountDueCents(inv), 0);
-        previousBalance = {
-          invoices: siblings.map((inv) => ({
-            invoiceNumber: inv.invoice_number,
-            // NO serviceType (codex r14 P1): /pay/:token is an
-            // unauthenticated forwarded bearer surface — the owner-approved
-            // exception covers sibling numbers, dates, and amounts only,
-            // never the customer's service history.
-            serviceDate: inv.service_date,
-            dueDate: inv.due_date,
-            amountDue: PayCombined.amountDueCents(inv) / 100,
-          })),
-          total: prevTotalCents / 100,
-          combinedTotal: (prevTotalCents + PayCombined.amountDueCents(data)) / 100,
-        };
-      }
-    }
+    previousBalance = await payPagePreviousBalance(data, {
+      creditWillCoverAnchor,
+      onPayerResolved: () => { payerOwnedLive = true; },
+    });
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
     // Off-Stripe tenders (see isZelleTransferEligible for the full
@@ -752,6 +732,9 @@ router.get('/:token', async (req, res, next) => {
         // creditApplied drives the "Account credit applied" line.
         amountDue: parseFloat(data.amount_due != null ? data.amount_due : data.total),
         creditApplied: parseFloat(data.credit_applied || 0),
+        // Part payments already received on this open invoice (amount due
+        // above is net of them); drives the "Paid so far" line.
+        amountPaid: parseFloat(data.amount_paid || 0),
         dueDate: data.due_date,
         paidAt: data.paid_at,
         cardBrand: data.card_brand,
@@ -1316,9 +1299,6 @@ router.post('/:token/confirm', async (req, res, next) => {
         });
         ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
       }
-      // Fire-and-forget: release any payment-held WDO report gated on this
-      // invoice (60s interval is the fallback).
-      require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
     }
 
     res.json({
@@ -1993,6 +1973,74 @@ router.post('/:token/error', clientPaymentErrorLimiter, async (req, res) => {
   }
 });
 
+// The pay page's previous-balance itemization (owner ruling 2026-08-16; see
+// the GET /:token comment for the disclosure contract): the customer's other
+// open self-pay invoices — numbers, dates, amounts, NEVER tokens — and the
+// combined total the Pay button charges, or null when nothing is itemized.
+// Shared with the invoice.pdf download so the printed invoice lists exactly
+// what the page shows and charges.
+async function payPagePreviousBalance(data, { creditWillCoverAnchor, onPayerResolved } = {}) {
+  if (!isInvoiceCollectibleStatus(data.status) || data.payer_id || creditWillCoverAnchor) return null;
+  const PayCombined = require('../services/pay-combined');
+  const siblings = await PayCombined.combinedEligibleSiblings(data, {
+    reusePaymentIntentId: data.stripe_payment_intent_id || null,
+    onPayerResolved,
+  });
+  if (!siblings?.length) return null;
+  const prevTotalCents = siblings.reduce((sum, inv) => sum + PayCombined.amountDueCents(inv), 0);
+  return {
+    invoices: siblings.map((inv) => ({
+      invoiceNumber: inv.invoice_number,
+      // NO serviceType (codex r14 P1): /pay/:token is an
+      // unauthenticated forwarded bearer surface — the owner-approved
+      // exception covers sibling numbers, dates, and amounts only,
+      // never the customer's service history.
+      serviceDate: inv.service_date,
+      dueDate: inv.due_date,
+      // open-balance's ET-correct overdue verdict — renderers do no date math.
+      pastDue: inv.is_overdue === true,
+      amountDue: PayCombined.amountDueCents(inv) / 100,
+    })),
+    total: prevTotalCents / 100,
+    combinedTotal: (prevTotalCents + PayCombined.amountDueCents(data)) / 100,
+  };
+}
+
+// What the Pay button will charge beyond this invoice, decided the way
+// /:token/setup decides it: the gate is on, no account credit is in play,
+// and no required-save capture hold is pending (setup's
+// holdCoverageForCapture skips the combined allocation). Null when the
+// charge would be this invoice alone, or might not match. Shared by the
+// invoice.pdf download and the invoice email (its PDF block and "pay
+// everything at once" line), so neither states a combined total that setup
+// will not charge.
+async function payPageCombinedBalance(data) {
+  if (!require('../config/feature-gates').isEnabled('payIncludeBalance')) return null;
+  let creditWillCoverAnchor;
+  try {
+    creditWillCoverAnchor = await invoiceCreditWouldFullyCover(data);
+  } catch {
+    return null;
+  }
+  if (creditWillCoverAnchor) return null;
+  if (await invoiceRequiresSavedMethod(data) && await invoiceCaptureNeeded(data)) return null;
+  // Opted-in account credit: whether setup applies it to the anchor, and how
+  // much, is decided under setup's own locks by
+  // customer-credit.applyAccountCreditToInvoice (it declines an invoice on an
+  // active payment plan or with a PaymentIntent attached, among others). A
+  // projected total that guesses wrong states a figure setup will not charge,
+  // so with any credit in play, or a credit read that fails, nothing combined
+  // is promised.
+  let creditToApply;
+  try {
+    creditToApply = await invoiceProjectedCreditApplied(data);
+  } catch {
+    return null;
+  }
+  if (creditToApply > 0) return null;
+  return payPagePreviousBalance(data, { creditWillCoverAnchor });
+}
+
 // =========================================================================
 // GET /api/pay/:token/invoice.pdf — Branded invoice PDF for download/print
 // =========================================================================
@@ -2013,6 +2061,12 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
     if (!data.payer && data.payer_id) {
       data.payer = { company_name: 'Third-party payer', ap_email: null };
     }
+    // The page's previous-balance block, only when setup would actually
+    // charge it (gate off: no extra reads, PDF exactly as before).
+    const previousBalance = await payPageCombinedBalance(data);
+    // This figure is what the Pay button charges, not the whole account
+    // (stopped-dunning and in-flight invoices are left out) — label it so.
+    if (previousBalance) data.previous_balance = { ...previousBalance, totalLabel: 'Total due today' };
     generateInvoicePDF(data, res);
   } catch (err) {
     next(err);
@@ -2022,5 +2076,6 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
 module.exports = router;
 module.exports.invoiceRequiresSavedMethod = invoiceRequiresSavedMethod;
 module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;
+module.exports.payPageCombinedBalance = payPageCombinedBalance;
 module.exports.isZelleTransferEligible = isZelleTransferEligible;
 module.exports.payPageZelleVisibility = payPageZelleVisibility;

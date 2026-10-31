@@ -37,6 +37,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Trash2 } from "lucide-react";
 import {
+  ActionFeedback,
   Badge,
   Button,
   Card,
@@ -137,22 +138,36 @@ export function SmsTemplatesTabV2() {
   const [templateIssues, setTemplateIssues] = useState([]);
   const [filter, setFilter] = useState("all");
   const [highlightKey, setHighlightKey] = useState(null);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [issuesError, setIssuesError] = useState(false);
+  const [issuesAttempt, setIssuesAttempt] = useState(0);
+  const [togglingId, setTogglingId] = useState(null);
+  const [toggleError, setToggleError] = useState("");
+  const [variantLoadErrors, setVariantLoadErrors] = useState({});
   const hashApplied = useRef(false);
 
   useEffect(() => {
     adminFetch("/admin/sms-templates")
       .then((d) => {
         setTemplates(d.templates || []);
+        setLoadError(false);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(() => {
+        setLoadError(true);
+        setLoading(false);
+      });
+  }, [loadAttempt]);
 
   useEffect(() => {
     adminFetch("/admin/sms-templates/issues?limit=10")
-      .then((d) => setTemplateIssues(d.issues || []))
-      .catch(() => setTemplateIssues([]));
-  }, []);
+      .then((d) => {
+        setTemplateIssues(d.issues || []);
+        setIssuesError(false);
+      })
+      .catch(() => setIssuesError(true));
+  }, [issuesAttempt]);
 
   useEffect(() => {
     if (hashApplied.current || !templates.length) return;
@@ -192,7 +207,9 @@ export function SmsTemplatesTabV2() {
   };
 
   const loadVariants = async (templateKey) => {
-    if (!templateKey || variantsByKey[templateKey]) return;
+    // After a failed load the cache holds at most the variants saved since
+    // (Add Variant), never the full list: a retry fetches it.
+    if (!templateKey || (variantsByKey[templateKey] && !variantLoadErrors[templateKey])) return;
     setLoadingVariants(templateKey);
     try {
       const data = await adminFetch(`/admin/sms-templates/${templateKey}/variants`);
@@ -200,8 +217,12 @@ export function SmsTemplatesTabV2() {
         ...prev,
         [templateKey]: data.variants || [],
       }));
-    } catch {
-      setVariantsByKey((prev) => ({ ...prev, [templateKey]: [] }));
+      setVariantLoadErrors((prev) => ({ ...prev, [templateKey]: "" }));
+    } catch (err) {
+      setVariantLoadErrors((prev) => ({
+        ...prev,
+        [templateKey]: err.message || "Request failed",
+      }));
     }
     setLoadingVariants(null);
   };
@@ -328,13 +349,25 @@ export function SmsTemplatesTabV2() {
   };
 
   const toggleActive = async (t) => {
-    await adminFetch(`/admin/sms-templates/${t.id}`, {
-      method: "PUT",
-      body: JSON.stringify({ is_active: !t.is_active }),
-    });
-    setTemplates((prev) =>
-      prev.map((x) => (x.id === t.id ? { ...x, is_active: !x.is_active } : x)),
-    );
+    setTogglingId(t.id);
+    setToggleError("");
+    try {
+      await adminFetch(`/admin/sms-templates/${t.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ is_active: !t.is_active }),
+      });
+      setTemplates((prev) =>
+        prev.map((x) => (x.id === t.id ? { ...x, is_active: !x.is_active } : x)),
+      );
+    } catch (err) {
+      setToggleError(`Could not update ${t.name}: ${err.message || "Request failed"}`);
+    }
+    setTogglingId(null);
+  };
+
+  const retryTemplates = () => {
+    setLoading(!templates.length);
+    setLoadAttempt((n) => n + 1);
   };
 
   const jumpToTemplate = (templateKey) => {
@@ -362,9 +395,21 @@ export function SmsTemplatesTabV2() {
       </div>
     );
 
+  if (loadError && !templates.length)
+    return (
+      <ActionFeedback error onRetry={retryTemplates}>
+        SMS templates could not load.
+      </ActionFeedback>
+    );
+
   return (
     <div className="flex flex-col gap-4">
-      {" "}
+      {loadError ? (
+        <ActionFeedback error onRetry={retryTemplates}>
+          SMS templates could not refresh. Showing the last loaded list.
+        </ActionFeedback>
+      ) : null}
+      {toggleError ? <ActionFeedback error>{toggleError}</ActionFeedback> : null}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         {" "}
         <div className="text-13 text-ink-secondary">
@@ -405,6 +450,11 @@ export function SmsTemplatesTabV2() {
           ))}
         </div>{" "}
       </div>{" "}
+      {issuesError ? (
+        <ActionFeedback error onRetry={() => setIssuesAttempt((n) => n + 1)}>
+          Recent template issues are unavailable.
+        </ActionFeedback>
+      ) : null}
       {templateIssues.length ? (
         <Card>
           <CardBody>
@@ -416,8 +466,11 @@ export function SmsTemplatesTabV2() {
                 variant="secondary"
                 size="sm"
                 onClick={() => adminFetch("/admin/sms-templates/issues?limit=10")
-                  .then((d) => setTemplateIssues(d.issues || []))
-                  .catch(() => setTemplateIssues([]))}
+                  .then((d) => {
+                    setTemplateIssues(d.issues || []);
+                    setIssuesError(false);
+                  })
+                  .catch(() => setIssuesError(true))}
               >
                 Refresh
               </Button>
@@ -490,6 +543,7 @@ export function SmsTemplatesTabV2() {
                   <Switch
                     aria-label={`${t.is_active ? 'Disable' : 'Enable'} ${t.name}`}
                     checked={t.is_active}
+                    disabled={togglingId === t.id}
                     onChange={() => toggleActive(t)}
                   />
                   {editing === t.id ? (
@@ -587,7 +641,7 @@ export function SmsTemplatesTabV2() {
                             type="number"
                             min="0"
                             step="0.1"
-                            value={variantDrafts[variantDraftId(t.template_key)]?.weight ?? 1}
+                            value={variantDrafts[variantDraftId(t.template_key)]?.weight}
                             onChange={(e) => setVariantDraftField(variantDraftId(t.template_key), "weight", e.target.value)}
                           />
                           <Select
@@ -643,7 +697,11 @@ export function SmsTemplatesTabV2() {
                         </div>
                       </div>
                     ) : null}
-                    {(variantsByKey[t.template_key] || []).length ? (
+                    {variantLoadErrors[t.template_key] ? (
+                      <ActionFeedback error onRetry={() => loadVariants(t.template_key)}>
+                        Variants could not load: {variantLoadErrors[t.template_key]}
+                      </ActionFeedback>
+                    ) : (variantsByKey[t.template_key] || []).length ? (
                       <div className="flex flex-col gap-2">
                         {variantsByKey[t.template_key].map((variant) => (
                           <div
@@ -666,7 +724,7 @@ export function SmsTemplatesTabV2() {
                                     type="number"
                                     min="0"
                                     step="0.1"
-                                    value={variantDrafts[variantDraftId(t.template_key, variant.variant_key)]?.weight ?? 1}
+                                    value={variantDrafts[variantDraftId(t.template_key, variant.variant_key)]?.weight}
                                     onChange={(e) => setVariantDraftField(variantDraftId(t.template_key, variant.variant_key), "weight", e.target.value)}
                                   />
                                   <Select
@@ -800,6 +858,9 @@ export function SmsTemplatesTabV2() {
 
 // ── CSR Coach Tab ───────────────────────────────────────────────────
 
+const COACH_SECTIONS = ["overview", "tasks", "weeklyRec", "leaderboard", "leadQuality"];
+const OPEN_TASK_STATUSES = ["pending", "in_progress"];
+
 export function CSRCoachTabV2() {
   const [overview, setOverview] = useState(null);
   const [tasks, setTasks] = useState(null);
@@ -807,32 +868,80 @@ export function CSRCoachTabV2() {
   const [leaderboard, setLeaderboard] = useState(null);
   const [leadQuality, setLeadQuality] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [sectionErrors, setSectionErrors] = useState({});
+  const [reload, setReload] = useState({ n: 0, keys: null });
+  const [busyTasks, setBusyTasks] = useState({});
+  const [taskError, setTaskError] = useState("");
 
   useEffect(() => {
-    Promise.all([
-      adminFetch("/admin/csr/overview?days=30").catch(() => null),
-      adminFetch("/admin/csr/follow-up-tasks").catch(() => null),
-      adminFetch("/admin/csr/weekly-recommendation").catch(() => null),
-      adminFetch("/admin/csr/leaderboard").catch(() => null),
-      adminFetch("/admin/csr/lead-quality?days=30").catch(() => null),
-    ]).then(([ov, tk, wr, lb, lq]) => {
-      setOverview(ov);
-      setTasks(tk);
-      setWeeklyRec(wr);
-      setLeaderboard(lb);
-      setLeadQuality(lq);
+    // First run loads every section; a retry reloads only the failed ones.
+    const wants = (key) => !reload.keys || reload.keys.includes(key);
+    const setters = {
+      overview: setOverview,
+      tasks: setTasks,
+      weeklyRec: setWeeklyRec,
+      leaderboard: setLeaderboard,
+      leadQuality: setLeadQuality,
+    };
+    Promise.allSettled([
+      wants("overview") && adminFetch("/admin/csr/overview?days=30"),
+      wants("tasks") && adminFetch("/admin/csr/follow-up-tasks"),
+      wants("weeklyRec") && adminFetch("/admin/csr/weekly-recommendation"),
+      wants("leaderboard") && adminFetch("/admin/csr/leaderboard"),
+      wants("leadQuality") && adminFetch("/admin/csr/lead-quality?days=30"),
+    ]).then((results) => {
+      const errors = {};
+      COACH_SECTIONS.forEach((key, i) => {
+        if (!wants(key)) return;
+        errors[key] = results[i].status === "rejected";
+        if (!errors[key]) setters[key](results[i].value);
+      });
+      setSectionErrors((prev) => ({ ...prev, ...errors }));
       setLoading(false);
     });
-  }, []);
+  }, [reload]);
+
+  const retryFailedSections = () =>
+    setReload((r) => ({ n: r.n + 1, keys: COACH_SECTIONS.filter((k) => sectionErrors[k]) }));
 
   const handleTaskUpdate = async (taskId, status) => {
-    await adminFetch(`/admin/csr/follow-up-tasks/${taskId}`, {
-      method: "PUT",
-      body: JSON.stringify({ status }),
-    });
-    const tk = await adminFetch("/admin/csr/follow-up-tasks");
-    setTasks(tk);
+    setBusyTasks((prev) => ({ ...prev, [taskId]: true }));
+    setTaskError("");
+    try {
+      const { task } = await adminFetch(`/admin/csr/follow-up-tasks/${taskId}`, {
+        method: "PUT",
+        body: JSON.stringify({ status }),
+      });
+      // Show the saved task right away; the server list below replaces it.
+      setTasks((prev) => ({
+        ...prev,
+        tasks: (prev.tasks || [])
+          .map((t) => (t.id === taskId ? { ...t, ...task } : t))
+          .filter((t) => OPEN_TASK_STATUSES.includes(t.status)),
+      }));
+      try {
+        setTasks(await adminFetch("/admin/csr/follow-up-tasks"));
+        setSectionErrors((prev) => ({ ...prev, tasks: false }));
+      } catch {
+        // The counts stay the server's last answer; the notice says so.
+        setSectionErrors((prev) => ({ ...prev, tasks: true }));
+      }
+    } catch (err) {
+      setTaskError(`Could not update the task: ${err.message || "Request failed"}`);
+    }
+    setBusyTasks((prev) => ({ ...prev, [taskId]: false }));
   };
+
+  const sectionNotice = (key, label) =>
+    sectionErrors[key] ? (
+      <Card>
+        <CardBody>
+          <ActionFeedback error onRetry={retryFailedSections}>
+            {label} could not load.
+          </ActionFeedback>
+        </CardBody>
+      </Card>
+    ) : null;
 
   if (loading)
     return (
@@ -848,81 +957,85 @@ export function CSRCoachTabV2() {
   return (
     <div className="flex flex-col gap-4">
       {/* Team Overview */}
-      <Card>
-        {" "}
-        <CardBody>
+      {sectionNotice("overview", "Team overview")}
+      {overview || !sectionErrors.overview ? (
+        <Card>
           {" "}
-          <div className="text-13 font-medium text-ink-primary mb-3">
-            Team Overview (Last 30 Days)
-          </div>{" "}
-          <div className="overflow-x-auto">
+          <CardBody>
             {" "}
-            <Table>
+            <div className="text-13 font-medium text-ink-primary mb-3">
+              Team Overview (Last 30 Days)
+            </div>{" "}
+            <div className="overflow-x-auto">
               {" "}
-              <THead>
+              <Table>
                 {" "}
-                <TR>
+                <THead>
                   {" "}
-                  <TH>CSR</TH> <TH className="text-right">Calls</TH>{" "}
-                  <TH className="text-right">1st-Call Book %</TH>{" "}
-                  <TH className="text-right">Avg Score</TH>{" "}
-                  <TH className="text-right">Follow-Up %</TH>{" "}
-                </TR>{" "}
-              </THead>{" "}
-              <TBody>
-                {csrs.map((c) => (
-                  <TR key={c.name}>
+                  <TR>
                     {" "}
-                    <TD>{c.name}</TD>{" "}
-                    <TD className="text-right font-mono u-nums">{c.calls}</TD>{" "}
-                    <TD
-                      className={cn(
-                        "text-right font-mono u-nums",
-                        rateAlert(c.firstCallBookingRate) && "text-alert-fg",
-                      )}
-                    >
-                      {c.firstCallBookingRate}%
-                    </TD>{" "}
-                    <TD
-                      className={cn(
-                        "text-right font-mono u-nums",
-                        scoreAlert(c.avgScore) && "text-alert-fg",
-                      )}
-                    >
-                      {c.avgScore}/15
-                    </TD>{" "}
-                    <TD
-                      className={cn(
-                        "text-right font-mono u-nums",
-                        rateAlert(c.followUpRate) && "text-alert-fg",
-                      )}
-                    >
-                      {c.followUpRate}%
-                    </TD>{" "}
-                  </TR>
-                ))}
-                {overview?.teamTotals && (
-                  <TR className="border-t-2 border-zinc-300">
-                    {" "}
-                    <TD className="font-medium">Team</TD>{" "}
-                    <TD className="text-right font-mono u-nums font-medium">
-                      {overview.teamTotals.calls}
-                    </TD>{" "}
-                    <TD className="text-right font-mono u-nums font-medium">
-                      {overview.teamTotals.bookingRate}%
-                    </TD>{" "}
-                    <TD className="text-right font-mono u-nums font-medium">
-                      {overview.teamTotals.avgScore}/15
-                    </TD>{" "}
-                    <TD className="text-right text-ink-tertiary">—</TD>{" "}
-                  </TR>
-                )}
-              </TBody>{" "}
-            </Table>{" "}
-          </div>{" "}
-        </CardBody>{" "}
-      </Card>
+                    <TH>CSR</TH> <TH className="text-right">Calls</TH>{" "}
+                    <TH className="text-right">1st-Call Book %</TH>{" "}
+                    <TH className="text-right">Avg Score</TH>{" "}
+                    <TH className="text-right">Follow-Up %</TH>{" "}
+                  </TR>{" "}
+                </THead>{" "}
+                <TBody>
+                  {csrs.map((c) => (
+                    <TR key={c.name}>
+                      {" "}
+                      <TD>{c.name}</TD>{" "}
+                      <TD className="text-right font-mono u-nums">{c.calls}</TD>{" "}
+                      <TD
+                        className={cn(
+                          "text-right font-mono u-nums",
+                          rateAlert(c.firstCallBookingRate) && "text-alert-fg",
+                        )}
+                      >
+                        {c.firstCallBookingRate}%
+                      </TD>{" "}
+                      <TD
+                        className={cn(
+                          "text-right font-mono u-nums",
+                          scoreAlert(c.avgScore) && "text-alert-fg",
+                        )}
+                      >
+                        {c.avgScore}/16
+                      </TD>{" "}
+                      <TD
+                        className={cn(
+                          "text-right font-mono u-nums",
+                          rateAlert(c.followUpRate) && "text-alert-fg",
+                        )}
+                      >
+                        {c.followUpRate}%
+                      </TD>{" "}
+                    </TR>
+                  ))}
+                  {overview?.teamTotals && (
+                    <TR className="border-t-2 border-zinc-300">
+                      {" "}
+                      <TD className="font-medium">Team</TD>{" "}
+                      <TD className="text-right font-mono u-nums font-medium">
+                        {overview.teamTotals.calls}
+                      </TD>{" "}
+                      <TD className="text-right font-mono u-nums font-medium">
+                        {overview.teamTotals.bookingRate}%
+                      </TD>{" "}
+                      <TD className="text-right font-mono u-nums font-medium">
+                        {overview.teamTotals.avgScore}/16
+                      </TD>{" "}
+                      <TD className="text-right text-ink-tertiary">—</TD>{" "}
+                    </TR>
+                  )}
+                </TBody>{" "}
+              </Table>{" "}
+            </div>{" "}
+          </CardBody>{" "}
+        </Card>
+      ) : null}
       {/* Weekly Team Focus */}
+      {sectionNotice("weeklyRec", "This week's team focus")}
       {weeklyRec?.recommendation && (
         <Card>
           {" "}
@@ -961,6 +1074,7 @@ export function CSRCoachTabV2() {
       )}
 
       {/* Lead Quality */}
+      {sectionNotice("leadQuality", "Lead quality")}
       {leadQuality && (
         <Card>
           {" "}
@@ -1038,28 +1152,42 @@ export function CSRCoachTabV2() {
             <div className="text-13 font-medium text-ink-primary">
               Follow-up tasks
             </div>{" "}
-            <div className="text-12 text-ink-tertiary">
-              Pending:{" "}
-              <span className="font-mono u-nums text-ink-secondary">
-                {tasks?.pending || 0}
-              </span>{" "}
-              <span className="mx-2">·</span>Overdue:{" "}
-              <span
-                className={cn(
-                  "font-mono u-nums",
-                  tasks?.overdue > 0 ? "text-alert-fg" : "text-ink-tertiary",
-                )}
-              >
-                {tasks?.overdue || 0}
-              </span>{" "}
-            </div>{" "}
+            {tasks ? (
+              <div className="text-12 text-ink-tertiary">
+                Pending:{" "}
+                <span className="font-mono u-nums text-ink-secondary">
+                  {tasks.pending}
+                </span>{" "}
+                <span className="mx-2">·</span>Overdue:{" "}
+                <span
+                  className={cn(
+                    "font-mono u-nums",
+                    tasks.overdue > 0 ? "text-alert-fg" : "text-ink-tertiary",
+                  )}
+                >
+                  {tasks.overdue}
+                </span>{" "}
+              </div>
+            ) : null}
           </div>
-          {(tasks?.tasks || []).length === 0 ? (
+          {sectionErrors.tasks ? (
+            <ActionFeedback error onRetry={retryFailedSections} className="mb-3">
+              {tasks
+                ? "The task list could not refresh. The pending and overdue counts may be out of date."
+                : "Follow-up tasks could not load."}
+            </ActionFeedback>
+          ) : null}
+          {taskError ? (
+            <ActionFeedback error className="mb-3">
+              {taskError}
+            </ActionFeedback>
+          ) : null}
+          {!tasks ? null : (tasks.tasks || []).length === 0 ? (
             <div className="p-5 text-center text-ink-tertiary text-13">
               No pending follow-up tasks
             </div>
           ) : (
-            (tasks?.tasks || []).slice(0, 10).map((t) => {
+            (tasks.tasks || []).slice(0, 10).map((t) => {
               const isOverdue =
                 t.status === "pending" && new Date(t.deadline) < new Date();
               return (
@@ -1100,6 +1228,7 @@ export function CSRCoachTabV2() {
                     <Button
                       variant="primary"
                       size="sm"
+                      disabled={busyTasks[t.id]}
                       onClick={() => handleTaskUpdate(t.id, "completed")}
                     >
                       Mark Done
@@ -1107,6 +1236,7 @@ export function CSRCoachTabV2() {
                     <Button
                       variant="secondary"
                       size="sm"
+                      disabled={busyTasks[t.id]}
                       onClick={() => handleTaskUpdate(t.id, "in_progress")}
                     >
                       Reassign
@@ -1119,6 +1249,7 @@ export function CSRCoachTabV2() {
         </CardBody>{" "}
       </Card>
       {/* Bonus Leaderboard */}
+      {sectionNotice("leaderboard", "The bonus leaderboard")}
       {leaderboard && (
         <Card>
           {" "}

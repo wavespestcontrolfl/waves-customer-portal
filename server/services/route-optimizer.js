@@ -9,6 +9,7 @@
 
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
+const driveClock = require('./scheduling/drive-clock');
 
 // Start/end of every modeled day — the van's home base (13649 Luxe Ave,
 // Bradenton 34211; owner ruling 2026-09-07). Geocoded through the app's
@@ -39,10 +40,36 @@ const SCHEDULING_TRAVEL_BUDGET_MS = 15 * 60 * 1000;
 // The admin picker's own allowance (best-times chips, GATE_BEST_TIMES_ROAD_TIMES):
 // separate from the one above, so staff picks never spend customer booking's.
 const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 240, maxElements: 600 };
+// The staff pickers' route check (GATE_PICKER_ROAD_CHECK) has its own, so it
+// never raises the chips' ceiling. Per process and reset on a deploy, so it
+// only smooths bursts: both are also counted against the durable daily and
+// monthly ceilings (scheduling/picker-road-spend.js). Past it, searches fall
+// back to the model ("~").
+const pickerTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 600, maxElements: 1500 };
 
+// How a matrix source asks Google and keys its answers. `traffic: false`
+// (the pickers' later days, GATE_PICKER_ROAD_CHECK): road times without
+// traffic (routingPreference TRAFFIC_UNAWARE, Google's Essentials price, half
+// the traffic-aware one); the answer does not depend on the hour, so one
+// lookup per pair of places serves every departure.
+const MATRIX_MODES = {
+  traffic: {
+    source: 'google_traffic',
+    key: ({ date, from, to, departureMin }, pin) => `${date}|${Math.ceil(departureMin)}|${pin(from)}>${pin(to)}`,
+    preference: (batch) => ({ routingPreference: 'TRAFFIC_AWARE', departureTime: batch.departure.toISOString() }),
+  },
+  plain: {
+    source: 'google_road',
+    key: ({ from, to }, pin) => `${pin(from)}>${pin(to)}`,
+    preference: () => ({ routingPreference: 'TRAFFIC_UNAWARE' }),
+  },
+};
+
+// `signal` (the staff pickers' request, GATE_PICKER_ROAD_CHECK): once it
+// aborts (the picker closed or searched again), no queued request is sent.
 function createSchedulingTravel({
   maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now(),
-  sharedBudget = schedulingTravelBudget,
+  sharedBudget = schedulingTravelBudget, workers = 4, traffic = true, signal = null,
 } = {}) {
   const sharedMaxRequests = sharedBudget.maxRequests ?? 40;
   const sharedMaxElements = sharedBudget.maxElements ?? 800;
@@ -50,11 +77,16 @@ function createSchedulingTravel({
   const results = new Map();
   const attempted = new Set();
   let deadline = null;
+  // An aborted request ends the budget's deadline: every worker already
+  // stops there before it sends the next queued request.
+  if (signal?.aborted) deadline = 0;
+  signal?.addEventListener('abort', () => { deadline = 0; }, { once: true });
   const apiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
   let requests = 0;
   let elements = 0;
   const pin = (p) => `${Number(p.lat)},${Number(p.lng)}`;
-  const keyFor = ({ date, from, to, departureMin }) => `${date}|${Math.ceil(departureMin)}|${pin(from)}>${pin(to)}`;
+  const mode = MATRIX_MODES[traffic ? 'traffic' : 'plain'];
+  const keyFor = (leg) => mode.key(leg, pin);
   const validPin = (p) => p?.lat != null && p?.lng != null
     && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))
     && Math.abs(Number(p.lat)) <= 90 && Math.abs(Number(p.lng)) <= 180
@@ -66,12 +98,18 @@ function createSchedulingTravel({
     // is off; an API outage must not increase the capacity of a new booking.
     const minutes = miles < SAME_PLACE_MILES ? 0 : Math.ceil(Math.max(
       fallbackLegMetrics(miles).minutes,
-      CALIBRATED_FIXED_MINUTES + miles * CALIBRATED_MINUTES_PER_MILE,
+      calibratedMinutes(miles),
     ));
     return { minutes, source: 'conservative_model', reason };
   }
-  function lookup(leg) {
+  // `lookupRaw` = the stored answer; a caller that caches it (the pickers'
+  // road caches) keeps Google's own minutes, never the drive clock's.
+  function lookupRaw(leg) {
     return results.get(keyFor(leg)) || fallback(leg, apiKey ? 'request_budget' : 'provider_unconfigured');
+  }
+  // GATE_DRIVE_CLOCK: a Google leg carries the park minutes, added at read time.
+  function lookup(leg) {
+    return driveClock.withDriveClockPark(lookupRaw(leg));
   }
   async function preload(legs) {
     if (!apiKey) return;
@@ -83,6 +121,13 @@ function createSchedulingTravel({
       const key = keyFor(leg);
       if (attempted.has(key) || !validPin(leg.from) || !validPin(leg.to)) continue;
       attempted.add(key);
+      if (!traffic) {
+        // No departure: one origin, up to 25 destinations, any hour.
+        const batchKey = pin(leg.from);
+        if (!batches.has(batchKey)) batches.set(batchKey, { departure: null, from: leg.from, legs: [] });
+        batches.get(batchKey).legs.push(leg);
+        continue;
+      }
       const minutes = Math.ceil(leg.departureMin);
       const departure = parseETDateTime(`${leg.date}T${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`);
       if (!departure || !Number.isFinite(departure.getTime()) || departure.getTime() < now()) {
@@ -128,7 +173,7 @@ function createSchedulingTravel({
               'X-Goog-FieldMask': 'originIndex,destinationIndex,status,condition,duration,fallbackInfo' },
             body: JSON.stringify({ origins: [{ waypoint: toWaypoint(batch.from.lat, batch.from.lng) }],
               destinations: batch.legs.map((leg) => ({ waypoint: toWaypoint(leg.to.lat, leg.to.lng) })),
-              travelMode: 'DRIVE', routingPreference: 'TRAFFIC_AWARE', departureTime: batch.departure.toISOString() }),
+              travelMode: 'DRIVE', ...mode.preference(batch) }),
             signal: AbortSignal.timeout(Math.max(1, Math.min(1800, deadline - now()))),
           });
           const data = response.ok ? await response.json() : null;
@@ -141,7 +186,7 @@ function createSchedulingTravel({
               if ((row.status?.code ?? 0) !== 0 || row.condition !== 'ROUTE_EXISTS'
                 || row.fallbackInfo || !Number.isFinite(seconds) || seconds < 0
                 || (seconds === 0 && pin(leg.from) !== pin(leg.to))) continue;
-              results.set(keyFor(leg), { minutes: Math.ceil(seconds / 60), source: 'google_traffic', reason: null });
+              results.set(keyFor(leg), { minutes: Math.ceil(seconds / 60), source: mode.source, reason: null });
             }
             reason = 'partial_matrix';
           }
@@ -153,9 +198,9 @@ function createSchedulingTravel({
         }
       }
     }
-    await Promise.all(Array.from({ length: Math.min(4, work.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(workers, work.length) }, worker));
   }
-  return { lookup, preload, diagnostics: () => ({ requests, elements }) };
+  return { lookup, lookupRaw, preload, diagnostics: () => ({ requests, elements }) };
 }
 
 /**
@@ -235,6 +280,13 @@ const CALIBRATED_MINUTES_PER_MILE = 2.35;
 // slots with no parking time at all.
 const SAME_PLACE_MILES = 1e-6;
 
+// The calibrated model's minutes for a leg (unrounded). GATE_DRIVE_CLOCK swaps
+// in the GPS-fitted pair (scheduling/drive-clock.js); off = the constants above.
+function calibratedMinutes(miles) {
+  if (driveClock.driveClockLive()) return driveClock.driveClockMinutes(miles);
+  return CALIBRATED_FIXED_MINUTES + (miles * CALIBRATED_MINUTES_PER_MILE);
+}
+
 /**
  * Convert straight-line miles to estimated drive minutes.
  */
@@ -243,7 +295,7 @@ function milesToDriveMinutes(miles) {
   // Read at CALL time (not the baked gates map) so a flip needs no redeploy.
   if (gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
     if (miles < SAME_PLACE_MILES) return 0;
-    return Math.round(CALIBRATED_FIXED_MINUTES + (miles * CALIBRATED_MINUTES_PER_MILE));
+    return Math.round(calibratedMinutes(miles));
   }
   return Math.round((miles * ROAD_FACTOR / AVG_MPH) * 60);
 }
@@ -621,6 +673,7 @@ module.exports = {
   callGoogleRoutesAPI,
   createSchedulingTravel,
   hintTravelBudget,
+  pickerTravelBudget,
   nearestNeighborOptimize,
   calcUnoptimizedDistance,
   haversine,

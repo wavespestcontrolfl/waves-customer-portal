@@ -61,7 +61,7 @@ const TENANT = { ...OCCUPANT, contactRole: 'tenant' };
 
 function chain(rows) {
   const c = {};
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'leftJoin', 'select', 'orderBy', 'count']) c[m] = jest.fn(() => c);
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'leftJoin', 'select', 'orderBy', 'count', 'countDistinct', 'whereRaw']) c[m] = jest.fn(() => c);
   c.first = jest.fn(async () => rows[0] || null);
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;

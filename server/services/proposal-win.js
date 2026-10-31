@@ -16,23 +16,21 @@
 //      same default sub-rows and account de-dup as the Customers quick-add.
 //
 //   2. INVOICE-MODE WIN — the proposal is bill_by_invoice (billed by invoice,
-//      not autopay). Winning builds the first invoice directly from the
-//      proposal line items: every line billed once = the one-time items plus
-//      the first period of each recurring line (a line's `amount` is already a
-//      single occurrence). Ongoing recurring visits bill as completed through
-//      the normal per-visit invoicing; scheduling/onboarding stays operator
-//      driven, matching #1913's design.
+//      not autopay). Winning makes NO invoice (owner 2026-10-30, pipeline
+//      audit item 1, option A: "Bill after each visit"). Every visit, the
+//      first one included, bills once when it is completed, with any one-time
+//      work booked on it. The win used to bill the first period of every
+//      recurring line at once, and completing the first visit then billed that
+//      application a second time. The win still refuses an authored payment
+//      term that contradicts the customer's payer (assertProposalTermsMatchPayer).
+//      Scheduling stays operator driven.
 //
-// Tax: InvoiceService applies a single rate to the whole subtotal, but a
-// proposal carries per-line `taxable` flags. We pass a blended effective rate
-// (taxableSubtotal * taxRate / subtotal) so the invoice's tax dollars match
-// the proposal PDF exactly. When the proposal is uniformly taxable (or fully
-// non-taxable — the common case) the blended rate equals the real rate (or 0).
+// buildProposalFirstInvoice totals one occurrence of every line; its taxable
+// subtotal decides whether the win marks the customer commercial.
 // ============================================================
 
-const InvoiceService = require('./invoice');
 const { computeProposalTotals } = require('./estimate-proposal');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString } = require('../utils/datetime-et');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const logger = require('./logger');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -348,86 +346,58 @@ async function flagProposalCustomerCommercialIfTaxable({ trx, customerId, propos
   }
 }
 
-// Net-terms from the structured commercial terms (slice 1A-i). paymentTerms
-// is the CANONICAL payer vocabulary, and the token→days map is payer.js's
-// shared PAYMENT_TERM_NET_DAYS (the same map payer statements use) — a
-// lookup, never a parse or a local copy (codex #3297 r2/r4c). Without it,
-// a proposal accepted on authored Net-30 terms invoiced as due immediately
-// (codex 1A-i r4 P0).
-const { PAYMENT_TERM_NET_DAYS: NET_TERM_DAYS } = require('./payer');
-
-function proposalNetTermDays(proposal) {
-  return NET_TERM_DAYS[proposal?.commercialTerms?.paymentTerms] || 0;
+// The won proposal's building use onto the customer (owner 2026-10-28): what the
+// site is used for decides Florida sales tax on its later visits (TaxCalculator,
+// GATE_BUILDING_USE_TAX; written whatever the gate, read only when it is on).
+// Run on EVERY proposal win, beside the commercial flag. A proposal without a
+// pick leaves the customer as it is; a later win with a pick replaces it.
+async function recordProposalBuildingUse({ trx, customerId, proposal }) {
+  const use = proposal?.buildingUse;
+  if (!customerId || (use !== 'residential' && use !== 'nonresidential')) return;
+  await trx('customers').where({ id: customerId }).update({ building_use: use });
 }
 
-// One resolved term for the acceptance invoice, resolved through the
-// canonical PayerService.resolveForInvoice (it owns active-payer filtering
-// and fail-soft-to-self-pay). The accepted proposal's rendered term is the
-// AGREEMENT — if an active payer's canonical terms contradict it (payer
-// attached or edited after authoring; the PUT guard can't see the future),
-// acceptance REJECTS rather than silently invoicing a term the customer
-// never saw. The operator re-authors or clears the term (codex #3297 r2d).
-async function resolveAcceptanceTermDays({ trx, customerId, proposal }) {
+// The authored payment term is the AGREEMENT. Invoice-mode visits bill through the customer's payer when one is active
+// (statement accrual on its canonical terms, PayerService.resolveForInvoice), so an active payer whose terms contradict
+// the authored term (attached or edited after authoring; the PUT guard can't see the future) makes the win REJECT
+// rather than bill on a term the customer never saw. The operator re-authors or clears the term (codex #3297 r2d).
+async function assertProposalTermsMatchPayer({ trx, customerId, proposal }) {
+  const authoredTerm = proposal?.commercialTerms?.paymentTerms || null;
+  if (!customerId || !authoredTerm) return;
   const { resolveForInvoice } = require('./payer');
-  // Lock-then-read (codex #3297 r4b): freeze the customer's payer LINK
-  // first, then resolve, then freeze the payer's TERMS and re-resolve under
-  // both locks. Locks held to commit mean InvoiceService.create's own payer
-  // re-resolution inside this trx reads the same link and terms — under
-  // READ COMMITTED, a lock taken after the read would leave a window where
-  // the due date comes from stale terms while the invoice snapshot gets the
-  // new ones. throwOnError: a transient lookup failure must ABORT the win,
-  // not fail-soft to self-pay past the mismatch guard (codex 1A-i r3 P0).
+  // Lock-then-read (codex #3297 r4b): freeze the customer's payer LINK first, then resolve, then freeze the payer's
+  // TERMS and re-resolve under both locks. throwOnError: a transient lookup failure must ABORT the win, not fail-soft
+  // to self-pay past the mismatch guard (codex 1A-i r3 P0).
   await trx('customers').where({ id: customerId }).forShare().first('id');
   let resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
   if (resolved?.payerId != null) {
     await trx('payers').where({ id: resolved.payerId }).forShare().first('id');
     resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
   }
-  const authoredTerm = proposal?.commercialTerms?.paymentTerms || null;
-  if (resolved?.payerId != null && resolved.paymentTerms) {
-    if (authoredTerm && authoredTerm !== resolved.paymentTerms) {
-      throw winError(
-        `This proposal promises ${authoredTerm} payment terms but the customer bills through a payer on ${resolved.paymentTerms} terms. `
-        + 'Update the proposal terms (or the payer) so the agreement and the invoice match, then mark won again.',
-        409,
-      );
-    }
-    return NET_TERM_DAYS[resolved.paymentTerms] || 0;
+  if (resolved?.payerId != null && resolved.paymentTerms && authoredTerm !== resolved.paymentTerms) {
+    throw winError(
+      `This proposal promises ${authoredTerm} payment terms but the customer bills through a payer on ${resolved.paymentTerms} terms. `
+      + 'Update the proposal terms (or the payer) so the agreement and the invoices match, then mark won again.',
+      409,
+    );
   }
-  return proposalNetTermDays(proposal);
 }
 
-async function createProposalAcceptanceInvoice({ trx, estimate, proposal, customerId }) {
-  if (!customerId) throw winError('A customer is required to invoice a proposal win.', 400);
-  const built = buildProposalFirstInvoice(proposal);
-  if (!built.lineItems.length || !(built.subtotal > 0)) {
-    logger.warn(`[proposal-win] proposal estimate ${estimate.id} has no billable lines — invoice skipped`);
-    return null;
-  }
-
-  // Resolve (and possibly reject on payer-term mismatch) BEFORE any write in
-  // this flow — a 409 here must leave nothing half-done.
-  const acceptanceTermDays = await resolveAcceptanceTermDays({ trx, customerId, proposal });
-
-  // Ensure the billed customer is commercial for a taxable proposal (else
-  // InvoiceService forces $0 tax). Defensive — the win flow also flags it upstream.
-  await flagProposalCustomerCommercialIfTaxable({ trx, customerId, proposal });
-
-  const invoice = await InvoiceService.create({
-    database: trx,
-    customerId,
-    title: cleanStr(proposal.title || 'Commercial Service Proposal', 160),
-    lineItems: built.lineItems,
-    taxRate: built.blendedTaxRate,
-    notes: `Generated from accepted commercial proposal (estimate #${estimate.id}). `
-      + 'Covers one-time items plus the first period of each recurring service; '
-      + 'ongoing recurring visits are billed as completed.',
-    // Honor the resolved term — the shared ET calendar-day helper owns
-    // DST-safe day addition (codex #3297 r1).
-    dueDate: etDateString(addETDays(new Date(), acceptanceTermDays)),
-  });
-  logger.info(`[proposal-win] invoice ${invoice.invoice_number} ($${built.total}) from won proposal estimate ${estimate.id}`);
-  return invoice;
+// The due date of a visit invoice billed from an accepted invoice-mode commercial proposal: the base date plus the
+// agreement's Net term (net15 / net30 / net60, payer.js's shared PAYMENT_TERM_NET_DAYS map, never a parse). The win
+// makes no invoice (owner 2026-10-30, option A), so the visit invoices keep the agreement's terms. Null when the visit's
+// estimate is not such a proposal, or its term is none or due on receipt: the caller keeps its own due date. These are
+// the visits Auto Pay never collects (bill-by-invoice.js).
+async function proposalTermsDueDate(conn, sourceEstimateId, baseDate) {
+  if (!conn || !sourceEstimateId || !baseDate) return null;
+  const estimate = await conn('estimates').where({ id: sourceEstimateId }).first('status', 'bill_by_invoice', 'estimate_data');
+  const proposal = require('./bill-by-invoice').billByInvoiceProposal(estimate);
+  if (!proposal) return null;
+  const days = require('./payer').PAYMENT_TERM_NET_DAYS[proposal.commercialTerms?.paymentTerms] || 0;
+  if (!(days > 0)) return null;
+  // The base is already a calendar date (YYYY-MM-DD): whole days are added to its own fields, no clock or zone involved.
+  const [year, month, day] = String(baseDate instanceof Date ? baseDate.toISOString() : baseDate).slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
 }
 
 module.exports = {
@@ -438,6 +408,7 @@ module.exports = {
   promoteLinkedCustomerForProposalWin,
   ensureCustomerForProposalWin,
   flagProposalCustomerCommercialIfTaxable,
-  proposalNetTermDays,
-  createProposalAcceptanceInvoice,
+  recordProposalBuildingUse,
+  assertProposalTermsMatchPayer,
+  proposalTermsDueDate,
 };

@@ -43,7 +43,6 @@ describe('itemIds / summarize', () => {
   const items = {
     signedUnsent: [{ id: 'p1' }],
     stuckAppts: [{ id: 'a1' }, { id: 'a2' }],
-    stuckHolds: [],
   };
 
   test('itemIds is stable and namespaced', () => {
@@ -54,7 +53,6 @@ describe('itemIds / summarize', () => {
     const text = _private.summarize(items);
     expect(text).toContain('1 WDO report signed but never sent');
     expect(text).toContain('2 WDO inspections past date without a completed report');
-    expect(text).not.toContain('failing release');
   });
 });
 
@@ -79,14 +77,10 @@ describe('runWdoReportAttentionSweep', () => {
     isEnabled.mockReturnValue(true);
     db.mockImplementation((table) => {
       if (table === 'projects') {
-        // First projects query = signedUnsent, second = stuckHolds. Return one
-        // signed-unsent row on the whereNotNull('wdo_signature') variant only.
+        // The projects query is signedUnsent: return one signed-unsent row.
         return chain({
           whereNotNull: jest.fn().mockReturnThis(),
-          select: jest.fn().mockImplementation(function selectImpl() {
-            const wantsHolds = this.whereIn.mock.calls.length > 0;
-            return Promise.resolve(wantsHolds ? [] : [{ id: 'p1', customer_id: 'c1', project_date: '2026-07-15', updated_at: '2026-07-17' }]);
-          }),
+          select: jest.fn().mockResolvedValue([{ id: 'p1', customer_id: 'c1', project_date: '2026-07-15', updated_at: '2026-07-17' }]),
         });
       }
       if (table === 'notifications') return chain({ select: jest.fn().mockResolvedValue([]) });
@@ -107,10 +101,7 @@ describe('runWdoReportAttentionSweep', () => {
     db.mockImplementation((table) => {
       if (table === 'projects') {
         return chain({
-          select: jest.fn().mockImplementation(function selectImpl() {
-            const wantsHolds = this.whereIn.mock.calls.length > 0;
-            return Promise.resolve(wantsHolds ? [] : [{ id: 'p1' }]);
-          }),
+          select: jest.fn().mockResolvedValue([{ id: 'p1' }]),
         });
       }
       if (table === 'notifications') {
@@ -163,30 +154,13 @@ describe('runWdoReportAttentionSweep', () => {
     expect(apptChain.leftJoin).toHaveBeenCalledWith('services as s', 's.id', 'ss.service_id');
   });
 
-  test('held pay-before-report drafts are excluded from signed-unsent', async () => {
-    isEnabled.mockReturnValue(true);
-    const projectsChains = [];
-    db.mockImplementation((table) => {
-      const c = chain();
-      if (table === 'projects') projectsChains.push(c);
-      return c;
-    });
-    await runWdoReportAttentionSweep();
-    // First projects query = signedUnsent: held/releasing rows are parked by
-    // design (pay-before-report), not stalled — they must not ring here.
-    expect(projectsChains[0].whereRaw).toHaveBeenCalledWith(expect.stringContaining("NOT IN ('held', 'releasing')"));
-  });
-
   test('a failed bell insert fails the sweep instead of recording a ring', async () => {
     isEnabled.mockReturnValue(true);
     NotificationService.notifyAdmin.mockResolvedValue(null); // insert failed
     db.mockImplementation((table) => {
       if (table === 'projects') {
         return chain({
-          select: jest.fn().mockImplementation(function selectImpl() {
-            const wantsHolds = this.whereIn.mock.calls.length > 0;
-            return Promise.resolve(wantsHolds ? [] : [{ id: 'p1' }]);
-          }),
+          select: jest.fn().mockResolvedValue([{ id: 'p1' }]),
         });
       }
       if (table === 'notifications') return chain({ select: jest.fn().mockResolvedValue([]) });

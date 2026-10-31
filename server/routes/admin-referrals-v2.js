@@ -7,6 +7,11 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const inbound = require('../services/referral-inbound');
+const { form1099ThresholdCents } = require('../services/form-1099-threshold');
+const { referralInboundConfirmLive } = require('../config/feature-gates');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -56,9 +61,28 @@ router.get('/stats', async (req, res, next) => {
 // =========================================================================
 // GET /promoters — list with search/filter
 // =========================================================================
+const PROMOTERS_DEFAULT_LIMIT = 50;
+const PROMOTERS_MAX_LIMIT = 200;
+
+// Positive whole number from a query value. Undefined -> fallback. Anything
+// else that is not a plain positive integer -> null (the caller answers 400),
+// so a NaN offset can never reach SQL.
+function positiveIntParam(value, fallback) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string' || !/^[0-9]{1,9}$/.test(value)) return null;
+  const n = Number(value);
+  return n >= 1 ? n : null;
+}
+
 router.get('/promoters', async (req, res, next) => {
   try {
-    const { status = 'active', search, page = 1, limit = 50 } = req.query;
+    const { status = 'active' } = req.query;
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const page = positiveIntParam(req.query.page, 1);
+    const requestedLimit = positiveIntParam(req.query.limit, PROMOTERS_DEFAULT_LIMIT);
+    if (page === null) return res.status(400).json({ error: 'page must be a positive whole number' });
+    if (requestedLimit === null) return res.status(400).json({ error: 'limit must be a positive whole number' });
+    const limit = Math.min(requestedLimit, PROMOTERS_MAX_LIMIT);
 
     let query = db('referral_promoters')
       .leftJoin('customers', 'referral_promoters.customer_id', 'customers.id')
@@ -67,7 +91,9 @@ router.get('/promoters', async (req, res, next) => {
         'customers.waveguard_tier',
         'customers.city'
       )
-      .orderBy('referral_promoters.total_referrals_converted', 'desc');
+      .orderBy('referral_promoters.total_referrals_converted', 'desc')
+      // Tie-break so pages never repeat or skip rows with equal conversions.
+      .orderBy('referral_promoters.id', 'asc');
 
     if (status !== 'all') query = query.where('referral_promoters.status', status);
 
@@ -76,15 +102,21 @@ router.get('/promoters', async (req, res, next) => {
       query = query.where(function () {
         this.whereILike('referral_promoters.first_name', s)
           .orWhereILike('referral_promoters.last_name', s)
+          // A full name ("Jane Smith") spans both columns, as the old
+          // client-side filter matched it.
+          .orWhereRaw("concat_ws(' ', referral_promoters.first_name, referral_promoters.last_name) ILIKE ?", [s])
           .orWhereILike('referral_promoters.customer_phone', s)
           .orWhereILike('referral_promoters.referral_code', s);
       });
     }
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const promoters = await query.limit(parseInt(limit)).offset(offset);
+    // Fetch one extra row to learn whether a next page exists without a
+    // second count query that could disagree with the page.
+    const offset = (page - 1) * limit;
+    const rows = await query.limit(limit + 1).offset(offset);
+    const hasMore = rows.length > limit;
 
-    res.json({ promoters });
+    res.json({ promoters: hasMore ? rows.slice(0, limit) : rows, page, limit, hasMore });
   } catch (err) { next(err); }
 });
 
@@ -130,6 +162,56 @@ router.get('/queue', async (req, res, next) => {
     const referrals = await query;
     res.json({ referrals });
   } catch (err) { next(err); }
+});
+
+// =========================================================================
+// Inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM, dark): plan customers who
+// came in through a referral link or named a referrer, waiting for the office
+// to confirm the referrer. services/referral-inbound.js holds the rules.
+// =========================================================================
+router.get('/inbound', async (req, res, next) => {
+  try {
+    if (!referralInboundConfirmLive()) return res.json({ enabled: false, items: [] });
+    const items = await inbound.listInboundReferrals();
+    res.json({ enabled: true, items });
+  } catch (err) { next(err); }
+});
+
+function sendInboundError(res, err, next) {
+  if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code });
+  return next(err);
+}
+
+// POST /inbound/:customerId/confirm — the office names the referrer.
+router.post('/inbound/:customerId/confirm', async (req, res, next) => {
+  try {
+    if (!referralInboundConfirmLive()) return res.status(404).json({ error: 'Not found' });
+    const { customerId } = req.params;
+    const referrerCustomerId = String(req.body?.referrerCustomerId || '');
+    if (!UUID_RE.test(customerId) || !UUID_RE.test(referrerCustomerId)) {
+      return res.status(400).json({ error: 'customerId and referrerCustomerId are required' });
+    }
+    const result = await inbound.confirmInboundReferral({
+      customerId,
+      referrerCustomerId,
+      reviewedBy: UUID_RE.test(String(req.technicianId || '')) ? req.technicianId : null,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) { sendInboundError(res, err, next); }
+});
+
+// POST /inbound/:customerId/dismiss — not a referral; leaves the list for good.
+router.post('/inbound/:customerId/dismiss', async (req, res, next) => {
+  try {
+    if (!referralInboundConfirmLive()) return res.status(404).json({ error: 'Not found' });
+    const { customerId } = req.params;
+    if (!UUID_RE.test(customerId)) return res.status(400).json({ error: 'customerId is required' });
+    const result = await inbound.dismissInboundReferral({
+      customerId,
+      reviewedBy: UUID_RE.test(String(req.technicianId || '')) ? req.technicianId : null,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) { sendInboundError(res, err, next); }
 });
 
 // =========================================================================
@@ -244,6 +326,11 @@ router.post('/payouts/:id/approve', async (req, res, next) => {
         err.statusCode = 409;
         throw err;
       }
+      if (!Number.isSafeInteger(payout.amount_cents) || payout.amount_cents <= 0) {
+        const err = new Error('Payout amount must be a positive whole number of cents');
+        err.statusCode = 400;
+        throw err;
+      }
 
       const promoter = await trx('referral_promoters')
         .where({ id: payout.promoter_id })
@@ -277,7 +364,7 @@ router.post('/payouts/:id/approve', async (req, res, next) => {
         processed_by: adminAuditor,
         tax_year: year,
         ytd_total_at_payout: ytdTotal,
-        requires_1099: ytdTotal >= 60000, // $600 threshold in cents
+        requires_1099: ytdTotal >= form1099ThresholdCents(year), // $600 through 2025, $2,000 from 2026
       });
 
       // Deduct exact balance — no GREATEST() floor since we already verified it.
@@ -310,8 +397,14 @@ router.post('/payouts/:id/request', async (req, res, next) => {
     if (!promoter) return res.status(404).json({ error: 'Promoter not found' });
 
     const settings = await engine.getSettings();
-    const requestAmount = amount || promoter.available_balance_cents;
+    const requestAmount = amount === undefined || amount === null || amount === ''
+      ? promoter.available_balance_cents
+      : (typeof amount === 'string' && amount.trim() !== '' ? Number(amount) : amount);
 
+    // A payout is always a positive whole number of cents, whatever the minimum says.
+    if (!Number.isSafeInteger(requestAmount) || requestAmount <= 0) {
+      return res.status(400).json({ error: 'Payout amount must be a positive whole number of cents' });
+    }
     if (requestAmount < settings.min_payout_cents) {
       return res.status(400).json({ error: `Minimum payout is $${(settings.min_payout_cents / 100).toFixed(2)}` });
     }
@@ -347,7 +440,10 @@ router.put('/settings', async (req, res, next) => {
   try {
     const settings = await engine.updateSettings(req.body);
     res.json({ settings });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message, code: err.code });
+    next(err);
+  }
 });
 
 // =========================================================================

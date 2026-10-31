@@ -83,7 +83,9 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => gate === 'webhooks'),
   gateEnvValue: (gate) => process.env[gate] === 'true',
   smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
+  smsBareYesReplyLive: () => process.env.GATE_SMS_BARE_YES_REPLY === 'true',
 }));
+jest.mock('../services/messaging/bare-yes-reply', () => ({ bareYesIsReply: jest.fn(async () => true) }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -265,6 +267,27 @@ describe('an inbound text from an active technician\'s phone', () => {
     expect(recordTouchpoint).toHaveBeenCalledTimes(1);
     // Not treated as staff: the ordinary customer/lead side still sees it, as today.
     expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+  });
+
+  test('a bare YES is a keyword like STOP while GATE_SMS_BARE_YES_REPLY is off', async () => {
+    asStaff();
+    await receive('Yes');
+    expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+  });
+
+  test('a bare YES that GATE_SMS_BARE_YES_REPLY calls a reply is a staff text: inbox and owner forward, no customer side', async () => {
+    asStaff();
+    process.env.GATE_SMS_BARE_YES_REPLY = 'true';
+    try {
+      const res = await receive('Yes');
+      expect(res.statusCode).toBe(200);
+      expect(recordTouchpoint).toHaveBeenCalledTimes(1);
+      expect(sendSMS).toHaveBeenCalledTimes(1);
+      expect(startSmsThreadDraft).not.toHaveBeenCalled();
+      expect(processInboundSms).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_SMS_BARE_YES_REPLY;
+    }
   });
 
   (TECH_LINE ? test : test.skip)('a text to a technician line keeps its own conversation', async () => {

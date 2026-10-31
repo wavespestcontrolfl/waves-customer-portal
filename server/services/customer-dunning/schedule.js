@@ -23,6 +23,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { redactContact } = require('../../utils/redact-contact');
+const { formatETDayDate } = require('../../utils/datetime-et');
 const config = require('../../config/invoice-followups');
 const Followups = require('../invoice-followups');
 const { isTerminalEmailRefusal, reminderProgress } = require('../billing-reminder-delivery');
@@ -72,7 +73,7 @@ async function customerName(customerId) {
     const row = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
     const first = String(row?.first_name || '').trim();
     const last = String(row?.last_name || '').trim();
-    return first ? { full: `${first} ${last}`.trim(), first } : null;
+    return first ? { full: `${first} ${last}`.trim(), first, short: `${first} ${last ? `${last[0].toUpperCase()}.` : ''}`.trim() } : null;
   } catch {
     return null; // the alert still rings, with a generic headline
   }
@@ -80,9 +81,10 @@ async function customerName(customerId) {
 
 /**
  * `verb` completes "<verb> for <Customer Name>" (the headline names the customer when it fits the 60
- * characters the rule allows, then the first name, then falls back to `generic`).
+ * characters the rule allows, then the first name, then falls back to `generic`). `short` names them as
+ * first name and last initial only ("Sam T."), the form the Auto Pay timeout and combined-start alerts use.
  */
-async function alertStaff({ verb, generic, why, doneWhen, dedupeKey, customerId, subject = null, metadata = {} }) {
+async function alertStaff({ verb, generic, why, doneWhen, dedupeKey, customerId, subject = null, metadata = {}, short = false }) {
   try {
     const { composeAdminAlert, raiseAdminAlert } = require('../admin-alert-compose');
     const name = await customerName(customerId);
@@ -91,7 +93,8 @@ async function alertStaff({ verb, generic, why, doneWhen, dedupeKey, customerId,
       area: 'Billing', action, why, severity: 'needs-you', who: 'person', doneWhen, subject: subj,
       link: customerId ? `/admin/customers?customerId=${encodeURIComponent(customerId)}` : '/admin/invoices',
     });
-    const candidates = name ? [`${verb} for ${name.full}`, `${verb} for ${name.first}`, generic] : [generic];
+    const named = name ? (short ? [name.short] : [name.full, name.first]).map((who) => `${verb} for ${who}`) : [];
+    const candidates = [...named, generic];
     const action = candidates.find((candidate) => {
       try { composeAdminAlert(spec(candidate)); return true; } catch { return false; }
     }) || generic;
@@ -279,6 +282,23 @@ async function promoteInTransaction(trx, customerId, set, now) {
   return { promoted: true, schedule, seed: decision.seed };
 }
 
+// The office hears once per new schedule (owner 2026-10-29), so a person can look before the first combined
+// reminder goes out. Promotion itself still sends the customer nothing. The key is the schedule id: a re-run
+// that finds the schedule open promotes nothing, and a later episode is a new schedule with its own alert.
+async function alertCombinedStarted(schedule, set, seed) {
+  const count = set.members.length;
+  return alertStaff({
+    verb: 'combined reminders started',
+    generic: 'combined reminders started for a customer',
+    short: true,
+    why: `${count} invoices, $${(set.totalCents / 100).toFixed(2)} total; next step ${formatETDayDate(seed.next_touch_at)} unless held; pause it from the invoice panel if wrong.`,
+    doneWhen: 'combined_reminders_reviewed',
+    dedupeKey: `customer-dunning-started:${schedule.id}`,
+    customerId: schedule.customer_id,
+    metadata: { schedule_id: schedule.id, invoice_count: count },
+  });
+}
+
 /**
  * Promote ONE customer. Never sends: `next_touch_at` is always a future run's
  * anchor (seed.js). A concurrent promotion loses on the open unique index
@@ -289,7 +309,10 @@ async function promoteCustomer(customerId, now = new Date(), { database = db } =
   const set = await resolveDunnableSet(customerId, { database, now });
   if (set.kind !== 'multi') return { promoted: false, reason: set.kind === 'hold' ? set.reason : `set_${set.kind}` };
   try {
-    return await database.transaction((trx) => promoteInTransaction(trx, customerId, set, now));
+    const out = await database.transaction((trx) => promoteInTransaction(trx, customerId, set, now));
+    // After the commit and best effort: an alert that fails never undoes a promotion.
+    if (out.promoted) await alertCombinedStarted(out.schedule, set, out.seed);
+    return out;
   } catch (err) {
     if (err.code === '23505') {
       logger.info(`[customer-dunning] promotion of customer ${customerId} lost the race to a concurrent promotion`);
@@ -1027,7 +1050,39 @@ async function markAutopayHold(schedule, { claimStamp, now = new Date(), databas
     .where({ id: schedule.id, step_index: schedule.step_index, touch_claimed_at: claimStamp })
     .whereIn('status', CLAIMABLE_STATUSES)
     .update({ status: 'autopay_hold', next_touch_at: Followups.heldTouchFloor(now), updated_at: database.fn.now() });
+  // The daily revisit re-arms a hold that already stands and must stay quiet: only a row that was NOT already
+  // parked starts a hold episode, and a schedule that resumes and parks again is a new one.
+  if (Number(changed) === 1 && schedule.status !== 'autopay_hold') await alertAutopayHold(schedule, now);
   return Number(changed) === 1;
+}
+
+// The office decides (owner 2026-10-29): charge the card on file, or take the customer off Auto Pay so the
+// reminders run. Nothing is sent either way. Counts the customer's open invoices with a live per-invoice row.
+async function alertAutopayHold(schedule, now) {
+  try {
+    await raiseAutopayHoldAlert(schedule, now);
+  } catch (err) {
+    logger.warn(`[customer-dunning] autopay hold alert failed for schedule ${schedule.id}: ${redactContact(err.message)}`); // the hold itself stands
+  }
+}
+
+async function raiseAutopayHoldAlert(schedule, now) {
+  const rows = await db('invoice_followup_sequences as s').join('invoices as i', 'i.id', 's.invoice_id')
+    .where('s.customer_id', schedule.customer_id).whereIn('s.status', ['active', 'autopay_hold'])
+    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES).select('i.total', 'i.credit_applied', 'i.amount_paid');
+  const { invoiceAmountDue } = require('../invoice-helpers');
+  const total = rows.reduce((sum, r) => sum + Math.round(invoiceAmountDue(r) * 100), 0) / 100;
+  const who = (await customerName(schedule.customer_id))?.short || 'The customer';
+  await alertStaff({
+    verb: 'charge the card on file',
+    generic: 'charge a customer\'s card on file',
+    short: true,
+    why: `${who} is on Auto Pay; ${rows.length} invoices ($${total.toFixed(2)}) are not charged, so reminders are on hold.`,
+    doneWhen: 'invoice_charged',
+    dedupeKey: `customer-dunning-autopay-hold:${schedule.id}:${schedule.episode}:${now.getTime()}`,
+    customerId: schedule.customer_id,
+    metadata: { schedule_id: schedule.id, invoice_count: rows.length },
+  });
 }
 
 /** The revisit found the customer no longer on autopay: back to active so the ordinary send path owns the step. */

@@ -552,6 +552,19 @@ function hasAlignedAuth(authResults, fromDomain, { strict = false } = {}) {
   return false;
 }
 
+// Google's own DMARC verdict for the From domain: dmarc=pass means SPF or DKIM passed AND aligned with it. Read with the
+// strict clause parser (comments and quoted strings dropped, a clause must START with dmarc=pass, Google's authserv-id
+// only), so text a sender typed into a quoted MAIL FROM is never read. Needed where the SPF result names the MAIL FROM
+// only inside a quoted string, which the strict reader drops (a bounce address such as "bounces+...@em631.<county>.gov").
+function hasStrictDmarcPass(authResults, fromDomain) {
+  const { authResultClauses } = require('../zelle-notice');
+  const domain = String(fromDomain || '').toLowerCase();
+  const clauses = authResultClauses(authResults);
+  if (!domain || !clauses.length || !/^mx\.google\.com(?: \d+)?$/.test(clauses[0])) return false;
+  return clauses.slice(1).some((clause) => /^dmarc=pass\b/.test(clause)
+    && [...clause.matchAll(/\bheader\.from=([a-z0-9.-]+)/g)].some((m) => m[1] === domain));
+}
+
 /**
  * Rescue known senders out of Gmail's spam folder. Recent window only —
  * Gmail purges spam at 30 days and yesterday's sweep covered yesterday.
@@ -865,6 +878,7 @@ module.exports = {
   QUARANTINE_HOURS,
   isKnownSender,
   hasAlignedAuth,
+  hasStrictDmarcPass,
   quarantineMessage,
   cancelQuarantine,
   settleDeferredBlock,

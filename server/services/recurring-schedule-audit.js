@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { createHash } = require('node:crypto');
 const { etDateString, parseETDateTime, addETDays, etParts, etNthWeekdayOfMonth } = require('../utils/datetime-et');
+const { LAWN_ROUNDS_9, ROUNDS_PER_YEAR, lawnRoundDate, roundOf, roundOrdinal, roundStart, roundEnd } = require('./lawn-rounds');
 
 // Minimum plausible gap in DAYS between two visits of a series, per
 // recurring_pattern: ~70% of the nominal interval (a month counts 21 days).
@@ -16,6 +17,11 @@ const MIN_GAP_DAYS_BY_PATTERN = {
   // threshold applies; the Oct→Feb winter gap is longer than any threshold
   // and can never false-positive.
   seasonal_feb_oct: 21,
+  // Lawn 9x rounds: a visit moves anywhere inside its 40-day round, so a
+  // legitimate neighbour pair can sit closer than the 35-49 day cadence. This
+  // only catches two visits crowded together; a visit outside its round is
+  // hasAcceptedScheduleSpacingGap's finding.
+  [LAWN_ROUNDS_9]: 14,
   every_6_weeks: 29,
   bimonthly: 42,
   quarterly: 63,
@@ -448,6 +454,7 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
   const live = rows.filter((row) => !['cancelled', 'rescheduled', 'skipped', 'no_show'].includes(row.status));
   const expectedVisits = seeder.plannedVisitCountForPattern(pattern);
   const issues = [];
+  let missedRound = null;
   if (!rows.length) issues.push('missing_schedule');
   else if (!live.length) issues.push('cancelled_schedule_needs_review');
   else {
@@ -455,13 +462,21 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
     if (live.some((row) => {
       const stored = seeder.normalizeRecurringPattern(row.recurring_pattern);
       const sameInterval = (stored === 'custom' && Number(row.recurring_interval_days) === 42 && pattern === 'every_6_weeks')
+        || (stored === LAWN_ROUNDS_9 && pattern === 'every_6_weeks')
         || (stored === 'monthly_nth_weekday' && pattern === 'monthly');
       return row.recurring_pattern && stored !== pattern && !sameInterval;
     })) {
       issues.push('cadence_differs_from_acceptance');
     }
     if (live.length < expectedVisits) issues.push('missing_applications');
-    if (hasAcceptedScheduleSpacingGap(live, pattern, seeder)) issues.push('application_spacing_needs_review');
+    // A rounds series (the same 9x plan as every_6_weeks) is dated by its fixed
+    // rounds, so its spacing is checked against them, not the acceptance's 42-day walk.
+    const spacingPattern = live.some((row) => seeder.normalizeRecurringPattern(row.recurring_pattern) === LAWN_ROUNDS_9)
+      ? LAWN_ROUNDS_9 : pattern;
+    if (hasAcceptedScheduleSpacingGap(live, spacingPattern, seeder)) issues.push('application_spacing_needs_review');
+    // A rounds series whose latest ended round passed with no completed visit never took that round's step (owner 2026-10-29).
+    if (spacingPattern === LAWN_ROUNDS_9) missedRound = missedLawnRound(rows, todayET);
+    if (missedRound) issues.push(missedRound.issue);
     const upcoming = live.filter((row) => formatDateOnly(row.scheduled_date) >= todayET && row.status !== 'completed');
     if (!upcoming.length && live.some((row) => row.recurring_ongoing)) issues.push('ongoing_plan_has_no_future_visit');
     if (estimate.property_id && live.some((row) => row.property_id !== estimate.property_id)) issues.push('property_link_needs_review');
@@ -470,16 +485,47 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
   // The watchdog dedupes forever. Include the offending row state so a new
   // schedule regression after repair can ring again without ringing daily.
   const evidenceKey = createHash('sha256').update(JSON.stringify({
-    issues, pattern, expectedVisits,
+    issues, pattern, expectedVisits, ...(missedRound ? { missedRound: missedRound.ordinal } : {}),
     rows: rows.map((row) => [row.id, row.status, row.recurring_pattern, row.is_recurring,
       row.recurring_interval_days, row.recurring_ongoing, row.date_exception, formatDateOnly(row.date_exception_cadence_date),
       row.recurring_nth, row.recurring_weekday, row.skip_weekends, row.weekend_shift,
       // A correction followed by the SAME bad state must be a new incident.
       row.row_revision, row.property_id, formatDateOnly(row.scheduled_date)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   })).digest('hex').slice(0, 20);
+  // The finding alone, what the bell says: the issues, the accepted pattern and the planned and
+  // recorded application counts. No row revision or date, so a routine edit to a visit (any UPDATE
+  // moves xmin) leaves it as it was. The watchdog versions its bell with it under
+  // GATE_ACCEPTED_PLAN_RING_ON_CHANGE.
+  // A missed round carries its round ordinal (the program year's round on the continuous timeline), so a NEW missed round rings as a change
+  // while the same one stays a standing bell; the key of every other finding is as it was.
+  const findingKey = createHash('sha256').update(JSON.stringify({ issues, pattern, expectedVisits, recordedVisits: live.length, ...(missedRound ? { missedRound: missedRound.ordinal } : {}) }))
+    .digest('hex').slice(0, 20);
   return { estimateId: estimate.id, customerId: estimate.customer_id, serviceFamily: family,
-    pattern, expectedVisits, recordedVisits: live.length, issues, evidenceKey,
+    pattern, expectedVisits, recordedVisits: live.length, issues, evidenceKey, findingKey,
     appointmentIds: rows.map((row) => row.id) };
+}
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const roundDay = (dateStr) => `${MONTH_NAMES[Number(dateStr.slice(5, 7)) - 1]} ${Number(dateStr.slice(8, 10))}`;
+
+// Lawn rounds: the MOST RECENTLY ENDED round (it ended before today ET) of a rounds series that has no completed plan visit. A booster
+// never counts: it sits on top of the plan. Only a round from the round of the series' first visit through the round of its last row (a
+// series not yet started or already past its term has no missed round), and only the latest one, so the finding clears itself once the
+// next round ends with a completed visit. Returns { ordinal, issue } or null. `rows` are the family's visits in any status.
+function missedLawnRound(rows, todayET) {
+  const plan = rows.filter((row) => !isBoosterVisit(row));
+  const ordinals = plan.map((row) => roundOrdinal(formatDateOnly(row.scheduled_date))).filter((ordinal) => ordinal != null);
+  const today = roundOrdinal(todayET);
+  if (!ordinals.length || today == null) return null;
+  const ended = today - 1;
+  if (ended < Math.min(...ordinals) || ended > Math.max(...ordinals)) return null;
+  if (plan.some((row) => row.status === 'completed' && roundOrdinal(formatDateOnly(row.scheduled_date)) === ended)) return null;
+  const programYear = Math.floor(ended / ROUNDS_PER_YEAR);
+  const round = (ended % ROUNDS_PER_YEAR) + 1;
+  return {
+    ordinal: ended,
+    issue: `Round ${round} (${roundDay(roundStart(programYear, round))}-${roundDay(roundEnd(programYear, round))}) passed with no completed visit; that round's step was not applied.`,
+  };
 }
 
 // The weekend day the seeder walked to before it shifted a follow-up. A
@@ -504,12 +550,33 @@ function weekendShiftBaseDate(row, dateStr, seeder) {
   return dateStr;
 }
 
+// Lawn rounds: the k-th visit after the series anchor belongs in the round of
+// lawnRoundDate(anchor, k). A visit may sit anywhere inside that round (a
+// move or a weekend shift is not drift); outside it is the finding, and so is
+// a skipped or doubled round, which shifts every later visit one round.
+function lawnRoundsOutOfRound(sorted) {
+  let anchor = null;
+  let k = 0;
+  return sorted.some((row) => {
+    // An exception with no recorded cadence position breaks the count; the
+    // run after it is anchored on its own first visit (as the spacing walk
+    // below does).
+    if (row.date_exception) { anchor = null; return false; }
+    const date = formatDateOnly(row.scheduled_date);
+    if (!anchor) { anchor = date; k = 0; return false; }
+    k += 1;
+    const round = roundOf(lawnRoundDate(anchor, k));
+    return !round || date < round.start || date > round.end;
+  });
+}
+
 function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
   // Rebooker's stored cadence position keeps an exception in its original
   // slot even if the actual appointment moved past another application.
   const sorted = rows.map((row) => row.date_exception && row.date_exception_cadence_date
     ? { ...row, scheduled_date: formatDateOnly(row.date_exception_cadence_date), date_exception: false }
     : row).sort((a, b) => formatDateOnly(a.scheduled_date).localeCompare(formatDateOnly(b.scheduled_date)));
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundsOutOfRound(sorted);
   let anchorIndex = 0;
   let expectedTerm = [];
   return sorted.some((row, index) => {
@@ -664,6 +731,8 @@ async function acceptedRecurringScheduleGaps(conn, { now, cutoff, estimateIds, c
 
 module.exports = {
   MIN_GAP_DAYS_BY_PATTERN,
+  lawnRoundsOutOfRound,
+  hasAcceptedScheduleSpacingGap,
   auditRecurringScheduleAnomalies,
   buildRecurringScheduleAnomalySql,
   formatAnomaly,

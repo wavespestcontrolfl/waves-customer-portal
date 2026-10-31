@@ -385,6 +385,30 @@ async function callSideBlockForEstimateData(dbc, data, { estimateStatus = null }
   }
 }
 
+// The call-side verdict a public write re-runs inside its own transaction and
+// HOLDS through the write (AGENTS.md: the commit re-checks the preflight read
+// on the locked row). The caller already holds the estimate row (`row`, read
+// FOR SHARE or FOR UPDATE on `trx`). This checks the estimate-side linkage
+// markers, locks the linked lead, then the call row inside
+// staleCallLinkageReason (the repo-wide estimates, leads, call_log order), and
+// reads the call verdict on that locked row: the steps estimate-public.js's
+// referral-link and change-request writes run. True = blocked.
+async function callSideBlockedUnderLock(trx, row) {
+  let data = row?.estimate_data ?? null;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { data = null; }
+  }
+  const engine = data?.estimatorEngine;
+  if (engine && (engine.linkage_invalidated_at || engine.invalidation_pending_at)) return true;
+  if (data?.lead_id && ['sid', 'stamp'].includes(data?.lead_linkage)) {
+    await trx('leads').where({ id: String(data.lead_id) }).forUpdate().first('id');
+  }
+  // Lazy: admin-estimate-persistence requires this module at load.
+  const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+  if (data && await staleCallLinkageReason(trx, data, { lockCallRow: true, estimateStatus: row.status })) return true;
+  return !!(await callSideBlockForEstimateData(trx, data, { estimateStatus: row.status }));
+}
+
 // Batch form of callSideBlockForEstimateData for LIST views (the admin
 // Pipeline cards decide whether the staff preview can render a row).
 // `entries` are { id, status, data } with data the parsed estimate_data.
@@ -607,6 +631,7 @@ module.exports = {
   settledCallGeneration,
   callPassStillOwned,
   callSideBlockForEstimateData,
+  callSideBlockedUnderLock,
   callSideBlocksForEstimates,
   callDraftVerdict,
   quarantineQueueEntries,
