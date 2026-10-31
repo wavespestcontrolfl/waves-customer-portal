@@ -362,23 +362,33 @@ router.put('/:customerId/turf-profile/bermuda-removal', requireAdmin, async (req
         return res.status(400).json({ error: 'This St. Augustine cultivar (ProVista, Captiva or Seville) never gets bermuda removal' });
       }
     }
-    // Turning it on re-checks the active profile, the eligible grass and the cultivar inside the
-    // UPDATE itself, so a profile edit that lands between the read and the write wins.
-    const query = db('customer_turf_profiles').where({ customer_id: customerId });
-    if (enabled) {
-      // The excluded-cultivar rule rides the UPDATE too, so a cultivar changed to an excluded
-      // one after the read above makes the update hit no row (409), never a switched-on lawn.
-      const cultivarRule = excludedCultivarSql();
-      query.where({ active: true }).whereIn('grass_type', BERMUDA_REMOVAL_TRACKS).whereRaw(cultivarRule.sql, cultivarRule.bindings);
-    }
-    const [saved] = await query
-      .update({
-        bermuda_removal: enabled,
-        bermuda_removal_set_by: String(req.technicianId || '').slice(0, 80) || null,
-        bermuda_removal_set_at: new Date(),
-        updated_at: new Date(),
-      })
-      .returning('*');
+    // Same customer fence as the profile PUT: an archive or merge that committed after the read
+    // above wins, and the switch is not written.
+    const { withTurfProfileFence } = require('../services/customer-pricing-ai');
+    const outcome = await withTurfProfileFence(db, customerId, async (trx) => {
+      const live = await trx('customers').where({ id: customerId }).first('deleted_at');
+      if (!live || live.deleted_at) return { archived: true };
+      // Turning it on re-checks the active profile, the eligible grass and the cultivar inside the
+      // UPDATE itself, so a profile edit that lands between the read and the write wins.
+      const query = trx('customer_turf_profiles').where({ customer_id: customerId });
+      if (enabled) {
+        // The excluded-cultivar rule rides the UPDATE too, so a cultivar changed to an excluded
+        // one after the read above makes the update hit no row (409), never a switched-on lawn.
+        const cultivarRule = excludedCultivarSql();
+        query.where({ active: true }).whereIn('grass_type', BERMUDA_REMOVAL_TRACKS).whereRaw(cultivarRule.sql, cultivarRule.bindings);
+      }
+      const [row] = await query
+        .update({
+          bermuda_removal: enabled,
+          bermuda_removal_set_by: String(req.technicianId || '').slice(0, 80) || null,
+          bermuda_removal_set_at: new Date(),
+          updated_at: new Date(),
+        })
+        .returning('*');
+      return { saved: row };
+    });
+    if (outcome.archived) return res.status(404).json({ error: 'Customer not found' });
+    const { saved } = outcome;
     if (!saved) return res.status(409).json({ error: 'The turf profile changed; reload and try again' });
     logger.info?.(`[turf-profile] bermuda_removal=${enabled} customer=${customerId} by=${req.technicianId}`);
     res.json({ profile: saved });

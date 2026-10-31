@@ -7,8 +7,12 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/technician-visit-scope', () => ({ technicianServicesCustomer: jest.fn(async () => true) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/customer-pricing-ai', () => ({
+  withTurfProfileFence: jest.fn(async (knex, _customerId, fn) => fn(knex)),
+}));
 
 const db = require('../models/db');
+const { withTurfProfileFence } = require('../services/customer-pricing-ai');
 const { requireAdmin } = require('../middleware/admin-auth');
 const router = require('../routes/admin-customer-turf-profile');
 
@@ -63,6 +67,23 @@ describe('PUT bermuda-removal', () => {
   test.each([['a missing', null], ['an archived', { id: 'c1', deleted_at: new Date('2026-10-01T12:00:00Z') }]])('%s customer: 404 and nothing written', async (_label, customer) => {
     const updates = fakeDb({ customer, profile: { id: 'p1', grass_type: 'zoysia', active: true } });
     const res = await put({ enabled: false });
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(updates).toEqual([]);
+  });
+
+  test('an archive that commits before the fence wins: 404 and the switch is not written', async () => {
+    const updates = fakeDb({ profile: { id: 'p1', grass_type: 'zoysia', active: true } });
+    withTurfProfileFence.mockImplementationOnce(async (knex, _customerId, fn) => {
+      const live = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const q = live(table);
+        if (table === 'customers') q.first = jest.fn(async () => ({ id: 'c1', deleted_at: new Date('2026-10-01T12:00:00Z') }));
+        return q;
+      });
+      return fn(knex);
+    });
+    const res = await put({ enabled: false });
+    expect(withTurfProfileFence).toHaveBeenCalledWith(db, 'c1', expect.any(Function));
     expect(res.status).toHaveBeenCalledWith(404);
     expect(updates).toEqual([]);
   });
