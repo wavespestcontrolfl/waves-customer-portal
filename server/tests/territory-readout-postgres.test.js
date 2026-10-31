@@ -55,11 +55,12 @@ describeDb('territory read-out (Postgres)', () => {
         password_hash: 'synthetic-not-a-login-hash', role: 'technician', active: true, employment_status: 'active', field_dispatchable: true,
       });
       await trx('customers').insert({
-        id: customerId, first_name: 'Synthetic', last_name: 'Fixture', address_line1: '100 Fixture Way', city: 'Venice', state: 'FL', zip: '34293',
+        id: customerId, first_name: 'Synthetic', last_name: 'Fixture', email: `${customerId}@example.invalid`,
+        phone: '+19415550101', address_line1: '100 Fixture Way', city: 'Venice', state: 'FL', zip: '34293',
       });
       const visit = (date, status, extra = {}) => ({
         id: randomUUID(), customer_id: customerId, technician_id: techId, scheduled_date: date, status,
-        service_address_zip: '34293', window_start: '09:00', window_end: '10:00', ...extra,
+        service_type: 'General Pest Control', service_address_zip: '34293', window_start: '09:00', window_end: '10:00', ...extra,
       });
       await trx('scheduled_services').insert([
         visit('2099-01-06', 'confirmed'),
