@@ -2000,14 +2000,15 @@ const gates = {
   // sends, changes and holds nothing. Off unless exactly 'true'.
   smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true',
 
-  // SMS prompt patches (owner rulings 2026-09-27 "the texting AI should improve with NO human
-  // approval steps" and 2026-10-24 "do all"): with mode 'true' the real-answers drafter appends
-  // the ONE active learned-rules block (sms_prompt_patches) and stamps that patch's own
-  // prompt_version tag; the sealed exam can draft with a candidate block that the live drafter
-  // never sees. Modes: unset/anything else = off; 'observe' = record-only, the drafter stays
-  // unpatched; 'true' = the active patch applies. No active patch = prompt and version
-  // byte-identical to today. Read at call time through smsPromptAutopromoteMode(); this entry is
-  // on in both non-off modes (logGateStatus only).
+  // SMS prompt patches and the auto-promote loop (owner rulings 2026-09-27 "the texting AI should
+  // improve with NO human approval steps" and 2026-10-24 "do all"): with mode 'true' the
+  // real-answers drafter appends the ONE active learned-rules block (sms_prompt_patches) and
+  // stamps that patch's own prompt_version tag. In 'observe' or 'true' a daily tick turns the
+  // newest eligible pathology proposal into ONE guarded candidate rule, grades the drafter with it
+  // on the sealed exam (exam-only; real LLM API calls, a week apart at most) and records the
+  // decision; nothing activates. Unset/anything else = off: nothing runs and the drafter stays
+  // unpatched. No active patch = prompt and version byte-identical to today. Read at call time
+  // through smsPromptAutopromoteMode(); this entry is on in both non-off modes (logGateStatus only).
   get smsPromptAutopromote() { return smsPromptAutopromoteMode() !== 'off'; },
 
   // Lead Estimate Automation — generates priced draft estimates from new
@@ -8669,9 +8670,10 @@ function smsCourtesyAfterTemplateLive() {
   return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
 }
 
-// GATE_SMS_PROMPT_AUTOPROMOTE read at CALL time: 'true' = the active prompt patch applies;
-// 'observe' = record-only, the drafter stays unpatched; unset or anything else = off. The
-// canonical reader for sms-prompt-patch.js.
+// GATE_SMS_PROMPT_AUTOPROMOTE read at CALL time: 'true' = the active prompt patch applies and the
+// loop records candidates, exams and decisions; 'observe' = the loop records, the drafter stays
+// unpatched; unset or anything else = off. The canonical reader for sms-prompt-patch.js and the
+// cron.
 function smsPromptAutopromoteMode() {
   const raw = String(process.env.GATE_SMS_PROMPT_AUTOPROMOTE || '').trim().toLowerCase();
   if (raw === 'true') return 'true';
