@@ -431,33 +431,47 @@ function slotReanchors(data, slotDate) {
   return pullForwardDaysBetween(data?.current?.date, slotDate) >= threshold;
 }
 
+// True when this date is one the server moves ALONE for a lawn rounds visit
+// (payload.roundsOneOff, the size rule): within maxDays of the visit's regular
+// date and inside its round. The server is authoritative (shouldReanchor
+// applies the same bounds); this only drives the copy and the scope pin.
+function slotIsRoundsOneOff(data, slotDate) {
+  const t = data?.roundsOneOff;
+  const day = String(slotDate || '');
+  if (!t || !day) return false;
+  return day >= t.roundStart && day <= t.roundEnd
+    && Math.abs(pullForwardDaysBetween(t.fromDate, day)) <= t.maxDays;
+}
+
 // The recurring-plan note under the hero. Collective anchoring (server gate
 // GATE_COLLECTIVE_SERIES_ANCHOR via payload.collectiveAnchor — owner ruling
 // 2026-07-30): every date move shifts the series, so one steady sentence
 // replaces the legacy conditional pull-forward warning.
 function recurringNoteCopy(data, selectedSlot) {
-  const changesSeries = data?.collectiveAnchor
-    ? !selectedSlot || String(selectedSlot.date) !== String(data?.current?.date || '')
-    : selectedSlot && slotReanchors(data, selectedSlot.date);
+  const slotDate = selectedSlot ? String(selectedSlot.date) : null;
+  const sameDay = slotDate === String(data?.current?.date || '');
+  const collective = !!data?.collectiveAnchor;
+  // Lawn rounds size rule (payload.roundsOneOff): a short move inside the round shifts nothing.
+  const oneOff = slotIsRoundsOneOff(data, slotDate);
+  const changesSeries = collective ? !sameDay && !oneOff : slotReanchors(data, slotDate);
   if (data?.futurePlacementDays === 3 && changesSeries) {
     return 'Your selected appointment will be confirmed. Later visits will follow the new schedule, with each day and time arranged within 3 days of its due date. Existing appointment commitments will be reviewed separately.';
   }
-  if (data?.collectiveAnchor) {
-    // A same-date selection is a time-only move — the server's
-    // shouldReanchor never shifts the series for it, so the note must not
-    // promise a shift the commit won't perform (codex P1).
-    if (selectedSlot && String(selectedSlot.date) === String(data?.current?.date || '')) {
-      return "Only this visit will move — a same-day time change doesn't shift the rest of your plan.";
-    }
-    // "Re-anchors around the new date", not "shifts by the same amount":
-    // month-based patterns re-derive the ordinal/weekday from the new
-    // anchor (first-Thursday → first-Sunday), so sibling deltas differ from
-    // the anchor's (codex P1) — the promise must describe re-anchoring.
-    return 'This visit is part of your regular plan — moving it to a different day re-anchors your later visits around the new date, so your schedule always follows your last treatment.';
+  if (!collective) {
+    return changesSeries
+      ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
+      : 'Only this visit will move — the rest of your regular service schedule stays the same.';
   }
-  return selectedSlot && slotReanchors(data, selectedSlot.date)
-    ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
-    : 'Only this visit will move — the rest of your regular service schedule stays the same.';
+  // A same-date selection is a time-only move — the server's shouldReanchor
+  // never shifts the series for it, so the note must not promise a shift the
+  // commit won't perform (codex P1).
+  if (sameDay) return "Only this visit will move — a same-day time change doesn't shift the rest of your plan.";
+  if (oneOff) return 'Only this visit will move — the rest of your regular service schedule stays the same.';
+  // "Re-anchors around the new date", not "shifts by the same amount":
+  // month-based patterns re-derive the ordinal/weekday from the new
+  // anchor (first-Thursday → first-Sunday), so sibling deltas differ from
+  // the anchor's (codex P1) — the promise must describe re-anchoring.
+  return 'This visit is part of your regular plan — moving it to a different day re-anchors your later visits around the new date, so your schedule always follows your last treatment.';
 }
 
 // The next plan visit's new date for a picked slot (payload.nextVisit, server
@@ -1458,6 +1472,9 @@ const FLOWS = {
       disclosed_collective: !!data?.collectiveAnchor,
       disclosed_future_placement_days: data?.futurePlacementDays ?? null,
       disclosed_current_date: data?.current?.date || null,
+      // The lawn rounds size rule this page showed (null for every other visit).
+      // The server answers SCOPE_CHANGED when its rule is no longer this one.
+      disclosed_rounds_one_off: data?.roundsOneOff || null,
       // The next-visit date the note under Confirm named for this slot
       // (null = none named). The server projects it again under its locks
       // and answers SCOPE_CHANGED when the plan no longer matches.

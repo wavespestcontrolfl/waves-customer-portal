@@ -55,4 +55,49 @@ describe('proposal preview identity', () => {
       else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
     }
   });
+
+  // Size rule (owner 2026-10-31, lawn_rounds_9 only): a short move inside the round is a single move, so
+  // the reviewed preview reads no series and previews the single move; a bigger one reads the series.
+  test.each([
+    ['2099-09-12', 'lawn_rounds_9', false],  // 2 days inside round 7: single
+    ['2099-09-18', 'lawn_rounds_9', true],   // 8 days: the series preview
+    ['2099-09-12', 'custom', true],          // another pattern: the series preview
+  ])('a move to %s of a %s visit reads the series preview: %s', async (target, pattern, readsSeries) => {
+    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
+    const now = new Date('2099-09-09T08:00:00-04:00');
+    const startAt = `${target}T14:00:00-04:00`;
+    const quote = 'Could you come Thursday at two instead?';
+    const selected = { id: 'visit', customer_id: 'customer', service_id: 'service-a', service_type: 'Original service',
+      scheduled_date: '2099-09-10', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', property_id: null,
+      service_address_state: 'FL', is_recurring: true, recurring_pattern: pattern };
+    const tables = {
+      triage_items: [{ id: 'card', call_log_id: 'call', status: 'open', updated_at: now,
+        payload: { reschedule_proposal: { call_generation: 1, proposed_start_at: startAt } } }],
+      call_log: [{ id: 'call', customer_id: 'customer', processing_generation: 1, v2_extraction_status: 'valid',
+        direction: 'inbound', from_phone: '+15555550101', transcription: `Caller: ${quote}`, created_at: now,
+        ai_extraction_enriched: { scheduling: { status: 'reschedule_requested', proposed_start_at: startAt },
+          evidence: [{ field_path: '/scheduling/proposed_start_at', speaker: 'caller', quote }] } }],
+      customers: [{ id: 'customer', phone: '+15555550101', address_line1: '100 Example Avenue' }],
+      scheduled_services: [selected], services: [{ id: 'service-a', name: 'Original service' }],
+    };
+    const conn = (table) => {
+      const query = { where: () => query, whereIn: () => query, orderBy: () => query, leftJoin: () => query, select: () => query,
+        first: async () => ({ ...tables[table][0] }), then: (resolve, reject) => Promise.resolve(tables[table].map((row) => ({ ...row }))).then(resolve, reject) };
+      return query;
+    };
+    conn.transaction = async (fn) => fn(conn);
+    const rebooker = { collectiveMoveGateOn: () => true, reschedule: jest.fn(), previewMoveConflicts: jest.fn().mockResolvedValue([]),
+      previewSeriesMove: jest.fn().mockResolvedValue({ collective: true, conflictSnapshot: [], occurrenceIds: ['visit'], occurrences: [] }) };
+    try {
+      const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
+      expect(rebooker.previewSeriesMove).toHaveBeenCalledTimes(readsSeries ? 1 : 0);
+      expect(rebooker.previewMoveConflicts).toHaveBeenCalledTimes(readsSeries ? 0 : 1);
+      expect(preview.plan.roundsOneOff).toBe(!readsSeries);
+      expect(preview.series.collective).toBe(readsSeries);
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+    }
+  });
 });

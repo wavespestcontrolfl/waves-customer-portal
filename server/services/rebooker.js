@@ -237,7 +237,7 @@ function assertConflictSnapshot(actual, options) {
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
 // Lawn 9x rounds (owner 2026-10-28): one visit in each of nine fixed rounds a
 // year. A rescheduled round visit stays inside its own round.
-const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOf, roundOrdinal } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOf, roundOrdinal, roundsRowMoveIsOneOff } = require('./lawn-rounds');
 const { clearOfBlackout } = require('./scheduling/blackout-nudge');
 
 // Series sibling-projection clash horizon (rescheduleSeries): a shifted
@@ -1812,7 +1812,13 @@ class SmartRebooker {
     // an explicit single-row member move, keeps its own contract.
     const membershipFenced = options.visitPolicy !== 'single' && !service.visit_id
       && !Object.prototype.hasOwnProperty.call(options.expect || {}, 'visit_id');
-    if (options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
+    // Size rule (owner 2026-10-31, lawn_rounds_9 only): a date move of 7 days or fewer inside the
+    // visit's round, measured from its regular (cadence) date, moves only this visit. It falls
+    // through to the single path below, which keeps the OUT_OF_ROUND guard. A same-date call is
+    // never a one-off here: a retry of a committed series move must still reach its replay.
+    const sizeRuleSingle = dateOnly(newDate) !== dateOnly(service.scheduled_date)
+      && roundsRowMoveIsOneOff(service, dateOnly(newDate));
+    if (options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true && !sizeRuleSingle) {
       // A retry of a series move that already committed finds the anchor ON
       // the target (no date delta) — resolve the prior move by request
       // identity BEFORE branching on the anchor's mutable date, so the
@@ -4775,6 +4781,8 @@ class SmartRebooker {
     for (const raw of candidateDates) {
       const seriesDateStr = dateOnly(raw);
       if (!seriesDateStr || seriesDateStr === currentDate || byDate[seriesDateStr]) continue;
+      // Size rule (lawn_rounds_9): that date moves this visit alone, so no later visit shifts.
+      if (roundsRowMoveIsOneOff(service, seriesDateStr)) continue;
       const { cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
         service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends, closedDays,
       });

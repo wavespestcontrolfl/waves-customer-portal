@@ -773,6 +773,33 @@ describe('applyCallReschedule', () => {
     expect(rebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('seriesPolicy');
   });
 
+  // Size rule (owner 2026-10-31, lawn_rounds_9 only): the visit sits on 2026-09-24 in round 7 (2026-08-22 to 2026-09-30).
+  test.each([
+    ['2026-09-25T10:00:00-04:00', 'lawn_rounds_9', true],  // 1 day inside the round: a one-off
+    ['2026-10-02T10:00:00-04:00', 'lawn_rounds_9', false], // 8 days, and round 8: a series move
+    ['2026-09-25T10:00:00-04:00', 'custom', false],        // another pattern: a series move
+  ])('a date move to %s of a %s visit: one-off %s', async (startAt, pattern, oneOff) => {
+    const row = visit({ recurring_pattern: pattern });
+    const plan = planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: startAt } }), call: callFor(startAt), customer: customer(), candidates: [row], now: NOW });
+    expect(plan).toMatchObject({ action: 'apply', dateMove: true, roundsOneOff: oneOff });
+    // The automatic move pins single exactly for the one-off; otherwise the choke point decides (owner cadence ruling).
+    const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: startAt } }) });
+    conn.visits[0].recurring_pattern = pattern;
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    await applyCallReschedule({ conn, call: callFor(startAt), now: NOW, rebooker });
+    if (oneOff) expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({ seriesPolicy: 'single' });
+    else expect(rebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('seriesPolicy');
+  });
+
+  test('a same-day time change is never a rounds one-off (no date move)', () => {
+    const row = visit({ recurring_pattern: 'lawn_rounds_9' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [row], now: NOW }))
+      .toMatchObject({ action: 'apply', dateMove: false, roundsOneOff: false });
+  });
+
   test('review_status stays open when other cards remain', async () => {
     const conn = makeConn({ remaining: 2 });
     const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {

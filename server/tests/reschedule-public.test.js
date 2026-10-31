@@ -21,7 +21,7 @@ const {
   eligibility, eligibilityAsync, accountInactive, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, pickerMayReanchor, REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
-  seriesScopeMismatch,
+  seriesScopeMismatch, disclosedRoundsOneOff, roundsOneOffDate,
 } = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
@@ -581,6 +581,108 @@ describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
     expect(shouldReanchor(rec, '2026-09-13')).toBe(false);
     expect(shouldReanchor(rec, '2026-07-16')).toBe(true); // 28-day pull still re-anchors
     expect(collectiveAnchorActive()).toBe(false);
+  });
+});
+
+// Lawn rounds size rule (owner 2026-10-31): under collective anchoring a lawn_rounds_9 visit moves ALONE
+// for a date within 7 days of its regular date inside its round; a bigger move re-anchors. The page
+// discloses the rule, the POST pins it, and the next-visit projection skips those dates.
+describe('lawn rounds size rule on the customer page', () => {
+  // Round 8 runs 2026-10-01 to 2026-11-09.
+  const rounds = (extra = {}) => ({ is_recurring: true, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2026-10-15', ...extra });
+  const TERMS = { maxDays: 7, fromDate: '2026-10-15', roundStart: '2026-10-01', roundEnd: '2026-11-09' };
+  afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+
+  test('the GET payload discloses the rule for a rounds series visit under collective anchoring, and nothing for any other visit', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    expect(disclosedRoundsOneOff(rounds())).toEqual(TERMS);
+    // The disclosure names the REGULAR date once a date exception exists.
+    expect(disclosedRoundsOneOff(rounds({ scheduled_date: '2026-10-20', date_exception: true, date_exception_cadence_date: '2026-10-15' }))).toEqual(TERMS);
+    expect(disclosedRoundsOneOff(rounds({ recurring_pattern: 'custom' }))).toBeNull();
+    expect(disclosedRoundsOneOff(rounds({ is_recurring: false }))).toBeNull();
+    delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+    expect(disclosedRoundsOneOff(rounds())).toBeNull();
+    // The payload really carries it.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reschedule-public.js'), 'utf8');
+    expect(src).toContain('roundsOneOff: disclosedRoundsOneOff(svc),');
+  });
+
+  test('shouldReanchor: 7 days or fewer inside the round does not re-anchor; 8 days, another round and a time-only move behave as before', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const svc = rounds();
+    expect(shouldReanchor(svc, '2026-10-16')).toBe(false);
+    expect(shouldReanchor(svc, '2026-10-22')).toBe(false); // +7
+    expect(shouldReanchor(svc, '2026-10-08')).toBe(false); // -7
+    expect(shouldReanchor(svc, '2026-10-23')).toBe(true);  // +8
+    expect(shouldReanchor(svc, '2026-10-07')).toBe(true);  // -8
+    expect(shouldReanchor(rounds({ scheduled_date: '2026-11-07' }), '2026-11-11')).toBe(true); // 4 days, round 9 starts 11-10
+    expect(shouldReanchor(svc, '2026-10-15')).toBe(false); // time-only
+    // Another pattern re-anchors for the same one-day move.
+    expect(shouldReanchor(rounds({ recurring_pattern: 'custom' }), '2026-10-16')).toBe(true);
+    expect(shouldReanchor(rounds({ recurring_pattern: null }), '2026-10-16')).toBe(true);
+  });
+
+  test('shouldReanchor measures from the regular date, so repeated small moves cannot walk a visit across the round', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const moved = rounds({ scheduled_date: '2026-10-21', date_exception: true, date_exception_cadence_date: '2026-10-15' });
+    expect(shouldReanchor(moved, '2026-10-22')).toBe(false); // 7 from the regular date
+    expect(shouldReanchor(moved, '2026-10-23')).toBe(true);  // 2 from where it sits, 8 from the regular date
+  });
+
+  test('gate off: the legacy pull-forward rule decides, with no disclosure', () => {
+    expect(disclosedRoundsOneOff(rounds())).toBeNull();
+    expect(shouldReanchor(rounds(), '2026-10-16')).toBe(false);
+    expect(shouldReanchor(rounds({ scheduled_date: '2026-11-07' }), '2026-10-10')).toBe(true); // 28-day pull
+  });
+
+  test('pickerMayReanchor: a range wholly inside the one-off window is a single move; any wider range may re-anchor; one date equals shouldReanchor', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const svc = rounds();
+    expect(pickerMayReanchor(svc, '2026-10-16', '2026-10-22')).toBe(false);
+    expect(pickerMayReanchor(svc, '2026-10-15', '2026-10-15')).toBe(false);
+    expect(pickerMayReanchor(svc, '2026-10-16', '2026-10-23')).toBe(true);
+    expect(pickerMayReanchor(svc, '2026-10-01', '2026-10-30')).toBe(true);
+    expect(pickerMayReanchor(rounds({ recurring_pattern: 'custom' }), '2026-10-16', '2026-10-22')).toBe(true);
+    for (const day of ['2026-10-08', '2026-10-14', '2026-10-15', '2026-10-22', '2026-10-23', '2026-11-09', '2026-11-10']) {
+      expect(pickerMayReanchor(svc, day, day)).toBe(shouldReanchor(svc, day));
+    }
+  });
+
+  test('GET disclosure, POST decision and projection agree on every date of the round', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const svc = rounds();
+    const dayNum = (d) => Math.floor(Date.parse(`${d}T12:00:00Z`) / 86400000);
+    for (let n = dayNum('2026-09-25'); n <= dayNum('2026-11-15'); n++) {
+      const day = new Date(n * 86400000).toISOString().slice(0, 10);
+      // What the client computes from the disclosure alone.
+      const clientOneOff = day >= TERMS.roundStart && day <= TERMS.roundEnd && Math.abs(n - dayNum(TERMS.fromDate)) <= TERMS.maxDays;
+      expect(roundsOneOffDate(svc, day)).toBe(clientOneOff);
+      if (day !== svc.scheduled_date) expect(shouldReanchor(svc, day)).toBe(!clientOneOff);
+    }
+  });
+
+  test('POST scope pin: the rounds disclosure must match; absent or different fails closed; other visits are unchanged', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const svc = rounds();
+    const ok = { disclosed_collective: true, disclosed_current_date: '2026-10-15', disclosed_rounds_one_off: { ...TERMS } };
+    expect(seriesScopeMismatch(svc, ok)).toBe(false);
+    // A page left open across the deploy omits the field: SCOPE_CHANGED.
+    const { disclosed_rounds_one_off: _omit, ...legacy } = ok;
+    expect(seriesScopeMismatch(svc, legacy)).toBe(true);
+    expect(seriesScopeMismatch(svc, { ...ok, disclosed_rounds_one_off: null })).toBe(true);
+    for (const key of Object.keys(TERMS)) {
+      expect(seriesScopeMismatch(svc, { ...ok, disclosed_rounds_one_off: { ...TERMS, [key]: key === 'maxDays' ? 3 : '2026-10-16' } })).toBe(true);
+    }
+    // The regular date moved since the render (a date exception appeared): mismatch.
+    expect(seriesScopeMismatch(rounds({ scheduled_date: '2026-10-15', date_exception: true, date_exception_cadence_date: '2026-10-12' }), ok)).toBe(true);
+    // Any other series visit: no disclosure is asked for, and the old body still passes.
+    const other = rounds({ recurring_pattern: 'custom' });
+    expect(seriesScopeMismatch(other, legacy)).toBe(false);
+    expect(seriesScopeMismatch(other, { ...legacy, disclosed_rounds_one_off: null })).toBe(false);
+    // A rounds page sent to a visit that no longer has the rule (gate off): mismatch.
+    delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+    expect(seriesScopeMismatch(svc, { disclosed_collective: false, disclosed_current_date: '2026-10-15', disclosed_rounds_one_off: { ...TERMS } })).toBe(true);
+    expect(seriesScopeMismatch(svc, { disclosed_collective: false, disclosed_current_date: '2026-10-15' })).toBe(false);
   });
 });
 

@@ -1034,6 +1034,57 @@ describe('rain-out service', () => {
       expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
     });
 
+    // Size rule (owner 2026-10-31, lawn_rounds_9 only): a move of 7 days or fewer inside the round
+    // moves only this visit; a bigger one, or one that leaves the round, keeps the series shift.
+    describe('lawn rounds size rule', () => {
+      // SERVICE sits on 2026-06-11, in round 5 (2026-06-03 to 2026-07-12).
+      const ROUNDS_SERVICE = { ...RECURRING_SERVICE, recurring_pattern: 'lawn_rounds_9' };
+      const moveTo = (date) => ({ ...DAY_MOVE_ARGS, target: { date, window: { start: '13:00', end: '14:00' } } });
+
+      test.each([
+        ['one day', '2026-06-12'],
+        ['seven days (the limit)', '2026-06-18'],
+      ])('%s inside the round: the visit moves alone, no series shift', async (_label, date) => {
+        process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+        wireRecurring(ROUNDS_SERVICE);
+        SmartRebooker.reschedule.mockResolvedValueOnce({ id: 'svc-1', visitMove: null });
+        const result = await RainOut.commit(moveTo(date));
+        expect(result.ok).toBe(true);
+        expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+        expect(SmartRebooker.reschedule).toHaveBeenCalledWith('svc-1', date, expect.any(Object), 'weather_rain', 'tech',
+          expect.objectContaining({ seriesPolicy: 'single' }));
+      });
+
+      test('eight days, and a short move that crosses into the next round, still shift the series', async () => {
+        process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+        wireRecurring(ROUNDS_SERVICE);
+        await RainOut.commit(moveTo('2026-06-19'));
+        expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+        expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+        SmartRebooker.rescheduleSeries.mockClear();
+        wireRecurring({ ...ROUNDS_SERVICE, scheduled_date: '2026-07-10' });
+        await RainOut.commit(moveTo('2026-07-14')); // 4 days, but round 6 starts 2026-07-13
+        expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+      });
+
+      test('the size is measured from the regular (cadence) date, not the moved date', async () => {
+        process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+        // Moved earlier from its regular date 2026-06-04 to 2026-06-11. One more day is 1 day from where it sits
+        // but 8 days from the regular date, so it is not a one-off.
+        wireRecurring({ ...ROUNDS_SERVICE, date_exception: true, date_exception_cadence_date: '2026-06-04' });
+        await RainOut.commit(moveTo('2026-06-12'));
+        expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+      });
+
+      test('another recurring pattern keeps the series shift for the same one-day move', async () => {
+        process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+        wireRecurring({ ...RECURRING_SERVICE, recurring_pattern: 'custom' });
+        await RainOut.commit(moveTo('2026-06-12'));
+        expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+        expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      });
+    });
+
     // codex-review P0 (PR #4673 round 3): the ROUTE's admin-only gate on
     // scope='job' decides from ITS OWN pre-call read of the visit, which
     // races this function's own re-read — a concurrent date change landing

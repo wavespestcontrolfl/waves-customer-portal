@@ -232,7 +232,8 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
   if (plan.action === 'skip') throw fail(`This request needs the schedule editor: ${plan.reason.replace(/_/g, ' ')}`);
   const selected = candidates.find((visit) => visit.id === selection);
   const mover = rebooker || require('./rebooker');
-  const series = mover.collectiveMoveGateOn()
+  // Size rule (lawn_rounds_9, owner 2026-10-31): a short move inside the round is a single move.
+  const series = mover.collectiveMoveGateOn() && !plan.roundsOneOff
     ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow, { conn, adminWindowRules: true, overlapAdvisory: true }) : { collective: false };
   const conflictSnapshot = series.collective ? series.conflictSnapshot
     : await mover.previewMoveConflicts(selection, plan.newDate, plan.newWindow, {
