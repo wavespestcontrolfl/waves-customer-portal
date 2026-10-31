@@ -187,7 +187,6 @@
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
  *   GATE_SMS_GRATITUDE_REPLIES=true (allow the delayed gratitude-only auto-reply lane; independent of GATE_SMS_AUTO_SEND)
  *   SMS_GRATITUDE_ACTIVATED_AT=<ISO timestamp with offset> (strict live-webhook cutoff for gratitude replies)
- *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
@@ -1719,9 +1718,6 @@ const gates = {
   // so prod requires explicit opt-in per house pattern.
   smsPathologyLedger: isProd ? process.env.GATE_SMS_PATHOLOGY_LEDGER === 'true' : true,
 
-  // AI Blog Writer — generates content via Anthropic API
-  aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
-
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
   cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : process.env.GATE_CRON_JOBS !== 'false',
 
@@ -1935,9 +1931,12 @@ const gates = {
   hermesWorker: isProd ? process.env.GATE_HERMES_WORKER === 'true' : true,
 
   // Link Prospect Outreach — master switch for the outreach lane: serves outreach
-  // prospects to the worker (claim) AND arms the M3b approval-gated send valve
-  // (link-prospect-outreach.js). Default OFF everywhere; even when ON, a send still
-  // requires an operator's explicit, authenticated approval click — never auto-send.
+  // prospects to the worker (claim) AND arms the M3b send valve
+  // (link-prospect-outreach.js). Default OFF everywhere. When ON, a manual send needs
+  // an operator's explicit, authenticated approval click, AND the nightly
+  // link-authority run auto-sends (mode 'auto', seo/link-authority-bridge.js
+  // dispatchAutoSends) every drafted prospect whose placement holds an AUTO_OUTREACH
+  // grant (a lint-clean, commitment-free draft). ON is not approval-only (sweep #3960 A5).
   linkProspectOutreach: process.env.GATE_LINK_OUTREACH === 'true',
 
   // Outreach Drafter — in-process cron that claims outreach prospects, drafts a
@@ -2972,8 +2971,8 @@ const gates = {
   // UNREGISTERED_AFFILIATE_LINK and the lane is fully dark. Raw affiliate
   // URLs never pass regardless (DISALLOWED_EXTERNAL_LINK), and channel
   // stripping (newsletter/social) runs regardless of this flag. OFF in
-  // EVERY environment unless set to EXACTLY 'true' (policy flag, same
-  // posture as GATE_NAMED_COMPETITOR_AUTOPUBLISH — '1'/'on' stay dark);
+  // EVERY environment unless set to EXACTLY 'true' (policy flag — '1'/'on'
+  // stay dark; unlike GATE_NAMED_COMPETITOR_AUTOPUBLISH, unset is OFF);
   // content-guardrails reads process.env.GATE_AFFILIATE_LINKS === 'true' at
   // CALL time (the reserviceReportCopy pattern) so flips and tests take
   // effect immediately; kill switch = unset GATE_AFFILIATE_LINKS.
@@ -3866,10 +3865,13 @@ const gates = {
   // every payload and the chips disappear.
   bookingRainChips: process.env.GATE_BOOKING_RAIN_CHIPS === 'true',
 
-  // Admin bell policy — the shared admin bell rings ONLY for new leads,
-  // inbound SMS, voicemail callbacks, accepted estimates, and money failures
-  // (payment failures, billing exceptions, disputes, refund failures, PCI
-  // events) plus twilio_failure; everything else is silenced at the
+  // Admin bell policy — the shared admin bell rings ONLY for a customer reaching
+  // out on any channel (new lead, text, email, voicemail, missed call, reschedule
+  // note), accepted estimates, and failed customer payments (payment_failed; with
+  // GATE_CUSTOMER_ALERTS_RING also bill_payment_error) — owner rulings 2026-08-28
+  // and 2026-09-11; the allowlists live in services/notification-bell-policy.js.
+  // Everything else (disputes, refund failures, PCI events and twilio_failure
+  // included) is silenced at the
   // NotificationService chokepoint with a per-category owner override in
   // Settings → Notifications, and the live dashboard-alert overlay stops
   // merging into the bell (the dashboard banner is untouched). Changes what
@@ -8066,6 +8068,10 @@ const RETIRED = new Set([
   'GATE_EMAIL_GLASS',
   'GATE_REPORT_GLASS',
   'GATE_PORTAL_GLASS',
+  // Read by nothing: the AI blog lane runs on GATE_AUTONOMOUS_CONTENT + the
+  // GATE_BLOG_* sub-gates, so flipping this from the bar changed nothing
+  // (weekly sweep #6341 B1).
+  'GATE_AI_BLOG_WRITER',
 ]);
 const INVERTED_GATE_RE = /_(OFF|DISABLE|DISABLED|KILL_SWITCH)$/;
 let gateCatalogCache = null;

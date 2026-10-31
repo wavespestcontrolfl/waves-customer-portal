@@ -4,8 +4,6 @@
  *   - "Board"        — phase 2 dispatch board (map + roster)
  *   - "Schedule"     — DispatchPageV2's schedule grid
  *   - "Protocols"    — DispatchPageV2's Protocols panel
- *   - "Tech Match"   — DispatchPageV2's TechMatchPanel
- *   - "CSR Booking"  — DispatchPageV2's CSRPanel
  *   - "Job Scores"   — DispatchPageV2's RevenuePanel
  *   - "Insights"     — DispatchPageV2's InsightsPanel
  * Auto-Dispatch runs in the background; old diagnostic links still redirect.
@@ -36,7 +34,6 @@ import {
   CalendarPlus,
   ClipboardList,
   Gauge,
-  Headphones,
   Lightbulb,
   Map,
   TrendingUp,
@@ -56,8 +53,6 @@ const TABS = {
   BOARD: "board",
   SCHEDULE: "schedule",
   PROTOCOLS: "protocols",
-  MATCH: "match",
-  CSR: "csr",
   REVENUE: "revenue",
   INSIGHTS: "insights",
   SCORECARD: "scorecard",
@@ -68,22 +63,9 @@ const TAB_LIST = [
   { key: TABS.BOARD, label: "Board", Icon: Map, adminOnly: true },
   { key: TABS.SCHEDULE, label: "Schedule", Icon: CalendarDays },
   { key: TABS.PROTOCOLS, label: "Protocols", Icon: ClipboardList },
-  // Matching (POST /dispatch/match/simulate) and Booking (POST
-  // /dispatch/csr/slots) are dispatcher tools, owner-only for a technician
-  // login (technician allow-list, 2026-10-02): a technician keeps
-  // Schedule, Protocols and Scores.
-  {
-    key: TABS.MATCH,
-    label: "Matching",
-    Icon: ClipboardList,
-    adminOnly: true,
-  },
-  {
-    key: TABS.CSR,
-    label: "Booking",
-    Icon: Headphones,
-    adminOnly: true,
-  },
+  // No Matching or Booking tab (schedule audit S2/S3, owner 2026-10-31):
+  // both showed fixed example slots and rules that never ran. A
+  // ?tab=match or ?tab=csr link falls back like any other unknown tab.
   {
     key: TABS.REVENUE,
     label: "Scores",
@@ -134,7 +116,7 @@ export default function AdminDispatchPage() {
     && searchParams.get(TAB_KEY) === TABS.SCORECARD;
   const roleTabs = isAdmin ? TAB_LIST : TAB_LIST.filter((t) => !t.adminOnly);
   const tabList = scorecardEnabled ? [...roleTabs, SCORECARD_TAB] : roleTabs;
-  const navGridClassName = `grid-cols-2 md:grid-cols-4 ${scorecardEnabled ? "xl:grid-cols-8" : "xl:grid-cols-7"}`;
+  const navGridClassName = `grid-cols-2 md:grid-cols-4 ${scorecardEnabled ? "xl:grid-cols-6" : "xl:grid-cols-5"}`;
 
   const validTabKeys = tabList.map((t) => t.key);
   // Fallback: Board for an admin, Schedule for a technician (Board is
