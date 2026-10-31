@@ -122,6 +122,29 @@ describe('imminentOverdueOwnerAlertSweep (the kept 30-days-overdue owner heads-u
     expect(digest.metadata).toMatchObject({ customerId: 'cust-1', severity: 'needs-you', subject: { type: 'customer', id: 'cust-1' } });
   });
 
+  // One row per customer per visit day: the visit-day run rewrites the row the day-before run wrote, so it
+  // never keeps "tomorrow" or an old balance (pre-push audit P1).
+  test('the visit-day run refreshes the same row with "today" and the current balance', async () => {
+    const visitDay = TOMORROW();
+    armSweep({ visits: [visit({ scheduled_date: visitDay })] });
+    await BalanceReminder.imminentOverdueOwnerAlertSweep();
+    jest.useFakeTimers({
+      now: Date.now() + 24 * 60 * 60 * 1000,
+      doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+    });
+    try {
+      armSweep({ visits: [visit({ scheduled_date: visitDay })], bal: balance({ totalBalance: 150 }) });
+      await BalanceReminder.imminentOverdueOwnerAlertSweep();
+    } finally {
+      jest.useRealTimers();
+    }
+    const [first, second] = deliverOpsDigest.mock.calls.map(([digest]) => digest);
+    expect(first.text).toMatch(/Service tomorrow\.$/);
+    expect(second.dedupeKey).toBe(first.dedupeKey);
+    expect(second.refreshOnDedupe).toBe(true);
+    expect(second.text).toBe('Overdue: Taylor Morgan — $150.00 (31 days). Service today.');
+  });
+
   test('says "today" for a visit today', async () => {
     armSweep({ visits: [visit({ scheduled_date: TODAY() })] });
     await BalanceReminder.imminentOverdueOwnerAlertSweep();

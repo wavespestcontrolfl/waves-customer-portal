@@ -47,6 +47,7 @@ describe('recordOwnerAlert', () => {
       link: '/admin/settings?tab=integrations',
       audience: 'fyi',
       dedupeKey: 'owner-alert:credential-check:2026-10-30',
+      refreshOnDedupe: true,
       itemKeys: ['cloudflare_workers_ai'],
       count: 1,
     });

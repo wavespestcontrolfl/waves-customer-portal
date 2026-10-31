@@ -81,6 +81,9 @@ function digestFor(kind, spec, composed, { text, dedupeKey, itemKeys, metadata }
     link: composed.link,
     audience: RINGING_KINDS.has(kind) ? 'owner' : 'fyi',
     dedupeKey,
+    // A later emission under the same key with new content (the overdue alert's visit-day run, a rerun with a
+    // different failure set) rewrites the row, so it never keeps old text. A ringing kind re-rings only on a new item.
+    refreshOnDedupe: true,
     ...(keys ? { itemKeys: keys, count: keys.length } : {}),
     metadata: { ...(metadata || {}), ...composed.metadata, ownerAlert: kind },
     sendEmail: noEmail,
