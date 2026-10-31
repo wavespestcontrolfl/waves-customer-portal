@@ -37,6 +37,8 @@ const {
   buildServiceDetailsContent,
 } = require('../services/estimate-service-details');
 const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
+const PDFDocument = require('pdfkit');
+const { WAVES_ADDRESS_LINE } = require('../constants/business');
 
 // Owner R1 2026-09-29 made the interior spray part of every pest visit; owner 2026-10-22 replaced that: the first
 // visit includes an inside spray, after that the inside is up to the customer (services/sms-company-facts.js).
@@ -110,9 +112,18 @@ describe('service-details PDF renderer', () => {
       address: '123 Monitoring Way, Sarasota, FL 34235',
       estimate_slug: 'EST-2026-0002',
     });
-    const buffer = await renderServiceDetailsPdf(content);
+    const drawn = [];
+    const realText = PDFDocument.prototype.text;
+    const textSpy = jest.spyOn(PDFDocument.prototype, 'text').mockImplementation(function captureText(str, ...rest) {
+      drawn.push(String(str));
+      return realText.call(this, str, ...rest);
+    });
+    const buffer = await renderServiceDetailsPdf(content).finally(() => textSpy.mockRestore());
     expect(buffer.length).toBeGreaterThan(1500);
     expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
+    // Masthead + footer print the Luxe Ave office, never the dropped 9040 Town Center Pkwy line.
+    expect(drawn.join('\n')).toContain(WAVES_ADDRESS_LINE);
+    expect(drawn.join('\n')).not.toContain('Town Center');
   });
 
   test('renders for every supported service with an EMPTY registry (fallback note path)', async () => {

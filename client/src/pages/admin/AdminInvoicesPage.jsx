@@ -3358,7 +3358,10 @@ function InvoiceList({
                 res?.email?.ok &&
                   (res.email.recipient?.email
                     ? `email to ${res.email.recipient.email}`
-                    : "email"),
+                    : "email") +
+                    (res.email.cc?.length
+                      ? `, CC ${res.email.cc.join(", ")}`
+                      : ""),
               ].filter(Boolean);
               showToast(
                 channels.length
@@ -4164,6 +4167,7 @@ function SendInvoiceModal({
   const [recipientName, setRecipientName] = useState("");
   const [recipientEmail, setRecipientEmail] = useState("");
   const [saveAsDefault, setSaveAsDefault] = useState(false);
+  const [ccInput, setCcInput] = useState("");
   const [sending, setSending] = useState(false);
   useEffect(() => {
     let alive = true;
@@ -4177,6 +4181,7 @@ function SendInvoiceModal({
         setRecipientName("");
         setRecipientEmail("");
         setSaveAsDefault(false);
+        setCcInput("");
       })
       .catch((err) => {
         if (!alive) return;
@@ -4196,11 +4201,16 @@ function SendInvoiceModal({
   const overrideValid = !useOverride || isEmailLike(overrideEmail);
   const emailChannel = useOverride ? overrideValid : !!defaultEmail;
   const sendWithServerRecipients = !!loadError && !useOverride;
+  // One CC address for the invoice email; only offered when an email goes out.
+  const ccOffered = emailChannel && !loadError;
+  const ccEmail = ccOffered ? ccInput.trim() : "";
+  const ccValid = !ccEmail || isEmailLike(ccEmail);
   const canSend =
     !loading &&
     !sending &&
     (sendWithServerRecipients || emailChannel || !!smsPhone) &&
-    overrideValid;
+    overrideValid &&
+    ccValid;
   // Three states, derived from the row alone (third audit P1 #4131: the
   // hold's override must be a caller's EXPLICIT statement, never inferred
   // from status/stamps) — parked wins first since a parked row can also
@@ -4235,6 +4245,7 @@ function SendInvoiceModal({
         body.invoiceRecipientName = recipientName.trim() || undefined;
         body.saveBillingRecipient = saveAsDefault;
       }
+      if (ccEmail) body.invoiceCcEmail = ccEmail;
       const res = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -4429,6 +4440,35 @@ function SendInvoiceModal({
                   Save as this customer's billing recipient for future invoices
                 </span>
               </label>
+            )}
+
+            {ccOffered && (
+              <div style={{ marginTop: 12 }}>
+                <Field label={<>CC (optional)</>} className="min-w-0">
+                  <Input
+                    id={`invoice-cc-email-${invoice.id}`}
+                    name="invoice_cc_email"
+                    type="email"
+                    autoComplete="email"
+                    value={ccInput}
+                    onChange={(e) => setCcInput(e.target.value)}
+                    placeholder="manager@example.com"
+                    style={{
+                      borderColor:
+                        ccEmail && !isEmailLike(ccEmail)
+                          ? "#C8312F"
+                          : "#E4E4E7",
+                    }}
+                    disabled={sending}
+                  />
+                </Field>
+                <div
+                  style={{ marginTop: 4 }}
+                  className="text-ui-caption text-ink-secondary"
+                >
+                  Gets a copy of the same email and PDF for this send only.
+                </div>
+              </div>
             )}
           </>
         )}

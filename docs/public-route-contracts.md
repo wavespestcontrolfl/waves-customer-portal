@@ -3636,8 +3636,6 @@ of these overall numbers, so they can still move when only the light did:
   +N overall points" (`ReportViewPage.jsx`, only when `reportV2` is absent);
 - the portal's "N pts since first visit" and "+N pts improvement" overall deltas
   (`PortalPage.jsx`; the overall score includes color);
-- the legacy narrative's `trendDirection` (`lawn-report-narrative.js`; env-gated and
-  bypassed, since the lawn v6 copy is always live);
 - the report-assistant answer "Current lawn health is N% overall. Breakdown: ..."
   (`report-assistant.js` `answerTrend`): current scores only, no comparison;
 - the staff and technician screens (Intelligence Bar, `LawnVisitReview`).
@@ -3881,7 +3879,7 @@ delivery time. Deliberate suppression is terminal. Push-only retries reuse the
 message tag without renotification; provider acceptance followed by a crash
 before receipt persistence remains ambiguous and can repeat a provider handoff.
 
-`GATE_SMS_SHARED_PHONE_LINK` (dark; owner 2026-10-10 "link text"): the inbound SMS matcher (`findSingleCustomerByPhone`) links a sender phone that two or more non-deleted customer rows share ONLY to the one row staff marked `customers.sms_primary_for_shared_phone` (admin `PUT /api/admin/customers/:id` field `smsPrimaryForSharedPhone`, audited as a sensitive field); no mark, or more than one mark, keeps today's behaviour (unlinked, unknown-sender path). The contact-correction queue's locked match applies the same rule. No recency or any other guess, ever: the linked customer feeds the reschedule-reply and draft paths. Any writer that changes a marked row's phone identity (last 10 digits) clears the mark unless that write sets it for the new number. A mark-linked text joins the customer's unified-inbox thread as that one message; the number's earlier unknown-contact thread is never promoted into the marked account. Gate off = byte-identical to before. Sends nothing.
+Shared-phone text link (always on; owner 2026-10-10 "link text", gate removed 2026-10-31): the inbound SMS matcher (`findSingleCustomerByPhone`) links a sender phone that two or more non-deleted customer rows share ONLY to the one row staff marked `customers.sms_primary_for_shared_phone` (admin `PUT /api/admin/customers/:id` field `smsPrimaryForSharedPhone`, audited as a sensitive field); no mark, or more than one mark, leaves the text unlinked (unknown-sender path). The contact-correction queue's locked match applies the same rule. No recency or any other guess, ever: the linked customer feeds the reschedule-reply and draft paths. Any writer that changes a marked row's phone identity (last 10 digits) clears the mark unless that write sets it for the new number. A mark-linked text joins the customer's unified-inbox thread as that one message; the number's earlier unknown-contact thread is never promoted into the marked account. Sends nothing.
 
 Lead CALL / TEXT preference (owner 2026-10-14; always on): on `POST /api/webhooks/twilio/sms`, a sender in lead intake (`lead_intake_status` set, not `estimate_drafted`, re-read under a row lock) whose whole text is a bare CALL or TEXT (`parseCallTextReply`) gets one note on their newest lead (`lead_activities`). The text is not consumed: it takes the ordinary inbox path and the `sms_reply` bell title for that text leads with "Wants a call:" or "Prefers text:". Stores no preference, sends nothing and leaves `lead_intake_status` alone. `classifyServiceIntent` returns no service for a bare CALL / TEXT reply (no paid model call).
 
@@ -5049,6 +5047,22 @@ and no self-book handoff. The keyed `top_dressing` catalog key was already
 quote-on-request and is unchanged. Additive: no new field, no new copy, no new
 auth surface, no migration, no gate.
 
+Plugging is priced only from the area to plug (owner 2026-10-31: a blank area
+priced the whole lawn, so a 12,000 sq ft lawn at 12-inch spacing quoted about
+$29,300). `/calculate`
+still forwards only a positive finite `services.plugging.area`; the engine no
+longer falls back to the lawn. With no area the `plugging` line carries
+`price: null`, `quoteRequired`, `requiresMeasurement` and
+`manualReviewReasons: ['missing_plugging_area_sqft']`
+(`pluggingAreaRequiredLine`, `service-pricing.js`), so the request answers
+`202 { quote_required: true, service: 'plugging', reason:
+'missing_plugging_area_sqft', service_interest, message }` (it priced the whole
+lawn before). `message` is "Lawn plugging is priced by the square feet that need
+plugs — the Waves team will confirm that area with you and send your exact price
+shortly." and the office notice reads "needs the area to plug (sq ft)". A
+positive area prices exactly as before. The site's plugging forms require the
+area. No new field, no new auth surface, no migration, no gate.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed
@@ -5072,6 +5086,32 @@ draft estimate stays mirrored to the run's own row, and `/upsell` reaches
 only the authenticated lead's draft. Resolving a repeat to its root at
 estimate acceptance / self-booking is PR B′ (services, not this route).
 Kill switch: unset the gate — rows already labelled keep their marker.
+
+Same-person customer link (owner 2026-10-31; DARK behind
+`GATE_QUOTE_SAME_PERSON_MATCH`, read at call time, strict `'true'`, default
+off in every environment — off, behavior is exactly as before): the
+post-pricing customer upsert in `/calculate` still links a typed phone that
+matches exactly ONE non-deleted customer row, and still declines a phone
+that matches several. With the gate on, a phone that matches 2 to 10 rows
+links the lead and draft estimate to ONE of them instead of inserting a new
+`customers` row, but only when every matched row is live (active, not
+deleted) and all rows plus the typed contact are one person at one premise:
+names compatible (`namesCompatible`), the same parsed street key, equal unit
+keys from the shared address normalizer (trailing inline units peeled by
+`splitStreetLineUnit`, compared with `unitLineValueKey`: Apt, Unit, Suite
+and # are one dwelling designator, while Bldg, Floor, Space and Lot stay, so
+"Bldg 2" never equals "Apt 2" and every part of a multi-part unit counts;
+no unit on both sides counts as equal), and equal 5-digit ZIPs, or, when either ZIP is blank,
+equal non-empty cities (`resolveSamePersonCluster`, `customer-dedupe.js`).
+The chosen row is the one the nightly duplicate sweep would keep
+(`pickWinner` with the sweep's business weighting). Any mismatch, an
+unparseable street, or more than 10 rows keeps the old behavior: a new row.
+The existing-row update is the same one a single match gets
+(`buildExistingCustomerPublicQuoteUpdates`: fill missing attribution, bump
+`last_contact_*`, never downgrade a stage). The link grants no identity:
+booking.js's contact-linked handoff guard still refuses to book a quote
+draft linked to an established customer. The pre-pricing rodent lookup is
+unchanged. Kill switch: unset the gate.
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
@@ -6135,7 +6175,11 @@ no PII, no request-derived content. **Both 404 behind GATE_UNIVERSAL_LINKS**;
 AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
 also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
-API/PDF responses must never be claimed by the app).
+API/PDF responses must never be claimed by the app. It also excludes the
+browser-only pages (`/card`, `/careers`, `/newsletter`, the roots Android's
+allowlist leaves out) and the exact marketing-redirect paths (`/quote`, bare
+`/estimate`, `/estimate/<service>`), so those open in Safari; `/estimate/<token>`
+stays claimed).
 `/.well-known/security.txt` (RFC 9116 vulnerability-disclosure contact — static
 plain text, no auth, no PII, not gated; `Expires` is computed per request 180
 days ahead so it never goes stale; cached 1 day).
@@ -6857,7 +6901,24 @@ or an SMS-delivered token whose signed `channel` claim is `smsChannelFor`
 of this exact phone — never a bare public-form
 submission; otherwise it always gets its own separate prospect profile and
 never sees another customer's visit data, reschedule URL, or booking
-(Codex pre-push P1, 2026-09-24). The free-text note rides
+(Codex pre-push P1, 2026-09-24). Exception, DARK behind `GATE_INSPECTION_REUSE_LEAD_SHELL` (strict
+`'true'`, read at call time; off = the rule above holds with no exception):
+an unverified lead whose linked customer is provably its OWN untouched intake
+profile (`leadOwnIntakeShell`: active, `new_lead`, created at most 10 minutes
+before the lead, this lead the first live lead on it, no billing, visit,
+login or merge history, the same full phone identity and email as the lead,
+no other lead's consultation provenance naming it, the primary AND only live
+profile of its own account, a complete stored street, city and ZIP, and the
+same unit as the booked address by the shared normalizer's
+`unitLineValueKey`, so a stored building with no apartment never absorbs an
+"Apt 4" booking) books onto that profile instead of a new prospect, with an outright
+`consultation_prospect` provenance row and no write to the profile; a profile
+filed under another household's account (a last-ten phone suffix match), a
+partial address, a stored street that affirmatively differs from the booked
+address, a busy comms fence, or an unsettled location keeps the separate
+prospect. The web form mints that profile from the same typed contact
+seconds before the lead row, so the reuse exposes nothing the submitter did
+not type. The free-text note rides
 `scheduled_services.internal_notes` (never `notes`, which is customer/tech
 visible) via a best-effort post-commit update. `SLOT_TAKEN` 409 mirrors
 reservice-public's shape (fresh `availability` attached). Office alert:
@@ -7394,7 +7455,7 @@ server, no SSE). Each tool call is a `tool_health_events` row (source
 `mcp-knowledge`) with its outcome and time, never its arguments or answer.
 Treat the auth ordering and the read-only tool surface as
 security-critical).
-`/api/mcp-admin` (POST; token-only JSON-RPC — the owner's READ-ONLY MCP server over an allow-list of Intelligence Bar read tools for Claude Code, `server/routes/mcp-admin.js`; owner decision 2026-10-30). Separate from `/api/mcp` on purpose: that credential stays knowledge-only. The only credential is the owner's mcp_read key (`server/services/mcp-admin-key.js`): an HS256 JWT of TYPE `mcp_read`, never `access`, so every staff verifier (`isStaffAccessToken`) refuses it and it can never act as a staff session; it lives 30 days and is minted only by `ops/agents/mint-mcp-admin-key.js` (audit row `mcp.admin_key.mint`, key never printed). Mounted like `/api/mcp`: the global `/api/` limiter (per IP) runs first, then a pre-parser chain ahead of the global JSON parser — `noStore` (Cache-Control no-store, X-Robots-Tag noindex, Referrer-Policy no-referrer on every outcome), `mcpAdminAuth`, a 60/min limiter keyed per login (after auth, so a dark or unauthenticated probe never reaches it), a 64 kb JSON parse and the JSON-RPC body-error handler. `mcpAdminAuth` layers, in order: 403 unless `GATE_MCP_ADMIN_READ=true` (before any key or DB read); 401 without a Bearer; 401 when the JWT signature, expiry or type fails (the format gate — no DB read before it); then one `technicians` read by id and 401 unless the row is still an active admin on the IB full-access list with no forced password change and `auth_token_version` equal to the key's (a password change or reset revokes every key); 503 if that read fails. EXCEPTION to the generic-404 baseline, as for `/api/mcp`: an MCP client needs real 401/403 statuses, so dark answers 403 and credential failures 401; only a holder of a validly signed key can see the expired/revoked wording. Batches cap at 10 messages and 3 tools/call; GET is 405 (no SSE). Responses: each tool answer keeps only its `TOOL_FIELDS` paths (`keepPaths`; a field a tool adds later never leaves), strings are cut at 160 characters, a listed DATE field (`CALENDAR_DAY_PATHS`; pg sends a DATE as UTC midnight) leaves as `YYYY-MM-DD` while every timestamp keeps its time, and every answer carries an untrusted-text line; `get_day_summary` leaves out `estimated_revenue` (it counts $125 for each unpriced visit); a schema refusal (`invalid_input`) keeps the failing arguments' `path` and `rule`, never their values; each call is a `tool_health_events` row (source `mcp-admin`) without arguments or answer. `initialize` carries server `instructions` (Claude Code puts them in each session's system prompt): what never comes back, how to read dates (`Z` timestamps are UTC, `time_window` values are Eastern wall-clock times) and pages, and that tool names in the Intelligence Bar's descriptions that are not on this server are not to be substituted. Tools run through `ActionRegistry.execute` and must be action-policy `kind: read` with no approval (a reclassified tool drops out); no write tool, no general admin read (`read_admin_data`) and no tool without its own reviewed field list may be added. Kill switch: unset the gate. `server/tests/mcp-admin-route.test.js` pins the auth order, the allow-list and the projections).
+`/api/mcp-admin` (POST; token-only JSON-RPC — the owner's READ-ONLY MCP server over an allow-list of Intelligence Bar read tools for Claude Code, `server/routes/mcp-admin.js`; owner decision 2026-10-30). Separate from `/api/mcp` on purpose: that credential stays knowledge-only. The only credential is the owner's mcp_read key (`server/services/mcp-admin-key.js`): an HS256 JWT of TYPE `mcp_read`, never `access`, so every staff verifier (`isStaffAccessToken`) refuses it and it can never act as a staff session; it lives 30 days and is minted only by `ops/agents/mint-mcp-admin-key.js` (audit row `mcp.admin_key.mint`, key never printed). Mounted like `/api/mcp`: the global `/api/` limiter (per IP) runs first, then a pre-parser chain ahead of the global JSON parser — `noStore` (Cache-Control no-store, X-Robots-Tag noindex, Referrer-Policy no-referrer on every outcome), `mcpAdminAuth`, a 60/min limiter keyed per login (after auth, so a dark or unauthenticated probe never reaches it), a 64 kb JSON parse and the JSON-RPC body-error handler. `mcpAdminAuth` layers, in order: 403 unless `GATE_MCP_ADMIN_READ=true` (before any key or DB read); 401 without a Bearer; 401 when the JWT signature, expiry or type fails (the format gate — no DB read before it); then one `technicians` read by id and 401 unless the row is still an active admin on the IB full-access list with no forced password change and `auth_token_version` equal to the key's (a password change or reset revokes every key); 503 if that read fails. EXCEPTION to the generic-404 baseline, as for `/api/mcp`: an MCP client needs real 401/403 statuses, so dark answers 403 and credential failures 401; only a holder of a validly signed key can see the expired/revoked wording. Batches cap at 10 messages and 3 tools/call; GET is 405 (no SSE). Responses: each tool answer keeps only its `TOOL_FIELDS` paths (`keepPaths`; a field a tool adds later never leaves), strings are cut at 160 characters, a listed DATE field (`CALENDAR_DAY_PATHS`; pg sends a DATE as UTC midnight) leaves as `YYYY-MM-DD` while every timestamp keeps its time, and every answer carries an untrusted-text line; `get_day_summary` sends `visit_price_total` (each visit's set price, a $0 one included, or its prepaid amount when no price is set) with `visits_with_price` and `visits_without_price`, so a visit with no price is counted, never given a guessed amount; a schema refusal (`invalid_input`) keeps the failing arguments' `path` and `rule`, never their values; each call is a `tool_health_events` row (source `mcp-admin`) without arguments or answer. `initialize` carries server `instructions` (Claude Code puts them in each session's system prompt): what never comes back, how to read dates (`Z` timestamps are UTC, `time_window` values are Eastern wall-clock times) and pages, and that tool names in the Intelligence Bar's descriptions that are not on this server are not to be substituted. Tools run through `ActionRegistry.execute` and must be action-policy `kind: read` with no approval (a reclassified tool drops out); no write tool, no general admin read (`read_admin_data`) and no tool without its own reviewed field list may be added. Kill switch: unset the gate. `server/tests/mcp-admin-route.test.js` pins the auth order, the allow-list and the projections).
 `/api/ops/digest` and `/api/ops/digest/resolve` (POST; machine-to-machine
 — the external Waves ops crons on the owner's Mac post their FIX:/ACT:
 findings so they land as `ops_digest` admin bell rows (the Waves Ops lane

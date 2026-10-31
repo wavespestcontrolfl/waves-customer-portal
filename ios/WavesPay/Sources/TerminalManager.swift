@@ -145,24 +145,37 @@ final class TerminalManager: NSObject {
         try await connectTapToPay(reader: reader)
     }
 
+    // Discovery that ends with no reader and no error, or never answers, used
+    // to leave this wait open forever: the card screen spun with no way out.
+    // Both now end in this error, which the card screen shows with Try again.
+    private static let discoveryTimeoutNanoseconds: UInt64 = 30_000_000_000
+    private static let noReaderError = NSError(domain: "wavespay", code: -5, userInfo: [
+        NSLocalizedDescriptionKey: "Tap to Pay did not start on this iPhone. Please try again.",
+    ])
+
     private func discoverFirstReader(config: TapToPayDiscoveryConfiguration) async throws -> Reader {
         try await withCheckedThrowingContinuation { cont in
             var resumed = false
-            let delegate = DiscoveryCallback { [weak self] readers in
-                guard !resumed, let reader = readers.first else { return }
+            // The one exit: the first reader, an error, an empty finish, or
+            // the timeout, whichever comes first.
+            let finish: (Result<Reader, Error>) -> Void = { [weak self] result in
+                guard !resumed else { return }
                 resumed = true
                 self?.discoverCancelable?.cancel { _ in }
                 self?.discoverCancelable = nil
                 self?.discoveryDelegate = nil
-                cont.resume(returning: reader)
+                cont.resume(with: result)
+            }
+            let delegate = DiscoveryCallback { readers in
+                if let reader = readers.first { finish(.success(reader)) }
             }
             self.discoveryDelegate = delegate
-            self.discoverCancelable = Terminal.shared.discoverReaders(config, delegate: delegate) { [weak self] error in
-                if let error, !resumed {
-                    resumed = true
-                    self?.discoveryDelegate = nil
-                    cont.resume(throwing: error)
-                }
+            self.discoverCancelable = Terminal.shared.discoverReaders(config, delegate: delegate) { error in
+                finish(.failure(error ?? Self.noReaderError))
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: Self.discoveryTimeoutNanoseconds)
+                finish(.failure(Self.noReaderError))
             }
         }
     }

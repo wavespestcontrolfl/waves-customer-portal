@@ -9,7 +9,6 @@
  */
 
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
-const { _test } = require('../services/service-report/lawn-report-narrative');
 const { NO_OBSERVATIONS } = require('../services/lawn-visit-customer-copy');
 
 function assessment(overrides = {}) {
@@ -55,45 +54,6 @@ describe('lawn report photoSummary — placeholder caption', () => {
   test('copy that merely contains the placeholder wording is kept', () => {
     const text = `${NO_OBSERVATIONS} Edge near the driveway is thin.`;
     expect(buildLawnReportV2({ lawnAssessment: assessment({ observations: text }) }).photoSummary).toBe(text);
-  });
-});
-
-describe('lawn narrative — dead model outputs removed', () => {
-  const facts = { diagnosis: [{ key: 'turf_density' }] };
-
-  test('JSON schema no longer lists or requires mainWatch / treatmentSummary', () => {
-    const schema = _test.narrativeSchema(facts);
-    expect(schema.properties).not.toHaveProperty('mainWatch');
-    expect(schema.properties).not.toHaveProperty('treatmentSummary');
-    expect(schema.required).not.toContain('mainWatch');
-    expect(schema.required).not.toContain('treatmentSummary');
-    expect(schema.required).toEqual(expect.arrayContaining(['statusHeadline', 'customerAction', 'categories', 'water', 'mowing', 'insights']));
-    expect(Object.keys(schema.properties).sort()).toEqual([...schema.required].sort());
-  });
-
-  test('OUTPUT prompt no longer asks for either field', () => {
-    expect(_test.SYSTEM_PROMPT).not.toMatch(/mainWatch/);
-    expect(_test.SYSTEM_PROMPT).not.toMatch(/treatmentSummary/);
-  });
-
-  test('PROMPT_VERSION was bumped so cached narratives regenerate', () => {
-    expect(_test.PROMPT_VERSION).toBe('lawn_report_v2_narrative_v11_no_dead_fields');
-  });
-
-  test('an old response that still carries the keys merges without writing them', () => {
-    const v2 = buildLawnReportV2({ lawnAssessment: assessment() });
-    v2.treatment = { focus: ['Weed control'], products: [] };
-    const before = JSON.parse(JSON.stringify(v2));
-    const merged = _test.mergeNarrative(v2, {
-      statusHeadline: 'A steady lawn with one spot to watch',
-      mainWatch: 'Watch the mid-lawn zone this week.',
-      treatmentSummary: 'We applied a fertilizer to feed the turf.',
-    });
-    expect(merged.snapshot).not.toHaveProperty('mainWatch');
-    expect(merged.treatment).toEqual(before.treatment);
-    expect(merged.treatment).not.toHaveProperty('summary');
-    expect(merged.snapshot.treatmentSummary).toBe(before.snapshot.treatmentSummary);
-    expect(merged.snapshot.statusHeadline).toBe('A steady lawn with one spot to watch');
   });
 });
 

@@ -419,6 +419,19 @@ function unitLineValueKey(normalizedUnitLine) {
   return tokens.length === 2 && tokens[0] === 'unit' ? tokens[1] : tokens.join(' ');
 }
 
+// The full unit identity of a stored address as ONE comparison key: the
+// trailing inline unit peeled off line 1 (splitStreetLineUnit) joined with
+// line 2 BEFORE keying, so "123 Main St Bldg C" + "Apt 2" keys like a typed
+// "Bldg C Apt 2" (keyed apart, the lone "Apt 2" lost its dwelling
+// designator — Codex #7249 r4 P2). The same unit written in both places
+// counts once. '' = no unit. Callers compare keys for equality.
+function premiseUnitKey(line1, line2) {
+  const keyOf = (unitText) => unitLineValueKey(normalizeUnitLine(unitText));
+  const parts = [splitStreetLineUnit(String(line1 || '')).unit, line2].map((s) => String(s || '').trim()).filter(Boolean);
+  const fragments = parts.length === 2 && keyOf(parts[0]) === keyOf(parts[1]) ? [parts[0]] : parts;
+  return fragments.length ? keyOf(fragments.join(' ')) : '';
+}
+
 // Split a street line into its street part and a trailing inline unit —
 // "123 Main St Apt A" → { street: '123 Main St', unit: 'Apt A' }, and
 // multi-part units peel fully: "123 Main St Bldg 2 Apt 4" →
@@ -867,6 +880,7 @@ module.exports = {
   normalizeStreetLine,
   normalizeUnitLine,
   unitLineValueKey,
+  premiseUnitKey,
   splitStreetLineUnit,
   splitStreetLineUnitParts,
   splitUnitFirstLine,

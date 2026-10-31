@@ -14,6 +14,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true), logGateStatus: jest.fn(), gateEnvValue: jest.fn(() => true),
+  smsPromptAutopromoteMode: jest.fn(() => 'off'),
 }));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_name, run) => run()),

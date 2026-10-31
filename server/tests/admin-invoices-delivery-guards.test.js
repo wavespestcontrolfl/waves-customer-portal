@@ -128,6 +128,21 @@ describe('POST /admin/invoices/:id/send — request-contract flags (third audit 
     });
   });
 
+  test('invoiceCcEmail passes one cleaned CC to the email leg; a bad one is a 400 before the service', async () => {
+    await withServer(async (baseUrl) => {
+      const ok = await postSend(baseUrl, { resend: true, invoiceCcEmail: ' Manager@Example.com ' });
+      expect(ok.status).toBe(200);
+      expect(InvoiceService.sendViaSMSAndEmail.mock.calls[0][1].emailCc).toBe('manager@example.com');
+
+      for (const invoiceCcEmail of ['not-an-email', ['a@example.com', 'b@example.com']]) {
+        const bad = await postSend(baseUrl, { resend: true, invoiceCcEmail });
+        expect(bad.status).toBe(400);
+        expect((await bad.json()).code).toBe('invalid_cc');
+      }
+      expect(InvoiceService.sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('neither flag (legacy caller) passes both false — an ordinary send, hold still not overridable', async () => {
     await withServer(async (baseUrl) => {
       const res = await postSend(baseUrl, {});

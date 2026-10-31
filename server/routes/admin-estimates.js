@@ -951,6 +951,29 @@ function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode }) {
   return { subject: proposalMode ? 'Your pest control proposal from Waves' : 'Your Waves Pest Control Estimate is Ready', html, text };
 }
 
+// The amount the customer's link shows. The public page reconciles a frozen
+// member snapshot against the live plan before it prices (a lapsed member is
+// repriced as a non-member), so the email's price_summary and the SMTP
+// preheader must read the same reconciled row, not the stored totals (10-30
+// estimate audit F4). Works on a copy: the caller's row is hashed into the
+// review's editVersion and must not change. Any failure falls back to the
+// stored line, as before.
+async function currentQuoteMoneySummary(estimate) {
+  try {
+    const copy = structuredClone(estimate);
+    await require('./estimate-public').reconcileFrozenMembershipSnapshot(copy);
+    return moneySummary(copy);
+  } catch (err) {
+    logger.warn(`[estimates] current quote price line unavailable for estimate ${estimate?.id}: ${err.message}`);
+    return moneySummary(estimate);
+  }
+}
+
+async function currentEstimateEmailPriceLine(estimate) {
+  if (normalizeProposal(estimate).enabled) return estimateEmailPriceLine(estimate);
+  return currentQuoteMoneySummary(estimate);
+}
+
 function estimateEmailPriceLine(estimate) {
   if (!normalizeProposal(estimate).enabled) return moneySummary(estimate);
   // This is the same first-year/recurring/one-time breakdown printed by
@@ -982,7 +1005,7 @@ async function buildEstimateSendPreview(estimate) {
   const firstName = await estimateGreetingFirstName(db, estimate);
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const proposalMode = normalizeProposal(estimate).enabled;
-  const priceLine = estimateEmailPriceLine(estimate);
+  const priceLine = await currentEstimateEmailPriceLine(estimate);
   // GATE_ESTIMATE_MONTHLY_AVERAGE: null with the gate off, so the email is unchanged.
   const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
   // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
@@ -3045,7 +3068,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // Residential sends use the compliant summary (codex 2642 r1: the old
   // "$X/mo · $Y/yr" priceLine bypassed moneySummary's residential branch).
   // Commercial proposals rebuild their own totals line below (freshPriceLine).
-  const priceLine = moneySummary(estimate);
+  // The amount is the one the link shows (current membership), not the stored one.
+  const priceLine = await currentQuoteMoneySummary(estimate);
 
   // Commercial proposal PDF — attached to the delivery email only when the
   // operator has authored a multi-building proposal (proposal.enabled). A
@@ -6334,6 +6358,7 @@ router._internals = {
   estimateMatchesSentOnlyScope,
   sendEstimateEmail,
   moneySummary,
+  currentQuoteMoneySummary,
   estimateEmailPayload,
   estimateEmailIdempotencyKey,
   smtpFallbackAllowed,

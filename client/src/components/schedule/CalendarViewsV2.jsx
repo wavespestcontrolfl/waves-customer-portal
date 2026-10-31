@@ -84,6 +84,17 @@ function minutesToHHMM(min) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+// A month-grid drop changes only the date, so the visit keeps its stored
+// span. The month feed's `duration` falls back to 30 when
+// estimated_duration_minutes is null, so a 09:00-10:30 visit would land as
+// 09:00-09:30; the stored window wins over that fallback.
+function monthMoveDurationMinutes(svc) {
+  const start = parseHHMM(svc?.windowStart);
+  const end = parseHHMM(svc?.windowEnd);
+  if (start != null && end != null && end > start) return end - start;
+  return svc?.duration || 30;
+}
+
 
 // ─── VIEW MODE SELECTOR ──────────────────────────────────────────
 
@@ -111,7 +122,7 @@ export function ViewModeSelectorV2({ viewMode, onViewModeChange, allowed }) {
           type="button"
           onClick={() => onViewModeChange(m.id)}
           className={cn(
-            'h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
+            'h-8 px-3 text-14 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
             viewMode === m.id
               ? 'bg-zinc-900 text-white border-zinc-900'
               : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
@@ -133,13 +144,13 @@ export function ViewModeSelectorV2({ viewMode, onViewModeChange, allowed }) {
 function CalendarLoadError({ label, onRetry }) {
   return (
     <div className="py-10 text-center">
-      <div className="text-13 text-ink-secondary mb-3">
+      <div className="text-14 text-ink-secondary mb-3">
         Couldn&rsquo;t load the {label}. Check your connection and try again.
       </div>
       <button
         type="button"
         onClick={onRetry}
-        className="h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 u-focus-ring transition-colors"
+        className="h-8 px-3 text-14 uppercase font-medium tracking-label rounded-sm border-hairline bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 u-focus-ring transition-colors"
       >
         Retry
       </button>
@@ -314,7 +325,7 @@ function MonthServiceChip({ service, onViewCustomer }) {
       {...attributes}
       {...listeners}
       className={cn(
-        'text-11 truncate leading-tight cursor-grab active:cursor-grabbing select-none px-1.5 py-0.5 rounded-[3px] font-medium',
+        'text-14 truncate leading-tight cursor-grab active:cursor-grabbing select-none px-1.5 py-0.5 rounded-[3px] font-medium',
         completed && 'bg-zinc-200 text-zinc-500 line-through',
         service.status === 'skipped' && 'bg-alert-bg text-alert-fg',
         !completed && service.status !== 'skipped' && 'text-white',
@@ -364,7 +375,7 @@ function MonthDayCell({ day, di, onDateClick, onViewCustomer }) {
       <div className="flex items-center justify-between mb-1">
         <span
           className={cn(
-            'u-nums text-13',
+            'u-nums text-14',
             day.isToday
               ? 'font-medium text-white bg-zinc-900 rounded-full w-6 h-6 inline-flex items-center justify-center'
               : 'text-ink-primary'
@@ -373,7 +384,7 @@ function MonthDayCell({ day, di, onDateClick, onViewCustomer }) {
           {day.dayNum}
         </span>
         {day.count > 0 && (
-          <span className="u-nums text-11 font-medium text-ink-tertiary">
+          <span className="u-nums text-14 font-medium text-ink-tertiary">
             {day.count}
           </span>
         )}
@@ -388,7 +399,7 @@ function MonthDayCell({ day, di, onDateClick, onViewCustomer }) {
         ))}
       </div>
       {day.count > 6 && (
-        <div className="hidden md:block text-11 text-ink-tertiary mt-1">
+        <div className="hidden md:block text-14 text-ink-tertiary mt-1">
           +{day.count - 6} more
         </div>
       )}
@@ -454,7 +465,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
     if (!fromDate || fromDate === toDate) return;
 
     const startMin = parseHHMM(svc.windowStart);
-    const dur = svc.duration || 30;
+    const dur = monthMoveDurationMinutes(svc);
     // A windowless visit stays windowless on a date-only drop (newWindow
     // null) — synthesizing a window here would invent a booking time the
     // operator never chose.
@@ -536,7 +547,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
 
   const viewData = optimistic || data;
 
-  if (loading) return <div className="py-10 text-center text-13 text-ink-secondary">Loading calendar…</div>;
+  if (loading) return <div className="py-10 text-center text-14 text-ink-secondary">Loading calendar…</div>;
   if (error) return <CalendarLoadError label="calendar" onRetry={() => { setLoading(true); reload(); }} />;
   if (!viewData?.weeks) return null;
 
@@ -560,7 +571,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
               <div className="u-nums text-22 font-medium tracking-tight text-zinc-900 leading-none">
                 {stat.value}
               </div>
-              <div className="u-label text-ink-secondary mt-2">{stat.label}</div>
+              <div className="text-14 uppercase tracking-label font-medium text-ink-secondary mt-2">{stat.label}</div>
             </CardBody>
           </Card>
         ))}
@@ -574,7 +585,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
             .map(([cat, count]) => (
               <span
                 key={cat}
-                className="inline-flex items-center gap-2 text-11 px-2.5 h-6 rounded-sm bg-white text-ink-secondary"
+                className="inline-flex items-center gap-2 text-14 px-2.5 h-6 rounded-sm bg-white text-ink-secondary"
                 style={{ border: '1px solid #E4E4E7' }}
               >
                 <span className="u-dot u-dot--filled" />
@@ -595,7 +606,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
             style={{ borderBottom: '1px solid #E4E4E7' }}
           >
             {DOW.map((d) => (
-              <div key={d} className="u-label text-ink-secondary py-2 text-center">
+              <div key={d} className="text-14 uppercase tracking-label font-medium text-ink-secondary py-2 text-center">
                 {d}
               </div>
             ))}
@@ -616,7 +627,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
         </Card>
         </div>
         {busy && (
-          <div className="mt-2 text-11 text-ink-secondary text-center">Saving…</div>
+          <div className="mt-2 text-14 text-ink-secondary text-center">Saving…</div>
         )}
       </DndContext>
 
@@ -631,7 +642,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
         serviceId={pending?.svc?.id}
         toWindow={pending?.newWindow}
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
-        durationMinutes={pending?.svc?.duration || 30}
+        durationMinutes={pending?.svc ? monthMoveDurationMinutes(pending.svc) : undefined}
         technicianId={pending?.svc?.technicianId || pending?.svc?.technician_id || undefined}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
@@ -641,7 +652,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
       {Object.keys(summary.byTech || {}).length > 0 && (
         <Card className="hidden md:block mt-4">
           <CardBody className="p-4">
-            <div className="u-label text-ink-secondary mb-3">
+            <div className="text-14 uppercase tracking-label font-medium text-ink-secondary mb-3">
               Tech Workload — {viewData.monthName}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -658,8 +669,8 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
                       style={{ border: '1px solid #E4E4E7' }}
                     >
                       <div className="flex items-baseline justify-between">
-                        <div className="text-13 font-medium text-ink-primary">{tech}</div>
-                        <span className="u-nums text-12 font-medium text-zinc-900">
+                        <div className="text-14 font-medium text-ink-primary">{tech}</div>
+                        <span className="u-nums text-14 font-medium text-zinc-900">
                           {count}
                         </span>
                       </div>

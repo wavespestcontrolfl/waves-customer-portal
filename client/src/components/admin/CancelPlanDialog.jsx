@@ -404,6 +404,9 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
                   {impact.perAppChanges?.length > 0 && (
                     <Fact label="Visit prices">{impact.perAppChanges.map((r) => `${r.label} ${money(r.before)} → ${money(r.after)}`).join(", ")}</Fact>
                   )}
+                  {impact.templateChanges?.length > 0 && (
+                    <Fact label="Future visits added later">{impact.templateChanges.map((r) => `${r.label} ${money(r.before)} → ${money(r.after)}`).join(", ")}</Fact>
+                  )}
                   {impact.openBalance != null && impact.openBalance > 0 && (
                     <Fact label="Open balance">{money(impact.openBalance)} (still payable)</Fact>
                   )}

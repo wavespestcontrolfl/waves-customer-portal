@@ -27,6 +27,7 @@ const {
   drawFieldSectionHeading,
 } = require('./field-pdf');
 const {
+  WAVES_ADDRESS_LINE,
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
 } = require('../../constants/business');
@@ -44,10 +45,6 @@ const L = 40;
 const W = PAGE_W - 80;
 const FOOTER_TOP = FIELD_PDF_LAYOUT.footerTop;
 const CONTENT_BOTTOM = FIELD_PDF_LAYOUT.contentBottom;
-
-// Same headquarters line as the other global customer guides
-// (2026-07-11 publishing rule).
-const GUIDE_ADDRESS_LINE = '9040 Town Center Pkwy, Lakewood Ranch, FL 34202';
 
 const money = (n) => `$${Number(n).toLocaleString('en-US', {
   minimumFractionDigits: Number.isInteger(Number(n)) ? 0 : 2,
@@ -69,7 +66,7 @@ function crossoverText(quarters) {
 function footer(doc) {
   drawFieldFooter(doc, {
     tagline: 'Termite protection comparison',
-    detail: `${GUIDE_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}`,
+    detail: `${WAVES_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}`,
   });
 }
 
@@ -85,7 +82,7 @@ function headerBar(doc, title) {
   drawFieldMasthead(doc, {
     title,
     eyebrow: 'Protection options',
-    addressLine: GUIDE_ADDRESS_LINE,
+    addressLine: WAVES_ADDRESS_LINE,
   });
   doc.y = Math.max(150, doc.y);
 }

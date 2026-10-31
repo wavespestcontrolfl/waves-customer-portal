@@ -52,8 +52,7 @@ const ROW_COLUMNS = ['id', 'status', 'expires_at', 'estimate_data', ...FINGERPRI
 // through. `db` may be a knex instance or an open transaction; pass the
 // caller's trx to read inside its lock, or nothing for a fresh connection
 // read. `forUpdate` locks the row for a caller that is about to mutate it in
-// the same transaction (estimate-auto-renew.js's renewal UPDATE); every
-// chokepoint recheck itself asks for a fresh, unlocked read instead.
+// the same transaction; every chokepoint recheck itself asks for a fresh, unlocked read instead.
 async function loadAnnualOfferRow(db, estimateId, { forUpdate = false } = {}) {
   let query = db('estimates').where({ id: estimateId });
   if (forUpdate) query = query.forUpdate();

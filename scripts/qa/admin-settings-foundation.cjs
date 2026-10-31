@@ -53,8 +53,13 @@ async function main() {
     if (api === '/admin/settings/visit-timeline/reset') return { config: visitTimeline };
     if (api === '/admin/settings/service-coverage') return { config: serviceCoverage, defaults: serviceCoverage };
     if (api === '/admin/settings/service-coverage/reset') return { config: serviceCoverage };
-    if (api === '/admin/revenue/settings') return { settings: { ovh_office_payroll: '1200', ovh_rent: '900', overhead_entered_at: '2026-09-01' } };
+    if (api === '/admin/revenue/settings') return { settings: { ovh_office_payroll: '1200', ovh_rent: '900', overhead_entered_at: '2026-09-01T15:00:00.000Z' } };
     if (api === '/admin/kpi-targets') return { targets: [] };
+    if (api === '/admin/cost-cards') return { enabled: false };
+    if (api === '/admin/settings/gates') return { gates: [
+      { name: 'GATE_CRON_JOBS', set: true, value: 'true', readByCode: true, description: 'Synthetic scheduled-jobs gate.' },
+      { name: 'GATE_SEO_INTELLIGENCE', set: false, value: null, readByCode: true, description: 'Synthetic SEO gate.' },
+    ] };
     if (api === '/admin/communications/link-library') return method === 'POST' ? { ok: true } : {
       links: [{ id: 'manual-1', key: 'manual-1', name: 'Synthetic link', url: 'https://example.invalid/help', source: 'manual', category: 'website' }],
       lastSyncedAt: null,

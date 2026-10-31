@@ -1140,6 +1140,20 @@ router.get('/incentives/attribution-candidates', requireAdmin, async (req, res, 
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/reviews/:id/name-match/dismiss — rule out the review matcher's suggested customer
+// for this review, or keep a link it disputes (services/review-name-match.js). Writes only the
+// decision columns: no link, no customer change, no send.
+router.post('/:id/name-match/dismiss', requireAdmin, async (req, res, next) => {
+  try {
+    const { dismissNameMatch } = require('../services/review-name-match');
+    const result = await dismissNameMatch({ reviewId: req.params.id, customerId: req.body?.customerId, result: req.body?.result });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode === 400 || err.statusCode === 409) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
 // POST /api/admin/reviews/incentives/attribute — manually attribute a confirmed Google review payout
 router.post('/incentives/attribute', requireAdmin, async (req, res, next) => {
   try {

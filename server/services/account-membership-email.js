@@ -19,6 +19,17 @@ function clean(value) {
   return String(value || '').trim();
 }
 
+// The cancel flow stores a staff actor suffix on service_requests.subject
+// (admin-cancellation.js builds " (Intelligence Bar (user <id>))" / " (Admin
+// (user <id>))"). That text is internal: strip ONLY that trailing suffix
+// before a subject reaches a customer. The stored subject is unchanged (it is
+// also the cancel-retry dedupe key).
+const STAFF_ACTOR_SUFFIX = /\s*\((?:Intelligence Bar|Admin)(?:\s*\(user [^()]*\))?\)\s*$/;
+
+function customerRequestSubject(subject, fallback) {
+  return clean(subject).replace(STAFF_ACTOR_SUFFIX, '').trim() || fallback;
+}
+
 function cleanEmail(value) {
   return clean(value).toLowerCase();
 }
@@ -420,7 +431,7 @@ async function sendRequestReceived({
     payload: {
       request_id: request.id,
       request_type: category.replace(/\b\w/g, (ch) => ch.toUpperCase()),
-      request_subject: clean(request.subject) || 'New request',
+      request_subject: customerRequestSubject(request.subject, 'New request'),
       request_summary: clean(request.description),
       request_status: clean(request.status) || 'new',
       submitted_at: displayDate(submittedAt),
@@ -526,7 +537,7 @@ async function sendCancellationReceived({
     eventType: 'account.cancellation_received',
     payload: {
       request_id: request.id,
-      request_subject: clean(request.subject) || 'Cancellation request',
+      request_subject: customerRequestSubject(request.subject, 'Cancellation request'),
       submitted_at: displayDate(submittedAt),
       outcome_line: outcomeLine,
     },
@@ -657,7 +668,7 @@ async function sendRequestUpdated({
     payload: {
       request_id: request.id,
       request_type: clean(request.category).replace(/_/g, ' ') || 'request',
-      request_subject: clean(request.subject) || 'Your request',
+      request_subject: customerRequestSubject(request.subject, 'Your request'),
       request_summary: clean(request.description),
       request_status: status,
       updated_at: displayDate(request.updated_at || new Date()),
@@ -1340,6 +1351,7 @@ module.exports = {
   // The sender's own address check (sendTemplate skips any other address).
   isEmailLike,
   _private: {
+    customerRequestSubject,
     hashValue,
     itemSummary,
     membershipPayload,

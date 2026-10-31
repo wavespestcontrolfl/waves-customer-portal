@@ -20,7 +20,7 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     await knex.raw('CREATE SCHEMA ??', [schema]);
     await knex.schema.createTable('customers', t => {
       t.uuid('id').primary(); t.string('address_line1'); t.string('address_line2'); t.string('city'); t.string('zip');
-      t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at'); t.string('state');
+      t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at'); t.string('state'); t.timestamp('deleted_at');
     });
     await knex.schema.createTable('customer_properties', t => {
       t.string('address_key'); t.decimal('latitude', 10, 7); t.decimal('longitude', 10, 7);
@@ -191,6 +191,41 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBe(4700);
     expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(4700);
     expect((await knex('customer_properties').where({ id: second.id }).first()).service_area_measurements.areas.lawn.sqft).toBe(1200);
+  });
+  test('a legacy turf save on an archived customer is a 404 and writes nothing, even when the archive commits while the save waits on the row lock', async () => {
+    delete process.env.GATE_PROPERTY_SERVICE_AREAS;
+    let handler;
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => knex);
+      const router = require('../routes/admin-customer-turf-profile');
+      handler = router.stack.find(layer => layer.route?.methods.put).route.stack.at(-1).handle;
+    });
+    jest.dontMock('../models/db');
+    const put = async () => {
+      const res = { json: jest.fn() };
+      res.status = jest.fn(() => res);
+      await handler({ ...admin, params: { customerId }, body: { lawn_sqft: 5000 } }, res, err => { throw err; });
+      return res;
+    };
+    // The archive route's order: hold the customer row, stamp deleted_at, commit.
+    const archive = await knex.transaction();
+    await archive('customers').where({ id: customerId }).forUpdate().first('id');
+    await archive('customers').where({ id: customerId }).update({ deleted_at: new Date() });
+    const raced = put();
+    let waiting = false;
+    for (let i = 0; i < 100 && !waiting; i += 1) {
+      const { rows } = await knex.raw(`SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND query LIKE '%from "customers"%for update%'`);
+      waiting = rows[0].n > 0;
+      if (!waiting) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    expect(waiting).toBe(true);
+    await archive.commit();
+    expect((await raced).status).toHaveBeenCalledWith(404);
+    expect((await put()).status).toHaveBeenCalledWith(404);
+    expect(await knex('customer_turf_profiles').where({ customer_id: customerId }).first()).toBeUndefined();
+    expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBeNull();
+    expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBeNull();
   });
   test('a primary address move clears only the mirrors a review of the former address wrote', async () => {
     await knex('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: 3000 });

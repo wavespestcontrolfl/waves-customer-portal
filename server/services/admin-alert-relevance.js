@@ -80,19 +80,21 @@
  * ruling (2026-10-03), each closed only by the record that answers it: the
  * promise-chaser bell once the promise it chases is closed, and a portal chat
  * hand-off about adding a service once an estimate is handed off to that
- * customer. A self-booked re-service bell (owner 2026-10-05) closes once its
+ * customer (a person's contact also closes it, below). A self-booked re-service bell (owner 2026-10-05) closes once its
  * booked visit is completed, cancelled or gone. A phone-booking rain notice
  * (owner 2026-10-08) closes once its visit is closed, gone, moved off the
  * date or start it was booked for, or past its date. A call last-name
  * suggestion (owner 2026-10-08) closes once its customer has a last name or is
- * gone. Every other missed-call bell and portal chat topic stays a
- * person's to close. A promise-chaser retirement is final (`rearm: false`),
+ * gone. Every other missed-call bell stays a person's to close, and so does a
+ * portal chat topic that no person has answered (owner 2026-10-31: "A chat item
+ * closes itself when someone texts, calls or emails that customer after the
+ * request"; below). A promise-chaser retirement is final (`rearm: false`),
  * like the close its own emitter writes inside its 30-minute window: a
  * promise reopened later is the promise list's and the SLA pager's to
  * surface, and a later callback rings its own bell.
  *
- * Two more rules carry their OWN three-state gate (owner 2026-10-29, "Stuck
- * Alert Fixes"), so they can run in shadow while GATE_ALERT_CONTACT_CLOSE is
+ * Three more rules carry their OWN three-state gate (owner 2026-10-29, "Stuck
+ * Alert Fixes"; the third 2026-10-31), so they can run in shadow while GATE_ALERT_CONTACT_CLOSE is
  * `true`. A class (`gate`) is not offered at all while its gate is off, except
  * to the re-arm pass, so turning a gate off puts back what it closed; a single
  * reason (a contact rule answering `{ reason, mode }`) is silent while its mode
@@ -104,11 +106,18 @@
  *     `doneWhen: 'lead_contacted'` (call or reply to a lead) close once a
  *     person's text or call reached the lead, a visit was booked for the lead's
  *     customer, or an estimate was handed off, each after the bell.
+ *   - GATE_PORTAL_CHAT_ANSWERED_CLOSE: a portal chat hand-off bell (dedupeKey
+ *     `portal-chat-escalation:`, `doneWhen: 'customer_answered'`, a customer id) closes once a
+ *     person called back, answered the customer's call, texted or emailed that customer after the
+ *     bell's latest event (bellEventAt: a re-rung bell's `rungAt`). Rides on
+ *     GATE_ALERT_CONTACT_CLOSE (the weaker of the two wins). The add-a-service chat keeps its
+ *     estimate rule, and also closes on this contact. The confirmed-email-change bell
+ *     (`portal-chat-email-change:`) is never judged: its answer is the account change.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode } = require('../config/feature-gates');
+const { adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode, portalChatAnsweredCloseMode } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 // The dedupeKey prefix call-last-name-lookup.js gives its suggestion (its
@@ -255,6 +264,8 @@ function bellEventAt(row) {
   return times.length ? new Date(Math.max(...times.map((d) => d.getTime()))) : null;
 }
 
+const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered']);
+
 // What a customer-contact bell is about, for the witnesses: the text, call or
 // email it names, or the lead's own phone. Nothing here reads the customer's
 // account at large.
@@ -273,6 +284,11 @@ function contactRefs(kind, row, data) {
   }
   if (kind === 'voice') return { callLogId: uuidOrNull(payload.callLogId), customerId: uuidOrNull(payload.customerId), phone: payload.phone };
   if (kind === 'email') return { emailId: uuidOrNull(payload.emailId), customerId: uuidOrNull(payload.customerId) };
+  // A portal chat hand-off is about its customer alone (metadata.customerId); one without is not judged.
+  if (kind === 'customer') {
+    const customerId = uuidOrNull(refs.meta.customerId);
+    return customerId ? { customerId } : null;
+  }
   const lead = refs.leadId ? data.leads.get(refs.leadId) : null;
   return lead ? { customerId: uuidOrNull(lead.customer_id), phone: lead.phone } : null;
 }
@@ -287,10 +303,14 @@ async function loadContact(rows, data, conn) {
     // A class with its own gate (the lead_contacted class) reads witnesses by that gate; every
     // other class by GATE_ALERT_CONTACT_CLOSE, as before.
     if (!cls || (cls.gate ? cls.gate() === 'off' : data.contactMode === 'off')) continue;
+    // A gated class that judges by the contact witnesses also rides on GATE_ALERT_CONTACT_CLOSE.
+    if (cls.gate && cls.contactRule && data.contactMode === 'off') continue;
+    // The portal chat contact witnesses (customer kind) are read only while their own gate is on.
+    if (cls.contact === 'customer' && portalChatAnsweredCloseMode() === 'off') continue;
     const refs = cls.contact ? contactRefs(cls.contact, row, data) : null;
     if (!refs) continue;
-    // A lead_contacted bell can be refreshed with new content: its boundary is its latest event.
-    const bellAt = cls.key === 'lead_contacted' ? bellEventAt(row) : (row.created_at ? new Date(row.created_at) : null);
+    // A lead_contacted or portal chat bell can be refreshed and rung again: its boundary is its latest event.
+    const bellAt = BELL_EVENT_CLASSES.has(cls.key) ? bellEventAt(row) : (row.created_at ? new Date(row.created_at) : null);
     items.push({ id: row.id, kind: cls.contact, bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null, refs });
   }
   if (!items.length) return;
@@ -610,6 +630,12 @@ function isAddServiceChat(meta) {
 function addServiceQuoted(s) {
   return isAddServiceChat(s.meta) && s.quoteHandedOff ? 'Estimate was sent' : null;
 }
+// Any portal chat hand-off that asks for a customer answer (`doneWhen: 'customer_answered'`) and names
+// its customer. The confirmed-email-change bell (`portal-chat-email-change:`, `doneWhen: 'email_changed'`)
+// has another prefix and another promise: the account change is its answer, so it never matches.
+function isAnswerableChat(meta) {
+  return meta.doneWhen === 'customer_answered' && !!uuidOrNull(meta.customerId);
+}
 
 // A re-service request bell (notification-triggers.js reservice_self_booked)
 // is about its booked visit: done once that visit is completed, cancelled or
@@ -754,6 +780,25 @@ function leadContacted(s) {
   return contactAfter(c, c.textAt) || contactAfter(c, c.backAt) ? 'Lead was contacted' : null;
 }
 
+// A portal chat hand-off (GATE_PORTAL_CHAT_ANSWERED_CLOSE; owner 2026-10-31: "a chat item closes itself
+// when someone texts, calls or emails that customer after the request"): a person called back, answered
+// the customer's call, texted or emailed that customer after the bell's latest event (the witnesses'
+// anchor, bellEventAt). Answered with the gate's own mode, so it follows the weaker of that and
+// GATE_ALERT_CONTACT_CLOSE (judge). No visit or estimate reason here: the add-a-service chat keeps its
+// estimate rule beside it.
+function portalChatAnswered(s) {
+  const c = s.contact;
+  if (!c) return null;
+  const mode = portalChatAnsweredCloseMode();
+  if (mode === 'off') return null;
+  let reason = null;
+  if (contactAfter(c, c.backAt)) reason = 'A person called back';
+  else if (contactAfter(c, c.inAt)) reason = 'A person answered their call';
+  else if (contactAfter(c, c.textAt)) reason = 'Answered by text';
+  else if (contactAfter(c, c.replyAt)) reason = 'Answered by email';
+  return reason ? { reason, mode } : null;
+}
+
 // A lead_contacted Leads bell (GATE_LEAD_CONTACTED_CLOSE): the emitters promise "done when
 // the lead is contacted" and nothing closed it. Judged only by what came AFTER the bell
 // (its latest event, bellEventAt: created_at or the last ringing refresh's rungAt): a person's text or call back reached the lead (the
@@ -806,6 +851,12 @@ const CLASSES = [
   },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
+    // Also closed by a person's contact after the bell (GATE_PORTAL_CHAT_ANSWERED_CLOSE, own mode).
+    contact: 'customer', contactRule: portalChatAnswered,
+  },
+  { // the same hand-off for every other topic: closed only by a person's contact (add_service matched above)
+    key: 'portal_chat_answered', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAnswerableChat,
+    gate: portalChatAnsweredCloseMode, contact: 'customer', contactRule: portalChatAnswered,
   },
   { // lead-webhook.js ringRepeatFormAlert — it dedupes on OPEN rows only, so a
     // retirement ends the episode and the lead's next form rings a fresh row.
@@ -1164,7 +1215,7 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (retired) logger.info(`[alert-relevance] retired ${retired} of ${scanned} unread alert(s): ${JSON.stringify(byClass)}`);
   if (rearmed) logger.info(`[alert-relevance] put back ${rearmed} alert(s) whose subject is relevant again`);
   if (wouldClose) logger.info(`[alert-relevance] shadow: recorded ${wouldClose} alert(s) the customer-contact rules would close`);
-  const anyShadow = [alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode].some((mode) => mode() === 'shadow');
+  const anyShadow = [alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode, portalChatAnsweredCloseMode].some((mode) => mode() === 'shadow');
   return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}) };
 }
 

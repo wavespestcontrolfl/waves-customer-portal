@@ -28,12 +28,11 @@ const sendgrid = require('./sendgrid-mail');
 const NewsletterSender = require('./newsletter-sender');
 const { wrapNewsletter, bodyIsDarkAware } = require('./email-template');
 const { validateNewsletterDraft, lockedPricesForSend } = require('./newsletter-validator');
-const { requiresClaimValidation, isFlagshipType } = require('../config/newsletter-types');
+const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
 const { pestInsiderProofLive, newsletterAutoSendLive } = require('../config/feature-gates');
-const { PEST_INSIDER_TYPE } = require('./pest-insider-autopilot');
 
 /**
  * Internal diagnostics panel rendered ABOVE the recipient preview in the

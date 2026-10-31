@@ -12,10 +12,6 @@ const {
   FLAGSHIP_SEASONAL_CONTEXT,
 } = require('../services/newsletter-draft');
 const { getVoiceProfile } = require('../config/voice-profiles');
-const {
-  isFirstTuesdayET,
-  etMonthBounds,
-} = require('../services/pest-insider-autopilot');
 
 const voice = getVoiceProfile('waves_phase_3_local');
 
@@ -354,22 +350,5 @@ describe('pest-insider claim validation at the send gates', () => {
     const draft = { ...baseSend, html_body: `${baseSend.html_body}<p>Termites don&#39;t have a second swarm after storms.</p>` };
     const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
     expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(false);
-  });
-});
-
-describe('pest-insider cron guards', () => {
-  test('isFirstTuesdayET: first Tuesday yes; second Tuesday and other weekdays no', () => {
-    expect(isFirstTuesdayET(new Date('2026-06-02T11:05:00Z'))).toBe(true);  // Tue Jun 2, 7:05am ET
-    expect(isFirstTuesdayET(new Date('2026-06-09T11:05:00Z'))).toBe(false); // Tue Jun 9 (second)
-    expect(isFirstTuesdayET(new Date('2026-06-03T11:05:00Z'))).toBe(false); // Wed Jun 3
-    expect(isFirstTuesdayET(new Date('2026-12-01T12:00:00Z'))).toBe(true);  // Tue Dec 1
-  });
-
-  test('etMonthBounds spans the ET month, including the December rollover', () => {
-    const june = etMonthBounds(new Date('2026-06-15T12:00:00Z'));
-    expect(june.start.getTime()).toBeLessThan(new Date('2026-06-15T12:00:00Z').getTime());
-    expect(june.end.getTime()).toBeGreaterThan(new Date('2026-06-30T12:00:00Z').getTime());
-    const dec = etMonthBounds(new Date('2026-12-15T12:00:00Z'));
-    expect(dec.end.toISOString()).toBe(new Date('2027-01-01T05:00:00Z').toISOString()); // ET midnight Jan 1 = 05:00Z
   });
 });

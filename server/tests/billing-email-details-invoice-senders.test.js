@@ -202,6 +202,14 @@ describe('invoice.sent', () => {
     expect(args).not.toHaveProperty('idempotencyKey');
   });
 
+  test('gate on: a CC\'d copy never shows the homeowner\'s card, to either address', async () => {
+    process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
+    const { args } = await sent(invoiceRow(), { cc: 'manager@example.com' });
+    expect(args.cc).toEqual(['manager@example.com']);
+    expect(args.payload.payment_method).toBe('');
+    expect(args.payload.service_label).toBe('Quarterly Pest Control');
+  });
+
   test('gate on: a distinct saved billing contact (billing_email) never sees the homeowner\'s card', async () => {
     process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
     require('../services/customer-contact').getInvoiceEmailRecipients

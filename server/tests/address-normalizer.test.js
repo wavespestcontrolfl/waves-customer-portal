@@ -1,6 +1,6 @@
 const {
   normalizeLeadAddress, leadAddressFields, streetLineHoldsLocality, parseRawAddress, formatAddress,
-  normalizeUnitLine, unitLineValueKey, splitStreetLineUnit,
+  normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, premiseUnitKey,
   dwellingUnitOnLine, dwellingUnitOfUnitLine, splitUnitFirstLine, structuralUnitPart,
 } = require('../utils/address-normalizer');
 
@@ -515,6 +515,29 @@ describe('unitLineValueKey', () => {
     expect(unitLineValueKey('Bldg 2 Apt 4')).toBe(unitLineValueKey('Bldg 2 Unit 4'));
     expect(unitLineValueKey('Bldg 2 Apt 4')).not.toBe(unitLineValueKey('Apt 4'));
     expect(unitLineValueKey('Bldg 2 Apt 4')).not.toBe(unitLineValueKey('Bldg 2'));
+  });
+});
+
+// Shared by the quote wizard's same-person link (customer-dedupe) and the
+// consultation page's shell reuse (inspection-public): one key per premise.
+describe('premiseUnitKey', () => {
+  test('an inline building plus a line-2 apartment keys like the compound unit typed on line 2 (Codex #7249 r4)', () => {
+    expect(premiseUnitKey('123 Sample St Bldg C', 'Apt 2')).toBe(premiseUnitKey('123 Sample St', 'Bldg C Apt 2'));
+    expect(premiseUnitKey('123 Sample St Bldg C', 'Apt 2')).not.toBe(premiseUnitKey('123 Sample St', 'Bldg C Apt 3'));
+  });
+
+  test('the same unit inline and on line 2 counts once', () => {
+    expect(premiseUnitKey('123 Sample St Apt 2', 'Unit 2')).toBe(premiseUnitKey('123 Sample St', '#2'));
+  });
+
+  test('no unit is empty, and a unit never equals no unit', () => {
+    expect(premiseUnitKey('123 Sample St', '')).toBe('');
+    expect(premiseUnitKey('123 Sample St', null)).toBe('');
+    expect(premiseUnitKey('123 Sample St', 'Apt 4')).not.toBe(premiseUnitKey('123 Sample St', ''));
+  });
+
+  test('a building is not an apartment, inline or on line 2', () => {
+    expect(premiseUnitKey('123 Sample St Bldg 2', '')).not.toBe(premiseUnitKey('123 Sample St', 'Apt 2'));
   });
 });
 

@@ -293,8 +293,11 @@ describe('enrollSequenceFromEvent', () => {
 });
 
 describe('enrollReviewThankYou', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const recent = () => new Date(Date.now() - 2 * DAY).toISOString();
+
   test('maps the GBP location to its sequence and dedupes across the whole family', async () => {
-    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'parrish', starRating: 5 });
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'parrish', starRating: 5, reviewCreatedAt: recent() });
 
     expect(result).toEqual({ enrolled: true, reason: 'enrolled' });
     expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'review_thank_you_parrish' }));
@@ -304,7 +307,7 @@ describe('enrollReviewThankYou', () => {
   });
 
   test('bradenton GBP routes to the LWR-keyed sequence', async () => {
-    await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'bradenton', starRating: 4 });
+    await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'bradenton', starRating: 4, reviewCreatedAt: recent() });
 
     expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'review_thank_you_lwr' }));
   });
@@ -312,23 +315,47 @@ describe('enrollReviewThankYou', () => {
   test('gate off → gate_off, nothing queried', async () => {
     isEnabled.mockImplementation((key) => key !== 'reviewThankYouEnroll');
 
-    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'venice', starRating: 5 });
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'venice', starRating: 5, reviewCreatedAt: recent() });
 
     expect(result).toEqual({ enrolled: false, reason: 'gate_off' });
     expect(db).not.toHaveBeenCalled();
   });
 
   test('1-3 star reviews are never thanked', async () => {
-    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'venice', starRating: 3 });
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'venice', starRating: 3, reviewCreatedAt: recent() });
 
     expect(result).toEqual({ enrolled: false, reason: 'low_rating' });
     expect(enrollCustomer).not.toHaveBeenCalled();
   });
 
   test('unknown location → no_template', async () => {
-    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'tampa', starRating: 5 });
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'tampa', starRating: 5, reviewCreatedAt: recent() });
 
     expect(result).toEqual({ enrolled: false, reason: 'no_template' });
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  // A review matched to its customer weeks after it posted (late name match,
+  // manual match, backlog cleanup) must not get "we saw your Google review".
+  test('a review older than 14 days is never thanked', async () => {
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'parrish', starRating: 5, reviewCreatedAt: new Date(Date.now() - 15 * DAY).toISOString() });
+
+    expect(result).toEqual({ enrolled: false, reason: 'review_too_old' });
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('a review 13 days old is still thanked', async () => {
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'parrish', starRating: 5, reviewCreatedAt: new Date(Date.now() - 13 * DAY) });
+
+    expect(result).toEqual({ enrolled: true, reason: 'enrolled' });
+  });
+
+  test('no review date → no thank-you (the age rule cannot be checked)', async () => {
+    const missing = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'parrish', starRating: 5 });
+    const garbage = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'parrish', starRating: 5, reviewCreatedAt: 'not a date' });
+
+    expect(missing).toEqual({ enrolled: false, reason: 'review_date_unknown' });
+    expect(garbage).toEqual({ enrolled: false, reason: 'review_date_unknown' });
     expect(enrollCustomer).not.toHaveBeenCalled();
   });
 });

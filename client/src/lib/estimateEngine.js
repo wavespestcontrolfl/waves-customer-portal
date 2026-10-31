@@ -2188,7 +2188,8 @@ export function calculateEstimate(inputs) {
   // mirror: the lawn line's low_confidence_turf manualReviewReason).
   const lowConfidenceTurf = String(turfArea.turfConfidence || '').toUpperCase() === 'LOW'
     || (turfArea.turfFlags || []).includes('FIELD_VERIFY_TURF_SQFT');
-  const hasTurfPricedService = svcLawn || svcOnetimeLawn || svcTopdress || svcDethatch || svcPlugging;
+  // Plugging is not here: it prices only from its own entered area (server mirror: turfPricedServicesSelected).
+  const hasTurfPricedService = svcLawn || svcOnetimeLawn || svcTopdress || svcDethatch;
   if (hasTurfPricedService) {
     turfArea.turfFlags.forEach(flag => {
       if (!fieldVerify.includes(flag)) fieldVerify.push(flag);

@@ -29,6 +29,7 @@
  */
 import { isNativeApp, nativePlatform } from './platform';
 import { reportNativeLink } from '../lib/reportError';
+import { markPageNavigating } from '../lib/staleChunkReload';
 
 const STAFF_OR_API_PATH = /^\/(admin|tech|api)(\/|$)/;
 const LINK_ROUTES = new Map([['', 'home'], ['l', 'shortlink'], ['estimate', 'estimate']]);
@@ -101,10 +102,14 @@ export function navigateToCustomerUrl(rawUrl, loc = window.location) {
   const target = customerAppUrl(rawUrl, loc);
   if (!target) return false;
   if (isCurrentUrl(target, loc)) return false;
+  // WebKit cancels this page's in-flight chunk loads as the navigation starts;
+  // the mark stops the stale-chunk handler from reloading over it.
+  const closeNavigationWindow = markPageNavigating();
   try {
     loc.assign(target.href);
     return true;
   } catch {
+    closeNavigationWindow();
     return false;
   }
 }

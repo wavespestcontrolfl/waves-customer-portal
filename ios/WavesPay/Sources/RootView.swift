@@ -30,8 +30,8 @@ struct PaymentSheet: View {
             WavesScene()
         case .validating:
             LoadingView(title: "Getting the payment ready…")
-        case .ready(let handoff):
-            CollectView(handoff: handoff)
+        case .ready(let handoff, let jti):
+            CollectView(handoff: handoff, jti: jti)
         case .collecting(.starting):
             LoadingView(title: "Opening Tap to Pay…")
         case .collecting(.finishing):
@@ -44,34 +44,35 @@ struct PaymentSheet: View {
     }
 }
 
+// The waiting screens use the amount screen's frame and glass card, so the
+// logo stays put while the sheet moves between steps.
 struct LoadingView: View {
     let title: String
     var detail: String? = nil
 
     var body: some View {
-        VStack(spacing: 28) {
-            Spacer()
-            WavesLogo(height: 128)
-            ProgressView()
-                .controlSize(.large)
-                .tint(Brand.ink)
-            VStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(Brand.ink)
-                if let detail {
-                    Text(detail)
-                        .font(.system(size: 16))
-                        .foregroundStyle(Brand.body)
+        SheetLayout {
+            GlassCard {
+                VStack(spacing: 18) {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(Brand.ink)
+                    VStack(spacing: 6) {
+                        Text(title)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(Brand.ink)
+                        if let detail {
+                            Text(detail)
+                                .font(.system(size: 16))
+                                .foregroundStyle(Brand.body)
+                        }
+                    }
+                    .multilineTextAlignment(.center)
                 }
             }
-            .multilineTextAlignment(.center)
-            Spacer()
-            Spacer()
+        } actions: {
+            EmptyView()
         }
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(WavesScene())
     }
 }
 
@@ -205,8 +206,8 @@ enum PaymentPreview {
         )
         switch screen {
         case "validating": app.flow = .validating
-        case "ready": app.flow = .ready(handoff)
-        case "ready-long": app.flow = .ready(long)
+        case "ready": app.flow = .ready(handoff, jti: "preview")
+        case "ready-long": app.flow = .ready(long, jti: "preview")
         case "starting": app.flow = .collecting(.starting)
         case "finishing": app.flow = .collecting(.finishing)
         case "success":

@@ -363,3 +363,44 @@ describe.each([['Record', AnnualPrepayModal], ['Invoice', AnnualPrepayInvoiceMod
     expect(cadenceSelectOf().value).toBe('every_6_weeks');
   });
 });
+
+// A plan change replaces the amount THIS form suggested and clears it when the
+// new plan has no suggestion; a typed amount is never touched (sweep #3960 A3, codex P1).
+describe.each([['Record', AnnualPrepayModal], ['Invoice', AnnualPrepayInvoiceModal]])('%s modal — suggested amount follows the plan', (_name, Modal) => {
+  const PLANS = [
+    { serviceType: 'Lawn Care - Every 2 Months', seriesTotal: 600 },
+    { serviceType: 'Lawn Care - Every 3 Months', seriesTotal: 400 },
+  ];
+  const open = () => {
+    render(<Modal customer={BASE_CUSTOMER} activeTerm={null} prepaidPlans={PLANS} annualPrepayTerms={[]} onClose={() => {}} onSaved={() => {}} />);
+    return {
+      amountInput: document.querySelector('input[type="number"][step="0.01"]'),
+      serviceInput: screen.getByPlaceholderText('Search services or enter a custom label'),
+    };
+  };
+
+  it('swaps the suggested total plan to plan', () => {
+    const { amountInput, serviceInput } = open();
+    expect(amountInput).toHaveValue(600);
+    fireEvent.change(serviceInput, { target: { value: 'Lawn Care - Every 3 Months' } });
+    expect(amountInput).toHaveValue(400);
+    fireEvent.change(serviceInput, { target: { value: 'Lawn Care - Every 2 Months' } });
+    expect(amountInput).toHaveValue(600);
+  });
+
+  it('clears the previous plan total when the new plan has no match', () => {
+    const { amountInput, serviceInput } = open();
+    expect(amountInput).toHaveValue(600);
+    fireEvent.change(serviceInput, { target: { value: 'Lawn Care - Every 4 Months' } });
+    expect(amountInput).toHaveValue(null);
+  });
+
+  it('keeps an amount the admin typed when the plan changes', () => {
+    const { amountInput, serviceInput } = open();
+    fireEvent.change(amountInput, { target: { value: '123.45' } });
+    fireEvent.change(serviceInput, { target: { value: 'Lawn Care - Every 3 Months' } });
+    expect(amountInput).toHaveValue(123.45);
+    fireEvent.change(serviceInput, { target: { value: 'Lawn Care - Every 4 Months' } });
+    expect(amountInput).toHaveValue(123.45);
+  });
+});
