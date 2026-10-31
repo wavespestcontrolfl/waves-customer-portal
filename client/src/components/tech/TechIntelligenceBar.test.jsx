@@ -2,6 +2,7 @@
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import TechIntelligenceBar from './TechIntelligenceBar';
 
 function ok(body) {
@@ -133,5 +134,54 @@ describe('auto-growing composer', () => {
     await act(async () => { queryResolvers[0](ok({ response: 'Head to River Home next.', conversationHistory: [] })); });
     const followUp = await screen.findByPlaceholderText('Follow up...');
     expect(followUp.tagName).toBe('TEXTAREA');
+  });
+});
+
+describe('answers', () => {
+  async function askAndAnswer(response) {
+    render(<MemoryRouter initialEntries={['/admin/today']}><TechIntelligenceBar /></MemoryRouter>);
+    const box = await screen.findByPlaceholderText('Ask anything...');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "What's my next stop?" } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+    return () => act(async () => { queryResolvers[0](ok({ response, conversationHistory: [] })); });
+  }
+
+  it('links open records in the app and https pages in a new tab; other targets stay text', async () => {
+    const answer = await askAndAnswer([
+      'Next: [the fixture customer](/admin/customers?customerId=customer-a).',
+      '- Read **[the label guide](https://example.invalid/label)**',
+      '[run](javascript:alert(1))',
+    ].join('\n'));
+    await answer();
+    expect(await screen.findByRole('link', { name: 'the fixture customer' })).toHaveAttribute('href', '/admin/customers?customerId=customer-a');
+    const guide = screen.getByRole('link', { name: 'the label guide' });
+    expect(guide).toHaveAttribute('target', '_blank');
+    expect(guide.closest('strong')).not.toBeNull();
+    expect(screen.queryByRole('link', { name: 'run' })).not.toBeInTheDocument();
+    expect(screen.getByText(/\[run\]\(javascript:alert\(1\)\)/)).toBeInTheDocument();
+  });
+
+  it('text and controls are at least 14px', async () => {
+    fetchMock.mockImplementation((url) => {
+      if (url.includes('/query')) return new Promise((resolve) => queryResolvers.push(resolve));
+      return Promise.resolve(ok({ actions: [{ id: 'route', label: "Today's Route", prompt: "What's my route today?" }] }));
+    });
+    // The list bullet is a decorative dot, not text.
+    const small = () => [...document.querySelectorAll('[style]')]
+      .filter(el => el.style.fontSize && parseFloat(el.style.fontSize) < 14 && el.textContent.trim() !== '●');
+    const answer = await askAndAnswer('**Stop 2**\n- Gate code on file');
+    expect(screen.getByText('...')).toBeInTheDocument();
+    expect(small()).toEqual([]);
+    await answer();
+    fireEvent.change(await screen.findByPlaceholderText('Follow up...'), { target: { value: 'And after that?' } });
+    expect(screen.getAllByRole('button', { name: 'Go' })).toHaveLength(2);
+    expect(screen.getByRole('button', { name: '✕' })).toBeInTheDocument();
+    expect(small()).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: '✕' }));
+    fireEvent.focus(screen.getByPlaceholderText('Ask anything...'));
+    expect(await screen.findByText("Today's Route")).toBeInTheDocument();
+    expect(small()).toEqual([]);
   });
 });
