@@ -299,13 +299,31 @@ function isLiveRow(row) {
   return row.active !== false && !row.deleted_at;
 }
 
+// addressCompat is permissive on purpose (a missing unit or locality is not a
+// conflict, and two identical unparseable lines match). Linking a public
+// quote needs POSITIVE agreement instead: both street lines parse to the same
+// key, the units are equal (both empty counts), and the ZIPs are equal or,
+// when either ZIP is blank, both cities are present and equal.
+function samePremiseStrict(a, b) {
+  if (addressCompat(a, b).status !== 'match') return false;
+  const ak = normalizeStreetKey(a.address_line1);
+  const bk = normalizeStreetKey(b.address_line1);
+  if (!ak || !bk || ak.key !== bk.key) return false;
+  if ((ak.unit || unitFromLine2(a.address_line2) || '') !== (bk.unit || unitFromLine2(b.address_line2) || '')) return false;
+  const az = String(a.zip || '').slice(0, 5);
+  const bz = String(b.zip || '').slice(0, 5);
+  if (az && bz) return az === bz;
+  const ac = String(a.city || '').trim().toLowerCase();
+  return Boolean(ac) && ac === String(b.city || '').trim().toLowerCase();
+}
+
 function everySamePerson(a, b) {
-  return namesCompatible(a, b) && addressCompat(a, b).status === 'match';
+  return namesCompatible(a, b) && samePremiseStrict(a, b);
 }
 
 // A phone that matches 2..10 customer rows which are ALL one person at ONE
-// premise (names compatible, address a positive match, pairwise AND against
-// what the visitor typed) resolves to the row the nightly sweep would keep.
+// premise (names compatible, the same parsed street, unit and ZIP or city,
+// pairwise AND against what the visitor typed) resolves to the row the nightly sweep would keep.
 // Anything else returns null: a shared household or business line is not
 // one person, so the caller must not link to an arbitrary row of it.
 // typed = { first_name, last_name, address_line1, address_line2, city, zip }.

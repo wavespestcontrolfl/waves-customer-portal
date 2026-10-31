@@ -43,6 +43,38 @@ const row = (id, over = {}) => ({
 });
 
 describe('resolveSamePersonCluster', () => {
+  // Pre-push audit P1: addressCompat alone lets a missing unit or locality
+  // match. Linking a public quote needs positive agreement.
+  test('a typed unit never resolves to street-only rows', async () => {
+    const typedUnit = { ...TYPED, address_line2: 'Apt 2' };
+    expect(await resolveSamePersonCluster(fakeDb(), [row('a'), row('b')], typedUnit)).toBeNull();
+  });
+
+  test('rows that disagree on the unit do not resolve', async () => {
+    const rows = [row('a', { address_line2: 'Apt 2' }), row('b', { address_line2: 'Apt 3' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Apt 2' })).toBeNull();
+  });
+
+  test('the same unit on every row and the typed address resolves', async () => {
+    const rows = [row('a', { address_line2: 'Apt 2' }), row('b', { address_line2: 'Unit 2' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: '#2' })).not.toBeNull();
+  });
+
+  test('no ZIP and no city on a row is not a locality match', async () => {
+    const rows = [row('a'), row('b', { zip: '', city: '' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, TYPED)).toBeNull();
+  });
+
+  test('a blank ZIP still resolves when both cities are present and equal', async () => {
+    const rows = [row('a'), row('b', { zip: '' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, TYPED)).not.toBeNull();
+  });
+
+  test('identical unparseable street lines do not resolve', async () => {
+    const odd = { address_line1: 'Lot E12 Sunny Acres' };
+    expect(await resolveSamePersonCluster(fakeDb(), [row('a', odd), row('b', odd)], { ...TYPED, ...odd })).toBeNull();
+  });
+
   test('two same-person rows at the typed address resolve to the older row', async () => {
     const older = row('a', { created_at: '2026-09-01T00:00:00Z' });
     const newer = row('b', { created_at: '2026-10-29T00:00:00Z' });
