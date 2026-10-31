@@ -9399,6 +9399,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN — a caller who CANCELED on a call while nothing is booked for them (GATE_CALL_CANCEL_GUARD, checked each
+  // tick): dismisses the same customer's open "time unclear" booking cards from the 14 days before that call, each with a
+  // note naming the cancel call; the cancel card stays open. Never texts, emails or changes a visit. See
+  // server/services/call-cancel-guard.js.
+  cron.schedule('4,14,24,34,44,54 * * * *', async () => {
+    if (!require('../config/feature-gates').callCancelGuardLive()) return;
+    try {
+      await runExclusive('call-cancel-guard', async () => {
+        const result = await require('./call-cancel-guard').runCallCancelGuardSweep();
+        if (result.dismissed > 0) logger.info(`[call-cancel-guard] scanned=${result.scanned} dismissed=${result.dismissed}`);
+      });
+    } catch (err) {
+      logger.error(`[call-cancel-guard] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // Call booking-miss watchdog — every 30 min (offset from the ingest
   // watchdog), ring an admin bell for any call whose V2 extraction confirmed

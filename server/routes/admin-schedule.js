@@ -24554,6 +24554,24 @@ router.get('/reservice-request-suggestion', requireAdmin, async (req, res, next)
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/cancel-call-notice?customerId= — the New Appointment
+// modal's "Canceled on a call" notice (GATE_CALL_CANCEL_GUARD): this customer's
+// latest real conversation from the last 14 days, when that call filed a
+// cancellation card, with its time and the card's summary. Read-only and a
+// warning only: the booking route never reads it. Gate off answers
+// {enabled:false, call:null}, so the modal renders nothing new.
+router.get('/cancel-call-notice', requireAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').callCancelGuardLive()) return res.json({ enabled: false, call: null });
+    const customerId = String(req.query.customerId || '');
+    if (!reserviceOfficeRequest.isUuid(customerId)) {
+      return res.status(400).json({ error: 'customerId required' });
+    }
+    const call = await require('../services/call-cancel-guard').latestCancelCall(customerId);
+    res.json({ enabled: true, call });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/schedule/annual-prepay-preview — can the booking the
 // operator is composing in the New Appointment modal be sold as an annual
 // prepay, and for exactly how much?
