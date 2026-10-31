@@ -1035,6 +1035,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN at :11 — the Mercury paycheck status poller (owner plan A, 2026-10-30). READ-ONLY toward Mercury:
+  // it moves each open payroll payment on from Mercury's answers and rings the payroll bells; it never makes or
+  // repeats a payment request. Gates (GATE_PAYROLL and GATE_PAYROLL_MERCURY_STATUS) read per tick, so a flip
+  // needs no restart; off = no Mercury call at all. Sends nothing to a customer or staff member.
+  cron.schedule('11,26,41,56 * * * *', async () => {
+    const gates = require('../config/feature-gates');
+    if (!(typeof gates.payrollLive === 'function' && gates.payrollLive())) return;
+    if (!(typeof gates.payrollMercuryStatusLive === 'function' && gates.payrollMercuryStatusLive())) return;
+    try {
+      await runExclusive('payroll-mercury-poll', () => require('./payroll-mercury-poller').pollPayments());
+    } catch (err) {
+      logger.error(`[payroll-mercury-poller] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
