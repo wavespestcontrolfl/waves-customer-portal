@@ -40,6 +40,23 @@ function collectInApp(deepLink) {
   });
 }
 
+// Waves Admin connects the phone's card reader before the first tap, because
+// connecting is the slow step (seconds). It asks this signed-in page for each
+// Stripe connection token, so the app never holds the staff sign-in itself.
+// Returns a cleanup for sign-out and account switches.
+export function prepareInAppReader() {
+  if (!isWavesAdminApp()) return () => {};
+  window.wavesAdminConnectionToken = async () => {
+    const r = await adminFetch('/stripe/terminal/connection-token', { method: 'POST' });
+    if (!r.ok) throw new Error(`Connection token failed (${r.status})`);
+    const { secret } = await r.json();
+    if (!secret) throw new Error('Connection token missing');
+    return secret;
+  };
+  window.webkit.messageHandlers.wavesAdmin.postMessage({ type: 'prepareReader' });
+  return () => { delete window.wavesAdminConnectionToken; };
+}
+
 function isIPhoneLikeDevice() {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';

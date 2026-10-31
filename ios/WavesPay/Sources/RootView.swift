@@ -4,10 +4,20 @@ import SwiftUI
 // a sheet over them, so taking a card never leaves the app. PortalCoordinator
 // presents PaymentSheet over whatever is on top, a portal popup included.
 struct RootView: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         PortalView()
             .ignoresSafeArea()
             .onAppear { TerminalManager.shared.configure() }
+            // Back from another app: reconnect the reader if it dropped.
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { TerminalManager.shared.prepare() }
+            }
+            #if DEBUG
+            .task { await PaymentPreview.show(in: app) }
+            #endif
     }
 }
 
@@ -17,15 +27,17 @@ struct PaymentSheet: View {
     var body: some View {
         switch app.flow {
         case .idle:
-            Color(.systemBackground)
+            WavesScene()
         case .validating:
-            LoadingView(message: "Verifying payment…")
+            LoadingView(title: "Getting the payment ready…")
         case .ready(let handoff):
             CollectView(handoff: handoff)
-        case .collecting:
-            LoadingView(message: "Tap customer's card or device…")
-        case .success(let pi):
-            SuccessView(paymentIntentId: pi)
+        case .collecting(.starting):
+            LoadingView(title: "Opening Tap to Pay…")
+        case .collecting(.finishing):
+            LoadingView(title: "Finishing the payment…", detail: "Keep this screen open.")
+        case .success(let receipt):
+            SuccessView(receipt: receipt)
         case .failure(let msg):
             FailureView(message: msg)
         }
@@ -33,37 +45,86 @@ struct PaymentSheet: View {
 }
 
 struct LoadingView: View {
-    let message: String
+    let title: String
+    var detail: String? = nil
+
     var body: some View {
-        VStack(spacing: 16) {
-            ProgressView().scaleEffect(1.5)
-            Text(message).foregroundColor(.secondary)
+        VStack(spacing: 28) {
+            Spacer()
+            WavesLogo(height: 128)
+            ProgressView()
+                .controlSize(.large)
+                .tint(Brand.ink)
+            VStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(Brand.ink)
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 16))
+                        .foregroundStyle(Brand.body)
+                }
+            }
+            .multilineTextAlignment(.center)
+            Spacer()
+            Spacer()
         }
+        .padding(.horizontal, 32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
+        .background(WavesScene())
     }
 }
 
 struct SuccessView: View {
     @EnvironmentObject var app: AppState
-    let paymentIntentId: String
+    let receipt: Receipt
+    @State private var shown = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 72))
-                .foregroundColor(.green)
-            Text("Payment collected")
-                .font(.title.bold())
-            Text(paymentIntentId)
-                .font(.caption.monospaced())
-                .foregroundColor(.secondary)
-            Spacer().frame(height: 20)
+        VStack(spacing: 0) {
+            WavesLogo(height: 104)
+                .padding(.top, 28)
+            Spacer(minLength: 20)
+            GlassCard {
+                VStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 68))
+                        .foregroundStyle(Brand.success)
+                        .scaleEffect(shown ? 1 : 0.4)
+                        .opacity(shown ? 1 : 0)
+                    Text("Payment collected")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundStyle(Brand.ink)
+                    Text(Money.format(receipt.amountCents, currency: receipt.currency))
+                        .font(.system(size: 48, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Brand.ink)
+                    if let card = receipt.card {
+                        Text(card)
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(Brand.body)
+                    }
+                    if let name = receipt.customerName, !name.isEmpty {
+                        Text("From \(name)")
+                            .font(.system(size: 17))
+                            .foregroundStyle(Brand.body)
+                    }
+                    Text(receipt.paymentIntentId)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Brand.body.opacity(0.6))
+                        .padding(.top, 4)
+                }
+            }
+            Spacer(minLength: 20)
             Button("Done") { app.close() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(GoldButtonStyle())
+                .padding(.bottom, 8)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
+        .padding(.horizontal, 24)
+        .background(WavesScene())
+        .onAppear {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.55)) { shown = true }
+        }
     }
 }
 
@@ -72,21 +133,65 @@ struct FailureView: View {
     let message: String
 
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 72))
-                .foregroundColor(.red)
-            Text("Payment failed")
-                .font(.title.bold())
-            Text(message)
-                .multilineTextAlignment(.center)
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 40)
-            Spacer().frame(height: 20)
+        VStack(spacing: 0) {
+            WavesLogo(height: 104)
+                .padding(.top, 28)
+            Spacer(minLength: 20)
+            GlassCard {
+                VStack(spacing: 14) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 68))
+                        .foregroundStyle(Brand.alert)
+                    Text("Payment failed")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundStyle(Brand.ink)
+                    Text(message)
+                        .font(.system(size: 17))
+                        .foregroundStyle(Brand.body)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 20)
             Button("Back") { app.close() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(GoldButtonStyle())
+                .padding(.bottom, 8)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
+        .padding(.horizontal, 24)
+        .background(WavesScene())
     }
 }
+
+#if DEBUG
+// Opens one payment screen with sample data, for simulator screenshots:
+//   xcrun simctl launch booted com.wavespestcontrol.wavespay \
+//     -WavesPreviewScreen success -howToTapShown YES
+// Screens: validating, ready, starting, finishing, success, failure.
+enum PaymentPreview {
+    @MainActor
+    static func show(in app: AppState) async {
+        guard let screen = UserDefaults.standard.string(forKey: "WavesPreviewScreen") else { return }
+        // Let the portal view attach its sheet presenter first.
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        let handoff = API.ValidatedHandoff(
+            invoice_id: "preview", customer_name: "Sample Customer",
+            amount_cents: 18900, currency: "usd", authToken: nil,
+            surcharge_enabled: true, surcharge_cents: 548, credit_total_cents: 19448
+        )
+        switch screen {
+        case "validating": app.flow = .validating
+        case "ready": app.flow = .ready(handoff)
+        case "starting": app.flow = .collecting(.starting)
+        case "finishing": app.flow = .collecting(.finishing)
+        case "success":
+            app.flow = .success(Receipt(
+                paymentIntentId: "pi_preview", amountCents: 19448, currency: "usd",
+                customerName: "Sample Customer", card: "Visa •••• 4242 · Credit"
+            ))
+        case "failure":
+            app.flow = .failure("The invoice total changed. Close this and tap Tap to Pay again.")
+        default: break
+        }
+    }
+}
+#endif
