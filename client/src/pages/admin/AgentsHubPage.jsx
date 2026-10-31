@@ -76,7 +76,6 @@ const TAB_LIST = [
   { key: TABS.DECISIONS, label: "Decisions", Icon: ListChecks },
   { key: TABS.DRAFTS, label: "Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow", Icon: MessageSquareDashed },
-  { key: TABS.HYGIENE, label: "Hygiene", Icon: DatabaseZap },
   // Models — which model every AI lane runs on today, and the Railway env
   // change that moves it (server/services/model-switchboard.js).
   { key: TABS.MODELS, label: "Models", Icon: Cpu },
@@ -89,8 +88,13 @@ const QUEUE_TAB = { key: TABS.QUEUE, label: "Queue", Icon: Layers };
 // says the lane is live. Fails closed: a dark gate shows no tab and
 // ?tab=typed falls back to Overview.
 const TYPED_TAB = { key: TABS.TYPED, label: "Typed", Icon: Binary };
-// Literal classes so Tailwind keeps them: one column per visible tab.
-const XL_COLS = { 7: "xl:grid-cols-7", 8: "xl:grid-cols-8", 9: "xl:grid-cols-9" };
+// GATE_DATA_HYGIENE_UI: the Hygiene tab (and its API) exists only when the
+// hub probe says the review surface is on. Fails closed: a dark gate shows no
+// tab and ?tab=hygiene falls back to Overview.
+const HYGIENE_TAB = { key: TABS.HYGIENE, label: "Hygiene", Icon: DatabaseZap };
+// Literal classes so Tailwind keeps them: one column per visible tab (6 base
+// tabs, plus Typed, Hygiene and Queue when their gates are on).
+const XL_COLS = { 6: "xl:grid-cols-6", 7: "xl:grid-cols-7", 8: "xl:grid-cols-8", 9: "xl:grid-cols-9" };
 // Tabs that read ?area= get the product-area strip under the tab row
 // (AdminCommandHeader's secondary row). Overview joins while it renders the
 // Control center (the old Overview does not read the area).
@@ -139,8 +143,13 @@ export default function AgentsHubPage() {
   // but it is no longer a section in the everyday navigation.
   const controlCenter = hub.features.ledger === true;
   const typedAvailable = hub.features.typed === true;
+  const hygieneAvailable = hub.features.hygiene === true;
   const tabList = [
-    ...TAB_LIST.flatMap((t) => (t.key === TABS.DECISIONS && typedAvailable ? [t, TYPED_TAB] : [t])),
+    ...TAB_LIST.flatMap((t) => [
+      t,
+      ...(t.key === TABS.DECISIONS && typedAvailable ? [TYPED_TAB] : []),
+      ...(t.key === TABS.SHADOW && hygieneAvailable ? [HYGIENE_TAB] : []),
+    ]),
     ...(queueAvailable ? [QUEUE_TAB] : []),
   ];
   const validTabs = tabList.map((t) => t.key);

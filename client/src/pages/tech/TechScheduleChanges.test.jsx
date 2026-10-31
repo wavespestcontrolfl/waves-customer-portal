@@ -220,6 +220,28 @@ describe('TechScheduleChanges', () => {
     }
   });
 
+  // Today audit TODAY-03: a hidden tab kept reading every 10 s.
+  it('makes no reads while the page is hidden, and reads at once when it is shown again', async () => {
+    vi.useFakeTimers();
+    const setVisibility = (state) => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    try {
+      const calls = stubApi([]);
+      await renderChanges();
+      const reads = () => calls.filter((c) => c.method === 'GET').length;
+      expect(reads()).toBe(1);
+      await act(async () => { setVisibility('hidden'); vi.advanceTimersByTime(60_000); await Promise.resolve(); });
+      expect(reads()).toBe(1);
+      await act(async () => { setVisibility('visible'); await Promise.resolve(); });
+      expect(reads()).toBe(2);
+    } finally {
+      delete document.visibilityState;
+      vi.useRealTimers();
+    }
+  });
+
   it('a request still in flight when the list unmounts never marks the feed ready later', async () => {
     let resolveSlow;
     vi.stubGlobal('fetch', vi.fn(() => new Promise((r) => { resolveSlow = r; })));

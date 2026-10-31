@@ -9,6 +9,7 @@ const { autoLunchLive, techWorkDaysLive } = featureGates;
 const serviceLineMode = () => (typeof featureGates.serviceLineMapMode === 'function' ? featureGates.serviceLineMapMode() : 'off');
 // The Team tab card and its endpoints work in 'shadow' and 'live' alike.
 const serviceLineMapOn = () => ['shadow', 'live'].includes(serviceLineMode());
+const territoryReadoutOn = () => (typeof featureGates.territoryReadoutLive === 'function' ? featureGates.territoryReadoutLive() : false);
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
@@ -802,6 +803,7 @@ async function listTechnicians(req, res, next) {
       technicians: enriched,
       ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}),
       ...(serviceLineMapOn() ? { serviceLinesEnabled: true } : {}),
+      ...(territoryReadoutOn() ? { territoryReadoutEnabled: true } : {}),
     });
   } catch (err) { next(err); }
 }
@@ -1706,6 +1708,27 @@ router.get('/service-lines/shadow-summary', requireAdmin, async (req, res, next)
       bySource: asNumber(bySource),
       byLineReason: asNumber(byLineReason),
     });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /territory-readout?weeks=4 — territories by ZIP, build 3 (GATE_TERRITORY_READOUT, owner
+// 2026-10-30): stops per technician and area, booked over the next `weeks` and done over the
+// last `weeks` (1-13, default 4), so the re-cut rule is a number on the Team tab. Read only.
+const TERRITORY_READOUT_DEFAULT_WEEKS = 4;
+const TERRITORY_READOUT_MAX_WEEKS = 13;
+router.get('/territory-readout', requireAdmin, async (req, res, next) => {
+  try {
+    if (!territoryReadoutOn()) return res.status(404).json({ error: 'Not found' });
+    const asked = Number.parseInt(req.query.weeks, 10);
+    const weeks = Number.isInteger(asked) && asked > 0 ? Math.min(asked, TERRITORY_READOUT_MAX_WEEKS) : TERRITORY_READOUT_DEFAULT_WEEKS;
+    const now = new Date();
+    const today = etDateString(now);
+    const ahead = etDateString(addETDays(now, weeks * 7));
+    const back = etDateString(addETDays(now, -weeks * 7));
+    const rows = await require('../services/territory').territoryReadout(db, { today, ahead, back });
+    return res.json({ weeks, today, rows });
   } catch (err) {
     return next(err);
   }

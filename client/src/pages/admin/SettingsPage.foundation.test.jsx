@@ -311,12 +311,19 @@ describe("Settings audit fixes", () => {
     expect(requestedPaths().filter((p) => p !== "/health" && p !== "/admin/auth/me")).toEqual([]);
   });
 
-  it("a failed profile read counts as non-admin: General, no owner panel", async () => {
-    override({ "/admin/auth/me": () => response({ error: "Profile unavailable" }, 500) });
+  it("a failed profile read hides owner settings, says so, and retries", async () => {
+    let fail = true;
+    override({ "/admin/auth/me": () => (fail ? response({ error: "Profile unavailable" }, 500) : undefined) });
     mount("kpi-targets");
-    expect(await screen.findByText("Company info")).toBeInTheDocument();
+    expect(await screen.findByText("Could not load your account, so owner settings are hidden.")).toBeInTheDocument();
+    expect(screen.getByText("Company info")).toBeInTheDocument();
     await settle();
     expect(requestedPaths().some((p) => p.startsWith("/admin/kpi-targets"))).toBe(false);
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    // The owner's deep link opens once the profile loads.
+    expect(await screen.findByText("KPI targets", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load your account/)).not.toBeInTheDocument();
   });
 
   describe("in a browser outside Eastern time", () => {
@@ -397,12 +404,43 @@ describe("Settings audit fixes", () => {
     expect(screen.queryByText(/settings saved\./)).not.toBeInTheDocument();
   });
 
-  it("a failed service-report load shows the error instead of loading forever", async () => {
-    override({ "/admin/settings/service-coverage": () => response({ error: "Coverage read failed" }, 500) });
+  it("a failed service-report load shows the error with a retry, and Visit Timeline stays usable", async () => {
+    let fail = true;
+    override({ "/admin/settings/service-coverage": () => (fail ? response({ error: "Coverage read failed" }, 500) : undefined) });
     mount("service-reports");
     const message = await screen.findByText("Could not load Service Coverage settings. Coverage read failed");
     expect(message.closest('[role="alert"]')).not.toBeNull();
     expect(screen.queryByText("Loading Service Coverage settings...")).not.toBeInTheDocument();
+    // Visit Timeline has its own read: the Service Coverage failure does not hide it.
+    fireEvent.change(await screen.findByDisplayValue("Synthetic timeline source note."), { target: { value: "Typed before the retry." } });
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Service coverage", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load Service Coverage settings/)).not.toBeInTheDocument();
+    // The Visit Timeline card stayed mounted: one read, and the typed note is still there.
+    expect(screen.getByDisplayValue("Typed before the retry.")).toBeInTheDocument();
+    expect(requestedPaths().filter((p) => p === "/admin/settings/visit-timeline")).toHaveLength(1);
+  });
+
+  it("a failed Visit Timeline read, or a reply with no settings, says so and Try again loads it", async () => {
+    const replies = [response({ error: "Timeline read failed" }, 503), response({})];
+    override({
+      "/admin/settings/visit-timeline": (options) => (options.method ? undefined : replies.shift()),
+      "/admin/settings/visit-timeline/reset": () => response({}),
+    });
+    mount("service-reports");
+    const failed = await screen.findByText("Could not load Visit Timeline settings. Timeline read failed");
+    expect(failed.closest('[role="alert"]')).not.toBeNull();
+    expect(screen.queryByText("Loading Visit Timeline settings...")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Could not load Visit Timeline settings. The reply had no settings.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByDisplayValue("Synthetic timeline source note.")).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load Visit Timeline settings/)).not.toBeInTheDocument();
+    // A restore whose reply has no settings is an error, and the form stays.
+    fireEvent.click(screen.getAllByRole("button", { name: "Restore defaults" })[0]);
+    expect((await screen.findByText("The reply had no settings.")).closest('[role="alert"]')).not.toBeNull();
+    expect(screen.getByDisplayValue("Synthetic timeline source note.")).toBeInTheDocument();
   });
 
   it("locks the service-coverage controls while its save runs", async () => {
@@ -456,6 +494,21 @@ describe("Settings audit fixes", () => {
     expect(screen.getAllByText("Unsaved")).toHaveLength(1);
   });
 
+  it.each([
+    ["operating-costs", "/admin/revenue/settings", "Operating costs"],
+    ["kpi-targets", "/admin/kpi-targets", "KPI targets"],
+  ])("a failed %s read shows the error with Try again, and the retry loads the form", async (tab, path, title) => {
+    let fail = true;
+    override({ [path]: (options) => (fail && !options.method ? response({ error: "Read failed" }, 503) : undefined) });
+    mount(tab);
+    expect((await screen.findByText("Read failed")).closest('[role="alert"]')).not.toBeNull();
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(title, { exact: true })).toBeInTheDocument();
+    // The failed read leaves no stale error above the loaded form.
+    expect(screen.queryByText("Read failed")).not.toBeInTheDocument();
+  });
+
   it("offers no blackout controls until the days off have loaded", async () => {
     let fail = true;
     override({
@@ -469,6 +522,36 @@ describe("Settings audit fixes", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("button", { name: "Sat open weekly" })).toBeEnabled();
     expect(requestedPaths().includes("/admin/schedule/blackout-dates/weekly")).toBe(false);
+  });
+
+  it("a blocked day stays listed when the reload after it fails", async () => {
+    let reads = 0;
+    override({
+      "/admin/schedule/blackout-dates": (options) => {
+        if (options.method === "POST") {
+          return response({ success: true, blackout: { id: "day-2", date: "2026-12-31", reason: "Office closed" } });
+        }
+        reads += 1;
+        return reads === 1 ? undefined : response({ error: "Schedule read failed" }, 500);
+      },
+    });
+    mount("blackout-days");
+    await screen.findByText("Holiday");
+    fireEvent.change(screen.getByLabelText("Blackout date"), { target: { value: "2026-12-31" } });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Office closed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Block day" }));
+    expect(await screen.findByText("Could not refresh blackout days. Schedule read failed")).toBeInTheDocument();
+    expect(screen.getByText("Office closed")).toBeInTheDocument();
+    expect(screen.getByText("Holiday")).toBeInTheDocument();
+  });
+
+  it("a failed Link Library read shows its error, not \"0 links\"", async () => {
+    override({
+      "/admin/communications/link-library": (options) => (options.method ? undefined : response({ error: "Links read failed" }, 500)),
+    });
+    mount("link-library");
+    expect(await screen.findByText("Links read failed")).toBeInTheDocument();
+    expect(screen.queryByText(/0 links/)).not.toBeInTheDocument();
   });
 
   it("an Unblock that lands while the list reloads stays unblocked", async () => {
@@ -497,7 +580,9 @@ describe("Settings audit fixes", () => {
     fireEvent.change(screen.getByLabelText("Blackout date"), { target: { value: "2026-12-31" } });
     fireEvent.click(screen.getByRole("button", { name: "Block day" }));
     await waitFor(() => expect(held).not.toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: "Unblock" }));
+    // Rows are in date order: the first Unblock is Dec 25 ("Holiday"); the
+    // new Dec 31 row is already listed from the POST reply.
+    fireEvent.click(screen.getAllByRole("button", { name: "Unblock" })[0]);
     expect(await screen.findByText("Office closed")).toBeInTheDocument();
     held.resolve();
     await settle();

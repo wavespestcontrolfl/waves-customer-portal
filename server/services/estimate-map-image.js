@@ -71,8 +71,9 @@ function redactMapsKeyFromUrl(raw) {
 }
 
 // Last-resort scrub over an outgoing payload (object/array/string): any
-// maps.googleapis.com URL loses its key param, any `key=AIza...` token and any
-// bare Google API key shape is removed regardless of separator, and any literal
+// maps.googleapis.com URL loses its key param, any `key=AIza...` or `key=AQ....` token
+// and any bare Google API key shape (AIza..., or the newer "AQ." + 50 characters of a
+// key bound to a service account) is removed regardless of separator, and any literal
 // occurrence of the configured server key is blanked. Defense in depth behind
 // the purpose-built proxy paths — catches a keyed URL sitting in an unrelated
 // blob (estimate_data, authored text, enriched profile) that no builder knew
@@ -86,7 +87,7 @@ function redactMapsKeyFromUrl(raw) {
 // does), so this string pass is the backstop, not the only line.
 const KEY_SEPARATOR = String.raw`(?:&amp;|&#0*38;|&#x0*26;|\\u0026|\\x26|&)`;
 const KEY_VALUE = String.raw`[^&#\s"'<>\\]*`;
-const GOOGLE_KEY_SHAPE = /AIza[0-9A-Za-z_-]{20,}/g;
+const GOOGLE_KEY_SHAPE = /AIza[0-9A-Za-z_-]{20,}|\bAQ\.[0-9A-Za-z_-]{40,}/g;
 
 function stripKeyParamsFromMapsUrlText(url) {
   return url
@@ -130,8 +131,8 @@ function scrubMapsKeysFromUnprotectedString(text) {
   if (/maps\.googleapis\.com/i.test(out)) {
     out = out.replace(/https?:\/\/maps\.googleapis\.com\/[^\s"'<>]*/gi, (m) => stripKeyParamsFromMapsUrlText(m));
   }
-  // Any `key=AIza...` token (any separator, any host) and any bare key shape.
-  out = out.replace(/key=AIza[0-9A-Za-z_-]{20,}/gi, '').replace(GOOGLE_KEY_SHAPE, '');
+  // Any `key=AIza...` / `key=AQ....` token (any separator, any host) and any bare key shape.
+  out = out.replace(/key=(?:AIza[0-9A-Za-z_-]{20,}|AQ\.[0-9A-Za-z_-]{40,})/gi, '').replace(GOOGLE_KEY_SHAPE, '');
   return blankConfiguredKeys(out);
 }
 
