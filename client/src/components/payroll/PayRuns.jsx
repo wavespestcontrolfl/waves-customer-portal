@@ -355,6 +355,21 @@ function VoidForm({ busy, onVoid, onCancel }) {
 }
 
 const OUTCOME_WORDS = { requested: 'asked Mercury', failed: 'Mercury did not take it', unknown: 'outcome unknown', skipped: 'not sent' };
+
+// The line after Send. "Nothing was sent" only when no request can have reached Mercury: an unknown one may have.
+function sendSummary(results) {
+  const count = outcome => results.filter(item => item.outcome === outcome).length;
+  const many = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const asked = count('requested');
+  const unknown = count('unknown');
+  const failed = count('failed');
+  const parts = [
+    asked > 0 && `Asked Mercury for ${many(asked, 'payment')}. Approve them in the Mercury app.`,
+    unknown > 0 && `We cannot tell if Mercury got ${many(unknown, 'request')}. Look in Mercury before you send again.`,
+    failed > 0 && `Mercury did not take ${many(failed, 'request')}. Look at the payments below.`,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' ') : 'Nothing was sent to Mercury.';
+}
 const SKIP_WORDS = { no_recipient: 'no Mercury recipient id', no_pay: 'no pay', already_has_payment: 'already has a payment' };
 const skipWords = reason => SKIP_WORDS[String(reason).split(':')[0]] || 'not sent';
 
@@ -386,9 +401,8 @@ function SendToMercury({ call, run, onChanged, onMessage }) {
     setBusy(true); setError('');
     try {
       const data = await call(`/runs/${run.id}/send`, { method: 'POST', body: {} });
-      const asked = data.results.filter(item => item.outcome === 'requested').length;
       setResults(data.results); setStep('idle');
-      onMessage(asked > 0 ? `Asked Mercury for ${asked} payment${asked === 1 ? '' : 's'}. Approve them in the Mercury app.` : 'Nothing was sent to Mercury.');
+      onMessage(sendSummary(data.results));
       await onChanged(run.id);
     } catch (failure) { setError(failure.message); }
     setBusy(false);

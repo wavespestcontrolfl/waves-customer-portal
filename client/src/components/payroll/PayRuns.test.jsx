@@ -417,6 +417,21 @@ describe('Mercury paychecks', () => {
     expect(results.getByText(/Sample Beta: no Mercury recipient id/)).toBeInTheDocument();
   });
 
+  it.each([
+    [['unknown'], 'We cannot tell if Mercury got 1 request. Look in Mercury before you send again.'],
+    [['requested', 'unknown', 'unknown'], 'Asked Mercury for 1 payment. Approve them in the Mercury app. We cannot tell if Mercury got 2 requests. Look in Mercury before you send again.'],
+    [['failed'], 'Mercury did not take 1 request. Look at the payments below.'],
+    [['skipped'], 'Nothing was sent to Mercury.'],
+  ])('after Send, %j: never "nothing was sent" when a request may have reached Mercury', async (outcomes, message) => {
+    writeReply = () => reply({ results: outcomes.map((outcome, i) => ({ checkId: `check-${i}`, name: `Sample ${i}`, outcome, ...(outcome === 'skipped' ? { reason: 'no_recipient' } : {}) })), run: current });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => (path.endsWith('/send-preview') ? reply({ preview: PREVIEW }) : base(path, options)));
+    const view = await openFinal([['check-a', 'Sample Alpha', { payment: pay() }]]);
+    fireEvent.click(view.getByRole('button', { name: 'Send to Mercury' }));
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Confirm send to Mercury' })).getByRole('button', { name: 'Yes, send to Mercury' }));
+    await screen.findByText(message);
+  });
+
   it('can be cancelled at the confirm step without a write, and names who has no recipient id', async () => {
     const base = adminFetch.getMockImplementation();
     adminFetch.mockImplementation((path, options) => (path.endsWith('/send-preview') ? reply({ preview: PREVIEW }) : base(path, options)));
