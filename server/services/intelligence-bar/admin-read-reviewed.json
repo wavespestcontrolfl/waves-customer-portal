@@ -1876,14 +1876,14 @@
     },
     {
       "endpoint": "/admin/revenue/settings",
-      "reviewed": "Handler: latest company_financials row (cost and margin settings; technicians get a field subset); read end to end.",
+      "reviewed": "Handler: latest company_financials row (cost and margin settings); the revenue router is owner-only, technicians get 403 (settings audit SET-01, 2026-10-31); read end to end.",
       "scope": "broad",
       "freeText": {
         "notes": "note"
       },
       "signals": [],
       "unresolved": [],
-      "hash": "b30ef0152427d3828bf50b862de3da03"
+      "hash": "d8be6622ba22d377d932198d0159ecdb"
     },
     {
       "endpoint": "/admin/route-scorecard/status",
