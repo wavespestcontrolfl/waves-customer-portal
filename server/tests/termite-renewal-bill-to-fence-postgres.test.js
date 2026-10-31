@@ -9,7 +9,10 @@
 //     as in flight, so a payer writer that comes after the claim refuses with
 //     invoice_send_in_flight (the Bill-To edit, and payer.js activation).
 // The renewal's "payment didn't go through" text hands off under the same
-// claim (withPayLinkSendClaim). Non-renewal invoices behave exactly as before.
+// claim (withPayLinkSendClaim). The claim-time payer re-resolve stays
+// renewal-only. Since #6117 (Codex r8 P1) a STANDALONE invoice (no packet, no
+// visit link, not a renewal) also counts as in flight while its send claim is
+// live (a 'sending' row written in the last 10 minutes).
 //
 // Rows are real (committed) and removed after each test; providers are
 // synthetic stubs. Runs where CI runs the other invoice-claim suites:
@@ -152,7 +155,7 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     return { release, inHandoff };
   }
 
-  test('in flight: a renewal invoice being delivered (or its debit clearing) counts for its customer and the payer that customer names; a plain invoice never does', async () => {
+  test('in flight: a renewal invoice being delivered (or its debit clearing) counts for its customer and the payer that customer names; a plain invoice counts only while its send claim is live', async () => {
     const inactivePayer = await insertPayer({ active: false });
     const renewal = await fixture({ payerId: inactivePayer });
     const plain = await fixture({ renewal: false });
@@ -163,7 +166,11 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     await db('invoices').where({ id: plain.invoiceId }).update({ status: 'sending', send_claim_token: randomUUID() });
     expect(await inFlight({ customerId: renewal.customerId })).toBe(true);
     expect(await inFlight({ payerId: inactivePayer })).toBe(true);
-    expect(await inFlight({ customerId: plain.customerId })).toBe(false); // unchanged for non-renewal invoices
+    // A standalone invoice's live send claim is the fence too (#6117 r8 P1). A stale claim (no write
+    // for 10 minutes) is not, so a stuck row never blocks a Bill-To change for good.
+    expect(await inFlight({ customerId: plain.customerId })).toBe(true);
+    await db('invoices').where({ id: plain.invoiceId }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
+    expect(await inFlight({ customerId: plain.customerId })).toBe(false);
 
     await db('invoices').where({ id: renewal.invoiceId }).update({ status: 'processing', send_claim_token: null, stripe_payment_intent_id: 'pi_synthetic_clearing' });
     expect(await inFlight({ customerId: renewal.customerId })).toBe(true);
@@ -231,16 +238,17 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     await send;
   });
 
-  test('non-renewal invoices behave exactly as before: no claim-time payer re-resolve, never counted in flight', async () => {
+  test('non-renewal invoices: no claim-time payer re-resolve; in flight only while the send holds its claim', async () => {
     const payerId = await insertPayer();
     const { customerId, invoiceId } = await fixture({ renewal: false, payerId });
     const { release, inHandoff } = holdHandoff();
     const send = Invoice.sendViaSMSAndEmail(invoiceId, {});
     await inHandoff;
-    expect(await Packets.packetInvoiceSendInFlight({ customerId })).toBe(false);
+    expect(await Packets.packetInvoiceSendInFlight({ customerId })).toBe(true); // #6117: the live claim is the fence
     release();
     await expect(send).resolves.toMatchObject({ sms: { ok: true } });
     expect(await readInvoice(invoiceId)).toMatchObject({ status: 'sent', payer_id: null });
+    expect(await Packets.packetInvoiceSendInFlight({ customerId })).toBe(false);
   });
 
   test('the charge-failed text hands off under the same claim: in flight while the provider has it, restored after; refused once a payer owns the bill', async () => {
