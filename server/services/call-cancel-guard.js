@@ -59,6 +59,9 @@ const realConversation = (call) => isRealConversation(call, parseExtraction(call
 
 const primaryCategory = (call) => parseExtraction(call.ai_extraction_enriched)?.service_request?.primary_service_category || null;
 const CALL_COLUMNS = ['id', 'customer_id', 'processing_status', 'answered_by', 'ai_extraction_enriched'];
+// Categories that do not name ONE service: 'other' is the catch-all and a WaveGuard bundle spans several, so two calls
+// that share one of them need not be about the same thing.
+const NON_SPECIFIC_CATEGORIES = new Set(['other', 'bundled_waveguard']);
 
 // The cancel still stands: the call is still a processed real conversation and its cancel card was not dismissed.
 async function cancelStands(conn, cancelCall) {
@@ -83,7 +86,7 @@ async function cardIsMoot(conn, { customerId, cancelCallId, cardCallId }) {
   if (String(cancelCall.customer_id) !== String(customerId) || String(cardCall.customer_id) !== String(customerId)) return false;
   if (!(await cancelStands(conn, cancelCall))) return false;
   const service = primaryCategory(cancelCall);
-  if (!service || primaryCategory(cardCall) !== service) return false;
+  if (!service || NON_SPECIFIC_CATEGORIES.has(service) || primaryCategory(cardCall) !== service) return false;
   const properties = await conn('customer_properties').where({ customer_id: customerId, active: true }).count('* as n').first();
   if (Number(properties?.n || 0) > 1) return false;
   return !(await hasLiveVisit(conn, customerId));

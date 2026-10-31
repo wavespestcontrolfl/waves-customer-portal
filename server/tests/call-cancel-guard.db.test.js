@@ -185,6 +185,14 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       for (const lead of [lawn, unknown]) expect((await row(lead.ask.id)).status).toBe('open');
     });
 
+    test.each(['other', 'bundled_waveguard'])('a shared non-specific service (%s) keeps the card', async (category) => {
+      const lead = await canceledLead();
+      const extraction = JSON.stringify({ service_request: { primary_service_category: category } });
+      await trx('call_log').whereIn('id', [lead.askCall, lead.cancelCall]).update({ ai_extraction_enriched: extraction });
+      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
+      expect((await row(lead.ask.id)).status).toBe('open');
+    });
+
     test('a customer with two properties keeps the card (which one was canceled is unknown)', async () => {
       const { customerId, ask } = await canceledLead();
       for (const line1 of ['100 Example Lane', '200 Example Lane']) {
