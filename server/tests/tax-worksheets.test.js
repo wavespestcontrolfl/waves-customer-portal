@@ -233,14 +233,12 @@ describe('1099 list', () => {
     const r = ws.build1099List(2026, [
       zelle({ expense_id: 'z1', amount: 1200, bank_original: 'Zelle money sent to Pat Example Conf# AB12CD' }),
       zelle({ expense_id: 'z2', amount: 900, bank_original: 'Zelle money sent to PAT EXAMPLE' }),
-      // a reference code or date after the name is not part of it
-      zelle({ expense_id: 'z3', amount: 50, bank_original: 'Zelle payment to Pat Example JPM99999999 10/12' }),
       row({ expense_id: 'v1', amount: 100, vendor_name: 'Pat Example', bank_text: 'Pat Example' }),
     ]);
     expect(r.payees.map((p) => [p.key, p.name, p.total, p.count, p.unresolved, p.needs_1099])).toEqual([
-      ['pat example', 'Pat Example', 2250, 4, false, true],
+      ['pat example', 'Pat Example', 2200, 3, false, true],
     ]);
-    expect(r.payees[0].payments.map((p) => [p.expense_id, p.channel])).toEqual([['z1', 'zelle'], ['z2', 'zelle'], ['z3', 'zelle'], ['v1', 'unknown']]);
+    expect(r.payees[0].payments.map((p) => [p.expense_id, p.channel])).toEqual([['z1', 'zelle'], ['z2', 'zelle'], ['v1', 'unknown']]);
   });
 
   test('a typed vendor name is never overridden; wording that names no one stays unresolved, one line each', () => {
@@ -271,10 +269,14 @@ describe('1099 list', () => {
       generic('p3', 'PayPal', 'PAYPAL *PAT EXAMPLE'),
       // a Zelle phrase with no name (phone number only) names no one
       generic('z9', 'Zelle', 'Zelle money sent to 9415550100'),
+      // a digit left in the name is too ambiguous to add up by: these are two businesses
+      generic('d1', 'Zelle', 'Zelle money sent to A1 Consulting LLC', 1200),
+      generic('d2', 'Zelle', 'Zelle money sent to B2 Consulting LLC', 1200),
+      generic('d3', 'Zelle', 'Zelle payment to Pat Example JPM99999999 10/12'),
     ]);
     expect(r.payees.every((p) => p.unresolved && p.count === 1)).toBe(true);
     expect(r.payees.some((p) => p.needs_1099)).toBe(false);
-    expect(r.payees).toHaveLength(7);
+    expect(r.payees).toHaveLength(10);
   });
 
   test('2025 payments use the $600 threshold', () => {

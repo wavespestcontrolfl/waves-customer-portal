@@ -249,15 +249,17 @@ const payeeKey = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 // The bank's original wording (Plaid keeps it in original_description) names
 // a payee only through Zelle's explicit recipient phrase: "Zelle money sent
 // to Pat Example". Zelle files no 1099-K, so those are the payments this list
-// is for. Words with a digit (reference codes, dates) are dropped. Every other
-// raw descriptor ("PAYPAL INST XFER ...", "VENMO 1030 PAYMENT ...",
-// "CASH APP*CASH OUT") names an action, not a person: payeeOf's looser rules
-// would read it as a name and add up everyone paid that way.
+// is for. Every other raw descriptor ("PAYPAL INST XFER ...", "VENMO 1030
+// PAYMENT ...", "CASH APP*CASH OUT") names an action, not a person: payeeOf's
+// looser rules would read it as a name and add up everyone paid that way. A
+// digit left in the name may be a reference code, a date or part of the name
+// itself ("A1 Consulting LLC"), so such a payment stays unresolved too.
 function zelleRecipientOf(text) {
   const m = ZELLE_TO.exec(String(text || '').replace(/\s+/g, ' ').trim());
   if (!m) return null;
-  const name = tidy(m[1]).split(' ').filter((word) => !/\d/.test(word)).join(' ');
-  return /[a-z]/i.test(name) && !GENERIC_NAME.test(name) ? { name, identified: true } : null;
+  const name = tidy(m[1]);
+  if (/\d/.test(name) || !/[a-z]/i.test(name) || GENERIC_NAME.test(name)) return null;
+  return { name, identified: true };
 }
 
 // The expense's own name first: a vendor the operator typed (or a bank text
