@@ -1240,7 +1240,7 @@ function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
         >
           Map unavailable
         </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted }}>
+        <div style={{ fontSize: 14, color: D.muted }}>
           Customer addresses are still available in the Directory.
         </div>{" "}
       </div>
@@ -1270,8 +1270,8 @@ function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
         >
           Map Error
         </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted }}>{mapError}</div>{" "}
-        <div style={{ fontSize: 11, color: D.muted, marginTop: 8 }}>
+        <div style={{ fontSize: 14, color: D.muted }}>{mapError}</div>{" "}
+        <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
           Ensure Maps JavaScript API is enabled in Google Cloud Console.
         </div>{" "}
       </div>
@@ -1290,7 +1290,7 @@ function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
         }}
       >
         {" "}
-        <div style={{ fontSize: 13, color: D.muted }}>Loading map...</div>{" "}
+        <div style={{ fontSize: 14, color: D.muted }}>Loading map...</div>{" "}
       </div>
     );
   }
@@ -1317,7 +1317,7 @@ function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
             border: `1px solid ${D.border}`,
             borderRadius: 8,
             color: D.text,
-            fontSize: 12,
+            fontSize: 14,
           }}
         >
           {" "}
@@ -1338,7 +1338,7 @@ function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
             border: `1px solid ${D.border}`,
             borderRadius: 8,
             color: D.text,
-            fontSize: 12,
+            fontSize: 14,
           }}
         >
           {" "}
@@ -1363,7 +1363,7 @@ function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
             display: "flex",
             gap: 10,
             marginLeft: "auto",
-            fontSize: 11,
+            fontSize: 14,
             color: D.muted,
           }}
         >
@@ -1430,16 +1430,16 @@ function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
                 >
                   {selectedPin.firstName} {selectedPin.lastName}
                 </div>{" "}
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
                   {selectedPin.address} {selectedPin.city}
                 </div>{" "}
-                <div style={{ fontSize: 12, color: D.muted }}>
+                <div style={{ fontSize: 14, color: D.muted }}>
                   {selectedPin.phone}
                 </div>
                 {selectedPin.tier && selectedPin.tier !== 'Commercial' && selectedPin.tier !== 'One-Time' && (
                   <div
                     style={{
-                      fontSize: 11,
+                      fontSize: 14,
                       color: TIER_PIN_COLORS[selectedPin.tier] || D.teal,
                       fontWeight: 500,
                       marginTop: 4,
@@ -1459,7 +1459,7 @@ function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
                     color: "#fff",
                     border: "none",
                     borderRadius: 6,
-                    fontSize: 11,
+                    fontSize: 14,
                     fontWeight: 500,
                     cursor: "pointer",
                   }}
