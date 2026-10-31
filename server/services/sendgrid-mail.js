@@ -31,6 +31,9 @@
  *   - 2× DKIM CNAMEs at s1._domainkey + s2._domainkey on the root
  *   - 1× return-path CNAME (provider-named, e.g. wavesnewsletter.*)
  *   - 1× link-tracking CNAME (e.g. click.*)
+ *   The newsletter (issues, signup confirms, win-backs) sends from the separately
+ *   authenticated subdomain news.wavespestcontrol.com (em2241.news + s1/s2._domainkey.news,
+ *   owner 2026-10-31); the click.* link branding is the account default, so it covers it.
  *   - SPF include is implicit via the Sender Authentication wizard
  */
 

@@ -53,7 +53,7 @@ describe('newsletter-confirm', () => {
     });
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     const args = sendgrid.sendOne.mock.calls[0][0];
-    expect(args.fromEmail).toBe('newsletter@wavespestcontrol.com');
+    expect(args.fromEmail).toBe('newsletter@news.wavespestcontrol.com');
     expect(args.fromName).toBe('Waves Newsletter');
     // Still bypasses suppression (asmGroupId: 0) — that's the existing
     // contract; this test guards it as a side effect of pinning the args.
