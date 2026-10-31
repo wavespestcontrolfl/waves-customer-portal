@@ -1016,7 +1016,7 @@ describe('review incentives', () => {
         customerId: 'customer-sam',
         holder: { first: 'Sam', last: 'Northgate' },
         contacts: [],
-        timeline: { memberSince: '2025-02-01', leadSource: 'square' },
+        timeline: { memberSince: '2025-02-01' },
         activity: { visitsOn: ['2026-08-25'] },
         linkedProfiles: [],
       },
