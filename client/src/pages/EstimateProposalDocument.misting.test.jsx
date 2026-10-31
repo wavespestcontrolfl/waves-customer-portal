@@ -30,7 +30,7 @@ const misting = (over = {}) => ({
       title: 'Priced from your system layout',
       body: 'Your price is set by your system size and your nozzle and riser count.',
       metrics: [
-        { label: 'System', value: 'Standard system (55-gallon)' },
+        { label: 'System', value: 'Standard, 55-gallon' },
         { label: 'Nozzles', value: '21' },
         { label: 'Risers', value: '2' },
       ],
@@ -103,7 +103,7 @@ describe('EstimateProposalDocument: misting system plan', () => {
     const body = text();
     expect(body).toContain('How your price was built');
     expect(body).toContain('Your price is set by your system size and your nozzle and riser count.');
-    expect(body).toContain('System: Standard system (55-gallon)');
+    expect(body).toContain('System: Standard, 55-gallon');
     expect(body).toContain('Nozzles: 21');
     expect(body).toContain('Risers: 2');
     expect(body).not.toMatch(/mosquito pressure|resting zones|Near water/i);

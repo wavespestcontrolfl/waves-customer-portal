@@ -189,7 +189,7 @@ describe('GET /:token/data: misting plan alone', () => {
       title: 'Priced from your system layout',
       body: 'Your price is set by your system size and your nozzle and riser count.',
       metrics: [
-        { label: 'System', value: 'Standard system (55-gallon)' },
+        { label: 'System', value: 'Standard, 55-gallon' },
         { label: 'Nozzles', value: '21' },
         { label: 'Risers', value: '2' },
       ],

@@ -5316,7 +5316,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
       body: mistingCopy.aiBody,
       satelliteUrl,
       metrics: [
-        mistingFacts?.tierLabel ? { label: 'System', value: mistingFacts.tierLabel } : null,
+        mistingFacts?.tierLabel ? { label: 'System', value: mistingSystemTileValue(mistingFacts.tierLabel) } : null,
         mistingFacts?.nozzles != null ? { label: 'Nozzles', value: String(mistingFacts.nozzles) } : null,
         mistingFacts?.risers != null ? { label: 'Risers', value: String(mistingFacts.risers) } : null,
       ].filter(Boolean),
@@ -25262,6 +25262,13 @@ function customerSafeMistingDetail(detail) {
   if (detail == null) return detail;
   const kept = String(detail).split(/\s+\u00B7\s+/).filter((part) => !/refill/i.test(part));
   return kept.length ? kept.join(' \u00B7 ') : null;
+}
+
+// The Waves AI card's System tile in the owner-approved wording (2026-10-30, item E): "Standard system (55-gallon)" reads
+// "Standard, 55-gallon". A tier label in any other shape (the labels are editable in the price row) prints as it is.
+function mistingSystemTileValue(tierLabel) {
+  const match = /^\s*(.+?)\s+system\s*\((\d+(?:\.\d+)?)[\s-]*gallon\)\s*$/i.exec(String(tierLabel || ''));
+  return match ? `${match[1]}, ${match[2]}-gallon` : tierLabel;
 }
 
 // The customer-safe misting facts of the plan row (see mistingCustomerFacts: layout counts, tier label, refill price and

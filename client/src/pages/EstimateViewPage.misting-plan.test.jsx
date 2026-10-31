@@ -41,7 +41,7 @@ const payload = (over = {}) => ({
     acceptance: { mode: 'standard_slot_pick' }, membership: null, askToken: 'ask-token',
     intelligence: {
       eyebrow: 'Waves AI', title: 'Priced from your system layout', body: 'Your price is set by your system size and your nozzle and riser count.', satelliteUrl: null,
-      metrics: [{ label: 'System', value: 'Standard system (55-gallon)' }, { label: 'Nozzles', value: '21' }, { label: 'Risers', value: '2' }], signals: [],
+      metrics: [{ label: 'System', value: 'Standard, 55-gallon' }, { label: 'Nozzles', value: '21' }, { label: 'Risers', value: '2' }], signals: [],
     },
     defaultServiceMode: 'recurring', isOneTimeOnly: false, showOneTimeOption: false, billByInvoice: false,
     licenseNumber: 'JB000000', acceptedServiceMode: null, acceptedFrequencyKey: null, status: 'sent',
@@ -133,7 +133,7 @@ describe('estimate page: mosquito misting system plan', () => {
     await renderPage(payload());
     expect(text()).toContain('Priced from your system layout');
     expect(text()).toContain('Your price is set by your system size and your nozzle and riser count.');
-    expect(text()).toContain('Standard system (55-gallon)');
+    expect(text()).toContain('Standard, 55-gallon');
     expect(text()).toContain('Nozzles');
     expect(text()).toContain('Risers');
     expect(text()).not.toMatch(/Mosquito treatment area|Near water|Mosquito program/);
