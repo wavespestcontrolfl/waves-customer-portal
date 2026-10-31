@@ -148,6 +148,21 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
   return { recipient };
 }
 
+const INVOICE_EMAIL_CUSTOMER_COLUMNS = ['id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name'];
+
+// The invoice email address as resolved RIGHT NOW on `database` (the locked handoff's handle), in the sender's normal form, or
+// null when it cannot be read or there is none. The bar's email card compares it with the approved address.
+async function freshInvoiceEmailAddress(database, customerId) {
+  try {
+    const customer = await database('customers').where({ id: customerId }).select(...INVOICE_EMAIL_CUSTOMER_COLUMNS).first();
+    if (!customer) return null;
+    const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
+    return cleanEmail(invoiceRecipientFor(customer, prefs || {}, null).recipient?.email) || null;
+  } catch {
+    return null;
+  }
+}
+
 // The customer row, delivery preferences and channel choice the invoice email is addressed
 // from: the raw customers row (no account-primary fallback) and the customer's own
 // notification_prefs, refused the way sendInvoiceEmail refuses. One function for the
@@ -155,7 +170,7 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 // fold, billing-text-verdict.js), so they cannot drift apart.
 async function loadInvoiceEmailContext(invoice, options = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .select(...INVOICE_EMAIL_CUSTOMER_COLUMNS)
     .first();
   if (!customer) return { refusal: { ok: false, error: 'Customer not found' } };
   let prefsLookupFailed = false;
@@ -504,7 +519,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     let providerStarted = false;
     let providerAccepted = false;
     try {
-      const outcome = await require('./estimate-deposits').withInvoiceDepositSettlement(
+      const settle = (database) => require('./estimate-deposits').withInvoiceDepositSettlement(
         invoice.id,
         async (trx, current) => {
           if ((current.send_claim_token || null) !== claimToken) {
@@ -578,12 +593,31 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
               return { ok: false, reason: 'billing_email_not_selected' };
             }
           }
+          // The bar's approved address, re-read here under the customer-comms lock (taken first, below): the customer edit
+          // route changes the email without the invoice lock, so an address changed while the email was prepared is refused.
+          if (options.expectedRecipientEmail !== undefined
+            && await freshInvoiceEmailAddress(trx, current.customer_id) !== options.expectedRecipientEmail) {
+            boundaryRefusal = { code: 'recipient_changed', reason: 'The invoice email address is not the one the approval showed; the email was not sent' };
+            return { ok: false, ...boundaryRefusal };
+          }
           providerStarted = true;
           await dispatch();
           providerAccepted = true;
           return { ok: true };
         },
+        ...(database ? [database] : []),
       );
+      // The bar's email card holds the customer-comms lock (the comms writers' own lock, tried, never waited on) from the
+      // address re-read through the provider request, in the text leg's order: comms first, then the invoice row.
+      const outcome = options.expectedRecipientEmail !== undefined
+        ? await db.transaction(async (lockTrx) => {
+          if (!(await require('../utils/customer-comms-lock').tryLockCustomerComms(lockTrx, invoice.customer_id))) {
+            boundaryRefusal = { code: 'recipient_busy', reason: 'The customer\'s contact details are being changed; the email was not sent. Try again in a minute.' };
+            return { ok: false, ...boundaryRefusal };
+          }
+          return settle(lockTrx);
+        })
+        : await settle();
       return outcome || { ok: false, reason: 'Invoice could not be re-read before delivery' };
     } catch (err) {
       // The provider accepted the email before the read-only transaction's

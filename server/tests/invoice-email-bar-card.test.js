@@ -43,6 +43,7 @@ jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
   messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
+jest.mock('../utils/customer-comms-lock', () => ({ tryLockCustomerComms: jest.fn(async () => true) }));
 jest.mock('../services/invoice-helpers', () => ({
   ...jest.requireActual('../services/invoice-helpers'),
   selfPayAtDispatch: jest.fn(() => async () => ({ ok: true })),
@@ -57,6 +58,8 @@ jest.mock('../services/invoice-followups', () => ({
 }));
 
 const db = require('../models/db');
+const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
+const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const EmailTemplates = require('../services/email-template-library');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
@@ -81,6 +84,7 @@ const invoice = (overrides = {}) => ({
 });
 
 function mockDb(row) {
+  db.transaction = jest.fn(async (callback) => callback(db));
   db.mockImplementation((table) => {
     if (table === 'invoices') return chain({ first: row });
     if (table === 'customers') return chain({ first: { id: 'cust-1', first_name: 'Pat', email: 'customer@example.com' } });
@@ -91,9 +95,11 @@ function mockDb(row) {
 }
 
 // The library's handoff as sendTemplate runs it: the caller's boundary decides whether the provider is called.
-function sendTemplateThroughHandoff() {
+const provider = jest.fn(async () => {});
+function sendTemplateThroughHandoff(beforeHandoff = () => {}) {
   EmailTemplates.sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
-    const verdict = await withProviderHandoff(async () => {});
+    beforeHandoff();
+    const verdict = await withProviderHandoff(provider);
     return verdict.ok ? { sent: true, message: { provider_message_id: 'sg-1' } } : { sent: false, blocked: true, reason: verdict.reason };
   });
 }
@@ -153,6 +159,29 @@ describe('the bar send (expectedEmailDigest)', () => {
     EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }));
     await expect(sendInvoiceEmail('inv-1', barOptions())).resolves.toMatchObject({ ok: false, error: 'template not found' });
     expect(require('../services/sendgrid-mail').sendOne).not.toHaveBeenCalled();
+  });
+
+  test('the address is read again at the handoff under the customer-comms lock: changed while preparing, or a busy lock, sends nothing', async () => {
+    mockDb(invoice());
+    // The customer's invoice address changes after the email was prepared, before the handoff.
+    sendTemplateThroughHandoff(() => getInvoiceEmailRecipients.mockReturnValue([{ email: 'new@example.com', name: 'Pat', role: 'primary' }]));
+    await expect(sendInvoiceEmail('inv-1', barOptions())).resolves.toMatchObject({ ok: false, code: 'recipient_changed', deliveryOutcome: 'not_sent' });
+    expect(tryLockCustomerComms).toHaveBeenCalledWith(db, 'cust-1');
+    expect(provider).not.toHaveBeenCalled();
+
+    getInvoiceEmailRecipients.mockReturnValue([{ email: 'customer@example.com', name: 'Pat', role: 'primary' }]);
+    sendTemplateThroughHandoff();
+    tryLockCustomerComms.mockResolvedValueOnce(false);
+    mockDb(invoice());
+    await expect(sendInvoiceEmail('inv-1', barOptions())).resolves.toMatchObject({ ok: false, code: 'recipient_busy', deliveryOutcome: 'not_sent' });
+    expect(provider).not.toHaveBeenCalled();
+
+    // A page send (no approved address) takes no comms lock.
+    tryLockCustomerComms.mockClear();
+    mockDb(invoice());
+    await expect(sendInvoiceEmail('inv-1', {})).resolves.toMatchObject({ ok: true });
+    expect(tryLockCustomerComms).not.toHaveBeenCalled();
+    expect(provider).toHaveBeenCalledTimes(1);
   });
 
   test('the card\'s live owner check runs at the provider handoff on the locked row; a refusal or a throw sends nothing', async () => {
