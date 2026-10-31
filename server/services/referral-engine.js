@@ -913,64 +913,6 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
   return { referralId, rewardCents, rewardDollars, tier, requiresServiceCompletion: settings.require_service_completion };
 }
 
-// ---------------------------------------------------------------------------
-// 4. confirmFirstService
-// ---------------------------------------------------------------------------
-async function confirmFirstService(customerId) {
-  // Find referral where the converted customer matches
-  const referral = await db('referrals')
-    .where(function () {
-      this.where('referee_phone', '!=', '').whereIn('status', ['signed_up']);
-    })
-    .where('first_service_completed', false)
-    .first();
-
-  // Try by customer lookup
-  const customer = await db('customers').where({ id: customerId }).first();
-  if (!customer) return null;
-
-  const normalizedPhone = normalizePhone(customer.phone);
-  const matchedReferral = await db('referrals')
-    .whereIn('status', ['signed_up'])
-    .where('first_service_completed', false)
-    .where(function () {
-      this.where('referee_phone', customer.phone)
-        .orWhere('referee_phone', normalizedPhone);
-    })
-    .first();
-
-  if (!matchedReferral) return null;
-
-  const settings = await getSettings();
-  const rewardCents = Math.round((matchedReferral.referrer_reward_amount || 50) * 100);
-
-  // Update referral
-  await db('referrals').where({ id: matchedReferral.id }).update({
-    first_service_completed: true,
-    referrer_reward_status: 'earned',
-    status: 'credited',
-    updated_at: new Date(),
-  });
-
-  // Move pending to available for promoter
-  if (matchedReferral.promoter_id) {
-    await db('referral_promoters').where({ id: matchedReferral.promoter_id }).update({
-      available_balance_cents: db.raw('available_balance_cents + ?', [rewardCents]),
-      pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [rewardCents]),
-      referral_balance_cents: db.raw('referral_balance_cents + ?', [rewardCents]),
-      updated_at: new Date(),
-    });
-
-    // Auto-credit if enabled
-    if (settings.auto_credit_enabled) {
-      logger.info(`[ReferralEngine] Auto-credited $${(rewardCents / 100).toFixed(2)} to promoter ${matchedReferral.promoter_id}`);
-    }
-  }
-
-  logger.info(`[ReferralEngine] First service confirmed for referral ${matchedReferral.id}`);
-  return { referralId: matchedReferral.id, promoterId: matchedReferral.promoter_id, rewardCents };
-}
-
 // Retire (mark 'superseded') every still-uncredited pending_service referral for
 // a referee phone and unwind the promoter pending+earned cents staged at
 // conversion — so a same-phone duplicate (referred by another promoter) can never
@@ -1603,7 +1545,6 @@ module.exports = {
   submitReferral,
   convertReferral,
   updateReferralStatus,
-  confirmFirstService,
   creditReferralOnFirstService,
   sendDueReferralRewardEmails,
   nextRewardEmailAt,
