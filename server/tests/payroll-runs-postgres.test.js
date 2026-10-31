@@ -375,20 +375,21 @@ postgres('payroll pay runs', () => {
   describe('finalize', () => {
     it('is refused while a technician is blocked or waiting, and changes nothing', async () => {
       const ok = await readyTech('Sample Alpha');
-      const noW4 = await technician({ name: 'Sample NoW4' });
+      // A missing W-4 no longer blocks (IRS default); a missing pay rate still does.
+      const noRate = await readyTech('Sample NoRate', { pay_rate: null });
       const waiting = await readyTech('Sample Waiting');
       await approvedWeek(ok, W1);
-      await approvedWeek(noW4, W1);
+      await approvedWeek(noRate, W1);
       await workedDay(waiting, addDays(W1, 0));
       const { run } = (await draft(W1)).body;
       const refusal = await api('POST', `/runs/${run.id}/finalize`, { body: { token: run.token } });
       expect(refusal.status).toBe(409);
       expect(refusal.body.error).toMatch(/Sample Waiting: Timesheet for this week is not approved yet/);
-      expect(refusal.body.error).toMatch(/Sample NoW4: No Form W-4 on file/);
+      expect(refusal.body.error).toMatch(/Sample NoRate: No pay rate set/);
       expect((await trx('payroll_runs').where({ id: run.id }).first()).status).toBe('draft');
       expect(await trx('payroll_checks').where({ run_id: run.id, status: 'finalized' }).count('* as n').first()).toMatchObject({ n: '0' });
       // Fix both problems, and the same run finalizes.
-      await w4For(noW4);
+      await trx('technicians').where({ id: noRate }).update({ pay_rate: '22.00' });
       await trx('time_weekly_summary').insert({ technician_id: waiting, week_start: W1, week_end: addDays(W1, 6), status: 'approved', regular_minutes: 480 });
       await trx('time_entry_daily_summary').where({ technician_id: waiting }).del();
       await api('POST', `/runs/${run.id}/recompute`);
@@ -418,8 +419,8 @@ postgres('payroll pay runs', () => {
 
     it('refuses an empty run and a second finalize', async () => {
       const id = await readyTech('Sample Alpha');
-      const noW4 = await technician({ name: 'Sample NoW4' });
-      await approvedWeek(noW4, W1);
+      const noRate = await readyTech('Sample NoRate', { pay_rate: null });
+      await approvedWeek(noRate, W1);
       const { run: onlyBlocked } = (await draft(W1)).body;
       expect(onlyBlocked.checks).toEqual([]);
       expect((await api('POST', `/runs/${onlyBlocked.id}/finalize`, { body: { token: onlyBlocked.token } })).status).toBe(409);

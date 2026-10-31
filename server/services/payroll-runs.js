@@ -388,7 +388,8 @@ function serializeCheck(row) {
     flReemploymentCents: Number(row.fl_reemployment_cents),
     ytdGrossBeforeCents: Number(row.ytd_gross_before_cents),
     // No W-4 election stood behind this check: withheld as single, no adjustments (the IRS default).
-    w4Default: row.w4_election_id == null,
+    // Present only then, so a check with a W-4 keeps exactly its earlier keys.
+    ...(row.w4_election_id == null ? { w4Default: true } : {}),
     ...(timeOffOn() ? {
       ptoMinutes: Number(row.pto_minutes || 0),
       holidayMinutes: Number(row.holiday_minutes || 0),
@@ -1008,7 +1009,7 @@ async function getStub(checkId, conn = db) {
     netCents: c.netCents,
     payMethod: c.payMethod,
     checkNumber: c.checkNumber,
-    w4Default: c.w4Default,
+    ...(c.w4Default ? { w4Default: true } : {}),
     ytd: {
       grossCents: Number(ytd.gross),
       federalIncomeTaxCents: Number(ytd.federal_income_tax),
