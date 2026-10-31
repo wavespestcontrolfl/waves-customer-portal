@@ -13,6 +13,12 @@
  * Everything is gated behind GATE_NEWSLETTER_PROOF_APPROVAL (default OFF).
  * Kill switch: unset the gate — no proofs go out and approval replies are
  * ignored.
+ *
+ * GATE_NEWSLETTER_AUTO_SEND (default OFF; owner 2026-10-30, option A): the
+ * weekly flagship that passes every check here queues itself for its
+ * Tuesday 6:00 AM ET target in the same write that claims the proof, and the
+ * owner's copy is FYI. A HOLD reply to that copy skips the week. Unset the
+ * switch and the issue waits for an APPROVED reply again.
  */
 
 const crypto = require('crypto');
@@ -26,7 +32,7 @@ const { requiresClaimValidation, isFlagshipType } = require('../config/newslette
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
-const { pestInsiderProofLive } = require('../config/feature-gates');
+const { pestInsiderProofLive, newsletterAutoSendLive } = require('../config/feature-gates');
 const { PEST_INSIDER_TYPE } = require('./pest-insider-autopilot');
 
 /**
@@ -291,6 +297,23 @@ function isApprovalReply(text) {
 }
 
 /**
+ * HOLD matcher for an issue the auto-send switch queued. A hold word
+ * anywhere in the un-quoted reply stops the week: stopping is the safe side,
+ * so a reply that only quotes the banner ("Reply HOLD to skip…") also holds.
+ */
+function isHoldReply(text) {
+  const t = String(text || '').toLowerCase().replace(/[‘’ʼ]/g, "'");
+  return /\b(hold|stop|cancel|pause|abort|skip|don'?t\s+send|do\s+not\s+send)\b/.test(t);
+}
+
+// An issue the auto-send switch queued carries proof_approved_at with no
+// approving email: a reply approval always stores the email id it came in on
+// (email-sync passes the stored emails row).
+function isAutoQueued(send) {
+  return Boolean(send?.proof_approved_at) && !send.proof_approval_email_id;
+}
+
+/**
  * Render a send the way the live broadcast will look for one internal
  * recipient: same wrapper, all merge tags ({{greeting-name}}, {{city}},
  * {{grass-type}}) resolved from the recipient's subscriber row, quiz tokens
@@ -390,6 +413,19 @@ function proofBannerText(recipientCount, flagship) {
   return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to send this issue ${proofTimingCopy(flagship)} to ${recipientCount} active subscribers. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
 }
 
+// The owner's copy of an issue the auto-send switch queued: FYI, no reply
+// needed. HOLD (or Cancel schedule in History) skips the week.
+function autoSendBannerHtml(recipientCount) {
+  return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
+<p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Sends by itself — no reply needed</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">This issue goes to <strong>${recipientCount}</strong> active subscribers <strong>Tuesday at 6:00 AM ET</strong>. To skip this week, reply <strong>HOLD</strong>, or press Cancel schedule in Newsletter → History.</p>
+</div>\n`;
+}
+
+function autoSendBannerText(recipientCount) {
+  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis issue goes to ${recipientCount} active subscribers Tuesday at 6:00 AM ET. To skip this week, reply HOLD, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
+}
+
 async function countRecipients(send) {
   // Shared preflight (codex #3472 r3): runs the archived-link relink sweep
   // before counting, so a proof approval can't block on stale links the
@@ -428,6 +464,65 @@ async function releaseRefusedProofClaim(sendId, token, reason) {
       .update({ proof_token: null, proof_sent_at: null, proof_refused_at: new Date(), updated_at: new Date() });
   } catch (clearErr) {
     logger.error(`[newsletter-proof] failed to release proof claim after ${reason} for ${sendId}: ${clearErr.message}`);
+  }
+}
+
+/**
+ * How the proof step hands an issue on. Default: a proof that waits for an
+ * APPROVED reply. GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A): a
+ * weekly issue that passed every check is queued for its Tuesday target in
+ * the proof claim itself, and the owner's copy is FYI. The Tuesday tick
+ * re-runs the checks before it sends.
+ */
+function proofDelivery(calendarContext, recipientCount, now) {
+  if (!calendarContext.flagship || !newsletterAutoSendLive()) {
+    const noop = async () => {};
+    return {
+      queued: false,
+      prefix: 'ACT',
+      bannerHtml: proofBannerHtml(recipientCount, calendarContext.flagship),
+      bannerText: proofBannerText(recipientCount, calendarContext.flagship),
+      claimPatch: {},
+      releaseWhere: {},
+      releasePatch: {},
+      afterClaim: noop,
+      afterRelease: noop,
+    };
+  }
+  const week = () => db('newsletter_calendar').where({ id: calendarContext.linkedCalendar.id });
+  return {
+    queued: true,
+    prefix: 'FYI',
+    bannerHtml: autoSendBannerHtml(recipientCount),
+    bannerText: autoSendBannerText(recipientCount),
+    // No approving email id: that is how the dispatcher and the reply
+    // handler tell an auto-queued issue from a reply-approved one.
+    claimPatch: {
+      status: 'scheduled',
+      scheduled_for: calendarContext.scheduledFor,
+      proof_approved_at: now,
+      proof_approval_email_id: null,
+      proof_refused_at: null,
+    },
+    // The issue sends only once the owner's copy went out.
+    releaseWhere: { status: 'scheduled' },
+    releasePatch: { status: 'draft', scheduled_for: null, proof_approved_at: null },
+    afterClaim: () => week().update({ status: 'scheduled', updated_at: new Date() }),
+    afterRelease: () => week().update({ status: 'drafted', updated_at: new Date() }),
+  };
+}
+
+// Release OUR claim (token-scoped) after the proof email failed, so the
+// catch-up tick can retry a transient SendGrid failure instead of the week
+// silently losing its proof. An auto-queued issue also comes off the queue.
+async function releaseUnsentProof(sendId, token, delivery) {
+  try {
+    const released = await db('newsletter_sends')
+      .where({ id: sendId, proof_token: token, ...delivery.releaseWhere })
+      .update({ proof_token: null, proof_sent_at: null, updated_at: new Date(), ...delivery.releasePatch });
+    if (released) await delivery.afterRelease();
+  } catch (clearErr) {
+    logger.error(`[newsletter-proof] failed to release proof claim for ${sendId}: ${clearErr.message}`);
   }
 }
 
@@ -476,6 +571,9 @@ async function sendNewsletterProof(sendId) {
     }
   }
   const calendarContext = await resolveFlagshipCalendarContext(send);
+  // A held or skipped week stays skipped: a fresh proof would queue it again
+  // under GATE_NEWSLETTER_AUTO_SEND, or let a reply approve a retired issue.
+  if (calendarContext.linkedCalendar?.status === 'skipped') return { skipped: true, reason: 'week_skipped' };
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
     const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
@@ -510,8 +608,9 @@ async function sendNewsletterProof(sendId) {
   // gate while we email a proof rendered from the pre-edit body.
   const token = crypto.randomBytes(4).toString('hex');
   const now = new Date();
+  const delivery = proofDelivery(calendarContext, recipientCount, now);
   const claimQuery = db('newsletter_sends')
-    .where({ id: send.id })
+    .where({ id: send.id, status: 'draft' })
     .whereNull('proof_sent_at');
   // Millisecond-truncated comparison: DB-defaulted rows carry microsecond
   // updated_at while node-pg hands back millisecond Dates — an exact
@@ -523,10 +622,12 @@ async function sendNewsletterProof(sendId) {
       [send.updated_at],
     );
   }
-  const claimed = await claimQuery.update({ proof_token: token, proof_sent_at: now, updated_at: now });
+  const claimed = await claimQuery.update({ proof_token: token, proof_sent_at: now, updated_at: now, ...delivery.claimPatch });
   if (!claimed) return { skipped: true, reason: 'proof_claimed_elsewhere' };
 
   try {
+    // Inside the try: a failure here releases the claim (and the queue).
+    await delivery.afterClaim();
     // Internal diagnostics render between the proof banner and the
     // recipient preview — proof email ONLY, never the list send.
     const diagnosticsHtml = await buildProofDiagnosticsHtml(
@@ -536,17 +637,18 @@ async function sendNewsletterProof(sendId) {
     );
     const { html, text } = await renderSendPreview({
       ...send,
-      html_body: proofBannerHtml(recipientCount, calendarContext.flagship) + diagnosticsHtml + (send.html_body || ''),
-      text_body: send.text_body ? proofBannerText(recipientCount, calendarContext.flagship) + send.text_body : send.text_body,
+      html_body: delivery.bannerHtml + diagnosticsHtml + (send.html_body || ''),
+      text_body: send.text_body ? delivery.bannerText + send.text_body : send.text_body,
     }, to);
 
     const result = await sendgrid.sendOne({
       to,
       fromEmail: send.from_email,
       fromName: send.from_name,
-      // ACT: prefix per the ops-email convention; PROOF_SUBJECT_RE matches the
-      // token anywhere in the subject, so reply recognition is unaffected.
-      subject: `ACT: [PROOF-${token}] ${send.subject}`,
+      // ACT: / FYI: prefix per the ops-email convention (an auto-queued
+      // issue needs no reply); PROOF_SUBJECT_RE matches the token anywhere
+      // in the subject, so reply recognition is unaffected.
+      subject: `${delivery.prefix}: [PROOF-${token}] ${send.subject}`,
       html,
       text,
       // The reply must land in the mailbox the Gmail sync watches or the
@@ -559,34 +661,57 @@ async function sendNewsletterProof(sendId) {
       // silently swallow it.
     });
 
-    await notifyProof('newsletter_proof_sent', { sendId: send.id,
-      subject: send.subject,
-      recipient: maskEmail(to),
-      recipientCount,
-    });
-
-    logger.info(`[newsletter-proof] proof sent for ${send.id} (token ${token}, messageId ${result?.messageId || 'n/a'})`);
-    return { sent: true, token };
-  } catch (sendErr) {
-    // Release OUR claim (token-scoped) so the catch-up tick can retry a
-    // transient SendGrid failure instead of the week silently losing its
-    // proof.
-    try {
-      await db('newsletter_sends')
-        .where({ id: send.id, proof_token: token })
-        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
-    } catch (clearErr) {
-      logger.error(`[newsletter-proof] failed to release proof claim for ${send.id}: ${clearErr.message}`);
+    // The "reply APPROVED" bell is for a proof that waits on the owner; an
+    // auto-queued issue needs no one (its FYI copy is the record).
+    if (!delivery.queued) {
+      await notifyProof('newsletter_proof_sent', { sendId: send.id,
+        subject: send.subject,
+        recipient: maskEmail(to),
+        recipientCount,
+      });
     }
+
+    logger.info(`[newsletter-proof] proof sent for ${send.id} (token ${token}, queued ${delivery.queued}, messageId ${result?.messageId || 'n/a'})`);
+    return { sent: true, token, queued: delivery.queued };
+  } catch (sendErr) {
+    await releaseUnsentProof(send.id, token, delivery);
     logger.error(`[newsletter-proof] proof send failed for ${send.id}: ${sendErr.message}`);
     return { skipped: true, reason: 'proof_send_failed' };
   }
 }
 
 /**
+ * HOLD reply on an auto-queued issue: back to draft and the week skipped, so
+ * neither the catch-up nor the Monday autopilot proofs or queues it again
+ * (sendNewsletterProof skips a skipped week). The proof token is cleared, so
+ * a later reply on the thread is ordinary mail and can never approve the
+ * held issue. Too late once the send is claimed.
+ */
+async function holdAutoQueuedIssue(send, token, from) {
+  if (send.status !== 'scheduled') {
+    logger.info(`[newsletter-proof] HOLD for send ${send.id} arrived while it was ${send.status} — nothing to stop`);
+    return true;
+  }
+  const held = await db('newsletter_sends')
+    .where({ id: send.id, proof_token: token, status: 'scheduled' })
+    .whereNotNull('proof_approved_at')
+    .whereNull('proof_approval_email_id')
+    .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
+  if (!held) {
+    logger.info(`[newsletter-proof] HOLD for send ${send.id} lost a race with the send — nothing to stop`);
+    return true;
+  }
+  await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'skipped', updated_at: new Date() });
+  logger.info(`[newsletter-proof] send ${send.id} held by ${maskEmail(from)} — week skipped`);
+  return true;
+}
+
+/**
  * Inbound-email hook (called from the Gmail sync on every newly stored
  * email). Detects a reply to a proof email and, when it is an allowlisted
  * owner saying "approved", queues the list send for Tuesday at 6:00 AM ET.
+ * On an issue the auto-send switch already queued, a HOLD reply skips the
+ * week instead.
  *
  * Returns true when the email was recognized as proof-approval traffic
  * (whether or not it resulted in a send); false = not ours, continue the
@@ -614,15 +739,22 @@ async function maybeHandleProofApproval(email) {
     logger.warn(`[newsletter-proof] approval reply with unknown token ${token}`);
     return false;
   }
-  if (send.proof_approved_at) {
-    logger.info(`[newsletter-proof] send ${send.id} already approved — ignoring duplicate reply`);
-    return true;
-  }
 
   // HTML-only replies go through the quote-aware converter — a naive tag
   // strip would flatten the quoted proof banner ("Reply APPROVED…") into
   // the checked text and let a non-approval reply match.
   const replyText = extractTopReplyText(email.body_text || htmlReplyToText(email.body_html));
+
+  // HOLD on an issue the auto-send switch queued skips the week (owner
+  // 2026-10-30, option A). Checked before the duplicate guard below: an
+  // auto-queued issue already carries proof_approved_at.
+  if (isAutoQueued(send) && isHoldReply(replyText)) return holdAutoQueuedIssue(send, token, from);
+
+  if (send.proof_approved_at) {
+    logger.info(`[newsletter-proof] send ${send.id} already approved — ignoring duplicate reply`);
+    return true;
+  }
+
   if (!isApprovalReply(replyText)) {
     logger.info(`[newsletter-proof] reply for send ${send.id} did not say "approved" — leaving draft untouched`);
     return true;
@@ -823,6 +955,7 @@ module.exports = {
   extractTopReplyText,
   htmlReplyToText,
   isApprovalReply,
+  isHoldReply,
   renderSendPreview,
   sendNewsletterProof,
   maybeHandleProofApproval,

@@ -2,6 +2,8 @@
  * Cancelling a scheduled (approved) send clears EVERY proof field, including
  * the proof_refused_at marker the Pest Insider catch-up reads — a cancelled
  * approval must never look like a refused one (codex #5414 round 2 P2).
+ * With GATE_NEWSLETTER_AUTO_SEND on, Cancel schedule also skips the week, so the
+ * 4:30 AM catch-up cannot proof and queue it again (owner 2026-10-30, A).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -45,7 +47,9 @@ beforeEach(() => {
   });
 });
 
-test('cancel-schedule clears the refusal marker along with the other proof fields', async () => {
+afterEach(() => { delete process.env.GATE_NEWSLETTER_AUTO_SEND; });
+
+async function postCancel() {
   const app = express();
   app.use(express.json());
   app.use('/admin/newsletter', router);
@@ -56,6 +60,18 @@ test('cancel-schedule clears the refusal marker along with the other proof field
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+}
+
+test('cancel-schedule clears the refusal marker along with the other proof fields', async () => {
+  await postCancel();
   const [, patch] = updates.find(([table]) => table === 'newsletter_sends');
   expect(patch).toMatchObject({ status: 'draft', proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_refused_at: null });
+  // Switch off: the week goes back to 'drafted' and waits for a fresh proof.
+  expect(updates.find(([table]) => table === 'newsletter_calendar')[1]).toMatchObject({ status: 'drafted' });
+});
+
+test('with the auto-send switch on, Cancel schedule skips the week so the catch-up cannot queue it again', async () => {
+  process.env.GATE_NEWSLETTER_AUTO_SEND = 'true';
+  await postCancel();
+  expect(updates.find(([table]) => table === 'newsletter_calendar')[1]).toMatchObject({ status: 'skipped' });
 });

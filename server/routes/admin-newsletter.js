@@ -53,6 +53,7 @@ const {
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { newsletterAutoSendLive } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('../services/llm/call');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -1259,8 +1260,14 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
       updated_at: new Date(),
     });
     if (!cancelled) return res.status(409).json({ error: 'scheduled send was already claimed; it was not cancelled' });
-    // Roll the linked calendar row back to 'drafted' to match the send.
-    await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
+    // Roll the linked calendar row back to 'drafted' to match the send. With
+    // GATE_NEWSLETTER_AUTO_SEND on, Cancel schedule skips the week instead: a 'drafted'
+    // week gets a fresh proof from the 4:30 AM catch-up, and that proof would
+    // queue the issue again (owner 2026-10-30, option A).
+    await db('newsletter_calendar').where({ send_id: send.id }).update({
+      status: newsletterAutoSendLive() ? 'skipped' : 'drafted',
+      updated_at: new Date(),
+    });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
     res.json({ success: true, send: updated });
   } catch (err) { next(err); }

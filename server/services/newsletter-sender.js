@@ -38,7 +38,7 @@ const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = re
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
-const { pestInsiderProofLive } = require('../config/feature-gates');
+const { pestInsiderProofLive, newsletterAutoSendLive } = require('../config/feature-gates');
 const NewsletterSubscribers = require('./newsletter-subscribers');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
@@ -1542,6 +1542,40 @@ async function resumeCampaign(sendId) {
 }
 
 /**
+ * A scheduled send that fails a check at dispatch goes back to draft with its
+ * approval cleared (the state the owner signed off no longer holds), its
+ * calendar week back to 'drafted', and one alert that says why: the week is
+ * skipped, nothing went out (owner 2026-10-30, option A). Returns whether
+ * this tick reverted it.
+ */
+async function revertBlockedScheduledSend(row, reason) {
+  const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
+    status: 'draft',
+    scheduled_for: null,
+    proof_token: null,
+    proof_sent_at: null,
+    proof_approved_at: null,
+    proof_refused_at: null,
+    updated_at: new Date(),
+  });
+  if (!reverted) return false;
+  // Keep the calendar in lockstep: without this the row would stay
+  // 'scheduled' forever (autopilot then skips the week).
+  await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+  try {
+    const { triggerNotification } = require('./notification-triggers');
+    await triggerNotification('newsletter_proof_blocked', {
+      sendId: row.id,
+      subject: row.subject,
+      errors: [`Stopped at send time: ${reason}`],
+    });
+  } catch (e) {
+    logger.warn(`[newsletter-scheduler] stop notice for ${row.id} failed: ${e.message}`);
+  }
+  return true;
+}
+
+/**
  * Process scheduled sends whose scheduled_for has passed. Called from the
  * global scheduler every minute. Processes sequentially so one slow send
  * can't stampede the others.
@@ -1578,6 +1612,13 @@ async function processScheduledSends() {
         logger.warn(`[newsletter-scheduler] send ${row.id} is a proof-approved Pest Insider issue but GATE_PEST_INSIDER_PROOF is off — leaving it scheduled`);
         continue;
       }
+      // An issue the auto-send switch queued (approved with no approving
+      // email) stays queued while GATE_NEWSLETTER_AUTO_SEND is off: unsetting
+      // the switch stops it, and the next week waits for an APPROVED reply.
+      if (row.proof_approved_at && !row.proof_approval_email_id && !newsletterAutoSendLive()) {
+        logger.warn(`[newsletter-scheduler] send ${row.id} was queued by the auto-send switch, which is off — leaving it scheduled`);
+        continue;
+      }
       const eventSelection = await validateFlagshipEventSelection(row);
       if (eventSelection.flagship) {
         const now = new Date();
@@ -1603,21 +1644,8 @@ async function processScheduledSends() {
           logger.error(`[newsletter-scheduler] flagship send ${row.id} blocked: ${reason}`);
           // Reverting an approved schedule INVALIDATES the approval: the
           // state the owner signed off (lineup, target Tuesday) no longer
-          // holds. Clear the proof fields or the now-draft row would carry
-          // stale approval metadata forever — the PATCH invalidation only
-          // covers status='scheduled', so a draft must never hold one.
-          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
-            status: 'draft',
-            scheduled_for: null,
-            proof_token: null,
-            proof_sent_at: null,
-            proof_approved_at: null,
-            proof_refused_at: null,
-            updated_at: new Date(),
-          });
-          if (reverted) {
-            await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
-          }
+          // holds, so the draft must never keep stale approval metadata.
+          await revertBlockedScheduledSend(row, reason);
           continue;
         }
       }
@@ -1636,21 +1664,7 @@ async function processScheduledSends() {
         if (errors.length > 0) {
           logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
           // Same approval invalidation as the flagship revert above.
-          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
-            status: 'draft',
-            scheduled_for: null,
-            proof_token: null,
-            proof_sent_at: null,
-            proof_approved_at: null,
-            proof_refused_at: null,
-            updated_at: new Date(),
-          });
-          if (!reverted) continue;
-          // Keep the calendar in lockstep: this send is no longer scheduled, so
-          // roll its linked calendar row back to 'drafted'. Without this the
-          // row would stay 'scheduled' forever (autopilot then skips the week)
-          // and /cancel-schedule can't repair it — the send is already draft.
-          await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+          await revertBlockedScheduledSend(row, `validation failed: ${errors.join('; ')}`);
           continue;
         }
       }
@@ -1681,18 +1695,7 @@ async function processScheduledSends() {
         // revert-to-editable-draft exit as the tick's gate.
         logger.error(`[newsletter-scheduler] send ${row.id} blocked at dispatch: ${err.message}`);
         try {
-          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
-            status: 'draft',
-            scheduled_for: null,
-            proof_token: null,
-            proof_sent_at: null,
-            proof_approved_at: null,
-            proof_refused_at: null,
-            updated_at: new Date(),
-          });
-          if (reverted) {
-            await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
-          }
+          await revertBlockedScheduledSend(row, err.message);
         } catch { /* swallow */ }
         continue;
       }

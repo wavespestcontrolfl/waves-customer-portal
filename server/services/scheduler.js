@@ -4138,9 +4138,11 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY MONDAY 7AM ET — Newsletter autopilot
-  // Auto-drafts the weekly flagship digest from approved events. Never
-  // auto-sends — creates a draft for admin review. Skips if fewer than 3
-  // eligible events and notifies admin to approve more.
+  // Auto-drafts the weekly flagship digest from approved events and proofs
+  // it. Under GATE_NEWSLETTER_AUTO_SEND a draft that passes every check
+  // queues itself for Tuesday 6:00 AM ET (owner 2026-10-30, option A); off,
+  // it waits for an APPROVED reply. Skips if fewer than 3 eligible events
+  // and notifies admin to approve more.
   // =========================================================================
   cron.schedule('0 7 * * 1', async () => {
     try {
@@ -4155,7 +4157,8 @@ function initScheduledJobs() {
   // =========================================================================
   // MONDAY 2PM + TUESDAY 4:30AM ET — Missed-tick catch-up for the Monday-7AM
   // autopilot. The early-Tuesday recovery still leaves 90 minutes for proof
-  // approval before the exact 6:00AM delivery target; it never auto-approves.
+  // approval before the exact 6:00AM delivery target; it approves nothing
+  // itself (under GATE_NEWSLETTER_AUTO_SEND the proof step queues the issue).
   // Re-run autoDraftFlagship ONLY for a week that was NEVER ATTEMPTED (no
   // calendar row, or status 'planned'). A deliberately-deleted draft (status
   // 'drafted' with a null send_id) is left alone so it can't silently reappear,
