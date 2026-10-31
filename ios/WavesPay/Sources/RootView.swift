@@ -30,8 +30,8 @@ struct PaymentSheet: View {
             WavesScene()
         case .validating:
             LoadingView(title: "Getting the payment ready…")
-        case .ready(let handoff):
-            CollectView(handoff: handoff)
+        case .ready(let handoff, let jti):
+            CollectView(handoff: handoff, jti: jti)
         case .collecting(.starting):
             LoadingView(title: "Opening Tap to Pay…")
         case .collecting(.finishing):
@@ -205,8 +205,8 @@ enum PaymentPreview {
         )
         switch screen {
         case "validating": app.flow = .validating
-        case "ready": app.flow = .ready(handoff)
-        case "ready-long": app.flow = .ready(long)
+        case "ready": app.flow = .ready(handoff, jti: "preview")
+        case "ready-long": app.flow = .ready(long, jti: "preview")
         case "starting": app.flow = .collecting(.starting)
         case "finishing": app.flow = .collecting(.finishing)
         case "success":

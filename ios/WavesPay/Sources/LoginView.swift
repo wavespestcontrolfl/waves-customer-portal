@@ -105,11 +105,6 @@ struct LoginView: View {
                     return
                 }
                 app.signIn(token: token, techName: technician.name)
-                // If a handoff deep link arrived before login, consume it now.
-                if let t = PendingHandoff.token {
-                    PendingHandoff.token = nil
-                    await app.validate(token: t)
-                }
             } catch API.APIError.unauthorized where challengeToken != nil {
                 // A wrong code for a live sign-in answers 401.
                 self.error = "That code did not work. Try again."

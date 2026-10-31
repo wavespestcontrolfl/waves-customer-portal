@@ -14,10 +14,17 @@ final class AppState: ObservableObject {
     // clears; a later close() reports nothing.
     private var pendingResult: PendingResult?
 
+    // Counts payments. A server check that answers after its payment ended
+    // (closed, or its screen could not open) belongs to no payment: dropped.
+    private var paymentSerial = 0
+
     enum Flow {
         case idle
         case validating
-        case ready(API.ValidatedHandoff)
+        // The checked handoff and its jti. /payment-intent and the surcharge
+        // step both look up the burned handoff by the jti, so the payment
+        // carries its own copy from this one check.
+        case ready(API.ValidatedHandoff, jti: String)
         case collecting(CollectStep)
         case success(Receipt)
         case failure(String)     // human message
@@ -84,27 +91,32 @@ final class AppState: ObservableObject {
             return
         }
         pendingResult = PendingResult(requestId: requestId, invoiceId: nil)
+        paymentSerial += 1
+        let serial = paymentSerial
         // Hold the flow before the async check starts, so a second request in
         // the same moment finds a payment open and is answered "failed".
         flow = .validating
-        Task { await validate(token: token) }
+        Task { await validate(token: token, serial: serial) }
     }
 
-    func validate(token: String) async {
-        if pendingResult == nil { pendingResult = PendingResult(requestId: nil, invoiceId: nil) }
-        flow = .validating
+    private func validate(token: String, serial: Int) async {
         do {
             let validated = try await API.validateHandoff(token: token)
+            guard serial == paymentSerial else { return }
             if let fresh = validated.authToken {
                 Keychain.write(key: "authToken", value: fresh)
             }
-            PendingHandoff.jti = JWTDecoder.extractClaim(token: token, key: "jti")
+            guard let jti = JWTDecoder.extractClaim(token: token, key: "jti"), !jti.isEmpty else {
+                fail("This payment link is not valid. Tap Tap to Pay again.")
+                return
+            }
             pendingResult?.invoiceId = validated.invoice_id
-            flow = .ready(validated)
+            flow = .ready(validated, jti: jti)
             // Connect the reader while staff and customer read the amount,
             // unless the staff page already did.
             TerminalManager.shared.prepare()
         } catch {
+            guard serial == paymentSerial else { return }
             fail(error.localizedDescription)
         }
     }
@@ -131,7 +143,7 @@ final class AppState: ObservableObject {
     // does not wait on a sheet nobody can see.
     func abandon(_ message: String) {
         report(.failed, message: message)
-        PendingHandoff.jti = nil
+        paymentSerial += 1
         flow = .idle
     }
 
@@ -139,7 +151,7 @@ final class AppState: ObservableObject {
     // swiped away. Reports "canceled" only when no result went out yet.
     func close() {
         report(.canceled)
-        PendingHandoff.jti = nil
+        paymentSerial += 1
         flow = .idle
     }
 
@@ -180,13 +192,6 @@ struct Receipt {
     var items: [API.ValidatedHandoff.Item] = []
     var adjustments: [API.ValidatedHandoff.Adjustment] = []
     var amountDueCents: Int? = nil
-}
-
-// One-shot holders for values that need to survive across views during a
-// single handoff. Cleared after consumption.
-enum PendingHandoff {
-    static var token: String?
-    static var jti: String?
 }
 
 // Minimal JWT payload reader. Does NOT verify signature — that's the server's
