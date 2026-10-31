@@ -2,9 +2,11 @@
  * <AssessmentsHubPage> — consolidated assessments surface at
  * /admin/lawn-assessments. Two tabs rendered under one command header:
  *   - "Lead Magnets"     — PhotoAssessmentsPage (lawn + pest lead-magnet
- *                          funnels, admin-created assessments) (default)
+ *                          funnels, admin-created assessments) (default for
+ *                          admins)
  *   - "Field Assessment" — LawnAssessmentPanel (tech photo-scoring flow,
- *                          turf profiles, assessment history)
+ *                          turf profiles, assessment history); the only tab
+ *                          a signed-in non-admin gets
  *
  * Per-tab URL state via ?tab=<key>, same pattern as AdminDispatchPage.
  * The legacy /admin/lawn-assessment route still works (App.jsx redirect to
@@ -21,6 +23,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import PhotoAssessmentsPage from "./PhotoAssessmentsPage";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { UiSurface } from "../../components/ui";
+import { getAdminUser } from "../../lib/adminAuth";
 
 const LawnAssessmentPanel = React.lazy(() => import("./LawnAssessmentPanel"));
 
@@ -32,14 +35,29 @@ const TAB_LIST = [
 ];
 const VALID_TABS = TAB_LIST.map((t) => t.key);
 
+// Lead Magnets reads requireAdmin endpoints (/admin/photo-assessments and the
+// funnel stats), so a signed-in non-admin (technician, CSR) gets the Field tab
+// only: the bare menu link and a ?tab=funnel deep link both open Field instead
+// of a tab whose every request the server refuses. An unknown role keeps the
+// admin layout; the server still guards the data.
+function isFieldOnlyRole() {
+  const role = getAdminUser()?.role;
+  return Boolean(role) && role !== "admin";
+}
+
+function resolveTab(requested, fieldOnly) {
+  if (fieldOnly) return TABS.FIELD;
+  return VALID_TABS.includes(requested) ? requested : TABS.FUNNEL;
+}
+
 export default function AssessmentsHubPage() {
   // The URL is the source of truth for the active tab — no mirrored local
   // state. Query-only navigation while the hub is mounted (sidebar click
   // clearing ?tab, a ?tab=field deep link from lawn-protocol) re-renders
   // with the right tab instead of going stale.
   const [searchParams, setSearchParams] = useSearchParams();
-  const requested = searchParams.get(TAB_KEY);
-  const tab = VALID_TABS.includes(requested) ? requested : TABS.FUNNEL;
+  const fieldOnly = isFieldOnlyRole();
+  const tab = resolveTab(searchParams.get(TAB_KEY), fieldOnly);
 
   const setTab = (key) => {
     // Re-clicking the active section renders nothing new — skip the URL
@@ -68,7 +86,7 @@ export default function AssessmentsHubPage() {
       <AdminCommandHeader
         title="Assessments"
         icon={Camera}
-        sections={TAB_LIST}
+        sections={fieldOnly ? [] : TAB_LIST}
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Assessments section"
