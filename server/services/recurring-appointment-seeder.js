@@ -324,27 +324,31 @@ function serviceKeyFor(value = {}) {
 // service_key / name / label / service_type (or serviceType) / isCommercial.
 // Lazy converter require (it loads this module at boot); an identity that
 // cannot be read fails closed to the unchanged pattern.
-function lawnRoundsSeriesPattern({ pattern, intervalDays = null, ...identity } = {}) {
-  const unchanged = { pattern, intervalDays };
+function lawnRoundsSeriesPattern(input = {}) {
+  const { pattern, intervalDays = null } = input;
   try {
-    if (!lawn9xRoundsLive()) return unchanged;
-    const normalized = normalizeRecurringPattern(pattern);
-    const parsedInterval = Number.parseInt(intervalDays, 10);
-    const interval = Number.isFinite(parsedInterval) ? parsedInterval : null;
-    const sixWeek = (normalized === 'every_6_weeks' && (interval == null || interval === 42))
-      || (normalized === 'custom' && interval === 42);
-    if (!sixWeek) return unchanged;
-    const svc = { ...identity };
-    if (!svc.service_type && svc.serviceType) svc.service_type = svc.serviceType;
-    const parentRow = { service_type: svc.service_type };
-    const { seedingFamilyKey, isCommercialRecurringLine } = require('./estimate-converter');
-    if (svc.isCommercial === true || svc.is_commercial === true || isCommercialRecurringLine(svc, parentRow)) return unchanged;
-    if (seedingFamilyKey(svc, parentRow) !== 'lawn_care') return unchanged;
-    return { pattern: LAWN_ROUNDS_9, intervalDays: null };
+    if (lawn9xRoundsLive() && isLawn9xRoundsSeries(input)) return { pattern: LAWN_ROUNDS_9, intervalDays: null };
   } catch (err) {
     require('./logger').warn(`[recurring-seeder] lawn rounds identity unreadable (series left unchanged): ${err.message}`);
-    return unchanged;
   }
+  return { pattern, intervalDays };
+}
+
+// The identity half of lawnRoundsSeriesPattern, without the gate: is this a residential lawn 9x
+// series (lawn family; every_6_weeks, or custom with a 42-day interval)? The one-time re-date of
+// current 9x customers (lawn-rounds-redate.js) asks the same question while the gate is off.
+function isLawn9xRoundsSeries({ pattern, intervalDays = null, ...identity } = {}) {
+  const normalized = normalizeRecurringPattern(pattern);
+  const parsedInterval = Number.parseInt(intervalDays, 10);
+  const interval = Number.isFinite(parsedInterval) ? parsedInterval : null;
+  const sixWeek = (normalized === 'every_6_weeks' && (interval == null || interval === 42))
+    || (normalized === 'custom' && interval === 42);
+  if (!sixWeek) return false;
+  const svc = { ...identity };
+  if (!svc.service_type && svc.serviceType) svc.service_type = svc.serviceType;
+  const { seedingFamilyKey, isCommercialRecurringLine } = require('./estimate-converter');
+  if (svc.isCommercial === true || svc.is_commercial === true || isCommercialRecurringLine(svc, { service_type: svc.service_type })) return false;
+  return seedingFamilyKey(svc, { service_type: svc.service_type }) === 'lawn_care';
 }
 
 // The seeder's own follow-up rows: when it is handed a lawn 9x parent with the
@@ -1692,6 +1696,7 @@ module.exports = {
   seedFollowUpsForParent,
   serviceKeyFor,
   lawnRoundsSeriesPattern,
+  isLawn9xRoundsSeries,
   shiftPastWeekend,
   _internals: {
     applySeededPrepayCoverage,
