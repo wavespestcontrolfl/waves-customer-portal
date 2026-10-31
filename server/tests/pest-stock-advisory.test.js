@@ -1,4 +1,4 @@
-// GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): a pest visit's completion may take a product's stock
+// Owner 2026-10-20, "dont block": a pest visit's completion may take a product's stock
 // below zero instead of refusing it, and the office gets one alert per product while it stays below zero. The
 // PostgreSQL proofs (a real pest packet; a restock closing the alert) are in visit-completion-packets-postgres.test.js
 // and purchase-receipts-postgres.test.js.
@@ -14,85 +14,49 @@ const {
   deductProductInventory, isPestStockAdvisoryCompletion, isLawnTsStockAdvisoryCompletion, isStockAdvisoryCompletion, notifyOfficeOfStockShortfalls,
 } = require('../services/complete-scheduled-service');
 
-const GATE = 'GATE_PEST_STOCK_ADVISORY';
-const LAWN_TS_GATE = 'GATE_LAWN_TS_STOCK_ADVISORY';
-const savedGate = process.env[GATE];
-const savedLawnTsGate = process.env[LAWN_TS_GATE];
 afterEach(() => {
-  if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
-  if (savedLawnTsGate === undefined) delete process.env[LAWN_TS_GATE]; else process.env[LAWN_TS_GATE] = savedLawnTsGate;
   jest.clearAllMocks();
 });
 
 describe('which completions may take stock below zero', () => {
-  test.each(['Quarterly Pest Control', 'Pest Control Re-Service', 'Pest & Rodent Control'])('gate on: %s may', (serviceType) => {
-    process.env[GATE] = 'true';
+  test.each(['Quarterly Pest Control', 'Pest Control Re-Service', 'Pest & Rodent Control'])('%s may', (serviceType) => {
     expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
     expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
   });
 
-  test.each(['Lawn Care', 'Tree & Shrub Care', 'Mosquito Control', 'Termite Bait Station'])('pest gate on: %s may not', (serviceType) => {
-    delete process.env[LAWN_TS_GATE];
-    process.env[GATE] = 'true';
-    expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
-    expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
-  });
-
-  test.each([[undefined], ['TRUE'], ['1']])('gate %s: a pest visit may not', (value) => {
-    if (value === undefined) delete process.env[GATE]; else process.env[GATE] = value;
-    expect(isStockAdvisoryCompletion({ service_type: 'Quarterly Pest Control' })).toBe(false);
-  });
-
-  test('a WaveGuard lawn completion stays advisory with the gate off', () => {
-    delete process.env[GATE];
-    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' })).toBe(true);
-  });
-});
-
-describe('which completions may take stock below zero under GATE_LAWN_TS_STOCK_ADVISORY', () => {
-  test.each(['Lawn Care', 'Lawn Care Re-Service', 'Tree & Shrub Care', 'Shrub Fertilization'])('gate on: a non-member %s may', (serviceType) => {
-    delete process.env[GATE];
-    process.env[LAWN_TS_GATE] = 'true';
+  test.each(['Lawn Care', 'Lawn Care Re-Service', 'Tree & Shrub Care', 'Shrub Fertilization'])('a lawn or tree & shrub visit, any tier: %s may', (serviceType) => {
     expect(isLawnTsStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
+    expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
     expect(isStockAdvisoryCompletion({ service_type: serviceType, cust_waveguard_tier: 'Commercial' })).toBe(true);
   });
 
-  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion', 'Quarterly Pest Control'])('gate on: %s may not', (serviceType) => {
-    delete process.env[GATE];
-    process.env[LAWN_TS_GATE] = 'true';
+  test('a WaveGuard lawn completion may', () => {
+    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' })).toBe(true);
+  });
+
+  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion'])('%s may not', (serviceType) => {
+    expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
     expect(isLawnTsStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
     expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
-  });
-
-  test.each([[undefined], [''], ['TRUE'], ['1']])('gate %p: a non-member lawn and a tree & shrub visit may not', (value) => {
-    delete process.env[GATE];
-    if (value === undefined) delete process.env[LAWN_TS_GATE]; else process.env[LAWN_TS_GATE] = value;
-    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care' })).toBe(false);
-    expect(isStockAdvisoryCompletion({ service_type: 'Tree & Shrub Care' })).toBe(false);
-  });
-
-  test('the pest gate does not open lawn, and this gate does not open pest', () => {
-    process.env[GATE] = 'true';
-    delete process.env[LAWN_TS_GATE];
-    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care' })).toBe(false);
-    delete process.env[GATE];
-    process.env[LAWN_TS_GATE] = 'true';
-    expect(isStockAdvisoryCompletion({ service_type: 'Quarterly Pest Control' })).toBe(false);
   });
 });
 
 describe('the deduction a pest visit now makes with allowNegative', () => {
   // The row lock finds no row, so the deduction uses the passed-in product; the writes are recorded.
-  const fakeTrx = () => {
+  // Every history-style read the helper makes is recorded in trx.reads (the limit is fixed, so there are none).
+  const fakeTrx = (history = []) => {
     const writes = [];
+    const reads = [];
     const trx = (table) => ({
       where: () => ({
         forUpdate: () => ({ first: async () => null }),
         update: async (row) => { writes.push({ table, update: row }); return 1; },
+        where: (...since) => ({ select: async () => { reads.push({ table, since }); return history; } }),
       }),
       insert: (row) => ({ returning: async () => { writes.push({ table, insert: row }); return [{ id: 'movement-1', ...row }]; } }),
     });
     trx.writes = writes;
+    trx.reads = reads;
     return trx;
   };
   const args = {
@@ -117,6 +81,81 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
     const trx = fakeTrx();
     await expect(deductProductInventory(trx, args)).rejects.toMatchObject({ statusCode: 400, code: 'waveguard_inventory_lockout' });
     expect(trx.writes).toEqual([]);
+  });
+
+  describe('an amount no visit uses', () => {
+    const overdraw = (productInput, product = args.product) => ({ ...args, product, productInput, allowNegative: true });
+    const refusedWith = (result, trx) => {
+      expect(trx.writes).toEqual([]);
+      expect(result).toMatchObject({ status: 'not_deducted_implausible', productId: args.product.id, stockBefore: 1, remainingStock: 1 });
+      expect(result.movementId).toBeUndefined();
+      expect(result.costUsed).toBeUndefined();
+    };
+
+    describe('the fixed limit by unit dimension', () => {
+      test.each([
+        ['volume', { totalAmount: 641, amountUnit: 'fl_oz' }, 'fl_oz'],
+        ['volume, the old flat ceiling', { totalAmount: 2560, amountUnit: 'fl_oz' }, 'fl_oz'],
+        ['weight', { totalAmount: 101, amountUnit: 'lb' }, 'lb'],
+        ['count', { totalAmount: 51, amountUnit: 'each' }, 'each'],
+        ['weight sold in a different unit', { totalAmount: 101, amountUnit: 'lb' }, 'oz'],
+        ['a million fl oz', { totalAmount: 1000000, amountUnit: 'fl_oz' }, 'fl_oz'],
+      ])('%s over the floor moves no stock and no cost, and the completion goes on', async (_name, productInput, inventoryUnit) => {
+        const trx = fakeTrx();
+        const result = await deductProductInventory(trx, overdraw(productInput, { ...args.product, inventory_unit: inventoryUnit }));
+        refusedWith(result, trx);
+        expect(result.warning).toBe(`${productInput.totalAmount} ${productInput.amountUnit.replace('_', ' ')} of ${args.product.name} is too much for one visit, so stock was not changed. Check the amount.`);
+      });
+
+      test.each([
+        ['volume', { totalAmount: 640, amountUnit: 'fl_oz' }, 'fl_oz', -639],
+        ['weight', { totalAmount: 100, amountUnit: 'lb' }, 'lb', -99],
+        ['count', { totalAmount: 50, amountUnit: 'each' }, 'each', -49],
+        ['a bare oz stock takes the looser floor', { totalAmount: 1600, amountUnit: 'oz' }, 'oz', -1599],
+      ])('%s at the floor is an ordinary overdraw', async (_name, productInput, inventoryUnit, stockAfter) => {
+        const trx = fakeTrx();
+        const result = await deductProductInventory(trx, overdraw(productInput, { ...args.product, inventory_unit: inventoryUnit }));
+        expect(result).toMatchObject({ status: 'deducted_insufficient_stock', stockAfter });
+        expect(trx.writes).toHaveLength(2);
+      });
+
+      test('a unit with no known dimension fails closed on the submitted number: over 50 is refused, 50 is an ordinary overdraw', async () => {
+        const bags = { ...args.product, inventory_unit: 'bags' };
+        const over = fakeTrx();
+        refusedWith(await deductProductInventory(over, overdraw({ totalAmount: 1000000, amountUnit: 'bags' }, bags)), over);
+        const at = fakeTrx();
+        expect((await deductProductInventory(at, overdraw({ totalAmount: 50, amountUnit: 'bags' }, bags))).status).toBe('deducted_insufficient_stock');
+      });
+
+      test('a blank inventory unit in a per-area unit fails closed the same way', async () => {
+        const blank = { ...args.product, inventory_unit: null };
+        const over = fakeTrx();
+        refusedWith(await deductProductInventory(over, overdraw({ totalAmount: 51, amountUnit: 'oz/1000sf' }, blank)), over);
+        const at = fakeTrx();
+        expect((await deductProductInventory(at, overdraw({ totalAmount: 50, amountUnit: 'oz/1000sf' }, blank))).status).toBe('deducted_insufficient_stock');
+      });
+
+      test('no usage history is read, so past usage cannot raise or lower the limit', async () => {
+        const trx = fakeTrx();
+        refusedWith(await deductProductInventory(trx, overdraw({ totalAmount: 641, amountUnit: 'fl_oz' })), trx);
+        expect(trx.reads).toEqual([]);
+      });
+    });
+
+    test('an amount the stock covers never reads the history', async () => {
+      const trx = fakeTrx();
+      const result = await deductProductInventory(trx, overdraw({ totalAmount: 3000, amountUnit: 'fl_oz' }, { ...args.product, inventory_on_hand: 9000 }));
+      expect(result.status).toBe('deducted');
+      expect(trx.reads).toEqual([]);
+    });
+
+    test('a visit that may not go negative keeps the hard refusal, whatever the size', async () => {
+      const trx = fakeTrx();
+      await expect(deductProductInventory(trx, { ...args, productInput: { totalAmount: 1000000, amountUnit: 'fl_oz' } }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'waveguard_inventory_lockout' });
+      expect(trx.writes).toEqual([]);
+      expect(trx.reads).toEqual([]);
+    });
   });
 });
 
@@ -205,6 +244,51 @@ describe('the office alert for a product a pest visit took below zero', () => {
   });
 });
 
+describe('the office alert for an amount no visit uses', () => {
+  const refused = (over = {}) => ({
+    productId: 'prod-1', productName: 'Taurus SC', status: 'not_deducted_implausible', amount: 1000000, amountUnit: 'fl_oz', ...over,
+  });
+  const run = async (svc, deductions) => {
+    await notifyOfficeOfStockShortfalls({ svc, record: { id: 'record-1', structured_notes: { inventoryDeductions: deductions } }, database: { transaction: jest.fn() } });
+  };
+
+  test('one alert says to check the amount entered; it asks nothing of stock', async () => {
+    const database = { transaction: jest.fn() };
+    await notifyOfficeOfStockShortfalls({ svc: { id: 'visit-1', customer_id: 'customer-1', service_type: 'Lawn Care' }, record: { id: 'record-1', structured_notes: { inventoryDeductions: [refused()] } }, database });
+    expect(database.transaction).not.toHaveBeenCalled();
+    expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [category, spec, opts] = compose.raiseAdminAlert.mock.calls[0];
+    expect(category).toBe('inventory');
+    expect(spec).toEqual({
+      area: 'Inventory',
+      action: 'check Taurus SC amount',
+      why: 'Taurus SC amount looks too big for a lawn visit, so stock was not changed.',
+      severity: 'needs-you',
+      who: 'person',
+      link: '/admin/customers?customerId=customer-1',
+      subject: { type: 'check', id: 'stock-amount-check:record-1:prod-1' },
+      doneWhen: 'amount_checked',
+    });
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'stock-amount-check:record-1:prod-1', dedupeOpenOnly: true });
+    expect(opts.detail).toContain('1000000 fl oz was entered on a lawn visit');
+    expect(opts.detail).toContain('Check the amount entered');
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('a name the alert rules refuse falls back to plain words', async () => {
+    await run({ id: 'visit-1', service_type: 'Quarterly Pest Control' }, [refused({ productName: 'Bait [old lot]' })]);
+    const [, spec] = compose.raiseAdminAlert.mock.calls[0];
+    expect(spec).toMatchObject({ action: 'check a product amount', why: 'A product amount looks too big for a pest visit, so stock was not changed.' });
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('a failed alert is logged and never fails the visit', async () => {
+    compose.raiseAdminAlert.mockRejectedValueOnce(new Error('notifications unavailable'));
+    await expect(run({ id: 'visit-1', service_type: 'Quarterly Pest Control' }, [refused()])).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('stock amount alert failed (non-blocking)'));
+  });
+});
+
 describe('the office alert for a lawn or tree & shrub visit', () => {
   const shortfall = { productId: 'prod-1', productName: 'Taurus SC', status: 'deducted_insufficient_stock', stockAfter: -3, deductedAmount: 4, inventoryUnit: 'fl_oz' };
   const record = { id: 'record-1', structured_notes: { inventoryDeductions: [shortfall] } };
@@ -221,8 +305,7 @@ describe('the office alert for a lawn or tree & shrub visit', () => {
     ['Lawn Care', 'lawn'],
     ['Tree & Shrub Care', 'tree & shrub'],
     ['Quarterly Pest Control', 'pest'],
-  ])('a non-member %s record alerts, and the text names a %s visit, whatever the live gate says', async (serviceType, label) => {
-    delete process.env[LAWN_TS_GATE];
+  ])('a non-member %s record alerts, and the text names a %s visit, ', async (serviceType, label) => {
     const [, spec, opts] = await alertFor({ id: 'visit-1', service_type: serviceType });
     expect(spec).toMatchObject({ action: 'restock Taurus SC', why: `Taurus SC went below zero in stock after a ${label} visit.` });
     expect(opts).toMatchObject({ dedupeKey: 'stock-shortfall:prod-1', dedupeOpenOnly: true });
@@ -245,21 +328,14 @@ describe('the office alert for a lawn or tree & shrub visit', () => {
     expect(() => compose.composeAdminAlert(spec)).not.toThrow();
   });
 
-  test('a WaveGuard lawn record alerts only while GATE_LAWN_TS_STOCK_ADVISORY is live', async () => {
+  test('a WaveGuard lawn record alerts too', async () => {
     const svc = { id: 'visit-1', service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' };
-    delete process.env[LAWN_TS_GATE];
-    const quiet = catalog({ 'prod-1': '-3' });
-    await notifyOfficeOfStockShortfalls({ svc, record, database: quiet });
-    expect(quiet.transaction).not.toHaveBeenCalled();
-    expect(compose.raiseAdminAlert).not.toHaveBeenCalled();
-    process.env[LAWN_TS_GATE] = 'true';
     await notifyOfficeOfStockShortfalls({ svc, record, database: catalog({ 'prod-1': '-3' }) });
     expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
     expect(compose.raiseAdminAlert.mock.calls[0][1].why).toBe('Taurus SC went below zero in stock after a lawn visit.');
   });
 
   test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion'])('a %s record never alerts', async (serviceType) => {
-    process.env[LAWN_TS_GATE] = 'true';
     const database = catalog({ 'prod-1': '-3' });
     await notifyOfficeOfStockShortfalls({ svc: { id: 'visit-1', service_type: serviceType }, record, database });
     expect(database.transaction).not.toHaveBeenCalled();

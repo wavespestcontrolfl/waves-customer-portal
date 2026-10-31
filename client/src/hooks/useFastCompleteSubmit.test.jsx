@@ -466,6 +466,12 @@ describe('a saved completion whose stored copy will not clear (GitHub Codex P2 o
 });
 
 describe('definite refusals (GitHub Codex P2s on #5967)', () => {
+  it('a technician amount no visit uses (422) is correctable: the form stays with the server message and a fresh key, and is never retried', () => {
+    const err = { status: 422, code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', message: '406 lb of Celsius WG is far more than one visit uses. Check the amount and submit again.' };
+    expect(completionFailureOutcome(err)).toBe('correctable');
+    expect(completionFailureOutcome(err, { confirmable: true })).toBe('correctable');
+  });
+
   it('the lawn gallons check that could not read (a pre-commit 400) is correctable, where the same refusal as a 503 would lock the form', () => {
     expect(completionFailureOutcome({ status: 400, code: 'lawn_gallons_unavailable_now' })).toBe('correctable');
     expect(completionFailureOutcome({ status: 503, code: 'lawn_gallons_unavailable_now' })).toBe('retry');

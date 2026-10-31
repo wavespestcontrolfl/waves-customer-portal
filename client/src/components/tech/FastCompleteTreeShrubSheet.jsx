@@ -405,7 +405,7 @@ function contextFrom(data, service) {
     neonicCap: objectOrNull(data?.neonicCap),
     // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
     wrapUp: data?.wrapUp === true,
-    // GATE_LAWN_TS_STOCK_ADVISORY (owner 2026-10-20): /complete takes this visit's stock below zero instead of refusing,
+    // Owner 2026-10-20: /complete takes this visit's stock below zero instead of refusing,
     // so no product at 0 in stock holds the sheet. The server says so with `stockAdvisory: true`.
     stockAdvisory: data?.stockAdvisory === true,
   };
@@ -474,8 +474,8 @@ const sameSet = (analyzed, photos) => analyzed.length === photos.length && analy
 
 // The active products whose stock shows 0 for the unit they were measured in, split by what the server does about it:
 // `hold` is the first one that holds Complete, `notices` lists each one the sheet only names. With
-// GATE_LAWN_TS_STOCK_ADVISORY (the context's `stockAdvisory`) /complete takes the stock below zero and records the
-// shortfall, so nothing holds and every such product is named.
+// the context's `stockAdvisory` (the server sends it on a tree & shrub visit) /complete takes the stock below zero and
+// records the shortfall, so nothing holds and every such product is named.
 function stockState(rows, ctx) {
   const out = rows.filter((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   return ctx.stockAdvisory ? { hold: undefined, notices: out } : { hold: out[0], notices: [] };

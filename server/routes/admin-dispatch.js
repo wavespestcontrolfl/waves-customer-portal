@@ -4078,8 +4078,8 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
     // GATE_ONE_TAP_REPORT: the pest report sheet runs the one-tap flow. The key exists only while the gate is live, and
     // only for a visit of a recurring series or a re-service (the pest re-service, or a free callback booked under a
     // regular key: the sheet's own isReserviceVisit); a one-time visit keeps today's sheet.
-    // GATE_PEST_STOCK_ADVISORY: /complete takes this visit's stock below zero instead of refusing (the same rule), so
-    // the sheet lets a 0-in-stock product through. The key exists only while it does.
+    // /complete takes a pest visit's stock below zero instead of refusing (the same rule), so the sheet lets a
+    // 0-in-stock product through. The key exists only on a pest visit.
     const stockAdvisory = isPestStockAdvisoryCompletion({ service_type: ctx.service?.serviceType });
     res.json({
       ...ctx,
@@ -4905,8 +4905,8 @@ router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
     const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
     const { ok, ...body } = ctx;
-    // GATE_LAWN_TS_STOCK_ADVISORY: /complete takes this tree & shrub visit's stock below zero instead of refusing (the
-    // same rule), so the sheet lets a 0-in-stock product through. The key exists only while it does.
+    // /complete takes a tree & shrub visit's stock below zero instead of refusing (the same rule), so the sheet lets a
+    // 0-in-stock product through. The key exists only on a lawn or tree & shrub visit.
     res.json({ enabled: true, ...body, ...(isLawnTsStockAdvisoryCompletion({ service_type: body.service?.serviceType }) ? { stockAdvisory: true } : {}) });
   } catch (err) { next(err); }
 });
@@ -4984,9 +4984,8 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...(productIds ? { productIds } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
-    // GATE_LAWN_TS_STOCK_ADVISORY: /complete takes this lawn visit's stock below zero instead of refusing (the same rule),
-    // so the sheet lets a 0-in-stock product through. The key exists only while it does; absent, the sheet keeps its
-    // WaveGuard-tier rule (a WaveGuard lawn completion is always advisory).
+    // /complete takes a lawn visit's stock below zero instead of refusing (the same rule), so the sheet lets a
+    // 0-in-stock product through. The key exists only on a lawn or tree & shrub visit.
     res.json({ enabled: true, ...body, ...(isLawnTsStockAdvisoryCompletion({ service_type: body.service?.serviceType }) ? { stockAdvisory: true } : {}) });
   } catch (err) { next(err); }
 });

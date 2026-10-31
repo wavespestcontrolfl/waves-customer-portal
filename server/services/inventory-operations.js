@@ -26,7 +26,7 @@ const { AUTO_REORDER_SOURCE } = require('./procurement/auto-reorder');
 const { validCalendarDate } = require('../utils/datetime-et');
 const { restockMeta } = require('./inventory-restock-queue');
 
-// GATE_PEST_STOCK_ADVISORY: the office alert a pest visit raises for a product it took below zero
+// The office alert a pest, lawn or tree & shrub visit raises for a product it took below zero
 // (complete-scheduled-service.js notifyOfficeOfStockShortfalls) is keyed by product.
 const stockShortfallKey = (productId) => `stock-shortfall:${productId}`;
 
