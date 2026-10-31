@@ -1728,6 +1728,8 @@ module.exports = {
   sealEvalItems,
   createExamRun,
   runSealedExam,
+  expectedRunVersion,
+  loadRunPatch,
   finalizeRun,
   computeSignificance,
   judgeRulerOf,

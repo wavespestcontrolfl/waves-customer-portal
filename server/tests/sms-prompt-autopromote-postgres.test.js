@@ -637,6 +637,74 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(calls[calls.length - 1]).toEqual(expect.objectContaining({ runId: stranded.id }));
     });
 
+    describe('runs the loop started that no longer match the live prompt', () => {
+      const OLD_BASE = 'house_voice_v12_real_answers24_n';
+      const onlyRunning = () => trx('sms_sealed_eval_runs').where({ status: 'running' });
+
+      test('a failed baseline from before a prompt change is never resumed: a current baseline is created and the candidate is decided', async () => {
+        const items = await seedItems();
+        const patch = await insertPatch();
+        const old = await insertRun({ items, version: `${OLD_BASE}_old`, status: 'failed', over: { triggered_by: 'auto:autopromote-baseline' } });
+        await trx('sms_prompt_patches').where({ id: patch.id }).update({ baseline_run_id: old.id });
+        const { runner, calls } = crashRunner({ items });
+        const out = await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() });
+        expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
+        expect(calls.some((c) => c.runId === old.id)).toBe(false);
+        expect(calls[0]).toEqual(expect.objectContaining({ triggeredBy: 'auto:autopromote-baseline' }));
+        expect(calls[0].runId).toBeUndefined();
+        const row = await rowOf(patch.id);
+        expect(row.baseline_run_id).not.toBe(old.id);
+        expect(row.exam_attempts).toBe(1);
+      });
+
+      test('a running baseline from before a prompt change is settled under the exam lock, then a current baseline is created', async () => {
+        const items = await seedItems();
+        const patch = await insertPatch();
+        const old = await insertRun({ items, version: `${OLD_BASE}_old`, status: 'running', over: { triggered_by: 'auto:autopromote-baseline', finished_at: null } });
+        const { runner, calls } = crashRunner({ items });
+        const lock = jest.fn(lockThrough);
+        const out = await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock, notify: jest.fn() });
+        expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
+        expect(lock).toHaveBeenCalled();
+        expect(await trx('sms_sealed_eval_runs').where({ id: old.id }).first()).toMatchObject({ status: 'failed' });
+        expect(calls.some((c) => c.runId === old.id)).toBe(false);
+      });
+
+      test('a candidate run stranded when the base changed is settled before the patch is rejected, so a later candidate can run', async () => {
+        const items = await seedItems();
+        const patch = await insertPatch({ over: { base_version: OLD_BASE } });
+        const stranded = await insertRun({ items, version: `${OLD_BASE}_a`, patchId: patch.id, status: 'running', over: { triggered_by: 'auto:autopromote', finished_at: null } });
+        const { runner } = crashRunner({ items });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ rejected: patch.id, reason: 'base_changed' });
+        expect(await trx('sms_sealed_eval_runs').where({ id: stranded.id }).first()).toMatchObject({ status: 'failed' });
+        expect(await onlyRunning()).toHaveLength(0);
+        // The one-running slot is free: the next candidate creates its runs (the runner throws RUN_IN_PROGRESS otherwise).
+        const next = await insertPatch();
+        expect(await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 8 * DAY), runner, lock: lockThrough, notify: jest.fn() })).toEqual({ decided: 'would_promote', patchId: next.id });
+      });
+
+      test('with the exam lock busy nothing is settled and the patch is not rejected; the next tick does both', async () => {
+        const items = await seedItems();
+        const patch = await insertPatch({ over: { base_version: OLD_BASE } });
+        const stranded = await insertRun({ items, version: `${OLD_BASE}_a`, patchId: patch.id, status: 'running', over: { triggered_by: 'auto:autopromote', finished_at: null } });
+        const busy = jest.fn(async () => ({ skipped: true, reason: 'lease_held' }));
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner: jest.fn(), lock: busy })).toEqual({ skipped: 'lock_busy' });
+        expect((await rowOf(patch.id)).status).toBe('candidate');
+        expect(await trx('sms_sealed_eval_runs').where({ id: stranded.id }).first()).toMatchObject({ status: 'running' });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner: jest.fn(), lock: lockThrough })).toEqual({ rejected: patch.id, reason: 'base_changed' });
+        expect(await onlyRunning()).toHaveLength(0);
+      });
+
+      test('a run the nightly sweep or a person started is never settled by the loop', async () => {
+        const items = await seedItems();
+        const other = await insertRun({ items, version: `${OLD_BASE}_old`, status: 'running', over: { triggered_by: 'auto:prompt-watch', finished_at: null } });
+        await insertPatch();
+        const lock = jest.fn(lockThrough);
+        await auto.examineCandidate({ dbi: trx, now: NOW, runner: jest.fn(async () => { throw Object.assign(new Error('busy'), { code: 'RUN_IN_PROGRESS' }); }), lock });
+        expect(await trx('sms_sealed_eval_runs').where({ id: other.id }).first()).toMatchObject({ status: 'running' });
+      });
+    });
+
     test('a candidate written for an older base identity is rejected before any exam is paid for', async () => {
       const patch = await insertPatch({ over: { base_version: 'house_voice_v12_real_answers24_n' } });
       const runner = jest.fn();
