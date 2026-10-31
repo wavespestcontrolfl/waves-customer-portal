@@ -21,7 +21,7 @@
 
 const path = require('path');
 const {
-  nameParts, firstKnownContactAt, dateVerdict, scoreCandidate, decideReviewLink, saysReviewed,
+  nameParts, recordName, firstKnownContactAt, dateVerdict, scoreCandidate, decideReviewLink, saysReviewed,
 } = require(path.join(__dirname, '..', '..', 'server', 'services', 'review-link-evidence'));
 const { etDateString } = require(path.join(__dirname, '..', '..', 'server', 'utils', 'datetime-et'));
 const { ASK_TOUCH_SQL } = require(path.join(__dirname, '..', '..', 'server', 'services', 'review-outreach-templates'));
@@ -196,7 +196,7 @@ function auditRows(data) {
   const byId = new Map(candidates.map((c) => [c.customerId, c]));
   const holderSurnames = new Map();
   for (const c of candidates) {
-    const { last } = nameParts(`${c.holder.first || ''} ${c.holder.last || ''}`);
+    const { last } = recordName(c.holder.first, c.holder.last);
     if (last) holderSurnames.set(last, (holderSurnames.get(last) || 0) + 1);
   }
   const linkedBy = groupBy(data.reviews.filter((r) => r.customer_id), 'customer_id');

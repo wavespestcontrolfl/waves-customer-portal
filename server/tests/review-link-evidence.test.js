@@ -7,6 +7,7 @@
  */
 const {
   nameParts,
+  recordName,
   firstNameRelation,
   surnameRelation,
   firstKnownContactAt,
@@ -47,11 +48,21 @@ describe('names', () => {
     expect(nameParts('Kathy')).toEqual({ first: 'kathy', last: '' });
   });
 
+  test('a compound surname keeps its particles; a record keeps its whole last name; digits stay', () => {
+    expect(nameParts('Dana De La Cruz')).toEqual({ first: 'dana', last: 'delacruz' });
+    expect(nameParts('Mary Ann Pemberton')).toEqual({ first: 'mary', last: 'pemberton' });
+    expect(nameParts('Marlow Pemberton2')).toEqual({ first: 'marlow', last: 'pemberton2' });
+    expect(recordName('Dana', 'Santa Cruz')).toEqual({ first: 'dana', last: 'santacruz' });
+    expect(recordName('Dr. Marlow', 'Pemberton Jr.')).toEqual({ first: 'marlow', last: 'pemberton' });
+    expect(recordName('Marlow Pemberton', '')).toEqual({ first: 'marlow', last: 'pemberton' });
+  });
+
   test('first names: nickname groups, one letter off with the same first letter, a prefix', () => {
     expect(firstNameRelation('becky', 'rebecca')).toBe('nickname');
     expect(firstNameRelation('shelley', 'shelly')).toBe('spelling');
     expect(firstNameRelation('selena', 'jelena')).toBeNull();
     expect(firstNameRelation('ottil', 'ottilie')).toBe('prefix');
+    expect(firstNameRelation('marlow2', 'marlow')).toBeNull();
   });
 
   test('surnames: one letter off at 5+, a swap at 4+, one ending the other at 5+, initials either side', () => {
@@ -237,6 +248,12 @@ describe('decideReviewLink', () => {
     expect(decide(review('Gwen Pemberton'), [firstOnly], oneHolder)).toMatchObject({ result: 'link_confirm', top: { role: 'contact' } });
     const ownSurname = candidate('c1', 'Marlow', 'Pemberton', { contacts: ['Gwen Harlowe'] });
     expect(decide(review('Gwen Harlowe'), [ownSurname])).toMatchObject({ result: 'link_confirm', top: { role: 'contact' } });
+  });
+
+  test('different compound surnames never match, and a handle with digits is not a surname', () => {
+    expect(decide(review('Dana De La Cruz'), [candidate('c1', 'Dana', 'Santa Cruz')])).toMatchObject({ result: 'none' });
+    expect(decide(review('Dana De La Cruz'), [candidate('c1', 'Dana', 'De La Cruz')])).toMatchObject({ result: 'link', reason: 'exact' });
+    expect(decide(review('Marlow Pemberton2'), [candidate('c1', 'Marlow', 'Pemberton')])).toMatchObject({ result: 'none' });
   });
 
   test('short surnames need an exact match', () => {

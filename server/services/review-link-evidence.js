@@ -13,6 +13,9 @@
  * letters), two neighbouring letters swapped (4+), or one name ending the other (5+:
  * "delacroix"/"lacroix"). The surname near-miss is a REVIEW-only rule: name-match.js keeps a
  * surname typo a conflict for calls and payments on purpose. Titles and punctuation are dropped.
+ * A record's surname is its whole last_name ("Santa Cruz"); a display name's surname is its last
+ * word plus the particles before it ("De La Cruz"), so different compound surnames never match. A
+ * name with digits (a Google handle such as "Pemberton2") only matches itself.
  *
  * Dates. First known contact = the earliest of member_since (the start date carried over at the
  * 2026-04-06 import), customer_since, lead first contact, first call, first text, first visit and
@@ -79,22 +82,43 @@ function saysReviewed(body) {
   return Boolean(claim) && !NEGATION_RE.test(claim[0]) && !NOT_REVIEWED_RE.test(text);
 }
 
-function foldName(value) {
+// Digits stay: dropping them would turn a handle ("Pemberton2") into a real surname.
+function nameTokens(value) {
   return foldNameLetters(value)
     .toLowerCase()
     .replace(/['’‘`-]/g, '')
-    .replace(/[^a-z\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t && !TITLES.has(t));
 }
 
-// { first, last } from a display or record name. last is '' for a one-word name and a single letter
-// for an initial ("Frank C", "Alex M."). Titles never count as a name.
+// Words that start a compound surname: "De La Cruz" is one surname, not a middle name and "Cruz".
+const SURNAME_PARTICLES = new Set([
+  'de', 'del', 'della', 'der', 'den', 'di', 'da', 'das', 'dos', 'du', 'la', 'le',
+  'van', 'von', 'st', 'ste', 'saint', 'santa', 'san', 'ten', 'ter',
+]);
+
+// { first, last } from a display name (a Google reviewer, a listed contact). last is '' for a
+// one-word name and a single letter for an initial ("Frank C", "Alex M."); a compound surname keeps
+// its particles, joined ("delacruz"). Titles never count as a name.
 function nameParts(value) {
-  const tokens = foldName(value).split(' ').filter((t) => t && !TITLES.has(t));
+  const tokens = nameTokens(value);
   if (!tokens.length) return { first: '', last: '' };
-  return { first: tokens[0], last: tokens.length > 1 ? tokens[tokens.length - 1] : '' };
+  if (tokens.length === 1) return { first: tokens[0], last: '' };
+  let start = tokens.length - 1;
+  while (start > 1 && SURNAME_PARTICLES.has(tokens[start - 1])) start -= 1;
+  return { first: tokens[0], last: tokens.slice(start).join('') };
 }
+
+// { first, last } from a record's own fields: the record says where the surname starts, so every
+// word of last_name stays ("Santa Cruz" -> "santacruz").
+function recordName(first, last) {
+  const lastTokens = nameTokens(last);
+  if (!lastTokens.length) return nameParts(first);
+  return { first: nameTokens(first)[0] || '', last: lastTokens.join('') };
+}
+
+const hasDigit = (value) => /\d/.test(value);
 
 // Optimal string alignment distance: insert, delete, substitute, or swap two neighbours, each 1.
 function editDistance(a, b) {
@@ -116,6 +140,7 @@ const isSwap = (a, b) => a.length === b.length && editDistance(a, b) === 1 && [.
 function firstNameRelation(a, b) {
   if (!a || !b) return null;
   if (a === b) return 'exact';
+  if (hasDigit(a) || hasDigit(b)) return null;
   if (sameFirstName(a, b)) return 'nickname';
   if (a[0] === b[0] && Math.min(a.length, b.length) >= 4 && editDistance(a, b) === 1) return 'spelling';
   if (Math.min(a.length, b.length) >= 3 && (a.startsWith(b) || b.startsWith(a))) return 'prefix';
@@ -128,6 +153,7 @@ function surnameRelation(review, record) {
   // Before equality: two matching initials ("Q" and "Q.") are still only an initial.
   if (review.length === 1 || record.length === 1) return review[0] === record[0] ? 'initial' : null;
   if (review === record) return 'exact';
+  if (hasDigit(review) || hasDigit(record)) return null;
   const shorter = Math.min(review.length, record.length);
   if (shorter >= 5 && editDistance(review, record) === 1) return 'near';
   if (shorter >= 4 && isSwap(review, record)) return 'near';
@@ -213,7 +239,7 @@ function activityEvidence(reviewAt, activity = {}, { surnameClash = false, locat
 // The people on one account as folded names: the holder, then each listed contact. A contact saved
 // with a first name only shares the holder's surname.
 function accountPeople(candidate) {
-  const holder = nameParts(`${candidate.holder?.first || ''} ${candidate.holder?.last || ''}`);
+  const holder = recordName(candidate.holder?.first, candidate.holder?.last);
   const contacts = (candidate.contacts || []).map((raw) => {
     const parts = nameParts(raw);
     return { first: parts.first, last: parts.last || holder.last, role: 'contact' };
@@ -303,6 +329,7 @@ function decideReviewLink(scored, context = {}) {
 
 module.exports = {
   nameParts,
+  recordName,
   firstNameRelation,
   surnameRelation,
   firstKnownContactAt,
