@@ -928,9 +928,6 @@ app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, 
 app.use('/api/booking', require('./routes/booking'));
 app.use('/api/ai', aiAssistantRoutes);
 app.use('/api/webhooks/twilio', validateTwilioSignature, twilioVoiceWebhookRoutes);
-// Facebook Messenger / Instagram channel-sender inbound (POST /messenger) —
-// same mount + signature validation as the SMS/voice webhooks; no path conflict.
-app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/twilio-messenger-webhook'));
 // Collections outbound-voice vestibule + relay action (PR B) — same mount +
 // signature validation; every route fails closed (bare hangup) unless
 // GATE_VOICE_LATE_PAYMENT is exactly 'true'.
@@ -1022,6 +1019,7 @@ app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
 app.use('/api/admin/requests', require('./routes/admin-requests'));
 app.use('/api/admin/portal-inbox', require('./routes/admin-portal-inbox'));
+app.use('/api/admin/messenger', require('./routes/admin-messenger'));
 app.use('/api/admin/wiki', require('./routes/admin-wiki'));
 app.use('/api/admin/health', require('./routes/admin-health'));
 app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
