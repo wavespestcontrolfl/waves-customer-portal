@@ -10,13 +10,31 @@ import UserNotifications
 final class StaffAlerts {
     static let shared = StaffAlerts()
 
-    // Xcode development installs get sandbox tokens; the server sends each
-    // token to the matching APNs host.
-    #if DEBUG
-    static let environment = "sandbox"
-    #else
-    static let environment = "production"
-    #endif
+    // The APNs host this install's token belongs to, which the server sends
+    // to: the signing profile's aps-environment, whatever the build
+    // configuration. App Store and TestFlight installs carry no profile and
+    // use production; the simulator uses the sandbox.
+    static let environment: String = {
+        #if targetEnvironment(simulator)
+        return "sandbox"
+        #else
+        return provisionedEnvironment() == "development" ? "sandbox" : "production"
+        #endif
+    }()
+
+    // aps-environment from embedded.mobileprovision (a signed plist), if any.
+    private static func provisionedEnvironment() -> String? {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              let start = data.range(of: Data("<?xml".utf8)),
+              let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
+              let profile = try? PropertyListSerialization.propertyList(
+                  from: data.subdata(in: start.lowerBound..<end.upperBound), format: nil
+              ) as? [String: Any],
+              let entitlements = profile["Entitlements"] as? [String: Any]
+        else { return nil }
+        return entitlements["aps-environment"] as? String
+    }
 
     // Set by PortalCoordinator: hands a new token to the page that asked.
     var onToken: ((String) -> Void)?

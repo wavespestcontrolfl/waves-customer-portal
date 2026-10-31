@@ -70,27 +70,27 @@ describe('registerInAppPush', () => {
     expect(adminFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps one sign-up id for the whole sign-in, so a release matches whichever sign-up landed', async () => {
+  it("keeps the sign-in's sign-up id across a reload and repeated tokens, so sign-out releases the sign-up the server holds", async () => {
     vi.useFakeTimers();
     installApp();
     localStorage.setItem('waves_admin_token', 'staff-jwt');
-    // iOS hands over the token again; that second sign-up cannot reach the server.
-    adminFetch
-      .mockResolvedValueOnce({ ok: true, status: 200 })
-      .mockRejectedValueOnce(new TypeError('offline'));
+    // A reload: the server holds this sign-in's sign-up as reg-0001.
+    localStorage.setItem(SIGN_UP_KEY, JSON.stringify({ token: TOKEN, reg: 'reg-0001' }));
+    // iOS hands over the token twice, and the new sign-up cannot reach the server.
+    adminFetch.mockRejectedValueOnce(new TypeError('offline'));
     const cleanup = registerInAppPush();
     answer({ token: TOKEN, environment: 'sandbox' });
     answer({ token: TOKEN, environment: 'sandbox' });
     await vi.advanceTimersByTimeAsync(0);
-    expect(adminFetch).toHaveBeenCalledTimes(2);
-    const [[, first], [, second]] = adminFetch.mock.calls;
-    expect(second.body.reg).toBe(first.body.reg);
+    expect(adminFetch).toHaveBeenCalledTimes(1);
+    expect(adminFetch.mock.calls[0][1].body.reg).toBe('reg-0001');
+    expect(storedSignUp().reg).toBe('reg-0001');
 
     const released = releaseInAppPush();
     await vi.advanceTimersByTimeAsync(5000);
     await released;
     expect(adminFetch).toHaveBeenLastCalledWith('/admin/push/native-unsubscribe',
-      expect.objectContaining({ body: { token: TOKEN, reg: first.body.reg } }));
+      expect.objectContaining({ body: { token: TOKEN, reg: 'reg-0001' } }));
     cleanup();
   });
 

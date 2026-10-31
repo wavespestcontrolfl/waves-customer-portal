@@ -178,7 +178,8 @@ The token is registered even when permission is denied: iOS only hides the
 alerts, so allowing them later in iPhone Settings needs no new sign-up.
 The page registers the token under its own sign-in at
 `POST /api/admin/push/native-subscribe` (`client/src/native/wavesAdminPush.js`);
-the row names this app's bundle and APNs environment (Xcode installs use the
+the row names this app's bundle and APNs environment (the signing profile's
+`aps-environment`: development-signed installs, Debug or Release, use the
 sandbox), and `server/services/apns.js` sends to the matching topic and host.
 The page sets the icon badge with `{ type: 'badge', count }`. A tap on an
 alert opens its portal page: the app sends a cancelable `wavesadmin:openlink`

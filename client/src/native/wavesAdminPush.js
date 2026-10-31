@@ -9,10 +9,10 @@
 // Sign-out releases the token again (releaseInAppPush), and the app stops
 // this install's notifications until the next sign-in registers again.
 //
-// Each sign-in's sign-up carries its own id (`reg`), kept for every token
-// event of that sign-in. A release names it, so a late release can never
-// switch off a later sign-in's sign-up of the same token (the server matches
-// both in one update).
+// Each sign-in's sign-up carries its own id (`reg`), stored with the token and
+// kept for every token event and page reload of that sign-in. A release names
+// it, so a late release can never switch off a later sign-in's sign-up of the
+// same token (the server matches both in one update).
 //
 // A tapped alert, while a staff page is open, arrives as a cancelable
 // 'wavesadmin:openlink' window event (detail = { url }). The page cancels it
@@ -49,6 +49,14 @@ function newSignUpId() {
   }
 }
 
+function readSignUp() {
+  try {
+    return JSON.parse(localStorage.getItem(SIGN_UP_KEY) || 'null');
+  } catch {
+    return null; // storage unavailable or unreadable
+  }
+}
+
 // Waits before the next try: longer each time, or less when the connection
 // comes back.
 function retryDelay(attempt) {
@@ -67,9 +75,10 @@ function retryDelay(attempt) {
 export function registerInAppPush() {
   if (!isWavesAdminApp()) return () => {};
   const mine = ++epoch;
-  // One id for this sign-in: a second token event reuses it, so a release
-  // names whichever sign-up reached the server.
-  const reg = newSignUpId();
+  // One id for this sign-in. Every end of a session removes the stored
+  // sign-up, so a stored id is this sign-in's: a reload or a second token
+  // event reuses it, and a release names whichever sign-up reached the server.
+  const reg = readSignUp()?.reg || newSignUpId();
   const onToken = (event) => {
     const { token, environment } = event?.detail || {};
     if (mine !== epoch || !token) return;
@@ -106,11 +115,8 @@ export function releaseInAppPush() {
   if (!isWavesAdminApp()) return Promise.resolve();
   epoch += 1;
   postToApp({ type: 'signOut' });
-  let signUp = null;
-  try {
-    signUp = JSON.parse(localStorage.getItem(SIGN_UP_KEY) || 'null');
-    localStorage.removeItem(SIGN_UP_KEY);
-  } catch { /* storage unavailable or unreadable */ }
+  const signUp = readSignUp();
+  try { localStorage.removeItem(SIGN_UP_KEY); } catch { /* storage unavailable */ }
   const auth = localStorage.getItem('waves_admin_token');
   if (!signUp?.token || !signUp?.reg || !auth) return Promise.resolve();
   const release = async () => {
