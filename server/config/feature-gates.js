@@ -22,6 +22,7 @@
  *   GATE_EMAIL_AUTH_STRICT=true (inbound email trust: hasAlignedAuth parses only real Authentication-Results method results, and a vendor invoice books an expense only when the sender authenticated as its From domain; strict `=== 'true'`, read at call time by emailAuthStrictLive(); dark by default; sends nothing to a customer)
  *   GATE_DEDUPE_NO_UNVERIFIED_BACKFILL=true (the nightly duplicate auto-merge does not merge an untouched anonymous web-intake row whose typed email is not the kept customer's email; the pair stays on the Duplicates page for a manual merge; manual merges unchanged; strict opt-in read at call time by customer-dedupe.js; dark by default; sends nothing to a customer)
  *   GATE_NEWSLETTER_CLICK_BOUND=true (security audit run 2, 2026-10-22: the newsletter event link /api/public/newsletter/e/:token/:eventId redirects to the event's URL only when the token is a real delivery and the event is in that send's lineup (locked or alternate ids); any other pair goes to the homepage, so the portal host is not an open redirect; the target is the URL the send carried (newsletter_sends.event_url_snapshot, written at send time). Read at call time via newsletterClickBoundLive(), strict 'true', dark by default; off = redirect exactly as before. Sends nothing.)
+ *   GATE_NEWSLETTER_AUTO_SEND=true (owner 2026-10-30, option A: the weekly issue sends itself Tuesday at 6:00 AM ET once the automatic checks pass. The Monday proof step queues it and emails the owner an FYI copy; a HOLD reply or Cancel schedule in History skips that week. The inactive-reader check-in email also queues itself. Needs GATE_NEWSLETTER_PROOF_APPROVAL on. Read at call time via newsletterAutoSendLive(), strict 'true', dark by default; off = the issue waits for an APPROVED reply, as before. Emails the list.)
  *   GATE_ESTIMATE_LAWN_LIMITS=true (owner 2026-10-22: a recurring lawn estimate says in writing what the program can and can't fix, and the office can flag other grasses (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) and suspected virus streaks on the lawn's turf profile; each flag adds one line to the estimate page, the estimate PDF and the pdfkit fallback. The tech sheet warns when Celsius WG is picked on a carpetgrass lawn. Read at call time via estimateLawnLimitsLive(), strict 'true', dark by default; off = every estimate, turf profile and tech sheet output exactly as before. Sends nothing and prints no prices.)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
@@ -5028,6 +5029,13 @@ const gates = {
   // GATE_PEST_INSIDER_PROOF at call time. Kill = unset — today's behavior:
   // draft + notification only, no proof attempt.
   pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
+
+  // Weekly newsletter sends itself after its checks (owner 2026-10-30,
+  // option A). Ships DARK: off unless exactly 'true'. This entry is for
+  // logGateStatus only; newsletterAutoSendLive() is read at call time by
+  // services/newsletter-proof.js, newsletter-sunset.js and the History stop
+  // route. Kill = unset: the issue waits for an APPROVED reply again.
+  newsletterAutoSend: process.env.GATE_NEWSLETTER_AUTO_SEND === 'true',
   // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
   // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
   // version for what this deliberately leaves out). Ships DARK: off unless
@@ -6271,6 +6279,15 @@ function dedupeNoUnverifiedBackfillLive() {
 // to the URLs snapshotted on the send (security audit run 2).
 function newsletterClickBoundLive() {
   return process.env.GATE_NEWSLETTER_CLICK_BOUND === 'true';
+}
+
+// GATE_NEWSLETTER_AUTO_SEND read at CALL time, strict `=== 'true'`, dark by
+// default (owner 2026-10-30, option A). On, the weekly proof step queues the
+// issue for its Tuesday 6:00 AM ET target and the owner's copy is FYI (reply
+// HOLD to skip the week); the inactive-reader check-in email queues itself.
+// Off = the issue waits for an APPROVED reply. Emails the list.
+function newsletterAutoSendLive() {
+  return process.env.GATE_NEWSLETTER_AUTO_SEND === 'true';
 }
 
 // GATE_ESTIMATE_LAWN_LIMITS read at CALL time — strict `=== 'true'`, dark by
@@ -9328,6 +9345,8 @@ module.exports.RETIRED_GATES = RETIRED;
 module.exports.callEnrichCodesRequireAniLive = callEnrichCodesRequireAniLive;
 module.exports.backlinkSignupUrlGuardLive = backlinkSignupUrlGuardLive;
 module.exports.newsletterClickBoundLive = newsletterClickBoundLive;
+// GATE_NEWSLETTER_AUTO_SEND reader, on its own line so gate PRs never conflict.
+module.exports.newsletterAutoSendLive = newsletterAutoSendLive;
 // GATE_BILL_TO_NO_VISIT_INVOICES reader, on its own line so gate PRs never conflict.
 module.exports.billToNoVisitInvoicesLive = billToNoVisitInvoicesLive;
 // GATE_QUIET_OVERDUE_LIST reader, on its own line so gate PRs never conflict.
