@@ -20586,6 +20586,7 @@ const CallRecordingProcessor = {
                         durationMinutes: existing.estimated_duration_minutes || callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                         lat: existing.lat ?? null,
                         lng: existing.lng ?? null,
+                        zip: existing.service_address_zip || null,
                         // The row's own service: a replay can extract a
                         // different one while the appointment stays as booked.
                         serviceType: existing.service_type || serviceType,

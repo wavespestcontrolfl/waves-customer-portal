@@ -144,4 +144,11 @@ describe('call bookings route by the booked property (source guard)', () => {
     expect(call.slice(0, 700)).toContain('zip: existing.service_address_zip || null,');
     expect(call.slice(0, 700)).toContain('lat: existing.lat ?? null,');
   });
+
+  test('both second picks (scheduling pick over the default) keep the property ZIP', () => {
+    const reuse = source.slice(source.indexOf("const reusePick = await trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({"));
+    expect(reuse.slice(0, 1300)).toContain('zip: existing.service_address_zip || null,');
+    const fresh = source.slice(source.indexOf("const pickBookingTechnician = () => trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({"));
+    expect(fresh.slice(0, 1000)).toContain('zip: propertyLinkage.address?.zip || null,');
+  });
 });
