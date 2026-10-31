@@ -77,6 +77,7 @@ function fakeDb({
     // invoices query keyed by scheduled_service_id — the last-paid lookup
     // keys by customer/service_type and must keep returning paidInvoices.
     let probesServiceIds = false;
+    let idFilter = null;
     const builder = {
       // coveredTermsAsOf always leftJoins, so the join must exist whenever a
       // terms fixture is in play. The catalog loader's degrade-on-no-join
@@ -92,8 +93,10 @@ function fakeDb({
       whereNull: () => builder,
       whereRaw: () => builder,
       join: () => builder,
-      whereIn: (col) => {
+      whereIn: (col, values) => {
         if (col === 'scheduled_service_id') probesServiceIds = true;
+        // A visit read by id returns only those rows, as the database does.
+        if (col === 'id' && table === 'scheduled_services') idFilter = new Set([].concat(values).map(String));
         return builder;
       },
       whereNot: () => builder,
@@ -148,7 +151,9 @@ function fakeDb({
           if (prepaidTermsQueryThrows) throw new Error('relation does not exist');
           return prepaidTerms;
         }
-        if (table === 'scheduled_services') return scheduledRows;
+        if (table === 'scheduled_services') {
+          return idFilter ? scheduledRows.filter((row) => idFilter.has(String(row.id))) : scheduledRows;
+        }
         if (table === 'estimates') {
           if (estimatesQueryThrows) throw new Error('relation does not exist');
           return estimateRows;
@@ -3096,23 +3101,24 @@ describe('staff-picked tier extension (option B)', () => {
     expect(unknown.services.map((svc) => svc.marginPct)).toEqual([null, null]);
   });
 
-  test("pest and lawn margins re-price the setup estimate on today's engine at the plan the customer has now", async () => {
-    mockExtendExistingGate = true;
-    mockExtendPickGate = true;
+  // Pest every other month and a 9x lawn series (its stored recurrence in
+  // lawnSeries; extraRows adds its root), both set up by one estimate that
+  // quoted pest quarterly. Today's engine is stubbed.
+  const engineProfile = { homeSqFt: 2000, measuredTurfSf: 6800 };
+  async function todayEngineOffer(lawnSeries, extraRows = []) {
     const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
     const primaryKey = normalizedStampedStreet('123 Main St', null, 'Venice', '34285');
     const stamped = (row) => ({
       ...row, source_estimate_id: 'est-setup', service_address_line1: '123 Main St', service_address_city: 'Venice', service_address_zip: '34285',
     });
-    const profile = { homeSqFt: 2000, measuredTurfSf: 6800 };
     const database = fakeDb({
-      scheduledRows: silverRows().map(stamped),
+      scheduledRows: [...silverRows(), ...extraRows].map(stamped)
+        .map((row) => (row.id === 'l1' ? { ...row, ...lawnSeries } : row)),
       catalogRows: [
         ...['s1', 's2', 's3'].map((id) => ({ id, frequency: 'bimonthly', visits_per_year: 6 })),
-        { id: 'l1', frequency: 'every_6_weeks', visits_per_year: 9 },
+        { id: 'l1', frequency: 'every_6_weeks', visits_per_year: 9, ...lawnSeries },
       ],
-      // The setup estimate quoted pest quarterly; the customer now has it every other month.
-      marginEstimate: { estimate_data: { engineRequest: { profile, options: { pestFreq: 4, lawnFreq: 9 } } } },
+      marginEstimate: { estimate_data: { engineRequest: { profile: engineProfile, options: { pestFreq: 4, lawnFreq: 9 } } } },
     });
     mockTranslate.mockImplementation((_profile, codes, options) => ({ codes, options }));
     mockGenerate.mockImplementation((input) => ({
@@ -3121,18 +3127,42 @@ describe('staff-picked tier extension (option B)', () => {
         : [{ service: 'lawn_care', perApp: 100, margin: 0.3, costs: { annualAdmin: 51, annualCallbackReserve: 63 } }],
     }));
     const scope = { groupedEstimate: false, perPropertyStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey } };
-    const offer = await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
-    expect(mockTranslate).toHaveBeenCalledWith(profile, ['PEST'], { pestFreq: 6, lawnFreq: 9 });
-    expect(mockTranslate).toHaveBeenCalledWith(profile, ['LAWN'], { pestFreq: 4, lawnFreq: 9 });
-    // Pest: $140 x 0.4 = $56.00 against $113.33 = 50.6%. Lawn 9x books a
-    // 42-day series while the rounds gate is off, so its $114 of yearly costs
-    // spread over ~8.7 visits: $70.00 + $114 x (42/365 - 1/9) = $70.45 against
-    // $75.56 = 6.8%.
+    return currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
+  }
+
+  test("pest and lawn margins re-price the setup estimate on today's engine at the plan the customer has now", async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    const offer = await todayEngineOffer({ recurring_pattern: 'every_6_weeks' });
+    expect(mockTranslate).toHaveBeenCalledWith(engineProfile, ['PEST'], { pestFreq: 6, lawnFreq: 9 });
+    expect(mockTranslate).toHaveBeenCalledWith(engineProfile, ['LAWN'], { pestFreq: 4, lawnFreq: 9 });
+    // Pest: $140 x 0.4 = $56.00 against $113.33 = 50.6%. Lawn: $70.00 plus
+    // its 42-day spread (below) against $75.56 = 6.8%.
     expect(offer.services.map((svc) => [svc.key, svc.marginPct])).toEqual([['lawn_care', 6.8], ['pest_control', 50.6]]);
-    // Nine rounds book 9 visits a year: no spread.
-    mockLawnRoundsGate = true;
-    const rounds = await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
-    expect(rounds.services.find((svc) => svc.key === 'lawn_care').marginPct).toBe(7.4);
+  });
+
+  test('the lawn 42-day spread follows the stored series, never the 9-rounds gate', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    // A 42-day series makes ~8.7 visits a year, so the line's $114 of yearly
+    // costs spread over fewer visits than the 9 it prices: $70.00 + $114 x
+    // (42/365 - 1/9) = $70.45 against $75.56 = 6.8%. Nine rounds make 9
+    // visits: $70.00 = 7.4%. The gate decides only how NEW series are written.
+    const root = { id: 'l0', service_type: 'lawn_care', scheduled_date: '2020-01-06', estimated_price: 80, recurring_pattern: 'every_6_weeks' };
+    const cases = [
+      ['every_6_weeks', { recurring_pattern: 'every_6_weeks' }, [], 6.8],
+      ['custom, 42 days', { recurring_pattern: 'custom', recurring_interval_days: 42 }, [], 6.8],
+      ['a child that carries no pattern, under an every_6_weeks root', { recurring_parent_id: 'l0' }, [root], 6.8],
+      ['lawn_rounds_9', { recurring_pattern: 'lawn_rounds_9' }, [], 7.4],
+    ];
+    for (const rounds of [false, true]) {
+      mockLawnRoundsGate = rounds;
+      for (const [series, lawnSeries, extraRows, marginPct] of cases) {
+        const offer = await todayEngineOffer(lawnSeries, extraRows);
+        expect([series, rounds, offer.services.find((svc) => svc.key === 'lawn_care').marginPct])
+          .toEqual([series, rounds, marginPct]);
+      }
+    }
   });
 
   test('the save and the tick list share one property scope', () => {

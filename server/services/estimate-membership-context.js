@@ -1978,18 +1978,18 @@ const TODAY_ENGINE_PLANS = {
 };
 
 // Planned cost per visit of an engine line: its list per-visit price x
-// (1 - its list margin). A 9x lawn plan books a 42-day series while
-// GATE_LAWN_9X_ROUNDS is off (about 8.7 visits a year, not the 9 the engine
-// prices), so the line's yearly admin and callback reserve spread over those
-// visits. null when the line carries no price or margin.
-function plannedVisitCost(line, visits, key) {
+// (1 - its list margin). On a 42-day series (about 8.7 visits a year, not the
+// count the engine prices) the line's yearly admin and callback reserve
+// spread over the visits the series really makes; only lawn lines carry
+// them. null when the line carries no price or margin.
+function plannedVisitCost(line, visits, fortyTwoDaySeries) {
   const margin = Number(line?.margin);
   const listPerVisit = Number(line?.perApp) > 0 ? Number(line.perApp) : Number(line?.annual) / visits;
-  if (!(listPerVisit > 0) || !Number.isFinite(margin)) return null;
-  const yearly = key === 'lawn_care' && visits === 9 && !isEnabled('lawn9xRounds')
-    ? (Number(line.costs?.annualAdmin) || 0) + (Number(line.costs?.annualCallbackReserve) || 0)
+  if (!(Number.isFinite(listPerVisit) && listPerVisit > 0 && Number.isFinite(margin))) return null;
+  const spread = fortyTwoDaySeries && visits > 0
+    ? ((Number(line.costs?.annualAdmin) || 0) + (Number(line.costs?.annualCallbackReserve) || 0)) * (42 / 365 - 1 / visits)
     : 0;
-  return listPerVisit * (1 - margin) + yearly * (42 / 365 - 1 / 9);
+  return listPerVisit * (1 - margin) + spread;
 }
 
 // Estimated margin (percent, one decimal) at the new price for one offered
@@ -2003,18 +2003,30 @@ function plannedVisitCost(line, visits, key) {
 async function offeredFamilyMarginPct(database, service, visitsPerYear) {
   const rowIds = Array.isArray(service?.rowIds) ? service.rowIds : [];
   if (!rowIds.length || !(Number(service.newPerVisit) > 0)) return null;
-  // Children of a recurring series may carry no estimate stamp; their root does.
+  // Children of a recurring series may carry no estimate stamp or pattern;
+  // their root does.
+  const series = ['id', 'source_estimate_id', 'recurring_pattern', 'recurring_interval_days'];
   const rows = await database('scheduled_services').whereIn('id', rowIds)
-    .select('id', 'recurring_parent_id', 'source_estimate_id');
+    .select(...series, 'recurring_parent_id');
   const parentIds = [...new Set(rows.map((row) => row.recurring_parent_id).filter(Boolean).map(String))];
   const parents = parentIds.length
-    ? await database('scheduled_services').whereIn('id', parentIds).select('id', 'source_estimate_id')
+    ? await database('scheduled_services').whereIn('id', parentIds).select(...series)
     : [];
-  const parentEstimate = new Map(parents.map((row) => [String(row.id), row.source_estimate_id]));
+  const parentById = new Map(parents.map((row) => [String(row.id), row]));
   const estimateIds = new Set(rows
-    .map((row) => row.source_estimate_id || parentEstimate.get(String(row.recurring_parent_id)))
+    .map((row) => row.source_estimate_id || parentById.get(String(row.recurring_parent_id))?.source_estimate_id)
     .filter(Boolean).map(String));
   if (estimateIds.size !== 1) return null;
+  // The stored series, not GATE_LAWN_9X_ROUNDS: the gate decides how NEW
+  // series are written, and a rounds series (lawn_rounds_9) makes 9 visits a
+  // year. The scheduler's own gap says which rows repeat every 42 days
+  // (every_6_weeks, or custom with a 42-day interval). Required at call
+  // time, as the cadence read above does.
+  const { normalizeRecurringPattern, intervalDaysForPattern } = require('./recurring-appointment-seeder');
+  const fortyTwoDaySeries = rows.every((row) => {
+    const own = row.recurring_pattern ? row : parentById.get(String(row.recurring_parent_id)) || {};
+    return intervalDaysForPattern(normalizeRecurringPattern(own.recurring_pattern), own.recurring_interval_days) === 42;
+  });
   // A missing row parses to {} (parseEstimateData), which has no line.
   const estData = parseEstimateData(await database('estimates').where({ id: [...estimateIds][0] }).first('estimate_data'));
   const plan = TODAY_ENGINE_PLANS[service.key];
@@ -2030,7 +2042,7 @@ async function offeredFamilyMarginPct(database, service, visitsPerYear) {
     )).lineItems;
   }
   const line = (lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
-  const cost = plannedVisitCost(line, today ? visitsPerYear : estimateVisitsFor(estData, service.key), service.key);
+  const cost = plannedVisitCost(line, today ? visitsPerYear : estimateVisitsFor(estData, service.key), fortyTwoDaySeries);
   return cost === null ? null : Math.round((1 - cost / Number(service.newPerVisit)) * 1000) / 10;
 }
 
