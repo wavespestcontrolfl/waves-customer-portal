@@ -7016,6 +7016,18 @@ function customerRouteCheckMode() {
   return value === 'true' ? 'on' : 'off';
 }
 
+// GATE_REVIEW_NAME_MATCH_V2 read at CALL time (owner 2026-10-31, review matching plan PR 3):
+// 'off' | 'shadow' | 'on'. After each hourly review sync, services/review-name-match.js scores every
+// live Google review against every customer (names, first known contact, activity) and records the
+// decision on google_reviews.name_match_*. shadow = score and log the counts, write nothing; on =
+// write the decisions, which the Reviews match queue lists for one tap. Nothing links, marks or
+// sends either way. Unset is the kill, no redeploy.
+function reviewNameMatchMode() {
+  const value = String(process.env.GATE_REVIEW_NAME_MATCH_V2 || '').trim().toLowerCase();
+  if (value === 'shadow') return 'shadow';
+  return value === 'true' ? 'on' : 'off';
+}
+
 // GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
 // builds", Route Check Everywhere build 3c). The portal assistant's
 // check_availability and the text drafter's city-based OPEN TIMES fallback
@@ -8730,6 +8742,7 @@ function stockCountAwareUsageLive() {
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
+module.exports.reviewNameMatchMode = reviewNameMatchMode;
 module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
