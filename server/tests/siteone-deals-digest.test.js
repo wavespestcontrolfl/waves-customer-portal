@@ -11,6 +11,7 @@ const logger = require('../services/logger');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const {
   runSiteOneDealsDigest, isDealEmail, extractDeadline, matchProducts, isDealSenderDomain,
+  candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS,
 } = require('../services/procurement/siteone-deals-digest');
 
 // Gmail's own header, shaped like the real ones (see email-auth-strict.test.js).
@@ -194,7 +195,12 @@ describe('runSiteOneDealsDigest', () => {
       const preds = [];
       const chain = {
         select(...cols) { calls.selects.push(cols); return chain; },
+        // The SQL narrowing is checked on the real builder below; the fake keeps its date window only.
+        whereNull() { return chain; },
+        whereRaw() { return chain; },
+        limit(n) { calls.limit = n; return chain; },
         where(a, b, c) {
+          if (typeof a === 'function') return chain;
           calls.wheres.push([table, a, b, c]);
           if (typeof a === 'object') preds.push((row) => Object.entries(a).every(([k, v]) => row[k] === v));
           else if (c !== undefined) preds.push((row) => (b === '>=' ? row[a] >= c : row[a] < c));
@@ -213,6 +219,7 @@ describe('runSiteOneDealsDigest', () => {
       };
       return chain;
     };
+    db.raw = (sql, bindings) => ({ sql, bindings });
     return { db, calls };
   }
 
@@ -250,6 +257,27 @@ describe('runSiteOneDealsDigest', () => {
     expect(calls.wheres).toContainEqual(['emails', 'received_at', '<', now]);
     expect(calls.selects[0]).toEqual(expect.arrayContaining(['authentication_results', 'label_ids', 'quarantined_at']));
     expect(calls.wheres).toContainEqual(['products_catalog', { active: true }, undefined, undefined]);
+  });
+
+  test('reaching the candidate cap logs a warning and adds a line to the bell', async () => {
+    const flood = Array.from({ length: MAX_CANDIDATE_ROWS }, (_, i) => email({ id: 1000 + i, received_at: new Date('2026-10-30T15:00:00Z') }));
+    const { db, calls } = fakeDb({ emails: flood });
+    const notify = jest.fn().mockResolvedValue({ id: 1 });
+    logger.warn.mockClear();
+    await runSiteOneDealsDigest({ now, db, notify });
+    expect(calls.limit).toBe(MAX_CANDIDATE_ROWS);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`cap of ${MAX_CANDIDATE_ROWS}`));
+    const lines = notify.mock.calls[0][2].detail.split('\n');
+    expect(lines[lines.length - 1]).toBe(`Note: only the newest ${MAX_CANDIDATE_ROWS} candidate emails were read; older mail this week may be missing.`);
+  });
+
+  test('below the cap there is no cap warning or note', async () => {
+    const { db } = fakeDb({ emails: weekEmails() });
+    const notify = jest.fn().mockResolvedValue({ id: 1 });
+    logger.warn.mockClear();
+    await runSiteOneDealsDigest({ now, db, notify });
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(notify.mock.calls[0][2].detail).not.toContain('Note:');
   });
 
   test('spoofed, spam-labelled and quarantined mail never reaches the bell', async () => {
@@ -296,5 +324,42 @@ describe('runSiteOneDealsDigest', () => {
   test('a bell that was not saved fails the run so job health goes red', async () => {
     const { db } = fakeDb({ emails: weekEmails() });
     await expect(runSiteOneDealsDigest({ now, db, notify: jest.fn().mockResolvedValue(null) })).rejects.toThrow(/not saved/);
+  });
+});
+
+describe('candidateEmailQuery (SQL shape, built with the real knex builder, nothing sent to a database)', () => {
+  const knex = require('knex')({ client: 'pg' });
+  const since = new Date('2026-10-26T13:00:00Z');
+  const until = new Date('2026-11-02T13:00:00Z');
+  const { sql, bindings } = candidateEmailQuery(knex, since, until).toSQL().toNative();
+  const normalized = sql.replace(/\s+/g, ' ');
+
+  afterAll(() => knex.destroy());
+
+  test('bounds the bodies to excerpts under their own column names', () => {
+    expect(normalized).toContain('left(body_text, $1) as body_text');
+    expect(normalized).toContain('left(body_html, $2) as body_html');
+    expect(bindings.slice(0, 2)).toEqual([BODY_CHARS, HTML_CHARS]);
+    expect(HTML_CHARS).toBeGreaterThan(BODY_CHARS);
+  });
+
+  test('pre-filters the sender by SiteOne and every maker domain (a superset: JS decides)', () => {
+    for (const domain of ['siteone.com', 'basf.com', 'lesco.com', 'controlsolutionsinc.com']) expect(bindings).toContain(`%${domain}%`);
+    expect(normalized).toMatch(/\("from_address" ilike \$\d+ or "from_address" ilike/);
+    expect(bindings.filter((b) => typeof b === 'string' && b.startsWith('%') && b.endsWith('%') && !b.includes('pass')).length).toBe(20); // siteone.com + 19 makers
+  });
+
+  test('keeps the date window, a coarse dkim/spf pass check, and drops held-back rows in SQL', () => {
+    expect(bindings).toEqual(expect.arrayContaining([since, until, '%dkim=pass%', '%spf=pass%', 'SPAM', 'TRASH']));
+    expect(normalized).toContain('("authentication_results" ilike');
+    expect(normalized).toContain('"quarantined_at" is null');
+    expect(normalized).toContain("COALESCE(classification, '') NOT IN ('spam', 'vendor_invoice')");
+    expect(normalized.match(/NOT jsonb_exists\(COALESCE\(label_ids::jsonb, '\[\]'::jsonb\), \$\d+\)/g)).toHaveLength(2);
+    expect(normalized).not.toMatch(/label_ids\s*\?/);
+  });
+
+  test('newest first with a hard cap', () => {
+    expect(normalized).toContain('order by "received_at" desc limit $');
+    expect(bindings[bindings.length - 1]).toBe(MAX_CANDIDATE_ROWS);
   });
 });

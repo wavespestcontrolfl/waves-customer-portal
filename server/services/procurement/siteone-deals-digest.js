@@ -30,9 +30,15 @@ const { etWeekStart, etParts, etDateString } = require('../../utils/datetime-et'
 
 const WINDOW_DAYS = 7;
 const BODY_CHARS = 6000;
+// Tags inflate HTML, so the HTML excerpt is wider than the plain-text one.
+const HTML_CHARS = BODY_CHARS * 4;
+// The most mail one run reads. Anyone can write to the public contact@ address, so the
+// query is capped; a run that reaches the cap says so (log + a line in the bell).
+const MAX_CANDIDATE_ROWS = 300;
 const DEADLINE_MAX_DAYS = 180;
 const MAX_PRODUCTS = 6;
 const SUBJECT_CLIP = 120;
+const CAP_NOTE = `Note: only the newest ${MAX_CANDIDATE_ROWS} candidate emails were read; older mail this week may be missing.`;
 
 const SITEONE_DOMAIN = 'siteone.com';
 const MAKER_DOMAINS = [
@@ -265,6 +271,34 @@ function dealLine(email, products) {
 }
 
 /**
+ * The candidate rows, narrowed in SQL so a mail flood to the public contact@ address
+ * cannot load unbounded bodies into the worker. Every filter here is a SUPERSET of what
+ * the JS checks accept (sender domain by substring, a coarse dkim/spf pass, rows not
+ * obviously held back); isDealEmail stays the authority. Bodies come back as bounded
+ * excerpts under their own column names. label_ids is jsonb; jsonb_exists, never the
+ * "?" operator, which knex reads as a binding.
+ */
+function candidateEmailQuery(conn, since, now) {
+  return conn('emails')
+    .select(
+      'id', 'from_address', 'from_name', 'subject', 'has_attachments', 'received_at', 'classification',
+      'authentication_results', 'label_ids', 'quarantined_at',
+      conn.raw('left(body_text, ?) as body_text', [BODY_CHARS]),
+      conn.raw('left(body_html, ?) as body_html', [HTML_CHARS]),
+    )
+    .where('received_at', '>=', since)
+    .where('received_at', '<', now)
+    .where((qb) => { for (const domain of SENDER_DOMAINS) qb.orWhere('from_address', 'ilike', `%${domain}%`); })
+    .where((qb) => qb.where('authentication_results', 'ilike', '%dkim=pass%').orWhere('authentication_results', 'ilike', '%spf=pass%'))
+    .whereNull('quarantined_at')
+    .whereRaw("COALESCE(classification, '') NOT IN ('spam', 'vendor_invoice')")
+    .whereRaw("NOT jsonb_exists(COALESCE(label_ids::jsonb, '[]'::jsonb), ?)", ['SPAM'])
+    .whereRaw("NOT jsonb_exists(COALESCE(label_ids::jsonb, '[]'::jsonb), ?)", ['TRASH'])
+    .orderBy('received_at', 'desc')
+    .limit(MAX_CANDIDATE_ROWS);
+}
+
+/**
  * Scans the last 7 days of mail, rings ONE bell when there are deals.
  * `notify` has raiseAdminAlert's shape (category, spec, opts); tests pass a fake.
  * Returns { scanned, deals, notified }.
@@ -274,11 +308,9 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
   const raise = notify || ((...args) => require('../admin-alert-compose').raiseAdminAlert(...args));
   const since = new Date(now.getTime() - WINDOW_DAYS * 86400000);
 
-  const rows = await conn('emails')
-    .select('id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'has_attachments', 'received_at', 'classification', 'authentication_results', 'label_ids', 'quarantined_at')
-    .where('received_at', '>=', since)
-    .where('received_at', '<', now)
-    .orderBy('received_at', 'desc');
+  const rows = await candidateEmailQuery(conn, since, now);
+  const capped = rows.length >= MAX_CANDIDATE_ROWS;
+  if (capped) logger.warn(`[siteone-deals] candidate cap of ${MAX_CANDIDATE_ROWS} emails reached; older mail this week was not read`);
   const scanned = rows.length;
   const deals = rows
     .filter(isDealEmail)
@@ -310,7 +342,7 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
   }, {
     // 'system' alone is suppressed under the bell policy; a deal list is a handoff.
     bell: true,
-    detail: deals.map((e) => dealLine(e, productNames)).join('\n'),
+    detail: [...deals.map((e) => dealLine(e, productNames)), ...(capped ? [CAP_NOTE] : [])].join('\n'),
     dedupeKey,
     refreshOnDedupe: true,
     metadata: { source: 'siteone-deals-digest', dealCount: count, emailIds: deals.map((e) => e.id) },
@@ -323,4 +355,5 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
 
 module.exports = {
   runSiteOneDealsDigest, isDealEmail, extractDeadline, matchProducts, isDealSenderDomain,
+  candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS,
 };
