@@ -7,7 +7,6 @@
 // real test-env behavior (all gates dark); the extension suite flips ONLY
 // waveguardExtendExisting.
 let mockExtendExistingGate = false;
-let mockExtendPickGate = false;
 let mockLawnRoundsGate = false;
 let mockAutoTierGate = false;
 jest.mock('../config/feature-gates', () => ({
@@ -16,7 +15,6 @@ jest.mock('../config/feature-gates', () => ({
   ...jest.requireActual('../config/feature-gates'),
   isEnabled: (gate) => {
     if (gate === 'waveguardExtendExisting') return mockExtendExistingGate;
-    if (gate === 'waveguardExtendPick') return mockExtendPickGate;
     if (gate === 'lawn9xRounds') return mockLawnRoundsGate;
     if (gate === 'autoWaveguardTierEnroll') return mockAutoTierGate;
     return false;
@@ -2934,14 +2932,13 @@ describe('existing-service tier extension snapshot', () => {
   });
 });
 
-// Staff pick (GATE_WAVEGUARD_EXTEND_PICK, owner 2026-10-30 option B): the
+// Staff pick (owner 2026-10-30 option B): the
 // estimate tool lists the member's current services at the new tier and only
 // the ticked ones freeze — from ANY starting tier, at the old-rate-to-new-rate
 // price, never 5 more points off an already-discounted contract.
 describe('staff-picked tier extension (option B)', () => {
   afterEach(() => {
     mockExtendExistingGate = false;
-    mockExtendPickGate = false;
     mockLawnRoundsGate = false;
     mockTranslate.mockReset();
     mockGenerate.mockReset();
@@ -2965,7 +2962,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test('a Silver start freezes only the ticked service, moved from the Silver rate to the Gold rate', async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
       customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
       extensionPick: { ticked: ['pest_control'], unticked: ['lawn_care'] },
@@ -2982,7 +2978,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test('no pick sent (an older tab): a Silver start stays plan-less and a Bronze start keeps its automatic plan', async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     const silver = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
       customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
     });
@@ -2996,7 +2991,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test('a Bronze start honors an empty pick: nothing freezes and the unticked service is kept, not reviewed', async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     const ctx = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
       customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData(),
       extensionPick: { ticked: [], unticked: ['pest_control'] },
@@ -3007,7 +3001,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test('a service the list never showed is never recorded as kept — it stays on the office review path', async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     // Lawn was not on the list staff saw (say its next visit was already
     // invoiced), so it is neither ticked nor unticked.
     const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
@@ -3020,7 +3013,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test('a pick on a quote that raises no tier freezes and keeps nothing', async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     // The quote re-prices pest only: no new family, no tier change.
     const ctx = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
       customerId: 'cust-1', freezeExtensionPlan: true,
@@ -3034,7 +3026,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test('appointments an earlier extension already covered never freeze, so the card never shows a price the accept parks', async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     const pick = { extensionPick: { ticked: ['pest_control', 'lawn_care'], unticked: [] } };
     const freeze = (database) => computeMembershipContext(database, {
       customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(), ...pick,
@@ -3054,16 +3045,6 @@ describe('staff-picked tier extension (option B)', () => {
     // An unreadable audit trail freezes nothing.
     const unreadable = await freeze(fakeDb({ scheduledRows: silverRows(), extensionAuditsThrows: true }));
     expect(unreadable.existingServices).toEqual([]);
-  });
-
-  test('pick gate off: a sent pick changes nothing', async () => {
-    mockExtendExistingGate = true;
-    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
-      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
-      extensionPick: { ticked: ['pest_control', 'lawn_care'], unticked: [] },
-    });
-    expect(ctx.existingServices).toEqual([]);
-    expect(ctx).not.toHaveProperty('extensionKeptKeys');
   });
 
   test('the tick list offers each eligible service with a margin from the estimate that set it up', async () => {
@@ -3089,7 +3070,6 @@ describe('staff-picked tier extension (option B)', () => {
     const scope = { groupedEstimate: false, perPropertyStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey } };
     expect(await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope })).toBeNull();
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     const offer = await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
     expect(offer).toMatchObject({ fromTierLabel: 'Silver', tierLabel: 'Gold', tierDiscountPct: 15 });
     // Cost per visit = list price x (1 - list margin): pest $53.33 against
@@ -3147,7 +3127,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test("pest and lawn margins re-price the setup estimate on today's engine at the plan the customer has now", async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     const offer = await todayEngineOffer({ recurring_pattern: 'every_6_weeks' });
     expect(mockTranslate).toHaveBeenCalledWith(engineProfile, ['PEST'], { pestFreq: 6, lawnFreq: 9 });
     expect(mockTranslate).toHaveBeenCalledWith(engineProfile, ['LAWN'], { pestFreq: 4, lawnFreq: 9 });
@@ -3159,7 +3138,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test('a plan the engine prices as another plan shows no margin, never the default plan\'s', async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     // The engine prices pest 3x a year as quarterly, and lawn 2x, 4x (retired)
     // and 6x (hidden tier) as 9x.
     for (const lawn of ['semiannual', 'quarterly', 'bimonthly']) {
@@ -3172,7 +3150,6 @@ describe('staff-picked tier extension (option B)', () => {
 
   test('the lawn 42-day spread follows the stored series, never the 9-rounds gate', async () => {
     mockExtendExistingGate = true;
-    mockExtendPickGate = true;
     // A 42-day series makes ~8.7 visits a year, so the line's $114 of yearly
     // costs spread over fewer visits than the 9 it prices: $70.00 + $114 x
     // (42/365 - 1/9) = $70.45 against $75.56 = 6.8%. Nine rounds make 9

@@ -1086,7 +1086,7 @@ describe('admin estimate persistence', () => {
     mockQualifyingLookup.mockImplementation(actualQualifyingLookup);
   });
 
-  test('the current services staff ticked reach the membership snapshot, and the tick list is never stored (GATE_WAVEGUARD_EXTEND_PICK)', async () => {
+  test('the current services staff ticked reach the membership snapshot, and the tick list is never stored', async () => {
     const now = () => new Date('2026-05-15T12:00:00.000Z');
     const { database } = makeDatabase({
       lead: { id: 'lead-1', status: 'new', phone: '9415550101' },

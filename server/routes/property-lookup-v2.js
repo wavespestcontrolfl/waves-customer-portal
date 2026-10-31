@@ -6373,8 +6373,8 @@ router.post('/calculate-estimate', async (req, res) => {
       }
     } catch (_) { /* a convenience flag; the save decides */ }
     // The linked member's current services at the tier this quote moves
-    // them to, for staff to tick (GATE_WAVEGUARD_EXTEND_PICK, owner
-    // 2026-10-30 option B). Read-only; a failure only leaves the list off.
+    // them to, for staff to tick (owner 2026-10-30 option B). Read-only; a
+    // failure only leaves the list off.
     // ADMIN ONLY, like /api/admin/estimates/customer-spend: the list carries
     // contracted prices and margins, and this router also admits technicians.
     if (options?.existingCustomerId && req.techRole === 'admin') {

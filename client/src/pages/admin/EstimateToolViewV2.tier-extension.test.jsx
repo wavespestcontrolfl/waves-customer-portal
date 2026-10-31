@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Owner 2026-10-30, option B (GATE_WAVEGUARD_EXTEND_PICK): when a quote moves
+// Owner 2026-10-30, option B: when a quote moves
 // a linked member up a WaveGuard tier, the Pricing summary lists their current
 // services at the new tier price with tick boxes, and the save sends only the
 // ticked ones. The tier discount itself shows in the summary, not only inside

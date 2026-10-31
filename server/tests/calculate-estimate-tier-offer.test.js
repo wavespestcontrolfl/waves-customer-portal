@@ -1,6 +1,6 @@
 // POST /calculate-estimate attaches the linked member's current services at
-// the tier the quote moves them to (GATE_WAVEGUARD_EXTEND_PICK, owner
-// 2026-10-30 option B), scoped by the same property evidence the save uses.
+// the tier the quote moves them to (owner 2026-10-30 option B), scoped by the
+// same property evidence the save uses.
 // The list is read-only and best-effort: a failure leaves it off and the
 // quote still prices. Handler invoked off the router stack (repo has no
 // supertest); the account reads are mocked.

@@ -2199,7 +2199,7 @@ async function resolveEstimateWritePayload({
         // plan-less (codex #3338 r7).
         ...membershipScopeArgs({ groupedEstimate, perPropertyStreetScope }),
         // The current services staff ticked and unticked in the estimate
-        // tool (GATE_WAVEGUARD_EXTEND_PICK); absent = the automatic plan.
+        // tool; absent = the automatic plan.
         extensionPick: Array.isArray(body.tierExtensionKeys)
           ? {
             ticked: body.tierExtensionKeys.filter((key) => typeof key === 'string'),

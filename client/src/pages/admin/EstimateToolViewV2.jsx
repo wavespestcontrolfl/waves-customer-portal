@@ -796,8 +796,8 @@ export function nextFormForOfferTiers(form, estimate) {
   }
   return form;
 }
-// The linked member's current services this quote moves up a tier
-// (GATE_WAVEGUARD_EXTEND_PICK, owner 2026-10-30 option B). The pick keeps the
+// The linked member's current services this quote moves up a tier (owner
+// 2026-10-30 option B). The pick keeps the
 // latest list (`offered`) and every service staff unticked for this customer
 // (`unticked`); a service is ticked when it is offered and not unticked. An
 // untick holds until staff tick it again — through a regenerate, a result
@@ -2667,7 +2667,7 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }, []);
 
-  // A tick on the current-services list (GATE_WAVEGUARD_EXTEND_PICK) changes
+  // A tick on the current-services list (owner 2026-10-30 option B) changes
   // what an accept reprices, never this quote's price: the generated estimate
   // stays, and the saved state is invalidated like the other delivery options
   // so Review and send cannot go out with the previously saved choice.
@@ -4863,8 +4863,7 @@ export default function EstimateToolViewV2({
         offerTiersDeclined: !!form._offerTiersDeclined,
         billByInvoice: !!form.billByInvoice,
         // The current services staff ticked for the new tier, and the ones
-        // they saw and unticked (GATE_WAVEGUARD_EXTEND_PICK). Absent = the
-        // server's automatic plan.
+        // they saw and unticked. Absent = the server's automatic plan.
         ...(savingInputs.tierExtensionPick
           && savingInputs.tierExtensionPick.customerId === (form.customerId || existingCustomerMatch?.id)
           ? {
