@@ -102,7 +102,7 @@ const {
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching, priceAreaAddOnList, assertAreaAddOnHostVisit,
-  pricePlugging, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
+  pricePlugging, pluggingAreaRequiredLine, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   resolvePalmCount,
@@ -1987,15 +1987,18 @@ function generateEstimate(input) {
     lineItems.push(line);
   });
   if (services.plugging && !useCommercialManualQuote(services.plugging, 'lawn_care')) {
-    const result = pricePlugging(
-      services.plugging.area || property.lawnSqFt,
-      services.plugging.spacing || 12,
-      {
+    // Priced only from the entered area to plug, never the whole lawn (owner
+    // 2026-10-31). Blank or zero means not entered; any other value goes to
+    // pricePlugging, which still rejects an invalid one.
+    const plugArea = services.plugging.area;
+    const plugAreaEntered = plugArea !== undefined && plugArea !== null && plugArea !== '' && Number(plugArea) !== 0;
+    const plugSpacing = services.plugging.spacing || 12;
+    lineItems.push(plugAreaEntered
+      ? pricePlugging(plugArea, plugSpacing, {
         urgency: services.plugging.urgency || 'ROUTINE',
         afterHours: services.plugging.afterHours || false,
-      }
-    );
-    lineItems.push(stampTurfReview(result, !(Number(services.plugging.area) > 0)));
+      })
+      : pluggingAreaRequiredLine(plugSpacing));
   }
   // Commercial bypass only with a POSITIVE explicit point count (pre-audit of
   // the codex #3594 r4 pattern): priceFoamDrill defaults to 5 points when the
@@ -3029,13 +3032,13 @@ function generateEstimate(input) {
       priority: 'HIGH',
     });
   }
+  // Plugging is not here: it prices only from its own entered area.
   const turfPricedServicesSelected = !!(
     services.lawn ||
     services.oneTimeLawn ||
     services.lawnPestControl ||
     services.topDressing ||
-    services.dethatching ||
-    services.plugging
+    services.dethatching
   );
 
   // ── 8. Build estimate output ───────────────────────────────

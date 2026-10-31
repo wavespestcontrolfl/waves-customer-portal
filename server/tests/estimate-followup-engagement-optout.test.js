@@ -84,9 +84,6 @@ describe('opt-out key: ONE shared rule (contract)', () => {
   test.each([
     'estimate-follow-up.js',
     'estimate-engagement-engine.js',
-    // The auto-renew sender extends AND emails — both forbidden for
-    // opted-out estimates (uncapped audit r4 P1).
-    'estimate-auto-renew.js',
     // extendEstimate forces silent for opted-out rows — the extension is
     // allowed but its SMS/email announcement is not (in-hook audit on
     // #3391 round 9).

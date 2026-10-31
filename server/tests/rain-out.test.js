@@ -2290,7 +2290,7 @@ describe('rain-out service', () => {
   describe('getOptions', () => {
     test('attaches NWS rain chances to day options and counts the remaining route', async () => {
       SmartRebooker.findRescheduleOptions.mockResolvedValue([
-        { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120, dayAlreadyLate: true },
+        { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120, dayAlreadyLate: true, routeChecked: true, driveMinutes: 8 },
         { date: '2026-06-13', displayDate: 'Sat, Jun 13', suggestedWindow: { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' }, score: 100 },
       ]);
       getDailyRainOutlook.mockResolvedValue({
@@ -2321,6 +2321,9 @@ describe('rain-out service', () => {
       // GATE_ROUTE_CHECK_LATE_DAYS: the rebooker's already-late mark rides to the sheet; a clean day has no key.
       expect(options.days[0].dayAlreadyLate).toBe(true);
       expect(options.days[1]).not.toHaveProperty('dayAlreadyLate');
+      // Route-dispatcher audit D: the rebooker's driveMinutes rides to both sheets' "+N min drive"; an unpriced day has no key.
+      expect(options.days[0].driveMinutes).toBe(8);
+      expect(options.days[1]).not.toHaveProperty('driveMinutes');
       // Day options are booked as on-the-hour 1-hour slots, not the rebooker's
       // wider 2-3h suggestedWindow, and the display is re-derived to match.
       expect(options.days[0].window).toEqual({ start: '08:00', end: '09:00' });

@@ -1316,6 +1316,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       customerId,
       locationId: review.location_id,
       starRating: review.star_rating,
+      reviewCreatedAt: review.review_created_at,
       source: 'google_review_manual_match',
     });
     // review.linked_5star (email_template_automation, dark/shadow) — same

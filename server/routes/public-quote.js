@@ -127,6 +127,7 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
+const { PLUGGING_AREA_REQUIRED_REASON } = require('../services/pricing-engine/service-pricing');
 // customQuoteReason the engine stamps on every top dressing line (estimate-engine.js).
 const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
 // Reasons the office prices by hand: a keyed quote-on-request product and top
@@ -253,7 +254,23 @@ function numberOrNull(...values) {
 // probe applies: an ambiguous phone declines outright (falling through to
 // email would resolve the same shared household by another key); only a
 // no-match phone probe falls through.
-async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}) {
+//
+// GATE_QUOTE_SAME_PERSON_MATCH (dark): an ambiguous phone whose 2..10 rows are
+// ALL one person at the typed address (names + street/unit/ZIP match, pairwise
+// and against the typed contact) resolves to the nightly sweep's winner row,
+// so a rerun does not add a customers row each time. `typed` is optional; the
+// pre-pricing rodent lookup omits it and keeps the old null.
+async function resolveAmbiguousPhoneSamePerson(database, phoneDigits, typed) {
+  if (!typed || !require('../config/feature-gates').quoteSamePersonMatchLive()) return null;
+  const rows = await database('customers')
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+    .whereNull('deleted_at')
+    .limit(11)
+    .select('*');
+  return require('../services/customer-dedupe').resolveSamePersonCluster(database, rows, typed);
+}
+
+async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}, typed = null) {
   const phoneDigits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
   const emailLc = String(contactEmail || '').trim().toLowerCase();
   if (phoneDigits.length === 10) {
@@ -263,7 +280,7 @@ async function findExistingCustomerByContact(database, { contactPhone, contactEm
       .limit(2)
       .select('*');
     if (matches.length === 1) return matches[0];
-    if (matches.length > 1) return null;
+    if (matches.length > 1) return resolveAmbiguousPhoneSamePerson(database, phoneDigits, typed);
   }
   if (emailLc) {
     const matches = await database('customers')
@@ -1915,8 +1932,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.plugging) {
       // Forward a positive patch area so the engine prices the patch; when
-      // absent the engine falls back to the whole lawn (the /estimate page's
-      // default behavior).
+      // absent the engine prices nothing and the quote goes to the office
+      // (owner 2026-10-31: never the whole lawn).
       const pluggingArea = Number(services.plugging.area);
       engineInput.services.plugging = {
         spacing: services.plugging.spacing || 12,
@@ -2704,7 +2721,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // have it.
     let customerId = null;
     try {
-      const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
+      const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail }, {
+        first_name: contactFirstName,
+        last_name: contactLastName,
+        address_line1: quoteAddress,
+        address_line2: normalizedAddress.line2 || null,
+        city: quoteCity || '',
+        zip: quoteZip || '',
+      });
       // Normalized email for the new-customer insert below (the shared
       // lookup normalizes its own copy — codex #3591 r15 P1 TDZ fix).
       const emailLc = String(contactEmail || '').trim().toLowerCase();
@@ -3583,6 +3607,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         `${quoteRequired
           ? (quoteIsPricedByTeam
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
+            : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
+              ? `${serviceInterest} · needs the area to plug (sq ft) · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
@@ -4198,6 +4224,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
           : quoteRequiredReason === 'low_confidence_turf_requires_field_verification'
           ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
+          : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
+          ? 'Lawn plugging is priced by the square feet that need plugs — the Waves team will confirm that area with you and send your exact price shortly.'
           : (quoteRequiredReason === 'unknown_grass_type_priced_st_augustine' || quoteRequiredReason === 'lawn_v13_bahia_no_program')
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')

@@ -2107,6 +2107,17 @@ async function findScheduleGaps(input) {
 }
 
 
+// A visit's own price: its set price (a deliberate $0 included), else what was
+// prepaid for it (billing-lane.js treats a prepayment on an unpriced visit as its
+// payment). A visit with neither (a plan visit billed monthly, or one not priced
+// yet) returns null, so the day summary counts it and never guesses an amount.
+function visitOwnPrice(s) {
+  const set = s.estimated_price == null || s.estimated_price === '' ? NaN : Number(s.estimated_price);
+  if (Number.isFinite(set)) return set;
+  const prepaid = Number(s.prepaid_amount);
+  return prepaid > 0 ? prepaid : null;
+}
+
 async function getDaySummary(date) {
   const services = await db('scheduled_services')
     .where({ 'scheduled_services.scheduled_date': date })
@@ -2124,14 +2135,17 @@ async function getDaySummary(date) {
   const unassigned = [];
   const byZone = {};
   let completed = 0;
-  let estRevenue = 0;
+  let visitPriceTotal = 0;
+  let visitsWithoutPrice = 0;
 
   services.forEach(s => {
     const zone = getZone(s.city);
     byZone[zone] = (byZone[zone] || 0) + 1;
 
     if (s.status === 'completed') completed++;
-    estRevenue += (parseFloat(s.estimated_price) || 125);
+    const price = visitOwnPrice(s);
+    if (price == null) visitsWithoutPrice++;
+    else visitPriceTotal += price;
 
     if (!s.tech_name) {
       unassigned.push({
@@ -2181,7 +2195,9 @@ async function getDaySummary(date) {
     total_services: services.length,
     completed,
     remaining: services.length - completed,
-    estimated_revenue: estRevenue,
+    visit_price_total: Math.round(visitPriceTotal * 100) / 100,
+    visits_with_price: services.length - visitsWithoutPrice,
+    visits_without_price: visitsWithoutPrice,
     unassigned,
     unassigned_count: unassigned.length,
     new_customer_count: newCustomerIds.size,

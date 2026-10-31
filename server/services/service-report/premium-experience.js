@@ -647,7 +647,9 @@ function buildWeatherCallContext({ record, applications = [] } = {}) {
     // decisions, so it must not claim adjustments were made (same rule as
     // the rain branch; codex P2 #3038 flagged the invented-decision copy).
     headline = 'Wind was elevated.';
-    body = 'Elevated wind was recorded at application time and noted with today’s service record.';
+    // The wind is read when the visit is completed (application-conditions.js), not at the
+    // spray itself, so the line says when it was taken: during the visit (owner 2026-10-31, D3).
+    body = 'Elevated wind was recorded during the visit and noted with today’s service record.';
   } else if (Number.isFinite(wind) && wind > 10) {
     headline = 'Wind noted during service.';
     body = 'A breezy window was recorded during the service and noted with today’s record.';

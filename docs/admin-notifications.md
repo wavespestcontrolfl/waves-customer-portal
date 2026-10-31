@@ -157,11 +157,14 @@ customer's message by this rule.
    visit, a quote handed off, a person's Gmail reply. Never because someone opened or read
    the bell (`read_at` is not evidence). It is behind `GATE_ALERT_CONTACT_CLOSE`: off, or
    `shadow` (records what would close in `audit_log`, changes no bell), or `true` (closes).
-   Two rules carry their own gate (off / `shadow` / `true`, rollback = unset): a voicemail
+   Three rules carry their own gate (off / `shadow` / `true`, rollback = unset): a voicemail
    closes once the customer's own visit completed after it the same Eastern day
-   (`GATE_VOICEMAIL_VISIT_UNDERWAY`), and a Leads bell with `doneWhen: 'lead_contacted'` and a
+   (`GATE_VOICEMAIL_VISIT_UNDERWAY`), a Leads bell with `doneWhen: 'lead_contacted'` and a
    lead id closes once the lead was texted or called back, booked or quoted after the bell
-   (`GATE_LEAD_CONTACTED_CLOSE`). Details in `docs/gates-and-env.md`.
+   (`GATE_LEAD_CONTACTED_CLOSE`), and a portal chat hand-off bell (`doneWhen: 'customer_answered'`)
+   closes once a person called back, answered the customer's call, texted or emailed that
+   customer after the bell (`GATE_PORTAL_CHAT_ANSWERED_CLOSE`; never the email-change bell).
+   Details in `docs/gates-and-env.md`.
    A staff action also answers a text (`GATE_SMS_STAFF_ACTION_ANSWERS`, off / `shadow` / `true`,
    rollback = unset): a visit a person booked in the admin, or a payment a person recorded,
    for the text's customer (by customer id) within 24 hours after the text. In `true` the Messages

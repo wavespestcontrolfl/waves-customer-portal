@@ -164,18 +164,13 @@ async function findSingleCustomerByPhone(phone) {
     .limit(2);
 
   if (matches.length === 1) return matches[0];
-  if (matches.length > 1) {
-    if (require('../services/shared-phone-link').sharedPhoneLinkEnabled()) {
-      return pickSharedPhoneCustomer(key, phone);
-    }
-    logger.warn(`[sms] ${matches.length} customers share sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
-  }
+  if (matches.length > 1) return pickSharedPhoneCustomer(key, phone);
   return null;
 }
 
-// GATE_SMS_SHARED_PHONE_LINK: the rule lives in services/shared-phone-link.js
+// Shared-phone link (owner 2026-10-10): the rule lives in services/shared-phone-link.js
 // (one matcher for this route and the contact-correction queue). Here only
-// the logging; a failed lookup returns null, the same outcome as the gate off.
+// the logging; a failed lookup returns null, the same outcome as no mark.
 async function pickSharedPhoneCustomer(key, phone) {
   let picked;
   try {
@@ -500,7 +495,7 @@ router.post('/sms', async (req, res) => {
       customerId: customer?.id,
       // A mark-linked shared-phone sender joins the customer's thread with
       // THIS message only; the number's earlier unknown thread is kept
-      // (codex #6268 r14, GATE_SMS_SHARED_PHONE_LINK).
+      // (codex #6268 r14).
       preserveUnknownThread: customer?.sharedPhoneLinked === true,
       channel: 'sms',
       ourEndpointId: To,

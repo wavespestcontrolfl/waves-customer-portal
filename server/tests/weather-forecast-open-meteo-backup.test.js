@@ -61,8 +61,8 @@ describe('weather-forecast Open-Meteo backup', () => {
     // Each test uses its own point: the shared client keeps its own cache.
     const hours = await getHourlyRainOutlook(27.41, -82.41);
     expect(hours).toEqual([
-      { startTime: '2026-10-07T06:00:00-04:00', rainChance: 10, shortForecast: null, temperatureF: 84.4, windMph: 10.04, source: 'open-meteo' },
-      { startTime: '2026-10-07T07:00:00-04:00', rainChance: 70, shortForecast: null, temperatureF: 84.4, windMph: 10.04, source: 'open-meteo' },
+      { startTime: '2026-10-07T06:00:00-04:00', rainChance: 10, shortForecast: null, temperatureF: 84.4, windMph: 10.04, windDirection: null, relativeHumidity: null, source: 'open-meteo' },
+      { startTime: '2026-10-07T07:00:00-04:00', rainChance: 70, shortForecast: null, temperatureF: 84.4, windMph: 10.04, windDirection: null, relativeHumidity: null, source: 'open-meteo' },
     ]);
     const url = new URL(global.fetch.mock.calls[1][0]);
     expect(url.host).toBe('customer-api.open-meteo.com');
@@ -71,6 +71,23 @@ describe('weather-forecast Open-Meteo backup', () => {
     // Cached like an NWS answer.
     await getHourlyRainOutlook(27.41, -82.41);
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('NWS down: the backup hours carry the wind_dir label and the humidity when the rows have them', async () => {
+    const conditions = require('../services/service-report/application-conditions');
+    const row = (i, extra) => ({ at: new Date(BASE * 1000 + i * 3600000).toISOString(), precipitation_probability_pct: 0, temperature_f_exact: 90, wind_mph_exact: 8, ...extra });
+    const spy = jest.spyOn(conditions, 'fetchPropertyForecast').mockResolvedValue({
+      status: 'ok',
+      hourly: [
+        row(0, { wind_dir: 'SW', wind_dir_deg: 225, humidity_pct: 64 }),
+        row(1, { wind_dir: null, humidity_pct: 70 }),
+        row(2, {}),
+      ],
+    });
+    global.fetch.mockResolvedValueOnce({ ok: false });
+    const hours = await getHourlyRainOutlook(27.43, -82.43);
+    spy.mockRestore();
+    expect(hours.map((h) => [h.windDirection, h.relativeHumidity])).toEqual([['SW', 64], [null, 70], [null, null]]);
   });
 
   test('NWS down: daily = max daytime chance, only for dates with all 12 daytime hours', async () => {

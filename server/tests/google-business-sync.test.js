@@ -467,7 +467,7 @@ describe('Google Business review sync', () => {
 
     expect(mark).toHaveBeenCalled();
     // Independent side effects: the failed suppression mark must not skip the attribution-moment thank-you.
-    expect(enrollReviewThankYou).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', source: 'google_review' }));
+    expect(enrollReviewThankYou).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', source: 'google_review', reviewCreatedAt: '2026-05-14T01:22:29Z' }));
     expect(result.synced).toBe(1);
     // Surfaced, but not as a storage failure.
     // The first failure is the one reported; a RESOLVED failure marker from the enrollment helper counts too.
@@ -1029,6 +1029,28 @@ describe('Google Business review sync', () => {
       auto_reply_draft: null,
       auto_reply_attempts: 0,
     });
+  });
+
+  test('Places fallback: a newly matched review hands the thank-you its Google post time (the 14-day age rule reads it)', async () => {
+    db.__state.rows.customers.push({ id: 'cust-9', first_name: 'Reviewer', last_name: 'Delta', active: true, has_left_google_review: false });
+    service._getClient = jest.fn(async () => null); // force Places fallback
+    const postedSeconds = 1778721749;
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{ author_name: 'Reviewer Delta', rating: 5, text: 'Great', time: postedSeconds }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+    const enroll = jest.spyOn(require('../services/automation-enroll'), 'enrollReviewThankYou').mockResolvedValue({ enrolled: false, reason: 'review_too_old' });
+
+    await service.syncAllReviews();
+
+    expect(enroll).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-9',
+      source: 'google_review_places',
+      reviewCreatedAt: new Date(postedSeconds * 1000).toISOString(),
+    }));
+    enroll.mockRestore();
   });
 
   test('Places fallback dedupes an edited review against the GBP row once content converges (no duplicate)', async () => {

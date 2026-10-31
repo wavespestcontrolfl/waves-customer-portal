@@ -1,4 +1,4 @@
-// GATE_SMS_SHARED_PHONE_LINK (codex #6268 r14): a text linked through the
+// Shared-phone link (codex #6268 r14): a text linked through the
 // shared-phone primary mark joins the customer's thread as that one message.
 // The number's earlier unknown-contact thread (and every message in it) is
 // NOT promoted into the marked account — some of those messages may belong

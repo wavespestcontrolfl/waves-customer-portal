@@ -79,7 +79,13 @@ describe("Reviews workspace foundation", () => {
     vi.stubGlobal("fetch", fetch);
     render(<ReviewsPage />);
     const reply = await screen.findByPlaceholderText("Write your reply...");
+    // ReviewCard re-seeds its editor in an effect that runs after the card first renders. On a loaded runner that
+    // effect can still be pending when the editor appears; React then runs it inside the first change event, after
+    // the typed text, and the text is wiped (main 10-31). No person types inside that window. The first event has
+    // run the pending effect, so typing again holds.
     fireEvent.change(reply, { target: { value: "Thanks, Taylor!" } });
+    if (reply.value !== "Thanks, Taylor!") fireEvent.change(reply, { target: { value: "Thanks, Taylor!" } });
+    expect(reply).toHaveValue("Thanks, Taylor!");
 
     const searchBox = screen.getByPlaceholderText("Search reviews...");
     searchBox.focus();

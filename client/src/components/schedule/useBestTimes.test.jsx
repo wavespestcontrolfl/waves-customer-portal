@@ -475,6 +475,22 @@ it('an already_late day and its day_already_late hours reach the strip and the o
   }
 });
 
+// Route-dispatcher audit D: the route check's arrival rides onto each hour (for the box's end-of-window tag),
+// and only when the server sent it.
+it('estimated_arrival reaches both list shapes as estimatedArrival; an hour without it has no such field', () => {
+  const hourOf = (start, over = {}) => ({ start_time: start, end_time: `${Number(start.slice(0, 2)) + 1}:00`, detour_minutes: 3, technician: { id: 't1', name: 'T' }, ...over });
+  const data = {
+    summary: {
+      open_times: { from: '2035-01-01', to: '2035-01-01' },
+      days: [{ date: '2035-01-01', status: 'open', hours: [hourOf('12:00', { estimated_arrival: '13:55' }), hourOf('15:00')] }],
+    },
+  };
+  for (const out of [normalizeAvailability(data, { date: '2035-01-01', scopedToTech: false }), normalizeOpenTimes(data, { date: '2035-01-01' })]) {
+    expect(out.days[0].hours[0]).toMatchObject({ start: '12:00', estimatedArrival: '13:55' });
+    expect(out.days[0].hours[1]).not.toHaveProperty('estimatedArrival');
+  }
+});
+
 // ---- the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE, owner 2026-10-29) ----
 
 const LIMIT_NOTE = 'Google road times paused: daily limit reached. Times marked ~ use the estimate.';

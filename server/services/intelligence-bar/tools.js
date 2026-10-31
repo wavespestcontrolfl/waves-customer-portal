@@ -2924,6 +2924,8 @@ async function cancelPlan(input, actionContext = {}) {
       // Per-application repricing of surviving visits (scoped, per-visit
       // billing lane) — charge changes the confirmation card must show.
       per_app_changes: Array.isArray(impact.perAppChanges) ? impact.perAppChanges : [],
+      // The series price template visits added later bill from.
+      template_changes: Array.isArray(impact.templateChanges) ? impact.templateChanges : [],
       waive_late_fee: preview.waiveLateFee,
       send_confirmation: preview.sendConfirmation,
       confirmation_channels: preview.confirmationChannels,
