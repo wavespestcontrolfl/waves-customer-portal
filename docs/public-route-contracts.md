@@ -5083,9 +5083,11 @@ links the lead and draft estimate to ONE of them instead of inserting a new
 `customers` row, but only when every matched row is live (active, not
 deleted) and all rows plus the typed contact are one person at one premise:
 names compatible (`namesCompatible`), the same parsed street key, equal unit
-lines (both empty counts; every token counts, so "Bldg C Apt 2" and
-"Bldg C Apt 3" differ, and only the words Apt, Unit, Suite, # and No that
-label a unit number are ignored), and equal 5-digit ZIPs, or, when either ZIP is blank,
+keys from the shared address normalizer (trailing inline units peeled by
+`splitStreetLineUnit`, compared with `unitLineValueKey`: Apt, Unit, Suite
+and # are one dwelling designator, while Bldg, Floor, Space and Lot stay, so
+"Bldg 2" never equals "Apt 2" and every part of a multi-part unit counts;
+no unit on both sides counts as equal), and equal 5-digit ZIPs, or, when either ZIP is blank,
 equal non-empty cities (`resolveSamePersonCluster`, `customer-dedupe.js`).
 The chosen row is the one the nightly duplicate sweep would keep
 (`pickWinner` with the sweep's business weighting). Any mismatch, an

@@ -301,28 +301,35 @@ function isLiveRow(row) {
 
 // addressCompat is permissive on purpose (a missing unit or locality is not a
 // conflict, and two identical unparseable lines match). Linking a public
-// quote needs POSITIVE agreement instead: both street lines parse to the same
-// key, the whole unit lines are equal (both empty counts), and the ZIPs are equal or,
-// when either ZIP is blank, both cities are present and equal.
-// The row's unit for the strict test, from the WHOLE unit line: every token
-// counts ("Bldg C Apt 2" and "Bldg C Apt 3" differ; "Floor 2" and "Floor 3"
-// differ), and only the words that merely label a unit number drop, so
-// "Apt 2", "Unit 2", "#2" and "2" are equal. unitFromLine2 keeps the first
-// token only, which is enough for addressCompat's conflict test but not for
-// a positive match. A unit embedded in line1 joins in front ('' = no unit).
-const UNIT_LABEL_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite', 'no']);
-function strictUnit(streetKey, line2) {
-  const line2Text = String(line2 || '').toLowerCase().replace(/[.,#]/g, ' ').replace(/-/g, '')
-    .split(/\s+/).filter((w) => w && !UNIT_LABEL_WORDS.has(w)).join(' ');
-  return [streetKey.unit, line2Text].filter(Boolean).join(' ');
+// quote needs POSITIVE agreement instead, read through the shared address
+// normalizer (Codex #7249 rounds 1-2 found three unit shapes this file's own
+// first-token unit parse merged: "Floor 2"/"Floor 3", "Bldg C Apt 2"/"Bldg C
+// Apt 3", and inline "Bldg 2"/"Apt 2"):
+// - the street part (any trailing inline unit peeled by splitStreetLineUnit)
+//   parses to the same street key, with no unit text left inside it;
+// - the full unit keys are equal (unitLineValueKey: Apt/Unit/Suite/# are one
+//   dwelling designator, while Bldg/Floor/Space/Lot stay, so "Bldg 2" never
+//   equals "Apt 2", and a multi-part unit compares every part; no unit on
+//   both rows counts as equal);
+// - the ZIPs are equal, or, when either ZIP is blank, both cities are
+//   present and equal.
+function strictPremise(row) {
+  const { splitStreetLineUnit, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const { street, unit: inlineUnit } = splitStreetLineUnit(String(row.address_line1 || ''));
+  const streetKey = normalizeStreetKey(street);
+  if (!streetKey || streetKey.unit) return null;
+  const keyOf = (unitText) => (String(unitText || '').trim() ? unitLineValueKey(normalizeUnitLine(unitText)) : '');
+  const inlineKey = keyOf(inlineUnit);
+  const line2Key = keyOf(row.address_line2);
+  const unit = inlineKey && line2Key && inlineKey !== line2Key ? `${inlineKey} ${line2Key}` : (inlineKey || line2Key);
+  return { street: streetKey.key, unit };
 }
 
 function samePremiseStrict(a, b) {
   if (addressCompat(a, b).status !== 'match') return false;
-  const ak = normalizeStreetKey(a.address_line1);
-  const bk = normalizeStreetKey(b.address_line1);
-  if (!ak || !bk || ak.key !== bk.key) return false;
-  if (strictUnit(ak, a.address_line2) !== strictUnit(bk, b.address_line2)) return false;
+  const pa = strictPremise(a);
+  const pb = strictPremise(b);
+  if (!pa || !pb || pa.street !== pb.street || pa.unit !== pb.unit) return false;
   const az = String(a.zip || '').slice(0, 5);
   const bz = String(b.zip || '').slice(0, 5);
   if (az && bz) return az === bz;

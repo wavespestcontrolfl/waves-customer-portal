@@ -74,6 +74,22 @@ describe('resolveSamePersonCluster', () => {
 
   // Pre-push audit P1 (round 2): unitFromLine2 keeps only the first unit token,
   // so compound units must compare every token.
+  // Codex #7249 r2 P2: an inline structural unit is not a dwelling unit.
+  test('an inline building unit never equals an apartment (123 Sample St Bldg 2 vs Apt 2)', async () => {
+    const rows = [row('a', { address_line1: '123 Sample St Bldg 2' }), row('b', { address_line1: '123 Sample St Bldg 2' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line1: '123 Sample St Apt 2' })).toBeNull();
+  });
+
+  test('an inline unit equals the same unit on line 2 (123 Sample St Apt 2 vs Unit 2)', async () => {
+    const rows = [row('a', { address_line1: '123 Sample St Apt 2' }), row('b', { address_line2: 'Unit 2' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: '#2' })).not.toBeNull();
+  });
+
+  test('Building and Bldg are one designator (Building 2 vs Bldg 2)', async () => {
+    const rows = [row('a', { address_line2: 'Building 2' }), row('b', { address_line2: 'Bldg 2' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Bldg 2' })).not.toBeNull();
+  });
+
   test('compound units compare every token (Bldg C Apt 2 vs Bldg C Apt 3)', async () => {
     const rows = [row('a', { address_line2: 'Bldg C Apt 3' }), row('b', { address_line2: 'Bldg C Apt 3' })];
     expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Bldg C Apt 2' })).toBeNull();
