@@ -22,7 +22,9 @@ describe('loadEvidenceRows', () => {
     for (const { sql, bindings } of conn.calls) {
       const lists = sql.match(/IN \(\?, \?\)/g) || [];
       expect(lists.length).toBeGreaterThan(0);
-      expect(bindings).toEqual(lists.flatMap(() => ['c1', 'c2']));
+      // The customers query binds the sandbox call source first (its first-call subquery).
+      const sandbox = sql.includes('FROM call_log') ? ['voice_relay_sandbox'] : [];
+      expect(bindings).toEqual([...sandbox, ...lists.flatMap(() => ['c1', 'c2'])]);
     }
     const asks = conn.calls.find(({ sql }) => sql.includes('FROM review_requests rr'));
     expect(asks.sql).toMatch(/messaging_audit_log[\s\S]*customer_id IN \(\?, \?\)[\s\S]*GROUP BY/);
@@ -31,7 +33,8 @@ describe('loadEvidenceRows', () => {
   test('every customer when no subset is given; nothing when the subset is empty', async () => {
     const all = fakeConn();
     await loadEvidenceRows(all);
-    expect(all.calls.every(({ sql, bindings }) => !/ IN \(\?/.test(sql) && bindings.length === 0)).toBe(true);
+    expect(all.calls.every(({ sql }) => !/ IN \(\?/.test(sql))).toBe(true);
+    expect(all.calls.map(({ bindings }) => bindings)).toEqual([['voice_relay_sandbox'], [], [], [], []]);
     const none = fakeConn();
     await loadEvidenceRows(none, { customerIds: [] });
     expect(none.calls.every(({ sql }) => sql.includes(' AND false'))).toBe(true);

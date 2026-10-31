@@ -11,6 +11,7 @@
 
 const { ASK_TOUCH_SQL } = require('./review-outreach-templates');
 const { saysReviewed } = require('./review-link-evidence');
+const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
 
 const CONTACT_COLUMNS = ['secondary_contact_name', 'service_contact_name', 'service_contact2_name', 'service_contact3_name'];
 
@@ -31,11 +32,12 @@ async function loadEvidenceRows(conn, { customerIds = null } = {}) {
            cu.member_since::text AS member_since, cu.customer_since::text AS customer_since,
            (SELECT min(coalesce(l.first_contact_at, l.created_at)) FROM leads l WHERE l.customer_id = cu.id) AS first_lead_at,
            (SELECT min(s.created_at) FROM sms_log s WHERE s.customer_id = cu.id) AS first_sms_at,
-           (SELECT min(k.created_at) FROM call_log k WHERE k.customer_id = cu.id) AS first_call_at,
+           -- A voice-agent sandbox test call is never anyone's first contact.
+           (SELECT min(k.created_at) FROM call_log k WHERE k.customer_id = cu.id AND COALESCE(k.source, '') <> ?) AS first_call_at,
            (SELECT min(v.scheduled_date)::text FROM scheduled_services v WHERE v.customer_id = cu.id) AS first_visit_on,
            (SELECT min(e.created_at) FROM estimates e WHERE e.customer_id = cu.id) AS first_estimate_at
       FROM customers cu
-     WHERE cu.deleted_at IS NULL${cu.sql}`, cu.bindings)).rows;
+     WHERE cu.deleted_at IS NULL${cu.sql}`, [VOICE_RELAY_SANDBOX_SOURCE, ...cu.bindings])).rows;
   const visitIds = onlyCustomers('customer_id', customerIds);
   const visits = (await conn.raw(`
     SELECT customer_id, scheduled_date::text AS on_day FROM scheduled_services
