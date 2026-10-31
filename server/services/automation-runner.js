@@ -666,9 +666,11 @@ function sequenceCursor(enrollment, steps) {
   if (order !== null && order !== undefined && order !== '' && Number.isFinite(Number(order))) {
     return { anchor: [Number(order), String(meta.passed_step_id ?? '')], passedIds };
   }
-  const index = Number(enrollment.current_step) || 0;
-  const legacy = index >= 1 ? steps[Math.min(index, steps.length) - 1] : null;
-  return { anchor: legacy ? stepKey(legacy) : null, passedIds };
+  // No cursor yet: every enabled step before current_step counts as passed, the
+  // same reading that makes the last of them the anchor.
+  const before = steps.slice(0, Math.max(0, Math.min(Number(enrollment.current_step) || 0, steps.length)));
+  const legacy = before.length ? before[before.length - 1] : null;
+  return { anchor: legacy ? stepKey(legacy) : null, passedIds: [...new Set([...passedIds, ...before.map((s) => String(s.id))])] };
 }
 
 function firstStepAfter(steps, anchor, passedIds) {

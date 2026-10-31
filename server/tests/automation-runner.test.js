@@ -1117,6 +1117,23 @@ describe('advanceEnrollment', () => {
     expect(nextSequenceStep({ current_step: 3, metadata: null }, steps)).toBeNull();
   });
 
+  test('an enrolment advanced before the cursor existed records every earlier step as passed when it next advances', async () => {
+    const { advanceEnrollment, nextSequenceStep } = require('../services/automation-runner');
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const update = chain();
+    setDbQueues({ automation_enrollments: [update] });
+    const steps = [S('A', 0), S('B', 1), S('C', 2), S('D', 3)];
+    // Sent A and B under the old index (current_step 2), now passes C.
+    await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 2, metadata: {} }, steps, steps[2]);
+    const cursor = JSON.parse(update.update.mock.calls[0][0].metadata.bindings[0]);
+    expect(cursor).toEqual({ passed_step_order: 2, passed_step_id: 'C', passed_step_ids: ['A', 'B', 'C'] });
+    // Moving A after D later never sends A again.
+    const moved = [S('B', 1), S('C', 2), S('D', 3), S('A', 9)];
+    expect(nextSequenceStep({ current_step: 3, metadata: cursor }, moved).id).toBe('D');
+    const afterD = { passed_step_order: 3, passed_step_id: 'D', passed_step_ids: [...cursor.passed_step_ids, 'D'] };
+    expect(nextSequenceStep({ current_step: 3, metadata: afterD }, moved)).toBeNull();
+  });
+
   test('passing a step records the cursor in metadata, points current_step at the next step, and fences on the last passed step', async () => {
     const { advanceEnrollment } = require('../services/automation-runner');
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
