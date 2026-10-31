@@ -8,6 +8,9 @@
  * lists each deal with its deadline and the products from our own catalog that
  * it names. Zero deals = no bell, one info line.
  *
+ * A sender must also pass Gmail's SPF/DKIM check for its own domain (a typed From
+ * header proves nothing), and quarantined, SPAM, TRASH or spam rows are skipped.
+ *
  * Costs $0: plain string and regex rules over rows already in the database. No
  * model call, no paid API, no network. Read-only: it writes nothing but the bell.
  *
@@ -22,6 +25,7 @@
  * finds a different list.
  */
 const logger = require('../logger');
+const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { etWeekStart, etParts, etDateString } = require('../../utils/datetime-et');
 
 const WINDOW_DAYS = 7;
@@ -100,13 +104,33 @@ function bodyPlainText(email) {
   ).slice(0, BODY_CHARS);
 }
 
+// A From header is text the sender typed, and the Gmail sync also stores spam and
+// blocked mail, so a deal needs (1) Gmail's own Authentication-Results showing the
+// message authenticated as the From domain (the strict reader: Google's authserv-id,
+// real method results only; missing or unreadable = no), and (2) a row the sync did
+// not quarantine, label SPAM or TRASH, or classify as spam.
+const HELD_LABELS = ['SPAM', 'TRASH'];
+function labelsOf(email) {
+  let labels = email.label_ids; // jsonb array; the driver may hand it over as a string
+  if (typeof labels === 'string') {
+    try { labels = JSON.parse(labels); } catch { labels = []; }
+  }
+  return Array.isArray(labels) ? labels : [];
+}
+const isHeldBack = (email) => !!email.quarantined_at
+  || email.classification === 'spam'
+  || labelsOf(email).some((label) => HELD_LABELS.includes(label));
+const isAuthenticatedSender = (email) => isDealSenderDomain(email.from_address)
+  && hasAlignedAuth(email.authentication_results, senderDomain(email.from_address), { strict: true });
+
 /**
- * Is this email a SiteOne / maker deal? Sender must be on the list, the mail must
- * not be transactional, and the deal-word test must pass: a deal word in the
- * subject, OR one in the body with an attachment, OR two different ones in the body.
+ * Is this email a SiteOne / maker deal? The sender must be on the list AND
+ * authenticated as that domain, the row must not be held back, the mail must not be
+ * transactional, and the deal-word test must pass: a deal word in the subject, OR
+ * one in the body with an attachment, OR two different ones in the body.
  */
 function isDealEmail(email) {
-  if (!email || !isDealSenderDomain(email.from_address)) return false;
+  if (!email || !isAuthenticatedSender(email) || isHeldBack(email)) return false;
   if (email.classification === 'vendor_invoice') return false;
   const subject = String(email.subject || '');
   if (TRANSACTIONAL_SUBJECT.test(subject)) return false;
@@ -251,7 +275,7 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
   const since = new Date(now.getTime() - WINDOW_DAYS * 86400000);
 
   const rows = await conn('emails')
-    .select('id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'has_attachments', 'received_at', 'classification')
+    .select('id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'has_attachments', 'received_at', 'classification', 'authentication_results', 'label_ids', 'quarantined_at')
     .where('received_at', '>=', since)
     .where('received_at', '<', now)
     .orderBy('received_at', 'desc');

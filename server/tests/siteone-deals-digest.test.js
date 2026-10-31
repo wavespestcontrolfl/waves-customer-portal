@@ -13,6 +13,11 @@ const {
   runSiteOneDealsDigest, isDealEmail, extractDeadline, matchProducts, isDealSenderDomain,
 } = require('../services/procurement/siteone-deals-digest');
 
+// Gmail's own header, shaped like the real ones (see email-auth-strict.test.js).
+const authFor = (domain) => `mx.google.com; dkim=pass header.i=@${domain} header.s=s1 header.b=abc; spf=pass (google.com: domain of bounce@${domain} designates 192.0.2.1 as permitted sender) smtp.mailfrom=bounce@${domain}; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=${domain}`;
+const SPOOFED = 'mx.google.com; dkim=none; spf=fail (google.com: domain of bounce@attacker.example does not designate 198.51.100.7 as permitted sender) smtp.mailfrom=bounce@attacker.example; dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=siteone.com';
+const FORGED_TEXT = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=siteone.com y"@attacker.example designates 198.51.100.7 as permitted sender) smtp.mailfrom="x dkim=pass header.d=siteone.com y"@attacker.example';
+
 const email = (over = {}) => ({
   id: 1,
   from_address: 'srep@siteone.com',
@@ -23,6 +28,9 @@ const email = (over = {}) => ({
   has_attachments: false,
   received_at: new Date('2026-10-28T14:00:00Z'),
   classification: null,
+  authentication_results: authFor(String(over.from_address || 'srep@siteone.com').split('@')[1]),
+  label_ids: ['INBOX'],
+  quarantined_at: null,
   ...over,
 });
 
@@ -53,6 +61,33 @@ describe('isDealEmail', () => {
     ['one body word and no attachment', { subject: 'Hello', body_text: 'Ask about our promo.' }],
   ])('not a deal: %s', (_label, over) => {
     expect(isDealEmail(email(over))).toBe(false);
+  });
+
+  test('a spoofed From is not a deal: failed, forged, missing or unreadable authentication', () => {
+    expect(isDealEmail(email({ authentication_results: authFor('siteone.com') }))).toBe(true);
+    expect(isDealEmail(email({ authentication_results: SPOOFED }))).toBe(false);
+    expect(isDealEmail(email({ authentication_results: FORGED_TEXT }))).toBe(false);
+    expect(isDealEmail(email({ authentication_results: authFor('attacker.example') }))).toBe(false);
+    expect(isDealEmail(email({ authentication_results: null }))).toBe(false);
+    expect(isDealEmail(email({ authentication_results: '' }))).toBe(false);
+    expect(isDealEmail(email({ authentication_results: 'dkim=pass header.d=siteone.com' }))).toBe(false); // not Google's header
+    expect(isDealEmail(email({ from_address: 'news@basf.com', authentication_results: authFor('siteone.com') }))).toBe(false);
+  });
+
+  test('a subdomain sender authenticated by its own domain or the parent is a deal', () => {
+    expect(isDealEmail(email({ from_address: 'news@ec.siteone.com', authentication_results: authFor('ec.siteone.com') }))).toBe(true);
+    expect(isDealEmail(email({ from_address: 'news@ec.siteone.com', authentication_results: authFor('siteone.com') }))).toBe(true);
+  });
+
+  test('quarantined, SPAM, TRASH and spam-classified rows are skipped, even with aligned auth', () => {
+    expect(isDealEmail(email({ quarantined_at: new Date('2026-10-28T15:00:00Z') }))).toBe(false);
+    expect(isDealEmail(email({ label_ids: ['INBOX', 'SPAM'] }))).toBe(false);
+    expect(isDealEmail(email({ label_ids: ['TRASH'] }))).toBe(false);
+    expect(isDealEmail(email({ label_ids: JSON.stringify(['SPAM']) }))).toBe(false); // string-shaped jsonb
+    expect(isDealEmail(email({ classification: 'spam' }))).toBe(false);
+    expect(isDealEmail(email({ label_ids: null }))).toBe(true);
+    expect(isDealEmail(email({ label_ids: 'not json' }))).toBe(true);
+    expect(isDealEmail(email({ label_ids: ['INBOX', 'CATEGORY_PROMOTIONS'] }))).toBe(true);
   });
 
   test('a body deal word counts with an attachment, or when two different ones appear', () => {
@@ -153,12 +188,12 @@ describe('runSiteOneDealsDigest', () => {
   const now = new Date('2026-11-02T13:00:00Z'); // Monday 8:00 AM ET
 
   function fakeDb({ emails, products = [{ name: 'Taurus SC 1 gal' }, { name: 'Demand CS' }], productsFail = false }) {
-    const calls = { wheres: [], tables: [] };
+    const calls = { wheres: [], tables: [], selects: [] };
     const db = (table) => {
       calls.tables.push(table);
       const preds = [];
       const chain = {
-        select() { return chain; },
+        select(...cols) { calls.selects.push(cols); return chain; },
         where(a, b, c) {
           calls.wheres.push([table, a, b, c]);
           if (typeof a === 'object') preds.push((row) => Object.entries(a).every(([k, v]) => row[k] === v));
@@ -213,7 +248,23 @@ describe('runSiteOneDealsDigest', () => {
     // The query asks for the 7 days before now, and only active products.
     expect(calls.wheres).toContainEqual(['emails', 'received_at', '>=', new Date('2026-10-26T13:00:00Z')]);
     expect(calls.wheres).toContainEqual(['emails', 'received_at', '<', now]);
+    expect(calls.selects[0]).toEqual(expect.arrayContaining(['authentication_results', 'label_ids', 'quarantined_at']));
     expect(calls.wheres).toContainEqual(['products_catalog', { active: true }, undefined, undefined]);
+  });
+
+  test('spoofed, spam-labelled and quarantined mail never reaches the bell', async () => {
+    const received = new Date('2026-10-30T15:00:00Z');
+    const { db } = fakeDb({
+      emails: [
+        email({ id: 21, authentication_results: SPOOFED, received_at: received }),
+        email({ id: 22, authentication_results: null, received_at: received }),
+        email({ id: 23, label_ids: ['SPAM'], received_at: received }),
+        email({ id: 24, quarantined_at: received, received_at: received }),
+      ],
+    });
+    const notify = jest.fn();
+    expect(await runSiteOneDealsDigest({ now, db, notify })).toEqual({ scanned: 4, deals: 0, notified: false });
+    expect(notify).not.toHaveBeenCalled();
   });
 
   test('the dedupe key is the Monday of the ET week, from any day in it', async () => {
