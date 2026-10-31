@@ -4326,6 +4326,7 @@ const STATUS_OPTIONS = [
 function RegistryTab({ showToast }) {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
   const [filter, setFilter] = useState("all");
@@ -4334,8 +4335,10 @@ function RegistryTab({ showToast }) {
     try {
       const data = await adminFetch("/admin/inventory?limit=500");
       setProducts(data.products || []);
-    } catch {
-      setProducts([]);
+      setLoadError(null);
+    } catch (e) {
+      // A failed read is a failure, not an empty registry.
+      setLoadError(e?.message || "Request failed");
     } finally {
       setLoading(false);
     }
@@ -4394,6 +4397,7 @@ function RegistryTab({ showToast }) {
       return p.customerVisibility !== "internal_only" && !p.publicSummary;
     return true;
   });
+  if (loadError) return <LoadRetry what="the registry" error={loadError} onRetry={() => { setLoadError(null); load(); }} />;
   if (loading)
     return <ActionFeedback>Loading...</ActionFeedback>;
   return (
@@ -4791,13 +4795,19 @@ function ApprovalsTab({ showToast, onUpdate }) {
   const [approvals, setApprovals] = useState([]);
   const [selected, setSelected] = useState(new Set());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const load = () =>
     adminFetch("/admin/inventory/approvals?status=pending&limit=100")
       .then((d) => {
         setApprovals(d.approvals || []);
+        setLoadError(null);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      // A failed read is a failure, not "No pending approvals".
+      .catch((e) => {
+        setLoadError(e?.message || "Request failed");
+        setLoading(false);
+      });
   useEffect(() => {
     load();
   }, []);
@@ -4850,6 +4860,7 @@ function ApprovalsTab({ showToast, onUpdate }) {
       else n.add(id);
       return n;
     });
+  if (loadError) return <LoadRetry what="approvals" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); load(); }} />;
   if (loading) return <ActionFeedback>Loading approvals...</ActionFeedback>;
   return (
     <div>
@@ -5769,14 +5780,22 @@ function AddProtocolRow({
 function MarginsTab({ showToast }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     adminFetch("/admin/inventory/service-usage")
       .then((d) => {
         setServices(d.services || []);
+        setLoadError(null);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      // A failed read is a failure, not "No service product mappings yet".
+      .catch((e) => {
+        setLoadError(e?.message || "Request failed");
+        setLoading(false);
+      });
+  }, [attempt]);
+  if (loadError) return <LoadRetry what="service margins" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); setAttempt((n) => n + 1); }} />;
   if (loading) return <ActionFeedback>Loading service margins...</ActionFeedback>;
   return (
     <div>

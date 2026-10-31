@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Operations audit OP-10: Vendors, Protocols and Scraping left "Loading..."
-// up forever after a failed read. A failure now shows the error and a Retry
-// that re-issues the read.
+// up forever after a failed read; Registry, Approvals and Margins showed it as
+// an empty list. A failure now shows the error and a Retry that re-issues the read.
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -49,6 +49,10 @@ it.each([
   ['tab=vendors', '/inventory/vendors', 'vendors', 'Loading vendors...'],
   ['tab=protocols', '/inventory/service-usage', 'protocols', 'Loading protocols...'],
   ['tab=scrape', '/inventory/scrape-jobs', 'scrape data', 'Loading scrape data...'],
+  // Same class, follow-up: these three showed a failed read as an empty list.
+  ['tab=registry', '/inventory?limit=500', 'the registry', 'Loading...'],
+  ['tab=approvals', '/inventory/approvals', 'approvals', 'Loading approvals...'],
+  ['tab=margins', '/inventory/service-usage', 'service margins', 'Loading service margins...'],
 ])('%s: a failed read shows the error and Retry, not an endless spinner', async (query, endpoint, what, spinner) => {
   failing = [endpoint];
   mount(query);
