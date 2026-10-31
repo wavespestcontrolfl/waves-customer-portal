@@ -125,6 +125,7 @@ describe('poller decisions', () => {
     expect(poller.patchForTransaction(row, null).patch).toEqual({});
     expect(poller.patchForTransaction(row, tx('pending')).patch).toEqual({ mercury_transaction_id: 'tx-1' });
     expect(poller.patchForTransaction(row, tx('sent')).patch).toMatchObject({ state: 'sent', mercury_transaction_id: 'tx-1', posted_on: '2026-11-04' });
+    expect(poller.patchForTransaction(row, tx('sent', { hasReturn: true }))).toMatchObject({ patch: { state: 'returned' }, bell: 'returned' });
     expect(poller.patchForTransaction(row, tx('failed'))).toMatchObject({ patch: { state: 'failed' }, bell: 'failed' });
     expect(poller.patchForTransaction(row, tx('reversed'))).toMatchObject({ patch: { state: 'returned' }, bell: 'returned' });
   });

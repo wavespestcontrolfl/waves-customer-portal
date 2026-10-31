@@ -79,6 +79,10 @@ const postedOn = (tx) => (tx.postedAt ? etDateString(new Date(tx.postedAt)) : nu
 
 function patchForTransaction(row, tx) {
   if (!tx) return { patch: {}, bell: null };
+  // Sent and already returned by the first time we see it: returned, with its bell (same test as the daily reread).
+  if (tx.status === 'sent' && tx.hasReturn) {
+    return { patch: { state: 'returned', mercury_transaction_id: tx.id, posted_on: postedOn(tx), resolved_at: 'now', resolution: 'The bank transfer came back' }, bell: 'returned' };
+  }
   if (tx.status === 'sent') {
     return { patch: { state: 'sent', mercury_transaction_id: tx.id, posted_on: postedOn(tx), resolved_at: 'now', resolution: 'Mercury shows the money sent' }, bell: null, settled: true };
   }
