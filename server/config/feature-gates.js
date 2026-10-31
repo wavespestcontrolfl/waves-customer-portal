@@ -5078,12 +5078,13 @@ const gates = {
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 
   // Pest Insider monthly proof-approval (email division fact register lane).
-  // Ships DARK: off unless exactly 'true'. On, pest-insider-autopilot.js
-  // calls sendNewsletterProof after drafting, same as the weekly flagship —
-  // still subject to GATE_NEWSLETTER_PROOF_APPROVAL underneath. This entry
-  // is for logGateStatus only; services/pest-insider-autopilot.js reads
-  // GATE_PEST_INSIDER_PROOF at call time. Kill = unset — today's behavior:
-  // draft + notification only, no proof attempt.
+  // Ships DARK: off unless exactly 'true'. The monthly autopilot that sent
+  // the proof (pest-insider-autopilot.js) was deleted as unused after #7191;
+  // the gate still decides whether a Pest Insider proof can be approved
+  // (newsletter-proof.js) or dispatched (newsletter-sender.js). This entry
+  // is for logGateStatus only; pestInsiderProofLive() reads
+  // GATE_PEST_INSIDER_PROOF at call time. Kill = unset: a Pest Insider
+  // proof cannot be approved or dispatched.
   pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
 
   // Weekly newsletter sends itself after its checks (owner 2026-10-30,
@@ -5564,10 +5565,10 @@ function gateEnvValue(envName) {
 }
 
 // Pest Insider proof approval — read at CALL time so turning the gate off
-// takes effect without a redeploy at every point that matters: proofing
-// (pest-insider-autopilot.js), approval (newsletter-proof.js
-// maybeHandleProofApproval) and dispatch of an already-approved issue
-// (newsletter-sender.js processScheduledSends). Off = draft-only, which is
+// takes effect without a redeploy at every point that matters: approval
+// (newsletter-proof.js maybeHandleProofApproval) and dispatch of an
+// already-approved issue (newsletter-sender.js processScheduledSends).
+// Off = no approval and no dispatch, which is
 // what "kill switch" has to mean: a proof that went out while the gate was
 // on cannot be approved or dispatched after it is turned off.
 // GATE_PORTAL_ACTIVITY read at CALL time — strict `=== 'true'`. The one
