@@ -8927,7 +8927,8 @@ const InvoiceService = {
       // a partial credit changed the amount due or the lines after the card. Null = unchanged.
       expectedVersion = null,
       // Intelligence Bar send_invoice: ['sms'] = the text leg only (the email leg is never started, never refused into a
-      // retry). Null = both legs, as every other caller. The page never passes it.
+      // retry); ['email'] = the email leg only (the text leg is never started). Null = both legs, as every other caller. The
+      // page never passes it.
       channels = null,
       // false = a queued pay-link text (invoice_send_deferred) is never adopted or cancelled by this send: the claim refuses
       // it (queued_pay_link). The bar passes false; every other caller keeps the default.
@@ -8935,6 +8936,7 @@ const InvoiceService = {
     } = {},
   ) {
     const smsOnly = Array.isArray(channels) && channels.length === 1 && channels[0] === "sms";
+    const emailOnly = Array.isArray(channels) && channels.length === 1 && channels[0] === "email";
     // The confirming admin rides the version so the claim's closeout pin names them.
     if (expectedVersion && actorTechnicianId && expectedVersion.actorTechnicianId === undefined) {
       expectedVersion = { ...expectedVersion, actorTechnicianId };
@@ -9127,6 +9129,12 @@ const InvoiceService = {
       // sender never texts the invoice, and the leg does not count as delivered.
       sms.error = "Text carried by the visit summary";
       sms.code = "text_carried_by_summary";
+    } else if (emailOnly) {
+      // An email-only send (the Intelligence Bar's email card): the text leg is not part of it. A definite non-send, so a
+      // terminal visit or a failed email leaves nothing uncertain.
+      sms.skipped = true;
+      sms.code = "sms_not_requested";
+      sms.deliveryOutcome = "not_sent";
     } else if (!operatorInitiated
       && String(claim.invoice.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)) {
       // A prior automated attempt delivered Text/App but could not start its
@@ -9415,6 +9423,14 @@ const InvoiceService = {
         const r = await sendInvoiceEmail(invoiceId, {
           recipientOverride: emailRecipientOverride,
           ...(emailCc ? { cc: emailCc } : {}),
+          // The bar's email card: the address, the rendered email and the template it showed, and its live owner check at
+          // the provider handoff (each refuses before anything is sent).
+          ...(emailOnly && expectedVersion?.emailDigest ? {
+            expectedRecipientEmail: expectedRecipients?.email,
+            expectedEmailDigest: expectedVersion.emailDigest,
+            expectedContentHash: expectedVersion.emailContentHash,
+            verifyOwner: expectedVersion.verifyOwner,
+          } : {}),
           payUrlParams,
           claimToken: claim.invoice.send_claim_token,
           holdExempt,

@@ -1870,9 +1870,10 @@ async function invoiceSendHandler(req, res, next) {
           // claim refuses an edit or partial credit that landed after the card.
           expectedVersion: req.ibApprovedSend.version || null,
           skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true,
-          // The bar sends ONE text and nothing else: no email leg, and a pay-link text already queued for the send window is
-          // never adopted or cancelled (the claim refuses it).
-          channels: ['sms'], adoptsQueuedInvoiceSend: false,
+          // The bar sends ONE text, or (its email card) ONE email with at most the card's one CC, and nothing else. A pay-link
+          // text already queued for the send window is never adopted or cancelled (the claim refuses it).
+          channels: req.ibApprovedSend.channel === 'email' ? ['email'] : ['sms'], adoptsQueuedInvoiceSend: false,
+          emailCc: req.ibApprovedSend.channel === 'email' ? (req.ibApprovedSend.cc || null) : null,
         } : {}),
       });
     } catch (err) {
