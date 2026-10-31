@@ -1202,6 +1202,22 @@ technician set for the asked lines, offers what today's code offers. Public
 inspection booking, public reschedule and re-service offers do not pass lines
 and are unchanged.
 
+**Territory routing (`GATE_TERRITORY_ROUTING=true`, owner 2026-10-30; ships dark:
+unset, and every value other than exactly `true`, leaves these routes as described
+above, with no territory query).** It acts only while the line map is live. The
+place is the request's resolved map position (`lat` / `lng` from
+`resolveBookingCoords`): its Census 2020 ZIP area (`services/territory.js`
+`zipForPoint`, `server/data/territory-zip-shapes.json`) names the ZIP, and
+`territory_zips` names the technician who owns that ZIP. On a pest, mosquito,
+rodent or termite line that technician is the line's home technician, and the
+line's own home (else gap) technician fills the starts the territory technician
+has none for; this holds even for a line with no technician set in
+`service_line_techs`. Lawn / tree & shrub keeps the line map. A point outside the
+52 service ZIPs, or a ZIP with no territory technician, adds no rule. The payload,
+the signed `slot_sig`, `/confirm` and every commit check are unchanged, and the
+capture-intent revalidation resolves the same coordinates, so offer and recheck
+agree. Fail-open: an unreadable territory leaves the line map's offer.
+
 Public-confirm location freshness applies with either capacity gate on or
 off. After the scheduling and customer-communications fences, the customer
 row is held `FOR SHARE` through the insert. A complete live pin in another
@@ -1553,6 +1569,17 @@ list. On accept, a program added to the picked trip whose line's technician is
 someone else is booked the same day with no time on that technician (unassigned
 if nobody can take it) instead of copying the picked hour and technician; its
 visit note says in plain words that its time will be set separately.
+**Estimate picker, territory routing (`GATE_TERRITORY_ROUTING=true`, owner
+2026-10-30; ships dark: any other value leaves these routes as described above,
+with no territory query).** While the line map is live, the place is the ZIP typed
+in the estimate's QUOTED address (`parseRawAddress(estimate.address)`), never the
+customer row, because a multi-property estimate quotes another property. That
+ZIP's territory technician leads a pest, mosquito, rodent or termite line exactly
+as on the booking funnel; an address with no ZIP, a ZIP outside the 52, or a ZIP
+with no territory technician adds no rule. On accept, a same-trip program's own
+line technician is read with the reserved visit's service ZIP, else the same
+quoted-address ZIP. Slot fields, holds and commit checks are unchanged. Fail-open:
+an unreadable territory leaves the line map's list.
 **Customer rain rank (`GATE_CUSTOMER_RAIN_RANK`, owner 2026-10-08; ships
 dark).** Every caller of `buildBookingAvailability` except the active
 re-service rank profile — `/api/booking/availability`, `/find-slots`, the

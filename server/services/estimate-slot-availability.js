@@ -1313,11 +1313,15 @@ async function heldVisitLines(serviceProfile) {
 
 // null = keep today's offers (gate not live, no asked line has a technician set,
 // or the map is unreadable: getting the customer on the calendar beats withholding times).
-async function lineOfferRankingFor(serviceProfile) {
+// The territory place is the ZIP typed in the QUOTED address only: a multi-property
+// estimate keeps the customer_id while quoting another property (see resolveEstimateCoords).
+async function lineOfferRankingFor(serviceProfile, estimate = null) {
   if (!lineMapOfferLive()) return null;
   try {
     const { lineOfferRanking } = require('./scheduling/line-technician');
-    return await lineOfferRanking(db, { lines: await heldVisitLines(serviceProfile) });
+    const { parseRawAddress } = require('../utils/address-normalizer');
+    const zip = estimate && estimate.address ? parseRawAddress(estimate.address).zip || null : null;
+    return await lineOfferRanking(db, { lines: await heldVisitLines(serviceProfile), place: zip ? { zip } : null });
   } catch (err) {
     logger.warn(`[estimate-slots] service-line map unreadable, offering today's list: ${err.message}`);
     return null;
@@ -2065,7 +2069,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
 
   const serviceProfile = await resolveCatalogSlotProfile(estimate, userOpts);
   // LIVE line map: null with the gate off or shadow (no query), or no technician set for the held visit's line(s).
-  const lineRanking = await lineOfferRankingFor(serviceProfile);
+  const lineRanking = await lineOfferRankingFor(serviceProfile, estimate);
   const publicServiceProfile = {
     ...serviceProfile,
     services: serviceProfile.services.map((service) => {

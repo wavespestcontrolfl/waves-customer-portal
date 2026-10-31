@@ -48,6 +48,16 @@ beforeEach(() => {
   Object.assign(mockState, { live: true, linePick: null, techs: [A, B], pickerActive: false, pick: null });
 });
 
+describe('resolveOfficeAutoTechnician — territory place (GATE_TERRITORY_ROUTING)', () => {
+  test('the selected property\'s ZIP reaches the line picker next to the customer and map position', async () => {
+    mockState.linePick = { mapped: true, line: 'general', technicianId: 'tech-b', reason: 'home' };
+    await resolveOfficeAutoTechnician({ ...input(), zip: '34293', lat: 27.05, lng: -82.4 });
+    expect(lineTech.pickLineTechnician).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      zip: '34293', customerId: 'cust-1', lat: 27.05, lng: -82.4,
+    }));
+  });
+});
+
 describe('resolveOfficeAutoTechnician — service-line map live', () => {
   test('the line\'s home technician takes it, asked among the assignable technicians, with the probe only while the picker is active', async () => {
     mockState.linePick = { mapped: true, line: 'general', technicianId: 'tech-b', reason: 'home' };
