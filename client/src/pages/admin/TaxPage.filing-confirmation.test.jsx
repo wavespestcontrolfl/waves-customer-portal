@@ -14,17 +14,19 @@ const filings = [
 ];
 let puts;
 let seenInBank;
+let list;
 
 beforeEach(() => {
   puts = [];
   seenInBank = false;
+  list = filings;
   localStorage.setItem('waves_admin_token', 'test-token');
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     if (options.method === 'PUT') {
       puts.push({ url: String(url), body: JSON.parse(options.body) });
       return { ok: true, json: async () => ({ success: true }) };
     }
-    return { ok: true, json: async () => ({ filings: seenInBank ? filings.map(f => ({ ...f, bankSeenOn: '2099-04-28' })) : filings }) };
+    return { ok: true, json: async () => ({ filings: seenInBank ? list.map(f => ({ ...f, bankSeenOn: '2099-04-28' })) : list }) };
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -88,4 +90,17 @@ it('asks for the amount first, then the confirmation number, when marking paid',
   expect(prompt.mock.calls[0][0]).toMatch(/Amount paid/);
   expect(prompt.mock.calls[1][0]).toMatch(/Confirmation number/);
   expect(puts[0].body).toMatchObject({ status: 'paid', amountPaid: 120.5, confirmationNumber: 'PAY-1' });
+});
+
+it('keeps a Late filing in the open list with its status control; All caught up only when none is open', async () => {
+  list = [{ ...filings[0], status: 'late' }, filings[1]];
+  const first = render(<FilingCalendarTab />);
+  await waitFor(() => expect(screen.getByText('Form 941 — Q1 2099')).toBeInTheDocument());
+  expect(screen.getByLabelText('Filing status')).toHaveValue('late');
+  expect(screen.queryByText('All caught up!')).toBeNull();
+  expect(screen.getByText('Completed (1)')).toBeInTheDocument();
+  first.unmount();
+  list = [filings[1]];
+  render(<FilingCalendarTab />);
+  await waitFor(() => expect(screen.getByText('All caught up!')).toBeInTheDocument());
 });
