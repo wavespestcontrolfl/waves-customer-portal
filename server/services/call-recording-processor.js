@@ -21077,8 +21077,8 @@ const CallRecordingProcessor = {
                 // resolved before the txn; if the FOR SHARE recheck below
                 // books unassigned instead, it re-fences the unassigned-day
                 // rung there (codex r1 P2).
-                // Two technicians (GATE_MULTI_TECH_CONFIRM + capacity mode,
-                // owner 2026-10-03): a FRESH call booking goes to the
+                // Two technicians (GATE_MULTI_TECH_CONFIRM, hour or capacity mode,
+                // owner 2026-10-03; hour mode owner 2026-10-30): a FRESH call booking goes to the
                 // technician who is free at this time and whose route that day
                 // is closest (scheduling/pick-technician.js), not to the one
                 // default technician. Nobody free → unassigned, and the

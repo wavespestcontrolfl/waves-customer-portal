@@ -1151,13 +1151,15 @@ and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
 
 Tech-aware confirm conflict checks for a second field technician
-(`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; needs
-`GATE_SCHEDULING_CAPACITY` live too). The offer side (`buildBookingAvailability`'s
-occupancy mirror) already keeps an occupied row only when it is unassigned or on
-the offered slot's own technician; the confirm side used to be tech-blind (built
+(`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; owner
+2026-10-30: it no longer needs `GATE_SCHEDULING_CAPACITY`, so two technicians can
+book the same hour in hour mode too). The offer side (`buildBookingAvailability`'s
+occupancy mirror) keeps an occupied row only when it is unassigned or on the
+offered slot's own technician, in capacity mode (always) and in hour mode when
+this gate is on; the confirm side used to be tech-blind (built
 for one active technician), so a slot offered on technician B's day could be
 refused at confirm because technician A had an overlapping or nearby stop. With
-both gates on, `createSelfBooking` (`/api/booking/confirm`, the re-service commit
+the gate on, `createSelfBooking` (`/api/booking/confirm`, the re-service commit
 and the consultation-page commit) scopes its whole conflict check to the booked
 technician: the zone/city/hold fast-path legs are AND-ed with "technician_id is
 NULL or equals the booked technician", and the global backstop
@@ -1165,12 +1167,14 @@ NULL or equals the booked technician", and the global backstop
 same technician's rows plus unassigned ones. Unassigned rows still block every
 technician, so the offer/commit predicates stay identical. The public reschedule
 commit (`SmartRebooker.reschedule` with `capacityPlacement: true`, the same
-offer builder) opts into the same scope for its kept technician. Either gate
-off, or a booking with no technician, is byte-for-byte the tech-blind check
-above. Every other caller — admin schedule/leads, rebooker series and
-rain-out/SMS moves, the phone agent, the zone-engine confirm, estimate slot
-reserve (which already verifies per technician in capacity mode), auto-dispatch
-and follow-up seeders — never passes `technicianId` and is unchanged. The
+offer builder) opts into the same scope for its kept technician. The gate off,
+or a booking with no technician, is byte-for-byte the tech-blind check
+above. The estimate surface follows the same rule in hour mode: the offer filter
+(`filterCollidingSlots`), the ASAP packing dates and the hold/commit probes in
+`slot-reservation.js` count only the slot technician's rows plus unassigned ones
+while the gate is on, so an offered estimate hour reserves and commits.
+Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
+all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
 still serializes concurrent confirms per calendar day regardless of technician,
 so two technicians' bookings and an unassigned insert cannot race past each

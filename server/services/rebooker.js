@@ -197,7 +197,7 @@ async function probeMoveConflicts({
     excludeServiceIds,
     excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
     ...(travel !== undefined ? { travel } : {}),
-    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark; owner
+    // Second technician (GATE_MULTI_TECH_CONFIRM, hour or capacity mode, dark; owner
     // 2026-10-03, "Moves"): a move judges the route of the technician the row
     // is SAVED with — every caller builds `target.technicianId` from the
     // technician its own write carries (the kept one, the destination of a

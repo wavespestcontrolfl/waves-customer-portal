@@ -404,7 +404,7 @@ async function commitVoiceBooking({
       // a clash here is somebody ELSE's committed visit or live hold. The
       // offer came from the per-technician /book engine, so the probe is
       // scoped to the technician the row is written with (technicianId below):
-      // with GATE_MULTI_TECH_CONFIRM + capacity mode on, another technician's
+      // with GATE_MULTI_TECH_CONFIRM on (hour or capacity mode), another technician's
       // overlapping stop is not a clash, while an UNASSIGNED row still is;
       // gate off or no technician on the offer → tech-blind, as before.
       const clash = await findConflictingVisits({

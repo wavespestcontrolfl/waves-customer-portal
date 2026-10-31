@@ -8,7 +8,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const RouteOptimizer = require('../route-optimizer');
 const { loadTechStartPoint } = require('./tech-start-point');
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, multiTechConfirmLive } = require('../../config/feature-gates');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
@@ -551,6 +551,21 @@ function laterStopTooTight(simulation, order, targetId, rangeForStop, margin, sk
   });
 }
 
+// Whether a day row is a FIXED block on the target technician's simulated route.
+// Capacity: unassigned rows only. Hour mode (legacy placement): every other
+// technician's stop and every live hold, the one-technician shared rule. Hour
+// mode with GATE_MULTI_TECH_CONFIRM on (owner 2026-10-30, same-hour technicians):
+// each technician's route is separate, so a fixed block is an unassigned row or a
+// live hold on the target technician; another technician's stops and holds are ignored.
+function rowIsFixedBlock(row, target, capacity) {
+  if (capacity) return row.technician_id == null;
+  if (multiTechConfirmLive()) {
+    return row.technician_id == null
+      || (row.technician_id === target.technician_id && row.reservation_expires_at != null);
+  }
+  return row.technician_id !== target.technician_id || row.reservation_expires_at != null;
+}
+
 /** Simulate every candidate order and certify the winner: least travel,
  *  ties broken by less waiting — skipping any order that overruns a return
  *  deadline (returnTooLate) or collides with a FIXED blocker (unassigned
@@ -574,9 +589,7 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
     // Capacity models the selected technician's route; unassigned work still
     // blocks it, including the drive home. Legacy placement keeps its shared
     // occupancy rule for other technicians and live holds.
-    const fixedRows = rows.filter(row => row.status !== 'completed'
-      && (capacity ? row.technician_id == null
-        : row.technician_id !== target.technician_id || row.reservation_expires_at != null));
+    const fixedRows = rows.filter(row => row.status !== 'completed' && rowIsFixedBlock(row, target, capacity));
     const fixed = capacity ? occupiedRows(fixedRows).map(row => {
       const range = effectiveWindowRange(row);
       // Unassigned work can start anywhere in its arrival promise. Add that

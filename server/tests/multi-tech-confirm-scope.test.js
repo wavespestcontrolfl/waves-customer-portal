@@ -48,15 +48,18 @@ const args = { date: '2099-01-05', windowStart: '09:00', windowEnd: '10:00', tec
 const scoped = (q) => q.calls.orWhere.some(([col, val]) => col === 'technician_id' && val === 'tech-b');
 
 describe('techScopedConfirmActive', () => {
-  test('needs BOTH the gate and capacity mode (mirrors the offer predicate)', () => {
-    expect(techScopedConfirmActive()).toBe(false);
+  test('the gate alone turns scoping on, in hour mode and in capacity mode (owner 2026-10-30)', () => {
+    expect(techScopedConfirmActive()).toBe(false); // gate unset, capacity off (prod today)
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    expect(techScopedConfirmActive()).toBe(false); // gate unset, capacity on: unchanged
+    delete process.env.GATE_SCHEDULING_CAPACITY;
     process.env.GATE_MULTI_TECH_CONFIRM = 'true';
     expect(multiTechConfirmLive()).toBe(true);
-    expect(techScopedConfirmActive()).toBe(false); // capacity off
+    expect(techScopedConfirmActive()).toBe(true); // gate on, capacity off: NEW
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
-    expect(techScopedConfirmActive()).toBe(true);
+    expect(techScopedConfirmActive()).toBe(true); // gate on, capacity on: unchanged
     delete process.env.GATE_MULTI_TECH_CONFIRM;
-    expect(techScopedConfirmActive()).toBe(false); // gate off
+    expect(techScopedConfirmActive()).toBe(false); // gate off again
   });
 });
 
@@ -88,6 +91,30 @@ describe('findConflictingVisits technicianId scope', () => {
     expect(q.calls.orWhere).toContainEqual(['scheduled_services.technician_id', 'tech-b']);
   });
 
+  test('gate on, capacity OFF (hour mode): same technician OR unassigned — plain overlap SQL', async () => {
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    const q = makeQuery(); db.mockReturnValue(q);
+    await findConflictingVisits({ db, ...args });
+    expect(q.calls.whereNull).toContain('technician_id');
+    expect(scoped(q)).toBe(true);
+  });
+
+  test('gate on, capacity OFF (hour mode): same predicate on the travel-gap variant', async () => {
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const q = makeQuery(); db.mockReturnValue(q);
+    await findConflictingVisits({ db, ...args, travel: { lat: 27.5, lng: -82.4 } });
+    expect(q.calls.whereNull).toContain('scheduled_services.technician_id');
+    expect(q.calls.orWhere).toContainEqual(['scheduled_services.technician_id', 'tech-b']);
+  });
+
+  test('gate unset, capacity OFF (prod today): technicianId is ignored — tech-blind', async () => {
+    const q = makeQuery(); db.mockReturnValue(q);
+    await findConflictingVisits({ db, ...args });
+    expect(q.calls.whereNull).not.toContain('technician_id');
+    expect(scoped(q)).toBe(false);
+  });
+
   test('gate + capacity on but no technicianId (rebooker series, availability, unassigned rows): tech-blind', async () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env.GATE_MULTI_TECH_CONFIRM = 'true';
@@ -101,9 +128,9 @@ describe('findConflictingVisits technicianId scope', () => {
 describe('wiring', () => {
   const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
-  test('/book commit: zone/city/hold legs are AND-scoped, gated on technician + gate + capacity mode', () => {
+  test('/book commit: zone/city/hold legs are AND-scoped, gated on technician + the gate (hour or capacity mode)', () => {
     const src = read('routes/booking.js');
-    const scopeIdx = src.indexOf('if (technician_id && multiTechConfirmLive() && capacityEnabled()) {');
+    const scopeIdx = src.indexOf('if (technician_id && multiTechConfirmLive()) {');
     const firstIdx = src.indexOf("const conflict = await conflictQuery.first('scheduled_services.id');");
     expect(scopeIdx).toBeGreaterThan(-1);
     expect(scopeIdx).toBeLessThan(firstIdx);
@@ -288,11 +315,13 @@ describe('wiring', () => {
       expect(withTech.calls.whereNull).not.toContainEqual(['technician_id']);
     });
 
-    test('gate on but capacity off: still identical (offer side is tech-blind too)', async () => {
+    test('gate on, capacity off (hour mode, owner 2026-10-30): the same call scopes to that technician', async () => {
       const blind = await trace({}, { GATE_MULTI_TECH_CONFIRM: 'true' });
       const withTech = await trace({ technicianId: 'tech-b' }, { GATE_MULTI_TECH_CONFIRM: 'true' });
-      expect(techScopedConfirmActive()).toBe(false);
-      expect(withTech.calls).toEqual(blind.calls);
+      expect(techScopedConfirmActive()).toBe(true);
+      expect(blind.calls.whereNull).not.toContainEqual(['technician_id']);
+      expect(withTech.calls.whereNull).toContainEqual(['technician_id']);
+      expect(withTech.calls.orWhere).toContainEqual(['technician_id', 'tech-b']);
     });
 
     test('scope ON: the same call now scopes to that technician (so the plumbing is live once D1 is decided)', async () => {
@@ -335,9 +364,19 @@ describe('wiring', () => {
 
   test('callers that must stay tech-blind never pass technicianId', () => {
     for (const p of [
-      'services/availability.js', 'services/slot-reservation.js', 'services/visit-groups.js',
+      'services/availability.js', 'services/visit-groups.js',
       'services/annual-prepay-renewals.js']) {
       expect(read(p)).not.toMatch(/findConflictingVisits\(\{[^}]*technicianId/s);
     }
+  });
+
+  // Owner 2026-10-30 (same-hour technicians): the estimate-hold writers' hour-mode global probes
+  // pass the hold's technician (hourProbeTechnicianId: null in capacity mode), so with the gate on
+  // another technician's visit or hold neither blocks nor refuses a hold. The probe ignores the
+  // option with the gate off.
+  test('slot-reservation hour-mode probes pass the hold technician through hourProbeTechnicianId', () => {
+    const src = read('services/slot-reservation.js');
+    expect(src).toContain('return capacityEnabled() || !technicianId ? null : technicianId;');
+    expect(src.match(/technicianId: hourProbeTechnicianId\(/g)).toHaveLength(5);
   });
 });

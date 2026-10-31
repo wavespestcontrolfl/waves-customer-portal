@@ -12,14 +12,15 @@
  *
  * Second technician (GATE_MULTI_TECH_CONFIRM, dark, owner 2026-09-29): a
  * caller MAY pass `technicianId` to scope the probe to that technician's
- * route. With the gate on AND capacity mode on (GATE_SCHEDULING_CAPACITY —
- * techScopedConfirmActive()), a row conflicts only when it carries the SAME
+ * route. With the gate on (techScopedConfirmActive(); owner 2026-10-30: it
+ * no longer needs GATE_SCHEDULING_CAPACITY, so it works in hour mode and in
+ * capacity mode alike), a row conflicts only when it carries the SAME
  * technician_id or NO technician_id: unassigned rows still block everyone,
  * exactly the predicate booking.js's offer-side occupancy mirror applies
  * (`row.technician_id == null || row.technician_id === slot.technician.id`),
  * so a slot offered on technician B's day is not refused at confirm because
- * technician A has an overlapping or nearby stop. No `technicianId`, gate off,
- * or capacity off: the tech-blind behavior above, byte for byte. Callers that
+ * technician A has an overlapping or nearby stop. No `technicianId` or gate
+ * off: the tech-blind behavior above, byte for byte. Callers that
  * pass it (owner 2026-10-03: the /book commit, the public-reschedule probe,
  * admin-schedule.js create/series, the phone agent's commit, call follow-up
  * re-spacing, staff lead booking, and the completion follow-up dry-run;
@@ -72,7 +73,6 @@ const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
 const { multiTechConfirmLive } = require('../../config/feature-gates');
-const { capacityEnabled } = require('./policy');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows, allocationKey } = require('./visit-capacity');
 const logger = require('../logger');
@@ -89,12 +89,16 @@ const INTERVIEW_BUFFER_MINUTES = 15;
 
 const DEFAULT_DURATION_MINUTES = 60;
 
-// Tech-aware confirm scope is active only when the owner gate AND capacity
-// mode are on — the same condition under which booking.js's offer mirror
-// filters occupied rows by technician (`!capacityEnabled() || ...`), so offer
-// and confirm can never scope differently.
+// Tech-aware confirm scope is active when the owner gate (GATE_MULTI_TECH_CONFIRM)
+// is on, in hour mode and in capacity mode alike (owner 2026-10-30, "so techs
+// can and will book the same hr": it no longer needs GATE_SCHEDULING_CAPACITY).
+// Capacity mode ALSO scopes booking.js's offer mirror with the gate off (that
+// is today's behavior, kept byte for byte); offer-side sites therefore scope
+// on `capacityEnabled() || techScopedConfirmActive()` and every commit-side
+// probe scopes on techScopedConfirmActive() alone, so an offered slot is
+// always one a commit probe accepts when the gate is on.
 function techScopedConfirmActive() {
-  return multiTechConfirmLive() && capacityEnabled();
+  return multiTechConfirmLive();
 }
 
 // The offer-side predicate as SQL: a row counts when it is unassigned or on
@@ -521,7 +525,7 @@ function logRouteWarning(fit, arrivalWindow, date) {
  * @param {string|number|null} [args.technicianId]
  *                                          Opt-in technician scope (see the
  *                                          header): with GATE_MULTI_TECH_CONFIRM
- *                                          + capacity mode on, only rows with
+ *                                          on, only rows with
  *                                          this technician_id or a NULL one
  *                                          count. Omitted/null → tech-blind.
  * @returns {Promise<Array>} overlapping rows (chronological), [] if none.

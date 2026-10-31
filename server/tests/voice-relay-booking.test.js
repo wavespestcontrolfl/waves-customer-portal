@@ -1005,7 +1005,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(lockCustomerComms).toHaveBeenCalledWith(trx, CUSTOMER.id);
     // Second half of the contract: the GLOBAL probe, under the lock — scoped to
     // the technician the offer (and so the row) carries; occupancy.js ignores
-    // it unless GATE_MULTI_TECH_CONFIRM + capacity mode are on.
+    // it unless GATE_MULTI_TECH_CONFIRM is on (hour or capacity mode).
     expect(occupancy.findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
       db: trx, date: BOOK_DATE, windowStart: '09:00', windowEnd: '10:00', technicianId: 't-1',
     }));

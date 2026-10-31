@@ -24,8 +24,8 @@
  * fit and free (line-technician.pickLineTechnician), else nobody (step 2's list
  * still bounds who may be named). An unmapped line keeps steps 3 and 4.
  *
- * Active only when the tech-aware save scope is (GATE_MULTI_TECH_CONFIRM +
- * capacity mode, occupancy.techScopedConfirmActive). Otherwise `active` is
+ * Active only when the tech-aware save scope is (GATE_MULTI_TECH_CONFIRM, in
+ * hour or capacity mode, occupancy.techScopedConfirmActive). Otherwise `active` is
  * false and the caller keeps its own default, byte for byte.
  *
  * Reads only. The route estimate spends none of the shared Google allowance
