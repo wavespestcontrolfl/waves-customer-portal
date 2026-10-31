@@ -460,22 +460,29 @@ router.post('/:token/sign', drawnSignatureLimiter, async (req, res, next) => {
     // own signature above). Fire-and-forget, deduped per contract.
     const signedContract = response.body.contract;
     if (signedContract?.id && signedContract.documentTemplateKey === ANNUAL_TERMITE_TEMPLATE_KEY) {
-      const NotificationService = require('../services/notification-service');
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      const { fitAction } = require('../services/admin-alert-names');
       // bell:true — a customer signing is a customer acting (same site tag
       // accepted estimates use), so GATE_ADMIN_BELL_POLICY never silences
       // the one prompt to countersign. 'customer' is a registered,
       // owner-overridable category (codex #4842 r1 P2).
-      void NotificationService.notifyAdmin(
-        'customer',
-        'Termite annual agreement signed — countersign needed',
-        `${signedContract.signedName} signed the Waves Subterranean Termite Protection annual agreement. Add your certified-operator countersignature on the Contracts page.`,
-        {
-          link: '/admin/contracts?tab=requests&status=signed',
-          bell: true,
-          dedupeKey: `termite-annual-countersign:${signedContract.id}`,
-          metadata: { customerId: signedContract.customerId, contractId: signedContract.id },
-        },
-      ).catch((notifyErr) => {
+      void raiseAdminAlert('customer', {
+        area: 'Customers',
+        action: fitAction('Customers', signedContract.signedName, [
+          (n) => `countersign ${n}'s termite agreement`,
+          (n) => `countersign ${n}'s agreement`,
+        ]),
+        why: 'They signed the annual termite agreement, which needs your certified-operator countersignature.',
+        severity: 'needs-you',
+        link: '/admin/contracts?tab=requests&status=signed',
+        subject: { type: 'customer', id: signedContract.customerId },
+        doneWhen: 'contract_countersigned',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey: `termite-annual-countersign:${signedContract.id}`,
+        metadata: { customerId: signedContract.customerId, contractId: signedContract.id },
+      }).catch((notifyErr) => {
         logger.warn(`[contracts-public] countersign bell failed for contract ${signedContract.id}: ${notifyErr.message}`);
       });
     }

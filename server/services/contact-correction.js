@@ -1277,17 +1277,26 @@ async function applyContactCorrections({ customerId, corrections, source, source
       const lines = applied
         .map((a) => `${a.field}: ${a.oldValue || '(empty)'} → ${a.newValue || '(cleared)'}`)
         .join('; ');
-      await require('./notification-service').notifyAdmin(
-        'customer',
-        `Customer record corrected from ${source === 'call' ? 'a call' : 'SMS'}: ${customerName}`,
-        `${customerName} stated corrected contact info and it was auto-applied — ${lines}. `
-          + 'FYI only; revert from the customer page if wrong.',
-        {
-          link: `/admin/customers?customerId=${customerId}`,
-          bell: true,
-          metadata: { customerId, source, sourceId, applied },
-        },
-      ).catch((err) => {
+      const { fitAction } = require('./admin-alert-names');
+      // An FYI that rings (bell: true), so fyiRow keeps writing it: converting it changes no ring.
+      await require('./admin-alert-compose').raiseAdminAlert('customer', {
+        area: 'Customers',
+        action: fitAction('Customers', customerName, [
+          (n) => `${n}'s contact details updated`,
+          (n) => `${n}'s contact updated`,
+        ]),
+        why: `They gave corrected contact details on ${source === 'call' ? 'a call' : 'a text'}, so we applied them; undo on their page if wrong.`,
+        severity: 'fyi',
+        link: `/admin/customers?customerId=${customerId}`,
+        subject: { type: 'customer', id: customerId },
+        doneWhen: 'already_done',
+        who: 'person',
+      }, {
+        bell: true,
+        fyiRow: true,
+        detail: `${customerName} stated corrected contact info and it was auto-applied: ${lines}.`,
+        metadata: { customerId, source, sourceId, applied },
+      }).catch((err) => {
         logger.warn(`[contact-correction] FYI bell failed for ${customerId}: ${errTag(err)}`);
       });
       logger.info(`[contact-correction] applied ${applied.length} field(s) for customer ${customerId} via ${source}`);
@@ -1565,12 +1574,14 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     let callerIsPrimary = false;
     let call = null;
     let expectedValues = null;
+    let customerName = '';
     try {
       let owner = null;
       [call, owner] = await Promise.all([
         knex('call_log').where({ id: callId }).first('from_phone', 'to_phone', 'direction', 'transcription', 'processing_token'),
         knex('customers').where({ id: customerId }).first('phone', 'first_name', 'last_name'),
       ]);
+      customerName = require('./admin-alert-names').fullName(owner);
       // The EXTERNAL leg is the caller identity (codex #3413 r19): on a
       // recorded outbound callback from_phone is a Waves number and the
       // customer is to_phone. Same external-leg doctrine as the
@@ -1793,17 +1804,25 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
             .first('id'));
         } catch { alreadyRung = false; }
         if (alreadyRung) return;
-        await require('./notification-service').notifyAdmin(
-          'customer',
-          'Contact corrections proposed from a call',
-          `The caller stated corrected contact info on a recorded call — ${lines}. `
+        const { fitAction } = require('./admin-alert-names');
+        await require('./admin-alert-compose').raiseAdminAlert('customer', {
+          area: 'Customers',
+          action: fitAction('Customers', customerName || 'a customer', [
+            (n) => `review ${n}'s contact fixes from a call`,
+            (n) => `review ${n}'s contact fixes`,
+          ]),
+          why: 'A caller gave corrected contact details that are not applied on their own; apply them on the customer page.',
+          severity: 'needs-you',
+          link: `/admin/customers?customerId=${customerId}`,
+          subject: { type: 'customer', id: customerId },
+          doneWhen: 'contact_proposal_reviewed',
+          who: 'person',
+        }, {
+          bell: true,
+          detail: `The caller stated corrected contact info on a recorded call: ${lines}. `
             + 'Spoken email/address values are not auto-applied; review and apply from the customer page.',
-          {
-            link: `/admin/customers?customerId=${customerId}`,
-            bell: true,
-            metadata: { customerId, source: 'call', sourceId: callId, dedupeKey, proposed: proposals.map((p) => p.field_name) },
-          },
-        );
+          metadata: { customerId, source: 'call', sourceId: callId, dedupeKey, proposed: proposals.map((p) => p.field_name) },
+        });
       };
       try {
         if (procToken) await knex.transaction((trx) => ringProposalBell(trx));

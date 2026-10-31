@@ -4510,19 +4510,27 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
     try {
       const names = results.merged.slice(0, 5).map((m) => m.winnerName).join(', ');
       const more = results.merged.length > 5 ? ` and ${results.merged.length - 5} more` : '';
-      await require('./notification-service').notifyAdmin(
-        'customer',
-        `${results.merged.length} duplicate customer${results.merged.length === 1 ? '' : 's'} auto-merged`,
-        `Merged into: ${names}${more}. Same phone, matching identity, no billing on the duplicates. Full snapshots in the merge journal — most merges can be undone from Recent merges, though an undo refuses once state has moved on.`,
-        {
-          // The SPA registers /admin/customers and opens Customer 360
-          // via ?customerId= — a /admin/customers/<uuid> path 404s.
-          link: results.merged.length === 1
-            ? `/admin/customers?customerId=${results.merged[0].winnerId}`
-            : '/admin/customers',
-          metadata: { merged: results.merged.map(({ winnerId, loserId }) => ({ winnerId, loserId })) },
-        },
-      );
+      const n = results.merged.length;
+      // fyi with fyiRow: the row is written exactly as before (the bell policy and the owner's category
+      // setting still decide whether it rings), so converting it changes no ring.
+      await require('./admin-alert-compose').raiseAdminAlert('customer', {
+        area: 'Customers',
+        action: `${n} duplicate customer${n === 1 ? '' : 's'} merged on their own`,
+        why: 'Same phone and identity with no billing on the duplicates; most merges can be undone from Recent merges.',
+        severity: 'fyi',
+        // The SPA registers /admin/customers and opens Customer 360
+        // via ?customerId= — a /admin/customers/<uuid> path 404s.
+        link: n === 1
+          ? `/admin/customers?customerId=${results.merged[0].winnerId}`
+          : '/admin/customers',
+        subject: { type: 'check', id: 'customer-dedupe-auto-merge' },
+        doneWhen: 'already_done',
+        who: 'person',
+      }, {
+        fyiRow: true,
+        detail: `Merged into: ${names}${more}. Full snapshots in the merge journal; an undo refuses once state has moved on.`,
+        metadata: { merged: results.merged.map(({ winnerId, loserId }) => ({ winnerId, loserId })) },
+      });
     } catch (notifyErr) {
       logger.warn(`[customer-dedupe] merge digest notify failed (non-blocking): ${notifyErr.message}`);
     }
@@ -4651,15 +4659,21 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
   if (results.dismissed.length) {
     try {
       const n = results.dismissed.length;
-      await require('./notification-service').notifyAdmin(
-        'customer',
-        `${n} duplicate pair${n === 1 ? '' : 's'} auto-dismissed as different people`,
-        'Different last names at a different address on a shared phone — the detector\'s own "two people" verdict, so these pairs can never be merged. Removed from the duplicate review queue; to re-surface one, delete its customer_duplicate_dismissals row.',
-        {
-          link: '/admin/customers/duplicates',
-          metadata: { dismissed: results.dismissed, skippedStale: results.skippedStale },
-        },
-      );
+      // fyi with fyiRow, like the merge digest above: converting it changes no ring.
+      await require('./admin-alert-compose').raiseAdminAlert('customer', {
+        area: 'Customers',
+        action: `${n} duplicate pair${n === 1 ? '' : 's'} marked as two people`,
+        why: 'Different last names at a different address on a shared phone, so these pairs can never be merged.',
+        severity: 'fyi',
+        link: '/admin/customers/duplicates',
+        subject: { type: 'check', id: 'customer-dedupe-red-dismiss' },
+        doneWhen: 'already_done',
+        who: 'person',
+      }, {
+        fyiRow: true,
+        detail: 'Removed from the duplicate review queue; to re-surface one, delete its customer_duplicate_dismissals row.',
+        metadata: { dismissed: results.dismissed, skippedStale: results.skippedStale },
+      });
     } catch (notifyErr) {
       logger.warn(`[customer-dedupe] red-dismiss digest notify failed (non-blocking): ${notifyErr.message}`);
     }
@@ -7098,19 +7112,32 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     const skippedNote = result.skipped.length
       ? ` ${result.skipped.length} item(s) could not be restored automatically (state moved on since the merge).`
       : '';
-    await require('./notification-service').notifyAdmin(
-      'customer',
-      `Merge undone: ${result.loserName} restored`,
-      `${result.loserName} was split back out of ${result.winnerName}; ${back} row(s) repointed back.${skippedNote}`,
-      {
-        link: `/admin/customers?customerId=${result.loserId}`,
-        metadata: {
-          journalId: result.journalId,
-          skipped: result.skipped,
-          stripeMovedBack: result.stripeMovedBack,
-        },
+    const { fitAction } = require('./admin-alert-names');
+    const notRestored = result.skipped.length;
+    // fyi with fyiRow, like the merge digest: converting it changes no ring.
+    await require('./admin-alert-compose').raiseAdminAlert('customer', {
+      area: 'Customers',
+      action: fitAction('Customers', result.loserName, [
+        (n) => `merge undone, ${n} restored`,
+        (n) => `${n} restored`,
+      ]),
+      why: notRestored
+        ? `${back} record${back === 1 ? '' : 's'} moved back, and ${notRestored} could not be restored because they changed since the merge.`
+        : `${back} record${back === 1 ? '' : 's'} moved back to the restored customer.`,
+      severity: 'fyi',
+      link: `/admin/customers?customerId=${result.loserId}`,
+      subject: { type: 'customer', id: result.loserId },
+      doneWhen: 'already_done',
+      who: 'person',
+    }, {
+      fyiRow: true,
+      detail: `${result.loserName} was split back out of ${result.winnerName}; ${back} row(s) repointed back.${skippedNote}`,
+      metadata: {
+        journalId: result.journalId,
+        skipped: result.skipped,
+        stripeMovedBack: result.stripeMovedBack,
       },
-    );
+    });
   } catch (notifyErr) {
     logger.warn(`[customer-dedupe] revert notify failed (non-blocking): ${notifyErr.message}`);
   }

@@ -145,11 +145,21 @@ describe('countersign-needed bell', () => {
     expect(category).toBe('customer');
     expect(opts.bell).toBe(true);
     expect(jest.requireActual('../services/notification-bell-policy').OVERRIDABLE_CATEGORY_SET.has(category)).toBe(true);
-    expect(title).toMatch(/countersign needed/i);
-    expect(msg).toMatch(/Sam Customer/);
+    // Raised through raiseAdminAlert (alert step E2): the rule-format headline names the signer, and the
+    // composed fields join the emitter's own metadata.
+    expect(title).toBe("Customers — countersign Sam Customer's termite agreement");
+    expect(msg).toMatch(/countersignature/);
     expect(opts.dedupeKey).toBe(`termite-annual-countersign:${CONTRACT_ID}`);
     expect(opts.link).toBe('/admin/contracts?tab=requests&status=signed');
-    expect(opts.metadata).toEqual({ customerId: 'cust-1', contractId: CONTRACT_ID });
+    expect(opts.metadata).toEqual({
+      customerId: 'cust-1',
+      contractId: CONTRACT_ID,
+      area: 'Customers',
+      severity: 'needs-you',
+      subject: { type: 'customer', id: 'cust-1' },
+      doneWhen: 'contract_countersigned',
+      who: 'person',
+    });
   });
 
   test('does not fire for a different document template (e.g. the quarterly purchase agreement) — the email copy still sends', async () => {
