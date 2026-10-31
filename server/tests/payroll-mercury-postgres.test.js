@@ -976,6 +976,20 @@ postgres('payroll Mercury paychecks', () => {
       expect(bells).toHaveBeenCalledWith('pending_noon', expect.anything(), expect.anything());
     });
 
+    it.each(['rejected', 'cancelled'])('a request %s after the noon reminder closes the reminder; only its own bell stays open', async (status) => {
+      const ctx = await sent();
+      const row = await ctx.row();
+      const openKeys = async () => (await trx('notifications').where({ recipient_type: 'admin', category: 'payroll' })
+        .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
+        .select(trx.raw("metadata->>'dedupeKey' as key"))).map((r) => r.key).sort();
+      await poll(ctx.client, new Date('2026-09-24T16:01:00Z'));
+      expect(await openKeys()).toEqual([`payroll-pay:${row.id}:pending_noon`]);
+      ctx.client.getRequest.mockResolvedValue({ status });
+      await poll(ctx.client, new Date('2026-09-24T16:16:00Z'));
+      expect((await ctx.row()).state).toBe(status);
+      expect(await openKeys()).toEqual([`payroll-pay:${row.id}:${status}`]);
+    });
+
     it('a refused key (401) rings the key bell once and ends the run', async () => {
       const ctx = await sent(['Sample Alpha', 'Sample Beta']);
       ctx.client.getRequest.mockRejectedValue(new MercuryError('auth', { status: 401 }));

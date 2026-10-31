@@ -132,10 +132,21 @@ async function applyPatch(conn, row, patch, now) {
   return Number(changed) > 0;
 }
 
+// The bells a new state makes out of date (an approval reminder, an unknown outcome) close BEFORE the state's own bell
+// is raised, so the new bell stays open. A return closes nothing: a month-mismatch bell may still need its tax fix.
+const CLOSES_BELLS = {
+  requested: 'The request was found in Mercury',
+  approved: 'The request was approved in Mercury',
+  rejected: 'The request was rejected in Mercury',
+  cancelled: 'The request was cancelled in Mercury',
+  sent: 'Mercury shows the money sent',
+  failed: 'Mercury shows the payment failed',
+};
+
 async function afterChange(row, result, patch, conn) {
+  const closing = CLOSES_BELLS[patch.state];
+  if (closing) await alerts.closePaymentBells(row.id, closing, { conn });
   if (result.bell) await alerts.raisePaymentAlert(result.bell, { ...row, ...patch }, { conn });
-  if (patch.state === 'approved') await alerts.closePaymentBells(row.id, 'The request was approved in Mercury', { conn });
-  if (patch.state === 'sent') await alerts.closePaymentBells(row.id, 'Mercury shows the money sent', { conn });
   const day = patch.posted_on || null;
   if (day && String(day).slice(0, 7) !== String(row.pay_date).slice(0, 7)) {
     await alerts.raisePaymentAlert('month_mismatch', { ...row, posted_on: day }, { conn });
@@ -207,12 +218,8 @@ async function stepUnknown(row, ctx) {
     } catch (err) {
       if (!(err && err.code === '23505')) throw err;
     }
-    if (changed) {
-      // The request is found, so the "unknown" and "probably ours" bells are out of date. They close first, so a
-      // rejected or cancelled bell raised next stays open (linkRequest does the same).
-      await alerts.closePaymentBells(row.id, 'The request was found in Mercury', { conn: ctx.conn });
-      await afterChange(row, result, resolveNow(patch, ctx.now), ctx.conn);
-    }
+    // afterChange closes the "unknown" and "probably ours" bells first: the request is found (linkRequest does the same).
+    if (changed) await afterChange(row, result, resolveNow(patch, ctx.now), ctx.conn);
   } else {
     changed = await applyPatch(ctx.conn, row, {}, ctx.now);
     if (match.kind === 'probably_ours') await alerts.raisePaymentAlert('probably_ours', row, { conn: ctx.conn });
