@@ -173,7 +173,6 @@ const {
   bookArrivalGraceMinutes, delayWithinGrace, bookGapAdmits, bookClashesWaivable,
 } = require('../services/scheduling/book-arrival-grace');
 const { etDateString, addETDays, addETBusinessDays } = require('../utils/datetime-et');
-const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
 const {
@@ -6543,17 +6542,25 @@ async function createSelfBooking(payload = {}) {
       // reservice_self_booked bell from reservice-public.js (owner
       // 2026-10-05); this internal text would be a second alert for it.
       const reserviceOwnBell = !!callbackVisit && !callbackVisit.alertLabel;
-      if (process.env.ADAM_PHONE && !reserviceOwnBell) {
+      if (!reserviceOwnBell) {
         // A non-re-service internal caller (inspection-public.js's free
         // consultation) announces itself with its own alertLabel.
-        const alertHead = callbackVisit ? callbackVisit.alertLabel : '📱 New self-booked appointment:';
-        await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `${alertHead}\n${customer.first_name} ${customer.last_name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city}\nSource: ${source || 'portal'}\nCode: ${confCode}`,
-          { messageType: 'internal_alert' }
-        );
+        const alertHead = callbackVisit ? callbackVisit.alertLabel : 'New self-booked appointment:';
+        const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ') || 'A customer';
+        // Was an internal text to the owner's phone, silenced since 2026-09 (services/owner-alerts.js).
+        await require('../services/owner-alerts').recordOwnerAlert('self-booked', {
+          action: 'look over a new self-booked visit',
+          why: `${name} booked ${resolvedServiceType} for ${dateLabel}.`,
+          subject: { type: 'visit', id: String(serviceRow.id) },
+          text: `${alertHead}\n${name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city || ''}\nSource: ${source || 'portal'}\nCode: ${confCode}`,
+          link: `/admin/customers?customerId=${encodeURIComponent(custId)}`,
+          dedupeKey: `owner-alert:self-booked:${serviceRow.id}`,
+          itemKeys: [serviceRow.id],
+          metadata: { customerId: custId },
+        });
       }
     } catch (err) {
-      logger.error(`[booking:confirm] SMS failed: ${err.message}`);
+      logger.error(`[booking:confirm] owner alert failed: ${err.message}`);
     }
 
     // A self-booked recurring series (quarterly pest follow-ups seeded above) is

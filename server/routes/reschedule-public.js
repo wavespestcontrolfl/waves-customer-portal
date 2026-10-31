@@ -1323,23 +1323,29 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       logger.warn(`[reschedule-public] promise resolve failed for ${svc.id}: ${err.code || err.name || 'error'}`);
     }
 
-    // Office alert — same internal ping a new self-booked appointment fires.
+    // Office alert — same record a new self-booked appointment writes. Was an
+    // internal text to the owner's phone, silenced since 2026-09
+    // (services/owner-alerts.js).
     try {
-      if (process.env.ADAM_PHONE) {
-        const TwilioService = require('../services/twilio');
-        const name = [svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'Customer';
-        const displayDate = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
-        });
-        const seriesNote = shiftedOccurrences
-          ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted${siblingConflicts.length ? ` — ⚠️ ${siblingConflicts.length} left WITHOUT a time window (see bell)` : ''}`
-          : '';
-        await TwilioService.sendSMS(
-          process.env.ADAM_PHONE,
-          `🔁 Customer self-rescheduled:\n${name}\n${svc.service_type || 'service'}\n${apptDateStr(svc.scheduled_date)} → ${displayDate} ${slot.start_label}-${slot.end_label}${seriesNote}\n${svc.city || ''}`,
-          { messageType: 'internal_alert' }
-        );
-      }
+      const name = [svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'Customer';
+      const displayDate = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', {
+        weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
+      });
+      const seriesNote = shiftedOccurrences
+        ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted${siblingConflicts.length ? ` — ${siblingConflicts.length} left WITHOUT a time window (see bell)` : ''}`
+        : '';
+      const move = `${apptDateStr(svc.scheduled_date)} → ${displayDate} ${slot.start_label}-${slot.end_label}`;
+      await require('../services/owner-alerts').recordOwnerAlert('self-rescheduled', {
+        action: 'look over a visit a customer moved',
+        why: `${name} moved ${svc.service_type || 'a visit'} to ${displayDate}.`,
+        subject: { type: 'visit', id: String(svc.id) },
+        text: `Customer self-rescheduled:\n${name}\n${svc.service_type || 'service'}\n${move}${seriesNote}\n${svc.city || ''}`,
+        link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`,
+        // One row per move: the same visit moved again to another slot is a new row.
+        dedupeKey: `owner-alert:self-rescheduled:${svc.id}:${date}:${slot.start_label}`,
+        itemKeys: [`${svc.id}:${date}`],
+        metadata: { customerId: svc.customer_id },
+      });
     } catch (err) {
       logger.warn(`[reschedule-public] office alert failed for ${svc.id}: ${err.message}`);
     }

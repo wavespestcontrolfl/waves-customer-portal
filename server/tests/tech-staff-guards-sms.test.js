@@ -90,6 +90,12 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})), isKnownOwnerPhone: jest.fn(() => false) }));
+// The owner forward is an owner alert row now (services/owner-alerts.js), never a text: the owner-phone
+// internal text was silenced in 2026-09.
+jest.mock('../services/ops-digest', () => ({
+  ...jest.requireActual('../services/ops-digest'),
+  deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n-1' })),
+}));
 jest.mock('../services/messaging/validators/suppression', () => ({
   recordSuppression: jest.fn(async () => ({})), clearSuppression: jest.fn(async () => ({})),
 }));
@@ -133,6 +139,7 @@ const { handleClarifyReply } = require('../services/estimate-clarify-asks');
 const { startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
 const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { sendSMS } = require('../services/twilio');
+const { deliverOpsDigest } = require('../services/ops-digest');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const numbers = require('../config/twilio-numbers');
@@ -196,12 +203,12 @@ describe('an inbound text from an active technician\'s phone', () => {
     expect(writesTo('activity_log')).toHaveLength(1);
   });
 
-  test('raises the normal unknown-sender alert: one owner text forward', async () => {
+  test('raises the normal unknown-sender alert: one owner alert row, no text', async () => {
     asStaff();
     await receive(TEXT);
-    expect(sendSMS).toHaveBeenCalledTimes(1);
-    expect(sendSMS.mock.calls[0][0]).toBe('+12025550199');
-    expect(sendSMS.mock.calls[0][2]).toEqual({ messageType: 'internal_alert' });
+    expect(sendSMS).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest.mock.calls[0][0]).toMatchObject({ key: 'owner-alert:inbound-text', audience: 'fyi' });
   });
 
   test.each([
@@ -212,16 +219,16 @@ describe('an inbound text from an active technician\'s phone', () => {
     const { triggerNotification } = require('../services/notification-triggers');
     await receive(TEXT, { to: toNumber(), sid: `SM-synthetic-staff-${_label.length}` });
     expect(triggerNotification.mock.calls.filter((c) => c[0] === 'new_lead')).toHaveLength(0);
-    expect(sendSMS).toHaveBeenCalledTimes(1);
-    expect(sendSMS.mock.calls[0][0]).toBe('+12025550199');
-    expect(sendSMS.mock.calls[0][2]).toEqual({ messageType: 'internal_alert' });
+    expect(sendSMS).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest.mock.calls[0][0].key).toBe('owner-alert:inbound-text');
   });
 
   test('control: a stranger texting a tracking number gets the new-lead bell and no owner forward, as today', async () => {
     const { triggerNotification } = require('../services/notification-triggers');
     await receive(TEXT, { to: numbers.tracking.vanWrap.number, sid: 'SM-synthetic-stranger-van' });
     expect(triggerNotification.mock.calls.filter((c) => c[0] === 'new_lead')).toHaveLength(1);
-    expect(sendSMS).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
 
   test('skips the customer and lead side: no screen, estimator draft, agent, auto-reply or new-prospect bell', async () => {
@@ -258,7 +265,7 @@ describe('an inbound text from an active technician\'s phone', () => {
     expect(handleClarifyReply).toHaveBeenCalledTimes(1);
     expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
     expect(processInboundSms).toHaveBeenCalledTimes(1);
-    expect(sendSMS).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
   });
 
   test('a STOP keyword keeps its normal consent handling', async () => {
@@ -282,7 +289,7 @@ describe('an inbound text from an active technician\'s phone', () => {
       const res = await receive('Yes');
       expect(res.statusCode).toBe(200);
       expect(recordTouchpoint).toHaveBeenCalledTimes(1);
-      expect(sendSMS).toHaveBeenCalledTimes(1);
+      expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
       expect(startSmsThreadDraft).not.toHaveBeenCalled();
       expect(processInboundSms).not.toHaveBeenCalled();
     } finally {

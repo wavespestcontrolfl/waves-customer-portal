@@ -11,6 +11,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockSendSMS = jest.fn().mockResolvedValue({});
 jest.mock('../services/twilio', () => ({ sendSMS: (...a) => mockSendSMS(...a) }));
+// The daily summary is an owner alert row now (services/owner-alerts.js), never a text: the owner-phone
+// internal text was silenced in 2026-09. `text` carries what the text used to say.
+const mockDeliver = jest.fn().mockResolvedValue({ ok: true, channel: 'in_app', id: 'n-1' });
+jest.mock('../services/ops-digest', () => ({
+  ...jest.requireActual('../services/ops-digest'),
+  deliverOpsDigest: (...a) => mockDeliver(...a),
+}));
 jest.mock('../services/seo/search-console-v2', () => ({
   getPerformanceSummary: jest.fn().mockResolvedValue({ current: { clicks: 0 } }),
 }));
@@ -84,6 +91,7 @@ beforeEach(() => {
   mockLimits.length = 0;
   mockDispatch.mockReset();
   mockSendSMS.mockClear();
+  mockDeliver.mockClear();
   mockInsert.mockClear();
 });
 
@@ -284,7 +292,7 @@ describe('search-term truncation (Codex r6 on #5486)', () => {
 });
 
 describe('empty recommendations', () => {
-  test('are accepted by the leg validator, stored with a zero count, stamped with the writing model, and texted as nothing-to-do', async () => {
+  test('are accepted by the leg validator, stored with a zero count, stamped with the writing model, and recorded as nothing-to-do', async () => {
     mockDispatch.mockImplementation(async (_policy, _payload, opts) => {
       const json = { ...EMPTY_REPORT };
       expect(opts.validate({ json })).toBeNull();
@@ -301,13 +309,15 @@ describe('empty recommendations', () => {
     expect(row.grade).toBe('B');
     expect(JSON.parse(row.report_data).model).toBe('claude-fable-5-1');
 
-    expect(mockSendSMS).toHaveBeenCalledTimes(1);
-    const body = mockSendSMS.mock.calls[0][1];
+    expect(mockSendSMS).not.toHaveBeenCalled();
+    expect(mockDeliver).toHaveBeenCalledTimes(1);
+    expect(mockDeliver.mock.calls[0][0]).toMatchObject({ key: 'owner-alert:ads-daily-report', audience: 'fyi', link: '/admin/ads' });
+    const body = mockDeliver.mock.calls[0][0].text;
     expect(body).toContain('No changes recommended today.');
     expect(body).not.toContain('Top actions');
   });
 
-  test('empty recommendations with other flagged items are texted as flagged, never as "no changes" (Codex r2 on #5486)', async () => {
+  test('empty recommendations with other flagged items are recorded as flagged, never as "no changes" (Codex r2 on #5486)', async () => {
     const report = {
       ...EMPTY_REPORT,
       waste_alerts: [{ search_term: 'synthetic wasted term', spend: 12, conversions: 0, action: 'add_negative' }, { search_term: 'second term', spend: 9 }],
@@ -315,8 +325,8 @@ describe('empty recommendations', () => {
     };
     mockDispatch.mockResolvedValue({ ok: true, json: report, provider: 'anthropic', model: 'm' });
     await advisor.generateDailyAdvice();
-    expect(mockSendSMS).toHaveBeenCalledTimes(1);
-    const body = mockSendSMS.mock.calls[0][1];
+    expect(mockDeliver).toHaveBeenCalledTimes(1);
+    const body = mockDeliver.mock.calls[0][0].text;
     expect(body).not.toContain('No changes recommended today.');
     expect(body).toContain('No campaign changes recommended, but flagged:');
     expect(body).toContain('• Waste alerts: 2 (e.g. synthetic wasted term)');
@@ -325,7 +335,7 @@ describe('empty recommendations', () => {
     expect(body).not.toContain('Top actions');
   });
 
-  test('recommendations still lead the text when present', async () => {
+  test('recommendations still lead the alert text when present', async () => {
     const report = {
       ...EMPTY_REPORT,
       recommendations: [{ priority: 'high', action: 'Raise budget', reasoning: '7.0x ROAS on $40 spend' }],
@@ -333,7 +343,7 @@ describe('empty recommendations', () => {
     };
     mockDispatch.mockResolvedValue({ ok: true, json: report, provider: 'anthropic', model: 'm' });
     await advisor.generateDailyAdvice();
-    const body = mockSendSMS.mock.calls[0][1];
+    const body = mockDeliver.mock.calls[0][0].text;
     expect(body).toContain('Top actions:\n• Raise budget');
     expect(body).not.toContain('flagged');
   });

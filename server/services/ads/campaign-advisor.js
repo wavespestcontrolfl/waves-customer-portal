@@ -18,9 +18,6 @@ const ADVISOR_MAX_TOKENS = 16000;
 const ADVISOR_MAX_SEARCH_TERMS = 100;
 
 
-let TwilioService;
-try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
-
 let SearchConsole;
 try { SearchConsole = require('../seo/search-console-v2'); } catch { SearchConsole = null; }
 
@@ -646,16 +643,22 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
     }
   }
 
+  // Was an internal text to the owner's phone, silenced since 2026-09
+  // (services/owner-alerts.js). One row per report day.
   async sendSummary(advice) {
-    if (!TwilioService || !process.env.ADAM_PHONE) return;
     try {
       const actionsBlock = summaryActionsBlock(advice);
-      await TwilioService.sendSMS(process.env.ADAM_PHONE,
-        `📊 Daily Ads Report — Grade: ${advice.grade || '?'}\n${advice.overall_assessment || ''}\n\n${actionsBlock}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
-        { messageType: 'internal_alert' }
-      );
+      const { recordOwnerAlert, whyFromFreeText } = require('../owner-alerts');
+      await recordOwnerAlert('ads-daily-report', {
+        action: `read the daily ads report, grade ${String(advice.grade || 'none').slice(0, 3)}`,
+        why: whyFromFreeText(advice.overall_assessment),
+        subject: { type: 'check', id: 'ads-daily-report' },
+        text: `Daily Ads Report — Grade: ${advice.grade || '?'}\n${advice.overall_assessment || ''}\n\n${actionsBlock}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
+        link: '/admin/ads',
+        dedupeKey: `owner-alert:ads-daily-report:${advice.date || etDateString()}`,
+      });
     } catch (err) {
-      logger.error(`Advisor SMS failed: ${err.message}`);
+      logger.error(`Advisor owner alert failed: ${err.message}`);
     }
   }
 

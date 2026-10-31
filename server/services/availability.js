@@ -907,17 +907,22 @@ class AvailabilityEngine {
 
     // Customer confirmation is handled by registerAppointment above.
     try {
-      const TwilioService = require('./twilio');
       const dateLabel = new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
-      // Adam notification
-      if (process.env.ADAM_PHONE) {
-        await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `New self-booked appointment:\n${customer.first_name} ${customer.last_name}\n${serviceType}\n${dateLabel} ${this.minToTime12(this.timeToMin(startTime))}\n${customer.city}\nCode: ${confCode}`,
-          { messageType: 'internal_alert' }
-        );
-      }
+      const startLabel = this.minToTime12(this.timeToMin(startTime));
+      const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ') || 'A customer';
+      // Was an internal text to the owner's phone, silenced since 2026-09 (services/owner-alerts.js).
+      await require('./owner-alerts').recordOwnerAlert('self-booked', {
+        action: 'look over a new self-booked visit',
+        why: `${name} booked ${serviceType} for ${dateLabel}.`,
+        subject: { type: 'visit', id: String(scheduled.id) },
+        text: `New self-booked appointment:\n${name}\n${serviceType}\n${dateLabel} ${startLabel}\n${customer.city || ''}\nCode: ${confCode}`,
+        link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+        dedupeKey: `owner-alert:self-booked:${scheduled.id}`,
+        itemKeys: [scheduled.id],
+        metadata: { customerId },
+      });
     } catch (err) {
-      logger.error(`Booking SMS failed: ${err.message}`);
+      logger.error(`Booking owner alert failed: ${err.message}`);
     }
     };
 

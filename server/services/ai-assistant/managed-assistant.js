@@ -459,17 +459,10 @@ class ManagedAssistant {
       sent_to_customer: true,
     }).catch(e => logger.error(`[managed-assistant] Failed to save escalation reply: ${e.message}`, { conversationId: conversation.id }));
 
-    // Notify Adam via SMS for urgent escalations
+    // Urgent escalations leave an owner alert (was an internal text to the
+    // owner's phone, silenced since 2026-09; services/owner-alerts.js).
     if (priority === 'urgent') {
-      try {
-        const TwilioService = require('../twilio');
-        if (process.env.ADAM_PHONE) {
-          await TwilioService.sendSMS(process.env.ADAM_PHONE,
-            `🚨 AI Escalation (${priority})\n${customer ? customer.first_name + ' ' + customer.last_name : 'Unknown'}\nReason: ${reason}\nMsg: "${(customerMessage || '').substring(0, 100)}"`,
-            { messageType: 'internal_alert' }
-          );
-        }
-      } catch { /* SMS notification is best-effort */ }
+      await require('../owner-alerts').recordUrgentEscalation({ customer, reason, customerMessage, conversationId: conversation.id, escalationId: escalation?.id });
     }
 
     logger.info(`[managed-assistant] Escalated: ${conversation.id} reason="${reason}" priority=${priority}`);

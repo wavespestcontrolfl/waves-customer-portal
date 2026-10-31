@@ -794,9 +794,9 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
     });
   });
 
-    test('source pin: createSelfBooking sends no internal text for a re-service (one alert, not two)', () => {
+    test('source pin: createSelfBooking writes no owner alert for a re-service (one alert, not two)', () => {
       const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
-      expect(src).toMatch(/const reserviceOwnBell = !!callbackVisit && !callbackVisit\.alertLabel;\s*if \(process\.env\.ADAM_PHONE && !reserviceOwnBell\)/);
+      expect(src).toMatch(/const reserviceOwnBell = !!callbackVisit && !callbackVisit\.alertLabel;\s*if \(!reserviceOwnBell\)/);
     });
 
   // GATE_RESERVICE_DETAILS_REQUIRED (owner 2026-10-02: any text counts; a

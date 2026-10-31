@@ -7,6 +7,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({ success: true })) }));
+// The heads-up is an owner alert row now (services/owner-alerts.js), never a text: the owner-phone
+// internal text was silenced in 2026-09.
+jest.mock('../services/ops-digest', () => ({
+  ...jest.requireActual('../services/ops-digest'),
+  deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n-1' })),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
 }));
@@ -24,6 +30,7 @@ const path = require('path');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TwilioService = require('../services/twilio');
+const { deliverOpsDigest } = require('../services/ops-digest');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const InvoiceFollowUps = require('../services/invoice-followups');
 const StripeService = require('../services/stripe');
@@ -98,20 +105,27 @@ describe('the retired legacy senders are gone', () => {
 });
 
 describe('imminentOverdueOwnerAlertSweep (the kept 30-days-overdue owner heads-up)', () => {
-  test('texts the owner for a balance 30+ days overdue with service tomorrow', async () => {
+  test('records an owner alert (no text) for a balance 30+ days overdue with service tomorrow', async () => {
     armSweep();
     await BalanceReminder.imminentOverdueOwnerAlertSweep();
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-    const [to, body, opts] = TwilioService.sendSMS.mock.calls[0];
-    expect(to).toBe(process.env.ADAM_PHONE || '+19415993489');
-    expect(body).toBe('💰 Overdue: Taylor Morgan — $129.00 (31 days). Service tomorrow.');
-    expect(opts).toEqual({ messageType: 'internal_alert' });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    const digest = deliverOpsDigest.mock.calls[0][0];
+    expect(digest).toMatchObject({
+      key: 'owner-alert:overdue-visit',
+      headline: 'Billing — collect an overdue balance before the visit',
+      summary: 'Taylor Morgan owes $129.00, 31 days overdue, with service tomorrow.',
+      text: 'Overdue: Taylor Morgan — $129.00 (31 days). Service tomorrow.',
+      audience: 'fyi',
+      dedupeKey: `owner-alert:overdue-visit:cust-1:${TOMORROW()}`,
+    });
+    expect(digest.metadata).toMatchObject({ customerId: 'cust-1', severity: 'needs-you', subject: { type: 'customer', id: 'cust-1' } });
   });
 
   test('says "today" for a visit today', async () => {
     armSweep({ visits: [visit({ scheduled_date: TODAY() })] });
     await BalanceReminder.imminentOverdueOwnerAlertSweep();
-    expect(TwilioService.sendSMS.mock.calls[0][1]).toMatch(/Service today\.$/);
+    expect(deliverOpsDigest.mock.calls[0][0].text).toMatch(/Service today\.$/);
   });
 
   test.each([
@@ -122,19 +136,19 @@ describe('imminentOverdueOwnerAlertSweep (the kept 30-days-overdue owner heads-u
   ])('sends nothing for %s', async (_label, bal) => {
     armSweep({ bal });
     await BalanceReminder.imminentOverdueOwnerAlertSweep();
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
 
   test('sends nothing for a visit outside today and tomorrow', async () => {
     armSweep({ visits: [visit({ scheduled_date: etDateString(addETDays(new Date(), 3)) })] });
     await BalanceReminder.imminentOverdueOwnerAlertSweep();
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
 
   test('one alert per customer per visit day, however many visits that day', async () => {
     const read = armSweep({ visits: [visit(), visit({ id: 'visit-2' })] });
     await BalanceReminder.imminentOverdueOwnerAlertSweep();
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledTimes(1);
   });
 
@@ -161,7 +175,7 @@ describe('imminentOverdueOwnerAlertSweep (the kept 30-days-overdue owner heads-u
         StripeService.isInvoiceAwaitingMicrodepositVerification.mockImplementation(async (row) => row.id === stoppedId);
       }
       await BalanceReminder.imminentOverdueOwnerAlertSweep();
-      expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+      expect(deliverOpsDigest).not.toHaveBeenCalled();
     });
 
     test.each(['sequence', 'dunning', 'stripe'])('%s read error warns and sends nothing (fails closed)', async (readError) => {
@@ -174,7 +188,7 @@ describe('imminentOverdueOwnerAlertSweep (the kept 30-days-overdue owner heads-u
       if (readError === 'dunning') InvoiceFollowUps.isDunningStopped.mockRejectedValue(error);
       if (readError === 'stripe') StripeService.isInvoiceAwaitingMicrodepositVerification.mockRejectedValue(error);
       await BalanceReminder.imminentOverdueOwnerAlertSweep();
-      expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+      expect(deliverOpsDigest).not.toHaveBeenCalled();
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('dunning-stop check failed'));
     });
 
@@ -184,7 +198,7 @@ describe('imminentOverdueOwnerAlertSweep (the kept 30-days-overdue owner heads-u
         invoiceRows: invoiceIds.map((id) => ({ id, stripe_payment_intent_id: `pi-${id}` })),
       });
       await BalanceReminder.imminentOverdueOwnerAlertSweep();
-      expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+      expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
       for (const id of invoiceIds) {
         expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(id);
         expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(id);
@@ -197,8 +211,8 @@ describe('imminentOverdueOwnerAlertSweep (the kept 30-days-overdue owner heads-u
     read.mockRejectedValueOnce(new Error('boom')).mockResolvedValue(balance());
     await BalanceReminder.imminentOverdueOwnerAlertSweep();
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('boom'));
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-    expect(TwilioService.sendSMS.mock.calls[0][1]).toContain('Sam Lee');
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest.mock.calls[0][0].text).toContain('Sam Lee');
   });
 });
 
