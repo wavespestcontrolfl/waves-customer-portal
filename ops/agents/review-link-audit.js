@@ -20,7 +20,6 @@
 // print. --json prints the same rows as JSON.
 
 const path = require('path');
-const { readOnlyConn } = require('./second-tech-handover');
 const {
   nameParts, scoreCandidate, decideReviewLink, SAID_REVIEWED_RE,
 } = require(path.join(__dirname, '..', '..', 'server', 'services', 'review-link-evidence'));
@@ -59,9 +58,12 @@ async function loadData(trx) {
   const visits = (await trx.raw(`
     SELECT customer_id, scheduled_date::text AS on_day FROM scheduled_services
      WHERE status = 'completed' AND customer_id IS NOT NULL`)).rows;
+  // Every delivery of an ask: the text, the email, and a delivered follow-up (followup_sent_at is not
+  // one: it also stamps a suppressed follow-up).
   const asks = (await trx.raw(`
-    SELECT customer_id, coalesce(sms_sent_at, sent_at) AS at FROM review_requests
-     WHERE customer_id IS NOT NULL AND coalesce(sms_sent_at, sent_at) IS NOT NULL`)).rows;
+    SELECT customer_id, sms_sent_at, sent_at, followup_delivered_at FROM review_requests
+     WHERE customer_id IS NOT NULL
+       AND (sms_sent_at IS NOT NULL OR sent_at IS NOT NULL OR followup_delivered_at IS NOT NULL)`)).rows;
   // Server-observed taps only (review-click-correlation.js: the legacy promoter stamps redirected_at
   // before the browser navigates). Each timestamp keeps the profile it was stamped for.
   const taps = (await trx.raw(`
@@ -101,7 +103,9 @@ function buildCandidates({ customers, visits, asks, taps, texts }) {
     },
     activity: {
       visitsOn: (visitsBy.get(cu.id) || []).map((v) => v.on_day),
-      asksAt: (asksBy.get(cu.id) || []).map((a) => a.at),
+      // One request can deliver on both sides of a review: a text before it, the email or the
+      // follow-up after it. Each delivery counts on its own.
+      asksAt: (asksBy.get(cu.id) || []).flatMap((a) => [a.sms_sent_at, a.sent_at, a.followup_delivered_at]).filter(Boolean),
       taps: (tapsBy.get(cu.id) || []).flatMap((t) => [
         { at: t.redirected_at, locationId: t.google_location },
         { at: t.last_redirected_at, locationId: t.last_google_location },
@@ -166,6 +170,23 @@ function rowFor(review, decision, byId) {
   };
 }
 
+// Every live review's row, from the rows loadData read.
+function auditRows(data) {
+  const candidates = buildCandidates(data);
+  const byId = new Map(candidates.map((c) => [c.customerId, c]));
+  const holderSurnames = new Map();
+  for (const c of candidates) {
+    const { last } = nameParts(`${c.holder.first || ''} ${c.holder.last || ''}`);
+    if (last) holderSurnames.set(last, (holderSurnames.get(last) || 0) + 1);
+  }
+  const linkedBy = groupBy(data.reviews.filter((r) => r.customer_id), 'customer_id');
+  return data.reviews.map((review) => rowFor(
+    review,
+    auditReview(review, candidates, linkedBy, (surname) => holderSurnames.get(surname) || 0),
+    byId,
+  ));
+}
+
 function evidenceText(c) {
   if (!c) return '-';
   const acts = ['tap', 'recent', 'saidReviewed'].filter((k) => c.activity[k]).join('+') || 'no activity';
@@ -202,6 +223,7 @@ function printReport(rows, { all }) {
 }
 
 async function main() {
+  const { readOnlyConn } = require('./second-tech-handover');
   const args = new Set(process.argv.slice(2));
   const conn = process.env.DATABASE_PUBLIC_URL;
   if (!conn) {
@@ -220,25 +242,15 @@ async function main() {
       await trx.raw('SET TRANSACTION READ ONLY');
       return loadData(trx);
     });
-    const candidates = buildCandidates(data);
-    const byId = new Map(candidates.map((c) => [c.customerId, c]));
-    const holderSurnames = new Map();
-    for (const c of candidates) {
-      const { last } = nameParts(`${c.holder.first || ''} ${c.holder.last || ''}`);
-      if (last) holderSurnames.set(last, (holderSurnames.get(last) || 0) + 1);
-    }
-    const linkedBy = groupBy(data.reviews.filter((r) => r.customer_id), 'customer_id');
-    const rows = data.reviews.map((review) => rowFor(
-      review,
-      auditReview(review, candidates, linkedBy, (surname) => holderSurnames.get(surname) || 0),
-      byId,
-    ));
+    const rows = auditRows(data);
     if (args.has('--json')) console.log(JSON.stringify(rows, null, 2));
     else printReport(rows, { all: args.has('--all') });
   } finally {
     await db.destroy();
   }
 }
+
+module.exports = { auditRows };
 
 if (require.main === module) {
   main().catch((err) => { console.error(err.message || err); process.exit(1); });
