@@ -106,7 +106,8 @@ async function territoryTechnicianFor(conn, place = {}) {
 
 /**
  * Territories by ZIP, build 3 (GATE_TERRITORY_READOUT): stops per technician and area, booked
- * in [today, ahead) (pending / confirmed / rescheduled) and done in [back, today) (completed).
+ * in [today, ahead) (pending / confirmed) and done in [back, today) (completed). A stop is one
+ * customer at one appointment slot (sibling service rows count once).
  * The area is the visit's service ZIP, else its customer's ZIP, through territory_zips; a ZIP
  * outside the table reads area null. An unclaimed estimate hold is not a stop. Dates are
  * YYYY-MM-DD Eastern. Reads only.
@@ -116,8 +117,13 @@ async function territoryReadout(conn, { today, ahead, back }) {
   const db = conn || defaultDb;
   const result = await db.raw(`
     SELECT ss.technician_id, t.name AS technician_name, tz.area,
-      COUNT(*) FILTER (WHERE ss.scheduled_date >= ?::date AND ss.status IN ('pending', 'confirmed', 'rescheduled'))::int AS booked,
-      COUNT(*) FILTER (WHERE ss.scheduled_date < ?::date AND ss.status = 'completed')::int AS done
+      -- A stop is the repo's sibling identity (stops-ahead.js): one customer at one appointment
+      -- slot, so a pest + mosquito visit counts once. A 'rescheduled' row is the customer-portal
+      -- request's placeholder at the old slot (the schedule day feed drops it too): not a stop.
+      COUNT(DISTINCT (ss.customer_id, ss.scheduled_date, ss.window_start))
+        FILTER (WHERE ss.scheduled_date >= ?::date AND ss.status IN ('pending', 'confirmed'))::int AS booked,
+      COUNT(DISTINCT (ss.customer_id, ss.scheduled_date, ss.window_start))
+        FILTER (WHERE ss.scheduled_date < ?::date AND ss.status = 'completed')::int AS done
     FROM scheduled_services ss
     LEFT JOIN customers c ON c.id = ss.customer_id
     LEFT JOIN technicians t ON t.id = ss.technician_id
