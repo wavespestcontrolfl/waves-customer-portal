@@ -83,13 +83,16 @@ function storedChannels(platformsPosted) {
 }
 
 // Extra publishToAll options for a saved campaign draft only: its own image,
-// its result folded into its own row (postId), and never a fresh generated
-// image in place of the saved one. Every other scheduled row gets none, so it
-// publishes exactly as before.
+// and never a fresh generated image in place of the saved one. No postId:
+// publishToAll would rewrite this row's platforms_posted (the REQUESTED
+// channels the next tick reads) with results, even on a dry run, so the row
+// records its outcome the same way a typed scheduled post does. GBP takes no
+// shared image (only an approved card), so a saved draft posts to GBP
+// text-only. Every other scheduled row gets none and publishes as before.
 function storedPostOptions(social) {
   if (social.source_type !== SAVED_DRAFT.source_type) return {};
   const imageUrl = httpUrlOrNull(social.image_url);
-  return { ...(imageUrl ? { imageUrl } : {}), postId: social.id, noAiImage: true };
+  return { ...(imageUrl ? { imageUrl } : {}), noAiImage: true };
 }
 
 function parseCalendarStart(value) {

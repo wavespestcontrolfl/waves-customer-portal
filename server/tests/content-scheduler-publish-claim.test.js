@@ -474,8 +474,10 @@ describe('atomic SOCIAL publishing claim', () => {
       customContent: { facebook: 'fb copy', instagram: 'ig copy' },
       imageUrl: 'https://cdn.example.com/card.png',
       noAiImage: true,
-      postId: 'soc-2',
     });
+    // no postId: publishToAll must not rewrite the row's requested channels
+    // (platforms_posted) with results, which the next tick would read
+    expect(savedCall).not.toHaveProperty('postId');
     // a row with no image and no campaign source publishes exactly as before
     expect(plainCall).not.toHaveProperty('imageUrl');
     expect(plainCall).not.toHaveProperty('postId');
