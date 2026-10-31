@@ -1,0 +1,441 @@
+// @vitest-environment jsdom
+import React from "react";
+import "@testing-library/jest-dom/vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { adminFetch } from "../../utils/admin-fetch";
+import MessengerTabV2 from "./MessengerTabV2";
+
+vi.mock("../../utils/admin-fetch", () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
+
+function setVisibility(state) {
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+}
+
+afterEach(() => { cleanup(); vi.useRealTimers(); setVisibility("visible"); vi.clearAllMocks(); window.location.hash = ""; });
+
+const open = {
+  id: "t-open", name: "Pat Synthetic", lastMessageAt: "2026-10-31T15:00:00.000Z", lastInboundAt: "2026-10-31T15:00:00.000Z",
+  snippet: "Can someone call me about wasps?", unread: 2, answered: false, canReply: true,
+};
+const late = {
+  id: "t-late", name: "Kim Sample", lastMessageAt: "2026-10-29T15:00:00.000Z", lastInboundAt: "2026-10-29T15:00:00.000Z",
+  snippet: "Need a quote", unread: 0, answered: false, canReply: false,
+};
+const answered = {
+  id: "t-done", name: "Lee Example", lastMessageAt: "2026-10-30T15:00:00.000Z", lastInboundAt: "2026-10-30T14:00:00.000Z",
+  snippet: "Anytime", unread: 0, answered: true, canReply: true,
+};
+
+function detailFor(thread) {
+  return {
+    enabled: true,
+    thread,
+    messages: [
+      { id: `${thread.id}-1`, direction: "inbound", body: thread.snippet, createdAt: thread.lastInboundAt, author: { type: "customer", name: thread.name } },
+    ],
+  };
+}
+
+let threads;
+beforeEach(() => {
+  threads = [open, late, answered];
+  adminFetch.mockImplementation(async (url, options = {}) => {
+    if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+    const match = /^\/admin\/messenger\/threads\/([^/]+)(\/read|\/reply)?$/.exec(url);
+    if (match && !match[2]) return detailFor(threads.find((t) => t.id === match[1]));
+    if (match && match[2] === "/read") return { updated: 2 };
+    if (match && match[2] === "/reply") return { sent: true, message: { id: "m-new" }, options };
+    return {};
+  });
+});
+
+describe("Messenger tab", () => {
+  it("lists each thread with its name, latest words and unread count, and reports how many wait for an answer", async () => {
+    const onCount = vi.fn();
+    render(<MessengerTabV2 onCount={onCount} />);
+    const row = await screen.findByTestId("messenger-thread-t-open");
+    expect(within(row).getByText("Pat Synthetic")).toBeInTheDocument();
+    expect(within(row).getByText("Can someone call me about wasps?")).toBeInTheDocument();
+    expect(within(row).getByText("2 new")).toBeInTheDocument();
+    expect(within(screen.getByTestId("messenger-thread-t-late")).getByText("Not answered")).toBeInTheDocument();
+    await waitFor(() => expect(onCount).toHaveBeenLastCalledWith(2));
+  });
+
+  it("says so when there are no threads", async () => {
+    threads = [];
+    render(<MessengerTabV2 />);
+    expect(await screen.findByText("No Facebook messages yet.")).toBeInTheDocument();
+  });
+
+  it("opens a thread, shows its messages, and marks it read once", async () => {
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    const detail = await screen.findByTestId("messenger-detail");
+    expect(within(detail).getByText("Can someone call me about wasps?")).toBeInTheDocument();
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/messenger/threads/t-open/read", { method: "POST", body: JSON.stringify({ readBefore: open.lastInboundAt }) }));
+    await waitFor(() => expect(within(screen.getByTestId("messenger-thread-t-open")).queryByText("2 new")).not.toBeInTheDocument());
+  });
+
+  it("opens the thread named in the page link", async () => {
+    window.location.hash = "#tab=messenger&thread=t-late";
+    render(<MessengerTabV2 />);
+    const detail = await screen.findByTestId("messenger-detail");
+    expect(within(detail).getByText("Kim Sample")).toBeInTheDocument();
+  });
+
+  it("sends a reply, then reloads the thread and the list", async () => {
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    const box = await screen.findByLabelText("Reply on Facebook");
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    fireEvent.change(box, { target: { value: "  We can call at 3.  " } });
+    expect(send).toBeEnabled();
+    fireEvent.click(send);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/messenger/threads/t-open/reply", { method: "POST", body: JSON.stringify({ text: "We can call at 3." }) }));
+    await waitFor(() => expect(box).toHaveValue(""));
+    expect(adminFetch.mock.calls.filter(([url]) => url === "/admin/messenger/threads").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("disables Send with the reason while a reply is in flight, and sends it only once", async () => {
+    let finish;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url.endsWith("/reply")) return new Promise((resolve) => { finish = () => resolve({ sent: true }); });
+      if (url.endsWith("/read")) return { updated: 0 };
+      return detailFor(open);
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    fireEvent.change(await screen.findByLabelText("Reply on Facebook"), { target: { value: "On our way" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const busy = await screen.findByRole("button", { name: "Sending…" });
+    expect(busy).toBeDisabled();
+    expect(screen.getByText("Sending to Facebook. Wait for it to finish.")).toBeInTheDocument();
+    fireEvent.click(busy);
+    finish();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument());
+    expect(adminFetch.mock.calls.filter(([url]) => url.endsWith("/reply"))).toHaveLength(1);
+  });
+
+  it("treats a gateway 502 (not our send_failed) as unconfirmed", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url.endsWith("/reply")) throw Object.assign(new Error("Request failed (502 Bad Gateway)"), { status: 502 });
+      if (url.endsWith("/read")) return { updated: 0 };
+      return detailFor(open);
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    const box = await screen.findByLabelText("Reply on Facebook");
+    fireEvent.change(box, { target: { value: "On our way" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Facebook did not confirm this reply.");
+  });
+
+  it("treats a reply whose answer never reached the browser as unconfirmed", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url.endsWith("/reply")) throw new TypeError("Failed to fetch");
+      if (url.endsWith("/read")) return { updated: 0 };
+      return detailFor(open);
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    const box = await screen.findByLabelText("Reply on Facebook");
+    fireEvent.change(box, { target: { value: "On our way" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Facebook did not confirm this reply.");
+    expect(box).toHaveValue("On our way");
+  });
+
+  it("says Facebook did not confirm, and keeps the text, when a send has no confirmation", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url.endsWith("/reply")) throw Object.assign(new Error("send_uncertain"), { status: 504 });
+      if (url.endsWith("/read")) return { updated: 0 };
+      return detailFor(open);
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    const box = await screen.findByLabelText("Reply on Facebook");
+    fireEvent.change(box, { target: { value: "On our way" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Facebook did not confirm this reply. Check the thread in Facebook before you send it again.");
+    expect(box).toHaveValue("On our way");
+  });
+
+  it("shows a plain error and keeps the text when Facebook refuses the reply", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url.endsWith("/reply")) throw Object.assign(new Error("send_failed"), { status: 502, details: { error: "send_failed" } });
+      if (url.endsWith("/read")) return { updated: 0 };
+      return detailFor(open);
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    const box = await screen.findByLabelText("Reply on Facebook");
+    fireEvent.change(box, { target: { value: "On our way" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Facebook did not accept the reply. Nothing was sent.");
+    expect(box).toHaveValue("On our way");
+  });
+
+  it("outside the 24-hour window, shows the rule and a Reply in Facebook link instead of a reply box", async () => {
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-late"));
+    const note = await screen.findByTestId("messenger-outside-window");
+    expect(within(note).getByText("Facebook allows a reply for 24 hours after the customer's last message.")).toBeInTheDocument();
+    const link = within(note).getByRole("link", { name: /Reply in Facebook/ });
+    expect(link).toHaveAttribute("href", "https://business.facebook.com/latest/inbox/all");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(screen.queryByLabelText("Reply on Facebook")).not.toBeInTheDocument();
+  });
+  it("switching threads: Send stays disabled and posts nothing until the picked thread has loaded, and the draft goes only to the thread it is shown for", async () => {
+    let releaseLate;
+    adminFetch.mockImplementation(async (url, options = {}) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url === "/admin/messenger/threads/t-late") return new Promise((resolve) => { releaseLate = () => resolve(detailFor(late)); });
+      if (url.endsWith("/read")) return { updated: 0 };
+      if (url.endsWith("/reply")) return { sent: true, options };
+      return detailFor(threads.find((t) => url.endsWith(t.id)));
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    fireEvent.change(await screen.findByLabelText("Reply on Facebook"), { target: { value: "Meant for Pat" } });
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+
+    // Pick Kim: her thread is still loading, Pat's detail and draft are still on screen.
+    fireEvent.click(screen.getByTestId("messenger-thread-t-late"));
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    expect(screen.getByLabelText("Reply on Facebook")).toBeDisabled();
+    expect(screen.getByText("Loading the thread you picked. Wait for it to open.")).toBeInTheDocument();
+    fireEvent.click(send);
+    expect(adminFetch.mock.calls.some(([url]) => url.endsWith("/reply"))).toBe(false);
+
+    // Kim's thread arrives: it is outside the window, so there is no composer at all for it.
+    releaseLate();
+    expect(await screen.findByTestId("messenger-outside-window")).toBeInTheDocument();
+    expect(adminFetch.mock.calls.some(([url]) => url.endsWith("/reply"))).toBe(false);
+  });
+
+  it("ignores a thread response that arrives after another thread was picked", async () => {
+    let releaseOpen;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url === "/admin/messenger/threads/t-open") return new Promise((resolve) => { releaseOpen = () => resolve(detailFor(open)); });
+      if (url.endsWith("/read")) return { updated: 0 };
+      return detailFor(threads.find((t) => url.endsWith(t.id)));
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    fireEvent.click(screen.getByTestId("messenger-thread-t-done"));
+    const detail = await screen.findByTestId("messenger-detail");
+    expect(within(detail).getByText("Lee Example")).toBeInTheDocument();
+    // Pat's slow answer lands now and must not replace Lee's thread or its read mark.
+    releaseOpen();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(within(screen.getByTestId("messenger-detail")).getByText("Lee Example")).toBeInTheDocument();
+    expect(adminFetch.mock.calls.some(([url]) => url === "/admin/messenger/threads/t-open/read")).toBe(false);
+  });
+
+  it("posts the reply to the thread that is displayed", async () => {
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-done"));
+    fireEvent.change(await screen.findByLabelText("Reply on Facebook"), { target: { value: "Glad to help" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/messenger/threads/t-done/reply", { method: "POST", body: JSON.stringify({ text: "Glad to help" }) }));
+    expect(adminFetch.mock.calls.filter(([url]) => url.endsWith("/reply"))).toHaveLength(1);
+  });
+
+  it("says when older messages are not shown", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url.endsWith("/read")) return { updated: 0 };
+      return { ...detailFor(open), hasOlder: true };
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    expect(await screen.findByText("Showing the latest 500 messages.")).toBeInTheDocument();
+  });
+
+  it("opens the thread named in the link when only the hash changes while the tab stays open", async () => {
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    await screen.findByTestId("messenger-detail");
+    act(() => {
+      window.location.hash = "#tab=messenger&thread=t-late";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    await waitFor(() => expect(within(screen.getByTestId("messenger-detail")).getByText("Kim Sample")).toBeInTheDocument());
+    expect(screen.getByTestId("messenger-thread-t-late")).toHaveAttribute("aria-current", "true");
+  });
+
+  it("follows a router hash change too, and ignores a link to the thread already open", async () => {
+    const { rerender } = render(<MessengerTabV2 routeHash="" />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    await screen.findByTestId("messenger-detail");
+    const detailCalls = () => adminFetch.mock.calls.filter(([url]) => url === "/admin/messenger/threads/t-open").length;
+    const before = detailCalls();
+    window.location.hash = "#tab=messenger&thread=t-open";
+    rerender(<MessengerTabV2 routeHash="#tab=messenger&thread=t-open" />);
+    expect(detailCalls()).toBe(before);
+    window.location.hash = "#tab=messenger&thread=t-done";
+    rerender(<MessengerTabV2 routeHash="#tab=messenger&thread=t-done" />);
+    await waitFor(() => expect(within(screen.getByTestId("messenger-detail")).getByText("Lee Example")).toBeInTheDocument());
+  });
+
+  describe("keeping the open inbox fresh", () => {
+    const listCalls = () => adminFetch.mock.calls.filter(([url]) => url === "/admin/messenger/threads").length;
+    const tick = (ms) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+
+    it("shows a new thread after a minute", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<MessengerTabV2 />);
+      await screen.findByTestId("messenger-thread-t-open");
+      const fresh = { id: "t-new", name: "Sam Newcomer", lastMessageAt: "2026-10-31T16:00:00.000Z", lastInboundAt: "2026-10-31T16:00:00.000Z", snippet: "Just wrote in", unread: 1, answered: false, canReply: true };
+      threads = [fresh, ...threads];
+      expect(screen.queryByTestId("messenger-thread-t-new")).not.toBeInTheDocument();
+      await tick(60 * 1000);
+      expect(await screen.findByTestId("messenger-thread-t-new")).toBeInTheDocument();
+    });
+
+    it("does not reload while the page is hidden, and reloads once when it is visible again", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<MessengerTabV2 />);
+      await screen.findByTestId("messenger-thread-t-open");
+      setVisibility("hidden");
+      const before = listCalls();
+      await tick(5 * 60 * 1000);
+      expect(listCalls()).toBe(before);
+      setVisibility("visible");
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => expect(listCalls()).toBe(before + 1));
+    });
+
+    it("a refresh keeps the draft and the open thread, and picks up a new message in it", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+      const box = await screen.findByLabelText("Reply on Facebook");
+      fireEvent.change(box, { target: { value: "Half-written answer" } });
+      const extra = { id: "t-open-2", direction: "inbound", body: "One more thing", createdAt: "2026-10-31T15:30:00.000Z", author: { type: "customer", name: "Pat Synthetic" } };
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: 2 };
+        if (url.endsWith("/read")) return { updated: 0 };
+        const d = detailFor(threads.find((t) => url.endsWith(t.id)));
+        return { ...d, messages: [...d.messages, extra] };
+      });
+      await tick(60 * 1000);
+      expect(await screen.findByText("One more thing")).toBeInTheDocument();
+      expect(screen.getByLabelText("Reply on Facebook")).toHaveValue("Half-written answer");
+      expect(within(screen.getByTestId("messenger-detail")).getByText("Pat Synthetic")).toBeInTheDocument();
+    });
+
+    it("a refresh waits while a reply is being sent", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      let finish;
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: 2 };
+        if (url.endsWith("/reply")) return new Promise((resolve) => { finish = () => resolve({ sent: true }); });
+        if (url.endsWith("/read")) return { updated: 0 };
+        return detailFor(open);
+      });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+      fireEvent.change(await screen.findByLabelText("Reply on Facebook"), { target: { value: "On our way" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await screen.findByRole("button", { name: "Sending…" });
+      const detailCalls = () => adminFetch.mock.calls.filter(([url]) => url === "/admin/messenger/threads/t-open").length;
+      const before = detailCalls();
+      await tick(60 * 1000);
+      expect(detailCalls()).toBe(before);
+      finish();
+      await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument());
+    });
+
+    it("stops refreshing when the tab is closed", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const { unmount } = render(<MessengerTabV2 />);
+      await screen.findByTestId("messenger-thread-t-open");
+      unmount();
+      const before = listCalls();
+      await tick(5 * 60 * 1000);
+      expect(listCalls()).toBe(before);
+    });
+  });
+
+  describe("a long inbox", () => {
+    const older = { id: "t-older", name: "Old Timer", lastMessageAt: "2026-09-01T15:00:00.000Z", lastInboundAt: "2026-09-01T15:00:00.000Z", snippet: "From September", unread: 0, answered: true, canReply: false };
+
+    it("uses the server's count for the tab, not the loaded rows, and loads older threads on request", async () => {
+      const onCount = vi.fn();
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads: [open], hasMore: true, unanswered: 42 };
+        if (url.startsWith("/admin/messenger/threads?before=")) return { enabled: true, threads: [older], hasMore: false, unanswered: 42 };
+        return {};
+      });
+      render(<MessengerTabV2 onCount={onCount} />);
+      await screen.findByTestId("messenger-thread-t-open");
+      await waitFor(() => expect(onCount).toHaveBeenLastCalledWith(42));
+      expect(screen.queryByTestId("messenger-thread-t-older")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Show older" }));
+      expect(await screen.findByTestId("messenger-thread-t-older")).toBeInTheDocument();
+      expect(adminFetch).toHaveBeenCalledWith(`/admin/messenger/threads?before=${encodeURIComponent(open.lastMessageAt)}&beforeId=${open.id}`);
+      expect(screen.queryByRole("button", { name: "Show older" })).not.toBeInTheDocument();
+      expect(onCount).toHaveBeenLastCalledWith(42);
+    });
+
+    it("keeps an older thread that ties the first page's last time, when its id sorts after it", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const tie = { ...older, id: "t-0tie", name: "Lee Example", lastMessageAt: open.lastMessageAt };
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads: [open], hasMore: true, unanswered: 1 };
+        if (url.startsWith("/admin/messenger/threads?before=")) return { enabled: true, threads: [tie], hasMore: false, unanswered: 1 };
+        return {};
+      });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByRole("button", { name: "Show older" }));
+      await screen.findByTestId("messenger-thread-t-0tie");
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 1000); });
+      expect(screen.getByTestId("messenger-thread-t-0tie")).toBeInTheDocument();
+    });
+
+    it("holds the automatic refresh while an older page loads, then keeps both pages", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      let finishOlder;
+      let firstPageCalls = 0;
+      adminFetch.mockImplementation((url) => {
+        if (url === "/admin/messenger/threads") { firstPageCalls += 1; return Promise.resolve({ enabled: true, threads: [open], hasMore: true, unanswered: 1 }); }
+        if (url.startsWith("/admin/messenger/threads?before=")) return new Promise((resolve) => { finishOlder = () => resolve({ enabled: true, threads: [older], hasMore: false, unanswered: 1 }); });
+        return Promise.resolve({});
+      });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByRole("button", { name: "Show older" }));
+      const callsBefore = firstPageCalls;
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 1000); });
+      expect(firstPageCalls).toBe(callsBefore);
+      await act(async () => { finishOlder(); });
+      expect(await screen.findByTestId("messenger-thread-t-older")).toBeInTheDocument();
+      expect(screen.getByTestId("messenger-thread-t-open")).toBeInTheDocument();
+    });
+
+    it("keeps loaded older threads below a refreshed first page", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads: [open], hasMore: true, unanswered: 1 };
+        if (url.startsWith("/admin/messenger/threads?before=")) return { enabled: true, threads: [older], hasMore: false, unanswered: 1 };
+        return {};
+      });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByRole("button", { name: "Show older" }));
+      await screen.findByTestId("messenger-thread-t-older");
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 1000); });
+      expect(screen.getByTestId("messenger-thread-t-older")).toBeInTheDocument();
+      expect(screen.getByTestId("messenger-thread-t-open")).toBeInTheDocument();
+    });
+  });
+});
