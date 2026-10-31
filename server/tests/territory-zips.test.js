@@ -161,6 +161,14 @@ describe('backfill-blank-zip plan', () => {
     expect(plannedLeadZip({ customer_zip: null, address: '4512 Gulf Dr, Holmes Beach, FL 34217' })).toBe('34217');
   });
 
+  test('a lead takes the ZIP this run recovers for its customer, before its own typed address', () => {
+    const recovered = new Map([['cust-1', '34209']]);
+    expect(plannedLeadZip({ customer_id: 'cust-1', customer_zip: '', address: '' }, recovered)).toBe('34209');
+    expect(plannedLeadZip({ customer_id: 'cust-1', customer_zip: '', address: '1 Main St, Venice, FL 34293' }, recovered)).toBe('34209');
+    expect(plannedLeadZip({ customer_id: 'cust-1', customer_zip: '34202', address: '' }, recovered)).toBe('34202');
+    expect(plannedLeadZip({ customer_id: 'cust-2', customer_zip: '', address: '' }, recovered)).toBeNull();
+  });
+
   test('no ZIP to read stays blank: no guessing from a house number', () => {
     expect(plannedLeadZip({ customer_zip: null, address: '' })).toBeNull();
     expect(plannedLeadZip({ customer_zip: null, address: '34219 Main Street' })).toBeNull();

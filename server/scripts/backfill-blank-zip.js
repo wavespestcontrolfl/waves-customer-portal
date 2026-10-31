@@ -31,9 +31,13 @@ function blankZip() {
 
 const typedZip = (text) => normalizeZip(parseRawAddress(text).zip);
 
-/** The ZIP to set on a blank-ZIP lead, or null: its customer's ZIP, else one typed in its address. */
-function plannedLeadZip(row) {
-  return normalizeZip(row.customer_zip) || typedZip(row.address) || null;
+/**
+ * The ZIP to set on a blank-ZIP lead, or null: its customer's ZIP, else the ZIP this
+ * run recovers for that customer (`recovered`: customer id -> ZIP), else one typed in
+ * its address. Reading the recovered ZIP fills both rows in one pass.
+ */
+function plannedLeadZip(row, recovered = new Map()) {
+  return normalizeZip(row.customer_zip) || recovered.get(row.customer_id) || typedZip(row.address) || null;
 }
 
 /** The ZIP to set on a blank-ZIP customer, or null: one typed at the end of address_line1. */
@@ -48,7 +52,7 @@ async function loadLeads() {
     .where(function leadZipBlank() {
       this.whereNull('l.zip').orWhereRaw("TRIM(l.zip) = ''");
     })
-    .select('l.id', 'l.address', 'c.zip as customer_zip');
+    .select('l.id', 'l.customer_id', 'l.address', 'c.zip as customer_zip');
 }
 
 async function loadCustomers() {
@@ -88,9 +92,12 @@ async function applyPlan(table, plan) {
 
 async function main() {
   console.log(`Blank-ZIP backfill — mode: ${APPLY ? 'APPLY (writing changes)' : 'DRY-RUN (no writes; pass --apply to write)'}`);
+  // Customers first: a lead whose customer gets a ZIP in this run takes the same ZIP.
+  const customerPlan = planRows(await loadCustomers(), plannedCustomerZip);
+  const recovered = new Map(customerPlan.updates.map((u) => [u.id, u.zip]));
   const plans = [
-    ['leads', planRows(await loadLeads(), plannedLeadZip)],
-    ['customers', planRows(await loadCustomers(), plannedCustomerZip)],
+    ['customers', customerPlan],
+    ['leads', planRows(await loadLeads(), (row) => plannedLeadZip(row, recovered))],
   ];
   let fillable = 0;
   let updated = 0;
