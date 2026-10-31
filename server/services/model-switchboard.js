@@ -429,7 +429,9 @@ const LANES = [
   // miss OR Gemini is unsure / lists a runner-up of different risk. No Claude.
   // Customer app Photo ID (owner 2026-10-01, TEXT_POLICIES.photoIdPestV2):
   // one Gemini read answers; OpenAI only when Gemini returns nothing usable.
-  L('pest_id_app', 'Pest identification (customer app Photo ID)', 'photo-id-v2/pest-engine.js, routes/photo-id.js', 'multimodal', P('photoIdPestV2', 'primary'), P('photoIdPestV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-01); OpenAI stands in on a Gemini miss' }),
+  // The Chrome extension's identify route (owner 2026-10-31) runs the same
+  // gemini_only ladder, so it bills to this lane too.
+  L('pest_id_app', 'Pest identification (customer app Photo ID + Chrome extension)', 'photo-id-v2/pest-engine.js, routes/photo-id.js, routes/public-bug-id-extension.js', 'multimodal', P('photoIdPestV2', 'primary'), P('photoIdPestV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-01); OpenAI stands in on a Gemini miss' }),
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: P('photoIdVision', 'fallback'), note: `Gemini-first (owner 2026-09-26); OpenAI takes a second look when Gemini misses, scores itself under PHOTO_ID_ESCALATE_BELOW, or lists a runner-up of different risk · ${SHARED_GEMINI_PIN}` }),
   // Sequential ladder, same shape as pest_id above (owner ruling 2026-09-28,
   // TEXT_POLICIES.plantIdVision): identifyPlantV2 tries Gemini, then reaches
