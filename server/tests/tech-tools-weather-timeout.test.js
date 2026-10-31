@@ -168,16 +168,16 @@ describe('get_weather_conditions location and wording', () => {
     expect(out.location_source).toBe('service_area_default');
   });
 
-  test('wind direction is a 16-point label when the forecast has it, else null', async () => {
+  test('wind direction is the forecast module\'s label when it has one, else null', async () => {
     global.fetch = okWeather();
     expect((await executeTechTool('get_weather_conditions', {}, TECH)).wind_direction).toBeNull();
-    // The shared forecast module surfaces wind_dir_deg in another change; until
-    // then the field is absent and the label must be null, not an error.
+    // The shared forecast module adds the ready label wind_dir in another change; until
+    // then the field is absent and the direction must be null, not an error.
     jest.resetModules();
     jest.doMock('../services/service-report/application-conditions', () => ({
       ...jest.requireActual('../services/service-report/application-conditions'),
       fetchPropertyForecast: jest.fn(async () => ({
-        status: 'ok', current: { temperature_f: 80, wind_mph: 6, wind_gust_mph: 9, precipitation_probability_pct: 0, wind_dir_deg: 225 },
+        status: 'ok', current: { temperature_f: 80, wind_mph: 6, wind_gust_mph: 9, precipitation_probability_pct: 0, wind_dir_deg: 225, wind_dir: 'SW' },
       })),
     }));
     const { executeTechTool: run } = require('../services/intelligence-bar/tech-tools');

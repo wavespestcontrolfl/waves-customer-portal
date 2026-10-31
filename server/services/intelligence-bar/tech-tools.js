@@ -667,15 +667,6 @@ const WEATHER_BUDGET_MS = 6000;
 // the named service-area point and never breaks the tool.
 const WEATHER_STOP_LOOKUP_MS = 1500;
 
-const COMPASS_16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
-
-// 16-point label for the direction the wind blows FROM, or null when the
-// forecast module did not supply wind_dir_deg.
-function compassLabel(deg) {
-  if (deg == null || deg === '' || !Number.isFinite(Number(deg))) return null;
-  return COMPASS_16[Math.round((((Number(deg) % 360) + 360) % 360) / 22.5) % 16];
-}
-
 // The tech's current stop (checked in, not completed), else the next
 // not-completed stop today in route/window order, as { latitude, longitude,
 // source }. Same property pin the job card uses (job-card.js visitPinSql: the
@@ -746,7 +737,8 @@ async function getWeatherConditions(techId) {
       temperature: Math.round(c.temperature_f || 0),
       wind_speed: Math.round(c.wind_mph || 0),
       wind_gusts: Math.round(c.wind_gust_mph || 0),
-      wind_direction: compassLabel(c.wind_dir_deg),
+      // The forecast module's ready 16-point label (the direction the wind blows FROM); null when absent.
+      wind_direction: c.wind_dir || null,
       rain_probability: c.precipitation_probability_pct || 0,
       spray_conditions: windOk && rainOk ? 'good' : !windOk ? 'too_windy' : 'rain_likely',
       recommendation: windOk && rainOk
