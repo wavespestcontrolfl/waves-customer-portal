@@ -1108,6 +1108,8 @@ router.get('/control/hub', (_req, res) => {
       queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: require('../config/feature-gates').llmCostTrackingLive(), verification: false,
       // GATE_TYPED_DECISIONS: the Typed review tab exists only while the lane is live.
       typed: require('../config/feature-gates').typedDecisionsLive(),
+      // GATE_DATA_HYGIENE_UI: the Hygiene review tab exists only while the gate is on.
+      hygiene: require('../config/feature-gates').isEnabled('dataHygieneReviewUi') === true,
     },
     areas: modelSwitchboard.AREAS,
   });
