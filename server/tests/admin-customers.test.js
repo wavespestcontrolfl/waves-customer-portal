@@ -272,6 +272,18 @@ describe('admin customers route helpers', () => {
     });
   });
 
+  test('customer list rows carry the canonical membership verdict (hasActivePlan)', () => {
+    const row = (extra) => mapCustomerListRow({ id: 'c', first_name: 'Ada', tags_str: '', ...extra });
+    // A tiered member with a zero monthly rate IS a member.
+    expect(row({ waveguard_tier: 'Gold', monthly_rate: '0' }).hasActivePlan).toBe(true);
+    // A legacy member with a positive rate and no tier IS a member.
+    expect(row({ waveguard_tier: null, monthly_rate: '129.50' }).hasActivePlan).toBe(true);
+    // Sentinel tiers are not members, even with a rate.
+    expect(row({ waveguard_tier: 'Commercial', monthly_rate: '129.50' }).hasActivePlan).toBe(false);
+    expect(row({ waveguard_tier: 'none', monthly_rate: '129.50' }).hasActivePlan).toBe(false);
+    expect(row({ waveguard_tier: null, monthly_rate: '0' }).hasActivePlan).toBe(false);
+  });
+
   test('propertyCount reads 0, never 1, when the list query did not select property_count', () => {
     const mapped = mapCustomerListRow({ id: 'customer-2', first_name: 'Ada', tags_str: '' });
     expect(mapped.propertyCount).toBe(0);

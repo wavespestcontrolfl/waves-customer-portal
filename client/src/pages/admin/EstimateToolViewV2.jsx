@@ -160,6 +160,11 @@ function matchHasActivePlan(match) {
   return !!(match.tier && match.tier !== "null");
 }
 
+// True when a customer is already linked and the pick is someone else.
+function switchedCustomer(linkedId, pickedId) {
+  return !!linkedId && String(linkedId) !== String(pickedId || "");
+}
+
 // Where a customer's current per-application figure came from. The office
 // needs to know whether a number is a real payment or an inference — an
 // upgrade conversation built on a guess goes badly. Mirrors the spendSource
@@ -2832,6 +2837,7 @@ export default function EstimateToolViewV2({
   // adopts the customer's address (the operator searched by person); the
   // suggestion keeps the address the operator just looked up.
   function applyCustomerLink(c, { adoptAddress }) {
+    if (customerSwitchLocked) return;
     const name = `${c.firstName || ""} ${c.lastName || ""}`.trim();
     const previousPick = pickedContactRef.current;
     if (!preLinkContactRef.current) {
@@ -2849,10 +2855,11 @@ export default function EstimateToolViewV2({
           isRecurringCustomer: form.isRecurringCustomer,
         };
     }
-    // 'Commercial' is a flat non-member tier — exclude it so a commercial
-    // customer doesn't unlock recurring-customer loyalty discounts.
-    const hasActivePlan =
-      c.tier && c.tier !== "null" && c.tier !== "Commercial" && c.monthlyRate > 0;
+    // The server's membership verdict (hasActivePlan on the search and
+    // address-match rows) is the one rule: a tier, or a positive monthly rate
+    // with no tier; Commercial and the sentinel tiers are not members. The
+    // preview must not copy a stricter predicate of its own.
+    const hasActivePlan = matchHasActivePlan(c);
     // A lead picked from this search belongs to someone else than the
     // customer now chosen: drop that link and its service hint, or the save
     // would post this customer's contact with the other person's lead id. A
@@ -2875,7 +2882,11 @@ export default function EstimateToolViewV2({
       // No plan: the address suggestion resets the loyalty flag (it may have
       // been set for whoever was linked before); the lookup list keeps the
       // operator's own answer, as it always has.
-      isRecurringCustomer: hasActivePlan ? "YES" : adoptAddress ? f.isRecurringCustomer : "NO",
+      // A different customer than the one already linked never inherits the
+      // previous customer's loyalty flag.
+      isRecurringCustomer: hasActivePlan
+        ? "YES"
+        : adoptAddress && !switchedCustomer(f.customerId, c.id) ? f.isRecurringCustomer : "NO",
     }));
     pickedContactRef.current = { customerPhone: c.phone || "", customerEmail: c.email || "" };
     setExistingCustomerMatch(c);
@@ -2945,6 +2956,10 @@ export default function EstimateToolViewV2({
   // PUT keeps the row's customer_id (codex #3768 r1), and a grouped sibling
   // must share the anchor's customer or the save 400s (codex #3768 r3).
   const canUnlink = !editMode?.id && !groupAnchorId;
+  // A revision keeps the row's customer: the revise endpoint answers 409 to a
+  // different customer (the customer's link is a bearer link into this quote).
+  // So the lookup is switched off while a linked estimate is being revised.
+  const customerSwitchLocked = !!editMode?.id && !!form.customerId;
   // A lead can be linked or unlinked only where a save will honor it: a NEW,
   // ungrouped draft that has not been saved yet. A revise sends leadId null
   // and keeps the row's own linkage, so on a saved or revised estimate the
@@ -5573,16 +5588,19 @@ export default function EstimateToolViewV2({
                   placeholder="Name, phone, email, or address..."
                   aria-label="Search customers by first name, last name, or full name"
                   aria-describedby="customer-search-help"
+                  disabled={customerSwitchLocked}
                 />
               </Field>
               <p id="customer-search-help" className="text-14 text-ink-secondary mb-3">
-                Search by first name, last name, or full name. Phone, email, and address also work.{canChangeLeadLink ? " Leads with no customer record are listed too." : ""}
+                {customerSwitchLocked
+                  ? "This estimate stays with its customer. To quote a different customer, start a new estimate."
+                  : <>Search by first name, last name, or full name. Phone, email, and address also work.{canChangeLeadLink ? " Leads with no customer record are listed too." : ""}</>}
               </p>
               {customerSearchStatus === "loading" && <p role="status" className="text-14 text-ink-secondary mb-3">Searching customers…</p>}
               {customerSearchStatus === "error" && <p role="alert" className="text-14 text-alert-fg mb-3">Customer search failed. Edit your search to try again.</p>}
               {canChangeLeadLink && leadSearchStatus === "error" && <p role="status" className="text-14 text-ink-secondary mb-3">Lead search failed. Customer results are not affected. Edit your search to try again.</p>}
               {customerSearchStatus === "done" && customers.length === 0 && !(canChangeLeadLink && (leadSearchStatus === "loading" || leadSearchStatus === "error" || leadMatches.length > 0)) && <p role="status" className="text-14 text-ink-secondary mb-3">{canChangeLeadLink ? "No customers or leads found." : "No customers found."} Try a first name, last name, or full name.</p>}
-              {customers.length > 0 && (
+              {customers.length > 0 && !customerSwitchLocked && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {
                     const name =
@@ -5884,7 +5902,6 @@ export default function EstimateToolViewV2({
                       ? " · Recurring plan"
                       : " · No active plan"}
                     {matchHasActivePlan(existingCustomerMatch) &&
-                    existingCustomerMatch.monthlyRate > 0 &&
                     form.isRecurringCustomer === "YES"
                       ? " · 15% loyalty discount applied"
                       : ""}
