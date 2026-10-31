@@ -16,9 +16,8 @@
  * credential-expiry-checker: a broken dedupe query fires anyway rather than
  * silently skipping a $400 penalty.
  *
- * Status stays 'upcoming' until the operator marks it filed/paid — the
- * FilingCalendarTab only renders upcoming/prepared and filed/paid buckets,
- * so writing 'late' would make the row invisible in /admin/tax.
+ * Status stays 'upcoming' until the operator marks it filed/paid; the past
+ * due date already shows the row as overdue in the FilingCalendarTab.
  */
 const db = require('../models/db');
 const logger = require('./logger');

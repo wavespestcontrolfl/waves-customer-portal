@@ -1795,12 +1795,12 @@ export function FilingCalendarTab() {
       setPendingAction("");
     }
   };
-  const upcoming = filings.filter(
-    (f) => f.status === "upcoming" || f.status === "prepared",
-  );
-  const completed = filings.filter(
-    (f) => f.status === "filed" || f.status === "paid",
-  );
+  // Every filing that is not filed or paid is still open, Late included (the
+  // server's dashboard and advisor read it the same way). "All caught up!"
+  // means no open filing at all.
+  const isDone = (f) => f.status === "filed" || f.status === "paid";
+  const upcoming = filings.filter((f) => !isDone(f));
+  const completed = filings.filter(isDone);
   if (read.loading || read.error)
     return <TaxReadFeedback read={read} label="filings" />;
   return (
@@ -2870,7 +2870,7 @@ function ExemptionsTab() {
 // ═══════════════════════════════════════════════════════════════
 // MILEAGE TAB
 // ═══════════════════════════════════════════════════════════════
-function MileageTab() {
+export function MileageTab() {
   const actionRef = useRef(false);
   const [pendingAction, setPendingAction] = useState("");
   const [actionError, setActionError] = useState("");
@@ -2887,11 +2887,12 @@ function MileageTab() {
   const [purposeFilter, setPurposeFilter] = useState("all");
   const [selected, setSelected] = useState(() => new Set());
   const [classifying, setClassifying] = useState(false);
+  // Field names are POST /admin/tax/mileage's own: the form is the body.
   const [form, setForm] = useState({
-    trip_date: etDateString(),
-    start_address: "",
-    end_address: "",
-    distance_miles: "",
+    tripDate: etDateString(),
+    startAddress: "",
+    endAddress: "",
+    distanceMiles: "",
     purpose: "business",
     notes: "",
   });
@@ -2987,8 +2988,10 @@ function MileageTab() {
         const r = await adminFetch("/admin/tax/mileage/sync-bouncie", {
           method: "POST",
         });
+        const range =
+          r.startDate && r.endDate ? ` (${r.startDate} to ${r.endDate})` : "";
         alert(
-          `Bouncie sync: ${r.tripsImported || 0} trips imported, ${r.totalMiles?.toFixed(1) || 0} miles, ${fmtM(r.deductionAmount)} deduction`,
+          `Bouncie sync${range}: ${r.tripsImported || 0} trips imported, ${r.totalMiles?.toFixed(1) || 0} miles, ${fmtM(r.deductionAmount)} deduction`,
         );
         load();
       } catch (e) {
@@ -3006,7 +3009,7 @@ function MileageTab() {
     setPendingAction("handleAdd");
     setActionError("");
     try {
-      if (!form.distance_miles) return;
+      if (!form.distanceMiles) return;
       try {
         await adminFetch("/admin/tax/mileage", {
           method: "POST",
@@ -3014,9 +3017,9 @@ function MileageTab() {
         });
         setForm((f) => ({
           ...f,
-          start_address: "",
-          end_address: "",
-          distance_miles: "",
+          startAddress: "",
+          endAddress: "",
+          distanceMiles: "",
           notes: "",
         }));
         load();
@@ -3190,11 +3193,11 @@ function MileageTab() {
             <Field label="Date" className="min-w-0">
               <Input
                 type="date"
-                value={form.trip_date}
+                value={form.tripDate}
                 onChange={(e) =>
                   setForm((f) => ({
                     ...f,
-                    trip_date: e.target.value,
+                    tripDate: e.target.value,
                   }))
                 }
                 style={{
@@ -3207,11 +3210,11 @@ function MileageTab() {
           <div>
             <Field label="From" className="min-w-0">
               <Input
-                value={form.start_address}
+                value={form.startAddress}
                 onChange={(e) =>
                   setForm((f) => ({
                     ...f,
-                    start_address: e.target.value,
+                    startAddress: e.target.value,
                   }))
                 }
                 placeholder="Start"
@@ -3225,11 +3228,11 @@ function MileageTab() {
           <div>
             <Field label="To" className="min-w-0">
               <Input
-                value={form.end_address}
+                value={form.endAddress}
                 onChange={(e) =>
                   setForm((f) => ({
                     ...f,
-                    end_address: e.target.value,
+                    endAddress: e.target.value,
                   }))
                 }
                 placeholder="End"
@@ -3244,11 +3247,11 @@ function MileageTab() {
             <Field label="Miles" className="min-w-0">
               <Input
                 type="number"
-                value={form.distance_miles}
+                value={form.distanceMiles}
                 onChange={(e) =>
                   setForm((f) => ({
                     ...f,
-                    distance_miles: e.target.value,
+                    distanceMiles: e.target.value,
                   }))
                 }
                 placeholder="0.0"
