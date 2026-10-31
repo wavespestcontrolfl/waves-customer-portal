@@ -160,15 +160,36 @@ function Field({ label, value, mono = false }) {
   );
 }
 
-function buildQuery({ status, contentType, source, liveStatus, search }) {
+// One page of the inventory. The API pages by offset and reports the full
+// filtered total, so the list can reach every match (audit BLOG-12).
+const REGISTRY_PAGE_SIZE = 100;
+
+function buildQuery({ status, contentType, source, liveStatus, search, offset = 0 }) {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (contentType) params.set("content_type", contentType);
   if (source) params.set("source", source);
   if (liveStatus) params.set("live_status", liveStatus);
   if (search.trim()) params.set("search", search.trim());
-  params.set("limit", "100");
+  params.set("limit", String(REGISTRY_PAGE_SIZE));
+  if (offset) params.set("offset", String(offset));
   return `/admin/content-registry?${params.toString()}`;
+}
+
+function registryRangeLabel({ offset, shown, total }) {
+  if (total <= shown || shown === 0) return `${total.toLocaleString()} filtered`;
+  return `${offset + 1}–${offset + shown} of ${total.toLocaleString()} filtered`;
+}
+
+function RegistryPager({ offset, shown, total, onPage }) {
+  if (offset === 0 && shown >= total) return null;
+  const buttonStyle = { minHeight: 40, padding: "0 14px", borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, fontSize: 14, cursor: "pointer" };
+  return (
+    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: `1px solid ${D.border}` }}>
+      <button type="button" disabled={offset === 0} onClick={() => onPage(Math.max(0, offset - REGISTRY_PAGE_SIZE))} style={buttonStyle}>Previous</button>
+      <button type="button" disabled={offset + shown >= total} onClick={() => onPage(offset + shown)} style={buttonStyle}>Next</button>
+    </div>
+  );
 }
 
 export default function ContentRegistryPage({ embedded = false } = {}) {
@@ -178,6 +199,11 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
   const [source, setSource] = useState("");
   const [liveStatus, setLiveStatus] = useState("");
   const [search, setSearch] = useState("");
+  // The page belongs to the filters it was picked under: any filter change
+  // starts again at the first page without a request for the old offset.
+  const filterKey = JSON.stringify([status, contentType, source, liveStatus, search]);
+  const [page, setPage] = useState({ key: filterKey, offset: 0 });
+  const offset = page.key === filterKey ? page.offset : 0;
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -191,7 +217,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
     if (!background) setLoading(true);
     setReadError("");
     try {
-      const next = await adminFetch(buildQuery({ status, contentType, source, liveStatus, search }));
+      const next = await adminFetch(buildQuery({ status, contentType, source, liveStatus, search, offset }));
       if (gen !== loadGen.current) return;
       setData(next);
       setReadError("");
@@ -204,7 +230,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
     } finally {
       if (gen === loadGen.current) setLoading(false);
     }
-  }, [status, contentType, source, liveStatus, search]);
+  }, [status, contentType, source, liveStatus, search, offset]);
 
   const runSync = useCallback(async () => {
     loadGen.current += 1;
@@ -240,6 +266,10 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
   );
 
   const items = data?.items || [];
+  const filteredTotal = Number(data?.total || 0);
+  // The offset of the rows on screen (the response echoes it), so the range
+  // never names a page whose rows have not arrived yet.
+  const shownOffset = Number(data?.offset || 0);
   const counts = data?.counts || {};
   const selected = items.find((item) => item.id === selectedId) || null;
   const totalRows = countSum(counts);
@@ -376,7 +406,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
               Inventory
             </div>
             <div style={{ color: D.muted, fontSize: 12 }}>
-              {loading ? "Loading..." : `${Number(data?.total || 0).toLocaleString()} filtered`}
+              {loading ? "Loading..." : registryRangeLabel({ offset: shownOffset, shown: items.length, total: filteredTotal })}
             </div>
           </div>
           {loading && !data ? (
@@ -425,6 +455,14 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
                 </tbody>
               </table>
             </div>
+          )}
+          {!loading && (
+            <RegistryPager
+              offset={shownOffset}
+              shown={items.length}
+              total={filteredTotal}
+              onPage={(next) => setPage({ key: filterKey, offset: next })}
+            />
           )}
         </section>
 

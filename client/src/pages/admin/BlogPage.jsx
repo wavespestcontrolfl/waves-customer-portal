@@ -140,6 +140,36 @@ const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 // ISO form made every dated row render "Invalid Date" — take the stored date
 // part for either shape (same defense as ContentCalendar's calendarDateKey).
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+// Fields only the server changes: lifecycle status, Astro state and the hero
+// URL. Image, status-refresh and merge responses merge just these into the
+// editor, so a title or body the operator has not saved yet survives them.
+const SERVER_OWNED_FIELDS = new Set([
+  "status",
+  "publish_status",
+  "featured_image_url",
+]);
+function serverOwnedFields(row) {
+  return Object.fromEntries(
+    Object.entries(row || {}).filter(
+      ([key]) => key.startsWith("astro_") || SERVER_OWNED_FIELDS.has(key),
+    ),
+  );
+}
+
+// Save Draft writes only the portal row. Once a post has a PR or a live
+// page, the site keeps its own copy, so the editor says where a saved edit
+// stops instead of letting a merge ship the older text silently.
+const SAVE_STOPS_AT_PORTAL = {
+  pr_open:
+    "Saved edits do not update this preview. Approving it publishes the preview as it is.",
+  merged:
+    "Saved edits do not update the live page. To change it, unpublish, edit, then publish again.",
+  live: "Saved edits do not update the live page. To change it, unpublish, edit, then publish again.",
+  unpublish_pending:
+    "Saved edits do not reach the site. This post is being removed.",
+};
+
 function publishDateLabel(value) {
   if (!value) return "";
   const text = String(value);
@@ -178,6 +208,49 @@ function seoColor(score) {
 // =========================================================================
 // POST LIST COMPONENT (shared between Published, Drafts, Calendar, Ideas)
 // =========================================================================
+// One page of the Posts list. The API caps a response at 500 rows, so the
+// list pages by offset instead of trusting one response to hold every match.
+const POSTS_PAGE_SIZE = 200;
+
+function postRangeLabel({ offset, shown, total }) {
+  if (total == null || total <= shown) return `${shown} posts`;
+  if (shown === 0) return `${total} posts`;
+  return `${offset + 1}–${offset + shown} of ${total} posts`;
+}
+
+function PostPager({ offset, shown, total, onPage }) {
+  if (total == null || (offset === 0 && shown >= total)) return null;
+  const buttonStyle = {
+    minHeight: 44,
+    padding: "8px 16px",
+    border: `1px solid ${D.border}`,
+    borderRadius: 6,
+    background: D.card,
+    color: D.text,
+    fontSize: 14,
+  };
+  return (
+    <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+      <button
+        type="button"
+        disabled={offset === 0}
+        onClick={() => onPage(Math.max(0, offset - POSTS_PAGE_SIZE))}
+        style={buttonStyle}
+      >
+        Previous
+      </button>
+      <button
+        type="button"
+        disabled={offset + shown >= total}
+        onClick={() => onPage(offset + shown)}
+        style={buttonStyle}
+      >
+        Next
+      </button>
+    </div>
+  );
+}
+
 function PostList({ status, onSelectPost }) {
   const [posts, setPosts] = useState([]);
   const [counts, setCounts] = useState({});
@@ -187,11 +260,14 @@ function PostList({ status, onSelectPost }) {
   const [filterTag, setFilterTag] = useState("");
   const [filterCity, setFilterCity] = useState("");
   const [search, setSearch] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(null);
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError("");
-    let url = `/admin/content/blog?status=${status}`;
+    let url = `/admin/content/blog?status=${status}&limit=${POSTS_PAGE_SIZE}`;
+    if (offset) url += `&offset=${offset}`;
     if (filterTag) url += `&tag=${encodeURIComponent(filterTag)}`;
     if (filterCity) url += `&city=${encodeURIComponent(filterCity)}`;
     if (search) url += `&search=${encodeURIComponent(search)}`;
@@ -201,6 +277,7 @@ function PostList({ status, onSelectPost }) {
         if (!active) return;
         setPosts(d.posts || []);
         setCounts(d.counts || {});
+        setTotal(Number.isFinite(d.total) ? d.total : null);
         setLoading(false);
       })
       .catch((requestError) => {
@@ -211,18 +288,18 @@ function PostList({ status, onSelectPost }) {
     return () => {
       active = false;
     };
-  }, [status, filterTag, filterCity, search, retry]);
+  }, [status, filterTag, filterCity, search, retry, offset]);
 
   const tags = [...new Set(posts.map((p) => p.tag).filter(Boolean))].sort();
   const cities = [...new Set(posts.map((p) => p.city).filter(Boolean))].sort();
+  // A filter change starts again from the first page.
+  const refilter = (setter) => (e) => {
+    setter(e.target.value);
+    setOffset(0);
+  };
 
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading posts...
-      </div>
-    );
-
+  // The filter bar stays mounted while a request is in flight: unmounting
+  // it took keyboard focus out of Search after the first letter (BLOG-08).
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* Filters */}
@@ -237,7 +314,7 @@ function PostList({ status, onSelectPost }) {
         {" "}
         <input
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={refilter(setSearch)}
           placeholder="Search..."
           style={{
             padding: "6px 12px",
@@ -251,7 +328,7 @@ function PostList({ status, onSelectPost }) {
         />{" "}
         <select
           value={filterTag}
-          onChange={(e) => setFilterTag(e.target.value)}
+          onChange={refilter(setFilterTag)}
           style={{
             padding: "6px 10px",
             borderRadius: 6,
@@ -271,7 +348,7 @@ function PostList({ status, onSelectPost }) {
         </select>{" "}
         <select
           value={filterCity}
-          onChange={(e) => setFilterCity(e.target.value)}
+          onChange={refilter(setFilterCity)}
           style={{
             padding: "6px 10px",
             borderRadius: 6,
@@ -290,11 +367,19 @@ function PostList({ status, onSelectPost }) {
           ))}
         </select>{" "}
         <span style={{ fontSize: 14, color: D.muted, marginLeft: "auto" }}>
-          {error ? "Posts unavailable" : `${posts.length} posts`}
+          {error
+            ? "Posts unavailable"
+            : loading
+              ? "Loading…"
+              : postRangeLabel({ offset, shown: posts.length, total })}
         </span>{" "}
       </div>
       {/* Post Cards */}
-      {error ? (
+      {loading ? (
+        <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+          Loading posts...
+        </div>
+      ) : error ? (
         <div role="alert" style={{ color: D.red, padding: 16, fontSize: 14 }}>
           <p>Couldn't load posts — {error}</p>
           <button
@@ -396,6 +481,14 @@ function PostList({ status, onSelectPost }) {
           </div>
         ))
       )}
+      {!loading && !error && (
+        <PostPager
+          offset={offset}
+          shown={posts.length}
+          total={total}
+          onPage={setOffset}
+        />
+      )}
     </div>
   );
 }
@@ -410,6 +503,7 @@ function PostEditor({ post, onBack, onUpdate }) {
   const [astroMerging, setAstroMerging] = useState(false);
   const [astroRefreshing, setAstroRefreshing] = useState(false);
   const [astroUnpublishing, setAstroUnpublishing] = useState(false);
+  const [refreshError, setRefreshError] = useState(null);
   const [regeneratingImage, setRegeneratingImage] = useState(false);
   const [imageError, setImageError] = useState(null);
   const [authors, setAuthors] = useState([]);
@@ -477,7 +571,7 @@ function PostEditor({ post, onBack, onUpdate }) {
       );
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      if (d.post) setEditing((prev) => ({ ...prev, ...d.post }));
+      if (d.post) setEditing((prev) => ({ ...prev, ...serverOwnedFields(d.post) }));
     } catch (err) {
       setImageError(err.message || "Image generation failed");
     }
@@ -575,7 +669,14 @@ function PostEditor({ post, onBack, onUpdate }) {
   };
 
   const handleMergeAstro = async () => {
-    if (!window.confirm("Merge this PR and go live on wavespestcontrol.com?"))
+    const removing = editing.astro_status === "unpublish_pending";
+    if (
+      !window.confirm(
+        removing
+          ? "Merge the removal PR and take this post off wavespestcontrol.com?"
+          : "Merge this PR and go live on wavespestcontrol.com?",
+      )
+    )
       return;
     setAstroMerging(true);
     try {
@@ -586,11 +687,26 @@ function PostEditor({ post, onBack, onUpdate }) {
       if (result.error) {
         alert(`Merge failed: ${result.error}`);
       } else {
+        // The server returns the row after the merge: a removal is back to
+        // draft with its PR and live links cleared, a publish is merged.
+        // Without the row, apply the known outcome of each kind of merge.
+        const fallback = result.unpublished
+          ? {
+              status: "draft",
+              astro_status: "draft",
+              astro_pr_number: null,
+              astro_branch_name: null,
+              astro_preview_url: null,
+              astro_live_url: null,
+            }
+          : {
+              status: "published",
+              astro_status: "merged",
+              astro_live_url: result.live_url || editing.astro_live_url,
+            };
         setEditing((prev) => ({
           ...prev,
-          astro_status: "merged",
-          status: "published",
-          astro_live_url: result.live_url || prev.astro_live_url,
+          ...(result.post ? serverOwnedFields(result.post) : fallback),
         }));
       }
     } catch (err) {
@@ -601,14 +717,16 @@ function PostEditor({ post, onBack, onUpdate }) {
 
   const handleRefreshAstro = async () => {
     setAstroRefreshing(true);
+    setRefreshError(null);
     try {
       const result = await adminPost(
         `/admin/content/blog/${post.id}/refresh-astro`,
         {},
       );
-      if (result.post) setEditing((prev) => ({ ...prev, ...result.post }));
+      if (result.post)
+        setEditing((prev) => ({ ...prev, ...serverOwnedFields(result.post) }));
     } catch (err) {
-      // Silent — refresh is best-effort
+      setRefreshError(err.message || "Request failed");
     }
     setAstroRefreshing(false);
   };
@@ -1384,18 +1502,19 @@ function PostEditor({ post, onBack, onUpdate }) {
               }}
             >
               No hero image yet. Generate one before publishing to Astro.
-              {imageError && (
-                <div
-                  style={{
-                    marginTop: 6,
-                    color: D.red,
-                    fontFamily: MONO,
-                    fontSize: 14,
-                  }}
-                >
-                  Last attempt: {imageError}
-                </div>
-              )}
+            </div>
+          )}
+          {imageError && (
+            <div
+              role="alert"
+              style={{
+                marginTop: 6,
+                color: D.red,
+                fontFamily: MONO,
+                fontSize: 14,
+              }}
+            >
+              Image not changed. Last attempt: {imageError}
             </div>
           )}
         </div>
@@ -1620,6 +1739,16 @@ function PostEditor({ post, onBack, onUpdate }) {
           refreshing={astroRefreshing}
           unpublishing={astroUnpublishing}
         />
+      )}
+      {refreshError && (
+        <p role="alert" style={{ margin: 0, fontSize: 14, color: D.red }}>
+          Couldn't refresh the publish status: {refreshError}
+        </p>
+      )}
+      {SAVE_STOPS_AT_PORTAL[editing.astro_status] && (
+        <p style={{ margin: 0, fontSize: 14, color: D.muted }}>
+          {SAVE_STOPS_AT_PORTAL[editing.astro_status]}
+        </p>
       )}
       {/* Actions */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

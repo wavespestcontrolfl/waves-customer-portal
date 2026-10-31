@@ -61,3 +61,32 @@ it("preserves a failed sync while automatic reads clear only read errors", async
   expect(screen.queryByText("Registry read failed")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
 });
+
+it("pages the inventory past the first response and restarts on a filter change (BLOG-12)", async () => {
+  adminFetch.mockImplementation((path) => {
+    const offset = Number(new URL(path, "http://x").searchParams.get("offset") || 0);
+    return Promise.resolve({
+      ...EMPTY_REGISTRY,
+      items: [{ id: `row-${offset}`, title: `Row at ${offset}`, reconciliation_status: "matched" }],
+      total: 101,
+      offset,
+    });
+  });
+
+  render(<ContentRegistryPage embedded />);
+  expect(await screen.findByText("1–1 of 101 filtered")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Next" }));
+  expect(await screen.findByText("2–2 of 101 filtered")).toBeInTheDocument();
+  expect(screen.getAllByText("Row at 1").length).toBeGreaterThan(0);
+  expect(adminFetch.mock.calls.at(-1)[0]).toContain("offset=1");
+
+  fireEvent.change(screen.getByPlaceholderText("Search title, URL, slug, or source path"), {
+    target: { value: "termite" },
+  });
+  expect(await screen.findByText("1–1 of 101 filtered")).toBeInTheDocument();
+  const last = adminFetch.mock.calls.at(-1)[0];
+  expect(last).toContain("search=termite");
+  expect(last).not.toContain("offset=");
+});
