@@ -47,6 +47,7 @@ const {
 const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
 const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
 const { PORTAL_CANCEL_FACT_LABEL, PORTAL_CANCEL_AVAILABLE_LINE, PORTAL_CANCEL_UNAVAILABLE_LINE } = require('./sms-portal-cancel-fact');
+const { splitPromptVersion, stampPatchVersion } = require('./sms-prompt-patch');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 // a row whose static COMPANY FACTS section was re-rendered to the identity's at freeze time (varchar(40))
@@ -212,7 +213,9 @@ function versionSuffixTokens(promptVersion) {
 }
 function requiredFactMarkers(promptVersion) {
   if (!isV12PromptVersion(promptVersion)) return [];
-  const tags = String(promptVersion).split('+')[1] || '';
+  // The category tags only: a prompt-patch tag ('A', GATE_SMS_PROMPT_AUTOPROMOTE) changes the
+  // prompt text, never the fact contract the frozen items must satisfy.
+  const { tags } = splitPromptVersion(promptVersion);
   return [...new Set([
     V12_FACTS_MARKER,
     ...versionSuffixTokens(promptVersion).flatMap(suffixTokenMarkers),
@@ -703,7 +706,7 @@ function computeSignificance({ candidateResults = [], baselineResults = [], alph
  * Returns true when a result row landed; false leaves the item pending for
  * a resume pass (transient provider/judge misses must not poison the run).
  */
-async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = null }) {
+async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = null, promptPatch }) {
   const startedAt = Date.now();
   const drafter = require('./sms-shadow-drafter');
   const judge = require('./sms-shadow-judge');
@@ -740,6 +743,7 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
     factsBlock: item.facts_block, // frozen day-of snapshot — never a live context
     routeOverride: route, // pinned leg, cross-provider fallback disabled
     voiceProfile, // pinned at run creation — null means drafted profile-free
+    promptPatch, // exam-only candidate rules (run.prompt_patch_id); undefined = the live drafter's own
     laneId: 'sealed_eval', // exam traffic is its own ledger lane, never the live drafter's
   });
   if (!parsed) {
@@ -911,13 +915,20 @@ async function finalizeRun({ runId, dbi = db } = {}) {
  * would sit unprocessed and read as a wedged run. A run stranded 'running'
  * by a crash is resumed (POST with resumeRunId), not recreated.
  */
-async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual', expectedVoiceProfileVersion, dbi = db } = {}) {
+async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual', expectedVoiceProfileVersion, promptPatch, dbi = db } = {}) {
   if (!EXAM_LEG_ROUTES[providerLeg]) throw new Error(`unknown sealed-eval provider leg: ${providerLeg}`);
   const drafter = require('./sms-shadow-drafter');
   // The version THIS run examines — currentPromptVersion(), not the static
   // PROMPT_VERSION (see the docstring above and currentPromptVersion's own
   // comment in sms-shadow-drafter.js).
-  const currentVersion = drafter.currentPromptVersion();
+  // EXAM-ONLY patch (GATE_SMS_PROMPT_AUTOPROMOTE): the run examines the candidate rules on top
+  // of the current gates, under the candidate's own identity. The live drafter never sees them.
+  const currentVersion = expectedRunVersion(promptPatch);
+  if (!currentVersion) {
+    const err = new Error('the prompt patch was built on another prompt identity, or its tag does not fit the prompt_version columns — examine a new candidate');
+    err.code = 'PATCH_BASE_MISMATCH';
+    throw err;
+  }
 
   const inFlight = await dbi('sms_sealed_eval_runs').where({ status: 'running' }).first('id', 'provider_leg');
   if (inFlight) {
@@ -985,6 +996,9 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
     // the first run under a new model IS the new baseline.
     const prior = await dbi('sms_sealed_eval_runs')
       .where({ provider_leg: providerLeg, status: 'complete', model: EXAM_LEG_ROUTES[providerLeg].model })
+      // Never an exam-only candidate-patch run (GATE_SMS_PROMPT_AUTOPROMOTE): a rule that never went
+      // live is not "the previous prompt". The auto-promote loop names its own baseline explicitly.
+      .whereNull('prompt_patch_id')
       .whereNot('prompt_version', currentVersion)
       .orderBy('started_at', 'desc')
       .first('id');
@@ -1018,6 +1032,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
         baseline_run_id: baseline,
         voice_profile_version: effectiveProfile?.version ?? null,
         model: EXAM_LEG_ROUTES[providerLeg].model,
+        prompt_patch_id: promptPatch ? promptPatch.id : null,
         triggered_by: String(triggeredBy || 'manual').slice(0, 100),
       })
       .returning('*');
@@ -1140,6 +1155,30 @@ async function pendingTailWithinCap({ run, cohortCutoff, dbi }) {
 }
 
 /**
+ * The exam-only patch a run was created with (sms_sealed_eval_runs.prompt_patch_id), as the
+ * drafter's override shape; undefined for an ordinary run, so the drafter keeps reading its own
+ * live patch (null would mean "no patch at all").
+ */
+async function loadRunPatch(run, dbi) {
+  if (!run || !run.prompt_patch_id) return undefined;
+  const row = await dbi('sms_prompt_patches').where({ id: run.prompt_patch_id }).first('id', 'patch_no', 'version_tag', 'base_version', 'patch_text');
+  if (!row) throw new Error(`run ${String(run.id).slice(0, 8)} is pinned to a prompt patch that no longer exists`);
+  return { id: row.id, patchNo: row.patch_no, tag: row.version_tag, baseVersion: row.base_version, text: row.patch_text };
+}
+
+// The prompt version a sitting must keep drafting under: the candidate's identity for an
+// exam-only patch run, else whatever the live drafter stamps now. null = the candidate cannot be
+// examined on the live prompt: it was built on another base identity (its letter is unique only
+// within that base, so stamping it here could share an identity with a different patch), or its
+// tagged identity would not fit the prompt_version columns.
+function expectedRunVersion(runPatch) {
+  const drafter = require('./sms-shadow-drafter');
+  if (!runPatch) return drafter.currentPromptVersion();
+  const base = drafter.currentPromptVersionBase();
+  return runPatch.baseVersion === base ? stampPatchVersion(base, runPatch.tag) : null;
+}
+
+/**
  * Run (or resume) one exam sitting. Long-running (items × several LLM
  * calls) — callers fire it in the background under
  * runExclusive('sms-sealed-eval'). Resumable: re-invoke with runId after an
@@ -1148,7 +1187,7 @@ async function pendingTailWithinCap({ run, cohortCutoff, dbi }) {
  * caller — so a mismatched resume can't grade one leg's run with the other
  * leg's drafts.
  */
-async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 'manual', expectedVoiceProfileVersion, dbi = db } = {}) {
+async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 'manual', expectedVoiceProfileVersion, promptPatch, dbi = db } = {}) {
   let run;
   let priorRunNoProgress = false;
   if (runId) {
@@ -1162,8 +1201,9 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
     // reflects the same way a code-level bump would — would draft the
     // remaining items under the NEW version and record them beneath the old
     // label; refuse and start a fresh run instead.
-    const currentVersion = require('./sms-shadow-drafter').currentPromptVersion();
+    const currentVersion = expectedRunVersion(await loadRunPatch(run, dbi));
     if (run.prompt_version !== currentVersion) {
+      const movedTo = currentVersion || 'another prompt identity';
       // A run stranded 'running' across the prompt-bump deploy must be
       // retired here, not just refused: the one-running unique index blocks
       // every new create while it sits, and resume is the only path the UI
@@ -1174,11 +1214,11 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
           .where({ id: runId, status: 'running' })
           .update({
             status: 'failed',
-            error: `superseded: drafter moved to ${currentVersion} mid-run`,
+            error: `superseded: drafter moved to ${movedTo} mid-run`,
             finished_at: new Date(),
           });
       }
-      throw new Error(`sealed-eval run ${runId} examined ${run.prompt_version} but the drafter is now ${currentVersion} — start a new run`);
+      throw new Error(`sealed-eval run ${runId} examined ${run.prompt_version} but the drafter is now ${movedTo} — start a new run`);
     }
     if (run.status === 'failed') {
       // Terminal-rule arm (see STUCK_TAIL_ABORT_RE): remember whether the
@@ -1203,10 +1243,11 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
       run = { ...run, status: 'running', error: null, finished_at: null };
     }
   } else {
-    run = await createExamRun({ providerLeg, baselineRunId, triggeredBy, expectedVoiceProfileVersion, dbi });
+    run = await createExamRun({ providerLeg, baselineRunId, triggeredBy, expectedVoiceProfileVersion, promptPatch, dbi });
   }
   const route = EXAM_LEG_ROUTES[run.provider_leg];
   if (!route) throw new Error(`run ${String(run.id).slice(0, 8)} has unknown provider leg ${run.provider_leg}`);
+  const runPatch = await loadRunPatch(run, dbi);
 
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -1260,7 +1301,7 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
       for (const item of items) {
         let ok = false;
         try {
-          ok = await examOneItem({ run, item, route, client, dbi, voiceProfile: runVoiceProfile });
+          ok = await examOneItem({ run, item, route, client, dbi, voiceProfile: runVoiceProfile, promptPatch: runPatch });
         } catch (err) {
           logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} failed: ${err.message}`);
         }
