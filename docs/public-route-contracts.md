@@ -6859,7 +6859,24 @@ or an SMS-delivered token whose signed `channel` claim is `smsChannelFor`
 of this exact phone — never a bare public-form
 submission; otherwise it always gets its own separate prospect profile and
 never sees another customer's visit data, reschedule URL, or booking
-(Codex pre-push P1, 2026-09-24). The free-text note rides
+(Codex pre-push P1, 2026-09-24). Exception, DARK behind `GATE_INSPECTION_REUSE_LEAD_SHELL` (strict
+`'true'`, read at call time; off = the rule above holds with no exception):
+an unverified lead whose linked customer is provably its OWN untouched intake
+profile (`leadOwnIntakeShell`: active, `new_lead`, created at most 10 minutes
+before the lead, this lead the first live lead on it, no billing, visit,
+login or merge history, the same full phone identity and email as the lead,
+no other lead's consultation provenance naming it, the primary AND only live
+profile of its own account, a complete stored street, city and ZIP, and the
+same unit as the booked address by the shared normalizer's
+`unitLineValueKey`, so a stored building with no apartment never absorbs an
+"Apt 4" booking) books onto that profile instead of a new prospect, with an outright
+`consultation_prospect` provenance row and no write to the profile; a profile
+filed under another household's account (a last-ten phone suffix match), a
+partial address, a stored street that affirmatively differs from the booked
+address, a busy comms fence, or an unsettled location keeps the separate
+prospect. The web form mints that profile from the same typed contact
+seconds before the lead row, so the reuse exposes nothing the submitter did
+not type. The free-text note rides
 `scheduled_services.internal_notes` (never `notes`, which is customer/tech
 visible) via a best-effort post-commit update. `SLOT_TAKEN` 409 mirrors
 reservice-public's shape (fresh `availability` attached). Office alert:
