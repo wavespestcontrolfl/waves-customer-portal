@@ -437,8 +437,10 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate), laborEstimated };
 }
 
-// The identity of a refused line: product, amount and base unit, so a corrected amount is a different line.
-const refusedLineKey = (productId, amount, unit) => `${productId}|${Number(amount)}|${baseQuantityUnit(unit) || ''}`;
+// The identity of a refused line: product, amount and base unit, so a corrected amount is a different line. The
+// amount is compared at the stored precision (quantity_applied / total_amount are decimal(8,3)), so a submitted
+// 641.1234 matches the 641.123 the ledger kept.
+const refusedLineKey = (productId, amount, unit) => `${productId}|${Number(amount).toFixed(3)}|${baseQuantityUnit(unit) || ''}`;
 
 // `structuredNotes` is the visit's service record notes as the caller already loaded them (object or JSON text): no second read.
 async function calcProductsCost(db, serviceRecordId, structuredNotes = null) {

@@ -927,6 +927,12 @@ describe('calcProductsCost — an application amount is priced per unit, never p
     test('the same number in a different unit is a different line and is costed', async () => {
       expect((await cost({ product_id: 'p-jug', quantity_applied: 1000000, quantity_unit: 'oz' })).productsCost).toBeGreaterThan(0);
     });
+
+    test('a refused amount with more decimals than the ledger keeps still matches the stored decimal(8,3) row', async () => {
+      const notes = { inventoryDeductions: [{ productId: 'p-jug', amount: 641.1234, amountUnit: 'fl_oz', status: 'not_deducted_implausible' }] };
+      expect((await cost({ product_id: 'p-jug', quantity_applied: '641.123', quantity_unit: 'fl_oz' }, notes)).productsCost).toBe(0);
+      expect((await cost({ product_id: 'p-jug', quantity_applied: '641.124', quantity_unit: 'fl_oz' }, notes)).productsCost).toBeGreaterThan(0);
+    });
   });
 
   test('a product an inventory movement already costed is not costed again', async () => {
