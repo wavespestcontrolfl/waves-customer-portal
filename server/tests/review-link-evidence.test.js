@@ -163,6 +163,14 @@ describe('saidLeftReview: a done-fact statement, strict enough to stop review as
     'Review posted. Thank you!',
     'My review was submitted this morning',
     'Thanks! We left a review for the tech.',
+    // Helper words between the subject and the verb.
+    'I have already left a review',
+    'I have already posted a review',
+    'We’ve both just left a review',
+    'I went ahead and left you a review',
+    // A past-tense time clause is still a done fact.
+    'After the visit I left a review',
+    'Will do! Just left a review.',
   ])('counts %s', (text) => expect(saidLeftReview(text)).toBe(true));
 
   test.each([
@@ -174,6 +182,14 @@ describe('saidLeftReview: a done-fact statement, strict enough to stop review as
     'When I left the review it asked me to sign in',
     'Did you review the estimate?',
     'I gave you guys 5 stars',
+    // A promise or a condition is not a done fact, whatever its tense.
+    'I’ll confirm once I’ve left a review.',
+    'Ill text you after Ive posted my review',
+    'We’ll let you know as soon as we have left a review',
+    'I’ll have left a review by Friday',
+    'Once my review is posted, send me the coupon',
+    'After my review is posted do I get the discount',
+    'I may have left a review',
   ])('never counts %s', (text) => expect(saidLeftReview(text)).toBe(false));
 });
 

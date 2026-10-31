@@ -83,16 +83,23 @@ function saysReviewed(body) {
 }
 
 // Stricter: a sentence that states as a done fact that the customer left a review ("I left you a
-// review", "Just posted my review!", "Review posted.", "My review was submitted"). saysReviewed only adds
-// weight near a review that exists; this one stops review asks by itself (review-click-guard.js),
-// so a question, a plan, a condition or a request never counts ("can you send the link so I can get
-// my review posted?", "I will let you know when I have left a review").
-const DONE_REVIEW_RE = /\b(i|we|ive|weve)\b[^.!?]{0,12}\b(left|posted|wrote|submitted|gave)\b[^.!?]{0,25}\breview\b|\b(my|our|the) review\b[^.!?]{0,10}\b(is|was|has been)\b[^.!?]{0,8}\b(posted|done|submitted)\b|^\s*(just\s+)?(left|posted|submitted)\b[^.!?]{0,25}\breview\b|^\s*review\s+(posted|done|submitted|left)\b/i;
-const NOT_A_DONE_FACT_RE = /\?|\b(will|would|could|can|should|going to|gonna|plan|planning|try|trying|when|if|let (you|u) know|so (i|we) can|need to|want to|how|where)\b/i;
+// review", "I have already posted a review", "Just posted my review!", "Review posted.", "My review
+// was submitted"). saysReviewed only adds weight near a review that exists; this one stops review
+// asks by itself, for good (review-click-guard.js), so a question, a plan, a condition, a promise or
+// a request never counts ("can you send the link so I can get my review posted?", "I will let you
+// know when I have left a review", "I'll confirm once I've left a review", "after my review is
+// posted"). Only helper words may stand between the subject and the verb ("I have already left").
+const DONE_REVIEW_RE = /\b(i|we|ive|weve)(\s+(have|has|had|already|just|also|actually|finally|recently|literally|both|each|went and|went ahead and|gone ahead and))*\s+(left|posted|wrote|submitted|gave)\b[^.!?]{0,25}\breview\b|\b(my|our|the) review\b[^.!?]{0,10}\b(is|was|has been)\b[^.!?]{0,8}\b(posted|done|submitted)\b|^\s*(just\s+)?(left|posted|submitted)\b[^.!?]{0,25}\breview\b|^\s*review\s+(posted|done|submitted|left)\b/i;
+// On the sentence with apostrophes dropped ("I'll" reads "Ill"). A present-tense review inside a time
+// clause is a future one: "after I've posted", "before my review is done".
+const NOT_A_DONE_FACT_RE = /\?|\b(will|ill|would|could|can|should|going to|gonna|plan|planning|try|trying|when|whenever|once|until|till|unless|as soon as|if|let (you|u) know|so (i|we) can|need to|want to|how|where)\b|\b(after|before)\s+(ive|weve|i have|we have|(my|our|the) review (is|has been))\b/i;
+// "we'll", "you'll": dropping the apostrophe would make "well" and "youll".
+const CONTRACTED_FUTURE_RE = /['’]ll\b/i;
 function saidLeftReview(body) {
   return String(body || '').split(/(?<=[.!?\n])/).some((sentence) => {
     const plain = sentence.replace(/[’']/g, ''); // "I've" -> "Ive"
-    return DONE_REVIEW_RE.test(plain) && !NOT_A_DONE_FACT_RE.test(plain) && saysReviewed(sentence);
+    return DONE_REVIEW_RE.test(plain) && !NOT_A_DONE_FACT_RE.test(plain) && !CONTRACTED_FUTURE_RE.test(sentence)
+      && saysReviewed(sentence);
   });
 }
 
