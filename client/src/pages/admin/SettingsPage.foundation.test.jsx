@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsPage from "./SettingsPage";
+import { KPI_METRIC_LABELS } from "./dashboard/kpi-targets";
 
 vi.mock("../../hooks/useIsMobile", () => ({ default: () => false }));
 vi.mock("../../lib/adminUsage", () => ({ trackAdminPageView: vi.fn() }));
@@ -66,7 +67,7 @@ function fixtureFor(url, options = {}) {
   if (path === "/admin/settings/visit-timeline/reset") return { config: visitTimeline };
   if (path === "/admin/settings/service-coverage") return { config: serviceCoverage, defaults: serviceCoverage };
   if (path === "/admin/settings/service-coverage/reset") return { config: serviceCoverage };
-  if (path === "/admin/revenue/settings") return { settings: { ovh_office_payroll: "1200", overhead_entered_at: "2026-09-01" } };
+  if (path === "/admin/revenue/settings") return { settings: { ovh_office_payroll: "1200", overhead_entered_at: "2026-09-01T15:00:00.000Z" } };
   if (path === "/admin/kpi-targets") return { targets: [] };
   if (path === "/admin/cost-cards") return { enabled: false };
   if (path === "/admin/communications/link-library") {
@@ -266,5 +267,305 @@ describe("Settings new UI foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Everyone" }));
     await waitFor(() => expect(fetch.mock.calls.some(([url]) =>
       url === "/api/admin/usage/summary?days=7&scope=all")).toBe(true));
+  });
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+// Route chosen paths to a handler; a handler that returns undefined falls
+// back to the shared fixture.
+function override(handlers) {
+  const base = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options = {}) => {
+    const path = String(url).replace(/^\/api/, "");
+    const handled = handlers[path] ? await handlers[path](options) : undefined;
+    return handled === undefined ? base(url, options) : handled;
+  });
+}
+
+const technician = () => response({ id: "synthetic-tech", name: "Synthetic technician", email: "tech@example.invalid", role: "technician" });
+const requestedPaths = () => fetch.mock.calls.map(([url]) => String(url).replace(/^\/api/, ""));
+// Let pending fetch replies and the renders they cause settle.
+const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+describe("Settings audit fixes", () => {
+  it.each([
+    "integrations",
+    "gates",
+    "link-library",
+    "service-reports",
+    "blackout-days",
+    "day-start",
+    "kpi-targets",
+    "operating-costs",
+    "system",
+  ])("a technician deep link to %s shows General and requests no owner endpoint", async (tab) => {
+    override({ "/admin/auth/me": technician });
+    mount(tab);
+    expect(await screen.findByText("Company info")).toBeInTheDocument();
+    await settle();
+    expect(requestedPaths().filter((p) => p !== "/health" && p !== "/admin/auth/me")).toEqual([]);
+  });
+
+  it("a failed profile read counts as non-admin: General, no owner panel", async () => {
+    override({ "/admin/auth/me": () => response({ error: "Profile unavailable" }, 500) });
+    mount("kpi-targets");
+    expect(await screen.findByText("Company info")).toBeInTheDocument();
+    await settle();
+    expect(requestedPaths().some((p) => p.startsWith("/admin/kpi-targets"))).toBe(false);
+  });
+
+  describe("in a browser outside Eastern time", () => {
+    // A bare toLocale*String() renders in UTC here; ET-pinned calls keep
+    // America/New_York. 02:30Z on Oct 1 is still Sep 30 in Eastern.
+    let spies = [];
+    beforeEach(() => {
+      spies = ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"].map((method) => {
+        const original = Date.prototype[method];
+        return vi.spyOn(Date.prototype, method).mockImplementation(function utcBrowser(locales, options) {
+          return original.call(this, locales, { timeZone: "UTC", ...(options || {}) });
+        });
+      });
+    });
+    afterEach(() => spies.forEach((spy) => spy.mockRestore()));
+
+    it("System shows the server time in Eastern", async () => {
+      override({ "/health": () => response({ status: "ok", environment: "synthetic", timestamp: "2026-10-01T02:30:00.000Z" }) });
+      mount("system");
+      expect(await screen.findByText(/^9\/30\/2026, 10:30:00\sPM$/)).toBeInTheDocument();
+    });
+
+    it("Link Library shows the last sync in Eastern", async () => {
+      override({
+        "/admin/communications/link-library": () => response({ links: [], lastSyncedAt: "2026-10-01T02:30:00.000Z" }),
+      });
+      mount("link-library");
+      expect(await screen.findByText(/website pages last synced 9\/30\/2026, 10:30:00\sPM/)).toBeInTheDocument();
+    });
+
+    it("LinkedIn shows the token expiry day in Eastern", async () => {
+      override({
+        "/admin/settings/linkedin/status": () => response({
+          configured: true, connected: true, orgVerified: true, hasRefreshToken: true, tokenExpiresAt: "2026-12-01T03:00:00.000Z",
+        }),
+      });
+      mount("integrations");
+      expect(await screen.findByText(/token expires 11\/30\/2026/)).toBeInTheDocument();
+    });
+
+    it("Operating Costs shows the Eastern day the figures were entered", async () => {
+      override({
+        "/admin/revenue/settings": () => response({ settings: { ovh_office_payroll: "1200", overhead_entered_at: "2026-10-01T02:30:00.000Z" } }),
+      });
+      mount("operating-costs");
+      expect(await screen.findByText("Last entered 9/30/2026.")).toBeInTheDocument();
+    });
+  });
+
+  it("a failed Google or LinkedIn read says so with a retry, never 'Not configured'", async () => {
+    let fail = true;
+    override({
+      "/admin/gbp/locations": () => (fail ? response({ error: "GBP read failed" }, 500) : undefined),
+      "/admin/settings/linkedin/status": () => (fail ? response({ error: "LinkedIn read failed" }, 500) : undefined),
+    });
+    mount("integrations");
+    expect(await screen.findByText("Could not load the Google Business Profile locations. GBP read failed")).toBeInTheDocument();
+    expect(screen.getByText("Could not load the LinkedIn connection status. LinkedIn read failed")).toBeInTheDocument();
+    expect(screen.queryByText(/Not configured/)).not.toBeInTheDocument();
+    fail = false;
+    screen.getAllByRole("button", { name: "Try again" }).forEach((button) => fireEvent.click(button));
+    expect(await screen.findByText("Bradenton")).toBeInTheDocument();
+    expect(await screen.findByText("Waves Pest Control")).toBeInTheDocument();
+  });
+
+  it("a refused service-report save shows as an error, whatever its wording", async () => {
+    override({
+      "/admin/settings/service-coverage": (options) => (options.method === "PUT" ? response({ error: "Admin access required" }, 403) : undefined),
+      "/admin/settings/visit-timeline": (options) => (options.method === "PUT" ? response({}, 422) : undefined),
+    });
+    mount("service-reports");
+    await screen.findByText("Service coverage", { exact: true });
+    const [timelineSave, coverageSave] = screen.getAllByRole("button", { name: "Save settings" });
+    fireEvent.click(coverageSave);
+    expect((await screen.findByText("Admin access required")).closest('[role="alert"]')).not.toBeNull();
+    fireEvent.click(timelineSave);
+    expect((await screen.findByText("Request failed (422)")).closest('[role="alert"]')).not.toBeNull();
+    expect(screen.queryByText(/settings saved\./)).not.toBeInTheDocument();
+  });
+
+  it("a failed service-report load shows the error instead of loading forever", async () => {
+    override({ "/admin/settings/service-coverage": () => response({ error: "Coverage read failed" }, 500) });
+    mount("service-reports");
+    const message = await screen.findByText("Could not load Service Coverage settings. Coverage read failed");
+    expect(message.closest('[role="alert"]')).not.toBeNull();
+    expect(screen.queryByText("Loading Service Coverage settings...")).not.toBeInTheDocument();
+  });
+
+  it("locks the service-coverage controls while its save runs", async () => {
+    const put = deferred();
+    override({
+      "/admin/settings/service-coverage": (options) => (options.method === "PUT"
+        ? put.promise.then(() => response({ config: serviceCoverage }))
+        : undefined),
+    });
+    mount("service-reports");
+    await screen.findByText("Service coverage", { exact: true });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save settings" })[1]);
+    expect(screen.getByRole("switch", { name: "Show map" })).toBeDisabled();
+    put.resolve();
+    await screen.findByText("Service Coverage settings saved.");
+    expect(screen.getByRole("switch", { name: "Show map" })).not.toBeDisabled();
+  });
+
+  it("keeps an operating-cost figure typed while a save runs", async () => {
+    const put = deferred();
+    override({
+      "/admin/revenue/settings": (options) => (options.method === "PUT"
+        ? put.promise.then(() => response({ settings: { ovh_office_payroll: "1750", overhead_entered_at: "2026-10-30T15:00:00.000Z" } }))
+        : undefined),
+    });
+    mount("operating-costs");
+    fireEvent.change(await screen.findByLabelText("Office payroll"), { target: { value: "1750" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save costs" }));
+    fireEvent.change(screen.getByLabelText("Rent / storage"), { target: { value: "900" } });
+    put.resolve();
+    await screen.findByText(/Saved\. The dashboard's EBITDA bridge/);
+    expect(screen.getByLabelText("Rent / storage")).toHaveValue(900);
+    expect(screen.getAllByText("Unsaved")).toHaveLength(1);
+    const call = fetch.mock.calls.find(([url, options]) => url === "/api/admin/revenue/settings" && options?.method === "PUT");
+    expect(JSON.parse(call[1].body)).toEqual({ ovhOfficePayroll: 1750 });
+  });
+
+  it("keeps a KPI target typed while a save runs", async () => {
+    const put = deferred();
+    override({
+      "/admin/kpi-targets": (options) => (options.method === "PUT" ? put.promise.then(() => response({ updated: 1 })) : undefined),
+    });
+    const [first, second] = Object.values(KPI_METRIC_LABELS);
+    mount("kpi-targets");
+    fireEvent.change(await screen.findByLabelText(`${first} target`), { target: { value: "50" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save targets" }));
+    fireEvent.change(screen.getByLabelText(`${second} target`), { target: { value: "7" } });
+    put.resolve();
+    await screen.findByText(/Saved 1 target\./);
+    expect(screen.getByLabelText(`${second} target`)).toHaveValue(7);
+    expect(screen.getAllByText("Unsaved")).toHaveLength(1);
+  });
+
+  it("offers no blackout controls until the days off have loaded", async () => {
+    let fail = true;
+    override({
+      "/admin/schedule/blackout-dates": (options) => (fail && !options.method ? response({ error: "Schedule read failed" }, 500) : undefined),
+    });
+    mount("blackout-days");
+    expect(await screen.findByText("Could not load blackout days. Schedule read failed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /weekly$/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/No blackout days set/)).not.toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("button", { name: "Sat open weekly" })).toBeEnabled();
+    expect(requestedPaths().includes("/admin/schedule/blackout-dates/weekly")).toBe(false);
+  });
+
+  it("an Unblock that lands while the list reloads stays unblocked", async () => {
+    let stored = [{ id: "day-1", date: "2026-12-25", reason: "Holiday" }];
+    let held = null;
+    let reads = 0;
+    override({
+      "/admin/schedule/blackout-dates": (options) => {
+        if (options.method === "POST") {
+          stored = [...stored, { id: "day-2", date: "2026-12-31", reason: "Office closed" }];
+          return response({ success: true, blackout: stored[stored.length - 1] });
+        }
+        reads += 1;
+        const body = { blackouts: stored, weeklyDaysOff: [0], holidays: [] };
+        if (reads !== 2) return response(body);
+        held = deferred(); // the reload after Block day, read before the Unblock
+        return held.promise.then(() => response(body));
+      },
+      "/admin/schedule/blackout-dates/day-1": () => {
+        stored = stored.filter((b) => b.id !== "day-1");
+        return response({ success: true });
+      },
+    });
+    mount("blackout-days");
+    await screen.findByText("Holiday");
+    fireEvent.change(screen.getByLabelText("Blackout date"), { target: { value: "2026-12-31" } });
+    fireEvent.click(screen.getByRole("button", { name: "Block day" }));
+    await waitFor(() => expect(held).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Unblock" }));
+    expect(await screen.findByText("Office closed")).toBeInTheDocument();
+    held.resolve();
+    await settle();
+    expect(screen.queryByText("Holiday")).not.toBeInTheDocument();
+    expect(screen.getByText("Office closed")).toBeInTheDocument();
+  });
+
+  it("a weekly day saved while the list reloads is not undone by the older read", async () => {
+    let weekly = [0];
+    let held = null;
+    let reads = 0;
+    override({
+      "/admin/schedule/blackout-dates": (options) => {
+        if (options.method === "POST") return response({ success: true, blackout: { id: "day-2", date: "2026-12-31", reason: null } });
+        reads += 1;
+        const body = { blackouts: [{ id: "day-1", date: "2026-12-25", reason: "Holiday" }], weeklyDaysOff: weekly, holidays: [] };
+        if (reads !== 2) return response(body);
+        held = deferred();
+        return held.promise.then(() => response(body));
+      },
+      "/admin/schedule/blackout-dates/weekly": (options) => {
+        weekly = JSON.parse(options.body).daysOff;
+        return response({ weeklyDaysOff: weekly });
+      },
+    });
+    mount("blackout-days");
+    await screen.findByText("Holiday");
+    fireEvent.change(screen.getByLabelText("Blackout date"), { target: { value: "2026-12-31" } });
+    fireEvent.click(screen.getByRole("button", { name: "Block day" }));
+    await waitFor(() => expect(held).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Sat open weekly" }));
+    expect(await screen.findByRole("button", { name: "Sat closed weekly" })).toBeInTheDocument();
+    held.resolve();
+    await settle();
+    expect(screen.getByRole("button", { name: "Sat closed weekly" })).toBeInTheDocument();
+  });
+
+  it("a link removed while an older reload is out stays removed", async () => {
+    const manual = (id, name) => ({ id, key: id, name, url: `https://example.invalid/${id}`, source: "manual", category: "website" });
+    let links = [manual("manual-1", "First link"), manual("manual-2", "Second link")];
+    let held = null;
+    let reads = 0;
+    override({
+      "/admin/communications/link-library": (options) => {
+        if (options.method) return undefined;
+        reads += 1;
+        const body = { links, lastSyncedAt: null };
+        if (reads !== 2) return response(body);
+        held = deferred(); // the reload after the first remove
+        return held.promise.then(() => response(body));
+      },
+      "/admin/communications/link-library/manual-1": () => {
+        links = links.filter((l) => l.id !== "manual-1");
+        return response({ ok: true });
+      },
+      "/admin/communications/link-library/manual-2": () => {
+        links = links.filter((l) => l.id !== "manual-2");
+        return response({ ok: true });
+      },
+    });
+    mount("link-library");
+    await screen.findByText("Second link");
+    fireEvent.click(screen.getByRole("button", { name: "Remove First link" }));
+    await waitFor(() => expect(held).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Remove Second link" }));
+    await waitFor(() => expect(screen.queryByText("Second link")).not.toBeInTheDocument());
+    held.resolve();
+    await settle();
+    expect(screen.queryByText("Second link")).not.toBeInTheDocument();
   });
 });

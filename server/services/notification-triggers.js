@@ -957,8 +957,8 @@ const TRIGGER_REGISTRY = {
         : '';
       return {
         title: 'Weekly newsletter draft ready',
-        body: `Autopilot drafted "${p.subject || 'Untitled'}" from ${p.eventCount || 0} events.${warn} Review and send when ready.`,
-        link: '/admin/newsletter?tab=compose',
+        body: `Autopilot drafted "${p.subject || 'Untitled'}" from ${p.eventCount || 0} events.${warn} It is in Newsletter → History.`,
+        link: '/admin/newsletter?tab=history',
       };
     },
   },
@@ -976,20 +976,6 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=dashboard',
     }),
   },
-  pest_insider_draft: {
-    label: 'Pest Insider monthly draft ready',
-    category: 'newsletter',
-    priority: 'normal',
-    group: 'Marketing',
-    rule: { area: 'Content', severity: 'needs-you', who: 'person', expiryDays: 30 },
-    build: (p) => ({
-      title: 'Pest Insider draft ready',
-      body: `Autopilot drafted the ${p.month || 'monthly'} Pest Insider: "${p.subject || 'Untitled'}". Review and send when ready.`,
-      // autopilotType deep-links Compose to the Pest Insider lane —
-      // without it, hydration defaults to the weekly flagship draft.
-      link: '/admin/newsletter?tab=compose&autopilotType=pest-insider-monthly',
-    }),
-  },
   newsletter_proof_sent: {
     label: 'Newsletter proof emailed for approval',
     category: 'newsletter',
@@ -999,9 +985,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Newsletter proof sent — reply APPROVED to send',
       body: `Proof of "${p.subject || 'Untitled'}" emailed to ${p.recipient || 'the owner inbox'}. Reply APPROVED to that email and it sends to ${p.recipientCount ?? '?'} active subscribers; any other reply (or none) leaves it a draft.`,
-      // Deep-link THE draft the notice is about — the bare compose tab opens
-      // the latest autopilot draft, not this one (codex round 16 P2).
-      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
+      link: '/admin/newsletter?tab=history',
     }),
   },
   newsletter_proof_approved: {
@@ -1016,21 +1000,6 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=history',
     }),
   },
-  newsletter_send_not_dispatched: {
-    label: 'Newsletter send cancelled: the draft changed after Send was clicked',
-    category: 'newsletter',
-    priority: 'high',
-    group: 'Marketing',
-    rule: { area: 'Content', severity: 'needs-you', who: 'person', expiryDays: 30 },
-    build: (p) => ({
-      title: 'Newsletter not sent',
-      body: `"${p.subject || 'Untitled'}" changed after Send was clicked — nothing went out. Review the draft and send it again.`,
-      // Deep-link THE affected draft: the bare compose tab opens the latest
-      // autopilot draft, not the campaign whose send was cancelled (codex
-      // round 14 P2).
-      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
-    }),
-  },
   newsletter_proof_blocked: {
     label: 'Newsletter proof/approval blocked by validation',
     category: 'newsletter',
@@ -1039,10 +1008,8 @@ const TRIGGER_REGISTRY = {
     rule: { area: 'Content', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: 'Newsletter proof blocked',
-      body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Fix the draft in the composer — nothing was sent.`,
-      // Deep-link THE draft the notice is about — the bare compose tab opens
-      // the latest autopilot draft, not this one (codex round 16 P2).
-      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
+      body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Nothing was sent.`,
+      link: '/admin/newsletter?tab=history',
     }),
   },
   event_sources_unhealthy: {

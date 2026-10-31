@@ -2372,7 +2372,7 @@ describe('rain-out service', () => {
       }
     });
 
-    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark; owner
+    // Second technician (GATE_MULTI_TECH_CONFIRM, dark; owner
     // 2026-10-03 "Moves"): commit keeps the visit's technician and the
     // rebooker's probe counts only that route plus unassigned rows, so the
     // sheet's warning must not name the OTHER technician's stop. Gate off:

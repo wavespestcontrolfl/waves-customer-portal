@@ -832,6 +832,30 @@ function applyPayrollProfileFields(updates, body) {
   }
 }
 
+// A pay rate must be a number from 0 to 999999.99 (the column is decimal(8,2)). Whether it clears
+// the Florida minimum wage is decided when a pay run is drafted, not at save.
+const PAY_RATE_CHECK = ['payRate', (v) => typeof v !== 'boolean' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 999999.99,
+  'Pay rate must be a number between 0 and 999999.99'];
+
+// Absent, null or '' keeps or clears the column (applyPayrollProfileFields); any other value must pass.
+function payRateError(body) {
+  const [key, valid, message] = PAY_RATE_CHECK;
+  return body[key] != null && body[key] !== '' && !valid(body[key]) ? message : null;
+}
+
+// One audit row when a save changes the pay rate (the old and new rate only; no other pay data).
+async function auditPayRateChange(trx, req, target, updates) {
+  if (!('pay_rate' in updates)) return;
+  const oldRate = target.pay_rate == null ? null : Number(target.pay_rate);
+  const newRate = updates.pay_rate == null ? null : Number(updates.pay_rate);
+  if (oldRate === newRate) return;
+  await recordAuditEvent({
+    trx, critical: true, actor_type: 'admin', actor_id: req.technicianId || null,
+    action: 'payroll.pay_rate_changed', resource_type: 'technicians', resource_id: target.id,
+    metadata: { technician_id: target.id, old_pay_rate: oldRate, new_pay_rate: newRate },
+  });
+}
+
 // Staff emails are authentication identifiers. Store one canonical form so
 // login/reset lookups cannot diverge on casing or surrounding whitespace.
 function normalizeTechnicianEmail(value) {
@@ -1081,6 +1105,8 @@ async function updateTechnician(req, res, next) {
     if (startPoint.error) return res.status(400).json({ error: startPoint.error });
     const workDays = normalizeWorkDaysInput(body.workDays);
     if (workDays.error) return res.status(400).json({ error: workDays.error });
+    const badPayRate = payRateError(body);
+    if (badPayRate) return res.status(400).json({ error: badPayRate });
 
     const outcome = await db.transaction(async (trx) => {
       // Every Staff identity writer takes the table lock before a row lock.
@@ -1163,6 +1189,7 @@ async function updateTechnician(req, res, next) {
       applyPayrollProfileFields(updates, body);
       updates.updated_at = new Date();
       await trx('technicians').where({ id: target.id }).update(updates);
+      await auditPayRateChange(trx, req, target, updates);
 
       const revokeAccess = credentialsChanged || active === false;
       if (revokeAccess) await PushService.deactivateStaffUser(target.id, trx);
@@ -1251,8 +1278,7 @@ function hiredPacketOff(res) {
 // PUT rule, applied by applyPayrollProfileFields); any other value must pass
 // its check, so a bad value is a 400 instead of a database error.
 const HIRE_OPTIONAL_FIELD_CHECKS = [
-  ['payRate', (v) => typeof v !== 'boolean' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 999999.99,
-    'Pay rate must be a number between 0 and 999999.99'],
+  PAY_RATE_CHECK,
   ['jobTitle', (v) => typeof v === 'string' && v.length <= 100, 'Job title must be 100 characters or fewer'],
   ['employmentType', (v) => HIRE_EMPLOYMENT_TYPES.includes(v), "Employment type must be 'w2' or '1099'"],
 ];

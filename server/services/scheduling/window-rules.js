@@ -18,8 +18,8 @@
  * (scheduling/occupancy.js — findConflictingVisits under the date-wide
  * advisory lock) exactly as routes/booking.js createSelfBooking does. It is
  * tech-blind unless the caller passes `technicianId` AND
- * techScopedConfirmActive() (GATE_MULTI_TECH_CONFIRM + capacity mode, off in
- * production): then only unassigned rows and that technician's own route
+ * techScopedConfirmActive() (GATE_MULTI_TECH_CONFIRM, hour or capacity mode,
+ * off in production): then only unassigned rows and that technician's own route
  * count. Callers pass the technician the row is SAVED with: the office bulk
  * edit, the Intelligence Bar create/move tools (and the create card's
  * preview pin), the completion follow-up write, the new-caller booking.

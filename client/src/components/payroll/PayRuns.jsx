@@ -26,6 +26,7 @@ const STATUS = {
   voided: { tone: 'neutral', label: 'Voided' },
 };
 const WEEK_CHOICES = 12;
+const NO_W4_NOTE = 'No W-4 on file: withheld as single, no adjustments (IRS default)';
 
 function StatusChip({ status }) {
   const known = STATUS[status] || { tone: 'neutral', label: status };
@@ -107,6 +108,7 @@ export function StubDialog({ call, check, onClose }) {
               <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
             </TBody>
           </Table>
+          {stub.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
 
           {stub.employerContributions && stub.employerContributions.hsaCents > 0 && <>
             <h2 className="field-section-heading">Employer contributions</h2>
@@ -198,7 +200,10 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
       </TR></THead>
       <TBody>
         {run.checks.map(check => <TR key={check.id}>
-          <TD>{check.name}</TD>
+          <TD>
+            {check.name}
+            {check.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
+          </TD>
           <TD nums align="right">{hoursWord(check.regularHours)}</TD>
           <TD nums align="right">{hoursWord(check.overtimeHours)}</TD>
           {showPto && <TD nums align="right">{hoursWord(check.ptoHours)} · {centsToDollars(check.ptoPayCents)}</TD>}

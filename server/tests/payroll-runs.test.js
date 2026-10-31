@@ -102,8 +102,19 @@ describe('buildCheck', () => {
     expect(check.gross_cents).toBe(88000 + 6600);
   });
 
+  it('withholds a technician with no W-4 on file as single with no adjustments, and stores no election', () => {
+    // 40 hours at $26.25 = $1,050.00. IRS Pub. 15-T (2026) weekly wage bracket table, single, Step 2 box
+    // unchecked, row $1,050: $84 (the table rounds to whole dollars, so the percentage method may differ by 50 cents).
+    const { check, blocked } = base({ tech: { pay_rate: '26.25' }, w4: null });
+    expect(blocked).toBeUndefined();
+    expect(check.w4_election_id).toBeNull();
+    expect(check.gross_cents).toBe(105000);
+    expect(Math.abs(check.federal_income_tax_cents - 8400)).toBeLessThanOrEqual(50);
+    expect(check.federal_income_tax_cents).toBe(base({ tech: { pay_rate: '26.25' } }).check.federal_income_tax_cents);
+  });
+
   it.each([
-    ['no W-4 on file', { w4: null }, /No Form W-4 on file/],
+    ['a pay rate under the Florida minimum wage on the pay date', { tech: { pay_rate: '14.99' } }, /Hourly rate \$14\.99 is below the Florida minimum wage of \$15\.00 on 2026-10-23/],
     ['no pay rate', { tech: { pay_rate: null } }, /No pay rate set/],
     ['a pay rate of zero', { tech: { pay_rate: '0.00' } }, /No pay rate set/],
     ['a pay date in a year with no tables', { payDate: '2027-01-08' }, /No federal withholding tables for 2027/],

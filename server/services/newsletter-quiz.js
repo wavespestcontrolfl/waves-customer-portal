@@ -162,17 +162,6 @@ function answerLabel(quizId, answerKey) {
   return a ? a.label : answerKey;
 }
 
-// Quiz metadata for the composer picker + results labels (no internal-only
-// fields beyond what the UI needs).
-function listQuizzes() {
-  return Object.entries(QUIZZES).map(([id, q]) => ({
-    id,
-    label: q.label || id,
-    question: q.question,
-    answers: q.answers.map((a) => ({ key: a.key, label: a.label, tags: a.tags })),
-  }));
-}
-
 /**
  * Aggregate raw per-answer count rows (from newsletter_send_deliveries grouped
  * by quiz_id + quiz_answer) into the History view's results shape. Pure — the
@@ -431,7 +420,6 @@ module.exports = {
   getQuiz,
   resolveAnswer,
   answerLabel,
-  listQuizzes,
   aggregateQuizResults,
   parseQuizTokens,
   hasQuizToken,

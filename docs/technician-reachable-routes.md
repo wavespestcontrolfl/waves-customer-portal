@@ -8,7 +8,7 @@ With GATE_STAFF_DEFAULT_DENY on, a technician reaches the routes in the first ta
 
 A route being listed as reachable means a technician may call it; routers still scope records to the assigned technician where they did before (schedule, customers, visits, timetracking).
 
-Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, admin-revenue, …) run a router-level function that admits a technician only on the router's own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.
+Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, …) run a router-level function that admits a technician only on the router's own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.
 
 Allow-list buckets: session, own-visits, own-time, own-texts, promises, documents, pay-growth, knowledge-read, equipment-read, own-truck.
 
@@ -545,9 +545,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/requests` | admin-requests |
 | PATCH | `/api/admin/requests/:id` | admin-requests |
 | GET | `/api/admin/requests/:id/photos` | admin-requests |
-| GET | `/api/admin/revenue/overview` | admin-revenue (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/revenue/settings` | admin-revenue (router exemption gate: admin-only unless its named staff exemption applies) |
-| PUT | `/api/admin/revenue/settings` | admin-revenue (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/stats` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/tech-voice-drafts` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |

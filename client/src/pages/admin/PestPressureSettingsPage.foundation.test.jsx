@@ -131,3 +131,60 @@ describe("Pest Pressure settings new UI foundation", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not load settings. Synthetic config unavailable");
   });
 });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+describe("Pest Pressure score actions and refreshes", () => {
+  it("runs one row action at a time, across rows", async () => {
+    const recalc = deferred();
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => (
+      String(url) === "/api/admin/pest-pressure/scores/service-1/recalculate"
+        ? recalc.promise.then(() => response({ ok: true }))
+        : base(url, options)
+    ));
+    mount();
+    await screen.findByText("Override customer");
+    const [firstRecalc, secondRecalc] = screen.getAllByRole("button", { name: "Recalc" });
+    fireEvent.click(firstRecalc);
+    // Row 2 waits too: a second action used to clear row 1's busy state
+    // and race its refresh.
+    expect(secondRecalc).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove override" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Override" })).toBeDisabled();
+    recalc.resolve();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Recalc" })[1]).not.toBeDisabled());
+    expect(screen.getByRole("button", { name: "Remove override" })).not.toBeDisabled();
+  });
+
+  it("an older score refresh never lands over a newer one", async () => {
+    // StrictMode (as in main.jsx) runs the mount effect twice, so two
+    // refreshes are in flight at once. Hold the first; answer the second
+    // with newer scores; then let the first, older reply arrive.
+    const older = deferred();
+    let reads = 0;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => {
+      if (String(url) !== "/api/admin/pest-pressure/scores/recent?limit=25") return base(url, options);
+      reads += 1;
+      if (reads === 1) return older.promise.then(() => response({ scores }));
+      return response({ scores: [{ ...scores[0], customer_name: "Rescored customer", displayed_score: 3.1 }, scores[1]] });
+    });
+    render(
+      <React.StrictMode>
+        <MemoryRouter initialEntries={["/admin/settings/pest-pressure"]}><PestPressureSettingsPage /></MemoryRouter>
+      </React.StrictMode>,
+    );
+    expect(await screen.findByText("Rescored customer")).toBeInTheDocument();
+    expect(reads).toBe(2);
+    older.resolve();
+    await older.promise;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText("Rescored customer")).toBeInTheDocument();
+    expect(screen.queryByText("Synthetic customer")).not.toBeInTheDocument();
+  });
+});

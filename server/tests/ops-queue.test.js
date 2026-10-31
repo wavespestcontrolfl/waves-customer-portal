@@ -266,7 +266,8 @@ describe('GET /api/admin/agents/queue', () => {
     await withServer(async (base) => {
       const a = await fetch(`${base}/api/admin/agents/control/hub`, { headers: { Authorization: 'Bearer admin' } });
       const hub = await a.json();
-      expect(hub.features).toEqual({ queue: false, ledger: false, runs: false, cost: false, verification: false, typed: false });
+      // hygiene: GATE_DATA_HYGIENE_UI defaults on outside production.
+      expect(hub.features).toEqual({ queue: false, ledger: false, runs: false, cost: false, verification: false, typed: false, hygiene: true });
       expect(hub.areas.map((x) => x.key)).toContain('sms');
       expect((await fetch(`${base}/api/admin/agents/queue`, { headers: { Authorization: 'Bearer admin' } })).status).toBe(404);
       process.env.GATE_ADMIN_OPS_QUEUE = 'true';

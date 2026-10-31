@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
@@ -310,7 +310,11 @@ export default function PestPressureSettingsPage() {
     setSaveMessage(null);
   };
 
+  // Only the newest refresh may land: an older reply can carry a score or
+  // audit list that a later row action already changed.
+  const scoresSeq = useRef(0);
   const refreshScores = useCallback(async () => {
+    const seq = ++scoresSeq.current;
     setScoresLoading(true);
     setScoresError(null);
     try {
@@ -318,12 +322,13 @@ export default function PestPressureSettingsPage() {
         adminFetch("/admin/pest-pressure/scores/recent?limit=25"),
         adminFetch("/admin/pest-pressure/audit?limit=25"),
       ]);
+      if (seq !== scoresSeq.current) return;
       setRecentScores(recentBody.scores || []);
       setAuditEvents(auditBody.events || []);
     } catch (err) {
-      setScoresError(err.message);
+      if (seq === scoresSeq.current) setScoresError(err.message);
     } finally {
-      setScoresLoading(false);
+      if (seq === scoresSeq.current) setScoresLoading(false);
     }
   }, []);
 
@@ -792,7 +797,9 @@ export default function PestPressureSettingsPage() {
                 </THead>
                 <TBody>
                   {recentScores.map((row) => {
-                    const busy = busyRowId === row.service_record_id;
+                    // One row action at a time, across rows: a second one used
+                    // to clear the first's busy state and race its refresh.
+                    const busy = busyRowId !== null;
                     return (
                       <TR key={row.id}>
                         <TD className="whitespace-nowrap u-nums">

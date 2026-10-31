@@ -297,3 +297,71 @@ it.each([
   await waitFor(() => expect(alert).not.toBeInTheDocument());
   expect(mutationCalls()).toHaveLength(1);
 });
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+const draftFor = (intent, name) => ({ id: `draft-${intent}`, intent, customerName: name, inboundMessage: `Synthetic ${intent} text` });
+const intentScores = { intents: [{ intent: 'scheduling' }, { intent: 'general_question' }] };
+
+function mockIntentReads(drafts) {
+  mockShadowData(async () => ({}), async (url) => {
+    if (url.endsWith('/shadow-scores')) return intentScores;
+    const match = url.match(/shadow-drafts\?intent=(\w+)/);
+    if (match) return drafts[match[1]]();
+    return undefined;
+  });
+}
+
+it('keeps the rows of the last selected intent when an earlier intent read resolves late', async () => {
+  const scheduling = deferred();
+  const general = deferred();
+  mockIntentReads({ scheduling: () => scheduling.promise, general_question: () => general.promise });
+  render(<AgentShadowDraftsPage />);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'scheduling' }));
+  fireEvent.click(screen.getByRole('button', { name: 'general question' }));
+  await act(async () => { general.resolve({ drafts: [draftFor('general_question', 'General Caller')] }); });
+  expect(await screen.findByText('General Caller')).toBeInTheDocument();
+
+  await act(async () => { scheduling.resolve({ drafts: [draftFor('scheduling', 'Scheduling Caller')] }); });
+  expect(screen.getByRole('button', { name: 'general question' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByText('General Caller')).toBeInTheDocument();
+  expect(screen.queryByText('Scheduling Caller')).not.toBeInTheDocument();
+});
+
+it('ignores a late error from an earlier intent read and ends loading for the current one', async () => {
+  const scheduling = deferred();
+  const general = deferred();
+  mockIntentReads({ scheduling: () => scheduling.promise, general_question: () => general.promise });
+  render(<AgentShadowDraftsPage />);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'scheduling' }));
+  fireEvent.click(screen.getByRole('button', { name: 'general question' }));
+  await act(async () => { general.resolve({ drafts: [draftFor('general_question', 'General Caller')] }); });
+  expect(await screen.findByText('General Caller')).toBeInTheDocument();
+
+  await act(async () => { scheduling.reject(new Error('Synthetic stale failure.')); });
+  expect(screen.queryByText(/Synthetic stale failure/)).not.toBeInTheDocument();
+  expect(screen.getByText('General Caller')).toBeInTheDocument();
+});
+
+it('shows the current intent error even when an earlier read succeeds afterwards', async () => {
+  const scheduling = deferred();
+  const general = deferred();
+  mockIntentReads({ scheduling: () => scheduling.promise, general_question: () => general.promise });
+  render(<AgentShadowDraftsPage />);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'scheduling' }));
+  fireEvent.click(screen.getByRole('button', { name: 'general question' }));
+  await act(async () => { general.reject(new Error('Synthetic current failure.')); });
+  expect(await screen.findByText(/Synthetic current failure/)).toBeInTheDocument();
+
+  await act(async () => { scheduling.resolve({ drafts: [draftFor('scheduling', 'Scheduling Caller')] }); });
+  expect(screen.getByText(/Synthetic current failure/)).toBeInTheDocument();
+  expect(screen.queryByText('Scheduling Caller')).not.toBeInTheDocument();
+});
