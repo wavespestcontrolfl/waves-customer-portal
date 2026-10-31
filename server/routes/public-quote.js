@@ -253,7 +253,23 @@ function numberOrNull(...values) {
 // probe applies: an ambiguous phone declines outright (falling through to
 // email would resolve the same shared household by another key); only a
 // no-match phone probe falls through.
-async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}) {
+//
+// GATE_QUOTE_SAME_PERSON_MATCH (dark): an ambiguous phone whose 2..10 rows are
+// ALL one person at the typed address (names + street/unit/ZIP match, pairwise
+// and against the typed contact) resolves to the nightly sweep's winner row,
+// so a rerun does not add a customers row each time. `typed` is optional; the
+// pre-pricing rodent lookup omits it and keeps the old null.
+async function resolveAmbiguousPhoneSamePerson(database, phoneDigits, typed) {
+  if (!typed || !require('../config/feature-gates').quoteSamePersonMatchLive()) return null;
+  const rows = await database('customers')
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+    .whereNull('deleted_at')
+    .limit(11)
+    .select('*');
+  return require('../services/customer-dedupe').resolveSamePersonCluster(database, rows, typed);
+}
+
+async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}, typed = null) {
   const phoneDigits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
   const emailLc = String(contactEmail || '').trim().toLowerCase();
   if (phoneDigits.length === 10) {
@@ -263,7 +279,7 @@ async function findExistingCustomerByContact(database, { contactPhone, contactEm
       .limit(2)
       .select('*');
     if (matches.length === 1) return matches[0];
-    if (matches.length > 1) return null;
+    if (matches.length > 1) return resolveAmbiguousPhoneSamePerson(database, phoneDigits, typed);
   }
   if (emailLc) {
     const matches = await database('customers')
@@ -2704,7 +2720,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // have it.
     let customerId = null;
     try {
-      const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
+      const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail }, {
+        first_name: contactFirstName,
+        last_name: contactLastName,
+        address_line1: quoteAddress,
+        address_line2: normalizedAddress.line2 || null,
+        city: quoteCity || '',
+        zip: quoteZip || '',
+      });
       // Normalized email for the new-customer insert below (the shared
       // lookup normalizes its own copy — codex #3591 r15 P1 TDZ fix).
       const emailLc = String(contactEmail || '').trim().toLowerCase();

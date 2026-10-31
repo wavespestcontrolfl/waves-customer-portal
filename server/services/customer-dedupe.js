@@ -289,6 +289,41 @@ function pickWinner(rows, extraScore = () => 0) {
     || String(a.id).localeCompare(String(b.id)))[0];
 }
 
+// ---------------------------------------------------------------------------
+// Same-person cluster (public quote wizard)
+// ---------------------------------------------------------------------------
+
+const SAME_PERSON_MAX_ROWS = 10;
+
+function isLiveRow(row) {
+  return row.active !== false && !row.deleted_at;
+}
+
+function everySamePerson(a, b) {
+  return namesCompatible(a, b) && addressCompat(a, b).status === 'match';
+}
+
+// A phone that matches 2..10 customer rows which are ALL one person at ONE
+// premise (names compatible, address a positive match, pairwise AND against
+// what the visitor typed) resolves to the row the nightly sweep would keep.
+// Anything else returns null: a shared household or business line is not
+// one person, so the caller must not link to an arbitrary row of it.
+// typed = { first_name, last_name, address_line1, address_line2, city, zip }.
+async function resolveSamePersonCluster(database, rows, typed = {}) {
+  if (!Array.isArray(rows) || rows.length < 2 || rows.length > SAME_PERSON_MAX_ROWS) return null;
+  if (!rows.every(isLiveRow)) return null;
+  for (let i = 0; i < rows.length; i += 1) {
+    if (!everySamePerson(typed, rows[i])) return null;
+    for (let j = i + 1; j < rows.length; j += 1) {
+      if (!everySamePerson(rows[i], rows[j])) return null;
+    }
+  }
+  const blockersById = await batchAutoBlockers(database, rows);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+  return pickWinner(rows, businessBoost);
+}
+
 function pairKey(idA, idB) {
   return idA < idB ? [idA, idB] : [idB, idA];
 }
@@ -7472,6 +7507,9 @@ module.exports = {
   // counts — customer-empty-loser.js (the delete_duplicate_customer
   // emptiness scan) reads the same lists.
   loserAutoBlockers,
+  // Public quote wizard: 2..10 phone matches that are one person at one address
+  // resolve to the sweep's winner row, else null.
+  resolveSamePersonCluster,
   REPOINT_EXCLUDED_TABLES,
   executeMerge,
   lockSeriesCreateForMerge,
