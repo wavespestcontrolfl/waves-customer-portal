@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Inbox, AlertTriangle } from "lucide-react";
 import { Badge, Button, Card, CardBody } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import { formatETDateTime } from "../../lib/timezone";
 
 // Communications -> Portal tab (GATE_PORTAL_INBOX). Lists what customers asked
 // for inside the customer portal and nobody answered: portal chat hand-offs and
@@ -20,8 +21,7 @@ function customerName(customer) {
 function formatWhen(value) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString("en-US", {
-    timeZone: "America/New_York",
+  return formatETDateTime(d, {
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -81,7 +81,7 @@ function InboxRow({ item, busy, error, onHandled, onReply, onOpenCustomer }) {
   return (
     <div className="py-4 first:pt-0 last:pb-0" data-testid={`portal-row-${item.kind}-${item.id}`}>
       <div className="flex items-center gap-2 flex-wrap">
-        <Badge tone={item.kind === "chat" ? "neutral" : "alert"}>{KIND_LABEL[item.kind]}</Badge>
+        <Badge tone="neutral">{KIND_LABEL[item.kind]}</Badge>
         <span className="text-14 font-medium text-zinc-900">{customerName(item.customer)}</span>
         <span className="text-14 text-ink-tertiary">{formatWhen(item.createdAt)}</span>
       </div>
@@ -192,7 +192,7 @@ export default function PortalInboxTabV2({ onCount }) {
       .catch((err) => {
         setLoadError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Failed to load.");
       });
-  }, [onCount]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
@@ -236,7 +236,7 @@ export default function PortalInboxTabV2({ onCount }) {
           ) : data && data.items.length === 0 ? (
             <div className="p-10 text-center">
               <Inbox size={28} strokeWidth={1.5} className="mx-auto text-ink-disabled mb-2" aria-hidden />
-              <div className="text-14 text-ink-secondary">Nothing open. Every portal request is answered.</div>
+              <div className="text-14 text-ink-secondary">Nothing open from the last 14 days.</div>
             </div>
           ) : data ? (
             <div className="divide-y divide-zinc-200">
