@@ -3,6 +3,10 @@ import SwiftUI
 struct CollectView: View {
     @EnvironmentObject var app: AppState
     let handoff: API.ValidatedHandoff
+    // The jti from the same check as `handoff`. /payment-intent and the
+    // surcharge step use it to find the burned handoff row (tech, invoice,
+    // amount all bound to it).
+    let jti: String
 
     // Apple asks for its "How to Tap" lesson when Tap to Pay is first used.
     @AppStorage("howToTapShown") private var howToTapShown = false
@@ -109,10 +113,10 @@ struct CollectView: View {
         TerminalManager.shared.prepare()
         Task {
             do {
-                let pi = try await API.createPaymentIntent(jti: extractJti())
+                let pi = try await API.createPaymentIntent(jti: jti)
                 let confirmed = try await TerminalManager.shared.collect(
                     clientSecret: pi.clientSecret,
-                    jti: extractJti(),
+                    jti: jti,
                     surchargeEnabled: handoff.surcharge_enabled == true,
                     onCardRead: { app.cardRead() }
                 )
@@ -121,13 +125,6 @@ struct CollectView: View {
                 app.fail(error.localizedDescription)
             }
         }
-    }
-
-    // jti was decoded from the JWT during validate() and stashed in
-    // PendingHandoff. /payment-intent uses it to look up the burned
-    // handoff row (tech, invoice, amount all bound to the jti).
-    private func extractJti() -> String {
-        return PendingHandoff.jti ?? ""
     }
 }
 
