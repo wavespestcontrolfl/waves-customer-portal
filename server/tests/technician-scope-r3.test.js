@@ -6,7 +6,7 @@ let mockRow = null;
 jest.mock('../models/db', () => {
   const fn = jest.fn(() => {
     const c = {};
-    for (const m of ['where', 'whereNull', 'whereIn', 'leftJoin', 'select', 'orderBy', 'limit', 'modify']) c[m] = () => c;
+    for (const m of ['where', 'whereNull', 'whereIn', 'leftJoin', 'select', 'orderBy', 'limit', 'modify', 'forUpdate']) c[m] = () => c;
     c.first = async () => mockRow;
     return c;
   });
