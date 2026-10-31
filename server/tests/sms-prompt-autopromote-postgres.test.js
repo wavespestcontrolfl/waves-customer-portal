@@ -847,18 +847,26 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
 
   describe('rollback monitor', () => {
     // judged drafts for a version: n judged, `unsafe` of them draft_unsafe, created at `at`.
-    const judged = async (version, n, unsafe, at, judgeVersion = null) => {
+    const judged = async (version, n, unsafe, at, judgeVersion = null, profile = null) => {
       for (let i = 0; i < n; i += 1) {
-        const [draft] = await trx('message_drafts').insert({ prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at }).returning('id');
+        const [draft] = await trx('message_drafts').insert({
+          prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at,
+          ...(profile == null ? {} : { intended_actions: JSON.stringify({ voice_profile_version: profile }) }),
+        }).returning('id');
         await trx('shadow_draft_judgments').insert({
           draft_id: draft.id, verdict: i < unsafe ? 'draft_unsafe' : 'equivalent', scores: JSON.stringify({ safety: 8, voice: 8, actions: 8, overall: 8 }), judge_version: judgeVersion,
         });
       }
     };
-    const replies = async (version, n, { confused = 0, optedOut = 0 } = {}, at, source = 'ai_approved') => {
+    // Reply outcomes hang off the AI draft behind each reply; the draft carries the voice profile.
+    const replies = async (version, n, { confused = 0, optedOut = 0 } = {}, at, source = 'ai_approved', profile = null) => {
       for (let i = 0; i < n; i += 1) {
+        const [draft] = await trx('message_drafts').insert({
+          prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at,
+          ...(profile == null ? {} : { intended_actions: JSON.stringify({ voice_profile_version: profile }) }),
+        }).returning('id');
         await trx('sms_reply_outcomes').insert({
-          reply_sms_log_id: randomUUID(), phone_last10: '9415550000', reply_source: source, reply_at: at, prompt_version: version, status: 'computed',
+          reply_sms_log_id: randomUUID(), phone_last10: '9415550000', reply_source: source, reply_at: at, prompt_version: version, draft_id: draft.id, status: 'computed',
           confused: i < confused, opted_out: i >= n - optedOut, silent: false,
         });
       }
@@ -890,6 +898,34 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(() => composeAdminAlert(spec)).not.toThrow();
       expect(spec.why).toContain('more live drafts were judged unsafe');
       expect(opts).toMatchObject({ dedupeKey: `sms-prompt-patch:${active.id}:rolled_back`, bellDefault: true });
+    });
+
+    test('a voice-profile change between the prior and patched drafts does not retire a healthy patch; same-profile cohorts still do', async () => {
+      // Prior drafts ran under profile 1 (5% unsafe); the patched drafts under profile 2 (20% unsafe). The patch is
+      // unchanged across profiles: the rise belongs to the new profile. Profile 2 is the effective one now.
+      await judged(active.prior_version, 40, 2, before, null, 1);
+      await judged(active.active_version, 25, 5, after, null, 2);
+      await replies(active.prior_version, 40, { confused: 2 }, before, 'ai_approved', 1);
+      await replies(active.active_version, 40, { confused: 20 }, after, 'ai_approved', 2);
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 })).toEqual({ checked: active.id });
+      // Too few prior drafts under the effective profile: skipped, not compared.
+      await judged(active.prior_version, 10, 0, before, null, 2);
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 })).toEqual({ checked: active.id });
+      // With a real prior cohort under the same profile, the same rise is the patch's and rolls back.
+      await judged(active.prior_version, 30, 2, before, null, 2);
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).retired_reason).toBe('live_unsafe_rise');
+    });
+
+    test('the same profile rule holds for reply outcomes', async () => {
+      await replies(active.prior_version, 40, { confused: 2 }, before, 'ai_approved', 1);
+      await replies(active.active_version, 40, { confused: 20 }, after, 'ai_approved', 2);
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 })).toEqual({ checked: active.id });
+      await replies(active.prior_version, 40, { confused: 2 }, before, 'ai_approved', 2);
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).retired_reason).toBe('reply_confusion_rise');
     });
 
     test('live judge with GATE_SMS_JUDGE_V2 on: only the stricter judge counts, as in graduation', async () => {

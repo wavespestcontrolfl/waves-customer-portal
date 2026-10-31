@@ -33,6 +33,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { gateEnvValue, smsJudgeV2Live } = require('../config/feature-gates');
+const { DRAFT_VOICE_PROFILE_SQL, voiceProfileKey, resolveVoiceProfilePin } = require('./sms-graduation');
 const patchLib = require('./sms-prompt-patch');
 
 const envNum = (name, def) => {
@@ -584,10 +585,11 @@ const ROLLBACK_PHRASES = Object.freeze({
 
 // Both groups are read with the ruler graduation reads (sms-graduation.js): with GATE_SMS_JUDGE_V2 on,
 // only the stricter judge's rows count, so a prior group graded by the old judge never reads as a rise.
-async function liveJudgeStats(dbi, version, from, to) {
+async function liveJudgeStats(dbi, version, from, to, voicePin) {
   const row = await dbi({ j: 'shadow_draft_judgments' })
     .join({ md: 'message_drafts' }, 'md.id', 'j.draft_id')
     .where('md.prompt_version', version)
+    .whereRaw(DRAFT_VOICE_PROFILE_SQL, [voiceProfileKey(voicePin)])
     .whereNotNull('j.scores')
     .modify((q) => { if (smsJudgeV2Live()) q.where('j.judge_version', 'j2'); })
     .where('md.created_at', '>=', from)
@@ -598,35 +600,37 @@ async function liveJudgeStats(dbi, version, from, to) {
   return { judged: row.judged, unsafe: row.unsafe };
 }
 
-async function liveJudgeCheck({ dbi, patch, now }) {
+async function liveJudgeCheck({ dbi, patch, now, voicePin }) {
   if (!patch.prior_version || !patch.active_version) return null;
   const since = new Date(patch.activated_at);
-  const prior = await liveJudgeStats(dbi, patch.prior_version, new Date(since.getTime() - BASELINE_LOOKBACK_DAYS * DAY_MS), since);
-  const live = await liveJudgeStats(dbi, patch.active_version, since, new Date(now.getTime() + DAY_MS));
+  const prior = await liveJudgeStats(dbi, patch.prior_version, new Date(since.getTime() - BASELINE_LOOKBACK_DAYS * DAY_MS), since, voicePin);
+  const live = await liveJudgeStats(dbi, patch.active_version, since, new Date(now.getTime() + DAY_MS), voicePin);
   if (live.judged < LIVE_MIN_JUDGED || prior.judged < LIVE_MIN_JUDGED) return null;
   const rise = rate(live.unsafe, live.judged) - rate(prior.unsafe, prior.judged);
   const detail = { live, prior, rise: Number(rise.toFixed(3)) };
   return live.unsafe >= LIVE_MIN_UNSAFE && rise >= LIVE_UNSAFE_RISE ? { reason: 'live_unsafe_rise', detail } : null;
 }
 
-async function outcomeStats(dbi, version, from, to) {
-  const row = await dbi('sms_reply_outcomes')
-    .where({ status: 'computed', prompt_version: version })
-    .whereIn('reply_source', AI_REPLY_SOURCES)
-    .where('reply_at', '>=', from)
-    .where('reply_at', '<', to)
+async function outcomeStats(dbi, version, from, to, voicePin) {
+  const row = await dbi({ o: 'sms_reply_outcomes' })
+    .join({ md: 'message_drafts' }, 'md.id', 'o.draft_id')
+    .where({ 'o.status': 'computed', 'o.prompt_version': version })
+    .whereIn('o.reply_source', AI_REPLY_SOURCES)
+    .whereRaw(DRAFT_VOICE_PROFILE_SQL, [voiceProfileKey(voicePin)])
+    .where('o.reply_at', '>=', from)
+    .where('o.reply_at', '<', to)
     .select(dbi.raw('COUNT(*)::int as total'))
-    .select(dbi.raw('COUNT(*) FILTER (WHERE confused)::int as confused'))
-    .select(dbi.raw('COUNT(*) FILTER (WHERE opted_out)::int as opted_out'))
+    .select(dbi.raw('COUNT(*) FILTER (WHERE o.confused)::int as confused'))
+    .select(dbi.raw('COUNT(*) FILTER (WHERE o.opted_out)::int as opted_out'))
     .first();
   return { total: row.total, confused: row.confused, optedOut: row.opted_out };
 }
 
-async function outcomeCheck({ dbi, patch, now }) {
+async function outcomeCheck({ dbi, patch, now, voicePin }) {
   if (!patch.prior_version || !patch.active_version) return null;
   const since = new Date(patch.activated_at);
-  const prior = await outcomeStats(dbi, patch.prior_version, new Date(since.getTime() - BASELINE_LOOKBACK_DAYS * DAY_MS), since);
-  const live = await outcomeStats(dbi, patch.active_version, since, new Date(now.getTime() + DAY_MS));
+  const prior = await outcomeStats(dbi, patch.prior_version, new Date(since.getTime() - BASELINE_LOOKBACK_DAYS * DAY_MS), since, voicePin);
+  const live = await outcomeStats(dbi, patch.active_version, since, new Date(now.getTime() + DAY_MS), voicePin);
   if (live.total < OUTCOME_MIN_REPLIES || prior.total < OUTCOME_MIN_REPLIES) return null;
   const confusionRise = rate(live.confused, live.total) - rate(prior.confused, prior.total);
   const optOutRise = rate(live.optedOut, live.total) - rate(prior.optedOut, prior.total);
@@ -646,12 +650,15 @@ async function examCheck({ dbi, patch }) {
     .where({ prompt_version: patch.active_version, status: 'complete' })
     .whereNotNull('baseline_run_id')
     .whereIn('provider_leg', LIVE_EXAM_LEGS)
-    .select('id', 'provider_leg', 'significance', 'baseline_run_id');
+    .select('id', 'provider_leg', 'significance', 'baseline_run_id', 'voice_profile_version');
   for (const r of runs) {
     const sig = parseScores(r.significance);
     if (!sig) continue;
     // Both rules read the items BOTH runs graded: whole-run totals would move when the exam pool
     // changed between the two runs, and could retire a healthy patch over items it never faced.
+    // A run graded under another voice profile than its baseline differs by more than the patch.
+    const baseRun = await dbi('sms_sealed_eval_runs').where({ id: r.baseline_run_id }).first('voice_profile_version');
+    if (!baseRun || (baseRun.voice_profile_version ?? null) !== (r.voice_profile_version ?? null)) continue;
     const cohort = await pairedUnsafeCohort(dbi, r.id, r.baseline_run_id);
     if (cohort.paired < MIN_PAIRED_ITEMS) continue;
     const regressed = Boolean(sig.significant && sig.direction === 'regressed');
@@ -715,7 +722,7 @@ async function rollbackPatch({ dbi = db, patchId, trigger, now = new Date(), not
 }
 
 /** Daily. Database reads only. The first check that trips retires the active patch. */
-async function runRollbackMonitor({ dbi = db, now = new Date(), notify } = {}) {
+async function runRollbackMonitor({ dbi = db, now = new Date(), notify, voiceProfileVersion } = {}) {
   if (patchLib.promptAutopromoteMode() !== 'true') return { skipped: 'gate_off' };
   const patch = await dbi(PATCHES).where({ status: 'active' }).first();
   if (!patch) return { skipped: 'no_active_patch' };
@@ -724,8 +731,18 @@ async function runRollbackMonitor({ dbi = db, now = new Date(), notify } = {}) {
   if (patch.base_version !== require('./sms-shadow-drafter').currentPromptVersionBase()) {
     return rollbackPatch({ dbi, patchId: patch.id, trigger: { reason: 'base_changed', detail: { base: patch.base_version } }, now, notify, restoreParent: false });
   }
+  // Both live cohorts (prior and patched) are read under the SAME effective voice profile, the one
+  // graduation pins: a profile change leaves the base identity unchanged, and its own effect on unsafe
+  // or confused rates must never be charged to the patch. An unknowable profile skips the checks.
+  let voicePin;
+  try {
+    voicePin = voiceProfileVersion !== undefined ? voiceProfileVersion : await resolveVoiceProfilePin({ dbi });
+  } catch (err) {
+    logger.warn(`[prompt-autopromote] rollback checks skipped, voice profile unreadable (code ${err?.code || 'unknown'})`);
+    return { skipped: 'voice_profile_unreadable' };
+  }
   for (const check of [liveJudgeCheck, outcomeCheck, examCheck]) {
-    const trigger = await check({ dbi, patch, now });
+    const trigger = await check({ dbi, patch, now, voicePin });
     if (trigger) return rollbackPatch({ dbi, patchId: patch.id, trigger, now, notify });
   }
   return { checked: patch.id };

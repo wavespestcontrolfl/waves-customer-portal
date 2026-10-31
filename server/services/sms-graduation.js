@@ -276,6 +276,11 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
  * voice-profile version (see the pin comment in the function body) — a
  * profile swap resets readiness evidence the same way a prompt bump does.
  */
+// The per-draft voice-profile predicate ('__none__' = no profile stamped), shared with the prompt
+// auto-promote rollback monitor so both read one definition. Needs the message_drafts alias md.
+const DRAFT_VOICE_PROFILE_SQL = "COALESCE(md.intended_actions::jsonb->>'voice_profile_version', '__none__') = ?";
+const voiceProfileKey = (pin) => (pin == null ? '__none__' : String(pin));
+
 /**
  * The voice-profile pin every readiness/eligibility query shares: the
  * EFFECTIVE profile version (null when none is approved OR the drafter's
@@ -308,7 +313,7 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
   const pinValue = pin == null ? '__none__' : String(pin);
   const liveOnly = function () {
     this.whereNotNull('j.intent').whereRaw("md.prompt_version NOT LIKE '%backfill'");
-    this.whereRaw("COALESCE(md.intended_actions::jsonb->>'voice_profile_version', '__none__') = ?", [pinValue]);
+    this.whereRaw(DRAFT_VOICE_PROFILE_SQL, [pinValue]);
     if (cohort) this.whereIn('md.prompt_version', cohort);
     // GATE_SMS_JUDGE_V2: the stricter judge is a different ruler. While the gate is on, only rows it graded
     // ('j2') count as backstop evidence; old-judge rows (NULL) must not mix in. Off = unchanged.
@@ -597,7 +602,7 @@ async function fetchSuggestOutcomes({ intent, dbi = db, cohortVersions, voicePro
   const query = dbi({ a: 'agent_decisions' })
     .join({ md: 'message_drafts' }, 'md.id', 'a.entity_id')
     .where({ 'a.workflow': SUGGEST_WORKFLOW, 'a.detected_intent': intent })
-    .whereRaw("COALESCE(md.intended_actions::jsonb->>'voice_profile_version', '__none__') = ?", [pinValue])
+    .whereRaw(DRAFT_VOICE_PROFILE_SQL, [pinValue])
     .select('a.status as status')
     .count('* as count')
     .groupBy('a.status');
@@ -706,6 +711,8 @@ module.exports = {
   evaluateAutoSendHealth,
   fetchLiveJudgeSignals,
   resolveVoiceProfilePin,
+  DRAFT_VOICE_PROFILE_SQL,
+  voiceProfileKey,
   fetchSuggestOutcomes,
   evaluateAutoSendEligibility,
   evaluateJudgeBackstop,
