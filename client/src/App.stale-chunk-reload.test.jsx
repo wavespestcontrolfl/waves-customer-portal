@@ -16,6 +16,7 @@ import {
   CHUNK_RELOAD_FLAG,
   handleVitePreloadError,
   isStaleChunkReloadPending,
+  markPageNavigating,
   resetStaleChunkReloadForTests,
 } from './lib/staleChunkReload';
 
@@ -45,7 +46,7 @@ beforeEach(() => {
   reported.calls = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 test('the first stale-chunk preload error reloads once and marks the reload pending', () => {
   const reload = vi.fn();
@@ -87,6 +88,32 @@ test('a chunk that fails after a CSS preload already started the reload shows th
   expect(await screen.findByRole('status')).toHaveTextContent('Loading...');
   expect(screen.queryByText('Couldn’t load this page')).not.toBeInTheDocument();
   expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+});
+
+test('while an app link navigates away, a cancelled chunk holds the placeholder and never reloads over the navigation', async () => {
+  markPageNavigating();
+  const reload = vi.fn();
+  const cancelled = preloadErrorEvent();
+  handleVitePreloadError(cancelled, reload);
+  expect(cancelled.defaultPrevented).toBe(true);
+  expect(reload).not.toHaveBeenCalled();
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  const LeavingPage = lazyWithRetry(swallowedImport);
+  renderInBoundary(LeavingPage);
+  expect(await screen.findByRole('status')).toHaveTextContent('Loading...');
+  expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+  expect(reported.calls).toHaveLength(0);
+});
+
+test('a page still open when the navigation window ends reloads a stale chunk as before', () => {
+  vi.useFakeTimers();
+  markPageNavigating();
+  vi.advanceTimersByTime(30000);
+  const reload = vi.fn();
+  const stale = preloadErrorEvent();
+  handleVitePreloadError(stale, reload);
+  expect(stale.defaultPrevented).toBe(true);
+  expect(reload).toHaveBeenCalledTimes(1);
 });
 
 test('with no reload pending, a real page crash still shows the crash screen and is reported', async () => {

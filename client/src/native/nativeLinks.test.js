@@ -6,6 +6,11 @@ import {
   navigateToCustomerUrl,
   sameOriginUrl,
 } from './nativeLinks';
+import {
+  handleVitePreloadError,
+  isStaleChunkReloadPending,
+  resetStaleChunkReloadForTests,
+} from '../lib/staleChunkReload';
 
 const loc = { origin: 'https://portal.wavespestcontrol.com' };
 
@@ -104,5 +109,29 @@ describe('nativeLinks', () => {
       search: '?tab=dashboard&requestId=request-1&requestEvent=status-1', hash: '', assign };
     expect(navigateToCustomerUrl('/?tab=dashboard&requestId=request-1&requestEvent=status-2', navigationLocation)).toBe(true);
     expect(assign).toHaveBeenCalledWith('https://portal.wavespestcontrol.com/?tab=dashboard&requestId=request-1&requestEvent=status-2');
+  });
+
+  it('stops a cancelled chunk load from reloading over its navigation, unless the navigation did not start', () => {
+    // Device test 2026-10-31: WebKit cancels the page's in-flight chunk loads
+    // as the link navigation starts, and the stale-chunk reload that followed
+    // put every app link back on Home.
+    resetStaleChunkReloadForTests();
+    sessionStorage.clear();
+    const reload = vi.fn();
+    const preloadError = () => new Event('vite:preloadError', { cancelable: true });
+    let windowOpenAtAssign;
+    const started = { ...loc, pathname: '/', search: '', hash: '',
+      assign: () => { windowOpenAtAssign = isStaleChunkReloadPending(); } };
+    expect(navigateToCustomerUrl('/book', started)).toBe(true);
+    expect(windowOpenAtAssign).toBe(true);
+    handleVitePreloadError(preloadError(), reload);
+    expect(reload).not.toHaveBeenCalled();
+
+    const refused = { ...started, assign: () => { throw new Error('navigation denied'); } };
+    expect(navigateToCustomerUrl('/book', refused)).toBe(false);
+    handleVitePreloadError(preloadError(), reload);
+    expect(reload).toHaveBeenCalledTimes(1);
+    resetStaleChunkReloadForTests();
+    sessionStorage.clear();
   });
 });
