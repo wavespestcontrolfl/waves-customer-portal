@@ -72,26 +72,6 @@ enum API {
         let reason: String?
     }
 
-    // A signed-in response carries `token` + `user`. With two-step sign-in on
-    // (GATE_ADMIN_MFA) an enrolled account's password step instead returns
-    // `mfaRequired` + a short-lived `challengeToken` for loginMfa.
-    struct LoginResponse: Decodable {
-        let token: String?
-        let technician: Technician?
-        let mfaRequired: Bool?
-        let challengeToken: String?
-        struct Technician: Decodable { let id: String; let name: String }
-
-        // Server returns the tech under `user` (shared with the web admin portal);
-        // iOS keeps the domain-correct `technician` name locally.
-        enum CodingKeys: String, CodingKey {
-            case token
-            case technician = "user"
-            case mfaRequired
-            case challengeToken
-        }
-    }
-
     enum APIError: LocalizedError {
         case http(Int, String)
         case network(Error)
@@ -126,18 +106,6 @@ enum API {
                 return "HTTP \(status): \(body)"
             }
         }
-    }
-
-    static func login(email: String, password: String) async throws -> LoginResponse {
-        let body = ["email": email, "password": password]
-        return try await request("/admin/auth/login", body: body, auth: false)
-    }
-
-    // Step two of two-step sign-in: the challenge from login plus a 6-digit
-    // authenticator code or a recovery code.
-    static func loginMfa(challengeToken: String, code: String) async throws -> LoginResponse {
-        let body = ["challengeToken": challengeToken, "code": code]
-        return try await request("/admin/auth/login/mfa", body: body, auth: false)
     }
 
     static func validateHandoff(token: String) async throws -> ValidatedHandoff {
