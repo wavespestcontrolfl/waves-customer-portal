@@ -11,6 +11,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'messenger-inbox-postgres-onl
 const { randomUUID } = require('crypto');
 
 const SKIP = !process.env.DATABASE_URL;
+// Real Postgres on a loaded CI runner: past jest's 5 s default (like the other DATABASE_URL suites).
+jest.setTimeout(120000);
 const maybeDescribe = SKIP ? describe.skip : describe;
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
