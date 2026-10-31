@@ -1,10 +1,9 @@
 /**
  * GATE_CALL_CANCEL_GUARD through PostgreSQL (owner 2026-10-30). A new lead agreed a visit on a 12:52 AM call that did
- * not book (a "time unclear" booking card), canceled on a 7:08 AM call while nothing was booked (a cancellation_request
- * card), and the office booked her at 11:22 from New Appointment. Pinned here, with real queries inside a rolled-back
- * transaction: the sweep dismisses ONLY the same customer's open booking-ask cards from the 14 days before the cancel,
- * only while no live visit exists, and leaves the cancel card open; the New Appointment notice route answers the
- * customer's latest processed call when it was the cancel. Synthetic names and numbers only. Skips without DATABASE_URL.
+ * not book, canceled on a 7:08 AM call while nothing was booked, and the office booked her at 11:22 from New
+ * Appointment, which showed nothing about the cancel. Pinned here, with real queries inside a rolled-back transaction:
+ * the notice answers the customer's latest real conversation when its newest cancel card still stands, and the route
+ * answers {enabled:false} with the gate off. Synthetic names and numbers only. Skips without DATABASE_URL.
  */
 const SKIP = !process.env.DATABASE_URL;
 
@@ -30,7 +29,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const knex = require('knex');
 const express = require('express');
 const { randomUUID } = require('crypto');
-const { runCallCancelGuardSweep, latestCancelCall, _test } = require('../services/call-cancel-guard');
+const { latestCancelCall } = require('../services/call-cancel-guard');
 
 const GATE = 'GATE_CALL_CANCEL_GUARD';
 const describeDb = SKIP ? describe.skip : describe;
@@ -89,12 +88,6 @@ describeDb('call cancel guard (PostgreSQL)', () => {
     }).returning('*');
     return row;
   }
-  async function visit(customerId, status = 'pending') {
-    await trx('scheduled_services').insert({
-      id: randomUUID(), customer_id: customerId, scheduled_date: '2026-10-30', window_start: '16:00', status,
-      service_type: 'One-Time Pest Control Service',
-    });
-  }
   // The 10-30 shape: a 12:52 AM booking ask, then a 7:08 AM cancel.
   async function canceledLead() {
     const customerId = await customer();
@@ -104,162 +97,6 @@ describeDb('call cancel guard (PostgreSQL)', () => {
     const cancel = await card(cancelCall, 'cancellation_request');
     return { customerId, askCall, ask, cancelCall, cancel };
   }
-  const row = (id) => trx('triage_items').where({ id }).first();
-
-  describe('the sweep', () => {
-    test('dismisses the earlier booking card with a note naming the cancel call, and leaves the cancel card open', async () => {
-      const { askCall, ask, cancel } = await canceledLead();
-      expect(await runCallCancelGuardSweep({ now: NOW })).toEqual({ scanned: 1, dismissed: 1 });
-      expect(await row(ask.id)).toMatchObject({
-        status: 'dismissed', resolution_source: 'auto', resolution_rule: 'customer_canceled_on_later_call',
-        resolution_note: 'The customer canceled on a later call (Fri, Oct 30, 7:08 AM). Book only if they ask again.',
-      });
-      expect((await row(cancel.id)).status).toBe('open');
-      expect((await trx('call_log').where({ id: askCall }).first()).review_status).toBe('dismissed');
-    });
-
-    test('a second run changes nothing', async () => {
-      await canceledLead();
-      await runCallCancelGuardSweep({ now: NOW });
-      expect(await runCallCancelGuardSweep({ now: NOW })).toEqual({ scanned: 1, dismissed: 0 });
-    });
-
-    test.each(['pending', 'confirmed', 'en_route', 'on_site', null])('a visit with status %s keeps every card', async (status) => {
-      const { customerId, ask } = await canceledLead();
-      await visit(customerId, status);
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
-      expect((await row(ask.id)).status).toBe('open');
-    });
-
-    test('a completed or cancelled visit does not count as booked', async () => {
-      const { customerId, ask } = await canceledLead();
-      await visit(customerId, 'completed');
-      await visit(customerId, 'cancelled');
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 1 });
-      expect((await row(ask.id)).status).toBe('dismissed');
-    });
-
-    test('only booking-ask cards close: a claimed card, other categories and existing-visit cards stay', async () => {
-      const { customerId, askCall } = await canceledLead();
-      const claimed = await card(askCall, 'not_confirmed', { status: 'in_progress' });
-      const name = await card(askCall, 'missing_last_name', { category: 'name_review' });
-      const existing = await card(await call(customerId, '2026-10-30T02:00:00Z'), 'existing_appointment_coordination');
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 1 });
-      for (const kept of [claimed, name, existing]) expect((await row(kept.id)).status).toBe(kept.status);
-      // The call still has open work, so it stays open on the review list.
-      expect((await trx('call_log').where({ id: askCall }).first()).review_status).toBe('open');
-    });
-
-    test('cards from a later call, from 14+ days before, and from another customer stay', async () => {
-      const { customerId } = await canceledLead();
-      const later = await card(await call(customerId, '2026-10-30T13:00:00Z'), 'not_confirmed');
-      const old = await card(await call(customerId, '2026-10-15T11:00:00Z'), 'not_confirmed');
-      const other = await card(await call(await customer(), '2026-10-30T04:00:00Z'), 'ambiguous_scheduling');
-      await runCallCancelGuardSweep({ now: NOW });
-      for (const kept of [later, old, other]) expect((await row(kept.id)).status).toBe('open');
-    });
-
-    test('a cancel call older than 3 days is not scanned', async () => {
-      const { ask } = await canceledLead();
-      expect(await runCallCancelGuardSweep({ now: new Date('2026-11-03T12:00:00Z') })).toEqual({ scanned: 0, dismissed: 0 });
-      expect((await row(ask.id)).status).toBe('open');
-    });
-
-    test('a thrown-out cancel does not count: a dismissed cancel card, or a call turned voicemail', async () => {
-      const first = await canceledLead();
-      await trx('triage_items').where({ id: first.cancel.id }).update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.' });
-      const second = await canceledLead();
-      await trx('call_log').where({ id: second.cancelCall }).update({ processing_status: 'voicemail' });
-      const third = await canceledLead();
-      await trx('call_log').where({ id: third.cancelCall }).update({ answered_by: 'voicemail' });
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
-      for (const lead of [first, second, third]) expect((await row(lead.ask.id)).status).toBe('open');
-      expect(await _test.cardIsMoot(trx, { customerId: first.customerId, cancelCallId: first.cancelCall, cardId: first.ask.id })).toBe(false);
-    });
-
-    test('the cancel must name the same service: another service or an unknown one keeps the card', async () => {
-      const lawn = await canceledLead();
-      await trx('call_log').where({ id: lawn.cancelCall }).update({ ai_extraction_enriched: JSON.stringify({ service_request: { primary_service_category: 'lawn_care' } }) });
-      const unknown = await canceledLead();
-      await trx('call_log').where({ id: unknown.cancelCall }).update({ ai_extraction_enriched: JSON.stringify({}) });
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
-      for (const lead of [lawn, unknown]) expect((await row(lead.ask.id)).status).toBe('open');
-    });
-
-    test.each(['other', 'bundled_waveguard'])('a shared non-specific service (%s) keeps the card', async (category) => {
-      const lead = await canceledLead();
-      const extraction = JSON.stringify({ service_request: { primary_service_category: category } });
-      await trx('call_log').whereIn('id', [lead.askCall, lead.cancelCall]).update({ ai_extraction_enriched: extraction });
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
-      expect((await row(lead.ask.id)).status).toBe('open');
-    });
-
-    test('the cancel must cover every service the card asked for (the 10-30 card asked pest and stinging insects)', async () => {
-      const partial = await canceledLead();
-      const scope = { scheduling_window: { requested_service_categories: ['pest_general', 'stinging_insect'] } };
-      await trx('triage_items').where({ id: partial.ask.id }).update({ payload: JSON.stringify(scope) });
-      const full = await canceledLead();
-      await trx('triage_items').where({ id: full.ask.id }).update({ payload: JSON.stringify(scope) });
-      await trx('call_log').where({ id: full.cancelCall }).update({ ai_extraction_enriched: JSON.stringify({ service_request: { primary_service_category: 'pest_general', secondary_categories: ['stinging_insect'] } }) });
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 1 });
-      expect((await row(partial.ask.id)).status).toBe('open');
-      expect((await row(full.ask.id)).status).toBe('dismissed');
-    });
-
-    test('a caller the carrier did not fully vouch for keeps the card; an office-dialed call counts', async () => {
-      const spoofable = await canceledLead();
-      await trx('call_log').where({ id: spoofable.cancelCall }).update({ metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-B' }) });
-      const unsigned = await canceledLead();
-      await trx('call_log').where({ id: unsigned.cancelCall }).update({ metadata: JSON.stringify({}) });
-      const outbound = await canceledLead();
-      await trx('call_log').where({ id: outbound.cancelCall }).update({ direction: 'outbound', metadata: JSON.stringify({}) });
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 1 });
-      expect((await row(spoofable.ask.id)).status).toBe('open');
-      expect((await row(unsigned.ask.id)).status).toBe('open');
-      expect((await row(outbound.ask.id)).status).toBe('dismissed');
-    });
-
-    test('the newest cancel card decides: an older resolved one does not outweigh a newer dismissal', async () => {
-      const { customerId, cancelCall, cancel, ask } = await canceledLead();
-      await trx('triage_items').where({ id: cancel.id }).update({ status: 'resolved', created_at: at('2026-10-30T11:09:00Z') });
-      await card(cancelCall, 'cancellation_request', { status: 'dismissed', created_at: at('2026-10-30T11:30:00Z') });
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
-      expect((await row(ask.id)).status).toBe('open');
-      expect(await latestCancelCall(customerId, { now: NOW })).toBeNull();
-    });
-
-    test('a customer with two properties keeps the card (which one was canceled is unknown)', async () => {
-      const { customerId, ask } = await canceledLead();
-      for (const line1 of ['100 Example Lane', '200 Example Lane']) {
-        await trx('customer_properties').insert({ customer_id: customerId, address_line1: line1, city: 'Sampleton', state: 'FL', zip: '34200' });
-      }
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
-      expect((await row(ask.id)).status).toBe('open');
-    });
-
-    test('a call relinked to another customer keeps the card', async () => {
-      const { askCall, ask, customerId, cancelCall } = await canceledLead();
-      const other = await customer();
-      await trx('call_log').where({ id: askCall }).update({ customer_id: other });
-      expect(await _test.cardIsMoot(trx, { customerId, cancelCallId: cancelCall, cardId: ask.id })).toBe(false);
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 0 });
-      expect((await row(ask.id)).status).toBe('open');
-    });
-
-    test('a resolved cancel card still counts (the office handled the cancel)', async () => {
-      const { cancel, ask } = await canceledLead();
-      await trx('triage_items').where({ id: cancel.id }).update({ status: 'resolved' });
-      expect(await runCallCancelGuardSweep({ now: NOW })).toMatchObject({ dismissed: 1 });
-      expect((await row(ask.id)).status).toBe('dismissed');
-    });
-
-    test('gate off: nothing is read or written', async () => {
-      const { ask } = await canceledLead();
-      delete process.env[GATE];
-      expect(await runCallCancelGuardSweep({ now: NOW })).toEqual({ skipped: true, scanned: 0, dismissed: 0 });
-      expect((await row(ask.id)).status).toBe('open');
-    });
-  });
 
   describe('the New Appointment notice', () => {
     test('the latest processed call was the cancel: its time and the card summary', async () => {
@@ -286,6 +123,15 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       expect(await latestCancelCall(customerId, { now: NOW })).toBeNull();
     });
 
+    test('the newest cancel card decides: an older resolved one does not outweigh a newer dismissal', async () => {
+      const { customerId, cancelCall, cancel } = await canceledLead();
+      await trx('triage_items').where({ id: cancel.id }).update({ status: 'resolved', created_at: at('2026-10-30T11:09:00Z') });
+      const newer = await card(cancelCall, 'cancellation_request', { status: 'dismissed', created_at: at('2026-10-30T11:30:00Z') });
+      expect(await latestCancelCall(customerId, { now: NOW })).toBeNull();
+      await trx('triage_items').where({ id: newer.id }).update({ status: 'resolved' });
+      expect(await latestCancelCall(customerId, { now: NOW })).toMatchObject({ callId: cancelCall });
+    });
+
     test('a cancel older than 14 days, or no cancel at all, shows nothing', async () => {
       const { customerId } = await canceledLead();
       expect(await latestCancelCall(customerId, { now: new Date('2026-11-14T12:00:00Z') })).toBeNull();
@@ -308,7 +154,4 @@ describeDb('call cancel guard (PostgreSQL)', () => {
     });
   });
 
-  test('the booking-ask list names only cards that ask the office to book', () => {
-    expect(_test.BOOKING_ASK_REASONS).toEqual(['ambiguous_scheduling', 'not_confirmed', 'confirmed_without_start_time', 'off_hour_start']);
-  });
 });
