@@ -85,6 +85,9 @@ const TECH_LIST_STRIPPED_FIELDS = [
   // never render plan price, and the server-priced estimate builder doesn't
   // take it from directory rows.
   'monthlyRate',
+  // The membership verdict is derived from the rate for a tier-less customer,
+  // so it carries the same office-only information.
+  'hasActivePlan',
   // Stored coordinates are the map's office-only input; a technician already
   // gets the address text for assigned customers and needs nothing more.
   'lat', 'lng',
@@ -1350,6 +1353,10 @@ function mapCustomerListRow(c) {
     // only; null means "not located yet". Numeric columns arrive as strings.
     lat: toCoordinate(c.latitude), lng: toCoordinate(c.longitude),
     tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
+    // The server's canonical membership verdict (tier, or a positive rate with
+    // no tier; Commercial and the sentinel tiers are not members). Clients
+    // that need "is a member" read this instead of copying the predicate.
+    hasActivePlan: hasMembership(c),
     memberSince: c.member_since, active: c.active,
     pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
     leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
@@ -3457,6 +3464,7 @@ router.post('/at-address', async (req, res, next) => {
         email: c.email,
         tier: c.waveguard_tier,
         monthlyRate: parseFloat(c.monthly_rate || 0),
+        hasActivePlan: hasMembership(c),
         address: formatAddress({ line1: c.address_line1, line2: c.address_line2, city: c.city, state: c.state, zip: c.zip }),
         // Street + unit on one line for the suggestion row (formatAddress
         // comma-separates line2, so a first-comma split would drop the unit).
