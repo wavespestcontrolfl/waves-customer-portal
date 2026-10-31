@@ -48,7 +48,7 @@ const job = (expression) => {
 
 beforeEach(() => jest.clearAllMocks());
 
-test('the snapshot loads with crons disabled, and not at all with the gate off', () => {
+test('the refresh watcher starts with crons disabled and in every mode, so a runtime flip reaches the process', () => {
   isEnabled.mockImplementation((name) => name === 'smsPromptAutopromote');
   initScheduledJobs();
   expect(patchLib.startPatchRefresh).toHaveBeenCalledTimes(1);
@@ -56,7 +56,7 @@ test('the snapshot loads with crons disabled, and not at all with the gate off',
   jest.clearAllMocks();
   isEnabled.mockImplementation(() => false);
   initScheduledJobs();
-  expect(patchLib.startPatchRefresh).not.toHaveBeenCalled();
+  expect(patchLib.startPatchRefresh).toHaveBeenCalledTimes(1);
 });
 
 test('gate off: both crons return before taking a lock; gate on: each runs under its own lock', async () => {

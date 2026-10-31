@@ -988,8 +988,10 @@ function initScheduledJobs() {
 
   // SMS prompt patches (GATE_SMS_PROMPT_AUTOPROMOTE): the drafter's snapshot of the active patch
   // loads here, BEFORE the cronJobs early return below, so a process with crons disabled still
-  // drafts with the live patch (and its version tag).
-  if (isEnabled('smsPromptAutopromote')) require('./sms-prompt-patch').startPatchRefresh();
+  // drafts with the live patch (and its version tag). The watcher starts in every mode: it reads
+  // the environment only (no database read) until the mode is 'true', so a runtime flip from off
+  // or observe to 'true' reaches this process too.
+  require('./sms-prompt-patch').startPatchRefresh();
 
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.

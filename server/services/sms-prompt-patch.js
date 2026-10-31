@@ -171,10 +171,16 @@ async function refreshActivePatch({ dbi } = {}) {
   }
 }
 
-/** Boot hook: load once, then re-read every minute. Returns at once when the gate is off. */
+/**
+ * Boot hook: install the mode-aware watcher in EVERY mode, including off and observe, so a runtime
+ * change of GATE_SMS_PROMPT_AUTOPROMOTE to 'true' loads the active patch in this process too (a
+ * promotion refreshes only the promoting process). While the mode is not 'true' a tick reads the
+ * environment only: no database read, and the snapshot is dropped. When it is 'true' the active row
+ * loads at once and then every minute.
+ */
 function startPatchRefresh() {
-  if (promptAutopromoteMode() !== 'true' || refreshTimer) return;
-  refreshActivePatch().catch(() => {});
+  if (refreshTimer) return;
+  if (promptAutopromoteMode() === 'true') refreshActivePatch().catch(() => {});
   refreshTimer = setInterval(() => {
     if (promptAutopromoteMode() !== 'true') {
       snapshot = null;

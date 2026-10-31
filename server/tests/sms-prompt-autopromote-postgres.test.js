@@ -612,6 +612,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
     };
 
     test('a baseline sitting that dies mid-run is resumed by the next tick, with the nightly sweep never involved (not a RUN_IN_PROGRESS loop)', async () => {
+      setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
       const items = await seedItems();
       const patch = await insertPatch();
       const { runner, calls } = crashRunner({ items, interruptBaseline: true });
@@ -629,6 +630,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
     });
 
     test('a baseline run whose id never reached the patch (died between the two writes) is found by its trigger tag and resumed', async () => {
+      setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
       const items = await seedItems();
       const patch = await insertPatch();
       const { runner, calls } = crashRunner({ items, interruptBaseline: true, linkBaseline: false });
@@ -642,6 +644,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
     });
 
     test('a candidate sitting that dies mid-run is resumed too: its run row carries the patch id from creation', async () => {
+      setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
       const items = await seedItems();
       const patch = await insertPatch();
       const { runner, calls } = crashRunner({ items, interruptCandidate: true });
@@ -658,6 +661,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       const onlyRunning = () => trx('sms_sealed_eval_runs').where({ status: 'running' });
 
       test('a failed baseline from before a prompt change is never resumed: a current baseline is created and the candidate is decided', async () => {
+        setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
         const items = await seedItems();
         const patch = await insertPatch();
         const old = await insertRun({ items, version: `${OLD_BASE}_old`, status: 'failed', over: { triggered_by: 'auto:autopromote-baseline' } });
@@ -674,6 +678,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       });
 
       test('a running baseline from before a prompt change is settled under the exam lock, then a current baseline is created', async () => {
+        setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
         const items = await seedItems();
         const patch = await insertPatch();
         const old = await insertRun({ items, version: `${OLD_BASE}_old`, status: 'running', over: { triggered_by: 'auto:autopromote-baseline', finished_at: null } });
@@ -687,6 +692,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       });
 
       test('a candidate run stranded when the base changed is settled before the patch is rejected, so a later candidate can run', async () => {
+        setMode('observe'); // these tests are about run recovery; observe keeps the decision shape
         const items = await seedItems();
         const patch = await insertPatch({ over: { base_version: OLD_BASE } });
         const stranded = await insertRun({ items, version: `${OLD_BASE}_a`, patchId: patch.id, status: 'running', over: { triggered_by: 'auto:autopromote', finished_at: null } });
