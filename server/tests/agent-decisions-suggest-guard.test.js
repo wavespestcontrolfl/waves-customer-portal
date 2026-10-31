@@ -20,7 +20,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (req, res, next) => next(),
   adminAuthenticate: (req, _res, next) => {
-    req.technician = { id: 'admin-1', first_name: 'Test', last_name: 'Admin' };
+    req.technician = { id: 'admin-1', name: 'Test Admin' };
     req.technicianId = 'admin-1';
     return next();
   },

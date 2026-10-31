@@ -1642,7 +1642,7 @@ async function sendSmsHandler(req, res, next) {
             await recordLeadSmsOutreach({
               leadId: outreachLeadId,
               message: cleanBody,
-              performedBy: req.technician?.name || [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin',
+              performedBy: req.technician?.name || 'Admin',
             });
           } else {
             logger.debug(`[admin-communications] lead outreach skipped — leadId ${outreachLeadId} does not bind to this destination`);

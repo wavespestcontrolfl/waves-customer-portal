@@ -30,8 +30,10 @@ function parseJson(value, fallback) {
   }
 }
 
+// technicians has one `name` column (no first_name / last_name), so reading those
+// always fell through to the staff email.
 function actorName(req) {
-  return [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ')
+  return req.technician?.name
     || req.technician?.email
     || req.technicianId
     || 'Admin';

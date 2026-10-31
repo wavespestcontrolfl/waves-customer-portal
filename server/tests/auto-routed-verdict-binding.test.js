@@ -205,7 +205,7 @@ describe('POST /api/ai/admin/calls/:id/route-feedback', () => {
   const post = async (body) => {
     const res = makeRes();
     const next = jest.fn();
-    await lastHandler(router, '/admin/calls/:id/route-feedback', 'post')({ params: { id: CALL }, body: { verdict: 'accept', ...body }, technician: { first_name: 'T', last_name: 'One' } }, res, next);
+    await lastHandler(router, '/admin/calls/:id/route-feedback', 'post')({ params: { id: CALL }, body: { verdict: 'accept', ...body }, technician: { name: 'T One' } }, res, next);
     expect(next).not.toHaveBeenCalled();
     return res;
   };
