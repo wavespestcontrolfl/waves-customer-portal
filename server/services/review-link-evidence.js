@@ -67,11 +67,17 @@ const COMMON_SURNAMES = new Set([
 ]);
 
 // "I left you a review", "review posted", "just submitted my review". Not "did": "did you review
-// the estimate?" is a question about something else. A negated statement ("I have not left a review
-// yet", "my review isn't done") is not evidence.
+// the estimate?" is a question about something else. A negated statement is not evidence: a
+// negation before the verb ("I have not left a review yet") or inside the claim itself ("I left no
+// review", "my review isn't done").
 const SAID_REVIEWED_RE = /\b(left|posted|wrote|submitted|gave)\b[^.!?]{0,25}\breview\b|\breview\b[^.!?]{0,20}\b(posted|left|submitted|done)\b/i;
 const NOT_REVIEWED_RE = /\b(not|never|haven['’]?t|hasn['’]?t|didn['’]?t|isn['’]?t|wasn['’]?t)\b[^.!?]{0,20}\b(left|posted|wrote|submitted|gave|done)\b/i;
-const saysReviewed = (body) => SAID_REVIEWED_RE.test(body || '') && !NOT_REVIEWED_RE.test(body || '');
+const NEGATION_RE = /\b(no|not|never)\b|n['’]t\b/i;
+function saysReviewed(body) {
+  const text = String(body || '');
+  const claim = SAID_REVIEWED_RE.exec(text);
+  return Boolean(claim) && !NEGATION_RE.test(claim[0]) && !NOT_REVIEWED_RE.test(text);
+}
 
 function foldName(value) {
   return foldNameLetters(value)
@@ -119,8 +125,9 @@ function firstNameRelation(a, b) {
 // 'exact' | 'near' | 'initial' | null. `review` is the Google surname, `record` the customer's.
 function surnameRelation(review, record) {
   if (!review || !record) return null;
-  if (review === record) return 'exact';
+  // Before equality: two matching initials ("Q" and "Q.") are still only an initial.
   if (review.length === 1 || record.length === 1) return review[0] === record[0] ? 'initial' : null;
+  if (review === record) return 'exact';
   const shorter = Math.min(review.length, record.length);
   if (shorter >= 5 && editDistance(review, record) === 1) return 'near';
   if (shorter >= 4 && isSwap(review, record)) return 'near';

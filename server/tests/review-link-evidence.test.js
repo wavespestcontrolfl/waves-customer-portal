@@ -62,6 +62,8 @@ describe('names', () => {
     expect(surnameRelation('q', 'quill')).toBe('initial');
     expect(surnameRelation('quill', 'q')).toBe('initial');
     expect(surnameRelation('r', 'quill')).toBeNull();
+    // Two matching initials are still only an initial, never an exact surname.
+    expect(surnameRelation('q', 'q')).toBe('initial');
     // Short surnames must match exactly: one letter changes a different family.
     expect(surnameRelation('lea', 'lee')).toBeNull();
     expect(surnameRelation('lion', 'lyon')).toBeNull();
@@ -135,6 +137,8 @@ describe('activity around the review', () => {
     expect(said(2 * HOUR, 'I have not left a review yet, sorry!')).toBe(false);
     expect(saysReviewed('I haven\u2019t posted my review')).toBe(false);
     expect(saysReviewed('My review isn\'t done yet')).toBe(false);
+    expect(saysReviewed('I left no review')).toBe(false);
+    expect(saysReviewed('Left a review, not sure it went through')).toBe(true);
   });
 });
 
@@ -163,6 +167,8 @@ describe('decideReviewLink', () => {
 
   test('an initial queues alone and pauses asks with a tap; it never links, even with an "I left a review" text', () => {
     expect(decide(review('Peter Q'), [candidate('c1', 'Peter', 'Quill')])).toMatchObject({ result: 'queue', reason: 'initial' });
+    // A record saved with an initial too ("Peter Q.") is no stronger.
+    expect(decide(review('Peter Q'), [candidate('c1', 'Peter', 'Q.')])).toMatchObject({ result: 'queue', reason: 'initial' });
     const tapped = candidate('c1', 'Peter', 'Quill', { activity: { taps: [{ at: at(-HOUR), locationId: 'parrish' }] } });
     expect(decide(review('Peter Q'), [tapped])).toMatchObject({ result: 'pause', reason: 'initial' });
     const said = candidate('c1', 'Peter', 'Quill', {
