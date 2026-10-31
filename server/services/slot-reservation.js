@@ -949,7 +949,11 @@ async function reserveSlot({
         exp: offerExp, policy: CAPACITY_OFFER_POLICY, arrivalGrace: offerArrivalGrace }, offerSig)) throw capacityError('invalid_offer');
       preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
         prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
-          service_type: profile.services.map(service => service.service).join(' ') },
+          // The offer's own words (estimate-slot-availability.js: label first), so the placed visit
+          // plans the same planning-minutes row at reserve as it did in the offer ("Quarterly Pest
+          // Control" is recurring; the bare key is not). Several services name no single row.
+          service_type: profile.services.map(service => service.label || service.service).join(' '),
+          ...(profile.services.length > 1 ? { combined_services: true } : {}) },
         windowStart, windowEnd: addMinutesToTime(windowStart, profile.durationMinutes), durationMinutes: profile.durationMinutes });
     }
 

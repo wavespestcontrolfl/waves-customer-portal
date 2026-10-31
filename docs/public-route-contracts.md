@@ -1672,7 +1672,10 @@ find-time + commit probe, both directions, gate on and off),
 `booking-availability-arrival-grace.test.js` (offer mirror + signing),
 `booking-confirm-signed-offer.test.js` (commit matrix), `slot-offer-token.test.js`.
 Catalog-sized estimate offers resolve the primary appointment allowance from
-`services.scheduling_duration_policy`; independent recurring companions do not
+`services.scheduling_duration_policy`, except the retired `owner_2026_09_09`
+routine policy (30 minutes), which `service-library.js` ignores (owner
+2026-10-30: a written row keeps the one-hour promise; only the route PLAN uses
+minutes, 35 for recurring pest and lawn); independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.
 Combined catalog allowances still require `GATE_VISIT_COMBINED_CAPACITY` and
 `GATE_SEPARATE_COMBO_VISITS`. Version-2 combined allowances follow service

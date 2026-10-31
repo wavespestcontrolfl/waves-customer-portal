@@ -159,9 +159,9 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     expect(capturedSelect).toEqual(expect.arrayContaining([
       'scheduled_services.service_type', 'scheduled_services.is_recurring', 'scheduled_services.is_callback',
     ]));
-    // A recognized recurring-pest row plans at owner minutes (25), not the
+    // A recognized recurring-pest row plans at owner minutes (35, owner 2026-10-30), not the
     // legacy 60 its stored estimate/window would otherwise charge.
-    expect(result.days[0].byTech[0].serviceMinutes).toBe(25);
+    expect(result.days[0].byTech[0].serviceMinutes).toBe(35);
     // Codex r2 P2: the reported provenance names the planning basis.
     expect(result.days[0].byTech[0].assumptions.durationBasis).toBe('owner_planning_minutes_or_stored_window_or_estimate');
   });
@@ -360,7 +360,7 @@ test('an owner-planned stop with no stored estimate is not a default duration (C
       service_type: 'Quarterly Pest Control Service', is_recurring: true, is_callback: false };
     const result = measureDayQuality(Model, [planned], workday);
     expect(result.defaultDurations).toEqual([]);
-    expect(result.serviceMinutes).toBe(25);
+    expect(result.serviceMinutes).toBe(35); // owner 2026-10-30: recurring pest plans 35
     const unnamed = { ...stop(9, 1), window_end: null, estimated_duration_minutes: null, service_type: 'Mosquito' };
     expect(measureDayQuality(Model, [unnamed], workday).defaultDurations).toEqual(['visit-1']);
   } finally {
