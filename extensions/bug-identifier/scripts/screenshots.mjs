@@ -76,6 +76,14 @@ async function check(name, fn) {
   }
 }
 
+async function waitUntil(predicate, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 const photoB64 = async (file) => (await readFile(join(PHOTOS, file))).toString('base64');
 const dataUrl = (b64, mime) => `data:${mime};base64,${b64}`;
 
@@ -105,12 +113,18 @@ try {
   if (!worker) worker = await context.waitForEvent('serviceworker');
   const extId = new URL(worker.url()).host;
 
-  // API mock: each step sets the next response.
+  // API mock: each step sets the next response. A step can also hold the
+  // next call in flight until it resolves `holdNextCall`; a held call keeps
+  // the response that was set when it arrived.
   let nextResponse = null;
+  let holdNextCall = null;
   const apiCalls = [];
   await context.route(API, async (route) => {
     apiCalls.push(JSON.parse(route.request().postData() || '{}'));
     const { status = 200, body } = nextResponse;
+    const hold = holdNextCall;
+    holdNextCall = null;
+    if (hold) await hold;
     await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
   });
   const answerWith = (v2) => { nextResponse = { body: { success: true, result: v2 } }; };
@@ -174,6 +188,25 @@ try {
     assert.equal(apiCalls.length, before);
     assert.ok(await panel.locator('#start').isVisible());
     await panel.evaluate(() => chrome.storage.session.remove('job'));
+  });
+
+  await check('a hand-over that arrives mid-request is identified next, not dropped', async () => {
+    let release;
+    holdNextCall = new Promise((resolve) => { release = resolve; });
+    answerWith(ANSWERS.orbweaver);
+    const before = apiCalls.length;
+    await panel.setInputFiles('#file', join(PHOTOS, 'golden-silk-orbweaver.jpg'));
+    await waitUntil(() => apiCalls.length === before + 1);
+    answerWith(ANSWERS.wolf);
+    const wolf = await photoB64('wolf-spider.jpg');
+    await handOver({ data: wolf, mimeType: 'image/jpeg' });
+    // The panel has taken the hand-over while the first call is still held.
+    await waitUntil(async () => (await panel.evaluate(() => chrome.storage.session.get('job').then((r) => r.job))) === undefined);
+    release();
+    await panel.locator('#result .headline', { hasText: ANSWERS.wolf.answer.headline }).waitFor({ timeout: 10_000 });
+    assert.equal(apiCalls.length, before + 2);
+    assert.equal(apiCalls.at(-1).photos[0].data, wolf);
+    await reset();
   });
 
   await check('daily limit (429) shows the server message; Start over returns', async () => {

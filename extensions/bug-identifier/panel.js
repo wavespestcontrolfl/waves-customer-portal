@@ -34,6 +34,7 @@ const state = {
   appendAsk: null, // set while the user adds a confirming photo
   retryPhotos: null,
   busy: false,
+  queued: null, // the newest photos that arrived while a request was running
   lastView: 'start',
 };
 
@@ -75,27 +76,41 @@ function apiErrorMessage(err) {
 }
 
 async function run(photos) {
-  if (state.busy) return;
+  if (state.busy) {
+    // A photo that arrives mid-request (a right-click hand-off, a paste) runs
+    // as soon as this one finishes instead of being dropped; the newest wins,
+    // and the answer it supersedes is never shown.
+    state.queued = photos;
+    showStatus('Identifying your bug…', true);
+    return;
+  }
   state.busy = true;
   showStatus(photos.length > 1 ? 'Checking your photos…' : 'Identifying your bug…', true);
   try {
     const result = await identify(photos.map(({ data, mimeType }) => ({ data, mimeType })));
-    state.photos = photos;
-    setAppendAsk(null);
-    renderResult($('result'), result, {
-      photos,
-      canAddPhoto: photos.length < MAX_PHOTOS,
-      onAddPhoto: (nextPhoto) => {
-        setAppendAsk(nextPhoto.ask || 'a closer, sharper photo of the same bug.');
-        show('start');
-      },
-      onReset: reset,
-    });
-    show('result');
+    if (!state.queued) {
+      state.photos = photos;
+      setAppendAsk(null);
+      renderResult($('result'), result, {
+        photos,
+        canAddPhoto: photos.length < MAX_PHOTOS,
+        onAddPhoto: (nextPhoto) => {
+          setAppendAsk(nextPhoto.ask || 'a closer, sharper photo of the same bug.');
+          show('start');
+        },
+        onReset: reset,
+      });
+      show('result');
+    }
   } catch (err) {
-    showError(apiErrorMessage(err), err instanceof IdentifyError && TRANSIENT.has(err.kind) ? photos : null);
+    if (!state.queued) showError(apiErrorMessage(err), err instanceof IdentifyError && TRANSIENT.has(err.kind) ? photos : null);
   } finally {
     state.busy = false;
+  }
+  const next = state.queued;
+  if (next) {
+    state.queued = null;
+    run(next);
   }
 }
 
