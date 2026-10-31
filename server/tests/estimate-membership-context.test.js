@@ -11,6 +11,9 @@ let mockExtendPickGate = false;
 let mockLawnRoundsGate = false;
 let mockAutoTierGate = false;
 jest.mock('../config/feature-gates', () => ({
+  // The real adapter (tick-list margins) reads the named gate helpers too:
+  // those stay real, so dark in the test env.
+  ...jest.requireActual('../config/feature-gates'),
   isEnabled: (gate) => {
     if (gate === 'waveguardExtendExisting') return mockExtendExistingGate;
     if (gate === 'waveguardExtendPick') return mockExtendPickGate;
@@ -20,8 +23,13 @@ jest.mock('../config/feature-gates', () => ({
   },
 }));
 // The tick list's margin re-prices the setup estimate on today's engine: the
-// translator and the engine are stubbed (only that path loads them).
-jest.mock('../routes/property-lookup-v2', () => ({ translateV2CallToV1Input: jest.fn() }));
+// translator is a spy the today's-engine tests run as the real adapter (its
+// visit-count map is the real one), and the engine is stubbed (only that path
+// loads them).
+jest.mock('../routes/property-lookup-v2', () => ({
+  translateV2CallToV1Input: jest.fn(),
+  V1_VISIT_PLANS: jest.requireActual('../routes/property-lookup-v2').V1_VISIT_PLANS,
+}));
 jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }));
 const { translateV2CallToV1Input: mockTranslate } = require('../routes/property-lookup-v2');
 const { generateEstimate: mockGenerate } = require('../services/pricing-engine');
@@ -3103,29 +3111,37 @@ describe('staff-picked tier extension (option B)', () => {
 
   // Pest every other month and a 9x lawn series (its stored recurrence in
   // lawnSeries; extraRows adds its root), both set up by one estimate that
-  // quoted pest quarterly. Today's engine is stubbed.
-  const engineProfile = { homeSqFt: 2000, measuredTurfSf: 6800 };
-  async function todayEngineOffer(lawnSeries, extraRows = []) {
+  // quoted pest quarterly. The real adapter translates; the engine is stubbed
+  // and records the plan it was asked to price.
+  const engineProfile = { homeSqFt: 2000, lotSqFt: 8000, measuredTurfSf: 6800 };
+  let pricedPlans;
+  async function todayEngineOffer(lawnSeries, extraRows = [], plans = { pest: 'bimonthly', lawn: 'every_6_weeks' }) {
     const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
     const primaryKey = normalizedStampedStreet('123 Main St', null, 'Venice', '34285');
     const stamped = (row) => ({
       ...row, source_estimate_id: 'est-setup', service_address_line1: '123 Main St', service_address_city: 'Venice', service_address_zip: '34285',
     });
+    const { visitsPerYearForCadence } = require('../services/prepay-cadence');
+    const catalog = (frequency) => ({ frequency, visits_per_year: visitsPerYearForCadence(frequency) });
     const database = fakeDb({
       scheduledRows: [...silverRows(), ...extraRows].map(stamped)
         .map((row) => (row.id === 'l1' ? { ...row, ...lawnSeries } : row)),
       catalogRows: [
-        ...['s1', 's2', 's3'].map((id) => ({ id, frequency: 'bimonthly', visits_per_year: 6 })),
-        { id: 'l1', frequency: 'every_6_weeks', visits_per_year: 9, ...lawnSeries },
+        ...['s1', 's2', 's3'].map((id) => ({ id, ...catalog(plans.pest) })),
+        { id: 'l1', ...catalog(plans.lawn), ...lawnSeries },
       ],
       marginEstimate: { estimate_data: { engineRequest: { profile: engineProfile, options: { pestFreq: 4, lawnFreq: 9 } } } },
     });
-    mockTranslate.mockImplementation((_profile, codes, options) => ({ codes, options }));
-    mockGenerate.mockImplementation((input) => ({
-      lineItems: input.codes[0] === 'PEST'
-        ? [{ service: 'pest_control', perApp: 140, margin: 0.6 }]
-        : [{ service: 'lawn_care', perApp: 100, margin: 0.3, costs: { annualAdmin: 51, annualCallbackReserve: 63 } }],
-    }));
+    pricedPlans = [];
+    mockTranslate.mockImplementation(jest.requireActual('../routes/property-lookup-v2').translateV2CallToV1Input);
+    mockGenerate.mockImplementation(({ services }) => {
+      pricedPlans.push(services.pest ? ['pest', services.pest.frequency] : ['lawn', services.lawn.tier]);
+      return {
+        lineItems: services.pest
+          ? [{ service: 'pest_control', perApp: 140, margin: 0.6 }]
+          : [{ service: 'lawn_care', perApp: 100, margin: 0.3, costs: { annualAdmin: 51, annualCallbackReserve: 63 } }],
+      };
+    });
     const scope = { groupedEstimate: false, perPropertyStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey } };
     return currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
   }
@@ -3136,9 +3152,20 @@ describe('staff-picked tier extension (option B)', () => {
     const offer = await todayEngineOffer({ recurring_pattern: 'every_6_weeks' });
     expect(mockTranslate).toHaveBeenCalledWith(engineProfile, ['PEST'], { pestFreq: 6, lawnFreq: 9 });
     expect(mockTranslate).toHaveBeenCalledWith(engineProfile, ['LAWN'], { pestFreq: 4, lawnFreq: 9 });
+    expect(pricedPlans).toEqual(expect.arrayContaining([['pest', 'bimonthly'], ['lawn', 'enhanced']]));
     // Pest: $140 x 0.4 = $56.00 against $113.33 = 50.6%. Lawn: $70.00 plus
     // its 42-day spread (below) against $75.56 = 6.8%.
     expect(offer.services.map((svc) => [svc.key, svc.marginPct])).toEqual([['lawn_care', 6.8], ['pest_control', 50.6]]);
+  });
+
+  test('a plan the engine has no price for shows no margin, never the default plan\'s', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    // Pest 3x and lawn 2x a year: the adapter would price them as quarterly
+    // pest and enhanced (9x) lawn.
+    const offer = await todayEngineOffer({}, [], { pest: 'triannual', lawn: 'semiannual' });
+    expect(offer.services.map((svc) => [svc.key, svc.marginPct])).toEqual([['lawn_care', null], ['pest_control', null]]);
+    expect(pricedPlans).toEqual([]);
   });
 
   test('the lawn 42-day spread follows the stored series, never the 9-rounds gate', async () => {

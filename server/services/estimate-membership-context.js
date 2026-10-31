@@ -1996,10 +1996,11 @@ function plannedVisitCost(line, visits, fortyTwoDaySeries) {
 // family, from the estimate that set the family up. Pest and lawn re-price
 // that estimate's saved property inputs on TODAY's engine (live pricing
 // config) at the plan the customer has now (visitsPerYear); any other family,
-// or a setup estimate without saved inputs, reads that estimate's own engine
-// line. null when the frozen rows trace to no single setup estimate or the
-// line carries no margin — the tool then shows none. The caller has synced
-// the pricing config.
+// a setup estimate without saved inputs, or an unknown current plan reads
+// that estimate's own engine line. null when the frozen rows trace to no
+// single setup estimate, the engine has no price for the current plan (pest
+// 3x a year would price as quarterly), or the line carries no margin — the
+// tool then shows none. The caller has synced the pricing config.
 async function offeredFamilyMarginPct(database, service, visitsPerYear) {
   const rowIds = Array.isArray(service?.rowIds) ? service.rowIds : [];
   if (!rowIds.length || !(Number(service.newPerVisit) > 0)) return null;
@@ -2031,18 +2032,20 @@ async function offeredFamilyMarginPct(database, service, visitsPerYear) {
   const estData = parseEstimateData(await database('estimates').where({ id: [...estimateIds][0] }).first('estimate_data'));
   const plan = TODAY_ENGINE_PLANS[service.key];
   const request = estData?.engineRequest;
-  const today = plan && request?.profile && visitsPerYear > 0;
   let lineItems = estData?.engineResult?.lineItems;
-  if (today) {
+  let visits = estimateVisitsFor(estData, service.key);
+  if (plan && request?.profile && visitsPerYear > 0) {
     // Lazy-require the route adapter (service -> route load order), as the save's replay does.
-    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const { translateV2CallToV1Input, V1_VISIT_PLANS } = require('../routes/property-lookup-v2');
+    if (!V1_VISIT_PLANS[plan.code][visitsPerYear]) return null;
     const { generateEstimate } = require('./pricing-engine');
     lineItems = generateEstimate(translateV2CallToV1Input(
       request.profile, [plan.code], { ...request.options, [plan.visitsOption]: visitsPerYear },
     )).lineItems;
+    visits = visitsPerYear;
   }
   const line = (lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
-  const cost = plannedVisitCost(line, today ? visitsPerYear : estimateVisitsFor(estData, service.key), fortyTwoDaySeries);
+  const cost = plannedVisitCost(line, visits, fortyTwoDaySeries);
   return cost === null ? null : Math.round((1 - cost / Number(service.newPerVisit)) * 1000) / 10;
 }
 

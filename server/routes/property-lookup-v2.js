@@ -5358,6 +5358,13 @@ function isAssociationCommercialJob({ commercialRiskType = null, commercialSubty
     || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
 }
 
+// Frequency integer → v1 key, per recurring code: the visits a year the v1
+// engine prices. Any other count prices as quarterly pest / enhanced lawn.
+const V1_VISIT_PLANS = {
+  PEST: { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' },
+  LAWN: { 4: 'basic', 6: 'standard', 9: 'enhanced', 12: 'premium' },
+};
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -5483,12 +5490,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   };
   const track = TRACK_MAP[rawGrass] || ALIAS_TRACK[rawGrassCompact] || rawGrass;
 
-  // Frequency integer → v1 key
-  const PEST_FREQ = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
-  const LAWN_TIER_FROM_FREQ = { 4: 'basic', 6: 'standard', 9: 'enhanced', 12: 'premium' };
-
-  const pestFreq = PEST_FREQ[o.pestFreq] || 'quarterly';
-  const lawnTier = LAWN_TIER_FROM_FREQ[o.lawnFreq] || 'enhanced';
+  const pestFreq = V1_VISIT_PLANS.PEST[o.pestFreq] || 'quarterly';
+  const lawnTier = V1_VISIT_PLANS.LAWN[o.lawnFreq] || 'enhanced';
 
   // Urgency / afterHours / recurringCustomer (Step 2b-2). v2 uses 'ROUTINE'
   // as the no-urgency sentinel; v1 uses 'NONE' for OT pest/lawn (and falls
@@ -6716,6 +6719,7 @@ module.exports.performPropertyLookup = performPropertyLookup;
 module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.VACANT_SQFT_FLAG_COPY = VACANT_SQFT_FLAG_COPY;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
+module.exports.V1_VISIT_PLANS = V1_VISIT_PLANS;
 module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports.resolveCalculateQualifyingEvidence = resolveCalculateQualifyingEvidence;
 module.exports.countyCeilingStillValid = countyCeilingStillValid;
