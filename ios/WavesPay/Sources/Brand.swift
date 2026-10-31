@@ -115,3 +115,34 @@ struct GlassChipButtonStyle: ButtonStyle {
             .overlay(Capsule().strokeBorder(.white.opacity(0.8), lineWidth: 1))
     }
 }
+
+// The payment sheet's frame: logo at the top, card in the middle, actions at
+// the bottom. When a long invoice makes the card too tall for the screen, the
+// logo and card scroll and the actions stay on screen.
+struct SheetLayout<Card: View, Actions: View>: View {
+    @ViewBuilder var card: Card
+    @ViewBuilder var actions: Actions
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ViewThatFits(in: .vertical) {
+                VStack(spacing: 0) {
+                    WavesLogo(height: 104).padding(.top, 28)
+                    Spacer(minLength: 20)
+                    card
+                    Spacer(minLength: 20)
+                }
+                ScrollView {
+                    VStack(spacing: 20) {
+                        WavesLogo(height: 104).padding(.top, 28)
+                        card
+                    }
+                    .padding(.bottom, 20)
+                }
+            }
+            actions
+        }
+        .padding(.horizontal, 24)
+        .background(WavesScene())
+    }
+}

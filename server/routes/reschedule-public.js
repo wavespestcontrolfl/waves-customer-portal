@@ -82,6 +82,20 @@ const REANCHOR_PULLFORWARD_DAYS = Math.max(
   Number(process.env.RESCHEDULE_REANCHOR_PULLFORWARD_DAYS) || 14
 );
 
+// GATE_ROUTE_CHECK_BOOKING_SAVES: the rebooker numbers a moved visit's day
+// (placeMovedVisit) when its caller passes placeInRoute. Stop numbers only: a
+// customer call has no road spender, so nothing buys road times, and
+// overlapAdvisory stays off, so the placement is not a staff save. Gate off or
+// any reader failure: false, the options are exactly as before.
+function bookingPlacesInRoute() {
+  try {
+    const { routeCheckBookingSavesLive } = require('../services/scheduling/arrival-route');
+    return typeof routeCheckBookingSavesLive === 'function' && routeCheckBookingSavesLive() === true;
+  } catch (_err) {
+    return false;
+  }
+}
+
 // Days the target date sits EARLIER than the visit's current date (negative
 // for push-backs). Both args are YYYY-MM-DD strings; UTC-noon parse avoids
 // DST edges.
@@ -1140,6 +1154,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             sourceSurface: 'customer_web',
             disclosedFuturePlacementDays: req.body.disclosed_future_placement_days ?? null,
             travelGap: true,
+            // GATE_ROUTE_CHECK_BOOKING_SAVES: number each moved visit's day (stop
+            // numbers only; no road purchase, no message). Gate off: false.
+            placeInRoute: bookingPlacesInRoute(),
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
             beforeMove: noticeRecheck,
@@ -1169,6 +1186,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
             moveGuard: officeApprovalRecheck,
+            placeInRoute: bookingPlacesInRoute(), // GATE_ROUTE_CHECK_BOOKING_SAVES
             // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail

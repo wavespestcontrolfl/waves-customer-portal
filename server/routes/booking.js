@@ -205,6 +205,14 @@ function bookInsertionOffersLive() {
   return bookCapacityCommitLive() && capacityEnabled();
 }
 
+// Whether /book's offer-side occupancy mirror keeps only rows that are unassigned or on the
+// slot's own technician: capacity mode always (the gate off or on), hour mode when
+// GATE_MULTI_TECH_CONFIRM is on (occupancy.js techScopedConfirmActive, owner 2026-10-30).
+// Named rather than inline so the offer builder's own branching count stays flat.
+function offerScopedByTechnician() {
+  return capacityEnabled() || multiTechConfirmLive();
+}
+
 // Canonical reader for whether /book offers (and their commit) run under the
 // online-booking arrival grace (owner-approved 2026-09-29,
 // GATE_BOOK_ARRIVAL_GRACE): the gate AND mid-route insertion live — grace is
@@ -1933,7 +1941,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // offered (offer/commit parity).
     const slotGrace = bookSlotGrace(graceBuild, slot);
     if (occupiedByDate) {
-      const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !capacityEnabled()
+      // Technician scope of the mirror: capacity mode always scopes the offer (today's
+      // behavior, gate off or on); GATE_MULTI_TECH_CONFIRM alone (techScopedConfirmActive,
+      // occupancy.js) now scopes it in hour mode too, so two technicians can hold the same
+      // hour. The confirm probes below scope on the gate alone, so an offered slot commits.
+      const scopeByTech = offerScopedByTechnician();
+      const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !scopeByTech
         || row.technician_id == null || row.technician_id === slot.technician.id);
       if (dayOccupied && dayOccupied.some((b) => startMin < b.endMin && endMin > b.startMin)) return;
       // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): the commit gate's
@@ -2537,6 +2550,17 @@ async function preloadBookingLocation(customer) {
 async function customerBookingLocation(customer) {
   const location = storedBookingPin(customer) || await preloadBookingLocation(customer);
   return storedBookingPin({ latitude: location?.lat, longitude: location?.lng });
+}
+
+// The placement source for a self-booked visit (GATE_ROUTE_CHECK_BOOKING_SAVES):
+// /book itself is 'self_booking'; the internal callers pass callbackVisit: the
+// re-service page ('reservice'), the commercial first-visit page
+// ('commercial_first_visit', isCallback false with an estimateGuard) and the
+// inspection page ('inspection', isCallback false).
+function bookingPlacementSource(callbackVisit) {
+  if (!callbackVisit) return 'self_booking';
+  if (callbackVisit.isCallback !== false) return 'reservice';
+  return callbackVisit.estimateGuard ? 'commercial_first_visit' : 'inspection';
 }
 
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
@@ -4323,16 +4347,16 @@ async function createSelfBooking(payload = {}) {
             .whereRaw('scheduled_services.reservation_expires_at > NOW()');
         });
       });
-      // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark):
-      // the legs above are OR'd and tech-blind past the tech's own route — a
+      // Second technician (GATE_MULTI_TECH_CONFIRM, dark; hour mode or capacity
+      // mode alike): the legs above are OR'd and tech-blind past the tech's own route — a
       // zone/city leg matches ANOTHER technician's overlapping row, and a
       // hold leg matches a hold stamped for another technician — even though
       // the offer (buildBookingAvailability's occupancy mirror) only counts
       // rows that are unassigned or on the slot's own technician. AND the
       // same predicate onto the whole probe so a slot offered on technician
       // B's day is not refused for technician A's stop. Unassigned rows still
-      // block everyone. Off (or no technician, or capacity off): untouched.
-      if (technician_id && multiTechConfirmLive() && capacityEnabled()) {
+      // block everyone. Off (or no technician): untouched.
+      if (technician_id && multiTechConfirmLive()) {
         conflictQuery.where((q) => {
           q.whereNull('scheduled_services.technician_id')
             .orWhere('scheduled_services.technician_id', technician_id);
@@ -4566,6 +4590,15 @@ async function createSelfBooking(payload = {}) {
       if (capacityCommitFit) {
         const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
         await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
+      } else {
+        // GATE_ROUTE_CHECK_BOOKING_SAVES: capacity did not number this visit
+        // (capacity mode is off), so the dispatcher's placement does, in this
+        // same transaction. The primary visit only: package visit 2 is placed
+        // by package-followup-booking. Nothing below changes this row's date,
+        // window or technician. Gate off: touches nothing. Never throws.
+        await require('../services/scheduling/staff-save-route-check').placeBookingSavedVisit(trx, {
+          serviceId: scheduledRow.id, source: bookingPlacementSource(callbackVisit),
+        });
       }
       // Two-treatment package (cockroach / flea / bed bug): visit 2 books with
       // visit 1 when the row carries the catalog identity (internal callers'
@@ -5635,6 +5668,9 @@ async function createSelfBooking(payload = {}) {
                 lat: bookingLat,
                 lng: bookingLng,
               },
+              // The parent's own technician (GATE_MULTI_TECH_CONFIRM scopes the probe to that
+              // route plus unassigned rows; gate off or unassigned = tech-blind, as before).
+              technicianId: seriesParentRow.technician_id || null,
             });
             if (extensionClashes.length === 0) {
               await trx('scheduled_services')
@@ -7252,6 +7288,7 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 module.exports = router;
 module.exports.preferredTimePreParserGuard = preferredTimePreParserGuard;
 module.exports._internals = {
+  bookingPlacementSource,
   assertContactLinkedHandoffProvisional,
   suppressRecoveryIntents,
   captureIpKey,

@@ -1129,7 +1129,7 @@ function conflictsForTarget(occupancy, serviceId, date, window, {
   routeSiblingIds = null, excludeServiceIds = null, technicianId = null,
 } = {}) {
   const { windowsOverlap, techScopedConfirmActive } = require('./scheduling/occupancy');
-  // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark): with a
+  // Second technician (GATE_MULTI_TECH_CONFIRM, dark; hour or capacity mode): with a
   // technician named, only that route's rows and unassigned rows count —
   // findConflictingVisits' applyTechScope predicate. Gate off = tech-blind.
   const scopeTechId = technicianId != null && technicianId !== '' && techScopedConfirmActive()

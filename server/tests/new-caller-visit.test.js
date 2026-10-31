@@ -200,6 +200,19 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     expect(link.indexOf('processing_token: claimFence.procToken')).toBeLessThan(link.indexOf('await ensurePrimaryProperty('));
   });
 
+  test('GATE_ROUTE_CHECK_BOOKING_SAVES: Book numbers the new visit inside its transaction, right after the insert, before the activity row', () => {
+    const own = fs.readFileSync(path.join(__dirname, '../services/booking/new-caller-visit.js'), 'utf8');
+    const book = own.slice(own.indexOf('async function bookNewCallerVisit('), own.indexOf('async function linkNewCallerVisit('));
+    const insert = book.indexOf("const [visit] = await trx('scheduled_services').insert(data).returning('*');");
+    const place = book.indexOf("placeBookingSavedVisit(trx, { visit, source: 'new_caller' })");
+    const activity = book.indexOf("action: 'new_caller_visit_booked'");
+    expect(insert).toBeGreaterThan(-1);
+    expect(place).toBeGreaterThan(insert);
+    expect(activity).toBeGreaterThan(place);
+    // One placement site in the file: Link moves no date, window or technician.
+    expect(own.split('placeBookingSavedVisit(').length - 1).toBe(1);
+  });
+
   test('after a link, the outcome is read from the helpers\' own answers (they catch their failures)', async () => {
     const AppointmentReminders = require('../services/appointment-reminders');
     const register = jest.spyOn(AppointmentReminders, 'registerAppointment');
@@ -451,6 +464,39 @@ maybeDescribe('new-caller booking on Postgres', () => {
     made.visitIds.push(second.visit.id);
     expect(second.visit.source_call_log_id).toBeNull();
     expect(second.warnings).toHaveLength(1);
+  });
+
+  test('GATE_ROUTE_CHECK_BOOKING_SAVES: gate on places the new visit once with source new_caller; gate off never; a throwing placement still books', async () => {
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue([1]);
+    const saved = { booking: process.env.GATE_ROUTE_CHECK_BOOKING_SAVES, windows: process.env.GATE_ADMIN_ARRIVAL_WINDOWS };
+    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const book = async (date) => {
+      const result = await service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, scheduledDate: date, windowStart: '13:00' }) });
+      made.visitIds.push(result.visit.id);
+      return result.visit;
+    };
+    try {
+      delete process.env.GATE_ROUTE_CHECK_BOOKING_SAVES;
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+      await book('2031-03-10');
+      expect(placeSpy).not.toHaveBeenCalled();
+
+      process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
+      const visit = await book('2031-03-11');
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy).toHaveBeenCalledWith(expect.any(Function), { serviceId: visit.id, staffSave: true, source: 'new_caller' });
+
+      placeSpy.mockRejectedValueOnce(new Error('route boom'));
+      const survivor = await book('2031-03-12');
+      expect(await db('scheduled_services').where({ id: survivor.id }).first('id')).toBeTruthy();
+    } finally {
+      placeSpy.mockRestore();
+      if (saved.booking === undefined) delete process.env.GATE_ROUTE_CHECK_BOOKING_SAVES;
+      else process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = saved.booking;
+      if (saved.windows === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+      else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved.windows;
+    }
   });
 
   test('a call that already has a visit is refused with a 409: a repeated Book (the processor stamps its own booking the same way)', async () => {

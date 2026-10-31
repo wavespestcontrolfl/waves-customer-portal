@@ -249,44 +249,50 @@ router.post('/locations/:id/sync', async (req, res, next) => {
       incoming = mapPlacesData(await placesRes.json());
     }
 
-    // Get stored record
-    const stored = await db('gbp_locations').where({ location_id: id }).first();
+    // One sync per location at a time (transaction-scoped advisory lock), and
+    // a difference that already waits as a pending decision with the same new
+    // value is not queued again: a repeated or concurrent sync of an unchanged
+    // difference leaves one pending decision.
+    const { changes, updateRecords } = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`gbp-sync:${id}`]);
+      const storedRow = await trx('gbp_locations').where({ location_id: id }).first();
+      const diff = diffRecords(storedRow, incoming);
+      const queued = [];
+      for (const change of diff) {
+        const alreadyPending = await trx('gbp_updates')
+          .where({ location_id: id, field_name: change.field, status: 'pending', new_value: change.newVal })
+          .first('id');
+        if (alreadyPending) continue;
+        const [inserted] = await trx('gbp_updates').insert({
+          location_id: id,
+          field_name: change.field,
+          old_value: change.oldVal,
+          new_value: change.newVal,
+          source,
+          status: 'pending',
+        }).returning('*');
+        queued.push(inserted);
+      }
 
-    // Diff against stored
-    const changes = diffRecords(stored, incoming);
-
-    // Create update records for each detected change
-    const updateRecords = [];
-    for (const change of changes) {
-      const record = {
-        location_id: id,
-        field_name: change.field,
-        old_value: change.oldVal,
-        new_value: change.newVal,
-        source,
-        status: 'pending',
-      };
-      const [inserted] = await db('gbp_updates').insert(record).returning('*');
-      updateRecords.push(inserted);
-    }
-
-    // If no stored record yet, create one with the Google data
-    if (!stored) {
-      await db('gbp_locations').insert({
-        location_id: id,
-        ...incoming,
-        additional_categories: JSON.stringify(incoming.additional_categories),
-        regular_hours: incoming.regular_hours ? JSON.stringify(incoming.regular_hours) : null,
-        photos: JSON.stringify(incoming.photos),
-        last_synced_at: new Date(),
-      });
-    } else {
-      // Update last_synced_at but don't overwrite fields — those go through approve flow
-      await db('gbp_locations').where({ location_id: id }).update({
-        last_synced_at: new Date(),
-        updated_at: new Date(),
-      });
-    }
+      // If no stored record yet, create one with the Google data
+      if (!storedRow) {
+        await trx('gbp_locations').insert({
+          location_id: id,
+          ...incoming,
+          additional_categories: JSON.stringify(incoming.additional_categories),
+          regular_hours: incoming.regular_hours ? JSON.stringify(incoming.regular_hours) : null,
+          photos: JSON.stringify(incoming.photos),
+          last_synced_at: new Date(),
+        });
+      } else {
+        // Update last_synced_at but don't overwrite fields — those go through approve flow
+        await trx('gbp_locations').where({ location_id: id }).update({
+          last_synced_at: new Date(),
+          updated_at: new Date(),
+        });
+      }
+      return { changes: diff, updateRecords: queued };
+    });
 
     logger.info(`[gbp-mgmt] Synced ${id}: ${changes.length} changes detected`);
     res.json({
@@ -342,129 +348,6 @@ router.put('/locations/:id', async (req, res, next) => {
 
     const updated = await db('gbp_locations').where({ location_id: id }).first();
     res.json({ location: updated });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
-// POST /locations/:id/push — push stored state to Google via GBP API
-// =========================================================================
-router.post('/locations/:id/push', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const configLoc = WAVES_LOCATIONS.find(l => l.id === id);
-    if (!configLoc) return res.status(404).json({ error: 'Location not found' });
-    if (!configLoc.googleLocationResourceName) {
-      return res.status(400).json({ error: 'No GBP resource name configured for this location' });
-    }
-
-    const stored = await db('gbp_locations').where({ location_id: id }).first();
-    if (!stored) return res.status(404).json({ error: 'No stored profile data — sync first' });
-
-    const headers = await gbpService._getHeaders(id);
-    const resourceName = configLoc.googleLocationResourceName;
-
-    // Build GBP API update payload
-    const updateBody = {};
-    const updateMask = [];
-
-    if (stored.business_name) {
-      updateBody.title = stored.business_name;
-      updateMask.push('title');
-    }
-    if (stored.phone) {
-      updateBody.phoneNumbers = { primaryPhone: stored.phone };
-      if (stored.additional_phones) {
-        const addl = typeof stored.additional_phones === 'string'
-          ? JSON.parse(stored.additional_phones) : stored.additional_phones;
-        if (addl.length) updateBody.phoneNumbers.additionalPhones = addl;
-      }
-      updateMask.push('phoneNumbers');
-    }
-    if (stored.website_url) {
-      updateBody.websiteUri = stored.website_url;
-      updateMask.push('websiteUri');
-    }
-    if (stored.description) {
-      updateBody.profile = { description: stored.description };
-      updateMask.push('profile');
-    }
-    if (stored.regular_hours) {
-      const hours = typeof stored.regular_hours === 'string'
-        ? JSON.parse(stored.regular_hours) : stored.regular_hours;
-      const dayMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
-      const periods = [];
-      for (const [day, times] of Object.entries(hours)) {
-        if (!times || !times.open) continue;
-        const [openH, openM] = times.open.split(':').map(Number);
-        const [closeH, closeM] = (times.close || '17:00').split(':').map(Number);
-        periods.push({
-          openDay: day.toUpperCase(),
-          openTime: { hours: openH, minutes: openM },
-          closeDay: day.toUpperCase(),
-          closeTime: { hours: closeH, minutes: closeM },
-        });
-      }
-      updateBody.regularHours = { periods };
-      updateMask.push('regularHours');
-    }
-    if (stored.special_hours) {
-      const special = typeof stored.special_hours === 'string'
-        ? JSON.parse(stored.special_hours) : stored.special_hours;
-      if (special.length) {
-        updateBody.specialHours = {
-          specialHourPeriods: special.map(s => ({
-            startDate: { year: parseInt(s.date.split('-')[0]), month: parseInt(s.date.split('-')[1]), day: parseInt(s.date.split('-')[2]) },
-            openTime: s.closed ? undefined : { hours: parseInt((s.open || '08:00').split(':')[0]), minutes: parseInt((s.open || '08:00').split(':')[1]) },
-            closeTime: s.closed ? undefined : { hours: parseInt((s.close || '17:00').split(':')[0]), minutes: parseInt((s.close || '17:00').split(':')[1]) },
-            closed: !!s.closed,
-          })),
-        };
-        updateMask.push('specialHours');
-      }
-    }
-    if (stored.service_areas) {
-      const areas = typeof stored.service_areas === 'string'
-        ? JSON.parse(stored.service_areas) : stored.service_areas;
-      if (areas.length) {
-        updateBody.serviceArea = {
-          businessType: 'CUSTOMER_AND_BUSINESS_LOCATION',
-          places: { placeInfos: areas.map(a => ({ placeName: a.name || a, placeId: a.placeId })) },
-        };
-        updateMask.push('serviceArea');
-      }
-    }
-    if (stored.hide_address !== null && stored.hide_address !== undefined) {
-      updateBody.storefront_address = stored.hide_address ? undefined : { addressLines: [stored.address] };
-    }
-
-    if (updateMask.length === 0) {
-      return res.status(400).json({ error: 'No fields to push' });
-    }
-
-    const apiUrl = `https://mybusiness.googleapis.com/v4/${resourceName}?updateMask=${updateMask.join(',')}`;
-    const pushRes = await fetch(apiUrl, {
-      method: 'PATCH',
-      headers,
-      body: JSON.stringify(updateBody),
-    });
-
-    if (!pushRes.ok) {
-      const errText = await pushRes.text();
-      logger.error(`[gbp-mgmt] Push failed for ${id}: ${pushRes.status} ${errText}`);
-      return res.status(502).json({ error: `GBP API error: ${pushRes.status}`, details: errText });
-    }
-
-    const result = await pushRes.json();
-
-    await db('gbp_locations').where({ location_id: id }).update({
-      last_synced_at: new Date(),
-      updated_at: new Date(),
-    });
-
-    logger.info(`[gbp-mgmt] Pushed updates to Google for ${id}: ${updateMask.join(', ')}`);
-    res.json({ success: true, updatedFields: updateMask, googleResponse: result });
   } catch (err) {
     next(err);
   }
@@ -541,7 +424,7 @@ router.post('/updates/:id/approve', async (req, res, next) => {
 });
 
 // =========================================================================
-// POST /updates/:id/reject — reject update, push old value back to Google
+// POST /updates/:id/reject — reject update (local only: Google keeps its value)
 // =========================================================================
 router.post('/updates/:id/reject', async (req, res, next) => {
   try {
