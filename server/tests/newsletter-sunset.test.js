@@ -29,6 +29,7 @@ const {
   safetyValveTripped,
   buildWinbackDraftRow,
   ensureWinbackDraft,
+  stageWinback,
   syncAlert,
   MIN_VALVE_COUNT,
   REENGAGEMENT_TAG,
@@ -157,6 +158,38 @@ describe('win-back under GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A)'
     db.mockImplementation(() => q);
     expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: false, openSendId: 'wb-old', parked: false });
     expect(q.update).not.toHaveBeenCalled();
+  });
+
+  // Consecutive weekly cohorts: the first cohort keeps the tag through its
+  // grace window, so a second tag-wide win-back would mail it again.
+  function wireStage({ inGrace, open }) {
+    const subs = chain();
+    ['whereNotNull', 'whereExists', 'whereNotExists', 'withMaterialized'].forEach((m) => { subs[m] = jest.fn(() => subs); });
+    subs.count = jest.fn(() => subs);
+    subs.first = jest.fn(async () => ({ c: inGrace }));
+    const sends = chain({ first: open });
+    db.mockImplementation((table) => (table === 'newsletter_subscribers' ? subs : sends));
+    return { subs, sends };
+  }
+
+  test('next week, while the first cohort is in its grace window, no second win-back is staged', async () => {
+    const { subs, sends } = wireStage({ inGrace: 7, open: undefined });
+    expect(await stageWinback(3, { autoSend: true })).toEqual({ created: false, openSendId: null, waitingOnGrace: 7 });
+    expect(subs.whereExists).toHaveBeenCalledTimes(1);
+    expect(sends.insert).not.toHaveBeenCalled();
+  });
+
+  test('once the first cohort recovered or was sunset, the next win-back queues itself', async () => {
+    const { sends } = wireStage({ inGrace: 0, open: undefined });
+    expect(await stageWinback(3, { autoSend: true })).toEqual({ created: true, openSendId: 'wb-1', queued: true });
+    expect(sends.insert.mock.calls[0][0].status).toBe('scheduled');
+  });
+
+  test('switch off: no grace check, the draft is parked for the owner as before', async () => {
+    const { subs, sends } = wireStage({ inGrace: 7, open: undefined });
+    expect((await stageWinback(3, { autoSend: false })).queued).toBe(false);
+    expect(subs.whereExists).not.toHaveBeenCalled();
+    expect(sends.insert.mock.calls[0][0].status).toBe('draft');
   });
 
   test('the "win-back waiting" alert resolves itself; the safety valve still alerts', async () => {

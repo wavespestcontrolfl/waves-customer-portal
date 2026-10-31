@@ -284,21 +284,40 @@ function buildWinbackDraftRow({ queued = false } = {}) {
 // subscriber is never actually sent the win-back (the sender skips them at
 // send time), so without this filter they count as "awaiting" forever and
 // ensureWinbackDraft keeps parking a fresh draft that can never resolve them.
+// This flag episode's win-back, sent to the outer subscriber row.
+function winbackSentThisEpisode() {
+  this.select(db.raw('1'))
+    .from('newsletter_send_deliveries as wd')
+    .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
+    .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
+    .where('ws.newsletter_type', REENGAGEMENT_TYPE)
+    .whereNotNull('wd.sent_at')
+    .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at');
+}
+
 async function cohortAwaitingWinback() {
   const { excludeMailboxNotMailable } = require('./newsletter-sender');
   const row = await excludeMailboxNotMailable(
     db('newsletter_subscribers')
       .where({ status: 'active' })
       .whereNotNull('reengagement_flagged_at')
-      .whereNotExists(function () {
-        this.select(db.raw('1'))
-          .from('newsletter_send_deliveries as wd')
-          .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
-          .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
-          .where('ws.newsletter_type', REENGAGEMENT_TYPE)
-          .whereNotNull('wd.sent_at')
-          .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at');
-      }),
+      .whereNotExists(winbackSentThisEpisode),
+  )
+    .count('* as c')
+    .first();
+  return Number(row?.c || 0);
+}
+
+// Flagged actives who already got this episode's win-back. They keep the tag
+// through their grace window, and a win-back targets the whole tag, so a new
+// one would mail them again. Same mailable filter as cohortAwaitingWinback.
+async function cohortInGrace() {
+  const { excludeMailboxNotMailable } = require('./newsletter-sender');
+  const row = await excludeMailboxNotMailable(
+    db('newsletter_subscribers')
+      .where({ status: 'active' })
+      .whereNotNull('reengagement_flagged_at')
+      .whereExists(winbackSentThisEpisode),
   )
     .count('* as c')
     .first();
@@ -317,6 +336,18 @@ async function ensureWinbackDraft(cohort, { autoSend = false } = {}) {
   if (!cohort) return { created: false, openSendId: null };
   const [row] = await db('newsletter_sends').insert(buildWinbackDraftRow({ queued: autoSend })).returning('id');
   return { created: true, openSendId: row?.id ?? row, queued: autoSend };
+}
+
+// Phase C. Under the auto-send switch a queued win-back goes to the whole
+// tag, so it waits while an earlier cohort is still in its grace window
+// (at most GRACE_DAYS: each of them recovers or is sunset). Switch off, the
+// parked draft is the owner's to review, as before.
+async function stageWinback(cohortAwaiting, { autoSend = false } = {}) {
+  if (autoSend && cohortAwaiting > 0) {
+    const inGrace = await cohortInGrace();
+    if (inGrace > 0) return { created: false, openSendId: null, waitingOnGrace: inGrace };
+  }
+  return ensureWinbackDraft(cohortAwaiting, { autoSend });
 }
 
 // Phase D candidates — flagged, win-back SENT for this flag episode with the
@@ -482,7 +513,7 @@ async function runNewsletterSunset(now = new Date()) {
     // first, so the draft decision sees only people still owed a win-back.
     sunset = await applySunset(sunsetIds, now);
     cohortAwaiting = await cohortAwaitingWinback();
-    draft = await ensureWinbackDraft(cohortAwaiting, { autoSend });
+    draft = await stageWinback(cohortAwaiting, { autoSend });
   }
 
   const summary = {
@@ -499,6 +530,7 @@ async function runNewsletterSunset(now = new Date()) {
     openSendId: draft.openSendId || null,
     winbackQueued: Boolean(draft.queued),
     winbackParked: Boolean(draft.parked),
+    winbackWaitingOnGrace: draft.waitingOnGrace || 0,
     autoSend,
   };
   await syncAlert(summary, now);
@@ -512,6 +544,7 @@ module.exports = {
   safetyValveTripped,
   buildWinbackDraftRow,
   ensureWinbackDraft,
+  stageWinback,
   syncAlert,
   MIN_DELIVERED_SENDS,
   INACTIVITY_DAYS,
