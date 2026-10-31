@@ -109,8 +109,10 @@ describe('the shared Open-Meteo request and the normalized forecast', () => {
     const { fetchPropertyForecast } = load();
     const f = await fetchPropertyForecast({ ...COORDS, from: '2026-10-03T09:00', to: '2026-10-03T11:00', now: NOW });
     expect(f.hourly.map((r) => r.wind_dir_deg)).toEqual([180, 190]);
+    // The ready compass label rides beside the degrees, for the tech tool and the NWS backup.
+    expect(f.hourly.map((r) => r.wind_dir)).toEqual(['S', 'S']);
     expect(f.hourly[0]).toMatchObject({ time: '2026-10-03T09:00', wind_mph: 14, wind_gust_mph: 19 });
-    expect(f.current).toMatchObject({ wind_mph: 14.6, wind_gust_mph: 22.4, wind_dir_deg: 191, temperature_f: 81.4 });
+    expect(f.current).toMatchObject({ wind_mph: 14.6, wind_gust_mph: 22.4, wind_dir_deg: 191, wind_dir: 'S', temperature_f: 81.4 });
   });
 
   test('a payload without wind_direction_10m still works and reads null', async () => {
@@ -118,8 +120,9 @@ describe('the shared Open-Meteo request and the normalized forecast', () => {
     const { fetchPropertyForecast } = load();
     const f = await fetchPropertyForecast({ ...COORDS, from: '2026-10-03T09:00', to: '2026-10-03T11:00', now: NOW });
     expect(f.status).toBe('ok');
-    expect(f.hourly.every((r) => r.wind_dir_deg === null)).toBe(true);
+    expect(f.hourly.every((r) => r.wind_dir_deg === null && r.wind_dir === null)).toBe(true);
     expect(f.current.wind_dir_deg).toBeNull();
+    expect(f.current.wind_dir).toBeNull();
     expect(f.current.wind_mph).toBe(14.6);
   });
 

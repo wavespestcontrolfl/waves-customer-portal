@@ -175,6 +175,15 @@ function epochMs(seconds) {
   return seconds * 1000;
 }
 
+// 16-point compass label for a bearing in degrees (0 = N, 90 = E); null when
+// the bearing is not a finite number.
+const COMPASS_16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+function compassLabel(degrees) {
+  const deg = finiteNumber(degrees);
+  if (deg == null) return null;
+  return COMPASS_16[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
+}
+
 function normalizeForecastPayload(payload) {
   const h = payload?.hourly || {};
   const times = Array.isArray(h.time) ? h.time : [];
@@ -203,6 +212,7 @@ function normalizeForecastPayload(payload) {
       wind_mph: roundedNumber(wind[i], 1),
       wind_gust_mph: roundedNumber(gust[i], 1),
       wind_dir_deg: finiteNumber(windDir[i]),
+      wind_dir: compassLabel(windDir[i]),
       // Unrounded readings, for callers that test a label limit with a strict
       // comparison (exactReadings); dropped from the returned rows otherwise.
       temperature_raw_f: finiteNumber(temp[i]),
@@ -221,6 +231,7 @@ function normalizeForecastPayload(payload) {
       wind_mph: roundedNumber(c.wind_speed_10m, 1),
       wind_gust_mph: roundedNumber(c.wind_gusts_10m, 1),
       wind_dir_deg: finiteNumber(c.wind_direction_10m),
+      wind_dir: compassLabel(c.wind_direction_10m),
       precipitation_probability_pct: roundedNumber(c.precipitation_probability),
       weather_code: finiteNumber(c.weather_code),
     };
@@ -340,9 +351,9 @@ function sliceForecast(entry, cached, {
 //   { status: 'ok', source: 'open_meteo', fetchedAt, cached, latitude, longitude,
 //     window: { from, to },                       // ISO instants
 //     current: { time, at, temperature_f, humidity_pct, wind_mph, wind_gust_mph,
-//                wind_dir_deg, precipitation_probability_pct, weather_code } | null,
+//                wind_dir_deg, wind_dir, precipitation_probability_pct, weather_code } | null,
 //     hourly: [{ time, at, precipitation_in, precipitation_probability_pct,
-//                temperature_f, humidity_pct, wind_mph, wind_gust_mph, wind_dir_deg }],
+//                temperature_f, humidity_pct, wind_mph, wind_gust_mph, wind_dir_deg, wind_dir }],
 //             // rows are the hour stamps in [from, to). precipitation_in is the rain
 //             // in the hour ENDING at that stamp (Open-Meteo "sum of the preceding
 //             // hour"); the other fields are readings AT the stamp.
@@ -489,15 +500,6 @@ async function fetchPropertyRainQuarterHours({
 // rain_24h_in "the whole ET day so far plus the rest of today's model" rather
 // than a true trailing 24 h; changing it would change report copy, so it is
 // left for an owner decision.
-// 16-point compass label for a bearing in degrees (0 = N, 90 = E); null when
-// the bearing is not a finite number.
-const COMPASS_16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
-function compassLabel(degrees) {
-  const deg = finiteNumber(degrees);
-  if (deg == null) return null;
-  return COMPASS_16[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
-}
-
 // The wind for each hour of the visit: the hour stamps from the arrival hour
 // through the hour of the model reading, at most the 4 most recent (the
 // reading hour included). Arrival unknown, invalid or after the reading -> only
@@ -524,7 +526,7 @@ function visitWindHours(hourly, readingAt, arrivedAt) {
       time: r.time,
       wind_mph: r.wind_mph,
       wind_gust_mph: r.wind_gust_mph,
-      wind_dir: compassLabel(r.wind_dir_deg),
+      wind_dir: r.wind_dir,
     }));
 }
 
@@ -571,7 +573,7 @@ async function fetchOpenMeteoConditions({ latitude, longitude, arrivedAt } = {})
     longitude: lon,
     wind_gust_mph: roundedNumber(current.wind_gust_mph),
     wind_dir_deg: roundedNumber(current.wind_dir_deg),
-    wind_dir: compassLabel(current.wind_dir_deg),
+    wind_dir: current.wind_dir,
     reading_at: current.at || null,
     visit_hours: visitWindHours(hourly, current.at, arrivedAt),
   };
