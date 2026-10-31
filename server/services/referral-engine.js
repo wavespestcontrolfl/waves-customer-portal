@@ -591,10 +591,11 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 
 // The referrer's reward email (referral.reward_earned template). Sent
 // immediately at conversion, beside the reward SMS, when
-// require_service_completion is off; when it is on, sent alone by
-// sendDueReferralRewardEmails at the next 9:00 AM ET after the first-service
-// credit (owner 2026-10-29). Best-effort and idempotent per referral, so the
-// two call sites can never double-send. Promoters aren't always customers, so
+// require_service_completion is off (sendDueReferralRewardEmails sends one that
+// never went out); when it is on, sent alone by sendDueReferralRewardEmails at
+// the next 9:00 AM ET after the first-service credit (owner 2026-10-29).
+// Best-effort and idempotent per referral, so the call sites can never
+// double-send. Promoters aren't always customers, so
 // the send goes straight to promoter.customer_email.
 async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
   try {
@@ -668,6 +669,22 @@ function recentRewardCreditsQuery(conn, now) {
     .select('r.*', 'l.delta as credit_dollars', 'l.created_at as credited_at');
 }
 
+// Conversions paid at once (require_service_completion off) put the reward on
+// the promoter balance inside convertReferral's transaction and email after it
+// commits. A failure before that email exists is only logged, and a retried
+// conversion is refused, so the converted referral row is the pending notice:
+// one the conversion's own email never reached is sent here, once (same key).
+function recentImmediateRewardsQuery(conn, now) {
+  return conn('referrals')
+    .where('status', 'signed_up')
+    .where('referrer_reward_status', 'earned')
+    .where('first_service_completed', false)
+    .whereNotNull('promoter_id')
+    .where('converted_at', '>=', new Date(now.getTime() - REWARD_EMAIL_LOOKBACK_DAYS * 86400000))
+    .orderBy('converted_at', 'asc')
+    .select('*');
+}
+
 // Run by scheduler.js (every 15 minutes, 9:00-11:45 AM ET). A credit whose
 // morning was missed goes out the next morning; one older than
 // REWARD_EMAIL_LOOKBACK_DAYS is left alone. The email library decides whether
@@ -676,21 +693,26 @@ function recentRewardCreditsQuery(conn, now) {
 async function sendDueReferralRewardEmails({ now = new Date() } = {}) {
   const { shouldRetryExistingMessage } = require('./email-template-library');
   const credits = await recentRewardCreditsQuery(db, now);
+  const immediate = await recentImmediateRewardsQuery(db, now);
+  const due = [
+    ...credits.map((row) => ({ row, at: row.credited_at, dollars: Number(row.credit_dollars), destination: 'account_credit' })),
+    ...immediate.map((row) => ({ row, at: row.converted_at, dollars: Number(row.referrer_reward_amount), destination: 'referral_balance' })),
+  ];
   let attempted = 0;
-  for (const credit of credits) {
-    if (nextRewardEmailAt(credit.credited_at) > now) continue;
+  for (const { row, at, dollars, destination } of due) {
+    if (nextRewardEmailAt(at) > now) continue;
     const earlier = await db('email_messages')
-      .where({ idempotency_key: `referral.reward_earned:${credit.id}` })
+      .where({ idempotency_key: `referral.reward_earned:${row.id}` })
       .first('status');
     if (earlier && !shouldRetryExistingMessage(earlier)) continue;
-    const promoter = await db('referral_promoters').where({ id: credit.promoter_id }).first();
+    const promoter = await db('referral_promoters').where({ id: row.promoter_id }).first();
     if (!promoter) continue;
     // Best-effort, as before: sendRewardEarnedEmail logs a send error, and the
     // next run tries again while the credit is inside the lookback.
-    await sendRewardEarnedEmail(promoter, credit, Number(credit.credit_dollars), 'account_credit');
+    await sendRewardEarnedEmail(promoter, row, dollars, destination);
     attempted += 1;
   }
-  return { credits: credits.length, attempted };
+  return { credits: credits.length, immediate: immediate.length, attempted };
 }
 
 // ---------------------------------------------------------------------------
@@ -813,8 +835,9 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
 
   // Post-commit side effects — NON money-critical (the milestone award already
   // committed in the transaction above). Wrapped so a transient failure here can't
-  // bubble a 500: on retry the admin would hit the alreadyConverted no-op and these
-  // would be skipped for good.
+  // bubble a 500: on retry the admin would hit the alreadyConverted no-op. The
+  // reward email is the one leg sent later if it never went out here
+  // (sendDueReferralRewardEmails); the texts stay best-effort.
   //
   // Reward SMS routing depends on WHEN the reward is earned:
   //  - require_service_completion ON  → deferred: the real money is issued when
@@ -1117,9 +1140,17 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   if (!visit || !(visit.is_recurring || visit.recurring_pattern)) return null;
 
   const normalizedPhone = normalizePhone(customer.phone);
-  // Phone predicate reused for the guard, the match, and the dedupe sweep.
+  // Phone predicate reused for the guard, the match, and the dedupe sweep. By
+  // digits too, not exact text only: an older referral can keep a domestic
+  // spelling ('(941) 555-1234') after the customer's phone became E.164 (same
+  // rule as findHouseholdPromoter). One predicate for all three keeps the
+  // once-only guard and the sibling sweep as wide as the match.
+  const phoneVariants = phoneMatchDigits(normalizedPhone || customer.phone);
   const matchesPhone = function () {
     this.where('referee_phone', customer.phone).orWhere('referee_phone', normalizedPhone);
+    if (phoneVariants.length) {
+      this.orWhereRaw(`${PHONE_DIGITS_SQL('referee_phone')} IN (${phoneVariants.map(() => '?').join(', ')})`, phoneVariants);
+    }
   };
 
   // Reward at most once per referee phone, EVER. submitReferral dedupes only per
