@@ -601,6 +601,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       phone: phoneFormatted, email: email || null,
       address: fullAddress || '',
       city: resolvedCity,
+      // Only a typed ZIP: a blank one must not erase a ZIP the call lead already holds.
+      ...(normalizedAddress.zip ? { zip: normalizedAddress.zip } : {}),
       service_interest: serviceInterest || null,
       service_key: leadServiceKey,
       customer_id: customer.id,
@@ -892,6 +894,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           phone: phoneFormatted, email: email || null,
           address: fullAddress || '',
           city: resolvedCity,
+          // The territory read-outs and ads count leads by ZIP (territory build 2).
+          zip: normalizedAddress.zip || null,
           lead_source_id: leadSourceId,
           lead_type: 'form_submission',
           service_interest: serviceInterest || null,
