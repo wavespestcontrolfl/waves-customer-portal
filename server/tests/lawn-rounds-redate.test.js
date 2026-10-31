@@ -109,6 +109,16 @@ describe('planSeriesRedate', () => {
     expect(plan.held).toBeNull();
   });
 
+  test('a prepaid visit that would leave its term holds the series: outside prepaid term; inside it only flags', () => {
+    // v2 moves from 2026-12-29 to the next round's area day, 2027-01-12.
+    const rows = [visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { prepaid: true, termId: 't1' })];
+    const termEnding = (end) => series(rows, { terms: { t1: { start: '2026-01-01', end } } });
+    expect(planSeriesRedate(termEnding('2027-01-11')).held).toBe('outside prepaid term');
+    expect(planSeriesRedate(termEnding('2027-01-12'))).toMatchObject({ held: null, flags: expect.arrayContaining(['prepaid']) });
+    // A term that could not be read holds too (fail closed).
+    expect(planSeriesRedate(series(rows)).held).toBe('outside prepaid term');
+  });
+
   test('a prepaid visit flags the series', () => {
     const plan = planSeriesRedate(series([visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { prepaid: true })]));
     expect(plan.flags).toContain('prepaid');
@@ -252,7 +262,8 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
     lockComms: jest.fn(async () => { log.push('lock-comms'); }),
     prepay: { normalizeCoverageCadence: (v) => v || null, inferCoverageCadence: () => 'quarterly' },
   };
-  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { termId: r.term_id, prepaid: !!r.term_id })))), { rebooker });
+  const termWindows = Object.fromEntries(terms.map((term) => [term.id, { start: '2026-01-01', end: '2027-12-31' }]));
+  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { termId: r.term_id, prepaid: !!r.term_id })), { terms: termWindows })), { rebooker });
   return { conn, deps, rebooker, reminders, log, rows, state, replan, fail };
 }
 

@@ -55,13 +55,14 @@ function stayReason(visit, nowMs = Date.now()) {
 }
 
 // PURE. One series' plan.
-//   series: { parentId, customerId, areaAnchor, areaKey, anchorOverride,
+//   series: { parentId, customerId, areaAnchor, areaKey, anchorOverride, terms: { [termId]: { start, end } },
 //             visits: [{ id, date, ws, we, dur, tech, stay, prepaid }] }  live future visits in date order
 //   opts:   { maxShiftDays, allowLongShift }
 // Returns { parentId, customerId, anchor, anchorSource, areaKey, flags, heldReasons, held, visits, moves, signature }.
 //   `visits` rows: { id, from, to, shift, kind: 'next' | 'keep' | 'move' | 'at-target', reason, ws, we, dur, tech }
 //   `flags` never hold the series: weekend day, prepaid, no area, short gap.
-//   `heldReasons` hold it (nothing changes): round conflict, shift over N days, untimed visit; the schedule
+//   `heldReasons` hold it (nothing changes): round conflict, untimed visit, shift over N days, outside prepaid
+//   term (a prepaid visit would leave its term's window, so the term would stop covering it); the schedule
 //   review adds hour taken and closed day.
 function planSeriesRedate(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allowLongShift = false } = {}) {
   const [next, ...later] = series.visits;
@@ -86,6 +87,7 @@ function planSeriesRedate(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allow
     c.conflict && 'round conflict',
     rows.some((r) => r.kind === 'move' && !r.ws) && 'untimed visit',
     c.long && !allowLongShift && `shift over ${maxShiftDays} days`,
+    rows.some((r) => r.kind === 'move' && r.termId && !insideTerm(series.terms, r)) && 'outside prepaid term',
   ].filter(Boolean);
   return {
     parentId: series.parentId,
@@ -114,6 +116,13 @@ const FLAG_RULES = [
 ];
 
 const pick = (v) => ({ id: v.id, ws: v.ws, we: v.we, dur: v.dur, tech: v.tech, prepaid: !!v.prepaid, termId: v.termId || null });
+
+// A prepaid row's target inside its term's window (annual-prepay coverageRowsForTerm covers term_start..term_end).
+// An unread term is outside: fail closed.
+function insideTerm(terms, row) {
+  const term = terms?.[row.termId];
+  return !!term && row.to >= term.start && row.to <= term.end;
+}
 
 // ---- reads (the dry run uses only these) -------------------------------------------------------------------------
 
@@ -185,12 +194,17 @@ async function readSeriesContext(conn, root, { todayET, nowMs = Date.now(), anch
   const rows = await readFutureVisits(conn, root.id, todayET);
   if (!rows.length) return { skip: 'no live future visit' };
   const areaAnchor = await lawnAreaRoundAnchor(conn, root);
+  const termIds = [...new Set(rows.map((v) => v.term_id).filter(Boolean))];
+  const { rows: terms } = termIds.length
+    ? await conn.raw('select id::text id, term_start::text "start", term_end::text "end" from annual_prepay_terms where id = any(?::uuid[])', [termIds])
+    : { rows: [] };
   return {
     series: {
       parentId: String(root.id),
       customerId: String(root.customer_id),
       areaAnchor,
       areaKey: areas.find((a) => a.anchor === areaAnchor)?.key || null,
+      terms: Object.fromEntries(terms.map((t) => [t.id, { start: t.start, end: t.end }])),
       anchorOverride,
       visits: rows.map((v) => ({
         id: v.id, date: v.d, ws: v.ws, we: v.we, dur: Number(v.dur), tech: v.tech, termId: v.term_id,
