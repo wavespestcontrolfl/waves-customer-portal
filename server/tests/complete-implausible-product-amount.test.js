@@ -28,7 +28,7 @@ jest.mock('../models/db', () => {
 
 const { freezeCompletionCeilings, deductProductInventory } = require('../services/complete-scheduled-service');
 
-const technicianImplausibleProduct = async (db, args) => (await freezeCompletionCeilings(db, args)).refusal;
+const technicianImplausibleProduct = async (db, args) => (await freezeCompletionCeilings(db, args)).refusal?.body ?? null;
 
 const CELSIUS = '11111111-1111-4111-8111-111111111111';
 const catalog = { id: CELSIUS, name: 'Celsius WG', inventory_unit: 'lb' };
@@ -54,10 +54,18 @@ describe('freezeCompletionCeilings (technician refusal)', () => {
     });
   });
 
-  test('a technician over 20 times the product\'s own median is refused', async () => {
-    mockTables.product_inventory_movements = [1, 1.5, 2, 2].map((quantity) => ({ quantity, unit: 'lb' }));
-    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(36) })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
-    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(35) })).toBeNull();
+  test('a technician over 20 times the product\'s own median is refused (history raises the ceiling above the floor)', async () => {
+    mockTables.product_inventory_movements = [10, 10, 10, 12].map((quantity) => ({ quantity, unit: 'lb' }));
+    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(201) })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
+    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(200) })).toBeNull();
+  });
+
+  test('a run of tiny logged usages cannot pull the ceiling under the floor', async () => {
+    mockTables.product_inventory_movements = [0.0001, 0.0001, 0.0001].map((quantity) => ({ quantity, unit: 'lb' }));
+    const out = await freezeCompletionCeilings(require('../models/db'), { actor: tech, products: line(1) });
+    expect(out.refusal).toBeNull();
+    expect([...out.ceilings.values()]).toEqual([100]);
+    expect(await technicianImplausibleProduct(require('../models/db'), { actor: tech, products: line(101) })).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
   });
 
   test('an amount under the ceiling is unchanged', async () => {
@@ -75,6 +83,46 @@ describe('freezeCompletionCeilings (technician refusal)', () => {
     expect(await technicianImplausibleProduct(db, { actor: tech, products: [{ productId: CELSIUS }] })).toBeNull();
     expect(await technicianImplausibleProduct(db, { actor: tech, products: [{ productId: 'not-a-uuid', totalAmount: 9999, amountUnit: 'lb' }] })).toBeNull();
     expect(await technicianImplausibleProduct(db, { actor: tech, products: null })).toBeNull();
+  });
+});
+
+describe('a malformed amount is refused with a 400 for every role, and the parsed number is what every sink reads', () => {
+  test.each([
+    ['trailing junk', '99999junk'],
+    ['exponent text', '1e3'],
+    ['a negative', -4],
+    ['a negative string', '-4'],
+    ['a boolean', true],
+    ['an object', { v: 1 }],
+    ['words', 'lots'],
+    ['whitespace and junk', ' 12 lb'],
+  ])('%s', async (_name, totalAmount) => {
+    for (const actor of [tech, admin]) {
+      const products = [{ productId: CELSIUS, totalAmount, amountUnit: 'lb' }];
+      const out = await freezeCompletionCeilings(require('../models/db'), { actor, products });
+      expect(out.refusal).toMatchObject({ status: 400, body: { code: 'INVALID_PRODUCT_AMOUNT', productId: CELSIUS } });
+      expect(out.refusal.body.error).toBe('The amount for Celsius WG is not a number. Enter the amount as a plain number and submit again.');
+    }
+  });
+
+  test('a plain decimal string is parsed once and written back as the number every later reader sees', async () => {
+    const products = [{ productId: CELSIUS, totalAmount: ' 12.5 ', amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: '.5', amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 3, amountUnit: 'lb' }];
+    const out = await freezeCompletionCeilings(require('../models/db'), { actor: tech, products });
+    expect(out.refusal).toBeNull();
+    expect(products.map((p) => p.totalAmount)).toEqual([12.5, 0.5, 3]);
+  });
+
+  test('empty and absent amounts behave as today: not judged, not changed', async () => {
+    const products = [{ productId: CELSIUS, totalAmount: '', amountUnit: 'lb' }, { productId: CELSIUS, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: null }];
+    const out = await freezeCompletionCeilings(require('../models/db'), { actor: tech, products });
+    expect(out.refusal).toBeNull();
+    expect(products.map((p) => p.totalAmount)).toEqual(['', undefined, null]);
+  });
+
+  test('a replay or resume (skip) parses and changes nothing', async () => {
+    const products = [{ productId: CELSIUS, totalAmount: '99999junk', amountUnit: 'lb' }];
+    expect((await freezeCompletionCeilings(require('../models/db'), { actor: tech, products, skip: true })).refusal).toBeNull();
+    expect(products[0].totalAmount).toBe('99999junk');
   });
 });
 
@@ -137,12 +185,12 @@ describe('the ceiling is frozen once per completion', () => {
     expect(trx.historyReads()).toBe(0); // no deduction recomputed a ceiling
   });
 
-  test('without the frozen map the same add-on would be judged against the moved 20 lb ceiling (what this guards against)', async () => {
+  test('without the frozen map each line reads the history afresh (what freezing replaces)', async () => {
     const history = [{ quantity: 1, unit: 'lb' }, { quantity: 1, unit: 'lb' }];
     const trx = statefulTrx(history);
     await deductProductInventory(trx, { ...visit, product: product(1), productInput: { totalAmount: 1, amountUnit: 'lb' } });
-    const addOn = await deductProductInventory(trx, { ...visit, product: product(0), productInput: { totalAmount: 30, amountUnit: 'lb' } });
-    expect(addOn.status).toBe('not_deducted_implausible');
+    await deductProductInventory(trx, { ...visit, product: product(0), productInput: { totalAmount: 30, amountUnit: 'lb' } });
+    expect(trx.historyReads()).toBe(1); // the host line stayed in stock; the add-on overdrew and read the history
   });
 });
 // The end-to-end proofs (422 before any write with the claim released, admin advisory path, under-ceiling unchanged, an

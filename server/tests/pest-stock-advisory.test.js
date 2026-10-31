@@ -133,14 +133,20 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
     });
 
     describe('a product with three or more prior rows (20 times the median)', () => {
-      test('an amount above 20 times the median is refused, even under the floor', async () => {
-        const trx = fakeTrx(usage(4, 5, 6)); // median 5, ceiling 100
-        refusedWith(await deductProductInventory(trx, overdraw({ totalAmount: 101, amountUnit: 'fl_oz' })), trx);
+      test('an amount above 20 times the median is refused when that is above the floor', async () => {
+        const trx = fakeTrx(usage(40, 50, 60)); // median 50, ceiling 1000
+        refusedWith(await deductProductInventory(trx, overdraw({ totalAmount: 1001, amountUnit: 'fl_oz' })), trx);
+      });
+
+      test('the history only raises the ceiling: small usages never pull it under the floor (owner-visible: a normal amount is not refused)', async () => {
+        const tiny = fakeTrx(usage(0.0001, 0.0001, 0.0001)); // 20 x median = 0.002; the floor 640 stands
+        expect(await deductProductInventory(tiny, overdraw({ totalAmount: 640, amountUnit: 'fl_oz' }))).toMatchObject({ status: 'deducted_insufficient_stock', stockAfter: -639 });
+        refusedWith(await deductProductInventory(fakeTrx(usage(4, 5, 6)), overdraw({ totalAmount: 641, amountUnit: 'fl_oz' })), fakeTrx());
       });
 
       test('an amount at or below it is an ordinary overdraw, even over the floor', async () => {
-        const low = fakeTrx(usage(4, 5, 6));
-        expect(await deductProductInventory(low, overdraw({ totalAmount: 100, amountUnit: 'fl_oz' }))).toMatchObject({ status: 'deducted_insufficient_stock', stockAfter: -99 });
+        const low = fakeTrx(usage(4, 5, 6)); // 20 x median = 100, the floor 640 stands
+        expect(await deductProductInventory(low, overdraw({ totalAmount: 640, amountUnit: 'fl_oz' }))).toMatchObject({ status: 'deducted_insufficient_stock', stockAfter: -639 });
         const high = fakeTrx(usage(100, 200, 300)); // median 200, ceiling 4000
         expect(await deductProductInventory(high, overdraw({ totalAmount: 3000, amountUnit: 'fl_oz' }))).toMatchObject({ status: 'deducted_insufficient_stock' });
         expect(low.writes).toHaveLength(2);

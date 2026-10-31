@@ -162,19 +162,39 @@ postgres('technician implausible product amount', () => {
     } finally { await cleanup(f); }
   });
 
-  test('an identical retry of a committed completion replays the success even though its own usage moved the ceiling', async () => {
+  test('a malformed amount is a 400 for a technician and an admin, with nothing written and the claim released', async () => {
+    for (const role of ['technician', 'admin']) {
+      const f = await seedPestVisit();
+      try {
+        const out = await complete(f, { role, totalAmount: '99999junk' });
+        expect(out.status).toBe(400);
+        expect(out.body).toMatchObject({ code: 'INVALID_PRODUCT_AMOUNT' });
+        expect(await writesFor(f)).toEqual({ records: 0, serviceProducts: 0, ownMovements: 0, allMovements: 0, stock: 500 });
+        const attempts = await mockPg('service_completion_attempts').where('service_id', f.serviceId);
+        expect(attempts.every((a) => a.status === 'failed')).toBe(true);
+      } finally { await cleanup(f); }
+    }
+  });
+
+  test('a numeric string amount is stored as that number', async () => {
+    const f = await seedPestVisit();
+    try {
+      expect((await complete(f, { role: 'technician', totalAmount: '12.5' })).status).toBe(200);
+      const row = await mockPg('service_products as sp').join('service_records as sr', 'sr.id', 'sp.service_record_id').where('sr.customer_id', f.customerId).first('sp.total_amount');
+      expect(Number(row.total_amount)).toBe(12.5);
+      expect((await writesFor(f)).stock).toBe(487.5);
+    } finally { await cleanup(f); }
+  });
+
+  test('an identical retry of a committed completion replays the success (a replay is never judged again)', async () => {
     const f = await seedPestVisit({ priorUsage: [1, 1] });
     try {
       const key = randomUUID();
-      // Two prior 1 lb rows: under the 3-row threshold the floor (100 lb) applies, so 100 lb passes.
       const first = await complete(f, { role: 'technician', totalAmount: 100, key });
       expect(first.status).toBe(200);
-      // Now three rows (1, 1, 100): median 1, ceiling 20 lb. The same 100 lb body would be refused as a fresh request.
       const retry = await complete(f, { role: 'technician', totalAmount: 100, key });
       expect(retry.status).toBe(200);
       expect(retry.body).toMatchObject({ replayed: true, serviceRecordId: first.body.serviceRecordId });
-      const { freezeCompletionCeilings } = require('../services/complete-scheduled-service');
-      expect((await freezeCompletionCeilings(mockPg, { actor: { techRole: 'technician' }, products: bodyFor(f, 100).products })).refusal).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT' });
       expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1 });
     } finally { await cleanup(f); }
   });

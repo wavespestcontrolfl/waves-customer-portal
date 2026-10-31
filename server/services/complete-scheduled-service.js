@@ -1650,8 +1650,8 @@ const PLAUSIBLE_VISIT = {
   floors: [{ amount: 640, unit: 'fl_oz' }, { amount: 100, unit: 'lb' }, { amount: 50, unit: 'each' }],
 };
 
-// The ceiling for one product, in its inventory unit: 20 times its own median usage over the last year with enough history,
-// else the floor by unit dimension. 0 means no ceiling (a unit with no known dimension and too little history).
+// The ceiling for one product, in its inventory unit: the floor by unit dimension, raised to 20 times the product's own median
+// usage over the last year when that is higher (and there are enough rows). 0 means no ceiling (a unit with no known dimension and too little history).
 async function plausibleCeilingFor(database, { productId, inventoryUnit }) {
   const since = new Date(Date.now() - PLAUSIBLE_VISIT.historyDays * 24 * 60 * 60 * 1000);
   const prior = await database('product_inventory_movements')
@@ -1663,7 +1663,8 @@ async function plausibleCeilingFor(database, { productId, inventoryUnit }) {
     .sort((x, y) => x - y);
   const median = (history[(history.length - 1) >> 1] + history[history.length >> 1]) / 2;
   const floor = Math.max(0, ...PLAUSIBLE_VISIT.floors.map((f) => convertInventoryQuantity(f.amount, f.unit, inventoryUnit) ?? 0));
-  return history.length >= PLAUSIBLE_VISIT.minHistory ? PLAUSIBLE_VISIT.medianMultiple * median : floor;
+  // The history can only RAISE the ceiling: a run of tiny logged usages must not push a normal amount under it.
+  return history.length >= PLAUSIBLE_VISIT.minHistory ? Math.max(floor, PLAUSIBLE_VISIT.medianMultiple * median) : floor;
 }
 
 // The key a frozen ceiling is stored under: one per product and inventory unit.
@@ -1685,9 +1686,38 @@ async function exceedsPlausibleVisit(database, { productId, inventoryUnit, deduc
 // and the customer report.
 const IMPLAUSIBLE_PRODUCT_AMOUNT = 'IMPLAUSIBLE_PRODUCT_AMOUNT';
 
+// The ONE parse of a submitted product amount. An absent or empty amount is "no amount" (null); a number or a plain
+// decimal string is that number; anything else ("99999junk", "1e3", a boolean, an object, a negative) is invalid (NaN).
+// parseFloat/Number on the raw value would each read it differently, and a sink that read "99999junk" as 99,999 would
+// store a number the preflight never judged.
+const PLAIN_DECIMAL = /^(\d+\.?\d*|\.\d+)$/;
+function strictProductAmount(raw) {
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw >= 0 ? raw : NaN;
+  if (typeof raw === 'string' && PLAIN_DECIMAL.test(raw.trim())) return Number(raw.trim());
+  return NaN;
+}
+
+// Parses every submitted line's amount once and writes the parsed number back onto the line, so every later sink
+// (the stock check, the service_products insert, the FDACS ledger, limits, nutrients) reads the same number. Returns
+// the 400 for the first malformed amount, else null. Runs for every role, on a fresh completion only.
+function normalizeProductAmounts(lines, nameOf) {
+  for (const line of lines) {
+    const amount = strictProductAmount(line.totalAmount);
+    if (Number.isNaN(amount)) {
+      return { status: 400, body: {
+        error: `The amount for ${nameOf(line)} is not a number. Enter the amount as a plain number and submit again.`,
+        code: 'INVALID_PRODUCT_AMOUNT', productId: line.productId,
+      } };
+    }
+    line.totalAmount = amount;
+  }
+  return null;
+}
+
 // The line's amount in its product's inventory unit, or null when there is nothing to judge.
 function plausibleLineAmount(submitted, catalogRow) {
-  const amount = submitted.totalAmount != null && submitted.totalAmount !== '' ? Number(submitted.totalAmount) : null;
+  const amount = submitted.totalAmount;
   const amountUnit = baseQuantityUnit(submitted.amountUnit || submitted.rateUnit || null);
   if (!catalogRow || !amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) return null;
   const inventoryUnit = catalogRow.inventory_unit || amountUnit;
@@ -1707,7 +1737,7 @@ function implausibleRefusal(catalogRow, { amount, amountUnit }) {
 }
 
 // Freezes the ceiling of every product line (admin and technician alike) ONCE, before the first write, and refuses a
-// technician's line over it. The returned map is the only source of a ceiling for the rest of the completion
+// technician's line over it (`refusal` is { status, body }: 400 for a malformed amount on any role, 422 for an implausible one). The returned map is the only source of a ceiling for the rest of the completion
 // (deductProductInventory): a line saved earlier in the visit adds usage history, so a recomputed ceiling would move
 // under a later line of the same product (a host row and an add-on row). `skip` is a replay, a resume or a packet effects
 // phase: nothing is judged and nothing is read.
@@ -1718,6 +1748,8 @@ async function freezeCompletionCeilings(database, { actor, products, skip = fals
   const ids = [...new Set(lines.map((p) => canonicalProductId(p.productId)).filter((id) => UUID_SHAPE.test(id)))];
   const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
   const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
+  const invalid = normalizeProductAmounts(lines, (line) => rowById.get(canonicalProductId(line.productId))?.name || line.name || line.product_name || 'a product');
+  if (invalid) return { ceilings, refusal: invalid };
   let refusal = null;
   for (const line of lines) {
     const catalogRow = rowById.get(canonicalProductId(line.productId));
@@ -1726,7 +1758,7 @@ async function freezeCompletionCeilings(database, { actor, products, skip = fals
     const key = ceilingKey(catalogRow.id, judged.inventoryUnit);
     if (!ceilings.has(key)) ceilings.set(key, await plausibleCeilingFor(database, { productId: catalogRow.id, inventoryUnit: judged.inventoryUnit }));
     const ceiling = ceilings.get(key);
-    if (!refusal && actor?.techRole !== 'admin' && ceiling > 0 && judged.deductedAmount > ceiling) refusal = implausibleRefusal(catalogRow, judged);
+    if (!refusal && actor?.techRole !== 'admin' && ceiling > 0 && judged.deductedAmount > ceiling) refusal = { status: 422, body: implausibleRefusal(catalogRow, judged) };
   }
   return { ceilings, refusal };
 }
@@ -5115,17 +5147,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // ... and a completed visit records an application for EVERY chemical add-on it carries (they are invoiced from the visit).
     await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
 
-    // A technician's amount no visit uses is refused on a FRESH completion only, before the first service write
+    // A malformed amount (any role) and a technician's amount no visit uses are refused on a FRESH completion only, before the first service write
     // (service_products, inventory, FDACS ledger, cost, report). A same-key replay or resume of a committed completion is
     // never judged: its own committed usage can change the product's history and move the ceiling under it. The claim is
     // released as failed, as for the other refusals above, so a corrected resubmit is not blocked. Admin keeps the
     // advisory path in deductProductInventory.
-    const { ceilings: plausibleCeilings, refusal: implausibleProduct } = await freezeCompletionCeilings(db, {
+    const { ceilings: plausibleCeilings, refusal: amountRefusal } = await freezeCompletionCeilings(db, {
       actor: completionInput.actor, products, skip: claim.action !== 'proceed',
     });
-    if (implausibleProduct) {
-      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(implausibleProduct.code), db);
-      return ({ status: 422, body: implausibleProduct });
+    if (amountRefusal) {
+      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(amountRefusal.body.code), db);
+      return amountRefusal;
     }
 
     // Fresh executions validate typed rules; replays returned above with the
@@ -8525,8 +8557,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
               err.code = 'area_sqft_required';
               throw err;
             }
+            // The amount was parsed once, strictly, before the first write (normalizeProductAmounts); NaN here is a line
+            // that never went through it, and is refused below.
             const appliedAmount = p.totalAmount != null && p.totalAmount !== ''
-              ? parseFloat(p.totalAmount)
+              ? Number(p.totalAmount)
               : null;
             // A "/gal" unit is a mix concentration: a total recorded against
             // it is the amount of concentrate, so store the base quantity
