@@ -3694,6 +3694,16 @@ const gates = {
   // requireAdmin-only and unaffected by this gate. Double-gated behind cronJobs.
   priceScanWeekly: process.env.GATE_PRICE_SCAN === 'true',
 
+  // Weekly SiteOne deals bell (owner 2026-10-31, plan A): Monday 8:00 AM ET the
+  // portal reads the last 7 days of the contact@ Gmail sync, keeps the SiteOne
+  // and product-maker mail that looks like a deal (promo, flyer, early order,
+  // rebate, price increase, price match), and rings ONE admin bell listing each
+  // deal with its deadline and the catalog products it names. Plain rules over
+  // rows already in the database: no model call, no paid API, no network, sends
+  // nothing to anyone. Strict opt-in (`=== 'true'`) checked by the cron in
+  // scheduler.js; double-gated behind cronJobs. Dark by default; kill = unset.
+  siteOneDealsDigest: process.env.GATE_SITEONE_DEALS_DIGEST === 'true',
+
   // Card-Present Surcharge (Tap to Pay) — adds the 2.9% credit-card surcharge to
   // in-person card_present charges, mirroring the online flow. Card-present
   // funding is only known AFTER the tap, so the PI is minted at base and raised
