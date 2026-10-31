@@ -14,7 +14,6 @@
 		71F2A1650406233E4A2CD653 /* CollectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1C0BACE518171B312F5B32 /* CollectView.swift */; };
 		800C9C346EA5B9DC2141B9F1 /* API.swift in Sources */ = {isa = PBXBuildFile; fileRef = 382A9E95DB30F9858AEDB35D /* API.swift */; };
 		86A9F2A9DFE673C345410D1D /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95C2F50AD33493B67A02D814 /* AppState.swift */; };
-		A1F14D26FC2B1C817A01C6BA /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEA410CF31BCB27C5D972663 /* LoginView.swift */; };
 		A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5879EC992F1DFD981D2C3E75 /* Brand.swift */; };
 		ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8F12848DEA3C5874AD613B3 /* PortalView.swift */; };
 		AC3A5837C1092E9D149FB407 /* TerminalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F257791252A99A45F5501281 /* TerminalManager.swift */; };
@@ -37,7 +36,6 @@
 		F2F14AD46D302EADCEB265C2 /* WavesPay.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = WavesPay.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F66184170B2FD174561E1F62 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		F72AB2068EA75B9DD83360CE /* HowToTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HowToTap.swift; sourceTree = "<group>"; };
-		FEA410CF31BCB27C5D972663 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -69,7 +67,6 @@
 				7D1C0BACE518171B312F5B32 /* CollectView.swift */,
 				F72AB2068EA75B9DD83360CE /* HowToTap.swift */,
 				78F12D9BA969C35A97B98616 /* Keychain.swift */,
-				FEA410CF31BCB27C5D972663 /* LoginView.swift */,
 				C8F12848DEA3C5874AD613B3 /* PortalView.swift */,
 				F66184170B2FD174561E1F62 /* RootView.swift */,
 				B697676CF8667C3A3F9C626B /* StaffAlerts.swift */,
@@ -178,7 +175,6 @@
 				71F2A1650406233E4A2CD653 /* CollectView.swift in Sources */,
 				693F6579FC4F8E662993A132 /* HowToTap.swift in Sources */,
 				E3D72235F0CE1767D22C1AA5 /* Keychain.swift in Sources */,
-				A1F14D26FC2B1C817A01C6BA /* LoginView.swift in Sources */,
 				ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */,
 				5B4CE5DF257AE388559CE024 /* RootView.swift in Sources */,
 				D99E615FC3F554C7F4A69C6B /* StaffAlerts.swift in Sources */,
