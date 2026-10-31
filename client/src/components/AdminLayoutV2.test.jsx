@@ -299,6 +299,26 @@ describe("AdminLayoutV2", () => {
     expect(localStorage.getItem("waves_admin_token")).toBeNull();
   });
 
+  it("an expired-token response inside Waves Admin stops this iPhone's staff alerts", async () => {
+    const postMessage = vi.fn();
+    window.webkit = { messageHandlers: { wavesAdmin: { postMessage } } };
+    localStorage.setItem("waves_admin_push_signup", JSON.stringify({ token: "ab".repeat(32), reg: "reg-0001" }));
+    try {
+      adminFetch.mockRejectedValue(Object.assign(new Error("Expired"), { status: 401 }));
+      render(<MemoryRouter initialEntries={["/admin/documents"]}>
+        <Routes>
+          <Route element={<AdminLayoutV2 />}><Route path="/admin/documents" element={<div>Forbidden child</div>} /></Route>
+          <Route path="/admin/login" element={<LoginProbe />} />
+        </Routes>
+      </MemoryRouter>);
+      expect(await screen.findByText("Sign in required")).toBeInTheDocument();
+      expect(postMessage).toHaveBeenCalledWith({ type: "signOut" });
+      expect(localStorage.getItem("waves_admin_push_signup")).toBeNull();
+    } finally {
+      delete window.webkit;
+    }
+  });
+
   it("no longer owns the Safari bookmark identity (moved to AdminSafariShell in App)", async () => {
     // Regression pin: the manifest/title swap lives in useAdminBookmarkMeta,
     // mounted app-wide so /admin/login (outside this layout) is covered. A

@@ -78,14 +78,21 @@ export function registerInAppPush() {
   };
   window.addEventListener(TOKEN_EVENT, onToken);
   postToApp({ type: 'registerPush' });
-  return () => window.removeEventListener(TOKEN_EVENT, onToken);
+  return () => {
+    window.removeEventListener(TOKEN_EVENT, onToken);
+    // Ends this mount's sign-up retries; a newer mount keeps its own.
+    if (mine === epoch) epoch += 1;
+  };
 }
 
-// Sign-out: stop this iPhone's staff alerts before the credentials go. The
-// app clears shown alerts and the badge and stops this install's
-// notifications at once, so nothing more shows even if the server cannot be
-// reached. The server release goes after any sign-up still in flight and is
-// retried on failure. Never rejects.
+// Every end of a staff session (clearStaffDeviceData: a sign-out button, a
+// 401, a forced password change) stops this iPhone's staff alerts. The app
+// clears shown alerts and the badge and stops this install's notifications at
+// once, so nothing more shows even when the server cannot be reached (APNs
+// then answers Unregistered and the server deactivates the row). While the
+// sign-in still stands (the buttons call this before the credentials go),
+// the server release also runs, after any sign-up in flight, with retries.
+// Never rejects.
 export function releaseInAppPush() {
   if (!isWavesAdminApp()) return Promise.resolve();
   epoch += 1;
@@ -95,8 +102,8 @@ export function releaseInAppPush() {
     signUp = JSON.parse(localStorage.getItem(SIGN_UP_KEY) || 'null');
     localStorage.removeItem(SIGN_UP_KEY);
   } catch { /* storage unavailable or unreadable */ }
-  if (!signUp?.token || !signUp?.reg) return Promise.resolve();
   const auth = localStorage.getItem('waves_admin_token');
+  if (!signUp?.token || !signUp?.reg || !auth) return Promise.resolve();
   const release = async () => {
     for (let attempt = 1; attempt <= RELEASE_ATTEMPTS; attempt += 1) {
       const response = await adminFetch('/admin/push/native-unsubscribe', {
