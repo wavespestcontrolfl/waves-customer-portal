@@ -565,11 +565,16 @@ function isSet(value) {
 //   c. else the root's own price is the template -> add an explicit override
 //      (the root row itself is never touched: a completed visit is history),
 //      unless the root was itself repriced as a visit row in this run.
+// `needsOverrideGate` = the change lives in an estimated_price /
+// primary_line_price override, which the scheduler reads only while
+// GATE_EDIT_APPT_PRICE_SERVICE_SCOPE is on (the marker is read ungated).
 function planTemplateChange(root, family, repricedIds, reprice) {
   const overrides = readTemplateOverrides(root.recurring_template_overrides);
   const changes = [];
+  let needsOverrideGate = false;
   const set = (key, from, to) => {
     if (!(to > 0) || to === from) return;
+    if (TEMPLATE_PRICE_KEYS.includes(key)) needsOverrideGate = true;
     overrides[key] = to;
     changes.push(`Future-visit price ${family} ${from} → ${to}`);
   };
@@ -587,7 +592,7 @@ function planTemplateChange(root, family, repricedIds, reprice) {
     const from = Number(root[key]);
     if (from > 0) set(key, from, reprice(from));
   }
-  return changes.length ? { overrides, changes } : null;
+  return changes.length ? { overrides, changes, needsOverrideGate } : null;
 }
 
 async function templateBlockedReason(trx, root) {
@@ -607,6 +612,7 @@ async function repriceSurvivingSeriesTemplates(trx, customerId, plan, repricedId
   if (plan.discountBefore === plan.discountAfter) return out;
   const { uniqueServiceFamilies, detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   const reprice = (rate) => repriceAtTier(rate, plan.discountBefore, plan.discountAfter);
+  const overrideGateOn = require('../config/feature-gates').isEnabled('editApptPriceServiceScope');
   const roots = await trx('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
@@ -621,7 +627,9 @@ async function repriceSurvivingSeriesTemplates(trx, customerId, plan, repricedId
     if (!family || !plan.remaining.includes(family)) continue;
     const next = planTemplateChange(root, family, repricedIds, reprice);
     if (!next) continue;
-    const blocked = await templateBlockedReason(trx, root);
+    const blocked = (next.needsOverrideGate && !overrideGateOn)
+      ? 'price-override gate is off, so the scheduler would ignore an override'
+      : await templateBlockedReason(trx, root);
     if (blocked) {
       logger.warn(`[cancellation-processor] series template ${root.id} (${family}) left at the old tier price for ${customerId}: ${blocked}`);
       out.skipped.push(`${family} series ${root.id} (${blocked})`);

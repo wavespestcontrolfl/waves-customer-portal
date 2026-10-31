@@ -1195,6 +1195,12 @@ describe('boundary inputs and holds under the lock (Codex r3)', () => {
 
 describe('per-application tier drop reprices the series price template', () => {
   const { logger } = { logger: require('../services/logger') };
+  let gateOn;
+  beforeEach(() => {
+    gateOn = true;
+    jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation((g) => (g === 'editApptPriceServiceScope' ? gateOn : false));
+  });
+  afterEach(() => jest.restoreAllMocks());
   const perAppCustomer = () => ({ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true });
   const lawn = (extra = {}) => ({
     id: 'v-lawn', customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(10),
@@ -1282,6 +1288,17 @@ describe('per-application tier drop reprices the series price template', () => {
       { invoices: [{ id: 'inv-9', scheduled_service_id: 'root-pest', status: 'sent' }] });
     expect(rowOf('root-pest').estimated_price).toBe(115.2);
     expect(overridesOf('root-pest')).toEqual({ estimated_price: 128 });
+  });
+
+  test('price-override gate off: an override-based template is left alone and named, the marker (read ungated) is still repriced', async () => {
+    gateOn = false;
+    await run(perAppCustomer(), [lawn(), pestRoot({ estimated_price: 115.2 }), pestChild()]);
+    expect(rowOf('root-pest').recurring_template_overrides).toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('price-override gate is off'));
+    expect(note()).toContain('NOT changed');
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Bronze');
+    await run(perAppCustomer(), [lawn(), pestRoot({ estimated_price: 115.2, recurring_template_overrides: { anchored_split_per_visit: 115.2 } }), pestChild()]);
+    expect(overridesOf('root-pest')).toEqual({ anchored_split_per_visit: 128 });
   });
 
   test('a tier that does not change writes no template', async () => {
