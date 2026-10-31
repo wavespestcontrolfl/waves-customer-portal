@@ -185,3 +185,54 @@ it('shows the server reason when the run already started',async()=>{
   fireEvent.click(screen.getByRole('button',{name:'Unschedule'}));
   expect(await screen.findByRole('status')).toHaveTextContent("Couldn't unschedule: Publishing already started for this post");
 });
+
+// SOC-01: Schedule Social can pick a saved Social Studio draft; the draft id
+// and time go to the server, and a scheduled social row can be withdrawn.
+function socialFetch({ drafts = [], draftsFail = null, calendar = [] } = {}) {
+  return vi.fn(async (url, options = {}) => {
+    const text = String(url);
+    if (options.method === 'DELETE') return { ok: true, json: async () => ({ success: true, type: 'social', id: 's1' }) };
+    if (text.includes('/calendar?')) return { ok: true, json: async () => ({ calendar }) };
+    if (text.includes('/social-drafts')) {
+      if (draftsFail) return { ok: false, status: 500, json: async () => ({ error: draftsFail }) };
+      return { ok: true, json: async () => ({ drafts }) };
+    }
+    return { ok: true, json: async () => ({}) };
+  });
+}
+
+it('lists saved drafts in Schedule Social and submits the draft id and time',async()=>{
+  vi.stubGlobal('fetch',socialFetch({drafts:[{id:'sd-1',title:'Synthetic campaign',channels:['facebook','gbp']}]}));
+  render(<ContentCalendar/>);
+  fireEvent.click(await screen.findByRole('button',{name:/12, .*0 scheduled items/}));
+  fireEvent.click(screen.getByRole('button',{name:'Schedule Social'}));
+  await screen.findByRole('option',{name:'Synthetic campaign (facebook, gbp)'});
+  fireEvent.change(screen.getByLabelText('Saved draft'),{target:{value:'sd-1'}});
+  // a picked draft supplies its own title, so the typed-title field goes away
+  expect(screen.queryByLabelText('Title')).not.toBeInTheDocument();
+  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button',{name:'Schedule',exact:true}));
+  await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/content/schedule-social',expect.objectContaining({method:'POST',body:JSON.stringify({postId:'sd-1',scheduledFor:`${day}T09:00:00`})})));
+  await waitFor(()=>expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+});
+
+it('says when saved drafts could not load and still lets a typed post through',async()=>{
+  vi.stubGlobal('fetch',socialFetch({draftsFail:'database unavailable'}));
+  render(<ContentCalendar/>);
+  fireEvent.click(await screen.findByRole('button',{name:/12, .*0 scheduled items/}));
+  fireEvent.click(screen.getByRole('button',{name:'Schedule Social'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load saved drafts: database unavailable");
+  expect(screen.getByLabelText('Title')).toBeInTheDocument();
+});
+
+it('offers Unschedule on a social post that waits for its time, not on a published one',async()=>{
+  vi.stubGlobal('fetch',socialFetch({calendar:[
+    {id:'s1',title:'Waiting social',type:'social',scheduledDate:day,status:'pending'},
+    {id:'s2',title:'Done social',type:'social',scheduledDate:day,status:'published'},
+  ]}));
+  render(<ContentCalendar/>);
+  fireEvent.click(await screen.findByRole('button',{name:/12, .*2 scheduled items/}));
+  const unschedule=screen.getAllByRole('button',{name:'Unschedule'});
+  expect(unschedule).toHaveLength(1);
+  fireEvent.click(unschedule[0]);
+  await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/content/schedule/s1',expect.objectContaining({method:'DELETE'})));
+});

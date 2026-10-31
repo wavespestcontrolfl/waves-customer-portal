@@ -44,6 +44,43 @@ function parseScheduledTime(value, label) {
   return parsed;
 }
 
+// Only http(s) image URLs reach the publishers; anything else posts text-only.
+function httpUrlOrNull(value) {
+  const text = String(value || '').trim();
+  try {
+    const { protocol } = new URL(text);
+    return protocol === 'http:' || protocol === 'https:' ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+// A saved Social Studio campaign draft (Campaign Builder > Save Draft, SOC-01)
+// waits at status 'draft' with no time until the Calendar gives it one.
+const SAVED_DRAFT = { source_type: 'campaign_builder', status: 'draft', publish_status: 'pending' };
+
+// Pre-publish, platforms_posted holds the REQUESTED channel list (strings, or
+// {platform} objects once publishToAll has written results).
+function storedChannels(platformsPosted) {
+  let stored = platformsPosted;
+  if (typeof stored === 'string') {
+    try { stored = JSON.parse(stored); } catch { stored = null; }
+  }
+  return Array.isArray(stored)
+    ? stored.map((p) => (typeof p === 'string' ? p : p?.platform)).filter(Boolean)
+    : [];
+}
+
+// Extra publishToAll options for a saved campaign draft only: its own image,
+// its result folded into its own row (postId), and never a fresh generated
+// image in place of the saved one. Every other scheduled row gets none, so it
+// publishes exactly as before.
+function storedPostOptions(social) {
+  if (social.source_type !== SAVED_DRAFT.source_type) return {};
+  const imageUrl = httpUrlOrNull(social.image_url);
+  return { ...(imageUrl ? { imageUrl } : {}), postId: social.id, noAiImage: true };
+}
+
 function parseCalendarStart(value) {
   const text = String(value || '').trim();
   return parseScheduledTime(DATE_ONLY.test(text) ? `${text}T00:00` : text, 'startDate');
@@ -490,6 +527,59 @@ const ContentScheduler = {
   },
 
   /**
+   * Saved campaign drafts the Calendar can still schedule: no time, not
+   * published, not already queued.
+   */
+  async listSavedSocialDrafts() {
+    const rows = await db('social_media_posts')
+      .where(SAVED_DRAFT)
+      .whereNull('scheduled_for')
+      .orderBy('created_at', 'desc')
+      .limit(100)
+      .select('id', 'title', 'platforms_posted');
+    return rows.map((r) => ({ id: r.id, title: r.title, channels: storedChannels(r.platforms_posted) }));
+  },
+
+  /**
+   * Give a saved campaign draft its time. The same row posts later, with its
+   * own copy, image, channels, title and link. The WHERE is the whole check:
+   * a row that published, is queued, or is not a campaign draft updates
+   * nothing and reads as a conflict.
+   */
+  async scheduleSavedSocialDraft(postId, scheduledFor) {
+    const scheduledAt = parseScheduledTime(scheduledFor, 'scheduledFor');
+    const [post] = await db('social_media_posts')
+      .where({ id: postId, ...SAVED_DRAFT })
+      .whereNull('scheduled_for')
+      .update({ scheduled_for: scheduledAt, status: 'scheduled' })
+      .returning('*');
+    if (!post) throw scheduleConflict('This draft is no longer available to schedule. Reload and pick again.');
+
+    logger.info(`[content-scheduler] Scheduled saved social draft "${post.title}" for ${scheduledFor}`);
+    return post;
+  },
+
+  /**
+   * Take a social row off the schedule. A saved campaign draft goes back to
+   * status 'draft' with publish_status 'pending' and no time, so it can be
+   * picked again; once the scheduler claimed it, that is a conflict.
+   */
+  async unscheduleSocialPost(social) {
+    if (social.source_type !== SAVED_DRAFT.source_type) {
+      await db('social_media_posts').where('id', social.id).update({
+        scheduled_for: null,
+        publish_status: null,
+        status: 'draft',
+      });
+      return;
+    }
+    const back = await db('social_media_posts')
+      .where({ id: social.id, source_type: SAVED_DRAFT.source_type, publish_status: 'pending' })
+      .update({ scheduled_for: null, status: 'draft' });
+    if (!back) throw scheduleConflict('Posting already started for this draft, so it can no longer be unscheduled.');
+  },
+
+  /**
    * Process all posts whose scheduled time has passed and status is pending.
    * Called by the cron job every 15 minutes.
    */
@@ -759,13 +849,7 @@ const ContentScheduler = {
         // results afterwards). Pass it through so a post scheduled for a
         // narrower set (e.g. Facebook-only) never fans out to platforms the
         // admin didn't select. Empty/missing → publishToAll's default set.
-        let storedPlatforms = social.platforms_posted;
-        if (typeof storedPlatforms === 'string') {
-          try { storedPlatforms = JSON.parse(storedPlatforms); } catch { storedPlatforms = null; }
-        }
-        const requestedChannels = Array.isArray(storedPlatforms)
-          ? storedPlatforms.map((p) => (typeof p === 'string' ? p : p?.platform)).filter(Boolean)
-          : [];
+        const requestedChannels = storedChannels(social.platforms_posted);
 
         const result = await SocialMediaService.publishToAll({
           title: social.title,
@@ -775,6 +859,7 @@ const ContentScheduler = {
           source: 'scheduled',
           channels: requestedChannels.length ? requestedChannels : undefined,
           customContent,
+          ...storedPostOptions(social),
         });
 
         const complianceRejected = !result?.dryRun && !result?.success

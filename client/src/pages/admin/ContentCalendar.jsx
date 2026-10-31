@@ -35,6 +35,33 @@ const statusLabel = item => {
 };
 // A schedule the run has not started, or one it parked as failed, can be withdrawn.
 const UNSCHEDULABLE = new Set(["pending", "failed"]);
+// A social post can be withdrawn only while it waits for its time.
+const canUnschedule = item => item.type === "blog" ? UNSCHEDULABLE.has(item.status) : item.type === "social" && item.status === "pending";
+const SCHEDULED_TOAST = { blog: "Scheduled. The preview PR opens at that time.", social: "Scheduled!" };
+// Calendar -> Schedule Social: a saved Social Studio draft posts its own row at
+// the chosen time; with none picked, a typed title makes a new post (SOC-01).
+const scheduleSavedDraft = (postId, scheduledFor) => adminFetch("/admin/content/schedule-social", {
+  method: "POST",
+  body: JSON.stringify({ postId, scheduledFor }),
+});
+const draftOptionLabel = draft => `${draft.title}${draft.channels?.length ? ` (${draft.channels.join(", ")})` : ""}`;
+function SocialTarget({ form, setForm, drafts, loading, error }) {
+  return (
+    <>
+      <Field
+        label="Saved draft"
+        help="Drafts saved from Social Studio. The draft posts to its own channels at this time, with its saved image."
+        error={error ? `Couldn't load saved drafts: ${error}` : undefined}
+      >
+        <Select value={form.socialPostId} onChange={e => setForm(prev => ({ ...prev, socialPostId: e.target.value }))}>
+          <option value="">{loading ? "Loading saved drafts..." : "New post (type a title below)"}</option>
+          {drafts.map(draft => <option key={draft.id} value={draft.id}>{draftOptionLabel(draft)}</option>)}
+        </Select>
+      </Field>
+      {!form.socialPostId && <Field label="Title"><Input value={form.title} onChange={e => setForm(prev => ({ ...prev, title: e.target.value }))} /></Field>}
+    </>
+  );
+}
 // The scheduled run skips drafts with a PR, a failed publish or no body, so
 // the picker offers only drafts it can publish (BLOG-03).
 const schedulableDraft = post => Boolean(post.content) && !post.astro_pr_number && !post.astro_branch_name && (!post.astro_status || post.astro_status === "draft") && post.publish_status !== "publishing";
@@ -65,11 +92,15 @@ export default function ContentCalendar() {
   const [scheduleForm, setScheduleForm] = useState({
     type: "blog",
     blogPostId: "",
+    socialPostId: "",
     title: "",
     date: "",
     time: "09:00",
     autoShare: true
   });
+  const [socialDrafts, setSocialDrafts] = useState([]);
+  const [socialDraftError, setSocialDraftError] = useState("");
+  const [loadingSocialDrafts, setLoadingSocialDrafts] = useState(false);
   const [draftPosts, setDraftPosts] = useState([]);
   const [hiddenDrafts, setHiddenDrafts] = useState(0);
   const [draftError, setDraftError] = useState("");
@@ -120,6 +151,17 @@ export default function ContentCalendar() {
       setHiddenDrafts(0);
       setDraftError(e.message);
     }).finally(() => setLoadingDrafts(false));
+  }, [showSchedule, scheduleForm.type]);
+  useEffect(() => {
+    if (!showSchedule || scheduleForm.type !== "social") return;
+    setLoadingSocialDrafts(true);
+    setSocialDraftError("");
+    adminFetch("/admin/content/social-drafts").then(data => {
+      setSocialDrafts(data.drafts || []);
+    }).catch(e => {
+      setSocialDrafts([]);
+      setSocialDraftError(e.message);
+    }).finally(() => setLoadingSocialDrafts(false));
   }, [showSchedule, scheduleForm.type]);
   const shiftMonth = dir => {
     // A selected day belongs to the month it was picked in (Oct 31 does not
@@ -177,6 +219,7 @@ export default function ContentCalendar() {
       type,
       date,
       blogPostId: "",
+      socialPostId: "",
       title: ""
     }));
     setShowSchedule(true);
@@ -211,6 +254,8 @@ export default function ContentCalendar() {
             }),
           },
         );
+      } else if (scheduleForm.socialPostId) {
+        await scheduleSavedDraft(scheduleForm.socialPostId, publishAt);
       } else {
         if (!scheduleForm.title.trim()) {
           showToast("Add a title");
@@ -227,7 +272,7 @@ export default function ContentCalendar() {
           }),
         });
       }
-      showToast(scheduleForm.type === "blog" ? "Scheduled. The preview PR opens at that time." : "Scheduled!");
+      showToast(SCHEDULED_TOAST[scheduleForm.type]);
       setShowSchedule(false);
       loadCalendar();
     } catch (e) {
@@ -311,7 +356,7 @@ export default function ContentCalendar() {
                 <div className="text-ink-secondary">{statusLabel(item)} · {item.platforms?.join(", ") || item.type}</div>
               </div>
               <Badge tone="neutral">{statusLabel(item)}</Badge>
-              {item.type === "blog" && UNSCHEDULABLE.has(item.status) && (
+              {canUnschedule(item) && (
                 <Button variant="secondary" onClick={() => handleUnschedule(item)} loading={unscheduling === item.id} disabled={Boolean(unscheduling)}>Unschedule</Button>
               )}
             </div>
@@ -325,7 +370,7 @@ export default function ContentCalendar() {
         </DialogHeader>
         <DialogBody className="space-y-3">
           <Field label="Type">
-            <Select value={scheduleForm.type} onChange={e => setScheduleForm(prev => ({ ...prev, type: e.target.value, blogPostId: "", title: "" }))}>
+            <Select value={scheduleForm.type} onChange={e => setScheduleForm(prev => ({ ...prev, type: e.target.value, blogPostId: "", socialPostId: "", title: "" }))}>
               <option value="blog">Blog Draft</option><option value="social">Social Post</option>
             </Select>
           </Field>
@@ -340,7 +385,7 @@ export default function ContentCalendar() {
                 {draftPosts.map(post => <option key={post.id} value={post.id}>{post.title}</option>)}
               </Select>
             </Field>
-          ) : <Field label="Title"><Input value={scheduleForm.title} onChange={e => setScheduleForm(prev => ({ ...prev, title: e.target.value }))} /></Field>}
+          ) : <SocialTarget form={scheduleForm} setForm={setScheduleForm} drafts={socialDrafts} loading={loadingSocialDrafts} error={socialDraftError} />}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_140px]">
             <Field label="Date"><Input type="date" value={scheduleForm.date} onChange={e => setScheduleForm(prev => ({ ...prev, date: e.target.value }))} /></Field>
             <Field label="Time"><Input type="time" value={scheduleForm.time} onChange={e => setScheduleForm(prev => ({ ...prev, time: e.target.value }))} /></Field>

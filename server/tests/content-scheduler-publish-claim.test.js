@@ -432,6 +432,49 @@ describe('atomic SOCIAL publishing claim', () => {
     expect(writes).toHaveLength(0);
   });
 
+  test('a saved campaign draft posts its stored image and folds the result into its own row; a title-only row is unchanged (SOC-01)', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.publishToAll.mockResolvedValue({ ok: true });
+    const saved = {
+      ...social,
+      id: 'soc-2',
+      source_type: 'campaign_builder',
+      source_guid: 'campaign_builder_1',
+      image_url: 'https://cdn.example.com/card.png',
+      platforms_posted: '["facebook","instagram"]',
+      custom_content: '{"facebook":"fb copy","instagram":"ig copy"}',
+    };
+    mockState.pendingSocials = [saved, social];
+
+    await ContentScheduler.processScheduledPosts();
+
+    const [savedCall, plainCall] = SocialMedia.publishToAll.mock.calls.map(([arg]) => arg);
+    // the saved image rides along, so no fresh generated image replaces it
+    expect(savedCall).toMatchObject({
+      guid: 'campaign_builder_1',
+      source: 'scheduled',
+      channels: ['facebook', 'instagram'],
+      customContent: { facebook: 'fb copy', instagram: 'ig copy' },
+      imageUrl: 'https://cdn.example.com/card.png',
+      noAiImage: true,
+      postId: 'soc-2',
+    });
+    // a row with no image and no campaign source publishes exactly as before
+    expect(plainCall).not.toHaveProperty('imageUrl');
+    expect(plainCall).not.toHaveProperty('postId');
+    expect(plainCall).not.toHaveProperty('noAiImage');
+  });
+
+  test('a stored image that is not http(s) is never passed to the publishers (SOC-01)', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.publishToAll.mockResolvedValue({ ok: true });
+    mockState.pendingSocials = [{ ...social, source_type: 'campaign_builder', image_url: 'javascript:alert(1)' }];
+
+    await ContentScheduler.processScheduledPosts();
+
+    expect(SocialMedia.publishToAll.mock.calls[0][0]).not.toHaveProperty('imageUrl');
+  });
+
   test('publishToAll failure marks failed only under the claim we hold', async () => {
     const SocialMedia = enableSocial();
     SocialMedia.publishToAll.mockRejectedValue(new Error('FB API down'));
