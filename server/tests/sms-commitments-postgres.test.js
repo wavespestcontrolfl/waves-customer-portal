@@ -4539,7 +4539,12 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(audits).toHaveLength(1);
         expect(audits[0]).toMatchObject({ resource_type: 'call_commitment', resource_id: row.id });
         expect(audits[0].metadata).toMatchObject({ commitment_id: row.id, kind: 'other', visit_id: visit.id });
-        await tick(NOW + 600000);
+        // The row carries the database clock while tick() runs 2 h ahead of it, so
+        // from about 9:50 PM ET the next run read a new Eastern day and wrote a
+        // second row. Stamp the row at its run's time; keep the next run in that day.
+        await mockPg('audit_log').where({ id: audits[0].id }).update({ created_at: at(NOW) });
+        const dayEnd = parseETDateTime(`${etDateString(addETDays(at(NOW), 1))}T00:00`).getTime() - 1;
+        await tick(Math.min(NOW + 600000, dayEnd - message.created_at.getTime()));
         audits = await mockPg('audit_log').where({ action: 'sms_commitment.on_track.shadow' });
         expect(audits).toHaveLength(1);
       });
