@@ -83,16 +83,17 @@ function storedChannels(platformsPosted) {
 }
 
 // Extra publishToAll options for a saved campaign draft only: its own image,
-// and never a fresh generated image in place of the saved one. No postId:
-// publishToAll would rewrite this row's platforms_posted (the REQUESTED
-// channels the next tick reads) with results, even on a dry run, so the row
-// records its outcome the same way a typed scheduled post does. GBP takes no
-// shared image (only an approved card), so a saved draft posts to GBP
-// text-only. Every other scheduled row gets none and publishes as before.
-function storedPostOptions(social) {
+// and never a fresh generated image in place of the saved one. A real publish
+// folds its results into this same row (postId: one History entry). A dry run
+// does not: publishToAll would replace the REQUESTED channels in
+// platforms_posted with results, and the next tick reads them; it records like
+// a typed scheduled post instead. GBP takes no shared image (only an approved
+// card), so a saved draft posts to GBP text-only. Every other scheduled row
+// gets none and publishes exactly as before.
+function storedPostOptions(social, { dryRun = false } = {}) {
   if (social.source_type !== SAVED_DRAFT.source_type) return {};
   const imageUrl = httpUrlOrNull(social.image_url);
-  return { ...(imageUrl ? { imageUrl } : {}), noAiImage: true };
+  return { ...(imageUrl ? { imageUrl } : {}), noAiImage: true, ...(dryRun ? {} : { postId: social.id }) };
 }
 
 function parseCalendarStart(value) {
@@ -880,7 +881,7 @@ const ContentScheduler = {
           source: 'scheduled',
           channels: requestedChannels.length ? requestedChannels : undefined,
           customContent,
-          ...storedPostOptions(social),
+          ...storedPostOptions(social, { dryRun: SocialMediaService.SOCIAL_FLAGS?.dryRun === true }),
         });
 
         const complianceRejected = !result?.dryRun && !result?.success

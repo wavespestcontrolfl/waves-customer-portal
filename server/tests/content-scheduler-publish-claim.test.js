@@ -474,14 +474,30 @@ describe('atomic SOCIAL publishing claim', () => {
       customContent: { facebook: 'fb copy', instagram: 'ig copy' },
       imageUrl: 'https://cdn.example.com/card.png',
       noAiImage: true,
+      // a real publish folds its results into the saved row: one History entry
+      postId: 'soc-2',
     });
-    // no postId: publishToAll must not rewrite the row's requested channels
-    // (platforms_posted) with results, which the next tick would read
-    expect(savedCall).not.toHaveProperty('postId');
     // a row with no image and no campaign source publishes exactly as before
     expect(plainCall).not.toHaveProperty('imageUrl');
     expect(plainCall).not.toHaveProperty('postId');
     expect(plainCall).not.toHaveProperty('noAiImage');
+  });
+
+  test('on a dry run a saved draft passes no postId, so its requested channels survive for the next tick (SOC-01)', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.SOCIAL_FLAGS.dryRun = true;
+    try {
+      SocialMedia.publishToAll.mockResolvedValue({ dryRun: true });
+      mockState.pendingSocials = [{ ...social, source_type: 'campaign_builder', platforms_posted: JSON.stringify(['gbp']) }];
+
+      await ContentScheduler.processScheduledPosts();
+
+      const call = SocialMedia.publishToAll.mock.calls[0][0];
+      expect(call).not.toHaveProperty('postId');
+      expect(call.channels).toEqual(['gbp']);
+    } finally {
+      SocialMedia.SOCIAL_FLAGS.dryRun = false;
+    }
   });
 
   test('a stored image that is not http(s) is never passed to the publishers (SOC-01)', async () => {
