@@ -24,6 +24,9 @@ jest.mock('../config/feature-gates', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+const mockRecordToolEvent = jest.fn();
+jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: (...args) => mockRecordToolEvent(...args) }));
+
 const mockEmbedQuery = jest.fn();
 jest.mock('../services/llm/embed', () => ({
   embedQuery: (...args) => mockEmbedQuery(...args),
@@ -82,6 +85,7 @@ beforeEach(() => {
   mockRejectWith = null;
   builders.length = 0;
   mockEmbedQuery.mockReset().mockResolvedValue({ ok: false, reason: 'unconfigured' });
+  mockRecordToolEvent.mockReset();
 });
 
 async function rpc(payload, { token = TOKEN, headers = {} } = {}) {
@@ -330,5 +334,24 @@ describe('tools', () => {
     expect(body.result.isError).toBe(true);
     expect(toolResult(body).error).toBe('tool execution failed');
     expect(JSON.stringify(body)).not.toMatch(/10\.0\.0\.7/);
+    expect(mockRecordToolEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'mcp-knowledge', toolName: 'list_sources', success: false }));
+  });
+
+  test('every tool call is one tool_health_events row with its outcome and time, never its arguments or answer', async () => {
+    mockRows = [{ source: 'kb', chunks: '3', last_updated: '2026-07-18T00:00:00Z' }];
+    await callTool('list_sources', {});
+    const bogus = await callTool('get_protocol', { protocol_key: 'nuke_everything' });
+    expect(bogus.body.result.isError).toBe(true);
+
+    expect(mockRecordToolEvent).toHaveBeenCalledTimes(2);
+    const [ok, refused] = mockRecordToolEvent.mock.calls.map(([event]) => event);
+    expect(ok).toEqual({ source: 'mcp-knowledge', context: 'mcp', toolName: 'list_sources', success: true, durationMs: expect.any(Number) });
+    expect(refused).toEqual({ source: 'mcp-knowledge', context: 'mcp', toolName: 'get_protocol', success: false, durationMs: expect.any(Number) });
+    expect(JSON.stringify(mockRecordToolEvent.mock.calls)).not.toMatch(/nuke_everything|kb/);
+  });
+
+  test('initialize carries no instructions: this server needs none beyond its tool descriptions', async () => {
+    const { body } = await rpc({ jsonrpc: '2.0', id: 8, method: 'initialize', params: {} });
+    expect(body.result).not.toHaveProperty('instructions');
   });
 });

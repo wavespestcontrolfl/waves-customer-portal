@@ -124,6 +124,7 @@ describe('JSON-RPC surface', () => {
     expect(body.result.serverInfo).toEqual({ name: 'waves-public', version: '1.0.0' });
     expect(body.result.protocolVersion).toBe('2025-03-26');
     expect(body.result.capabilities).toEqual({ tools: {} });
+    expect(body.result).not.toHaveProperty('instructions');
   });
 
   test('tools/list exposes exactly the 5 public read-only tools', async () => {
