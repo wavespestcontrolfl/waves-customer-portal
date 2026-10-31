@@ -9,12 +9,11 @@ jest.mock('../services/dispatch-alerts', () => ({
   createAlert: jest.fn(),
 }));
 
-// The street-level hold recheck (its row-lock transaction needs a database): a controllable stand-in.
+// The street-level hold re-read before each alert (it queries the database): a controllable stand-in.
 const mockHeld = new Set();
-const mockTrx = { isTrx: true };
 jest.mock('../services/street-level-hold', () => ({
   ...jest.requireActual('../services/street-level-hold'),
-  runUnlessLiveHold: jest.fn(async (id, action) => (mockHeld.has(id) ? { held: true } : { held: false, result: await action(mockTrx) })),
+  isStreetLevelHoldVisit: jest.fn(async (id) => mockHeld.has(id)),
 }));
 
 const db = require('../models/db');
@@ -80,7 +79,6 @@ describe('unassigned-overdue detector tuning', () => {
         window_end: '11:00:00',
         scheduled_date: '2026-05-05',
       },
-      trx: mockTrx,
     });
     expect(createAlert).toHaveBeenNthCalledWith(2, {
       type: 'unassigned_overdue',
@@ -93,7 +91,6 @@ describe('unassigned-overdue detector tuning', () => {
         window_end: '14:00:00',
         scheduled_date: '2026-05-05',
       },
-      trx: mockTrx,
     });
   });
 
@@ -111,7 +108,16 @@ describe('unassigned-overdue detector tuning', () => {
 
     expect(result).toEqual({ created: 1, suppressed: 0, scanned: 2 });
     expect(createAlert).toHaveBeenCalledTimes(1);
-    // Written on the guard's own transaction, like tech-late-detector.
-    expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-ok', trx: mockTrx }));
+    expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-ok' }));
+  });
+
+  // An advisory sweep never row-locks scheduled_services: invoice settlement takes the visit
+  // FOR UPDATE NOWAIT, so any lock held here would fail a payment with visit_busy.
+  test('the detector takes no row locks', () => {
+    const fs = require('fs');
+    const code = fs.readFileSync(require.resolve('../services/unassigned-overdue-detector'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    expect(code).not.toMatch(/\.for(Update|NoKeyUpdate|Share|KeyShare)\(|\bFOR (UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b|runUnlessLiveHold/);
   });
 });

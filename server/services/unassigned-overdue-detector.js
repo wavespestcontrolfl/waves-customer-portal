@@ -68,7 +68,7 @@ async function runUnassignedOverdueCheck() {
 
 async function runInner() {
   if (require('./no-show-detector').enabled()) return { created: 0, skipped: true, reason: 'handled_by_tech_late_check' };
-  const { heldVisitSql, runUnlessLiveHold } = require('./street-level-hold');
+  const { heldVisitSql, isStreetLevelHoldVisit } = require('./street-level-hold');
   let rows;
   try {
     const result = await db.raw(`
@@ -130,9 +130,13 @@ async function runInner() {
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
     const severity = delayMin >= UNASSIGNED_OVERDUE_CRITICAL_MINUTES ? 'critical' : 'warn';
     try {
-      // A promotion to a street-level hold can land after the scan above: re-read the hold under the
-      // visit row lock right before alerting (same guard as tech-late-detector).
-      const guarded = await runUnlessLiveHold(row.job_id, (trx) => createAlert({
+      // A promotion to a street-level hold can land after the scan above: re-read the hold right before
+      // alerting (a failed read counts as held). No row lock: this advisory sweep must never lock
+      // scheduled_services, because invoice settlement takes the visit FOR UPDATE NOWAIT and a held lock
+      // fails the payment with visit_busy. A hold that lands after this read is resolved by
+      // tech-late-detector's next tick.
+      if (await isStreetLevelHoldVisit(row.job_id)) continue;
+      await createAlert({
         type: 'unassigned_overdue',
         severity,
         techId: null,
@@ -143,9 +147,7 @@ async function runInner() {
           window_end: row.window_end,
           scheduled_date: row.scheduled_date,
         },
-        trx,
-      }));
-      if (guarded.held) continue;
+      });
       created += 1;
     } catch (err) {
       // 23505 = unique_violation. Concurrent process beat us between
