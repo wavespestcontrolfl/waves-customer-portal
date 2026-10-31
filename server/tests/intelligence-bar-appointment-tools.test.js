@@ -2015,6 +2015,33 @@ describe('reschedule_appointment', () => {
     expect(mockIoEmit).not.toHaveBeenCalled();
   });
 
+  // Size rule (owner 2026-10-31, lawn_rounds_9 only): with collective moves on, the tool still refuses a
+  // series move, but a rounds one-off (7 days or fewer inside the round) is a single-row move it may make.
+  describe('collective gate on, lawn rounds size rule', () => {
+    const roundsAppt = { ...baseAppt, is_recurring: true, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2099-04-01' };
+    beforeEach(() => { process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true'; });
+    afterEach(() => { delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+
+    test.each([
+      ['5 days inside the round', '2099-04-06', undefined, false],
+      ['11 days', '2099-04-12', undefined, true],
+      ['5 days of another pattern', '2099-04-06', 'custom', true],
+      ['5 days of a row with no pattern', '2099-04-06', null, true],
+    ])('%s: refused as a series move = %s', async (_label, newDate, pattern, refused) => {
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue(pattern === undefined ? roundsAppt : { ...roundsAppt, recurring_pattern: pattern }) }),
+          chain(), // advisory probe
+          chain({ update: jest.fn().mockImplementation(() => updateResult(0)) }), // CAS miss: proof the move was attempted
+        ],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      });
+      const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: newDate });
+      if (refused) expect(result).toMatchObject({ code: 'collective_move_unsupported' });
+      else expect(result.error).toMatch(/changed concurrently/);
+    });
+  });
+
   test('a windowless visit CASes on null start/end (object-form IS NULL contract) and moves date-only', async () => {
     // A windowless row's observed window fields are null — the object-form
     // predicate renders them as IS NULL (never `= NULL`, which matches

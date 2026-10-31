@@ -22,7 +22,7 @@ const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFi
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
-const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
+const { collectiveMoveGateOn, dateExceptionStamp, movesAsSeries } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
@@ -11120,7 +11120,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // so with the gate on a DATE move of a cadence visit is refused
               // rather than silently applied per-visit (refuse-don't-drop,
               // same as the IB tool); the bulk series path is a follow-up.
-              if (collectiveMoveGateOn() && svc.is_recurring === true && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
+              if (movesAsSeries(svc, bulkTargetDate) && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
                 throw Object.assign(
                   new Error('part of a recurring plan — with collective moves on, move it from Dispatch or the Edit appointment modal so its future visits follow'),
                   { isValidation: true },
@@ -12253,8 +12253,10 @@ async function planCollectiveEditDateMove(req) {
   const target = validScheduleDate(scheduledDate);
   if (!target) return null;
   const row = await db('scheduled_services').where({ id: req.params.id })
-    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');
-  if (!row || row.is_recurring !== true) return null;
+    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id',
+      'recurring_pattern', 'date_exception', 'date_exception_cadence_date');
+  // Not a series move (a one-time visit, or a lawn rounds one-off under the size rule): the edit saves as an ordinary date edit.
+  if (!row || !movesAsSeries(row, target)) return null;
   if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
   if (target === dateOnly(row.scheduled_date)) return null;
   // Grouped row (local gate r28): the handler's own grouped slot guard runs
@@ -18103,8 +18105,8 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       const collectiveMoveTarget = validScheduleDate(scheduledDate);
       if (collectiveMoveTarget) {
         const moveRow = await db('scheduled_services').where({ id })
-          .first('is_recurring', 'scheduled_date', 'status');
-        if (moveRow && moveRow.is_recurring === true
+          .first('is_recurring', 'scheduled_date', 'status', 'recurring_pattern', 'date_exception', 'date_exception_cadence_date');
+        if (moveRow && movesAsSeries(moveRow, collectiveMoveTarget)
           && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(moveRow.status))
           && collectiveMoveTarget !== dateOnly(moveRow.scheduled_date)) {
           scheduledDate = undefined;

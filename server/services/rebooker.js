@@ -341,6 +341,21 @@ function collectiveMoveGateOn() {
   return process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true';
 }
 
+// The ONE decision "this move of this row is a series move": the collective
+// gate is on, the row is a cadence visit, and the move is not a lawn rounds
+// one-off (size rule, owner 2026-10-31: 7 days or fewer inside the round,
+// measured from the regular date). Every staff and tool surface that moves,
+// previews or acknowledges a date move asks this, so they agree by
+// construction. A row that lacks recurring_pattern is never a one-off (series,
+// as before). A same-date target is not a one-off either: the caller keeps its
+// own date-change test, and the choke point must still reach a series retry's
+// replay.
+function movesAsSeries(row, newDate) {
+  const to = dateOnly(newDate);
+  const oneOff = !!to && to !== dateOnly(row?.scheduled_date) && roundsRowMoveIsOneOff(row, to);
+  return collectiveMoveGateOn() && row?.is_recurring === true && !oneOff;
+}
+
 // GATE_SERIES_MOVE_CARRIES_VISIT (owner ruling 2026-10-01: a pest visit riding
 // a lawn visit is ONE appointment — when either moves, both move). When true
 // for this caller, a series sweep that reaches an occurrence sitting in a
@@ -1769,7 +1784,7 @@ class SmartRebooker {
     // through the unit mover.
     let soloVisitRecheck = false;
     if (options.visitPolicy !== 'single' && service.visit_id
-      && options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
+      && options.seriesPolicy !== 'single' && movesAsSeries(service, newDate)) {
       // A retry of a series carry that already COMMITTED (the stop keeps its
       // visit) replays before the unit mover's eligibility checks — a visit
       // that froze since must not turn a committed move into a refusal and
@@ -1812,13 +1827,9 @@ class SmartRebooker {
     // an explicit single-row member move, keeps its own contract.
     const membershipFenced = options.visitPolicy !== 'single' && !service.visit_id
       && !Object.prototype.hasOwnProperty.call(options.expect || {}, 'visit_id');
-    // Size rule (owner 2026-10-31, lawn_rounds_9 only): a date move of 7 days or fewer inside the
-    // visit's round, measured from its regular (cadence) date, moves only this visit. It falls
-    // through to the single path below, which keeps the OUT_OF_ROUND guard. A same-date call is
-    // never a one-off here: a retry of a committed series move must still reach its replay.
-    const sizeRuleSingle = dateOnly(newDate) !== dateOnly(service.scheduled_date)
-      && roundsRowMoveIsOneOff(service, dateOnly(newDate));
-    if (options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true && !sizeRuleSingle) {
+    // Size rule (owner 2026-10-31, lawn_rounds_9 only): a one-off date move falls through to the
+    // single path below, which keeps the OUT_OF_ROUND guard (see movesAsSeries).
+    if (options.seriesPolicy !== 'single' && movesAsSeries(service, newDate)) {
       // A retry of a series move that already committed finds the anchor ON
       // the target (no date delta) — resolve the prior move by request
       // identity BEFORE branching on the anchor's mutable date, so the
@@ -4817,6 +4828,8 @@ class SmartRebooker {
     if (service.is_recurring !== true || !seriesDateStr || seriesDateStr === dateOnly(service.scheduled_date)) {
       return empty;
     }
+    // Size rule: a lawn rounds one-off moves this visit alone, so there is no series to preview.
+    if (roundsRowMoveIsOneOff(service, seriesDateStr)) return { ...empty, oneOff: true };
     const parentId = service.recurring_parent_id || service.id;
     const parent = await conn('scheduled_services').where({ id: parentId }).first();
     if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) return empty;
@@ -5041,6 +5054,7 @@ module.exports.makeSeriesProjector = makeSeriesProjector;
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;
 module.exports.collectiveMoveGateOn = collectiveMoveGateOn;
+module.exports.movesAsSeries = movesAsSeries;
 module.exports.assertSeriesWriteSetOwnedBy = assertSeriesWriteSetOwnedBy;
 module.exports.replaySeriesMoveCleanup = replaySeriesMoveCleanup;
 module.exports.dateExceptionStamp = dateExceptionStamp;

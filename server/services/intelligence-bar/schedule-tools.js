@@ -1281,9 +1281,8 @@ function splitMoveByDate(nonTerminal, dateStr) {
   const onTarget = (s) => stopDateOnly(s.scheduled_date) === dateStr;
   const movableAnyDate = nonTerminal.filter((s) => !elapsed(s));
   const movableByDate = movableAnyDate.filter((s) => !onTarget(s));
-  // The gate read is the rebooker's own (lazy — only when a recurring stop is in the set).
-  const collectiveGateOn = movableByDate.some((s) => s.is_recurring === true) && require('../rebooker').collectiveMoveGateOn();
-  const isSeries = (s) => collectiveGateOn && s.is_recurring === true;
+  // The rebooker's own decision (gate + cadence row + the lawn rounds size rule), read lazily — only for a recurring stop.
+  const isSeries = (s) => s.is_recurring === true && require('../rebooker').movesAsSeries(s, dateStr);
   return {
     skippedElapsed: nonTerminal.filter(elapsed).map((s) => ({ id: s.id, status: s.status })),
     skippedUnchanged: movableAnyDate.filter(onTarget).map((s) => ({ id: s.id })),

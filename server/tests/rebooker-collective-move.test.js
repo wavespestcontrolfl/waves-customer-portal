@@ -577,11 +577,82 @@ describe('reschedule() choke point — lawn rounds size rule', () => {
 
   test('the explicit office series move is never narrowed: the size rule lives at the choke point and the projection, not in rescheduleSeries or the dispatch scope "series" call', () => {
     const rebooker = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
-    expect(rebooker.match(/roundsRowMoveIsOneOff/g)).toHaveLength(3); // the import, the choke point, the next-visit projection
+    expect(rebooker.match(/roundsRowMoveIsOneOff/g)).toHaveLength(4); // the import, movesAsSeries, the series preview, the next-visit projection
     const series = rebooker.slice(rebooker.indexOf('async rescheduleSeries('), rebooker.indexOf('async projectNextVisitDates('));
-    expect(series).not.toMatch(/roundsRowMoveIsOneOff|sizeRuleSingle/);
+    expect(series).not.toMatch(/roundsRowMoveIsOneOff|movesAsSeries/);
     const dispatch = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     expect(dispatch).not.toMatch(/roundsRowMoveIsOneOff|roundsMoveIsOneOff/);
+  });
+});
+
+// movesAsSeries is the ONE decision every staff and tool surface asks (choke point, series preview,
+// ack, bulk move, Edit modal, IB tools), so they agree by construction.
+describe('movesAsSeries — the shared series-move decision', () => {
+  const row = (extra = {}) => ({ is_recurring: true, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2098-04-01', ...extra });
+  beforeEach(() => { process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true'; });
+
+  test('lawn rounds: 7 days or fewer inside the round is not a series move; 8 days, the next round and another pattern are', () => {
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-02')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-08')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-09')).toBe(true);
+    expect(SmartRebooker.movesAsSeries(row({ scheduled_date: '2098-04-22' }), '2098-04-26')).toBe(true);
+    expect(SmartRebooker.movesAsSeries(row({ recurring_pattern: 'custom' }), '2098-04-02')).toBe(true);
+  });
+
+  test('measures from the regular date of a date exception', () => {
+    const moved = row({ scheduled_date: '2098-04-06', date_exception: true, date_exception_cadence_date: '2098-04-01' });
+    expect(SmartRebooker.movesAsSeries(moved, '2098-04-08')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(moved, '2098-04-09')).toBe(true);
+  });
+
+  test('a row without recurring_pattern falls back to the series move, never to single', () => {
+    const { recurring_pattern: _p, ...bare } = row();
+    expect(SmartRebooker.movesAsSeries(bare, '2098-04-02')).toBe(true);
+    expect(SmartRebooker.movesAsSeries(row({ recurring_pattern: undefined }), '2098-04-02')).toBe(true);
+  });
+
+  test('gate off, a one-time visit, a booster and a missing row are never a series move; a same-date target stays in (the retry replay)', () => {
+    expect(SmartRebooker.movesAsSeries(row({ is_recurring: false }), '2098-04-20')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(row({ is_recurring: null }), '2098-04-20')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(null, '2098-04-20')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-01')).toBe(true);
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-20')).toBe(false);
+  });
+});
+
+describe('previewSeriesMove — lawn rounds size rule', () => {
+  const wirePreview = (anchor, siblings) => {
+    const dbQueries = [
+      chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ select: jest.fn().mockResolvedValue(siblings) }),
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'property_preferences') return chain({ first: jest.fn().mockResolvedValue(null) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    return dbQueries;
+  };
+  const sib = (id, date) => ({ id, status: 'confirmed', scheduled_date: date, window_start: '09:00:00', window_end: '11:00:00' });
+  const rounds = (extra = {}) => anchorRow({ recurring_pattern: 'lawn_rounds_9', scheduled_date: '2098-04-01', ...extra });
+
+  test('a one-off returns the non-collective shape (no siblings read) so every preview consumer shows a single move', async () => {
+    const queries = wirePreview(rounds(), []);
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', '2098-04-08');
+    expect(preview).toMatchObject({ collective: false, oneOff: true, movableCount: 0, conflictCount: 0, firstAffectedDate: null });
+    expect(preview).not.toHaveProperty('occurrenceIds');
+    expect(queries).toHaveLength(2); // only the first service read ran
+  });
+
+  test('8 days still previews the series; so does a one-day move of another pattern', async () => {
+    wirePreview(rounds(), [sib('svc-1', '2098-04-01'), sib('svc-2', '2098-05-12')]);
+    const far = await SmartRebooker.previewSeriesMove('svc-1', '2098-04-09');
+    expect(far).toMatchObject({ collective: true, occurrenceIds: ['svc-1', 'svc-2'] });
+    expect(far).not.toHaveProperty('oneOff');
+    wirePreview(rounds({ recurring_pattern: 'custom' }), [sib('svc-1', '2098-04-01'), sib('svc-2', '2098-05-12')]);
+    expect(await SmartRebooker.previewSeriesMove('svc-1', '2098-04-02')).toMatchObject({ collective: true });
   });
 });
 
@@ -1864,7 +1935,7 @@ describe('caller wiring (source)', () => {
     const write = src.indexOf('scheduled_date: dateStr,', fn);
     expect(refuse).toBeGreaterThan(fn);
     expect(refuse).toBeLessThan(write);
-    expect(src.slice(fn, refuse)).toContain('collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr');
+    expect(src.slice(fn, refuse)).toContain('movesAsSeries(appt, dateStr) && dateStr !== oldDateStr');
   });
 
   test('rain-out fallback and the customer web single branch opt out; the edit modal intercepts BEFORE its per-row edit', () => {

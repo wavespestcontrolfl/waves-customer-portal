@@ -90,3 +90,34 @@ describe('the SMS offer executor shares the page decision', () => {
     expect(page).toMatch(/'s\.date_exception',\s*\n\s*'s\.date_exception_cadence_date',/);
   });
 });
+
+describe('every staff and tool surface asks the one shared decision (rebooker.movesAsSeries)', () => {
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+  const COLUMNS = "'recurring_pattern', 'date_exception', 'date_exception_cadence_date'";
+
+  test.each([
+    ['routes/admin-schedule.js', ['movesAsSeries(svc, bulkTargetDate)', 'movesAsSeries(row, target)', 'movesAsSeries(moveRow, collectiveMoveTarget)'], 3],
+    ['services/intelligence-bar/tools.js', ['movesAsSeries(appt, dateStr) && dateStr !== oldDateStr'], 1],
+    ['services/intelligence-bar/schedule-tools.js', ["require('../rebooker').movesAsSeries(s, dateStr)"], 1],
+    ['routes/admin-intelligence-bar.js', ["require('../services/rebooker').movesAsSeries(seriesRow, params.new_date)"], 1],
+  ])('%s', (rel, needles) => {
+    const src = read(rel);
+    for (const needle of needles) expect(src).toContain(needle);
+    // No surface keeps its own copy of the old gate-plus-flag test for a date move.
+    expect(src).not.toMatch(/collectiveMoveGateOn\(\) && (svc|appt|row|moveRow)\.is_recurring === true/);
+  });
+
+  test('the narrow selects carry the pattern and the cadence columns, so a short rounds move is judged on its row', () => {
+    const schedule = read('routes/admin-schedule.js');
+    expect(schedule.match(new RegExp(COLUMNS.replace(/[()]/g, '\\$&'), 'g')).length).toBeGreaterThanOrEqual(2);
+    expect(read('routes/admin-intelligence-bar.js')).toContain("'is_recurring', 'scheduled_date', 'recurring_pattern', 'date_exception', 'date_exception_cadence_date'");
+  });
+
+  test('the choke point and the dispatch preview use the shared decision or its preview verdict', () => {
+    const rebooker = read('services/rebooker.js');
+    expect(rebooker.match(/movesAsSeries\(service, newDate\)/g)).toHaveLength(2);
+    const dispatch = read('routes/admin-dispatch.js');
+    expect(dispatch).toContain('preview.oneOff !== true');
+    expect(dispatch).toContain('if (preview?.oneOff) return null;');
+  });
+});

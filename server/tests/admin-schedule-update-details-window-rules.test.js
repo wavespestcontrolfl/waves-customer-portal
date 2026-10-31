@@ -223,6 +223,42 @@ describe('date-only moves + the scheduling-field CAS', () => {
     }
   });
 
+  // Size rule (owner 2026-10-31, lawn_rounds_9 only): with collective moves on the Edit modal demands the
+  // series acknowledgement for a series move, but a rounds one-off saves as an ordinary single date edit.
+  describe('collective gate on: the lawn rounds size rule', () => {
+    // 2099-01-15 sits in round 1 of 2099 (2098-12-25 to 2099-02-02).
+    const roundsRow = (extra = {}) => ({ ...STORED, is_recurring: true, status: 'confirmed', visit_id: null, recurring_pattern: 'lawn_rounds_9', ...extra });
+    beforeEach(() => { process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true'; });
+    afterEach(() => { delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+
+    test('a one-off (5 days) is not stopped for an acknowledgement: the save opens its transaction', async () => {
+      db.mockImplementation(() => chain(roundsRow()));
+      db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+      const { status } = await put({ scheduledDate: '2099-01-20' });
+      expect(status).toBe(418);
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['8 days', '2099-01-23', {}],
+      ['a one-day move of another pattern', '2099-01-16', { recurring_pattern: 'custom' }],
+      ['a one-day move of a row with no pattern', '2099-01-16', { recurring_pattern: null }],
+    ])('%s still demands the series acknowledgement, nothing saved', async (_label, scheduledDate, extra) => {
+      db.mockImplementation(() => chain(roundsRow(extra)));
+      const { status, body } = await put({ scheduledDate });
+      expect(status).toBe(409);
+      expect(body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    test('the dry-run preview mirrors the save: a one-off keeps its date, a series move strips it', () => {
+      const at = src.indexOf("router.post('/:id/update-details/preview'");
+      const block = src.slice(at, src.indexOf('collectiveMoveTarget !== dateOnly(moveRow.scheduled_date)', at));
+      expect(block).toContain('movesAsSeries(moveRow, collectiveMoveTarget)');
+      expect(block).toContain("'recurring_pattern', 'date_exception', 'date_exception_cadence_date'");
+    });
+  });
+
   test('a DATE-ONLY move of a windowless row (both null) passes validation and opens the transaction', async () => {
     db.mockImplementation(() => chain({ ...STORED, window_start: null, window_end: null }));
     db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });

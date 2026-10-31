@@ -14,7 +14,13 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
-const mockRebooker = { needsLifecycleRewind: jest.fn(() => false), collectiveMoveGateOn: jest.fn(() => false) };
+const mockRebooker = {
+  needsLifecycleRewind: jest.fn(() => false),
+  collectiveMoveGateOn: jest.fn(() => false),
+  // The rebooker's own decision, with the real size rule.
+  movesAsSeries: jest.fn((row, date) => mockRebooker.collectiveMoveGateOn() && row.is_recurring === true
+    && !require('../services/lawn-rounds').roundsRowMoveIsOneOff(row, date)),
+};
 jest.mock('../services/rebooker', () => mockRebooker);
 const mockFrozen = new Map();
 const mockMembers = new Map();
@@ -88,6 +94,23 @@ describe('move_stops_to_day with a grouped stop beside movable ones', () => {
     } finally {
       mockRebooker.collectiveMoveGateOn.mockReturnValue(false);
       mockFrozen.clear();
+    }
+  });
+
+  test('size rule: a lawn rounds one-off stop is movable beside a series stop, which is still skipped as collective', async () => {
+    const dated = (id, extra) => ({ ...stop(id, null), is_recurring: true, scheduled_date: '2099-01-02', ...extra });
+    mockStops.splice(0, mockStops.length,
+      dated('s1', { recurring_pattern: 'lawn_rounds_9' }),                       // 3 days inside round 1 of 2099: single
+      dated('s2', { recurring_pattern: 'lawn_rounds_9', scheduled_date: '2098-12-30' }), // 6 days: single
+      dated('s3', { recurring_pattern: 'lawn_rounds_9', scheduled_date: '2099-01-20' }), // 15 days: a series move
+      dated('s4', { recurring_pattern: 'custom' }));                              // another pattern: a series move
+    mockRebooker.collectiveMoveGateOn.mockReturnValue(true);
+    try {
+      const proposal = await executeScheduleTool('move_stops_to_day', { service_ids: ['s1', 's2', 's3', 's4'], new_date: '2099-01-05' });
+      expect(proposal.stops.map((s) => s.id)).toEqual(['s1', 's2']);
+      expect(proposal.capability_gaps).toEqual([{ code: 'collective_move_unsupported' }]);
+    } finally {
+      mockRebooker.collectiveMoveGateOn.mockReturnValue(false);
     }
   });
 

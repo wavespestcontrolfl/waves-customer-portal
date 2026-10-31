@@ -147,6 +147,28 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  // Size rule (owner 2026-10-31, lawn_rounds_9 only): the rebooker's preview says `oneOff` for a short move
+  // inside the round, so no acknowledgement is owed and the move reaches the rebooker as the single move it is.
+  test('gate on: a lawn rounds one-off owes no series ack and reaches the rebooker with no occurrence set', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = recurringRow();
+    SmartRebooker.previewSeriesMove.mockResolvedValueOnce({ collective: false, oneOff: true, movableCount: 0, conflictCount: 0 });
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' });
+    expect(status).toBe(200);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('expectOccurrenceIds');
+  });
+
+  test('GET series-move-preview: `enabled` is false for a one-off and follows the gate otherwise', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    const get = async () => (await fetch(`${baseUrl}/api/admin/dispatch/00000000-0000-4000-8000-000000000001/series-move-preview?newDate=${TARGET}`)).json();
+    SmartRebooker.previewSeriesMove.mockResolvedValueOnce({ collective: false, oneOff: true, movableCount: 0 });
+    expect(await get()).toMatchObject({ collective: false, enabled: false });
+    expect(await get()).toMatchObject({ collective: true, enabled: true, movableCount: 4 });
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    expect(await get()).toMatchObject({ enabled: false });
+  });
+
   test('the single customer notice for a grouped unit move quotes the STOP\'s landed start (visitMove.visitStart), not the tapped member\'s (codex #3609 r25 P1)', async () => {
     const { sendRescheduleNoticeForVisit } = require('../routes/admin-schedule');
     mockVisitRow = { ...recurringRow(), is_recurring: false, visit_id: '11111111-1111-4111-8111-111111111111' };
