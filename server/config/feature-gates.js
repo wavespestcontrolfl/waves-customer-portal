@@ -161,6 +161,7 @@
  *   GATE_ALERT_CATALOG=watch (owner 2026-10-29, "ok go" on admin bell rebuild step D1: every notification-registry type declares how it closes, and an admin alert the 08-28 bell policy silences is counted. `watch` = when NotificationService.create silences an admin row it writes ONE audit_log row (notification.bell_policy.muted) per Eastern day per distinct alert, category + trigger key + digit-free title stem only; the bell, pushes and create()'s return are unchanged. Anything else = off, byte-identical: no read, no write. Read at call time via alertCatalogMode(). See docs/gates-and-env.md.)
  *   GATE_SMS_STAFF_ACTION_ANSWERS=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F1: "A staff action answers a text" - a visit a person booked in the admin, or a payment a person recorded, for the text's customer within 24 hours after the text counts as the answer: the admin text alert closes, and in `true` the Messages Unanswered list and the evening Comms digest stop listing the text; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via staffActionAnswersMode(); shadow records the would-close only, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_LEAD_CONTACTED_CLOSE=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F5: a lead_contacted Leads bell closes once the lead was texted or called back, booked or quoted after the bell; its own gate, read at call time via leadContactedCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
+ *   GATE_PORTAL_CHAT_ANSWERED_CLOSE=shadow|true (owner 2026-10-31, approved Portal inbox plan: a portal chat hand-off bell closes once a person texted, called or emailed that customer after the hand-off; its own gate, rides on GATE_ALERT_CONTACT_CLOSE, read at call time via portalChatAnsweredCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true|charge (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release; `charge` (owner 2026-10-28, "Charge the saved card"; narrowed 2026-10-29, option B) = charge the customer's saved Auto Pay card or bank for a held VISIT bill only, and only inside the visit-completion rail's own authorization (completion-charge-verdict.js: the visit's agreed price cap, the same lanes; an issued-invoice closeout counts as a performed visit for this charge only). Keep the hold when the charge went through or its outcome is unclear (an office alert says check Stripe). Over the agreed price, no agreed price, a visit that was not performed, a payer, or any guard refusal = the hold is kept, nothing is charged or texted, one office alert asks for a review (it is looked at again only after the bill or visit price changes). Release the hold only when the card was really declined or there is no Auto Pay method; an invoice bound to no visit, an annual-prepay term rail invoice, or a bill no completion lane admits is released as `true` releases it, never charged (one office alert, one audit_log row per attempt, invoice_followup.autopay_hold_timeout_charge). `charge` MOVES MONEY: the owner flips it. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
  *   GATE_AUTO_DISPATCH_CATCH_UP=true (owner 2026-10-26 ("build A"): a 5:00 AM Eastern catch-up run of the auto-dispatch night tool. The 04:10 run is cut off when a deploy restarts the server mid-run (2026-09-03 and 2026-10-26: nothing moved, nothing re-ran it). On, a 05:00 job checks whether today already has a finished night run (cron or catch_up, completed or completed_with_errors); if not, it marks any cron run left 'running' by a dead process as failed and runs the night tool once more (triggered_by catch_up, at most one catch-up a day), under the same run lock. It uses the same mode and rules as the 04:10 run. Strict opt-in: exactly 'true', read at call time via autoDispatchCatchUpLive(). Ships DARK; off = the 05:00 job does nothing and reads nothing. Sends nothing to a customer.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; exactly 'live' (build 4, owner "DO THIS NOW" 2026-10-30) = record AND pick: /book offers, the phone booking recheck, the after-call booking, the office Auto choice, the estimate time offers and the estimate accept send a mapped line's new work to its home technician, else its gap technician; a line with no technician set keeps today's choice. Anything else, including 'true', = off, no resolver call and no query. Shadow never changes a booking; neither value sends anything to a customer or staff member.)
@@ -5048,6 +5049,11 @@ const gates = {
   // read leadContactedCloseMode() at CALL time. Kill switch: unset.
   leadContactedClose: ['shadow', 'true'].includes(String(process.env.GATE_LEAD_CONTACTED_CLOSE || '').trim().toLowerCase()),
 
+  // A portal chat hand-off bell closes once a person answered that customer after it (owner 2026-10-31,
+  // approved Portal inbox plan). Tri-state, own gate, rides on GATE_ALERT_CONTACT_CLOSE. Registered for
+  // logGateStatus only; consumers read portalChatAnsweredCloseMode() at CALL time. Kill switch: unset.
+  portalChatAnsweredClose: ['shadow', 'true'].includes(String(process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE || '').trim().toLowerCase()),
+
   // Unassigned-visit guard (owner 2026-10-25). Ships DARK: exactly 'true'. Registered for
   // logGateStatus only; consumers read unassignedVisitGuardLive() at CALL time. Kill switch: unset.
   unassignedVisitGuard: process.env.GATE_UNASSIGNED_VISIT_GUARD === 'true',
@@ -7700,6 +7706,17 @@ function leadContactedCloseMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
+// GATE_PORTAL_CHAT_ANSWERED_CLOSE read at CALL time: 'shadow', 'true' or 'off'. A portal chat hand-off bell
+// (portal-chat-escalation:<id>, doneWhen 'customer_answered') as a class of admin-alert-relevance.js: closed
+// once a person called back, answered the customer's call, texted or emailed that customer after the bell's
+// latest event. Rides on GATE_ALERT_CONTACT_CLOSE (the weaker of the two wins). 'shadow' records the
+// would-close in audit_log and changes no bell; 'true' closes. Anything else, unset included, is off: the
+// class is not judged, and a bell it closed is put back.
+function portalChatAnsweredCloseMode() {
+  const value = String(process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // ALERT_EPISODES read at CALL time — ships LIVE: on unless set to exactly
 // 'off', 'false' or '0' (case-insensitive), so an unset env is the live state
 // and the env is a pure kill switch (owner-approved scope 2026-09-29, rule
@@ -9003,6 +9020,8 @@ module.exports.alertContactCloseMode = alertContactCloseMode;
 module.exports.voicemailVisitUnderwayMode = voicemailVisitUnderwayMode;
 // GATE_LEAD_CONTACTED_CLOSE reader, on its own line so gate PRs never conflict.
 module.exports.leadContactedCloseMode = leadContactedCloseMode;
+// GATE_PORTAL_CHAT_ANSWERED_CLOSE reader, on its own line so gate PRs never conflict.
+module.exports.portalChatAnsweredCloseMode = portalChatAnsweredCloseMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
