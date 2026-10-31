@@ -2,8 +2,8 @@
  * Lawn 9x neighborhood days (owner 2026-10-31, PR 5a): a NEW lawn_rounds_9 series
  * is born on its AREA's anchor, so neighbors share one day in every round.
  * Covers the area module (config, ZIP-then-city match, anchor validation), the
- * shared dates, the 28-day first follow-up floor, and the seeder that stamps the
- * anchor (its planner equals its write). The office spawn has its own harness
+ * shared dates, and the seeder that stamps the anchor (its planner equals its
+ * write). The office spawn has its own harness
  * (lawn-9x-rounds-admin-create.test.js); the prepay new parent is below.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -38,7 +38,7 @@ const gap = (a, b) => Math.round((new Date(`${b}T12:00:00Z`) - new Date(`${a}T12
 beforeEach(() => { area._resetWarnings(); jest.clearAllMocks(); });
 
 // A scripted connection for the config read and the address lookups.
-function addressConn({ setting = undefined, settingThrows = false, customer = null, parentCols = null, parentRow = null } = {}) {
+function addressConn({ setting = undefined, settingThrows = false, customer = null, customerThrows = false, parentCols = null, parentRow = null } = {}) {
   const reads = [];
   const conn = (table) => {
     if (table === 'system_settings') {
@@ -49,7 +49,11 @@ function addressConn({ setting = undefined, settingThrows = false, customer = nu
       } }) };
     }
     if (table === 'customers') {
-      return { where: () => ({ first: async () => { reads.push('customers'); return customer; } }) };
+      return { where: () => ({ first: async () => {
+        reads.push('customers');
+        if (customerThrows) throw new Error('db down');
+        return customer;
+      } }) };
     }
     if (table === 'scheduled_services') {
       return {
@@ -175,6 +179,23 @@ describe('lawnAreaRoundAnchor reads the address', () => {
     const brokenCustomer = addressConn({});
     expect(await lawnAreaRoundAnchor(brokenCustomer, { id: 'p1', customer_id: 'c1', service_address_zip: null, service_address_city: null }))
       .toBeNull();
+  });
+
+  test('inside a caller transaction each read runs in a savepoint, so a failed read cannot abort it (25P02)', async () => {
+    // A knex transaction: transaction(read) is a savepoint; a query on the trx itself is not.
+    const inTrx = (options) => Object.assign(jest.fn(), {
+      isTransaction: true,
+      transaction: jest.fn(async (read) => read(addressConn(options))),
+    });
+    const parent = { id: 'p1', customer_id: 'c1', service_address_zip: null, service_address_city: null };
+    const ok = inTrx({ customer: { zip: '34219', city: 'Parrish' } });
+    expect(await lawnAreaRoundAnchor(ok, parent)).toBe(PARRISH);
+    expect(ok.transaction).toHaveBeenCalledTimes(2);
+    const badConfig = inTrx({ settingThrows: true });
+    expect(await lawnAreaRoundAnchor(badConfig, parent)).toBeNull();
+    const badAddress = inTrx({ customerThrows: true });
+    expect(await lawnAreaRoundAnchor(badAddress, parent)).toBeNull();
+    for (const trx of [ok, badConfig, badAddress]) expect(trx).not.toHaveBeenCalled();
   });
 
   test('newSeriesAreaAnchor: rounds only, and not when the parent already stores an anchor', async () => {

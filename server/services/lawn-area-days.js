@@ -159,13 +159,20 @@ function parseLawnAreaDays(value) {
   return areas;
 }
 
+// Area reads are optional, and callers pass their open transaction. A caught
+// error still aborts a PostgreSQL transaction (the caller's next write fails
+// with 25P02), so inside a transaction each read runs in a savepoint (a nested
+// knex transaction) and a failure rolls back only that savepoint.
+function inSavepoint(conn, read) {
+  const dbh = conn || require('../models/db');
+  return dbh.isTransaction ? dbh.transaction(read) : read(dbh);
+}
+
 // The configured areas, read at call time. Never throws.
 async function readLawnAreaDays(conn) {
   try {
-    const dbh = conn || require('../models/db');
-    const row = await dbh('system_settings').where('key', LAWN_ROUND_AREA_DAYS_KEY).first('value');
-    if (!row) return parseLawnAreaDays(DEFAULT_LAWN_ROUND_AREA_DAYS);
-    return parseLawnAreaDays(row.value);
+    const row = await inSavepoint(conn, (dbh) => dbh('system_settings').where('key', LAWN_ROUND_AREA_DAYS_KEY).first('value'));
+    return parseLawnAreaDays(row ? row.value : DEFAULT_LAWN_ROUND_AREA_DAYS);
   } catch (err) {
     warnOnce('read-failure', `config lookup failed (no areas): ${err.message}`);
     return [];
@@ -190,7 +197,7 @@ function matchLawnArea(areas, { zip = null, city = null } = {}) {
 // The address a series is matched on: the parent's service address, field by
 // field, else the customer's. The parent row is trusted when it carries the
 // service_address_* keys; otherwise it is read by id (only the columns that
-// exist, so a missing column cannot abort a caller's transaction).
+// exist).
 async function seriesAddress(conn, parentRow) {
   let zip = parentRow?.service_address_zip;
   let city = parentRow?.service_address_city;
@@ -215,10 +222,10 @@ async function seriesAddress(conn, parentRow) {
 // The area anchor for a series parent (a row, or { customer_id } before the
 // parent exists), or null when no area applies. Never throws.
 async function lawnAreaRoundAnchor(conn, parentRow) {
+  const areas = await readLawnAreaDays(conn);
+  if (!areas.length) return null;
   try {
-    const areas = await readLawnAreaDays(conn);
-    if (!areas.length) return null;
-    const area = matchLawnArea(areas, await seriesAddress(conn, parentRow));
+    const area = matchLawnArea(areas, await inSavepoint(conn, (dbh) => seriesAddress(dbh, parentRow)));
     return area ? area.anchor : null;
   } catch (err) {
     warnOnce('anchor-failure', `area lookup failed (series keeps its own anchor): ${err.message}`);
