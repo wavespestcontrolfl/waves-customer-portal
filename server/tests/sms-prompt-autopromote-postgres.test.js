@@ -982,6 +982,34 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect((await rowOf(active.id)).decision_detail.rollback).toMatchObject({ runId: run.id });
     });
 
+    describe('exam rollback compares the items both runs graded', () => {
+      const flatSig = JSON.stringify({ significant: false, direction: 'regressed', pairedItems: 24, newlyUnsafe: 3, newlySafe: 0, pValue: 0.25 });
+
+      test('two runs that share almost no items cannot retire a patch, however many items each graded (the pool changed)', async () => {
+        const shared = await seedItems(24);
+        const fresh = await seedItems(21);
+        const baseline = await insertRun({ items: shared, version: baseVersion(), unsafe: 0 });
+        // 24 graded items, 5 unsafe, but only 3 items in common with the baseline.
+        await insertRun({ items: [...fresh, ...shared.slice(0, 3)], version: active.active_version, baselineId: baseline.id, unsafe: 5, over: { significance: flatSig } });
+        expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      });
+
+      test('unsafe items outside the shared cohort do not count; unsafe items inside it do', async () => {
+        const shared = await seedItems(24);
+        const fresh = await seedItems(5);
+        const baseline = await insertRun({ items: shared, version: baseVersion(), unsafe: 0 });
+        // Five unsafe items, all on items the baseline never saw: 17% over the whole run, 0% over the cohort.
+        await insertRun({ items: [...fresh, ...shared], version: active.active_version, baselineId: baseline.id, unsafe: 5, over: { significance: flatSig } });
+        expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+        // The same five unsafe, now on shared items: a 21-point rise over the cohort.
+        await trx('sms_sealed_eval_runs').where({ prompt_version: active.active_version }).del();
+        await insertRun({ items: shared, version: active.active_version, baselineId: baseline.id, unsafe: 5, over: { significance: flatSig } });
+        const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+        expect(out.rolledBack).toBe(active.id);
+        expect((await rowOf(active.id)).decision_detail.rollback).toMatchObject({ pairedItems: 24, rise: 0.208 });
+      });
+    });
+
     test('a tiny exam never trips the unsafe-rate rollback (the promotion bar needed 20 items; so does the rollback)', async () => {
       const items = await seedItems(10);
       const baseline = await insertRun({ items, version: baseVersion(), unsafe: 0 });
@@ -1007,6 +1035,25 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(await eventsOf(active.id)).toContain('restored_parent');
       expect(patchLib.getActivePatch().patchNo).toBe(active.patch_no);
       expect(drafter.currentPromptVersion()).toBe(active.active_version);
+    });
+
+    test('a restored parent keeps its original activation, so its monitor windows and baseline still exist (a 45-day-old parent is still watched)', async () => {
+      const originallyActivated = new Date(NOW.getTime() - 45 * DAY);
+      await trx('sms_prompt_patches').where({ id: active.id }).update({ status: 'retired', retired_reason: 'superseded', activated_at: originallyActivated });
+      const child = await activate(await insertPatch({ rules: [GOOD_RULE, SECOND_RULE], over: { parent_patch_id: active.id } }), { prior_version: active.active_version, activated_at: new Date(NOW.getTime() - 3 * DAY) });
+      await refreshSnapshot();
+      await judged(active.prior_version, 40, 2, new Date(NOW.getTime() - 60 * DAY)); // the parent's own baseline, long before the child
+      await judged(child.prior_version, 40, 1, before);
+      await judged(child.active_version, 30, 10, after);
+      expect((await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).rolledBack).toBe(child.id);
+      const restored = await rowOf(active.id);
+      expect(restored.status).toBe('active');
+      expect(new Date(restored.activated_at).getTime()).toBe(originallyActivated.getTime());
+      // The restored parent now drafts badly: its baseline (60 days back) is still inside ITS window.
+      await judged(active.active_version, 30, 12, new Date(NOW.getTime() - 3600_000));
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).retired_reason).toBe('live_unsafe_rise');
     });
 
     test('a base identity change retires the active patch (no parent restored, one bell) even with no bad numbers', async () => {

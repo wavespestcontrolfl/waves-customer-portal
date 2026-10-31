@@ -642,24 +642,46 @@ async function outcomeCheck({ dbi, patch, now }) {
 async function examCheck({ dbi, patch }) {
   if (!patch.active_version) return null;
   const { LIVE_EXAM_LEGS, parseScores } = require('./sms-sealed-eval');
-  const runs = await dbi({ r: 'sms_sealed_eval_runs' })
-    .leftJoin({ b: 'sms_sealed_eval_runs' }, 'b.id', 'r.baseline_run_id')
-    .where('r.prompt_version', patch.active_version)
-    .where('r.status', 'complete')
-    .whereIn('r.provider_leg', LIVE_EXAM_LEGS)
-    .select('r.id', 'r.provider_leg', 'r.significance', 'r.unsafe_count', 'r.items_judged', 'b.unsafe_count as base_unsafe', 'b.items_judged as base_judged');
+  const runs = await dbi('sms_sealed_eval_runs')
+    .where({ prompt_version: patch.active_version, status: 'complete' })
+    .whereNotNull('baseline_run_id')
+    .whereIn('provider_leg', LIVE_EXAM_LEGS)
+    .select('id', 'provider_leg', 'significance', 'baseline_run_id');
   for (const r of runs) {
-    // Both rules need a real sample on both runs (the promotion bar needed MIN_PAIRED_ITEMS too).
-    if (!(r.items_judged >= MIN_PAIRED_ITEMS && r.base_judged >= MIN_PAIRED_ITEMS)) continue;
     const sig = parseScores(r.significance);
     if (!sig) continue;
-    const regressed = Boolean(sig.significant && sig.direction === 'regressed' && Number(sig.pairedItems) >= MIN_PAIRED_ITEMS);
-    const rise = r.unsafe_count >= LIVE_MIN_UNSAFE ? r.unsafe_count / r.items_judged - r.base_unsafe / r.base_judged : null;
+    // Both rules read the items BOTH runs graded: whole-run totals would move when the exam pool
+    // changed between the two runs, and could retire a healthy patch over items it never faced.
+    const cohort = await pairedUnsafeCohort(dbi, r.id, r.baseline_run_id);
+    if (cohort.paired < MIN_PAIRED_ITEMS) continue;
+    const regressed = Boolean(sig.significant && sig.direction === 'regressed');
+    const rise = cohort.liveUnsafe >= LIVE_MIN_UNSAFE ? (cohort.liveUnsafe - cohort.baseUnsafe) / cohort.paired : null;
     if (regressed || (rise !== null && rise >= EXAM_UNSAFE_RISE)) {
-      return { reason: 'exam_regression', detail: { runId: r.id, leg: r.provider_leg, rise: rise === null ? null : Number(rise.toFixed(3)) } };
+      return { reason: 'exam_regression', detail: { runId: r.id, leg: r.provider_leg, pairedItems: cohort.paired, rise: rise === null ? null : Number(rise.toFixed(3)) } };
     }
   }
   return null;
+}
+
+// The graded items a run and its baseline share (an 'ungradable' sentinel is no judgment, as in
+// computeSignificance), and how many of those each judged unsafe.
+async function pairedUnsafeCohort(dbi, runId, baselineRunId) {
+  const rows = await dbi('sms_sealed_eval_results')
+    .whereIn('run_id', [runId, baselineRunId])
+    .whereNotNull('verdict')
+    .whereNot('verdict', 'ungradable')
+    .select('run_id', 'item_id', 'verdict');
+  const base = new Map(rows.filter((x) => x.run_id === baselineRunId).map((x) => [String(x.item_id), x.verdict]));
+  let paired = 0;
+  let liveUnsafe = 0;
+  let baseUnsafe = 0;
+  for (const x of rows) {
+    if (x.run_id !== runId || !base.has(String(x.item_id))) continue;
+    paired += 1;
+    if (x.verdict === 'draft_unsafe') liveUnsafe += 1;
+    if (base.get(String(x.item_id)) === 'draft_unsafe') baseUnsafe += 1;
+  }
+  return { paired, liveUnsafe, baseUnsafe };
 }
 
 /**
@@ -676,7 +698,11 @@ async function rollbackPatch({ dbi = db, patchId, trigger, now = new Date(), not
     await logEvent(trx, now, patch.id, 'rolled_back', trigger.reason, trigger.detail);
     const parent = restoreParent && patch.parent_patch_id ? await trx(PATCHES).where({ id: patch.parent_patch_id }).forUpdate().first() : null;
     if (parent && parent.status === 'retired' && parent.retired_reason === 'superseded') {
-      await trx(PATCHES).where({ id: parent.id }).update({ status: 'active', activated_at: now, retired_at: null, retired_reason: null, updated_at: now });
+      // activated_at stays the parent's ORIGINAL activation: the monitor's windows (live from it, the prior
+      // version's baseline before it) must not move, or a parent that had been live for over the lookback
+      // would find no baseline rows and skip every check for good. Rows are matched by version, so the
+      // child's own period adds nothing to the parent's live window. The restore time is the audit row.
+      await trx(PATCHES).where({ id: parent.id }).update({ status: 'active', retired_at: null, retired_reason: null, updated_at: now });
       await logEvent(trx, now, parent.id, 'restored_parent', trigger.reason, { restoredAfter: patch.patch_no });
     }
     return { rolledBack: patch.id, patchNo: patch.patch_no };
