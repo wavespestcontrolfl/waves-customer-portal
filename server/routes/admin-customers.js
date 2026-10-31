@@ -5653,68 +5653,6 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Runs `write` in one transaction only while the customer is live: the row
-// is locked first, so an archive cannot commit between the check and the
-// write. Resolves false (nothing written) for a missing or archived customer
-// (Customers audit C12).
-async function writeForLiveCustomer(customerId, write) {
-  return db.transaction(async (trx) => {
-    const live = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
-    if (!live) return false;
-    await write(trx);
-    return true;
-  });
-}
-
-// POST /api/admin/customers/:id/tags
-router.post('/:id/tags', requireAdmin, async (req, res, next) => {
-  try {
-    const found = await writeForLiveCustomer(req.params.id, (trx) => trx('customer_tags')
-      .insert({ customer_id: req.params.id, tag: req.body.tag }).onConflict(['customer_id', 'tag']).ignore());
-    if (!found) return res.status(404).json({ error: 'Customer not found' });
-    res.json({ success: true });
-  } catch (err) { next(err); }
-});
-
-// DELETE /api/admin/customers/:id/tags/:tag
-router.delete('/:id/tags/:tag', requireAdmin, async (req, res, next) => {
-  try {
-    const found = await writeForLiveCustomer(req.params.id, (trx) => trx('customer_tags')
-      .where({ customer_id: req.params.id, tag: req.params.tag }).del());
-    if (!found) return res.status(404).json({ error: 'Customer not found' });
-    res.json({ success: true });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/customers/:id/interactions
-router.post('/:id/interactions', requireAdmin, async (req, res, next) => {
-  try {
-    const { type, subject, body } = req.body;
-    // The note and the customer's last-contact stamp commit together.
-    const found = await writeForLiveCustomer(req.params.id, async (trx) => {
-      await trx('customer_interactions').insert({
-        customer_id: req.params.id, interaction_type: type || 'note',
-        subject, body, admin_user_id: req.technicianId,
-      });
-      await trx('customers').where({ id: req.params.id }).update({ last_contact_date: new Date(), last_contact_type: type || 'note' });
-    });
-    if (!found) return res.status(404).json({ error: 'Customer not found' });
-    res.json({ success: true });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/customers/:id/follow-up
-router.post('/:id/follow-up', requireAdmin, async (req, res, next) => {
-  try {
-    // One statement: a missing or archived customer updates no row.
-    const updated = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').update({
-      next_follow_up_date: req.body.date, follow_up_notes: req.body.notes,
-    });
-    if (!updated) return res.status(404).json({ error: 'Customer not found' });
-    res.json({ success: true });
-  } catch (err) { next(err); }
-});
-
 // DELETE /api/admin/customers/:id — soft-delete a customer
 router.delete('/:id', requireAdmin, customerArchiveHandler);
 async function customerArchiveHandler(req, res, next) {
