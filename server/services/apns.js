@@ -29,6 +29,9 @@ const logger = require('./logger');
 const APNS_REQUEST_TIMEOUT_MS = 8000;
 const HOST_PROD = 'https://api.push.apple.com';
 const HOST_SANDBOX = 'https://api.sandbox.push.apple.com';
+// Waves Admin, the iOS staff app (ios/WavesPay). Its rows name this topic and
+// their own APNs environment; every other iOS row is the customer app.
+const STAFF_APP_BUNDLE_ID = 'com.wavespestcontrol.wavespay';
 
 function readConfig() {
   return {
@@ -131,8 +134,12 @@ function classifyApnsResponse(status, reason) {
 /**
  * Send one notification to one device token. Resolves (never rejects) with
  * { ok } | { skipped } | { expired } | { failed }.
+ *
+ * `route` overrides the topic and the APNs host for one device: Waves Admin
+ * is a second bundle, and its development installs register sandbox tokens
+ * while the customer app's tokens follow APNS_PRODUCTION.
  */
-function send(deviceToken, notification) {
+function send(deviceToken, notification, route = {}) {
   return new Promise((resolve) => {
     if (!configured) return resolve({ ok: false, skipped: true, reason: 'apns_not_configured' });
     if (!deviceToken) return resolve({ ok: false, failed: true, reason: 'missing_device_token' });
@@ -150,7 +157,8 @@ function send(deviceToken, notification) {
 
     let client;
     try {
-      client = http2.connect(cfg.production ? HOST_PROD : HOST_SANDBOX);
+      const production = typeof route.production === 'boolean' ? route.production : cfg.production;
+      client = http2.connect(production ? HOST_PROD : HOST_SANDBOX);
     } catch (err) {
       return resolve({ ok: false, failed: true, retryable: true, reason: err.message });
     }
@@ -179,7 +187,7 @@ function send(deviceToken, notification) {
         ':method': 'POST',
         ':path': `/3/device/${deviceToken}`,
         authorization: `bearer ${token}`,
-        'apns-topic': cfg.bundleId,
+        'apns-topic': route.topic || cfg.bundleId,
         'apns-push-type': 'alert',
         'content-type': 'application/json',
         'content-length': body.length,
@@ -225,6 +233,7 @@ function status() {
 
 module.exports = {
   APNS_REQUEST_TIMEOUT_MS,
+  STAFF_APP_BUNDLE_ID,
   send,
   status,
   // exported for unit tests

@@ -214,15 +214,23 @@ function waterSavedSentence(block, plan) {
  * weekly total): there is no plan to skip yet, so it gives the per-run figure as the reason to enter or confirm the
  * schedule. Default basis in practice (a weekly total gives no per-run depth); a portal schedule on file is named.
  * Appended to the ask; null when there is no block.
+ *
+ * `scheduleDetailsOnFile`: the setup ask beside this sentence already names entries the customer made (days,
+ * minutes or head types) and asks for the one thing still missing. "Once your schedule is on file" would then tell
+ * someone whose minutes and days ARE on file that they are not (owner 2026-10-26), so the closer points at the ask
+ * instead. Omitted = the original closer (nothing on file, or the confirm ask).
  */
-function waterSavedSetupSentence(block) {
+function waterSavedSetupSentence(block, { scheduleDetailsOnFile = false } = {}) {
   if (!block) return null;
   const perRun = fmtGallons(block.gallonsPerRun);
   const money = dollarClause(block, { whole: false });
   if (block.basis === 'schedule') {
     return `From the sprinkler schedule in your portal and your lawn's size on file, each run is about ${perRun} gallons, so every run you skip after a good rain is real water saved.${money}`;
   }
-  return `For a lawn your size, a typical ${DEFAULT_RUN_MINUTES}-minute run is about ${perRun} gallons, so every run you skip after a good rain is real water saved.${money} Once your schedule is on file we'll use your own minutes and days for that figure.`;
+  const closer = scheduleDetailsOnFile
+    ? "Once that's in your portal, we'll use your own schedule for that figure."
+    : "Once your schedule is on file we'll use your own minutes and days for that figure.";
+  return `For a lawn your size, a typical ${DEFAULT_RUN_MINUTES}-minute run is about ${perRun} gallons, so every run you skip after a good rain is real water saved.${money} ${closer}`;
 }
 
 module.exports = {

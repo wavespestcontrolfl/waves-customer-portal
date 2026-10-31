@@ -51,10 +51,22 @@ describe('loadActiveLargePatch', () => {
     const found = await areas.loadActiveLargePatch(knex, PROPERTY);
     expect(found.map((area) => area.id)).toEqual(['b']);
     expect(calls).toEqual(expect.arrayContaining([
-      ['table', 'property_application_history'], ['where', { property_id: PROPERTY }], ['whereNull', 'retracted_at'], ['whereIn', 'treated_place', ['front', 'back', 'left_side']],
+      ['table', 'property_application_history'], ['where', { property_id: PROPERTY }], ['whereNull', 'retracted_at'],
+      ['whereRaw', expect.stringMatching(/treated_places.*&& \?::varchar\[\]/), [['front', 'back', 'left_side']]],
     ]));
     // Only the category is filtered: a newer fungicide application with NO target outranks an older large patch one.
-    expect(calls.filter((call) => call[0] === 'whereRaw').map((call) => call[1])).toEqual(["lower(category) = 'fungicide'"]);
+    expect(calls.filter((call) => call[0] === 'whereRaw').map((call) => call[1]).filter((sql) => !/treated_places/.test(sql))).toEqual(["lower(category) = 'fungicide'"]);
+  });
+
+  test('one application on two places is evidence at each; a row an older server wrote (treated_place only) is evidence at its one place', async () => {
+    jest.spyOn(areas, 'loadActive').mockResolvedValue([
+      { id: 'a', place: 'front', type: 'fungus' }, { id: 'b', place: 'back', type: 'fungus' }, { id: 'c', place: 'left_side', type: 'fungus' },
+    ]);
+    const { knex } = ledgerKnex([
+      { treated_place: 'front', treated_places: ['front', 'back'], target_pest: 'Large patch', application_date: '2026-12-02' },
+      { treated_place: 'left_side', treated_places: null, target_pest: 'Large patch', application_date: '2026-12-02' },
+    ]);
+    expect((await areas.loadActiveLargePatch(knex, PROPERTY)).map((area) => area.id)).toEqual(['a', 'b', 'c']);
   });
 
   test('the newest application decides even when it names no target: an older large patch row is stale after it', async () => {

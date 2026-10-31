@@ -143,3 +143,75 @@ describe('Newsletter subscriber dialogs', () => {
     expect(alert).not.toHaveBeenCalled();
   });
 });
+
+// Audit 2026-10-30: NEWS-05 (a page from the previous filter appended to the
+// new one) and NEWS-08 (a failed read showed as an empty filter).
+describe('Newsletter subscriber list reads', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('waves_admin_token', 'admin-token');
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const fullActivePage = Array.from({ length: 100 }, (_, i) => ({
+    ...subscriber, id: `active-${i}`, email: `active-${i}@example.invalid`,
+  }));
+
+  it('discards a Load more page that belongs to the previous filter', async () => {
+    let finishOldPage;
+    const fetchMock = vi.fn((url, options = {}) => {
+      const qs = new URL(String(url), 'http://portal.invalid').searchParams;
+      if (qs.get('status') === 'active' && qs.get('offset') === '100') {
+        return new Promise((resolve, reject) => {
+          finishOldPage = resolve;
+          options.signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')));
+        });
+      }
+      if (qs.get('status') === 'pending') {
+        return Promise.resolve(response({
+          subscribers: [{ ...subscriber, id: 'pending-1', email: 'pending@example.invalid', status: 'pending' }],
+          counts: { active: 101, pending: 1 },
+        }));
+      }
+      return Promise.resolve(response({ subscribers: fullActivePage, counts: { active: 101, pending: 1 } }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SubscribersView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load 100 more' }));
+    await waitFor(() => expect(finishOldPage).toBeTypeOf('function'));
+    fireEvent.click(screen.getByRole('button', { name: /^Pending/ }));
+    await screen.findByText('pending@example.invalid');
+    // The old page's request was aborted; even a late answer adds nothing.
+    finishOldPage(response({
+      subscribers: [{ ...subscriber, id: 'stale-active', email: 'stale-active@example.invalid' }],
+      counts: { active: 101 },
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText('stale-active@example.invalid')).not.toBeInTheDocument();
+    expect(screen.getByText('pending@example.invalid')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Load 100 more' })).not.toBeInTheDocument();
+  });
+
+  it('shows a failed list read as an error with retry, not as an empty filter', async () => {
+    let reads = 0;
+    const fetchMock = vi.fn(() => {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(response({ error: 'Synthetic outage' }, false, 503));
+      return Promise.resolve(subscriberList());
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SubscribersView />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Subscribers could not be loaded: Synthetic outage');
+    expect(screen.queryByText('No subscribers in this filter.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText('reader@example.com');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});

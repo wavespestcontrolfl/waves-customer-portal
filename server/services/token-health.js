@@ -778,7 +778,7 @@ async function checkGemini() {
   }
 
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`);
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models', { headers: { 'x-goog-api-key': key } });
 
     if (res.ok) {
       const result = { platform, status: 'healthy', lastError: null, expiresAt: null };

@@ -33,6 +33,10 @@ beforeEach(() => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url) => {
+      // The gap-fill panel's read: 404 while GATE_ADS_GAP_RULE is off, so it renders nothing.
+      if (url.endsWith("/admin/ads/gap-rule")) {
+        return { ok: false, status: 404, json: async () => ({ error: "gap_rule_off" }) };
+      }
       const data = url.endsWith("/campaigns")
         ? { campaigns: [] }
         : url.includes("/call-bridge?")
@@ -44,7 +48,7 @@ beforeEach(() => {
               : url.endsWith("/advisor")
                 ? { report: null }
                 : url.endsWith("/capacity-heatmap")
-                  ? { heatmap: {} }
+                  ? { heatmap: { all: { days: [] } }, campaigns: [], recentChanges: [] }
                   : null;
       if (!data) throw new Error(`Unexpected fixture request: ${url}`);
       return { ok: true, json: async () => data };
@@ -133,7 +137,13 @@ it("retains all six PPC workflows and their data reads without starting an actio
       url.endsWith("/admin/ads/advisor/history"),
     ),
   ).toBe(true);
-  expect(fetch.mock.calls).toHaveLength(6);
+  // Capacity also asks for the gap-fill panel's state (hidden on 404).
+  await waitFor(() =>
+    expect(
+      fetch.mock.calls.some(([url]) => url.endsWith("/admin/ads/gap-rule")),
+    ).toBe(true),
+  );
+  expect(fetch.mock.calls).toHaveLength(7);
   expect(
     fetch.mock.calls.every(
       ([url, options]) =>

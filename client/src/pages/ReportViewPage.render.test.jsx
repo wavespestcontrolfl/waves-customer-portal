@@ -146,32 +146,6 @@ describe('ReportViewPage — shared customer header (GATE_REPORT_SHARED_TEMPLATE
   });
 });
 
-describe('ReportViewPage — Field document boundary', () => {
-  it('uses Field presentation for the authored live report while keeping portal tools outside it', async () => {
-    const { container } = renderReport(pestReportV2);
-    await screen.findByRole('heading', { level: 1 });
-
-    const documentBody = container.querySelector('.service-report-document-body');
-    expect(documentBody).not.toBeNull();
-    expect(documentBody.querySelector('.field-document-masthead')).not.toBeNull();
-    expect(documentBody.querySelector('#service-status')).not.toBeNull();
-    expect(documentBody.querySelector('.sr-footer')).not.toBeNull();
-    expect(documentBody.querySelector('.report-action-bar')).toBeNull();
-  });
-
-  it('leaves the pre-v1 archive/PDF viewer on its legacy presentation path', async () => {
-    const { container } = renderReport({
-      reportVersion: null,
-      customerFirstName: 'Sample',
-      cityState: 'Testville, FL',
-      serviceType: 'Pest Control',
-      notes: 'Stored visit summary.',
-    });
-    await screen.findByText('Stored visit summary.');
-    expect(container.querySelector('.service-report-document-body')).toBeNull();
-  });
-});
-
 describe('ReportViewPage — recap SMS anchor (#visit-recap)', () => {
   // The recap SMS links /report/:token#visit-recap, but the card only exists
   // after /data resolves — the browser's native fragment scroll runs against

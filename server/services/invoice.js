@@ -4835,6 +4835,9 @@ async function raiseHoldClaimStrandedAlert(invoiceId, customerId, claimToken, { 
       ? `Invoice ${invoiceId}: the send was stopped because the hold check failed, and its in-progress send claim could not be released. We could not confirm whether a hold applies, so do not assume one is pending: check the customer's hold status and whether the pay link was delivered, then re-queue or resend it if it was not.`
       : `Invoice ${invoiceId}: the customer has an active collections hold, so its send was stopped, but its in-progress send claim could not be released. It will not send on its own after the hold ends. Open the invoice and re-queue or resend it once the hold is released.`,
     dedupeKey: holdClaimStrandedAlertKey(invoiceId, claimToken),
+    // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to ring. This one
+    // rings unless the owner silences the category.
+    bellDefault: true,
     metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
   });
   if (!raised) throw new Error("the stranded-claim alert was not recorded");
@@ -4859,6 +4862,8 @@ async function raiseHoldClaimMaybeStuckAlert(invoiceId, customerId, claimToken, 
       ? `Invoice ${invoiceId}: its send claim was left in progress after a failed hold check. We could not confirm whether a hold applies; check the hold and whether the customer actually received the pay link before resending, so it is not sent twice.`
       : `Invoice ${invoiceId}: its send claim was left in progress and the customer has a collections hold. Check whether the customer actually received the pay link before resending, so it is not sent twice.`,
     dedupeKey: holdClaimMaybeStuckAlertKey(invoiceId, claimToken),
+    // Rings unless the owner silences the category, as the stranded alert does.
+    bellDefault: true,
     metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
   });
   if (!raised) throw new Error("the maybe-stuck alert was not recorded");
@@ -5807,6 +5812,9 @@ async function alertSummaryCarriedEmailFailed(invoiceId, invoiceNumber, reason) 
     }, {
       detail: `Invoice ${invoiceNumber || invoiceId}: its pay link was sent only in the visit summary text, and the invoice email did not go (${reason}). Check that the customer has the link, or resend the invoice.`,
       dedupeKey: `summary-carried-email:${invoiceId}`,
+      // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to
+      // ring. This one rings unless the owner silences the category.
+      bellDefault: true,
       metadata: { invoice_id: invoiceId },
     });
   } catch (err) {
@@ -5833,6 +5841,8 @@ async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
     }, {
       detail: `Invoice ${invoiceNumber || invoiceId}: the visit summary text did not carry its pay link and the invoice email did not go (${reason}). It is parked for review: send the link to the customer.`,
       dedupeKey: `summary-link-undelivered:${invoiceId}`,
+      // Rings unless the owner silences the category, as the carried-email alert does.
+      bellDefault: true,
       metadata: { invoice_id: invoiceId },
     });
     // The summary text may have been accepted between the park and this insert: its acceptance
@@ -6474,7 +6484,7 @@ const InvoiceService = {
     if (!skipAccrual && database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
       const PayerSvc = require("./payer");
       const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: linkedScheduledServiceId, throwOnError: true });
-      if (pre.payerId && ["net15", "net30"].includes(pre.paymentTerms)) {
+      if (pre.payerId && PayerSvc.isNetPaymentTerm(pre.paymentTerms)) {
         return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
     }
@@ -6676,7 +6686,7 @@ const InvoiceService = {
     let accruedStatementId = null;
     if (!skipAccrual
       && resolvedPayerId
-      && ['net15', 'net30'].includes(resolvedPaymentTerms)
+      && PayerService.isNetPaymentTerm(resolvedPaymentTerms)
       && isEnabled('payerStatements')) {
       // TOCTOU guard: the transaction wrap at the top was decided from a preflight
       // resolve. If the payer/terms flipped to NET between that preflight and this
@@ -7182,13 +7192,13 @@ const InvoiceService = {
               customerId,
               serviceData.service_type || title,
               afterDiscount,
-              { database: sp, skipCustomerExemption: !!resolvedPayerId },
+              { database: sp, skipCustomerExemption: !!resolvedPayerId, scheduledServiceId: linkedScheduledServiceId || undefined },
             ))
           : TaxCalculator.calculateTax(
               customerId,
               serviceData.service_type || title,
               afterDiscount,
-              { database, skipCustomerExemption: !!resolvedPayerId },
+              { database, skipCustomerExemption: !!resolvedPayerId, scheduledServiceId: linkedScheduledServiceId || undefined },
             ));
         rate = taxResult.rate;
         taxAmount = taxResult.amount;
@@ -7409,6 +7419,10 @@ const InvoiceService = {
     // Intelligence Bar create_invoice only: the caller's explicit taxRate, resolved as create() resolves one (residential or
     // payer-exempt = 0; a verified exemption zeroes it for a self-pay invoice). undefined = the calculator, as before.
     taxRate = undefined,
+    // Commercial first visit only (commercial-first-visit.js): the customer is marked commercial before this invoice
+    // exists (a taxable proposal's win, proposal-win.js flagProposalCustomerCommercialIfTaxable), so the preview taxes
+    // it as commercial, through TaxCalculator's own isCommercial option. Default false: the row decides, as before.
+    assumeCommercial = false,
     database = db,
   }) {
     const cust =
@@ -7455,13 +7469,15 @@ const InvoiceService = {
     // created (esp. for WDO report+invoice bundles billed to an exempt builder).
     let payerTaxExempt = false;
     let previewPayerBilled = false;
+    // The visit (direct, or the service record's) also names the tax county
+    // below, through its saved property, as in create() (GATE_TAX_SERVICE_COUNTY).
+    let previewScheduledServiceId = scheduledServiceId;
     try {
       const PayerService = require("./payer");
       // Mirror create(): when linked only by serviceRecordId, derive the visit's
       // scheduled_service_id so a per-job (tax-exempt) payer override is reflected
       // in the dry-run total — otherwise the preview shows tax the real, exempt
       // invoice won't actually bill.
-      let previewScheduledServiceId = scheduledServiceId;
       if (!previewScheduledServiceId && serviceRecordId) {
         const srLink = await database("service_records")
           .where({ id: serviceRecordId, customer_id: customerId })
@@ -7476,7 +7492,7 @@ const InvoiceService = {
       previewPayerBilled = !!resolved.payerId;
     } catch { /* preview proceeds with the normal tax calc */ }
 
-    const isCommercial =
+    const isCommercial = assumeCommercial === true ||
       cust.property_type === "commercial" || cust.property_type === "business";
     let rate, taxAmount;
     if (!isCommercial || payerTaxExempt) {
@@ -7501,7 +7517,12 @@ const InvoiceService = {
           customerId,
           serviceType || title,
           subtotal,
-          { database, skipCustomerExemption: previewPayerBilled },
+          {
+            database,
+            skipCustomerExemption: previewPayerBilled,
+            scheduledServiceId: previewScheduledServiceId || undefined,
+            ...(assumeCommercial === true ? { isCommercial: true } : {}),
+          },
         );
         rate = taxResult.rate;
         taxAmount = taxResult.amount;
@@ -10031,6 +10052,7 @@ const InvoiceService = {
         "status",
         "total",
         "credit_applied",
+        "amount_paid",
       );
 
     let sent = 0;
@@ -10900,8 +10922,11 @@ const InvoiceService = {
     const today = etDateString();
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
     const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
+    // An invoice with no service date falls back to the Eastern day it was
+    // created (the date presets send Eastern from/to bounds); a bare
+    // created_at::date is the UTC day, so a 9 PM ET invoice read as tomorrow.
     const dateColumn =
-      "COALESCE(invoices.service_date, invoices.created_at::date)";
+      "COALESCE(invoices.service_date, (invoices.created_at AT TIME ZONE 'America/New_York')::date)";
     const invoiceDate = database.raw(dateColumn);
     const validDate = (value) =>
       typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -10942,6 +10967,11 @@ const InvoiceService = {
             today,
           );
         });
+        // An annual prepay charged after the first visit is not due before
+        // that visit, whatever date its draft carries.
+        if (hasAnnualPrepayTerms) {
+          q.whereRaw(`invoices.id NOT IN (${require("./paf-prepay-release").AWAITING_FIRST_VISIT_INVOICE_IDS_SQL})`);
+        }
       } else if (normalizedStatus === "unpaid") {
         q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
@@ -11180,6 +11210,12 @@ const InvoiceService = {
     // that claimed, delivered, and released entirely before the row lock.
     let preSendState = null;
     if (isRetotal) {
+      // Plain words first for the common case of a part payment (amount_paid, payment_recorded_at both set by the Invoices page).
+      if (Math.round(Number(existing.amount_paid || 0) * 100) > 0) {
+        throw new Error(
+          "This invoice has a part payment on it, so its amounts cannot be edited. Undo the part payment first (the same day only), or issue a new invoice instead",
+        );
+      }
       if (existing.payment_recorded_at) {
         throw new Error(
           "Cannot edit amounts on an invoice with payment already applied — refund it or issue a new invoice instead",
@@ -11752,6 +11788,13 @@ const InvoiceService = {
     // refunding) would hide collected money. Account-CREDIT prepayment sets neither
     // signal (it only moves the credit ledger), so this still lets credit-covered
     // invoices void. Mirrors the cancelled-service auto-void money guard.
+    // A part payment (invoices.amount_paid, owner 2026-10-29) is money received on this invoice: plain words for the office. Its payments row and
+    // payment_recorded_at below would refuse it too; this is the readable reason.
+    if (Math.round(Number(current.amount_paid || 0) * 100) > 0) {
+      throw new Error(
+        "Cannot void an invoice with a part payment on it. Undo the part payment first (the same day only), or ask for help",
+      );
+    }
     const voidAppliedPayment = await db("payments")
       .whereIn("status", ["paid", "processing"])
       .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [current.id])
@@ -14033,6 +14076,11 @@ const InvoiceService = {
 
   async getStats() {
     const today = etDateString();
+    // The list's overdue filter: an annual prepay charged after the first
+    // visit is not overdue before that visit.
+    const notAwaitingFirstVisit = (await annualPrepayInvoiceTableExists())
+      ? ` AND invoices.id NOT IN (${require("./paf-prepay-release").AWAITING_FIRST_VISIT_INVOICE_IDS_SQL})`
+      : "";
     const [totals] = await db("invoices")
       .select(
         db.raw("COUNT(*) as total"),
@@ -14041,7 +14089,7 @@ const InvoiceService = {
           "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
         ),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
+          `COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)${notAwaitingFirstVisit}) as overdue`,
           [today],
         ),
         db.raw(
@@ -14051,7 +14099,7 @@ const InvoiceService = {
           "COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) FILTER (WHERE status = 'paid'), 0) as total_collected",
         ),
         db.raw(
-          "COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
+          "COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
         ),
       )
       .whereNull("archived_at");

@@ -331,6 +331,27 @@ describe('Before you book: commercial page', () => {
     expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { initialTermMonths: 24 } }))).toEqual(SCHEDULING.filter((line) => line !== AGREEMENT_LINE));
   });
 
+  test('the 12-month agreement line needs a recurring service: a one-time-only proposal drops it, a recurring one keeps it', () => {
+    const AGREEMENT_LINE = SCHEDULING[2];
+    const linesOf = (estimate) => textsOf(pageOf(estimate)).find((section) => section.key === 'scheduling').lines;
+    const oneTime = (extra = {}) => authored(['Commercial pest cleanout'], {
+      buildings: [{ name: 'Site', lineItems: [{ description: 'Commercial pest cleanout', unitPrice: 400, frequency: 'one_time' }] }], ...extra,
+    });
+    // One-time only, blank or standard-aligned terms: no term to state.
+    expect(linesOf(oneTime())).toEqual(SCHEDULING.filter((line) => line !== AGREEMENT_LINE));
+    expect(linesOf(oneTime({ commercialTerms: { initialTermMonths: 12 } }))).not.toContain(AGREEMENT_LINE);
+    // Adding a recurring service brings it back; a recurring program counts too.
+    expect(linesOf(authored(['Commercial pest cleanout', 'Monthly pest service'], {
+      buildings: [{ name: 'Site', lineItems: [
+        { description: 'Commercial pest cleanout', unitPrice: 400, frequency: 'one_time' },
+        { description: 'Monthly pest service', unitPrice: 100, frequency: 'monthly' },
+      ] }],
+    }))).toContain(AGREEMENT_LINE);
+    expect(linesOf(authored([], { programs: [{ service: 'pest', label: 'Program', frequencyPerYear: 4, pricePerApplication: 100 }], buildings: [] }))).toContain(AGREEMENT_LINE);
+    // A recurring proposal with custom terms still drops the line (unchanged).
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { initialTermMonths: 24 } }))).not.toContain(AGREEMENT_LINE);
+  });
+
   test('residential output is byte-identical to the page before this change (hash of the original build)', () => {
     // sha256 of JSON.stringify(buildBeforeYouBook(signals, { phone: '(941) 555-0100' })) on origin/main before the commercial page.
     const phone = { phone: '(941) 555-0100' };
@@ -341,6 +362,31 @@ describe('Before you book: commercial page', () => {
     expect(residential.title).toBe('Before you book');
     expect(residential.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
     expect(residential.closing.text).toMatch(/^Questions before you book\?/);
+  });
+
+  test('the misting section prints only for an estimate that carries the misting system (owner wording 2026-10-30)', () => {
+    const MISTING_LINES = ['The date you pick is your first monthly service visit.', 'We call you to book the install day.', 'The install charge is on your first invoice.'];
+    // The signal alone: no signal, or any other value, leaves the page exactly as it was.
+    for (const signals of [{ planTerms: true }, { planTerms: false }, { planTerms: true, misting: false }]) {
+      expect(buildBeforeYouBook(signals, {}).sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
+    }
+    const withMisting = buildBeforeYouBook({ planTerms: true, misting: true }, { phone: '(941) 555-0100' });
+    expect(withMisting.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent', 'misting']);
+    const section = withMisting.sections.find((s) => s.key === 'misting');
+    expect(section.heading).toBe('If your estimate includes a misting system');
+    expect(section.lines.map((l) => l.text)).toEqual(MISTING_LINES);
+    // Every other section is untouched by the misting signal.
+    expect(sha(buildBeforeYouBook({ planTerms: true }, { phone: '(941) 555-0100' }).sections)).toBe(sha(withMisting.sections.filter((s) => s.key !== 'misting')));
+
+    // End to end on stored estimates: the misting plan row (or the stored misting input) turns it on; nothing else does.
+    const misting = { service: 'mosquito_misting', name: 'Mosquito Misting Service Plan', visitsPerYear: 12 };
+    expect(pageOf(fixture('byb-misting', [misting])).sections.map((s) => s.key)).toContain('misting');
+    expect(pageOf(fixture('byb-pest-misting', [pest, misting])).sections.map((s) => s.key)).toContain('misting');
+    const inputOnly = { ...fixture('byb-misting-input', [pest]), estimate_data: { engineInputs: { services: { pest: true, mosquitoMisting: true } } } };
+    expect(pageOf(inputOnly).sections.map((s) => s.key)).toContain('misting');
+    for (const services of [[pest], [pest, lawn], [{ service: 'mosquito', name: 'Mosquito', visitsPerYear: 12 }]]) {
+      expect(pageOf(fixture('byb-no-misting', services)).sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
+    }
   });
 
   test('a commercial pest-only proposal prints exactly the approved strings', () => {

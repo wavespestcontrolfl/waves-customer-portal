@@ -61,6 +61,7 @@ jest.mock('../models/db', () => {
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
         return mockState.request;
       }
+      if (table === 'vendor_order_emails') return mockState.emailOrder || null; // the claim's order-email stand-down read
       if (table === 'vendors') return mockState.vendor;
       if (table === 'products_catalog') return mockState.product;
       if (table === 'vendor_orders') return { total: mockState.monthly };
@@ -103,7 +104,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null, currentBellV: null });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null, currentBellV: null, emailOrder: null });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -163,6 +164,15 @@ test('placed: claim first, then ledger placed + request ordered + audit, no bell
   expect(ledgerStatus()).toBe('placed');
   expect(requestStatus()).toBe('ordered');
   expect(auditVendorOrder).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', amount_cents: 31400, external_order_number: 'SM-1' }));
+  expect(notify).not.toHaveBeenCalled();
+});
+
+test.each(['sending', 'sent'])('a request whose order email to the vendor is %s is never claimed for the bot (GATE_SITEONE_EMAIL_ORDER)', async (status) => {
+  mockState.emailOrder = { id: 'email-1', status };
+  const a = mockAdapter();
+  expect(await run(a)).toEqual({ requestId: 'req-1', skipped: 'email_order' });
+  expect(mockState.ledgerRows).toHaveLength(0);
+  expect(a.place).not.toHaveBeenCalled();
   expect(notify).not.toHaveBeenCalled();
 });
 

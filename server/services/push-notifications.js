@@ -61,12 +61,27 @@ try {
 // for immediate delivery; low-priority pushes stay deferrable on purpose.
 const URGENCY_BY_PRIORITY = { urgent: 'high', high: 'high', normal: 'normal', low: 'low' };
 
+// Waves Admin (the iOS staff app) stores its bundle and APNs environment with
+// its token (admin-push.js native-subscribe): its route is the one extra
+// apns.send argument. Every other iOS row passes none, so apns.send keeps the
+// configured customer-app topic and host.
+function staffAppRouteArgs(sub) {
+  let data = sub.subscription_data;
+  try {
+    if (typeof data === 'string') data = JSON.parse(data);
+  } catch {
+    return [];
+  }
+  if (!data?.topic || data.topic !== apns.STAFF_APP_BUNDLE_ID) return [];
+  return [{ topic: data.topic, production: data.environment === 'production' }];
+}
+
 async function sendSubscription(sub, notification, options) {
   // iOS (Capacitor) subscriptions deliver via APNs, not web-push. Routing here
   // keeps every caller (sendToCustomer / sendToAdmins / sendToAdminUsers)
   // platform-agnostic — they just iterate active rows.
   if (sub.platform === 'ios') {
-    const result = await apns.send(sub.device_token, notification);
+    const result = await apns.send(sub.device_token, notification, ...staffAppRouteArgs(sub));
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
       // Best-effort cleanup on every platform path: a failed deactivation

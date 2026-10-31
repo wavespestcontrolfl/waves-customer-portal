@@ -44,8 +44,18 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
+
+// Technician scope for this module's hour-mode global overlap probes (findConflictingVisits).
+// With GATE_MULTI_TECH_CONFIRM on (occupancy.js techScopedConfirmActive, hour mode or capacity
+// mode), a row blocks only when it is unassigned or on this technician's route, so two
+// technicians can hold and commit the same hour; the probe ignores the id with the gate
+// off. Capacity mode keeps these probes tech-blind (they only run there for a legacy
+// version-1 hold), exactly as before.
+function hourProbeTechnicianId(technicianId) {
+  return capacityEnabled() || !technicianId ? null : technicianId;
+}
 const {
-  overlapsLunch, pastCustomerLastStart, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
+  pastCustomerLastStart, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
 } = require('./scheduling/customer-windows');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
@@ -253,6 +263,8 @@ function serviceKeyForLabel(value = '') {
   if (/mosquito/.test(raw)) return 'mosquito';
   if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
   if (/palm/.test(raw)) return 'palm_injection';
+  // Own identity (see estimate-public classifyServiceFamilyText): never the bait bucket below.
+  if (/dead[\s_-]*(?:rodent|animal)/.test(raw)) return 'rodent_dead_animal_removal';
   if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
   if (/rodent.*exclusion|exclusion.*rodent/.test(raw)) return 'rodent_exclusion';
   if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
@@ -349,6 +361,7 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   if (key === 'rodent_trapping') return 'Rodent Trapping Service';
   if (key === 'rodent_exclusion') return 'Rodent Exclusion Service';
   if (key === 'rodent_sanitation') return 'Rodent Sanitation Service';
+  if (key === 'rodent_dead_animal_removal') return 'Dead Rodent Removal & Odor Treatment';
   if (key === 'rodent_bait') return 'Rodent Bait';
   return cappedServiceType(fallback);
 }
@@ -946,7 +959,11 @@ async function reserveSlot({
         exp: offerExp, policy: CAPACITY_OFFER_POLICY, arrivalGrace: offerArrivalGrace }, offerSig)) throw capacityError('invalid_offer');
       preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
         prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
-          service_type: profile.services.map(service => service.service).join(' ') },
+          // The offer's own words (estimate-slot-availability.js: label first), so the placed visit
+          // plans the same planning-minutes row at reserve as it did in the offer ("Quarterly Pest
+          // Control" is recurring; the bare key is not). Several services name no single row.
+          service_type: profile.services.map(service => service.label || service.service).join(' '),
+          ...(profile.services.length > 1 ? { combined_services: true } : {}) },
         windowStart, windowEnd: addMinutesToTime(windowStart, profile.durationMinutes), durationMinutes: profile.durationMinutes });
     }
 
@@ -1179,18 +1196,6 @@ async function reserveSlot({
         err.slotId = slotId;
         throw err;
       }
-      // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23):
-      // mirrors the offer-side filter (estimate-slot-availability.js
-      // slotWindowFitsDay) so a slot the generator wouldn't offer under the
-      // gate can't be forged past this commit gate either — in BOTH capacity
-      // modes (the shift-fit check is orthogonal to lunch). No-op (always
-      // false) while the gate is off — byte-identical to before this check.
-      if (overlapsLunch(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)) {
-        const err = new Error('slot is inside the lunch block');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = slotId;
-        throw err;
-      }
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
       if (useCapacity && !holdPin) throw capacityError('address_changed');
@@ -1337,6 +1342,7 @@ async function reserveSlot({
           windowEnd,
           excludeServiceIds: [sameSlotHold.id],
           includeHolds: false,
+          technicianId: hourProbeTechnicianId(techId),
           // Travel gap (GATE_SLOT_TRAVEL_GAP): the same pin the fresh reserve
           // and commitReservation measure with — a refresh that skipped it
           // would hand back a hold the commit is guaranteed to reject. Same
@@ -1511,6 +1517,7 @@ async function reserveSlot({
         windowStart,
         windowEnd,
         includeHolds: false,
+        technicianId: hourProbeTechnicianId(techId),
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the hold's own pin, resolved
         // above; null → buffer-only, never a skipped check. Same
         // expected-minutes credit find-time/filterCollidingSlots resolved
@@ -1944,25 +1951,6 @@ async function commitReservation({
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
       throw err;
     }
-    // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) on the
-    // FINAL resolved window (the accepted profile's duration, not the hold's
-    // original): estimate acceptance graduates an existing hold through this
-    // path without passing reserveSlot's guard, so a noon hold minted before
-    // the gate flipped on — or an 11:00 hold the accepted profile lengthens
-    // into lunch — must stop here, in both capacity modes. No-op while unset.
-    {
-      const { parseHHMM } = require('./scheduling/window-rules');
-      const lunchEndMin = windowEnd
-        ? parseHHMM(windowEnd)
-        : (row.window_end ? parseHHMM(row.window_end) : null);
-      if (windowStart && lunchEndMin != null && overlapsLunch(parseHHMM(windowStart), lunchEndMin)) {
-        const err = new Error('slot is inside the lunch block');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
-        throw err;
-      }
-    }
-
     // GRACE-EXEMPT: no arrivalGraceMinutes here (owner ruling 2026-09-28,
     // Codex round 2 P0 on #5314): a hold is certified ONCE, at reserveSlot — re-applying a
     // freshly re-read grace here would let a since-LOWERED
@@ -2038,6 +2026,7 @@ async function commitReservation({
         windowEnd: probeWindowEnd,
         excludeServiceIds: [scheduledServiceId],
         includeHolds: !!row._lapsed,
+        technicianId: hourProbeTechnicianId(row.technician_id),
         // Travel gap: the pin reserveSlot stamped on the hold row, plus the
         // expected-minutes credit of the service ACTUALLY being scheduled
         // (owner ruling 2026-09-23). The accepted serviceProfile is
@@ -2124,6 +2113,10 @@ async function commitReservation({
       .returning('*');
     await writeAcceptedAreaAddOns(client, updated, serviceProfile);
     if (capacityFit) await persistArrivalOrder(client, capacityFit, scheduledServiceId);
+    // GATE_ROUTE_CHECK_ACCEPT_SAVES: a hold nothing numbered gets its stop
+    // number in this same save (the dispatcher's placement, inside `client`,
+    // a transaction here). Gate off: touches nothing. Never throws.
+    else await require('./scheduling/staff-save-route-check').placeAcceptedVisit(client, { serviceId: scheduledServiceId });
     // Two-treatment package (cockroach / flea): graduating the hold IS the
     // booking, so visit 2 books here for both estimate-accept branches and
     // one-tap — gate-dark, savepoint-isolated, no-op for every other
@@ -2285,7 +2278,7 @@ async function releaseExpiredReservations() {
             else qb.whereNull('scheduled_date');
           })
           .update({ reservation_expires_at: null, updated_at: now })
-          .returning(['id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes']);
+          .returning(['id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id']);
         const localCollisions = [];
         for (const row of rows) {
           if (!row.scheduled_date || !row.window_start) continue;
@@ -2306,6 +2299,7 @@ async function releaseExpiredReservations() {
             windowEnd: we,
             excludeServiceIds: [row.id],
             includeHolds: false,
+            technicianId: hourProbeTechnicianId(row.technician_id),
           });
           if (Array.isArray(clash) && clash.length) {
             localCollisions.push({ id: row.id, conflicts: clash.map((v) => v.id).slice(0, 5) });
@@ -2665,6 +2659,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       windowEnd,
       excludeServiceIds: [row.id],
       includeHolds: alreadyLapsed,
+      technicianId: hourProbeTechnicianId(row.technician_id),
       // Same expected-minutes credit find-time/filterCollidingSlots
       // resolved when this window was offered (owner ruling 2026-09-23).
       travel: {

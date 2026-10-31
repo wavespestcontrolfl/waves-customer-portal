@@ -60,9 +60,35 @@ export function deleteRiser(extras, key) {
 }
 
 // ── Pump ─────────────────────────────────────────────────────────────────────
-/** Place the pump, or move it if there is one. There is never more than one. */
+/**
+ * Place the pump, or move it if there is one. There is never more than one. A new spot clears the placement
+ * checklist (the outlet, ground and wall were judged for the old spot).
+ */
 export function setPump(extras, p) {
   return { ...extras, pump: clampToMap(p) };
+}
+
+// Pynamite's Cube Pro owner's manual and Nozzle and Riser guide: what staff confirm about the pump spot before a layout
+// can be saved. The keys are the saved ones (server/services/misting-layout-validate.js PUMP_CHECK_KEYS).
+export const PUMP_CHECKS = Object.freeze([
+  { key: 'outlet', label: 'A 120V, 15 amp GFCI outlet is within reach of the cabinet\'s cord (no extension cord).' },
+  { key: 'level', label: 'Firm, level ground.' },
+  { key: 'dry', label: 'Out of flooding and irrigation spray.' },
+  { key: 'stucco', label: 'Not a stucco wall, or Pynamite\'s stucco steps (866-986-5586) are noted for the install.' },
+]);
+
+/** The pump's checklist as four booleans; anything missing or not exactly true is false (an older saved pump has none). */
+export function pumpChecksOf(pump) {
+  const checks = (pump && pump.checks) || {};
+  return Object.fromEntries(PUMP_CHECKS.map(({ key }) => [key, checks[key] === true]));
+}
+
+export const pumpChecklistDone = (pump) => Boolean(pump) && PUMP_CHECKS.every(({ key }) => pumpChecksOf(pump)[key]);
+
+/** Tick or untick one box of the placed pump's checklist. No pump, no change. */
+export function setPumpCheck(extras, key, value) {
+  if (!extras.pump || !PUMP_CHECKS.some((c) => c.key === key)) return extras;
+  return { ...extras, pump: { ...extras.pump, checks: { ...pumpChecksOf(extras.pump), [key]: value === true } } };
 }
 
 // ── Zones ────────────────────────────────────────────────────────────────────

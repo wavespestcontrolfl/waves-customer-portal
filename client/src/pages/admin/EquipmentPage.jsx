@@ -224,8 +224,8 @@ export default function EquipmentPage() {
         </Tabs>}
       {/* Equipment is READ-ONLY for a technician (staff allow-list, 2026-10-02):
           create/edit, maintenance logging, mileage, alert resolution and mix
-          recalculation are owner-only writes. Calibration entry and
-          verification stay open to a technician (owner 2026-10-03). */}
+          recalculation are owner-only writes, and so are calibration entry
+          and verification (owner 2026-10-03: not set up yet). */}
       {tab === "assets" && <EquipmentTab showToast={showToast} editing={editing} setEditing={setEditing} canEdit={isAdminRole} />}
       {tab === "maintenance" && <EquipmentMaintenancePage key="maintenance" embedded initialTab="fleet" readOnly={!isAdminRole} />}
       {tab === "analytics" && isAdminRole && <EquipmentMaintenancePage key="analytics" embedded initialTab="analytics" />}

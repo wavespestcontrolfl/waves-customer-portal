@@ -6,7 +6,7 @@ import { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 
 // The directory stays mounted in the page so returning preserves its filters.
 // The record uses the admin shell's full content width.
-export default function Customer360Workspace({ selectedId, initialTab, onSelect, onClose, onCustomerMutation, onDraftActiveChange }) {
+export default function Customer360Workspace({ selectedId, initialTab, onSelect, onClose, onCustomerMutation, onDraftActiveChange, feedbackEnabled = false }) {
   // Lifted from the embedded profile's address-review panel: "All customers"
   // is a sibling control, outside the profile's own subtree, so it cannot see
   // the profile's local draft-active ref directly and needs its own copy.
@@ -26,7 +26,7 @@ export default function Customer360Workspace({ selectedId, initialTab, onSelect,
           onClose();
         }}><ChevronLeft size={17} />All customers</Button>
       </div>
-      <Customer360Profile key={selectedId} customerId={selectedId} initialTab={initialTab} onSelectCustomer={onSelect} onClose={onClose} onCustomerMutation={onCustomerMutation} onDraftActiveChange={handleDraftActiveChange} embedded />
+      <Customer360Profile key={selectedId} customerId={selectedId} initialTab={initialTab} onSelectCustomer={onSelect} onClose={onClose} onCustomerMutation={onCustomerMutation} onDraftActiveChange={handleDraftActiveChange} feedbackEnabled={feedbackEnabled} embedded />
     </div>
   </section>;
 }

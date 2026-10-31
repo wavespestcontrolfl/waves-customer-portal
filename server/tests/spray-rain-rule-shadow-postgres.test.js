@@ -61,6 +61,26 @@ postgres('spray rain rule shadow record against migrated PostgreSQL', () => {
     expect(await startOf()).toBe('2040-09-04T20:00:00.000Z');
   });
 
+  test('a Warning read replaces an earlier caution peak, and a plain caution does not replace a Warning (step 2)', async () => {
+    const warning = (startIso) => recordSprayRainShadow({
+      dbh: trx,
+      facts: { serviceId, scheduledDate: '2040-09-04', serviceType: 'Quarterly Pest Control' },
+      products: [{ id: 'p1', name: 'Synthetic Spray' }],
+      hourly: [],
+      serviceInstant: new Date(startIso),
+      live: { hold: false, issue: null },
+      shadow: { verdicts: [{ productId: 'p1', verdict: 'caution', level: 'warning', reason: 'warning read' }], issue: null },
+    });
+    await read('caution', '2040-09-04T18:00:00Z');
+    await warning('2040-09-04T19:00:00Z');
+    expect(await row()).toMatchObject({ shadow_status: 'caution', reads: 2, dose_hidden: false,
+      products: [{ name: 'Synthetic Spray', verdict: 'caution', level: 'warning', reason: 'warning read', source: null }] });
+    expect(await startOf()).toBe('2040-09-04T19:00:00.000Z');
+    // Not worse and inside 10 minutes: not written, the Warning stays the peak.
+    await read('caution', '2040-09-04T19:30:00Z');
+    expect(await row()).toMatchObject({ reads: 2, products: [expect.objectContaining({ level: 'warning' })] });
+  });
+
   test('a new live hold is kept inside the 10 minutes, without moving the peak', async () => {
     await read('caution', '2040-09-04T18:00:00Z');
     await read('ok', '2040-09-04T18:30:00Z', { liveHold: true });

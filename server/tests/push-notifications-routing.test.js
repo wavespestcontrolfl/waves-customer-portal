@@ -5,6 +5,7 @@ const mockWhere = jest.fn(() => ({ update: mockUpdate }));
 jest.mock('../models/db', () => jest.fn(() => ({ where: mockWhere })));
 
 jest.mock('../services/apns', () => ({
+  STAFF_APP_BUNDLE_ID: 'com.wavespestcontrol.wavespay',
   send: jest.fn(),
   status: () => ({ configured: false }),
 }));
@@ -56,4 +57,31 @@ test('web subscriptions never call APNs', async () => {
   );
   expect(apns.send).not.toHaveBeenCalled();
   expect(result.skipped).toBe(true);
+});
+
+describe('Waves Admin (the iOS staff app) rows', () => {
+  const staffRow = (environment, topic = 'com.wavespestcontrol.wavespay') => ({
+    id: 'sub-5', platform: 'ios', device_token: 'staff-tok',
+    subscription_data: JSON.stringify({ token: 'staff-tok', topic, environment }),
+  });
+
+  test('a development install goes to its own topic on the sandbox host', async () => {
+    apns.send.mockResolvedValue({ ok: true });
+    await sendSubscription(staffRow('sandbox'), { title: 'New lead' });
+    expect(apns.send).toHaveBeenCalledWith('staff-tok', { title: 'New lead' },
+      { topic: 'com.wavespestcontrol.wavespay', production: false });
+  });
+
+  test('a production install goes to the production host', async () => {
+    apns.send.mockResolvedValue({ ok: true });
+    await sendSubscription(staffRow('production'), { title: 'New lead' });
+    expect(apns.send).toHaveBeenCalledWith('staff-tok', { title: 'New lead' },
+      { topic: 'com.wavespestcontrol.wavespay', production: true });
+  });
+
+  test('any other topic keeps the customer-app default', async () => {
+    apns.send.mockResolvedValue({ ok: true });
+    await sendSubscription(staffRow('sandbox', 'com.example.other'), { title: 'Hi' });
+    expect(apns.send).toHaveBeenCalledWith('staff-tok', { title: 'Hi' });
+  });
 });

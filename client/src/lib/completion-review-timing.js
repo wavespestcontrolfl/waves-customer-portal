@@ -317,7 +317,39 @@ export function completionWillReview({
 }
 
 // The path of the server preview of the "Automatic" send time (GET /admin/reviews/send-time-preview).
-export const reviewSendPreviewPath = (serviceType) => `/admin/reviews/send-time-preview?${new URLSearchParams({ serviceType: serviceType || "" })}`;
+// `serviceId` (optional) lets the server say whether this visit's customer was never asked
+// (`firstReviewAsk`, GATE_REVIEW_FIRST_ASK_LOCK); without it the path is unchanged.
+export const reviewSendPreviewPath = (serviceType, serviceId) => `/admin/reviews/send-time-preview?${new URLSearchParams({ serviceType: serviceType || "", ...(serviceId ? { serviceId: String(serviceId) } : {}) })}`;
+
+// First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a customer never asked for a
+// review sees the box as "First review ask", on and kept on. The tech may turn it off with ONE
+// reason, "Complaint on site", confirmed first; the server keeps the ask on without it.
+export const FIRST_REVIEW_ASK_LABEL = "First review ask";
+export const COMPLAINT_ON_SITE_REASON = "complaint_on_site";
+export const FIRST_ASK_OPT_OUT_PROMPT = "Turn off the first review ask? This customer was never asked for a review. The only reason to skip it is: Complaint on site.";
+
+// The label of the review box: the suppressed, included and plain wordings are today's.
+export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk }) {
+  if (reviewSuppressionReason) return "Review request suppressed";
+  if (oneTimeRecapOnly) return "Review request included";
+  return firstAsk ? FIRST_REVIEW_ASK_LABEL : "Send review request";
+}
+
+// The preview's own verdict on the first ask, only when the server sent one (gate off: no key).
+export const firstReviewAskFrom = (preview) => (typeof preview?.firstReviewAsk === "boolean" ? preview.firstReviewAsk : null);
+
+// What the box does when toggled. A first ask turned off needs the confirmed reason; cancelling
+// keeps it on. Returns the next { requestReview, reviewOptOutReason }.
+export function nextReviewChoice({ checked, firstAsk, confirmOptOut }) {
+  if (checked) return { requestReview: true, reviewOptOutReason: null };
+  if (!firstAsk) return { requestReview: false, reviewOptOutReason: null };
+  return confirmOptOut()
+    ? { requestReview: false, reviewOptOutReason: COMPLAINT_ON_SITE_REASON }
+    : { requestReview: true, reviewOptOutReason: null };
+}
+
+// The body key beside requestReview:false that carries the reason; nothing otherwise.
+export const reviewOptOutFields = ({ firstAsk, willReview, reviewOptOutReason }) => (firstAsk && !willReview && reviewOptOutReason ? { reviewOptOutReason } : {});
 
 // The ET wall clock a "Tomorrow at 8 AM" or custom timing sends at; null for Automatic,
 // customer-requested, a suppressed review and a one-time recap.

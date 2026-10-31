@@ -198,6 +198,31 @@ describe('calendar facts on the days', () => {
     expect(screen.getByText('Wed Jan 3 (last resort)')).toBeTruthy();
   });
 
+  it('an already-late day (GATE_ROUTE_CHECK_LATE_DAYS) keeps its hours and says so in the day line, never as a verdict', () => {
+    const late = { date: '2035-01-03', status: 'open', alreadyLate: true, hours: [hour('2035-01-03', '15:00', 4, { dayAlreadyLate: true })] };
+    const availability = answer(null, [offDay, late, openDay]);
+    const v = availabilityVerdict(availability, at('2035-01-02', '09:00'));
+    expect(v.text).not.toMatch(/late|fit/i);
+    render(<AvailabilityStrip availability={availability} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    // The pill still counts the open hour.
+    expect(screen.getAllByTestId('availability-day')[1].textContent).toBe('Wed31 open');
+    fireEvent.click(screen.getAllByTestId('availability-day')[1]);
+    expect(screen.getByText('Wed Jan 3 (already late)')).toBeTruthy();
+    fireEvent.click(screen.getAllByTestId('availability-day')[2]);
+    expect(screen.getByText('Fri Jan 5')).toBeTruthy();
+  });
+
+  it('picking an hour on an already-late day reads as a fit: the verdict has no "doesn\'t fit" sentence and the day keeps its tag', () => {
+    const late = { date: '2035-01-03', status: 'open', alreadyLate: true, hours: [hour('2035-01-03', '15:00', 4, { dayAlreadyLate: true })] };
+    const availability = answer({ start: '15:00', fits: true, reason: null, detourMinutes: 4, dayAlreadyLate: true }, [late, openDay]);
+    const v = availabilityVerdict(availability, at('2035-01-03', '15:00'));
+    expect(v).toMatchObject({ tone: 'ok', text: 'Wed Jan 3 · 3 PM fits.' });
+    render(<AvailabilityStrip availability={availability} currentDate="2035-01-03" currentStart="15:00" onPick={() => {}} />);
+    expect(screen.getByRole('status').textContent).not.toMatch(/doesn't fit|miss|late/i);
+    fireEvent.click(screen.getAllByTestId('availability-day')[0]);
+    expect(screen.getByText('Wed Jan 3 (already late)')).toBeTruthy();
+  });
+
   it('a pick on a closed day says so in the verdict', () => {
     const availability = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 1 }, [closedDay]);
     expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('Adds +1 min to the day · estimated. Wed Jan 3 is a closed day.');
@@ -319,5 +344,29 @@ describe('best-times rows', () => {
   it('without bestRows the strip keeps its closest offers', () => {
     render(<AvailabilityStrip availability={withBest({ start: '09:00', fits: false, reason: 'arrival_window' })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
     expect(screen.queryByTestId('best-row')).toBeNull();
+  });
+});
+
+describe('the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE)', () => {
+  const NOTE = 'Google road times paused: daily limit reached. Times marked ~ use the estimate.';
+  const modelDays = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 5)] }];
+  const googleDays = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 5, { driveSource: 'google' })] }];
+
+  it('sits under the "~" legend when the server sends it', () => {
+    render(<AvailabilityStrip availability={{ ...answer(null, modelDays), roadLimit: NOTE }} currentDate="2035-01-02" currentStart="10:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    expect(screen.getByTestId('road-limit-note').textContent).toBe(NOTE);
+  });
+
+  it('without it the legend is alone, exactly as before', () => {
+    render(<AvailabilityStrip availability={answer(null, modelDays)} currentDate="2035-01-02" currentStart="10:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    expect(screen.queryByTestId('road-limit-note')).toBeNull();
+  });
+
+  it('shows only where the legend shows: no "~" hour on screen, no line', () => {
+    render(<AvailabilityStrip availability={{ ...answer(null, googleDays), roadLimit: NOTE }} currentDate="2035-01-02" currentStart="10:00" onPick={() => {}} />);
+    expect(screen.queryByText('~ = straight-line estimate, not a road time.')).toBeNull();
+    expect(screen.queryByTestId('road-limit-note')).toBeNull();
   });
 });

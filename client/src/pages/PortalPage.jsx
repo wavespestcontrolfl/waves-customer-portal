@@ -26,6 +26,7 @@ import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
+import MistingSystemCard from '../components/portal/MistingSystemCard';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
@@ -2787,6 +2788,22 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const lastScopeStale = scopeEchoMismatch(lastRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
   const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
+  // Misting system card (dark behind GATE_MOSQUITO_MISTING: gate off = { system: null }).
+  // A loading or failed read renders nothing.
+  const mistingRead = usePortalRead('misting-system', () => api.getMistingSystem());
+  const mistingScopeStale = scopeEchoMismatch(mistingRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
+  useEffect(() => { if (mistingScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [mistingScopeStale, onSavedScopeUnavailable]);
+  const mistingSystem = mistingScopeStale ? null : (mistingRead.data?.system || null);
+  // The server works out the next mist when it is read. Re-read just after that time passes, so a
+  // Home left open never keeps showing a mist that already ran (the card shows "—" meanwhile).
+  const mistingNextAt = mistingSystem?.nextMistAt || null;
+  const refreshMisting = mistingRead.refresh;
+  useEffect(() => {
+    const at = mistingNextAt ? new Date(mistingNextAt).getTime() : NaN;
+    if (!Number.isFinite(at)) return undefined;
+    const timer = setTimeout(() => { void refreshMisting(); }, Math.min(Math.max(at - Date.now(), 0) + 1000, 2147483647));
+    return () => clearTimeout(timer);
+  }, [mistingNextAt, refreshMisting]);
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
   const [reviewCard, setReviewCard] = useState(null);
   const [reviewCardStatus, setReviewCardStatus] = useState('loading');
@@ -3264,6 +3281,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
         </section>
       </div>
 
+      {mistingSystem && <MistingSystemCard system={mistingSystem} cardStyle={card} muted={muted} />}
+
       {dashboardSecondarySelection ? (
         <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
           <div style={{ fontSize: 14, color: muted, lineHeight: 1.5 }}>
@@ -3698,6 +3717,16 @@ function ServicesTab() {
   const thisYearServices = services.filter(s => parseDate(s.date).getFullYear() === currentYear);
   const totalProducts = thisYearServices.reduce((sum, s) => sum + (s.products?.length || 0), 0);
   const uniqueTechs = new Set(thisYearServices.map(s => s.technician).filter(Boolean)).size;
+  // A visit is a day with a completed service, not a record: one stop can
+  // carry several appointments, sibling records, or a record that never
+  // completed (scheduled / in_progress / incomplete / cancelled).
+  // Keyed off parseDate, the same ET day the year buckets and sort use.
+  const visitDay = (s) => {
+    const dt = parseDate(s.date);
+    return Number.isNaN(dt.getTime()) ? '' : `${dt.getFullYear()}-${dt.getMonth() + 1}-${dt.getDate()}`;
+  };
+  const isCompletedVisit = (s) => s.status === 'completed' && visitDay(s);
+  const thisYearVisits = new Set(thisYearServices.filter(isCompletedVisit).map(visitDay)).size;
   // WaveGuard memberships don't account for an hourly/per-visit time figure in the
   // customer portal — the average visit duration is intentionally not tallied (reads as zero).
   const avgMinutes = 0;
@@ -3712,19 +3741,22 @@ function ServicesTab() {
   });
   const sortedMonths = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
 
-  // --- Visit numbering --- single pass: assign visit number, then fill totals via map lookup.
-  const visitCounts = {};
+  // --- Visit numbering --- per service line and year, one number per
+  // completed visit day (same-day records share it); a record that did not
+  // complete gets no number.
+  const visitDays = {};
   const sortedAll = [...services].sort((a, b) => parseDate(a.date) - parseDate(b.date));
-  const visitKeys = new Array(sortedAll.length);
-  sortedAll.forEach((s, idx) => {
-    const cat = classifyType(s.type);
-    const yr = parseDate(s.date).getFullYear();
-    const k = `${cat}-${yr}`;
-    visitKeys[idx] = k;
-    visitCounts[k] = (visitCounts[k] || 0) + 1;
-    s._visitNum = visitCounts[k];
+  sortedAll.forEach((s) => {
+    s._visitNum = null;
+    s._visitTotal = null;
+    if (!isCompletedVisit(s)) return;
+    const k = `${classifyType(s.type)}-${parseDate(s.date).getFullYear()}`;
+    const days = visitDays[k] || (visitDays[k] = []);
+    if (days[days.length - 1] !== visitDay(s)) days.push(visitDay(s));
+    s._visitKey = k;
+    s._visitNum = days.length;
   });
-  sortedAll.forEach((s, idx) => { s._visitTotal = visitCounts[visitKeys[idx]]; });
+  sortedAll.forEach((s) => { if (s._visitNum) s._visitTotal = visitDays[s._visitKey].length; });
 
   // --- Available years ---
   const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
@@ -3754,7 +3786,7 @@ function ServicesTab() {
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginTop: 18 }}>
           {[
-            { val: thisYearServices.length, label: `${currentYear} visits` },
+            { val: thisYearVisits, label: `${currentYear} visits` },
             { val: totalProducts, label: 'Products applied' },
             { val: uniqueTechs, label: 'Technicians' },
             { val: avgMinutes > 0 ? `${avgMinutes} min` : 'N/A', label: 'Avg visit' },
@@ -3985,7 +4017,9 @@ function ServicesTab() {
             {loadingMore ? 'Loading...' : 'Load More Visits'}
           </button>
           <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>
-            Showing {services.length} of {totalServices} visits
+            {/* One card per service performed (a pest + lawn stop is two),
+                so this counts services; the tile above counts visit days. */}
+            Showing {services.length} of {totalServices} services
           </div>
         </div>
       )}
@@ -10386,7 +10420,7 @@ const SERVICE_CATALOG = [
     frequencies: ['Quarterly (4x)', 'Bi-Monthly (6x)', 'Monthly (12x)'],
     basePrice: 55, description: 'Interior + exterior treatment, granular perimeter band, bait station check, cobweb sweep on all eaves',
     // Advion granules are not used on pest visits (owner 2026-10-24); its catalog row is retired.
-    products: ['Demand CS', 'Alpine WSG'],
+    products: ['Demand CS', 'Atticus Antapex WSG'],
   },
   {
     id: 'lawn_care', name: 'Lawn Care', icon: 'sprout',

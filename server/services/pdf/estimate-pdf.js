@@ -514,7 +514,7 @@ function termsBlock(ctx, proposal, totals, y) {
   // r1 / #3297 r2b): the canned callback-guarantee claim must not sit beside
   // operator terms that may state the opposite. The neutral licensed-line
   // above stays — it makes no plan claims.
-  const structuredTermLines = commercialTermLines(proposal.commercialTerms);
+  const structuredTermLines = commercialTermLines(proposal.commercialTerms, { recurring: Number(totals.annualRecurring) > 0 });
   // The canned sentence is a recurring residential pest term: an all-pest
   // residential proposal only (proposalCallbackTermsEligible).
   const cannedTermsAllowed = !proposal.terms && structuredTermLines.length === 0 && !(proposal.programs || []).length;

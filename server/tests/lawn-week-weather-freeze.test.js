@@ -229,7 +229,10 @@ describe('freeze contract in the render path', () => {
     // "What to expect" sentences left the document.
     expect(LAWN_RENDER_STRATEGY).not.toMatch(/^p10-/);
     // p11: the April program line says "a slow-release feeding" (owner 2026-10-23).
-    expect(LAWN_RENDER_STRATEGY).toMatch(/^p11-/);
+    expect(LAWN_RENDER_STRATEGY).not.toMatch(/^p11-/);
+    // p12: a visit closed on a later day than it was worked renders no watering
+    // steps (owner 2026-10-27).
+    expect(LAWN_RENDER_STRATEGY).toMatch(/^p12-/);
   });
 
   test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
@@ -249,7 +252,7 @@ describe('freeze contract in the render path', () => {
     );
     // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
     // -lap2… / -lap3… — none can match the structured-evidence render.
-    expect(signature.startsWith('-lap11-lawn-slow-release-20261023')).toBe(true);
+    expect(signature.startsWith('-lap12-lawn-late-close-20261027')).toBe(true);
     expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature).not.toMatch(/^-lap1(?!\d)/);
   });

@@ -2907,6 +2907,23 @@ describe('POST /:id/cancel-plan', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('service');
   }));
 
+  test('a visit stuck on site from an EARLIER day still bells the office, but the customer hears the cancel is done', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9'], staleInProgressVisitIds: ['s9'] });
+    const body = await (await postCancel(baseUrl)).json();
+    // The operator still sees the partial run and the office is belled.
+    expect(body).toEqual(expect.objectContaining({ processed: false, errors: ['in_progress_visit:s9'] }));
+    expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    // Only the customer copy changes: completed, not "a team member will confirm".
+    expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+  }));
+
+  test('a stale stuck visit next to a LIVE in-progress visit keeps the by-hand confirmation', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9', 'in_progress_visit:s10'], staleInProgressVisitIds: ['s9'] });
+    await postCancel(baseUrl);
+    expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
+  }));
+
   test('a partial processor run reports processed:false, keeps the errors, and bells the office once', () => withServer(async (baseUrl) => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9'] });
     sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: false, emailSent: true, channels: ['email'] });

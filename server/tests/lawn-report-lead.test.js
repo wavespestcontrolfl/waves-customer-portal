@@ -397,7 +397,7 @@ describe('applyLawnReportReconciliation lead tail', () => {
     const bare = applyLawnReportReconciliation({ serviceLine: 'lawn', reportV2: { insights: [] } }, null);
     expect(Object.prototype.hasOwnProperty.call(bare.reportV2, 'lead')).toBe(false);
     const noV2 = applyLawnReportReconciliation({ serviceLine: 'lawn' }, null);
-    expect(noV2).toEqual({ serviceLine: 'lawn' });
+    expect(noV2).toEqual({ serviceLine: 'lawn', troubleSpotNote: null });
     expect(applyLawnReportReconciliation(null, null)).toBeNull();
   });
 

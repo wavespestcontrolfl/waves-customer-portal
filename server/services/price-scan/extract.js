@@ -228,6 +228,30 @@ function collectJsonLdOffers(jsonLdStrings) {
   return offers;
 }
 
+// Drop offers that are exact copies of an earlier one: same numeric price, currency,
+// availability (schema.org http/https spellings map to the same value), display name,
+// own name, aggregate flag and currency attestation. Two offers that differ in ANY of
+// these stay separate. PURE; keeps first-seen order.
+function dedupeExactOffers(offers) {
+  const seen = new Set();
+  const out = [];
+  for (const o of offers || []) {
+    const key = JSON.stringify([
+      Number(o.price),
+      String(o.currency || 'USD').toUpperCase(),
+      mapAvailability(o.availabilityRaw),
+      o.name == null ? null : o.name,
+      o.ownName == null ? null : o.ownName,
+      !!o.aggregate,
+      !!o.explicitCurrency,
+    ]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(o);
+  }
+  return out;
+}
+
 // Buyability rank for choosing among same-pool offers: a limited-stock price is
 // still purchasable and must beat a sold-out one; backorder is unbuyable like
 // out_of_stock (lower than 'unknown', so an unknown buyable offer wins over it).
@@ -260,7 +284,10 @@ function pickBestOffer(pool) {
 //   name (which may come from the product node) is allowed as size evidence.
 // Within the chosen pool, prefers an in-stock priced offer over an out-of-stock.
 function extractJsonLdOffer(jsonLdStrings, opts = {}) {
-  const offers = collectJsonLdOffers(jsonLdStrings);
+  // Collapse exact duplicates first: a storefront that prints the same Product block twice
+  // (Veseris, 2026-10) is ONE offer, not two competing ones. collectJsonLdOffers itself
+  // stays raw so its other callers keep seeing every block.
+  const offers = dedupeExactOffers(collectJsonLdOffers(jsonLdStrings));
   if (!offers.length) return null;
 
   if (opts.targetOz && opts.targetOz > 0) {
@@ -761,6 +788,7 @@ module.exports = {
   parsePriceTextCents,
   offerPrice,
   collectJsonLdOffers,
+  dedupeExactOffers,
   extractJsonLdOffer,
   extractDomPrice,
   pickVariantOffer,

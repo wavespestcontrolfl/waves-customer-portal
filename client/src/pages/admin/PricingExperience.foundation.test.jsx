@@ -110,4 +110,34 @@ describe("Pricing admin new UI foundation", () => {
     expect(await screen.findByText("Upsell SMS sent!")).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith("/api/admin/pricing/trigger-upsell/customer-1", expect.objectContaining({ method: "POST" }));
   });
+
+  // Operations audit OP-11/OP-12: a failed Strategy read is a failure with
+  // "Try again", never zero customers or "none found"; no dead New offer button.
+  it("shows failed strategy reads as failures and retries them", async () => {
+    const failing = new Set(["/admin/pricing/dashboard", "/admin/pricing/offers", "/admin/pricing/upsell-rules", "/admin/pricing/ltv-analysis"]);
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const path = String(url).replace(/^\/api/, "");
+      return failing.has(path) ? response({}, 503) : response(fixtureFor(url, options));
+    }));
+    render(<MemoryRouter><PricingStrategyPage /></MemoryRouter>);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load the money model — HTTP 503");
+    expect(screen.queryByText("Total customers")).not.toBeInTheDocument();
+    failing.delete("/admin/pricing/dashboard");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Total customers")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Offers" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load custom offer packages — HTTP 503");
+    expect(screen.queryByRole("button", { name: "+ New offer" })).not.toBeInTheDocument();
+    expect(screen.getByText("WaveGuard Bronze")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Upsells" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load upsell rules.");
+    expect(screen.queryByText("No upsell rules configured")).not.toBeInTheDocument();
+    expect(screen.getByText("Synthetic customer")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "LTV" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load LTV analysis — HTTP 503");
+    expect(screen.queryByText(/No LTV data yet/)).not.toBeInTheDocument();
+  });
 });

@@ -1124,6 +1124,82 @@ describe('moves need a real drive saving (owner 2026-10-09; same-day re-times to
     });
   });
 
+  // GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28, Google cost "way too high").
+  describe('the road check at apply', () => {
+    const roadCheck = require('../services/auto-dispatch/road-check');
+    const legs = (name, date) => ({ [roadCheck.ROAD_LEGS]: { prev: { p: name }, stop: { s: name }, next: { n: name }, date, startMin: 540 } });
+    const current = { ...CURRENT, ...legs('now', CURRENT.date) };
+    const cand = { ...CAND_BIG, ...legs('cand', CAND_BIG.date) };
+    const table = { now: [25, 25, 10], cand: [10, 10, 10] };
+    let prevAllow;
+    let preload;
+    // How many road buys had been made when pass 2 began (its first call is the supersession read).
+    let boughtInPass1;
+    beforeEach(() => {
+      prevAllow = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+      preload = jest.fn(async () => {});
+      jest.spyOn(roadCheck, 'createRunTravel').mockReturnValue({
+        preload,
+        lookup: (leg) => ({ minutes: table[leg.from.p || leg.from.s][leg.from.s ? 1 : (leg.to.s ? 0 : 2)], source: 'google_traffic' }),
+        diagnostics: () => ({ requests: 0, elements: 0 }),
+      });
+      boughtInPass1 = null;
+      apply.revalidatePlacement.mockImplementation(async () => {
+        if (boughtInPass1 === null) boughtInPass1 = preload.mock.calls.length;
+        return { ok: true };
+      });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+    });
+    afterEach(() => {
+      jest.restoreAllMocks();
+      if (prevAllow === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY; else process.env.AUTO_DISPATCH_ALLOW_APPLY = prevAllow;
+    });
+
+    test('gate on, apply: pass 1 buys nothing; the move about to be written is checked', async () => {
+      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: true });
+      expect(res).toMatchObject({ changed: 1 });
+      expect(boughtInPass1).toBe(0);
+      expect(preload.mock.calls.length).toBeGreaterThan(0);
+      expect(lastDecision('changed').routeMetrics.road).toMatchObject({ saving_minutes: 30, source: 'google' });
+    });
+
+    test('gate on, cap already full: the held move is not re-evaluated and buys nothing', async () => {
+      servicesResult = [svc(), svc({ id: 's2', customer_id: 'c2' })];
+      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: true, maxChangesPerRun: 1 });
+      expect(res).toMatchObject({ changed: 1, recommended: 1 });
+      expect(boughtInPass1).toBe(0);
+      // Only the one applied move was checked (one slot, three legs in a batch per side).
+      const bought = preload.mock.calls.length;
+      expect(bought).toBeGreaterThan(0);
+      expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+      const held = lastDecision('recommended');
+      expect(held).toMatchObject({ reason_code: 'MAX_CHANGES_REACHED', reason_description: expect.stringContaining('Per-run change cap 1 reached (valid move held, +') });
+      expect(held.service.id).toBe('s2');
+      // Run it again with the gate off for the same two visits: the held visit costs a road check of its own.
+      preload.mockClear();
+      await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: false, maxChangesPerRun: 1 });
+      expect(preload.mock.calls.length).toBeGreaterThan(bought);
+    });
+
+    test('gate off, apply: today\'s behavior, the road is checked in pass 1', async () => {
+      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: false });
+      expect(res).toMatchObject({ changed: 1 });
+      expect(boughtInPass1).toBeGreaterThan(0);
+    });
+
+    test('gate on, dry run: today\'s behavior, the road is checked and the row carries it', async () => {
+      expect(await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true, roadCheckAtApply: true })).toMatchObject({ recommended: 1 });
+      expect(preload.mock.calls.length).toBeGreaterThan(0);
+      expect(lastDecision('recommended').routeMetrics.road).toMatchObject({ saving_minutes: 30, source: 'google' });
+    });
+
+    test('the gate does nothing while the road check itself is off', async () => {
+      await runAutoDispatch({ mode: 'apply', roadCheckEnabled: false, roadCheckAtApply: true });
+      expect(roadCheck.createRunTravel).not.toHaveBeenCalled();
+    });
+  });
+
   test('a day move over the score bar with under 6 minutes saved reads NO_DRIVE_SAVING', async () => {
     const current = { ...CURRENT, detour_minutes: 5, same_area_share: 0, route_minutes: 600 };
     const cand = { ...CAND_BIG, detour_minutes: 2, same_area_share: 1, route_minutes: 300, start_time: '09:00' };
@@ -1755,8 +1831,6 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
   let checkMove;
   beforeEach(() => {
     checkMove = jest.spyOn(moveCheck, 'checkMove');
-    // The run's end closes stored notices the run settled: a raw column expression on the fake store.
-    db.raw = (sql) => sql;
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE] });
   });
   afterEach(() => jest.restoreAllMocks());
@@ -1793,16 +1867,11 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     await applyMode(async () => {
       checkMove.mockResolvedValue({ ...stop('PROOFREADER_UNSURE', 'unknown'), broke: true });
       expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+      raiseAdminAlert.mockClear();
       checkMove.mockResolvedValue({ ...stop('PROOFREADER_UNSURE', 'unknown'), broke: false });
       expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed' });
-    });
-  });
-
-  test('a held visit whose notice could not be written ends the run completed_with_errors', async () => {
-    await applyMode(async () => {
-      checkMove.mockImplementation(async ({ run }) => { run.proofreader.notices.set('k', { key: 'k', id: 's1', date: '2026-08-04' }); return stop('PROOFREADER_UNSURE', 'unknown'); });
-      jest.spyOn(audit, 'withinRingBudget').mockImplementation(() => { throw new Error('store down'); });
-      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+      // The visit stays and nobody is asked about it (owner 2026-10-29).
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
     });
   });
 
@@ -1828,13 +1897,16 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
-  test('the same refusal with no proofreader check: no_change, and the apply is handed the start-point lookup', async () => {
+  test('the same refusal with no proofreader check: no_change, and the apply is handed the start-point lookup and the current day\'s technician', async () => {
     await applyMode(async () => {
+      // An unassigned visit's current placement scored on t2's day (candidate-slots.js currentDayTechs).
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT, day_technician_id: 't2' }, candidates: [CAND_BIG, CAND_MODERATE] });
       apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('start address changed'), { code: 'START_POINT_CHANGED', statusCode: 409 }));
       const res = await runAutoDispatch({ mode: 'apply' });
       expect(res).toMatchObject({ changed: 0, failed: 0 });
       expect(lastDecision('no_change').reason_code).toBe('START_POINT_CHANGED');
       expect(typeof apply.applyAutoDispatchMove.mock.calls[0][3].startPointFor).toBe('function');
+      expect(apply.applyAutoDispatchMove.mock.calls[0][3].sourceDayTechnicianId).toBe('t2');
     });
   });
 
@@ -1867,20 +1939,16 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
-  test('preferences changed under an unsure answer: superseded, and the queued notice is discarded', async () => {
+  test('preferences changed under an unsure answer: superseded, and the run is green', async () => {
     await applyMode(async () => {
       const preferences = require('../services/auto-dispatch/preferences');
       const before = await preferences.getCustomerSchedulingPreferences();
-      let state;
-      checkMove.mockImplementation(async ({ run, service }) => {
-        state = run.proofreader;
-        state.notices.set(moveCheck.noticeKey(service.id, '2026-08-04', '09:00:t1'), { id: service.id });
+      checkMove.mockImplementation(async () => {
         preferences.getCustomerSchedulingPreferences.mockResolvedValueOnce({ ...before, preferred_day_indexes: [2] });
         return stop('PROOFREADER_UNSURE', 'unknown');
       });
       expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed' });
       expect(lastDecision('no_change').reason_code).toBe('SUPERSEDED_DURING_RUN');
-      expect(state.notices.size).toBe(0);
     });
   });
 
@@ -2099,5 +2167,19 @@ describe('day rules (GATE_AUTO_DISPATCH_DAY_RULES, owner 2026-10-24)', () => {
       expect(res).toMatchObject({ changed: 1 });
       expect(lastDecision('recommended')).toBeUndefined();
     });
+  });
+});
+
+describe('run log line words the day-move rule for the guard mode in force', () => {
+  const { describeGuardRule } = _internals;
+  test('legacy keeps the flat lock boundary', () => {
+    expect(describeGuardRule('legacy', '2026-11-09', '2026-10-26')).toBe('lock>2026-11-09');
+    expect(describeGuardRule(undefined, '2026-11-09', '2026-10-26')).toBe('lock>2026-11-09');
+  });
+  test('tiers says day moves start 7 days out', () => {
+    expect(describeGuardRule('tiers', '2026-11-09', '2026-10-26')).toBe('tiers: day moves from 7 days out');
+  });
+  test('flex says frozen under 73h and day moves land on or after today + 5', () => {
+    expect(describeGuardRule('flex', '2026-11-09', '2026-10-26')).toBe('flex: frozen under 73h, day moves on or after 2026-10-31');
   });
 });

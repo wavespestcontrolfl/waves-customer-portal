@@ -417,7 +417,6 @@ beforeEach(() => {
   mockEmailMessages.length = 0;
   mockRepairImpl = async () => new Set();
   process.env.GATE_DUNNING_LADDER_90 = 'true';
-  delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
   setup();
   mockOnAutopay.mockResolvedValue(false);
   mockPolicy.mockResolvedValue({ allowed: true });
@@ -2640,11 +2639,12 @@ describe('final notice, D2/D4/D5/D11', () => {
     expect(Schedule.markPaused.mock.calls[0][0].step_index).toBe(5);
   });
 
-  test('at-risk stamp: Day 60/90 under the gate pair only, on an advance', async () => {
+  test('at-risk stamp: Day 60/90 only while the Day 90 ladder is live, on an advance', async () => {
     const spy = jest.spyOn(Followups, 'markAtRiskForLongOverdue').mockResolvedValue();
+    delete process.env.GATE_DUNNING_LADDER_90;
     await run();
-    expect(spy).not.toHaveBeenCalled(); // GATE_BALANCE_REMINDER_LEGACY_OFF unset
-    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    expect(spy).not.toHaveBeenCalled(); // GATE_DUNNING_LADDER_90 unset
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
     mockLedger.length = 0;
     await run();
     expect(spy).toHaveBeenCalledWith(CUSTOMER_ID);

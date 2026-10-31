@@ -111,6 +111,8 @@ const w2Rows = form => [
   { line: 'Box 5', label: 'Medicare wages and tips', kind: 'cents', value: form.box5 },
   { line: 'Box 6', label: 'Medicare tax withheld (with Additional Medicare Tax)', kind: 'cents', value: form.box6 },
   ...(form.box12TT ? [{ line: 'Box 12 TT', label: 'Qualified overtime compensation', kind: 'cents', value: form.box12TT }] : []),
+  // Only with GATE_PAYROLL_PAY_LINES on: the employer's cafeteria-plan HSA contributions.
+  ...(form.box12W ? [{ line: 'Box 12 W', label: 'Employer contributions to a health savings account (cafeteria plan)', kind: 'cents', value: form.box12W }] : []),
 ];
 
 const w3Rows = totals => [

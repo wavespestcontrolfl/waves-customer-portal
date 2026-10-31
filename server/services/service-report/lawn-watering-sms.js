@@ -45,8 +45,10 @@ const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']
 // text too ("No watering change from today's treatment.").
 const EVERY_VISIT_STATES = Object.freeze([...SENDABLE_STATES, 'none']);
 // Why a visit has no instruction, for the office alert. A visit that logged no
-// product, or has no completion time, is not a watering question.
-const ALERT_REASONS = Object.freeze(['unruled_product', 'water_in_conflict', 'same_day_too_late', 'unchecked_rules', 'inputs_unreadable', 'report_not_built']);
+// product, or has no completion time, is not a watering question. Nor is a
+// late close (owner 2026-10-27): it gets the marker below and no alert.
+const ALERT_REASONS = Object.freeze(['unruled_product', 'water_in_conflict', 'same_day_too_late', 'unchecked_rules', 'inputs_unreadable', 'no_lawn_read', 'report_not_built']);
+const LATE_CLOSE = 'late_close';
 
 // Statuses that end the obligation for this visit. One try, then stop (owner
 // 2026-10-01): a send known NOT delivered ('failed') is final too, never
@@ -390,6 +392,7 @@ const NO_INSTRUCTION_WHY = {
     : `${a} needs watering that clashes with another product, so no watering text went out.`),
   same_day_too_late: ([a]) => `${a} must be watered in today, but the visit ended too late for a run.`,
   inputs_unreadable: () => 'The visit\'s products or watering settings could not be read, so no text went out.',
+  no_lawn_read: () => 'No lawn photo read was confirmed for this visit, so no watering text went out.',
   report_not_built: () => 'The lawn report for this visit could not be built, so no watering text went out.',
 };
 const WHY_MAX = 110;
@@ -411,12 +414,16 @@ const NO_INSTRUCTION_DETAIL = {
   water_in_conflict: (products) => `${products} ask for watering that cannot be done together`,
   same_day_too_late: (products) => `${products} must be watered in the same day, and the visit ended too late to fit a run that day`,
   inputs_unreadable: () => 'The visit\'s products or watering settings could not be read when the visit was completed',
+  no_lawn_read: () => 'No lawn photo read was confirmed when this visit was completed, and the watering steps are made only with one',
   report_not_built: () => 'The lawn report for this visit could not be built when the visit was completed',
 };
 const RULE_FIX = 'Text the customer the watering steps from the product labels, then ask Claude to fix the product\'s watering rule.';
 const READ_FIX = 'Text the customer the watering steps from the product labels, then check the products logged on this visit.';
+const PHOTO_FIX = 'Text the customer the watering steps from the product labels.';
+const FIX_FOR = { inputs_unreadable: READ_FIX, report_not_built: READ_FIX, no_lawn_read: PHOTO_FIX };
 
 async function alertNoInstruction({ record, svc, notes, noClaim }, deps) {
+  if (noClaim && noClaim.reason === LATE_CLOSE) return markLateClose({ record, notes }, deps);
   if (!noClaim || !ALERT_REASONS.includes(noClaim.reason) || !Array.isArray(noClaim.products)) {
     return { status: 'skip_no_instruction' };
   }
@@ -445,7 +452,7 @@ async function alertNoInstruction({ record, svc, notes, noClaim }, deps) {
     }, {
       bell: true,
       dedupeKey,
-      detail: `${NO_INSTRUCTION_DETAIL[noClaim.reason](products)}, so this lawn visit froze no watering instruction and the customer got no watering text. ${['inputs_unreadable', 'report_not_built'].includes(noClaim.reason) ? READ_FIX : RULE_FIX}`,
+      detail: `${NO_INSTRUCTION_DETAIL[noClaim.reason](products)}, so this lawn visit froze no watering instruction and the customer got no watering text. ${FIX_FOR[noClaim.reason] || RULE_FIX}`,
       metadata: { reason: noClaim.reason, products: noClaim.products, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey },
     });
   } catch (err) {
@@ -464,6 +471,22 @@ async function alertNoInstruction({ record, svc, notes, noClaim }, deps) {
     logger.warn(`[lawn-watering-sms] no-instruction marker write failed for service_record ${record.id}: ${err.message}`);
   }
   return { status: 'alerted_no_instruction' };
+}
+
+// Owner 2026-10-27: a lawn visit closed on a later day than it was worked gets
+// no watering text, no office alert and no technician note: its "today" would
+// be the close day, and the steps are moot days later. The marker records why
+// (a skipped_* status also ends the obligation for a resume); a failed marker
+// write changes nothing, since nothing is sent either way.
+async function markLateClose({ record, notes }, deps) {
+  const marker = { lawnWateringSmsStatus: 'skipped_late_close', lawnWateringNoClaimReason: LATE_CLOSE };
+  try {
+    await deps.mergeNotes(record.id, marker);
+    Object.assign(notes, marker);
+  } catch (err) {
+    logger.warn(`[lawn-watering-sms] late-close marker write failed for service_record ${record.id}: ${err.message}`);
+  }
+  return { status: 'skipped_late_close' };
 }
 
 module.exports = {

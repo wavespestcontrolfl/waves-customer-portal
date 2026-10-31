@@ -37,12 +37,12 @@ describe('stopPlanningMinutes', () => {
 
   test('GATE_SCHEDULING_CAPACITY on: uses the owner planning table for a named service', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
-    expect(stopPlanningMinutes(pestStop)).toBe(25); // recurringPest
+    expect(stopPlanningMinutes(pestStop)).toBe(35); // recurringPest (owner 2026-10-30: 35, was 25)
   });
 
   test('charges the MOVING VISIT too, even when it is marked planning_exempt — the deliberate departure from the general arrival-route contract', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
-    expect(stopPlanningMinutes({ ...pestStop, planning_exempt: true })).toBe(25);
+    expect(stopPlanningMinutes({ ...pestStop, planning_exempt: true })).toBe(35);
   });
 
   // Codex r2 (PRRT_kwDOR3YQi86mQebJ): the fallback is the canonical legacy
@@ -142,13 +142,13 @@ describe('routeCost', () => {
       expect(cost.routeTimeWithMinutes).toBeCloseTo(cost.driveWithMinutes + 45 + 30 + 20, 5);
     });
 
-    test('a GATE_SCHEDULING_CAPACITY planning-table change moves routeTimeWithMinutes (recurring pest: 25 min, not its own 60-min estimate)', () => {
+    test('a GATE_SCHEDULING_CAPACITY planning-table change moves routeTimeWithMinutes (recurring pest: 35 min, not its own 60-min estimate)', () => {
       process.env.GATE_SCHEDULING_CAPACITY = 'true';
       const pestVisit = { geo: FAR, startMin: 600, service_type: 'Quarterly Pest Control Service', is_recurring: true, estimated_duration_minutes: 60 };
-      const tableNamed = routeCost([], { ...pestVisit }); // table names it -> 25, not 60
+      const tableNamed = routeCost([], { ...pestVisit }); // table names it -> 35 (owner 2026-10-30), not 60
       delete process.env.GATE_SCHEDULING_CAPACITY;
       const gateOff = routeCost([], { ...pestVisit }); // gate off -> falls back to the 60-min estimate
-      expect(gateOff.routeTimeWithMinutes - tableNamed.routeTimeWithMinutes).toBeCloseTo(60 - 25, 5);
+      expect(gateOff.routeTimeWithMinutes - tableNamed.routeTimeWithMinutes).toBeCloseTo(60 - 35, 5);
       // The scored detourMinutes never moved — only the new field did.
       expect(gateOff.detourMinutes).toBeCloseTo(tableNamed.detourMinutes, 5);
     });

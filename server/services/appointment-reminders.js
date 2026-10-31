@@ -2745,9 +2745,18 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // NOT be stamped as sent, or the corrected time is suppressed forever.
       // A miss leaves the row pending and the stranded-confirmation sweep
       // resends with the new time (one extra, correct text beats none).
+      //
+      // A delivered confirmation for a visit that is already tomorrow (or
+      // today) IS the day-before notice: left armed, the 24h "is tomorrow"
+      // reminder goes out on the next 15-minute tick as a second text
+      // (2026-10-26: confirmation 12:53 PM, reminder 1:00 PM). Close it in
+      // this same fenced write so the cron never selects it. Delivered sends
+      // only — a failed confirmation keeps the 24h reminder as the notice.
+      const coversDayBefore = sent && etDateString(apptTime) <= etDateString(addETDays(new Date(), 1));
       const marked = await db('appointment_reminders')
         .where({ id: record.id, appointment_time: apptTime })
-        .update({ confirmation_sent: true, confirmation_sent_at: new Date(), confirmation_estimate_id: null });
+        .update({ confirmation_sent: true, confirmation_sent_at: new Date(), confirmation_estimate_id: null,
+          ...(coversDayBefore ? { reminder_24h_sent: true, reminder_24h_sent_at: new Date() } : {}) });
       if (Number(marked) === 0) {
         logger.warn(`[appt-remind] Confirmation for ${scheduledServiceId} went out for a time that changed under the send — row left pending so the sweep resends the new time`);
       }

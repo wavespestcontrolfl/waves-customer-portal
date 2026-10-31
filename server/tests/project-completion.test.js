@@ -16,7 +16,6 @@ const {
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
   projectIsExplicitlyNoCharge,
-  projectReportPaymentIsHeld,
   projectFollowupSuggestion,
   projectReviewedForPortalAttachment,
   serviceRecordMatchesScheduledService,
@@ -254,12 +253,6 @@ describe('project completion helpers', () => {
       project_type: 'pre_treatment_termite_certificate',
       findings: { inspection_fee: '0' },
     })).toBe(false);
-  });
-
-  test('treats held and releasing reports as portal-hidden payment holds', () => {
-    expect(projectReportPaymentIsHeld({ report_hold_status: 'held' })).toBe(true);
-    expect(projectReportPaymentIsHeld({ report_hold_status: 'releasing' })).toBe(true);
-    expect(projectReportPaymentIsHeld({ report_hold_status: 'released' })).toBe(false);
   });
 
   test('project follow-up suggestion uses profile policy and default interval', () => {

@@ -21,9 +21,11 @@ const {
   buildFindingsFromVision,
   runFindingsLadder,
   applyWriterSummary,
+  postedScore,
   deriveOverallScore,
 } = require('../services/lawn-diagnostic-analyze');
 const { etParts } = require('../utils/datetime-et');
+const { checkDiagnosisSummary } = require('../services/service-report/lawn-jev-timing-check');
 
 const MAX_ANALYZE_PHOTOS = 5;
 const DIAGNOSTIC_MODES = ['internal', 'prospect'];
@@ -445,7 +447,7 @@ router.post('/', async (req, res, next) => {
     const address = normalizeAddress(body.address);
     const compliance = body.compliance && typeof body.compliance === 'object' ? body.compliance : {};
     const aiAnalysis = body.aiAnalysis && typeof body.aiAnalysis === 'object' ? body.aiAnalysis : {};
-    const overallScore = Number.isFinite(Number(body.overallScore)) ? Math.round(Number(body.overallScore)) : null;
+    const overallScore = postedScore(body.overallScore);
     const aiConfidence = Number.isFinite(Number(body.aiConfidence)) ? Number(body.aiConfidence) : null;
     const inputPhotos = asArray(body.photos).map((photo, index) => ({
       photo_id: photo.photo_id || photo.photoId || `photo-${index + 1}`,
@@ -483,8 +485,18 @@ router.post('/', async (req, res, next) => {
         logger.warn(`[lawn-diagnostic] run-record lookup failed (non-blocking): ${err.message}`);
       }
     }
-    const sanitizedContract = applyAutoReleaseRepair(contract, releaseMode);
-    const aiSummary = cleanString(body.aiSummary, 2000) || cleanString(sanitizedContract.customer_summary, 2000);
+    // GATE_LAWN_JEV_TIMING_CHECK: only a summary a MODEL wrote (restored from the
+    // verified run record) is checked. body.aiSummary is a person's typed text: it
+    // goes only to ai_summary and is never asked about or changed.
+    const repairedContract = applyAutoReleaseRepair(contract, releaseMode);
+    const jevCheck = await checkDiagnosisSummary(repairedContract, { modelWritten: restoredFromRun });
+    const sanitizedContract = jevCheck.contract;
+    // A typed aiSummary is kept as typed, except a verbatim copy of the model's own
+    // summary: that copy must hold the same final text as report_contract.
+    const typedSummary = cleanString(body.aiSummary, 2000);
+    const aiSummary = (typedSummary && typedSummary !== cleanString(repairedContract.customer_summary, 2000))
+      ? typedSummary
+      : cleanString(sanitizedContract.customer_summary, 2000);
 
     const [row] = await db('lawn_diagnostics').insert({
       mode,
@@ -502,6 +514,7 @@ router.post('/', async (req, res, next) => {
       overall_score: deriveOverallScore(sanitizedContract, overallScore),
       ai_summary: aiSummary,
     }).returning(['id', 'mode', 'status']);
+    jevCheck.afterInsert(row.id);
 
     return res.status(201).json({ success: true, id: row.id, mode: row.mode, status: row.status });
   } catch (err) {
@@ -512,61 +525,68 @@ router.post('/', async (req, res, next) => {
 // POST /api/tech/lawn-diagnostic/:id/send — capture contact, mint token, mark sent.
 router.post('/:id/send', async (req, res, next) => {
   try {
-    const row = await db('lawn_diagnostics').where({ id: req.params.id }).first();
-    if (!row) return res.status(404).json({ error: 'Diagnostic not found' });
-    // A technician may act only on a diagnostic they created (codex #5568 r3
-    // P1); an admin may act on any. 404 so an id seen elsewhere confirms nothing.
-    if (req.techRole !== 'admin' && String(row.created_by_technician_id || '') !== String(req.technicianId || '')) {
-      return res.status(404).json({ error: 'Diagnostic not found' });
-    }
+    // One transaction, row locked FIRST: the recipient (a bare resend inherits the stored
+    // snapshot) and the keep-or-rotate decision below read what a concurrent send just
+    // committed. Deciding before the lock let two sends to one new recipient each return a
+    // token while only the later one survived, and let a stale unchanged resend write the
+    // older snapshot back under the newer token.
+    const [status, body] = await db.transaction(async (trx) => {
+      const row = await trx('lawn_diagnostics').where({ id: req.params.id }).forUpdate().first();
+      // A technician may act only on a diagnostic they created (codex #5568 r3
+      // P1); an admin may act on any. 404 so an id seen elsewhere confirms nothing.
+      if (!row || (req.techRole !== 'admin' && String(row.created_by_technician_id || '') !== String(req.technicianId || ''))) {
+        return [404, { error: 'Diagnostic not found' }];
+      }
 
-    const { contact, address } = resolveRecipient(req, row);
+      const { contact, address } = resolveRecipient(req, row);
 
-    // Hard gate: no token is minted without sendable contact info.
-    if (!hasSendableContact(contact, address)) {
-      return res.status(422).json({ error: 'A contact name and an email or address are required to send a report.' });
-    }
+      // Hard gate: no token is minted without sendable contact info.
+      if (!hasSendableContact(contact, address)) {
+        return [422, { error: 'A contact name and an email or address are required to send a report.' }];
+      }
 
-    const mintedToken = crypto.randomBytes(16).toString('hex');
-    const freshExpiry = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
+      const mintedToken = crypto.randomBytes(16).toString('hex');
+      const freshExpiry = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
 
-    // Rotate the token whenever the resend changes the recipient snapshot. Keeping the
-    // existing token under an edited contact/address would let the original link
-    // recipient see the newly-entered name/city (and tie a quote to the changed
-    // snapshot). A changed recipient forces a fresh token + expiry; the old link 404s.
-    const recipientChanged =
-      canonicalSnapshot(contact) !== canonicalSnapshot(parseJsonObject(row.contact_snapshot, null))
-      || canonicalSnapshot(address) !== canonicalSnapshot(parseJsonObject(row.address_snapshot, null));
+      // Rotate the token whenever the resend changes the recipient snapshot. Keeping the
+      // existing token under an edited contact/address would let the original link
+      // recipient see the newly-entered name/city (and tie a quote to the changed
+      // snapshot). A changed recipient forces a fresh token + expiry; the old link 404s.
+      const recipientChanged =
+        canonicalSnapshot(contact) !== canonicalSnapshot(parseJsonObject(row.contact_snapshot, null))
+        || canonicalSnapshot(address) !== canonicalSnapshot(parseJsonObject(row.address_snapshot, null));
 
-    // Atomic mint/rotate. Keep the existing token + expiry ONLY for a true idempotent
-    // resend: still-active token AND unchanged recipient. Otherwise rotate to a fresh
-    // token + expiry, so neither an old expired link is reactivated nor a changed
-    // recipient inherits the prior link. The row lock serializes concurrent sends (the
-    // second re-evaluates against the first's committed active token and keeps it).
-    const ACTIVE_TOKEN = 'report_token IS NOT NULL AND report_expires_at IS NOT NULL AND report_expires_at > now()';
-    const KEEP_EXISTING = recipientChanged ? 'false' : ACTIVE_TOKEN;
-    const [saved] = await db('lawn_diagnostics')
-      .where({ id: row.id })
-      .update({
-        mode: 'prospect',
-        status: 'sent',
-        contact_snapshot: JSON.stringify(contact),
-        // Write the RESOLVED address (null clears it) — never inherit the prior
-        // prospect's stored address when this send asserts a different recipient.
-        address_snapshot: address ? JSON.stringify(address) : null,
-        report_token: db.raw(`CASE WHEN ${KEEP_EXISTING} THEN report_token ELSE ? END`, [mintedToken]),
-        report_expires_at: db.raw(`CASE WHEN ${KEEP_EXISTING} THEN report_expires_at ELSE ? END`, [freshExpiry]),
-        last_sent_at: db.fn.now(),
-        updated_at: db.fn.now(),
-      })
-      .returning(['report_token', 'report_expires_at']);
+      // Keep the existing token + expiry ONLY for a true idempotent resend: still-active
+      // token AND unchanged recipient. Otherwise rotate to a fresh token + expiry, so
+      // neither an old expired link is reactivated nor a changed recipient inherits the
+      // prior link. Two sends of the same new recipient now return the same token: the
+      // second sees the first's committed snapshot and active token, and keeps it.
+      const ACTIVE_TOKEN = 'report_token IS NOT NULL AND report_expires_at IS NOT NULL AND report_expires_at > now()';
+      const KEEP_EXISTING = recipientChanged ? 'false' : ACTIVE_TOKEN;
+      const [saved] = await trx('lawn_diagnostics')
+        .where({ id: row.id })
+        .update({
+          mode: 'prospect',
+          status: 'sent',
+          contact_snapshot: JSON.stringify(contact),
+          // Write the RESOLVED address (null clears it) — never inherit the prior
+          // prospect's stored address when this send asserts a different recipient.
+          address_snapshot: address ? JSON.stringify(address) : null,
+          report_token: trx.raw(`CASE WHEN ${KEEP_EXISTING} THEN report_token ELSE ? END`, [mintedToken]),
+          report_expires_at: trx.raw(`CASE WHEN ${KEEP_EXISTING} THEN report_expires_at ELSE ? END`, [freshExpiry]),
+          last_sent_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+        })
+        .returning(['report_token', 'report_expires_at']);
 
-    return res.json({
-      success: true,
-      token: saved.report_token,
-      url: `/lawn-report/${saved.report_token}`,
-      expiresAt: saved.report_expires_at,
+      return [200, {
+        success: true,
+        token: saved.report_token,
+        url: `/lawn-report/${saved.report_token}`,
+        expiresAt: saved.report_expires_at,
+      }];
     });
+    return res.status(status).json(body);
   } catch (err) {
     return next(err);
   }

@@ -39,6 +39,8 @@ beforeEach(() => {
   loadBestMapImage.mockReset();
   loadBestMapImage.mockResolvedValue({ image: {}, url: 'https://maps.example/test.png', zoom: ZOOM });
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(() => RECT);
+  // jsdom has no canvas; the spray layer draws on one, so give it a context-less canvas.
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
 });
 
 afterEach(() => {
@@ -507,7 +509,7 @@ describe('MistingLayoutDesigner', () => {
       tap(frame, 300, 200);
       expect(pumps()).toHaveLength(1);
       expect(pumps()[0]).toHaveTextContent('Pump');
-      expect(pumps()[0].querySelector('rect').getAttribute('x')).toBe(String(600 - 12));
+      expect(pumps()[0].querySelector('rect').getAttribute('x')).toBe(String(600 - 17)); // the cabinet is 34 wide
       expect(countsText()).toContain('Pump: placed');
     });
 

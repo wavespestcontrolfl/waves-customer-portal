@@ -1348,6 +1348,29 @@ async function place(
   }
 }
 
+// Read-only signed-in session for the monthly savings-programs check
+// (procurement/siteone-programs-check.js). Same egress-locked browser and the
+// SAME login() place() uses, then `fn(page)` reads pages. It adds, orders and
+// changes nothing; the caller only navigates and reads text. The browser is
+// ALWAYS closed, on success and on a throw. Injectable like place().
+async function readSignedIn(
+  { credentials, launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps } = {},
+  fn,
+) {
+  if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
+  if (!hasLogin(credentials)) throw new RefusedError('no_credentials', 'SiteOne login is not stored on the vendor row');
+  const evidence = { blockedHosts: {}, readOnly: true };
+  let browser = null;
+  let page = null;
+  try {
+    ({ browser, page } = await openLockedBrowser({ launchBrowser, resolveHostIps, evidence }));
+    await login(page, credentials);
+    return await fn(page);
+  } finally {
+    if (browser) { try { await browser.close(); } catch { /* noop */ } }
+  }
+}
+
 module.exports = {
   key: 'siteone',
   loginRequired: true, // place() needs the vendor row's stored login (the dispatcher's claim looks it up and passes `credentials`)
@@ -1357,6 +1380,7 @@ module.exports = {
   preSubmitTotal: 'vendor', // the checkout total is read live, immediately before the click
   quote: () => null,
   place,
+  readSignedIn,
   RefusedError,
   _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, orderNumberIn, orderNumbersIn, fillLoginForm, browserUserAgent, EVIDENCE_PREFIX },
 };

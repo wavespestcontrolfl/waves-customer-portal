@@ -24,7 +24,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const {
   SYSTEM_ASSET_FIELDS,
@@ -35,6 +35,9 @@ const {
 
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
+// Technicians read systems and calibrations. Recording, verifying and
+// editing them is owner-only (owner 2026-10-03: calibration is not set up
+// yet), enforced here too, not only behind GATE_STAFF_DEFAULT_DENY (OP-13).
 
 // Sensible bounds. A backpack at 0.25 gal/1k or a 110-gal rig at 4.0 gal/1k
 // are both legitimate. Anything below 0.05 or above 10.0 is almost
@@ -427,7 +430,7 @@ router.get('/calibrations', async (req, res, next) => {
 // =========================================================================
 // POST /calibrations/:id/verify — convert estimate to field-verified
 // =========================================================================
-router.post('/calibrations/:id/verify', async (req, res, next) => {
+router.post('/calibrations/:id/verify', requireAdmin, async (req, res, next) => {
   try {
     const existing = await db('equipment_calibrations').where({ id: req.params.id }).first();
     if (!existing) return res.status(404).json({ error: 'Calibration not found' });
@@ -511,7 +514,7 @@ router.post('/calibrations/:id/verify', async (req, res, next) => {
 // =========================================================================
 // PUT /calibrations/:id — amend notes / deactivate / correct values
 // =========================================================================
-router.put('/calibrations/:id', async (req, res, next) => {
+router.put('/calibrations/:id', requireAdmin, async (req, res, next) => {
   try {
     const existing = await db('equipment_calibrations').where({ id: req.params.id }).first();
     if (!existing) return res.status(404).json({ error: 'Calibration not found' });
@@ -598,7 +601,7 @@ router.put('/calibrations/:id', async (req, res, next) => {
 // =========================================================================
 // PUT /:id/assets — link a calibrated system to operational equipment
 // =========================================================================
-router.put('/:id/assets', async (req, res, next) => {
+router.put('/:id/assets', requireAdmin, async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) {
       return res.status(400).json({ error: 'Invalid equipment system id' });
@@ -678,7 +681,7 @@ router.get('/:id', async (req, res, next) => {
 // =========================================================================
 // POST /:id/calibrations — record new calibration; deactivate prior active
 // =========================================================================
-router.post('/:id/calibrations', async (req, res, next) => {
+router.post('/:id/calibrations', requireAdmin, async (req, res, next) => {
   try {
     const systemId = req.params.id;
     const system = await db('equipment_systems').where({ id: systemId }).first();

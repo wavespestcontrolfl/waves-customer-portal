@@ -27,14 +27,20 @@ jest.mock('../services/workflows/missed-appointment', () => ({
 
 // A tiny in-memory knex: tables are arrays of rows; where/whereNull filter them;
 // update/first/select act on the filtered set. transaction(fn) runs fn on itself.
-const mockTables = { reschedule_log: [], dispatch_alerts: [], scheduled_services: [] };
+const mockTables = { reschedule_log: [], dispatch_alerts: [], scheduled_services: [], job_status_history: [] };
 let mockFailTransaction = false;
 const mockLocks = [];
 function mockTable(name) {
   let rows = mockTables[name] || [];
   const q = {
-    where(cond) { if (typeof cond !== 'string') rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+    where(cond, op, val) {
+      if (typeof cond !== 'string') rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
+      // `col > value` (ISO strings); a raw SQL bound is not modelled
+      else if (op === '>' && val && !val.__raw) rows = rows.filter((r) => r[cond] > val);
+      return q;
+    },
     whereNull(col) { rows = rows.filter((r) => r[col] == null); return q; },
+    whereNotNull(col) { rows = rows.filter((r) => r[col] != null); return q; },
     whereIn(col, vals) { rows = rows.filter((r) => vals.includes(String(r[col]))); return q; },
     orderBy() { return q; },
     forUpdate() { mockLocks.push(name); return q; },
@@ -80,6 +86,7 @@ beforeEach(() => {
   mockTables.reschedule_log = [logRow()];
   mockTables.dispatch_alerts = [card()];
   mockTables.scheduled_services = [{ ...service }];
+  mockTables.job_status_history = [];
 });
 
 describe('raiseCard', () => {
@@ -380,3 +387,111 @@ describe('slotChanged: only a real change of date or window is a rebooking', () 
   });
 });
 
+describe('retry gaps of the nightly repair (gate on only)', () => {
+  const FLAGGED = { original_date: '2026-09-29', original_window: '09:00:00-10:00:00' };
+
+  describe('a moved visit that has since started keeps no old card', () => {
+    test.each([['en_route'], ['on_site'], ['no_show']])('moved, then %s: settled as rebooked, card closed; a second run does nothing', async (status) => {
+      mockTables.reschedule_log = [logRow(FLAGGED)];
+      mockTables.scheduled_services = [{ ...service, status, scheduled_date: '2026-10-06' }];
+      // the settling write failed once, at the move
+      mockFailTransaction = true;
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+      expect(mockTables.reschedule_log[0].resolved_at).toBeNull();
+      mockFailTransaction = false;
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 1 });
+      expect(mockTables.reschedule_log[0]).toMatchObject({ resolution: 'rebooked', resolved_by: 'system' });
+      expect(mockResolveAlert).toHaveBeenCalledTimes(1);
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+      expect(mockResolveAlert).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([['en_route'], ['on_site'], ['no_show']])('still in the flagged slot while %s: stays open', async (status) => {
+      mockTables.reschedule_log = [logRow(FLAGGED)];
+      mockTables.scheduled_services = [{ ...service, status }];
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+      expect(mockTables.reschedule_log[0].resolved_at).toBeNull();
+    });
+
+    test('a person-confirmed row on a no_show visit waits for "Done"', async () => {
+      mockTables.reschedule_log = [logRow({ ...FLAGGED, miss_confirmed_at: 'THEN' })];
+      mockTables.scheduled_services = [{ ...service, status: 'no_show', scheduled_date: '2026-10-06' }];
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+      expect(mockTables.reschedule_log[0].resolved_at).toBeNull();
+    });
+
+    test('gate off: a started visit is not settled from its move (unchanged); the helper default is unchanged too', async () => {
+      mockGateOn = false;
+      mockTables.reschedule_log = [logRow(FLAGGED)];
+      mockTables.scheduled_services = [{ ...service, status: 'en_route', scheduled_date: '2026-10-06' }];
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+      expect(notClosedOut.settlementFromVisit({ ...service, status: 'on_site', scheduled_date: '2026-10-06' }, FLAGGED)).toBeNull();
+      expect(notClosedOut.settlementFromVisit({ ...service, status: 'on_site', scheduled_date: '2026-10-06' }, FLAGGED, { startedVisits: true })).toBe('rebooked');
+    });
+  });
+
+  describe('a dispatch no-show whose reopen failed is reopened by the repair', () => {
+    const settledRow = (over = {}) => logRow({ ...FLAGGED, customer_id: 'cust-1', resolved_at: '2026-10-03T00:00:00Z', resolution: 'backlog', resolved_by: 'migration', ...over });
+    const noShowMark = (over = {}) => ({ id: 'h-1', job_id: 'visit-1', to_status: 'no_show', transitioned_by: STAFF, transitioned_at: '2026-10-27T15:00:00Z', ...over });
+    beforeEach(() => {
+      mockTables.reschedule_log = [settledRow()];
+      mockTables.dispatch_alerts = [];
+      mockTables.scheduled_services = [{ ...service, status: 'no_show' }];
+      mockTables.job_status_history = [noShowMark()];
+    });
+
+    test('the card insert fails once, rolling the reopen back; the next night reopens it, once', async () => {
+      mockCreateAlertOnce.mockRejectedValueOnce(new Error('insert failed'));
+      await expect(notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF, reopen: true })).rejects.toThrow('insert failed');
+      // (the real transaction rolls back; this fake keeps the writes, so reset the row as the database would)
+      mockTables.reschedule_log = [settledRow()];
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 1, settled: 0 });
+      expect(mockTables.reschedule_log[0]).toMatchObject({ resolved_at: null, resolution: null, miss_confirmed_at: 'NOW', miss_confirmed_by: 'dispatch' });
+      expect(mockCreateAlertOnce.mock.calls[1][0].payload).toMatchObject({ log_id: 'log-1', miss_confirmed: true });
+      // the outreach is evaluated with the confirmation, as in the dispatch path
+      expect(mockEvaluateThreshold).toHaveBeenCalledTimes(1);
+      // a second run (or the dispatch path racing it) finds nothing to do (the mocked writer saves no card row)
+      mockTables.dispatch_alerts = [card({ payload: { log_id: 'log-1', miss_confirmed: true } })];
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+      expect(mockCreateAlertOnce).toHaveBeenCalledTimes(2);
+    });
+
+    test('a failing repair write never throws and leaves the row for the next night', async () => {
+      mockCreateAlertOnce.mockRejectedValueOnce(new Error('insert failed'));
+      mockTables.reschedule_log = [settledRow()];
+      expect(await notClosedOut.reopenUnconfirmedNoShows()).toEqual({ reopened: 0 });
+      mockTables.reschedule_log = [settledRow()];
+      expect(await notClosedOut.reopenUnconfirmedNoShows()).toEqual({ reopened: 1 });
+    });
+
+    test('a "Not a miss" given AFTER the no-show mark stands', async () => {
+      mockTables.reschedule_log = [settledRow({ resolved_at: '2026-10-28T09:00:00Z', resolution: 'not_a_miss', resolved_by: STAFF })];
+      expect(await notClosedOut.reopenUnconfirmedNoShows()).toEqual({ reopened: 0 });
+      expect(mockTables.reschedule_log[0]).toMatchObject({ resolution: 'not_a_miss', miss_confirmed_at: null });
+    });
+
+    test('a "Not a miss" given BEFORE the mark is the case the reopen is for', async () => {
+      mockTables.reschedule_log = [settledRow({ resolved_at: '2026-10-26T09:00:00Z', resolution: 'not_a_miss', resolved_by: STAFF })];
+      expect(await notClosedOut.reopenUnconfirmedNoShows()).toEqual({ reopened: 1 });
+    });
+
+    test.each([
+      ['a system no_show (no person)', () => { mockTables.job_status_history = [noShowMark({ transitioned_by: null })]; }],
+      ['a visit rebooked since the mark', () => { mockTables.scheduled_services = [{ ...service, status: 'no_show', scheduled_date: '2026-10-06' }]; }],
+      ['a visit no longer no_show', () => { mockTables.scheduled_services = [{ ...service, status: 'completed' }]; }],
+      ['a row settled some other way', () => { mockTables.reschedule_log = [settledRow({ resolution: 'rebooked' })]; }],
+      ['a row already confirmed', () => { mockTables.reschedule_log = [settledRow({ miss_confirmed_at: 'THEN' })]; }],
+    ])('left alone: %s', async (_label, arrange) => {
+      arrange();
+      expect(await notClosedOut.reopenUnconfirmedNoShows()).toEqual({ reopened: 0 });
+      expect(mockTables.reschedule_log[0].resolved_at).not.toBeNull();
+      expect(mockCreateAlertOnce).not.toHaveBeenCalled();
+    });
+
+    test('gate off: the nightly pass does not reopen', async () => {
+      mockGateOn = false;
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+      expect(mockTables.reschedule_log[0].resolved_at).not.toBeNull();
+    });
+  });
+});

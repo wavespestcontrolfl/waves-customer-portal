@@ -358,7 +358,6 @@ client/src/components/schedule/TimeGridDays.jsx,935,/admin/schedule/${…}/assig
 client/src/components/schedule/TimeGridDays.jsx,941,/admin/dispatch/${…}/reschedule
 client/src/components/schedule/TimeGridDays.jsx,964,/admin/schedule/week?start=${…}
 client/src/components/schedule/TreatmentPlanPanel.jsx,149,/admin/treatment-plans/${…}${…}
-client/src/components/schedule/WeatherBar.jsx,12,${…}/admin/dashboard-ops/weather?date=${…}
 client/src/components/schedule/seriesMove.js,117,${…}/admin/dispatch/${…}/series-move-preview?newDate=${…}
 client/src/components/schedule/useBestTimes.js,36,${…}/admin/schedule/find-time
 client/src/components/schedule/useSlotConflicts.js,31,${…}/admin/dispatch/slot-check
@@ -2441,7 +2440,6 @@ server/services/recurring-appointment-seeder.js,529,/admin/schedule
 server/services/recurring-card-on-file.js,587,/admin/customers/${…}
 server/services/recurring-card-on-file.js,587,/admin/dashboard
 server/services/recurring-card-on-file.js,815,/admin/invoices
-server/services/reschedule-intent-watcher.js,415,/admin/communications
 server/services/review-reply/runner.js,467,/admin/reviews?review=${…}
 server/services/review-reply/runner.js,504,/admin/reviews?responded=all&review=${…}
 server/services/review-reply/runner.js,844,/admin/reviews?responded=responded&review=${…}

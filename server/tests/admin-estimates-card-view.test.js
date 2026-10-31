@@ -6,6 +6,9 @@
  *    `staffPreviewable` (whether the staff preview renders the row).
  *  - GET /admin/estimates/:id/acceptance serves the recorded acceptance to the
  *    owner only, 404 when there is none, 500 when the read fails.
+ *  - The rows' outline summaries keep lawn, Tree & Shrub, Pest Control and
+ *    Mosquito packets apart (GATE_TS_OUTLINE, GATE_PEST_OUTLINE,
+ *    GATE_MOSQUITO_OUTLINE, owner 2026-10-26).
  * Synthetic data only.
  */
 jest.mock('../models/db', () => {
@@ -116,12 +119,12 @@ const base = (id, over = {}) => ({
   ...over,
 });
 
-function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], customers = [] }) {
+function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], customers = [], outlines = [] }) {
   const queries = [];
   const builderFor = (table) => {
     const b = {};
     const chain = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereILike', 'orWhereIn', 'orWhere',
-      'select', 'orderBy', 'limit', 'offset', 'leftJoin', 'groupBy', 'sum', 'max', 'distinct'];
+      'select', 'orderBy', 'limit', 'offset', 'leftJoin', 'groupBy', 'sum', 'max', 'count', 'distinct'];
     for (const m of chain) {
       b[m] = jest.fn((...args) => {
         queries.push({ table, m, args });
@@ -130,7 +133,7 @@ function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], custo
       });
     }
     b.first = jest.fn(async () => single[table]);
-    const rows = { estimates, estimate_acceptances: acceptances, annual_prepay_terms: prepaid, customers }[table] || [];
+    const rows = { estimates, estimate_acceptances: acceptances, annual_prepay_terms: prepaid, customers, service_outline_packets: outlines }[table] || [];
     b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
     return b;
   };
@@ -383,6 +386,183 @@ describe('GET /admin/estimates list shape', () => {
     });
     // one batched call_log read for the page (callSideBlocksForEstimates), not one per row
     expect(queries.filter((q) => q.table === 'call_log' && q.m === 'whereIn')).toHaveLength(1);
+  });
+
+  test('bookingLinkEligible mirrors the send-booking-link route\'s row refusals', async () => {
+    const lists = require('../routes/estimate-public').acceptanceServiceLists;
+    const approval = require('../services/estimate-delivery-options').estimateDataHasUnresolvedManagerApproval;
+    // Stand-ins keyed off the fixture: the one-time line the route pre-selects, and an open approval.
+    lists.mockImplementation((data) => ({ oneTimeList: data?.qaOneTime ? [{ name: data.qaOneTime }] : [] }));
+    approval.mockImplementation((data) => !!data?.qaNeedsApproval);
+    const oneTime = { qaOneTime: 'Ant Treatment' };
+    tableDb({
+      estimates: [
+        base('e-recurring'),
+        base('e-bundle', { estimate_data: oneTime }),
+        base('e-onetime', { monthly_total: '0', onetime_total: '400', estimate_data: oneTime }),
+        base('e-accepted', { status: 'accepted', monthly_total: '0', onetime_total: '400', estimate_data: oneTime }),
+        base('e-invoice', { monthly_total: '0', onetime_total: '400', bill_by_invoice: true, estimate_data: oneTime }),
+        base('e-draft', { status: 'draft', monthly_total: '0', onetime_total: '400', estimate_data: oneTime }),
+        base('e-expired', { status: 'expired', monthly_total: '0', onetime_total: '400', estimate_data: oneTime }),
+        base('e-approval', { monthly_total: '0', onetime_total: '400', estimate_data: { ...oneTime, qaNeedsApproval: true } }),
+      ],
+    });
+    try {
+      await withServer(async (baseUrl) => {
+        const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+        const eligible = Object.fromEntries(estimates.map((e) => [e.id, e.bookingLinkEligible]));
+        expect(eligible).toEqual({
+          // recurring-only offers route through onboarding, never /book
+          'e-recurring': false,
+          'e-bundle': true,
+          'e-onetime': true,
+          'e-accepted': true,
+          'e-invoice': false,
+          'e-draft': false,
+          'e-expired': false,
+          'e-approval': false,
+        });
+      });
+    } finally {
+      lists.mockReset();
+      approval.mockImplementation(() => false);
+    }
+  });
+});
+
+describe('GET /admin/estimates outline summaries', () => {
+  const saved = process.env.GATE_TS_OUTLINE;
+  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_OUTLINE; else process.env.GATE_TS_OUTLINE = saved;
+  });
+
+  // Newest first, as the route orders them: the Tree & Shrub packet is newer than the lawn one.
+  const outline = (id, serviceLine, createdAt, over = {}) => ({
+    id, estimate_id: 'e-ts', service_line: serviceLine, status: 'sent', validation_status: 'passed', created_at: createdAt,
+    summary_json: {}, content_json: {}, template_version: 'mvp-1', product_registry_version: 'public-facts-v1', ...over,
+  });
+  const rows = () => [
+    base('e-ts', { service_interest: 'Lawn Care + Tree & Shrub' }),
+    base('e-pest', { service_interest: 'Pest Control' }),
+  ];
+  const outlines = [
+    outline('ts-packet', 'tree_shrub', '2026-10-26T12:00:00Z', { content_library_version: 'ts-v1-copy-1', protocol_version: 'old-ts-protocol' }),
+    outline('lawn-packet', 'lawn_care', '2026-10-25T12:00:00Z'),
+  ];
+
+  test('off: a newer Tree & Shrub packet never stands in for the lawn outline, and no Tree & Shrub key is sent', async () => {
+    delete process.env.GATE_TS_OUTLINE;
+    tableDb({ estimates: rows(), outlines });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-ts'].lawnServiceOutline.id).toBe('lawn-packet');
+      expect(byId['e-ts']).not.toHaveProperty('treeShrubOutlineAvailable');
+      expect(byId['e-ts']).not.toHaveProperty('treeShrubServiceOutline');
+    });
+  });
+
+  test('on: a Tree & Shrub estimate offers its outline, with its own stale check', async () => {
+    process.env.GATE_TS_OUTLINE = 'true';
+    tableDb({ estimates: rows(), outlines });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-ts'].lawnServiceOutline.id).toBe('lawn-packet');
+      expect(byId['e-ts'].treeShrubOutlineAvailable).toBe(true);
+      expect(byId['e-ts'].treeShrubServiceOutline).toEqual(expect.objectContaining({
+        id: 'ts-packet',
+        currentContentLibraryVersion: 'ts-v1-copy-1',
+        staleReasons: ['protocol updated'],
+      }));
+      expect(byId['e-pest'].treeShrubOutlineAvailable).toBe(false);
+      expect(byId['e-pest'].treeShrubServiceOutline).toBeNull();
+    });
+  });
+});
+
+describe('GET /admin/estimates Pest Control outline (GATE_PEST_OUTLINE)', () => {
+  const saved = process.env.GATE_PEST_OUTLINE;
+  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_PEST_OUTLINE; else process.env.GATE_PEST_OUTLINE = saved;
+  });
+
+  test('on: a recurring pest plan offers the outline and keeps its packet apart; a one-time pest job is not offered', async () => {
+    process.env.GATE_PEST_OUTLINE = 'true';
+    tableDb({
+      estimates: [
+        base('e-recurring', { service_interest: 'Pest Control', monthly_total: '45.00' }),
+        base('e-one-time', { service_interest: 'Pest Control', monthly_total: '0', onetime_total: '189.00' }),
+      ],
+      outlines: [
+        { id: 'pest-packet', estimate_id: 'e-recurring', service_line: 'pest_control', status: 'sent', validation_status: 'passed', created_at: '2026-10-26T12:00:00Z', summary_json: {}, content_json: {}, content_library_version: 'pest-v1-copy-1', template_version: 'mvp-1', product_registry_version: 'public-facts-v1', protocol_version: null },
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-recurring'].pestOutlineAvailable).toBe(true);
+      expect(byId['e-recurring'].pestServiceOutline).toEqual(expect.objectContaining({ id: 'pest-packet', stale: false, staleReasons: [] }));
+      expect(byId['e-recurring'].lawnServiceOutline).toBeNull();
+      expect(byId['e-one-time'].pestOutlineAvailable).toBe(false);
+    });
+  });
+
+  test('off: no Pest Control key is sent', async () => {
+    delete process.env.GATE_PEST_OUTLINE;
+    tableDb({ estimates: [base('e-recurring', { service_interest: 'Pest Control', monthly_total: '45.00' })] });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      expect(estimates[0]).not.toHaveProperty('pestOutlineAvailable');
+      expect(estimates[0]).not.toHaveProperty('pestServiceOutline');
+    });
+  });
+});
+
+describe('GET /admin/estimates Mosquito outline (GATE_MOSQUITO_OUTLINE)', () => {
+  const saved = process.env.GATE_MOSQUITO_OUTLINE;
+  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_MOSQUITO_OUTLINE; else process.env.GATE_MOSQUITO_OUTLINE = saved;
+  });
+  const withRows = (services, oneTimeItems = []) => ({ result: { recurring: { services }, oneTime: { items: oneTimeItems } } });
+
+  test('on: only an exact recurring mosquito row offers the outline, and its packet stays apart', async () => {
+    process.env.GATE_MOSQUITO_OUTLINE = 'true';
+    tableDb({
+      estimates: [
+        base('e-program', { service_interest: 'Mosquito', monthly_total: '55.00', estimate_data: withRows([{ service: 'mosquito', addOns: { dunkCount: 1, stationCount: 0 } }]) }),
+        base('e-one-time', { service_interest: 'One-Time Mosquito', monthly_total: '0', onetime_total: '149.00', estimate_data: withRows([], [{ service: 'one_time_mosquito', price: 149 }]) }),
+        base('e-misting', { service_interest: 'Mosquito misting', monthly_total: '90.00', estimate_data: withRows([{ service: 'mosquito_misting' }]) }),
+        base('e-commercial', { service_interest: 'Commercial Mosquito', monthly_total: '300.00', estimate_data: withRows([{ service: 'commercial_mosquito' }]) }),
+        base('e-pest-beside-one-time', { service_interest: 'Pest Control, Mosquito', monthly_total: '45.00', estimate_data: withRows([{ service: 'pest_control' }], [{ service: 'one_time_mosquito', price: 149 }]) }),
+        // A server reprice removed every service: the empty result wins over the older priced engine result.
+        base('e-server-repriced', { service_interest: 'Mosquito', monthly_total: '55.00', pricing_authority: 'SERVER', estimate_data: { result: { recurring: { services: [] } }, engineResult: { recurring: { services: [{ service: 'mosquito' }] } } } }),
+      ],
+      outlines: [
+        { id: 'mosquito-packet', estimate_id: 'e-program', service_line: 'mosquito', status: 'sent', validation_status: 'passed', created_at: '2026-10-26T12:00:00Z', summary_json: {}, content_json: {}, content_library_version: 'mosquito-v1-copy-1', template_version: 'mvp-1', product_registry_version: 'public-facts-v1', protocol_version: null },
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-program'].mosquitoOutlineAvailable).toBe(true);
+      expect(byId['e-program'].mosquitoServiceOutline).toEqual(expect.objectContaining({ id: 'mosquito-packet', stale: false, staleReasons: [] }));
+      expect(byId['e-program'].lawnServiceOutline).toBeNull();
+      for (const id of ['e-one-time', 'e-misting', 'e-commercial', 'e-pest-beside-one-time', 'e-server-repriced']) expect({ id, offered: byId[id].mosquitoOutlineAvailable }).toEqual({ id, offered: false });
+    });
+  });
+
+  test('off: no Mosquito key is sent', async () => {
+    delete process.env.GATE_MOSQUITO_OUTLINE;
+    tableDb({ estimates: [base('e-program', { service_interest: 'Mosquito', monthly_total: '55.00', estimate_data: withRows([{ service: 'mosquito' }]) })] });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      expect(estimates[0]).not.toHaveProperty('mosquitoOutlineAvailable');
+      expect(estimates[0]).not.toHaveProperty('mosquitoServiceOutline');
+    });
   });
 });
 

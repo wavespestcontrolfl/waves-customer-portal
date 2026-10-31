@@ -126,10 +126,15 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
         <div className="text-14 font-medium text-ink-secondary">
           {label}
         </div>
-        <div className="flex items-end justify-between gap-3 mt-2 max-md:block">
+        {/* The sparkline drops under the number when the card is too narrow
+            for both side by side, instead of colliding with it. */}
+        <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-2 mt-2 max-md:block">
+          {/* Two tiles share a phone row: below ~360px a six-digit amount
+              would outrun its card at 28px, so the number scales with the
+              viewport there (never under 22px). */}
           <div
             className={cn(
-              'u-nums text-28 font-medium tracking-tight leading-none',
+              'u-nums text-28 max-md:text-[length:clamp(22px,7.8vw,28px)] font-medium tracking-tight leading-none',
               alert ? 'text-alert-fg' : 'text-zinc-900'
             )}
           >
@@ -966,8 +971,10 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
   return (
     <UiSurface density="comfortable">
       {mrrAvailable && (
-        <div className="flex items-center gap-2 mb-3">
-          <div className="inline-flex border-hairline border-zinc-300 rounded-sm overflow-hidden">
+        // The explanation wraps under the switch on a narrow phone; the
+        // switch itself never shrinks, so both labels stay whole.
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-3">
+          <div className="inline-flex shrink-0 border-hairline border-zinc-300 rounded-sm overflow-hidden">
             {[["customers", "Customers"], ["mrr", "Net MRR"]].map(([k, lbl]) => (
               <Button
                 key={k}
@@ -1504,8 +1511,10 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
               {...drillProps(r)}
               className={cn(
                 'flex items-center gap-2 sm:gap-3',
+                // A drillable row is a button: give it the 44px touch target
+                // the dashboard's other controls have.
                 drill
-                  && 'cursor-pointer rounded-xs -mx-1 px-1 py-0.5 hover:bg-surface-sunken focus:outline-none focus-visible:ring-1 focus-visible:ring-zinc-400',
+                  && 'min-h-11 cursor-pointer rounded-xs -mx-1 px-1 py-0.5 hover:bg-surface-sunken focus:outline-none focus-visible:ring-1 focus-visible:ring-zinc-400',
               )}
             >
               {/* Narrower name column on phones so the bar + revenue still fit;

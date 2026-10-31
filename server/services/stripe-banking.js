@@ -129,13 +129,22 @@ async function getBalance() {
       logger.warn('[stripe-banking] Could not fetch next payout:', err.message);
     }
 
+    // Payouts are USD only (createPayout sends currency 'usd' and its balance
+    // guard sums only the USD buckets), so the totals the page shows in dollars
+    // and offers as the payout limit are the USD buckets alone. Adding a CAD
+    // bucket to them showed funds no payout could use. Other currencies stay,
+    // unconverted, in the per-currency lists above.
+    const usdTotal = (entries) => entries
+      .filter(b => String(b.currency || '').toLowerCase() === 'usd')
+      .reduce((cents, b) => cents + Number(b.amount || 0), 0) / 100;
+
     return {
       available,
       pending,
       instant_available: instantAvailable,
-      total_available: available.reduce((s, b) => s + b.amount, 0),
-      total_pending: pending.reduce((s, b) => s + b.amount, 0),
-      total_instant_available: instantAvailable.reduce((s, b) => s + b.amount, 0),
+      total_available: usdTotal(balance.available),
+      total_pending: usdTotal(balance.pending),
+      total_instant_available: usdTotal(balance.instant_available || []),
       next_payout: nextPayout,
     };
   } catch (err) {
@@ -1094,8 +1103,25 @@ async function cancelPayout(payoutId, opts = {}) {
 // GET CASH FLOW
 // ═══════════════════════════════════════════════════════════════
 
+// Stripe's arrival_date is a calendar-day marker stored at midnight UTC (the
+// same contract as applyArrivalDayRange in routes/admin-banking.js). Its day is
+// the UTC calendar day; reading it through Eastern time moved every payout to
+// the day before.
+const ARRIVAL_DAY_SQL = "(arrival_date AT TIME ZONE 'UTC')::date";
+
+// Paid payouts whose arrival day is in [startDate, endDate]. One filter for
+// the daily rows and the summary, so the two always reconcile.
+function paidPayoutsArrivingIn(startDate, endDate) {
+  return db('stripe_payouts')
+    .where({ status: 'paid' })
+    .whereRaw(`${ARRIVAL_DAY_SQL} BETWEEN ?::date AND ?::date`, [startDate, endDate]);
+}
+
 /**
  * Aggregate cash flow: payments in, expenses out, fees, payouts.
+ * Every query is a source of the report: a failed query fails the whole
+ * report (the route answers 500 and the page says the figures are
+ * unavailable). A failure never stands in as an empty list or a $0 total.
  * @param {string} startDate — YYYY-MM-DD
  * @param {string} endDate — YYYY-MM-DD
  */
@@ -1111,8 +1137,7 @@ async function getCashFlow(startDate, endDate) {
         db.raw('COUNT(*) as count'),
       )
       .groupBy('payment_date')
-      .orderBy('payment_date')
-      .catch((e) => { logger.error('[stripe-banking] cash-flow revenue query failed:', e); return []; });
+      .orderBy('payment_date');
 
     // Expenses
     const expenseRows = await db('expenses')
@@ -1123,32 +1148,31 @@ async function getCashFlow(startDate, endDate) {
         db.raw('COUNT(*) as count'),
       )
       .groupBy('expense_date')
-      .orderBy('expense_date')
-      .catch((e) => { logger.error('[stripe-banking] cash-flow expense query failed:', e); return []; });
+      .orderBy('expense_date');
 
-    // Stripe fees from payout transactions
-    const feeRows = await db('stripe_payout_transactions')
-      .whereBetween('created_at_stripe', [startDate, endDate + 'T23:59:59'])
-      .select(db.raw('COALESCE(SUM(fee), 0) as total_fees'))
-      .first()
-      .catch((e) => { logger.error('[stripe-banking] cash-flow fee query failed:', e); return { total_fees: 0 }; });
-
-    // Payouts — bucket by business-local day (ET) so late-evening payouts
-    // don't roll into "tomorrow" under a UTC session timezone.
+    // Stripe fees from payout transactions. created_at_stripe is a real
+    // instant: count and bucket it on its business-local (ET) day, the same
+    // day for the filter and the buckets, so no fee lands in a bucket outside
+    // the range.
     const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || 'America/New_York';
-    // Same status rule as the export: failed/canceled payouts never reached
-    // the bank, so counting them under-/over-states daily cash.
-    const payoutRows = await db('stripe_payouts')
-      .where({ status: 'paid' })
-      .whereBetween('arrival_date', [startDate, endDate + 'T23:59:59'])
+    const FEE_DAY_SQL = 'DATE(created_at_stripe AT TIME ZONE ?)';
+    const feesIn = () => db('stripe_payout_transactions')
+      .whereRaw(`${FEE_DAY_SQL} BETWEEN ?::date AND ?::date`, [BUSINESS_TZ, startDate, endDate]);
+    const feeRows = await feesIn()
+      .select(db.raw('COALESCE(SUM(fee), 0) as total_fees'))
+      .first();
+
+    // Payouts, by arrival day. Same status rule as the export: failed or
+    // canceled payouts never reached the bank, so counting them under- or
+    // over-states daily cash.
+    const payoutRows = await paidPayoutsArrivingIn(startDate, endDate)
       .select(
-        db.raw("DATE(arrival_date AT TIME ZONE ?) as date", [BUSINESS_TZ]),
+        db.raw(`to_char(${ARRIVAL_DAY_SQL}, 'YYYY-MM-DD') as date`),
         db.raw('SUM(amount) as total'),
         db.raw('COUNT(*) as count'),
       )
-      .groupBy(db.raw("DATE(arrival_date AT TIME ZONE ?)", [BUSINESS_TZ]))
-      .orderBy('date')
-      .catch((e) => { logger.error('[stripe-banking] cash-flow payout query failed:', e); return []; });
+      .groupBy(db.raw(ARRIVAL_DAY_SQL))
+      .orderBy('date');
 
     // Build daily aggregates
     const dailyMap = {};
@@ -1162,15 +1186,16 @@ async function getCashFlow(startDate, endDate) {
       if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, fees: 0, payouts: 0 };
       dailyMap[d].expenses += parseFloat(r.total || 0);
     });
-    const feeDailyRows = await db('stripe_payout_transactions')
-      .whereBetween('created_at_stripe', [startDate, endDate + 'T23:59:59'])
+    const feeDailyRows = await feesIn()
       .select(
-        db.raw("DATE(created_at_stripe AT TIME ZONE ?) as date", [process.env.BUSINESS_TIMEZONE || 'America/New_York']),
+        db.raw(`to_char(${FEE_DAY_SQL}, 'YYYY-MM-DD') as date`, [BUSINESS_TZ]),
         db.raw('COALESCE(SUM(fee), 0) as total'),
       )
-      .groupBy(db.raw("DATE(created_at_stripe AT TIME ZONE ?)", [process.env.BUSINESS_TIMEZONE || 'America/New_York']))
-      .orderBy('date')
-      .catch((e) => { logger.error('[stripe-banking] cash-flow daily fee query failed:', e); return []; });
+      // Group by position: Postgres reads a second bound copy of the zone as a
+      // different expression and refuses the query ("must appear in the GROUP
+      // BY clause"). The old catch turned that refusal into "no fees".
+      .groupByRaw('1')
+      .orderBy('date');
     feeDailyRows.forEach(r => {
       const d = typeof r.date === 'string' ? r.date : new Date(r.date).toISOString().split('T')[0];
       if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, fees: 0, payouts: 0 };
@@ -1191,21 +1216,16 @@ async function getCashFlow(startDate, endDate) {
         .where('status', 'paid')
         .whereBetween('payment_date', [startDate, endDate])
         .select(db.raw("COALESCE(SUM(amount)::text, '0') as total, COUNT(*)::int as count"))
-        .first()
-        .catch(() => ({ total: '0', count: 0 })),
+        .first(),
       db('expenses')
         .whereBetween('expense_date', [startDate, endDate])
         .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
-        .first()
-        .catch(() => ({ total: '0' })),
-      db('stripe_payouts')
-        // Same status='paid' rule as the daily rows above — summary totals
-        // and the daily breakdown must reconcile.
-        .where({ status: 'paid' })
-        .whereBetween('arrival_date', [startDate, endDate + 'T23:59:59'])
+        .first(),
+      // The daily rows' own filter: summary totals and the daily breakdown
+      // must reconcile.
+      paidPayoutsArrivingIn(startDate, endDate)
         .select(db.raw("COALESCE(SUM(amount)::text, '0') as total, COUNT(*)::int as count"))
-        .first()
-        .catch(() => ({ total: '0', count: 0 })),
+        .first(),
     ]);
 
     const totalRevenue = parseFloat(revTot?.total ?? '0');

@@ -590,7 +590,7 @@ describe('reschedule — shared occupancy conflict gate', () => {
     ]);
   });
 
-  // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark; owner
+  // Second technician (GATE_MULTI_TECH_CONFIRM, dark; owner
   // 2026-10-03 "Moves"): the mocked probe records what the move hands it —
   // occupancy.js turns the technician into the "same technician or unassigned"
   // predicate only while the gate is on (multi-tech-confirm-scope.test.js).
@@ -737,7 +737,7 @@ describe('reschedule — shared occupancy conflict gate', () => {
 // Second technician: the day-option builder (rain-out sheet, admin picker)
 // judges each candidate day on the route commit will probe — the visit's own
 // technician — so a day offered is a day that saves. occupancy.js narrows the
-// probe only while GATE_MULTI_TECH_CONFIRM + capacity are on.
+// probe only while GATE_MULTI_TECH_CONFIRM is on (hour or capacity mode).
 describe('findRescheduleOptions — candidate days are probed on the visit\'s technician', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -907,7 +907,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(sibUpdate.update).not.toHaveBeenCalled();
     // Second technician: the techless anchor probes tech-blind, the follower
     // probes its OWN technician (the one it keeps; occupancy.js applies the
-    // scope only while GATE_MULTI_TECH_CONFIRM + capacity are on).
+    // scope only while GATE_MULTI_TECH_CONFIRM is on).
     expect(findConflictingVisits.mock.calls[0][0]).not.toHaveProperty('technicianId');
     expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ technicianId: 'tech-9' });
   });

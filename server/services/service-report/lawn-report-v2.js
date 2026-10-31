@@ -563,7 +563,7 @@ function buildAftercare(applications, opts = {}) {
       watering: NEUTRAL_AFTERCARE, reentry, waterInRequired: false, neutral: true, ruleSource: instruction.ruleSource || null,
     };
   }
-  // GATE_REPORT_CLEANUP_1020: a water-in product beside one with no stored rule left the instruction with no claim, and
+  // A water-in product beside one with no stored rule left the instruction with no claim, and
   // the legacy reading below then printed "No special watering". The products' own frozen rules give one clear line.
   const waterInAftercare = cleanup1020.waterInAftercare(opts.waterInRule, reentry);
   if (waterInAftercare) return normalizeLawnAftercare(waterInAftercare);
@@ -579,7 +579,7 @@ function buildAftercare(applications, opts = {}) {
   } else {
     // Non-label fallback — the report rewrites it to defer to the weekly
     // plan when one is on the card (see buildLawnReportV2).
-    // GATE_REPORT_CLEANUP_1020: a hold on the visit prints no neutral line (an empty line is not neutral copy).
+    // A hold on the visit prints no neutral line (an empty line is not neutral copy).
     watering = cleanup1020.neutralWatering(opts.waterInRule, NEUTRAL_AFTERCARE);
     neutral = watering !== '';
   }

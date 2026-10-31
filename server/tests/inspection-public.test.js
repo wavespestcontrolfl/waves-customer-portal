@@ -474,6 +474,21 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
     });
     await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
     expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.expectedLocation).toEqual({ lat: 27.4, lng: -82.5 });
+    // The lead link carries no estimate re-check (only the estimate-token page passes one).
+    expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('estimateGuard');
+  });
+
+  test('bookAssessmentVisit hands an estimate page\'s guard to the booking transaction unchanged', async () => {
+    const { bookAssessmentVisit } = require('../routes/inspection-public')._internals;
+    const createSelfBooking = jest.fn(async () => ({ ok: true }));
+    const estimateGuard = { estimateId: 'est-1', revalidate: jest.fn() };
+    await bookAssessmentVisit({
+      booking: { _internals: { createSelfBooking } }, date: FUTURE_DATE,
+      bookingSlot: { start_time: '09:00', end_time: '09:30', technician_id: 'tech-1' }, custRow: { id: 'cust-1' },
+      catalog: { serviceId: 'svc-catalog-1', serviceType: 'Waves Assessment', durationMinutes: 30 },
+      bookingLocation: { lat: 27.4, lng: -82.5 }, source: 'estimate_assessment_link', alertLabel: 'x', estimateGuard,
+    });
+    expect(createSelfBooking.mock.calls[0][0].callbackVisit.estimateGuard).toBe(estimateGuard);
   });
 
   test('booking.js checks expectedLocation under the customer-comms fence, before any insert', () => {
@@ -964,6 +979,33 @@ describe('Codex #4737 r12 pre-push: closed leads stop; untrusted sibling propert
     expect(res.statusCode).toBe(422);
     expect(res.body).toEqual({ error: 'address_unresolved' });
     expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+  });
+});
+
+// The website form saves the whole address on one line in leads.address with
+// no ZIP. Copied unsplit, the prospect keyed as a different house than the
+// form's own customer, and a later merge kept both copies (owner 2026-10-30).
+describe("a form lead's one-line address", () => {
+  const FORM_LEAD = { ...LEAD_ROW, customer_id: null, address: '12 Sample Ct East, Parrish, FL 34219', city: 'Parrish', zip: null };
+
+  test('the prospect the link creates carries the address split into street, city, state and ZIP', async () => {
+    firstResults.leads = FORM_LEAD;
+    listResults.scheduled_services = [];
+    mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-new', existingCustomer: null, matchType: null });
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(200);
+    const created = insertCalls.find((c) => c.table === 'customers');
+    expect(created.payload).toMatchObject({ address_line1: '12 Sample Ct East', city: 'Parrish', state: 'FL', zip: '34219' });
+  });
+
+  test('the page shows the address once', async () => {
+    firstResults.leads = FORM_LEAD;
+    listResults.scheduled_services = [];
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.lead.address_display).toBe('12 Sample Ct East, Parrish 34219');
   });
 });
 

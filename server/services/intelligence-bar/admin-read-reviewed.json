@@ -23,14 +23,14 @@
     },
     {
       "endpoint": "/admin/csr/overview",
-      "reviewed": "Handler + CSRCoach.getTeamOverview (csr-coach.js): csr_call_scores and ai_follow_up_tasks selects, aggregated per CSR in memory; read end to end.",
+      "reviewed": "Handler + CSRCoach.getTeamOverview (csr-coach.js): csr_call_scores and ai_follow_up_tasks selects, aggregated per CSR in memory; read end to end. Re-reviewed 2026-10-30 (#7142, CSR source question): avgScore and teamTotals.avgScore now put each csr_call_scores row on the 16-point scale by its own maximum (15 when its point_details has no source_question key). Two new pure callees, storedPointDetails (parses the same row's point_details) and totalOnCurrentScale (arithmetic), plus same-file constants; no new field, table, write or sent message.",
       "scope": "broad",
       "query": [
         "days"
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "5e718afcf11382ca2fdfa8ae26482348",
+      "hash": "5285de6ae3be3e0d540249441f197a72",
       "freeText": {
         "lossReasons": "content",
         "reason": "content"
@@ -38,7 +38,7 @@
     },
     {
       "endpoint": "/admin/customers",
-      "reviewed": "Handler (admin-customers.js GET /): customers select with a correlated-subquery projection, every row mapped by mapCustomerListRow to an explicit field list (names, contacts, address, tier, rate, pipeline stage, lead source, balance, last/next service, tags; no credential column), plus pipeline counts and filter lists; limit default 100, max 500 (truncation cuts the rest). The customers.* select is projected away by the mapper, so credential_table:customers is accepted. Free text: leadSourceDetail is declared a note; the default key-name rule withholds any other note-like key. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed for #6378: with suggest=1 (which the bar never sends; it is not in this row's query list) and GATE_CUSTOMER_SEARCH_FUZZY on, sound-alike rows are appended after the exact rows, same mapped columns, flagged approximate; the name index reads customers id, first_name, last_name, company_name only.",
+      "reviewed": "Handler (admin-customers.js GET /): customers select with a correlated-subquery projection, every row mapped by mapCustomerListRow to an explicit field list (names, contacts, address, tier, rate, pipeline stage, lead source, balance, last/next service, tags; no credential column), plus pipeline counts and filter lists; limit default 100, max 500 (truncation cuts the rest). The customers.* select is projected away by the mapper, so credential_table:customers is accepted. Free text: leadSourceDetail is declared a note; the default key-name rule withholds any other note-like key. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed for #6378: with suggest=1 (which the bar never sends; it is not in this row's query list) and GATE_CUSTOMER_SEARCH_FUZZY on, sound-alike rows are appended after the exact rows, same mapped columns, flagged approximate; the name index reads customers id, first_name, last_name, company_name only. Re-reviewed 2026-10-29 (partial payments PR 1a): balance_owed and overdue_invoice_count also subtract invoices.amount_paid; no new field, table, callee or write. Re-reviewed 2026-10-29 (completed-visit counts, follow-up to #7022): the services_count and last_service_date subqueries and the lastVisited filter read service_records rows with status = 'completed' only, and services_count counts DISTINCT service_date; a NULL status (the column default's legacy shape) counts as completed (COALESCE(status, 'completed') = 'completed'); no new field, table, callee or write. Re-reviewed 2026-10-30 (customers directory map and filter fixes): mapCustomerListRow adds lat and lng from customers.latitude and customers.longitude (already in the customers.* select); they are not in this row's keep list, so neither reaches the model, and techSafeListRow strips both for technicians. The hasBalance filter now subtracts credit_applied and amount_paid per invoice, the same net-due expression as balance_owed, over the same invoices table and statuses. One new pure callee (toCoordinate, a number parse); no new table, write or sent message.",
       "scope": "broad",
       "query": [
         "area",
@@ -141,7 +141,7 @@
         "services/intelligence-bar/name-match.js#simFn",
         "services/intelligence-bar/name-match.js#soundsOf"
       ],
-      "hash": "7b7b76ef25859d9c8e79d43e1de13a43"
+      "hash": "b702a3548d260644a46ca4d5497f2d1e"
     },
     {
       "endpoint": "/admin/customers/:id/autopay-state",
@@ -222,7 +222,7 @@
     },
     {
       "endpoint": "/admin/customers/:id/comms",
-      "reviewed": "Handler + customer-history.listCustomerComms: messages joined to conversations for one customer (sms and voice), limit default 100 max 100, no mark-read, media signed by signMediaForClient (S3 presigned URLs, removed by the signed-link pass). The row omits readScope (conversation ids) and composerComms (a duplicate of one message for the composer) so the answer is the thread only. Message bodies and summaries are free text and are withheld by the key-name default (the thread shows who, when, channel and delivery). Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
+      "reviewed": "Handler + customer-history.listCustomerComms: messages joined to conversations for one customer (sms and voice), limit default 100 max 100, no mark-read, media signed by signMediaForClient (S3 presigned URLs, removed by the signed-link pass). The row omits readScope (conversation ids) and composerComms (a duplicate of one message for the composer) so the answer is the thread only. Message bodies and summaries are free text and are withheld by the key-name default (the thread shows who, when, channel and delivery). Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed 2026-10-29 (#6959): the chain change is sms-intent.js isCourtesyOnly gaining the dark GATE_SMS_COURTESY_TAIL rule (classifier text only); signals and unresolved unchanged, no new read or write. Re-signed after the Codex P2 refactor on #6959 (the same rule split into helper functions).",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -279,7 +279,7 @@
         "services/sms-media.js#getSignedUrl",
         "services/sms-media.js#new GetObjectCommand"
       ],
-      "hash": "db5181f891f318c75f8ca0d3f7c7368d"
+      "hash": "cb5d2d72debab046452b7117adeb3688"
     },
     {
       "endpoint": "/admin/customers/:id/credits",
@@ -489,9 +489,82 @@
       "hash": "2a12517c72fac6cffbc7eea6a5693a77"
     },
     {
+      "endpoint": "/admin/dispatch/:serviceId/tech-tips",
+      "reviewed": "Handler (admin-dispatch.js GET /:serviceId/tech-tips, behind the router's adminAuthenticate + requireTechOrAdmin; the owner login reads any visit, a technician only their own through completionOwnershipError) and every function the scan followed: techTipGate and GATE_SERVICE_REPORT_COMPLETION_CHOICES (both off = { available: false }), one scheduled_services row with its property, loadPreviousRecommendations (the customer's completed service_records for the same premises, three visits and twelve items at most, selecting report_view_token only to test Boolean(report_view_token) for 'a report was published': the token is never put in the answer), addonServiceKeys, resolveCompletionProfileForScheduledService, the newest lawn_assessments and lawn_assessment_runs row (ranking only), loadTechTipYard (grass, irrigation and county facts) and tipBlogPosts when GATE_TECH_TIP_SOURCES is on, tipsForVisit (the tip registry, business-authored copy), the last 90 days of service_records.structured_notes->techTips (what was sent, as a tip-id to date map), and property_preferences (irrigation settings, read only to answer one boolean). Every function read end to end, every read is a select (the scan found no write, no outside call, no signed link; the only signals are the credential words it saw: report_view_token read as a boolean, a URL userinfo password check in the citation lint, the token_only delivery label, and the customers read inside the grass lookup). Scope is broad on purpose: the visit id is not a customer id, so a task for one customer cannot use it. KEEP mode, so only what the tip picker is for returns: whether tips are available, the line and season, each group's id, label and primary flag with its tips' id, label, group, pests, season and the customer-facing copy (business reference text, declared content), the other tips' id, label, group, pests and season, whether irrigation is on file, the yard facts the tips were matched to (grass, irrigation system, county), and the dates of the previous recommendations. The recommendation wording itself is staff-typed text about the customer: it returns only while GATE_IB_READ_NOTES is on (keepNotes). Withheld: the sent-tip map (a map of dates), the blog post map (titles and links), the tip keywords, sources, citations and links, the service-record ids, and every key not listed. Re-reviewed 2026-10-30 (dead rodent could-not-find rule): project-types.js rodent_sanitation Work completed gained two chip labels (\"Rodent not found after search\", \"Odor treated where strongest\"); options data only, no new read, write, signal or unresolved callee.",
+      "scope": "broad",
+      "params": {
+        "serviceId": "uuid"
+      },
+      "query": [],
+      "keywords": [
+        "tech tips",
+        "tips for this visit",
+        "what tips can we send",
+        "service tips",
+        "customer tips for a visit",
+        "previous recommendations for a visit"
+      ],
+      "keep": [
+        "available",
+        "completionChoicesEnabled",
+        "line",
+        "season",
+        "groups.*.id",
+        "groups.*.label",
+        "groups.*.primary",
+        "groups.*.tips.*.id",
+        "groups.*.tips.*.label",
+        "groups.*.tips.*.group",
+        "groups.*.tips.*.pests",
+        "groups.*.tips.*.season",
+        "groups.*.tips.*.copy",
+        "more.*.id",
+        "more.*.label",
+        "more.*.group",
+        "more.*.pests",
+        "more.*.season",
+        "conditions.irrigation_on_file",
+        "tipSources",
+        "yard.grass",
+        "yard.irrigationSystem",
+        "yard.county",
+        "previousRecommendations.*.serviceDate"
+      ],
+      "keepNotes": [
+        "previousRecommendations.*.text"
+      ],
+      "freeText": {
+        "copy": "content"
+      },
+      "acceptSignals": [
+        "credential_field:password",
+        "credential_field:report_view_token",
+        "credential_field:service_records.report_view_token as rep",
+        "credential_field:token_only",
+        "credential_table:customers"
+      ],
+      "signals": [
+        "credential_field:password",
+        "credential_field:report_view_token",
+        "credential_field:service_records.report_view_token as rep",
+        "credential_field:token_only",
+        "credential_table:customers"
+      ],
+      "unresolved": [
+        "services/service-completion-profiles.js#k",
+        "services/service-report/report-blog-post.js#HUB_SITE_KEYS.includes",
+        "services/service-report/service-line-configs.js#detectExistingServiceCategory",
+        "services/service-report/service-line-configs.js#normalizeServiceType",
+        "utils/savepoint-read.js#query",
+        "utils/savepoint-read.js#transactionQueues.delete"
+      ],
+      "hash": "2ae485a2e931a2f67b9219f9d96d2842"
+    },
+    {
       "endpoint": "/admin/dispatch/alerts",
       "reviewed": "Handler: dispatch_alerts joined to technician, job and customer with an explicit column list; limit default 50, max 200; unresolved by default. The payload column is system-written JSON. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
+      "office": true,
       "query": [
         "limit",
         "unresolved"
@@ -705,8 +778,85 @@
       "hash": "fff055e70de321e980fb41bf0337fbfc"
     },
     {
+      "endpoint": "/admin/email-templates",
+      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "scope": "broad",
+      "office": true,
+      "query": [
+        "mode",
+        "purpose",
+        "q",
+        "status"
+      ],
+      "keywords": [
+        "email templates",
+        "email template list",
+        "is an email template active",
+        "which email templates exist",
+        "customer email templates"
+      ],
+      "keep": [
+        "templates.*.id",
+        "templates.*.name",
+        "templates.*.description",
+        "templates.*.mode",
+        "templates.*.purpose",
+        "templates.*.audience",
+        "templates.*.status",
+        "templates.*.from_name",
+        "templates.*.default_cta_label",
+        "templates.*.last_published_at",
+        "templates.*.version_count",
+        "templates.*.draft_count",
+        "templates.*.automation_count"
+      ],
+      "freeText": {
+        "description": "content"
+      },
+      "signals": [],
+      "unresolved": [],
+      "hash": "7eca8f5c382949092cebdbb948877d81"
+    },
+    {
+      "endpoint": "/admin/email-templates/automations",
+      "reviewed": "Handler (admin-email-templates.js GET /automations): email_template_automations joined to email_templates and the active email_template_versions row, plus three 30-day aggregates (email_messages count by template, run-event would_send/would_block counts by automation, shadow-origin only); rows mapped with parsed JSON settings and counts. No customer data, no write; read end to end. Keep mode: only the automation's identity, trigger, template, timing, status and the counts reach the model. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "scope": "broad",
+      "office": true,
+      "keywords": [
+        "email automations",
+        "automatic emails",
+        "what emails go out automatically",
+        "email triggers",
+        "email automation status",
+        "which emails are active"
+      ],
+      "keep": [
+        "automations.*.name",
+        "automations.*.description",
+        "automations.*.trigger_description",
+        "automations.*.template_name",
+        "automations.*.template_status",
+        "automations.*.delay_minutes",
+        "automations.*.audience",
+        "automations.*.status",
+        "automations.*.frequency_cap",
+        "automations.*.timezone",
+        "automations.*.send_count_30d",
+        "automations.*.would_send_30d",
+        "automations.*.would_block_30d",
+        "automations.*.last_published_at"
+      ],
+      "freeText": {
+        "description": "content",
+        "trigger_description": "content"
+      },
+      "signals": [],
+      "unresolved": [],
+      "hash": "19248f920bdbcbfd4dcb1e5d3019ad67"
+    },
+    {
       "endpoint": "/admin/estimates",
-      "reviewed": "Handler (admin-estimates.js GET /): estimates joined to the creator, every row mapped to an explicit field list (status, contact, totals, dates, views, clicks, source, service lines, notes, decline reason, review material from estimate_data); limit default 50, max 500. pricingRisk is not offered (it runs the pricing-risk batch). The estimate token is omitted by the row. credential_field:token and credential_link:hasToken are the bearer token field and a presence check. Free text: notes, declineReason, dispositionNote, reviewNotes and description are withheld by the key-name default; leadSourceDetail and the agent draft reasoning, assumptions and uncertainty are declared notes. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read for PR #6432: the row mapping adds perApplication (service label, price, visits from the frozen proposal lines) and hasAcceptanceRecord (a boolean); both are outside the keep list, so neither reaches the model. New reads are batched and read-only: annual_prepay_terms ids, customers (id, pipeline_stage, monthly_rate, billing_mode only) and estimate_acceptances ids; the signals and unresolved callees are unchanged. Re-read for PR #6432 rounds 4-5: rows add staffPreviewable (a boolean, outside the keep list, so it never reaches the model) from staffPreviewableIdSet: the /data gate's pure row predicates (adminDraftPreviewEligible, isEstimateCustomerViewable) and callSideBlocksForEstimates, which reads call_log (id, metadata, processing_token, processing_status, extraction_attempts, created_at, twilio_call_sid) and leads (id, twilio_call_sid) once per page only to decide that boolean. The per-application lane also reads estimates (id, estimate_group_id, customer_id) and customers (id, live only) for a grouped row's sibling owner (resolveGroupedEstimateOwnerIds), and the batched phone match reads customers (id, phone, email, address fields, pipeline_stage, monthly_rate, billing_mode, updated_at) only to choose the lane; none of those values is returned. estimate_data is parsed once (parseEstimateData). New credential-named signals, accepted by name: credential_field:processing_token is the call row's processing claim, read only to judge whether the call is in flight and never returned; credential_link:canonicalizeRouteTokens is an address-word helper (road-word rewrite) reached through the address comparator, with no credential or link. All new reads are read-only; no write, outside call or file. Re-read for PR #6432 round 6: the per-application lane splits by isEstimateAcceptActive (pure). An offer that can still be accepted reads today's lane through the batched reads above (rowsBilledPerApplicationToday); every other row reads the lane it was sent in from its own frozen send bundle (sentBundleBillsPerApplication, a pure walk for billedPerApplication flags). No new table, column or response key. Re-read for round 7: one call-side read now serves both staffPreviewable and the per-application lane (a call-blocked offer is closed and shows its send-time lane), and an open offer shows its price only while sentSnapshotServesAsIs (the customer page's own pure fast-path predicate, extracted unchanged from buildPricingBundleInner) holds. No new table, column or response key. effect_call:upsertSupplement is the in-memory array helper inside recurringServicesWithSupplements, reached through that predicate; it writes nothing. Re-reviewed for #6503 (mosquito misting pricer, dark): the chain now reaches two pure string predicates, isMistingSystemIdentity (estimate-converter.js recurringServiceKey, via utils/mosquito-misting-system.js) and mistingProposalIdentity (estimate-proposal.js normalizeLineItem / normalizeProgram / normalizeCorrectiveWorkItem). Both read a row's key or label and return a string or null: no table, no query, no write, no new response key. normalizeLineItem / normalizeProgram / normalizeCorrectiveWorkItem additionally keep a line's own id, service, originalRequestedService and identity fields when the line is the misting system (fields the row already carried in the estimate_data it reads). Nothing else in the read path changed. Re-signed for #6503 round 7: normalizeCorrectiveWorkItem (estimate-proposal.js) now also infers the misting identity from the row's text through the same pure predicate (mistingProposalIdentity, already in this row's unresolved list) and keeps the row's own id; no table, query, write or response key changed. Re-signed for #6503 round 8: mistingProposalIdentity (utils/mosquito-misting-system.js, pure text predicate) now also recognizes the canonical misting work labels; nothing in the read path's tables, queries, writes or response keys changed. Re-signed for #6503 round 8 (second): normalizeCorrectiveWorkItem persists an originalRequestedService marker for a misting row; same pure predicate, no table, query, write or response key changed. Re-signed for misting PR 2a: the converter now reads the stored misting install row and the protocol-matcher rules gained the misting program; the signals, tables, queries, writes and response keys did not change. Re-signed for misting PR 2a audit fixes: the converter and the misting identity helper gained the install line marker (kind misting_installation); the signals, tables, queries, writes and response keys did not change. Re-signed for the misting PR 2a multi-install fix: frozenMistingInstall now returns one entry per sold install and the invoice lines come from a shared helper; the signals, tables, queries, writes and response keys did not change. Re-signed for the v13 lawn outline (GATE_LAWN_OUTLINE_V13): the outline stale check reads contentLibraryVersion() instead of the CONTENT_LIBRARY_VERSION constant; the signals, tables, queries, writes and response keys did not change. Re-signed for the Pynamite retail misting change (2026-10-24): mistingProposalIdentity (utils/mosquito-misting-system.js, pure text predicate) now also accepts the two frozen MistAway-era tier labels (MISTING_LEGACY_TIER_LABELS, a code-owned constant) beside the live tier-table labels, so a stored label-only misting line keeps its identity; the signals, tables, queries, writes and response keys did not change. Re-signed for #6684 (commercial Auto Pay, GATE_COMMERCIAL_AUTOPAY, 2026-10-25): normalizePaymentTerms (estimate-proposal.js, pure string normalizer reached through normalizeCommercialTerms) now also returns the proposal-only token autopay, compared against AUTOPAY_PAYMENT_TERMS (a string constant imported from shared/commercial-agreement-terms.cjs); those are the only two changes in the chain. The signals, tables, queries, writes and response keys did not change. Re-read for PR #6695: estimate-pricing-audit SERVICE_MAP adds the registry labels Bora-Care Treatment, German Roach Cleanout and Cockroach Treatment to three keys. That changes only which inventory rows the pricing-risk batch costs, which this row does not offer; the response keys, signals and unresolved callees are unchanged.",
+      "reviewed": "Handler (admin-estimates.js GET /): estimates joined to the creator, every row mapped to an explicit field list (status, contact, totals, dates, views, clicks, source, service lines, notes, decline reason, review material from estimate_data); limit default 50, max 500. pricingRisk is not offered (it runs the pricing-risk batch). The estimate token is omitted by the row. credential_field:token and credential_link:hasToken are the bearer token field and a presence check. Free text: notes, declineReason, dispositionNote, reviewNotes and description are withheld by the key-name default; leadSourceDetail and the agent draft reasoning, assumptions and uncertainty are declared notes. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read for PR #6432: the row mapping adds perApplication (service label, price, visits from the frozen proposal lines) and hasAcceptanceRecord (a boolean); both are outside the keep list, so neither reaches the model. New reads are batched and read-only: annual_prepay_terms ids, customers (id, pipeline_stage, monthly_rate, billing_mode only) and estimate_acceptances ids; the signals and unresolved callees are unchanged. Re-read for PR #6432 rounds 4-5: rows add staffPreviewable (a boolean, outside the keep list, so it never reaches the model) from staffPreviewableIdSet: the /data gate's pure row predicates (adminDraftPreviewEligible, isEstimateCustomerViewable) and callSideBlocksForEstimates, which reads call_log (id, metadata, processing_token, processing_status, extraction_attempts, created_at, twilio_call_sid) and leads (id, twilio_call_sid) once per page only to decide that boolean. The per-application lane also reads estimates (id, estimate_group_id, customer_id) and customers (id, live only) for a grouped row's sibling owner (resolveGroupedEstimateOwnerIds), and the batched phone match reads customers (id, phone, email, address fields, pipeline_stage, monthly_rate, billing_mode, updated_at) only to choose the lane; none of those values is returned. estimate_data is parsed once (parseEstimateData). New credential-named signals, accepted by name: credential_field:processing_token is the call row's processing claim, read only to judge whether the call is in flight and never returned; credential_link:canonicalizeRouteTokens is an address-word helper (road-word rewrite) reached through the address comparator, with no credential or link. All new reads are read-only; no write, outside call or file. Re-read for PR #6432 round 6: the per-application lane splits by isEstimateAcceptActive (pure). An offer that can still be accepted reads today's lane through the batched reads above (rowsBilledPerApplicationToday); every other row reads the lane it was sent in from its own frozen send bundle (sentBundleBillsPerApplication, a pure walk for billedPerApplication flags). No new table, column or response key. Re-read for round 7: one call-side read now serves both staffPreviewable and the per-application lane (a call-blocked offer is closed and shows its send-time lane), and an open offer shows its price only while sentSnapshotServesAsIs (the customer page's own pure fast-path predicate, extracted unchanged from buildPricingBundleInner) holds. No new table, column or response key. effect_call:upsertSupplement is the in-memory array helper inside recurringServicesWithSupplements, reached through that predicate; it writes nothing. Re-reviewed for #6503 (mosquito misting pricer, dark): the chain now reaches two pure string predicates, isMistingSystemIdentity (estimate-converter.js recurringServiceKey, via utils/mosquito-misting-system.js) and mistingProposalIdentity (estimate-proposal.js normalizeLineItem / normalizeProgram / normalizeCorrectiveWorkItem). Both read a row's key or label and return a string or null: no table, no query, no write, no new response key. normalizeLineItem / normalizeProgram / normalizeCorrectiveWorkItem additionally keep a line's own id, service, originalRequestedService and identity fields when the line is the misting system (fields the row already carried in the estimate_data it reads). Nothing else in the read path changed. Re-signed for #6503 round 7: normalizeCorrectiveWorkItem (estimate-proposal.js) now also infers the misting identity from the row's text through the same pure predicate (mistingProposalIdentity, already in this row's unresolved list) and keeps the row's own id; no table, query, write or response key changed. Re-signed for #6503 round 8: mistingProposalIdentity (utils/mosquito-misting-system.js, pure text predicate) now also recognizes the canonical misting work labels; nothing in the read path's tables, queries, writes or response keys changed. Re-signed for #6503 round 8 (second): normalizeCorrectiveWorkItem persists an originalRequestedService marker for a misting row; same pure predicate, no table, query, write or response key changed. Re-signed for misting PR 2a: the converter now reads the stored misting install row and the protocol-matcher rules gained the misting program; the signals, tables, queries, writes and response keys did not change. Re-signed for misting PR 2a audit fixes: the converter and the misting identity helper gained the install line marker (kind misting_installation); the signals, tables, queries, writes and response keys did not change. Re-signed for the misting PR 2a multi-install fix: frozenMistingInstall now returns one entry per sold install and the invoice lines come from a shared helper; the signals, tables, queries, writes and response keys did not change. Re-signed for the v13 lawn outline (GATE_LAWN_OUTLINE_V13): the outline stale check reads contentLibraryVersion() instead of the CONTENT_LIBRARY_VERSION constant; the signals, tables, queries, writes and response keys did not change. Re-signed for the Pynamite retail misting change (2026-10-24): mistingProposalIdentity (utils/mosquito-misting-system.js, pure text predicate) now also accepts the two frozen MistAway-era tier labels (MISTING_LEGACY_TIER_LABELS, a code-owned constant) beside the live tier-table labels, so a stored label-only misting line keeps its identity; the signals, tables, queries, writes and response keys did not change. Re-signed for #6684 (commercial Auto Pay, GATE_COMMERCIAL_AUTOPAY, 2026-10-25): normalizePaymentTerms (estimate-proposal.js, pure string normalizer reached through normalizeCommercialTerms) now also returns the proposal-only token autopay, compared against AUTOPAY_PAYMENT_TERMS (a string constant imported from shared/commercial-agreement-terms.cjs); those are the only two changes in the chain. The signals, tables, queries, writes and response keys did not change. Re-read for PR #6695: estimate-pricing-audit SERVICE_MAP adds the registry labels Bora-Care Treatment, German Roach Cleanout and Cockroach Treatment to three keys. That changes only which inventory rows the pricing-risk batch costs, which this row does not offer; the response keys, signals and unresolved callees are unchanged. Re-read for the pre-slab audit product change: estimate-pricing-audit.js now costs a pre-slab line from the quoted product (pure in-memory arithmetic on persisted line fields) and estimate-result-container.js carries one more field when it merges duplicate lines; the handler, its reads, signals and unresolved callees are unchanged, and pricingRisk is still not offered. Re-reviewed 2026-10-26 (lawn outline detail PR): contentLibraryVersion() now also reads GATE_LAWN_OUTLINE_DETAIL to pick the stamp it compares; no new read, write or field. Re-reviewed 2026-10-26 (Tree & Shrub outline PR, GATE_TS_OUTLINE): the outline summary read adds service_outline_packets.service_line and keeps lawn and Tree & Shrub packets apart; while the gate is on, rows add treeShrubOutlineAvailable (a boolean from the row's own service lines) and treeShrubServiceOutline (the lawn summary's shape); both are outside the keep list, so neither reaches the model. tree-shrub-service-outline.js is reached only for constants, the gate reader and the protocol version (protocols.json, loaded at start). No new table, write or call. Re-signed for #6869 (commercial first visit, GATE_COMMERCIAL_FIRST_VISIT, 2026-10-26): normalizeProgram (estimate-proposal.js) keeps a program's optional visitMinutes (a bounded whole number the proposal save validates); merged with main's re-sign. The signals, unresolved callees, tables, queries, writes and response keys did not change. Re-reviewed 2026-10-26 (Pest Control outline PR, GATE_PEST_OUTLINE): the outline programs now come from service-outline-programs.js (Tree & Shrub and Pest Control: gate readers, stamp constants, the protocol version, and a pure test of each service line plus the row's monthly total); while the Pest Control gate is on, rows add pestOutlineAvailable (a boolean) and pestServiceOutline (the lawn summary's shape), both outside the keep list, so neither reaches the model. No new table, query, write or call. Re-reviewed 2026-10-26 (Mosquito outline PR, GATE_MOSQUITO_OUTLINE): service-outline-programs.js gains a mosquito entry whose offer check reads the stored estimate data already loaded for the row (a pure read of the recurring mosquito row through estimate-result-container.js, with the row's own pricing_authority picking the stored container); while the Mosquito gate is on, rows add mosquitoOutlineAvailable (a boolean) and mosquitoServiceOutline (the lawn summary's shape), both outside the keep list, so neither reaches the model. No new table, query, write or call; the unresolved callees did not change. Re-read for PR #6945: normalizeProposal (estimate-proposal.js) now emits buildingUse ('residential' | 'nonresidential', only when the proposal has one) through normalizeBuildingUse and the BUILDING_USES constant; the row mapping does not read it and it is outside the keep list, so it never reaches the model. No new table, query, write or call; the signals and unresolved callees did not change. Re-reviewed 2026-10-29 (GATE_DEAD_ANIMAL_REMOVAL): estimate-service-lines.js selectedServiceKeysFromInputs also maps the svcRodentDeadAnimal input to the existing rodent service line, and estimate-public.js normalizeOneTimeBreakdown reads a Dead Rodent Removal row's tier and minutes from either stored shape (deadAnimalBreakdownFields); no new read, field or query key. Re-read for PR #7027 (GATE_COMMISSION_SOLD_BY, D5 part 3b-1): with the gate on, rows add soldBy (outside the keep list, so it never reaches the model) from loadSoldByForList (estimate-sold-by.js), which reads technicians (id, name) and leads (id, created_at, gps_check) once per page, batched and read-only; with the gate off there is no read and no key. Signals and unresolved callees unchanged. Re-read for the 2026-10-30 pipeline audit fixes: rows add bookingLinkEligible (a boolean, outside the keep list, so it never reaches the model) from bookingLinkEligible in admin-estimates.js: the row's own status, archived_at, bill_by_invoice and monthly_total, estimateDataHasUnresolvedManagerApproval (estimate-delivery-options.js, a pure walk of the estimate_data already parsed for the row) and acceptanceServiceLists (estimate-public.js, pure) through bookingLinkOneTimeLabel. No new table, query, write or call; the unresolved callees did not change. New credential-named signal, accepted by name: credential_link:normalizeApprovalToken is a pure lowercase and underscore normalizer for approval status words in estimate_data, with no credential or link. Re-read for the misting estimate page PR: recurringServiceKey (estimate-public.js) now returns mosquito_misting for the misting plan through the shared isMistingSystemIdentity predicate (pure string test, the same call estimate-converter already makes), recurringServicesWithSupplements stamps customer-safe misting facts on the plan row (pure), and the categories and detail helpers the row mapping reaches gain a misting case; no new read, write, table or credential signal, the signals are unchanged, the one new unresolved callee is that predicate, and the keep list is unchanged, so no new key reaches the model.",
       "scope": "broad",
       "query": [
         "archived",
@@ -791,6 +941,7 @@
         "credential_field:token",
         "credential_link:canonicalizeRouteTokens",
         "credential_link:hasToken",
+        "credential_link:normalizeApprovalToken",
         "credential_table:estimates"
       ],
       "signals": [
@@ -798,11 +949,17 @@
         "credential_field:token",
         "credential_link:canonicalizeRouteTokens",
         "credential_link:hasToken",
+        "credential_link:normalizeApprovalToken",
         "credential_table:estimates",
         "effect_call:merge",
         "effect_call:upsertSupplement"
       ],
       "unresolved": [
+        "routes/admin-estimates.js#program.contentLibraryVersion",
+        "routes/admin-estimates.js#program.live",
+        "routes/admin-estimates.js#program.offeredOn",
+        "routes/admin-estimates.js#program.protocolVersion",
+        "routes/estimate-public.js#isMistingSystemIdentity (depth limit)",
         "services/estimate-converter.js#callback isLegacyRow",
         "services/estimate-converter.js#isMistingSystemIdentity (depth limit)",
         "services/estimate-pricing-audit.js#containerPricesAnything (depth limit)",
@@ -827,7 +984,7 @@
         "utils/address-normalizer.js#titleCaseWords (depth limit)",
         "utils/estimate-claim-sql.js#dbc"
       ],
-      "hash": "bb2ae19ca97c89e6fa60d794253651a9"
+      "hash": "5486a1351efb6f59f523be1f629e7a1e"
     },
     {
       "endpoint": "/admin/estimates/source-performance",
@@ -841,8 +998,105 @@
       "hash": "6175e7ea103824452658cd90912d42b6"
     },
     {
+      "endpoint": "/admin/health/scores/:customerId",
+      "reviewed": "Handler (admin-health.js GET /scores/:customerId, behind the router's adminAuthenticate + requireAdmin): one customer_health_scores row joined to its customer (customers.* plus the score columns), the newest 90 customer_health_history rows and up to 20 new or acknowledged customer_health_alerts, with the stored JSON details parsed; a customer with no score answers 404. Handler read end to end, no write. The router used to run ensureHealthTables (CREATE TABLE and ALTER TABLE, once per process) in front of EVERY route, reads included; it now runs only in front of the four write routes (rescore, rescore-all, alert update, alert action), so this read creates and alters nothing (the migrations own the tables). The select takes customers.*, so the row is in KEEP mode: only the customer's name and WaveGuard tier, the score columns, the system-written detail counters (payment, service, engagement, satisfaction, loyalty, growth), the churn fields (the signal name and severity only: a behavioral signal's message is customer_signals.signal_value and stays out), the history scores and each active alert's type, severity, status, created time and system-composed description (health-alerts.js builds it from scores and counts) return. Withheld: every other customers column (contact, address, gate and lockbox codes, Stripe ids, notes, rates), the alert title (it names the customer and is never kept), trigger_data, recommended_actions, resolution_notes (staff-typed) and every id other than the customer's and the alert's. The customer's own id is the scope parameter, checked against the task customer.",
+      "scope": "customer",
+      "scopeParam": "customerId",
+      "params": {
+        "customerId": "uuid"
+      },
+      "query": [],
+      "keywords": [
+        "customer health score",
+        "health score",
+        "churn risk for a customer",
+        "is this customer at risk",
+        "customer health",
+        "why is their score low"
+      ],
+      "keep": [
+        "score.id",
+        "score.first_name",
+        "score.last_name",
+        "score.waveguard_tier",
+        "score.overall_score",
+        "score.score_grade",
+        "score.payment_score",
+        "score.service_score",
+        "score.engagement_score",
+        "score.satisfaction_score",
+        "score.loyalty_score",
+        "score.growth_score",
+        "score.payment_details.onTimeRate",
+        "score.payment_details.lateCount",
+        "score.payment_details.failedCount",
+        "score.service_details.completedCount",
+        "score.service_details.cancelledCount",
+        "score.service_details.skippedCount",
+        "score.service_details.daysSinceLastService",
+        "score.service_details.adherenceRate",
+        "score.service_details.callbackCount",
+        "score.service_details.callbackRatio",
+        "score.engagement_details.smsInbound",
+        "score.engagement_details.smsOutbound",
+        "score.engagement_details.interactions",
+        "score.engagement_details.daysSinceLastContact",
+        "score.satisfaction_details.avgRating",
+        "score.satisfaction_details.reviewCount",
+        "score.satisfaction_details.complaintCount",
+        "score.satisfaction_details.complimentCount",
+        "score.loyalty_details.tenureMonths",
+        "score.loyalty_details.tier",
+        "score.loyalty_details.referralCount",
+        "score.growth_details.distinctServices",
+        "score.growth_details.monthlyRate",
+        "score.growth_details.rateChange",
+        "score.churn_risk",
+        "score.churn_probability",
+        "score.churn_signals.*.signal",
+        "score.churn_signals.*.severity",
+        "score.days_until_predicted_churn",
+        "score.score_trend",
+        "score.previous_score",
+        "score.score_change_30d",
+        "score.scored_at",
+        "history.*.overall_score",
+        "history.*.payment_score",
+        "history.*.service_score",
+        "history.*.engagement_score",
+        "history.*.satisfaction_score",
+        "history.*.loyalty_score",
+        "history.*.growth_score",
+        "history.*.churn_risk",
+        "history.*.scored_at",
+        "alerts.*.id",
+        "alerts.*.alert_type",
+        "alerts.*.severity",
+        "alerts.*.status",
+        "alerts.*.description",
+        "alerts.*.created_at"
+      ],
+      "freeText": {
+        "description": "content",
+        "payment_details": "content",
+        "service_details": "content",
+        "engagement_details": "content",
+        "satisfaction_details": "content",
+        "loyalty_details": "content",
+        "growth_details": "content"
+      },
+      "acceptSignals": [
+        "credential_table:customers"
+      ],
+      "signals": [
+        "credential_table:customers"
+      ],
+      "unresolved": [],
+      "hash": "ece7928410d7507fcee5927d9770a95b"
+    },
+    {
       "endpoint": "/admin/invoices",
-      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly.",
+      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly. Re-reviewed 2026-10-29 (#6976 Undo): the response adds undoPaymentEnabled, one boolean read from GATE_UNDO_MANUAL_PAYMENT (undoManualPaymentLive); no new table, row field or write, and the keep list leaves it out. Re-reviewed 2026-10-29 (partial payments): the handler also sends the partialPaymentsEnabled flag; rows now carry amount_paid (money received on a still-open invoice), kept beside credit_applied; signals and unresolved unchanged. Re-reviewed 2026-10-30 (billing audit finding 7): the list date filter and ordering read an undated invoice on the Eastern day it was created ((created_at AT TIME ZONE 'America/New_York')::date instead of created_at::date); same rows and columns, no new table, field or write; signals and unresolved unchanged. Re-reviewed 2026-10-31 (after-visit prepay not overdue): status=overdue also leaves out the annual prepays whose charge waits for the first visit (invoices.id NOT IN AWAITING_FIRST_VISIT_INVOICE_IDS_SQL from paf-prepay-release.js: a read of annual_prepay_terms and each term's estimate_data prepayAutoChargeJob); a filter only, same rows and columns, no new field or write; signals and unresolved unchanged.",
       "scope": "customer",
       "scopeParam": "customer_id",
       "query": [
@@ -885,6 +1139,7 @@
         "invoices.*.tax_amount",
         "invoices.*.total",
         "invoices.*.credit_applied",
+        "invoices.*.amount_paid",
         "invoices.*.status",
         "invoices.*.sent_at",
         "invoices.*.viewed_at",
@@ -943,11 +1198,11 @@
         "services/invoice.js#database.transaction",
         "services/invoice.js#read"
       ],
-      "hash": "30644e37a7a7565ab5c03c6df495d423"
+      "hash": "6c40d705d84f27cfa1c0f3f04cecda41"
     },
     {
       "endpoint": "/admin/invoices/:id",
-      "reviewed": "Handler + InvoiceService.getById + loadInvoiceAnnualPrepay + loadAnnualPrepayTermForInvoice + suggestCoverageServiceType: invoices.* for one invoice with the customer (name, contact, address, default card brand and last four), active payment plan, annual prepay term and a coverage suggestion. Selects only; the row omits the pay token, the send claim token, the Stripe ids and the receipt URL. write:transaction is the read-only nested transaction helper. Free text: notes and line item descriptions are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read 2026-10-24 (PR #6656, multi-property invoices): the handler now drops property_id and property_address from line_items for a TECHNICIAN request (isTechnicianRequest; the bar runs as admin, so its read is unchanged), and line items may carry property_id / property_address, which this row's keep list does not include.",
+      "reviewed": "Handler + InvoiceService.getById + loadInvoiceAnnualPrepay + loadAnnualPrepayTermForInvoice + suggestCoverageServiceType: invoices.* for one invoice with the customer (name, contact, address, default card brand and last four), active payment plan, annual prepay term and a coverage suggestion. Selects only; the row omits the pay token, the send claim token, the Stripe ids and the receipt URL. write:transaction is the read-only nested transaction helper. Free text: notes and line item descriptions are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read 2026-10-24 (PR #6656, multi-property invoices): the handler now drops property_id and property_address from line_items for a TECHNICIAN request (isTechnicianRequest; the bar runs as admin, so its read is unchanged), and line items may carry property_id / property_address, which this row's keep list does not include. Re-read 2026-10-29 (PR #7008, lawn rounds prepay): loadInvoiceAnnualPrepay now resolves a lawn_rounds_9 term's round anchor for the coverage visit dates (roundAnchorForDisplay -> annual-prepay-renewals coverageRowsForTerm and seriesRoundAnchorForTerm, inside the same read-only optionalRead savepoint): SELECTs on scheduled_services and annual_prepay_terms only, no writes, no outside calls; other cadences make no extra read. The response keys and the keep list are unchanged; only coverageVisits dates differ for a rounds term.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1053,18 +1308,22 @@
       "unresolved": [
         "routes/admin-invoices.js#cadenceFromIntervalDays",
         "routes/admin-invoices.js#normalizeCoverageCadence",
+        "services/estimate-converter.js#isMistingSystemIdentity (depth limit)",
         "services/invoice-prepay.js#addDaysYmd",
         "services/invoice-prepay.js#conn.transaction",
         "services/invoice-prepay.js#coverageScheduleDates",
         "services/invoice-prepay.js#coverageSeriesAnchor",
         "services/invoice-prepay.js#daysUntil",
         "services/invoice-prepay.js#inferCoverageCadence",
+        "services/invoice-prepay.js#normalizeCoverageCadence",
         "services/invoice-prepay.js#read",
+        "services/invoice-prepay.js#seriesRoundAnchorForTerm",
         "services/invoice-prepay.js#splitCoverageAmount",
         "services/invoice.js#database.transaction",
-        "services/invoice.js#read"
+        "services/invoice.js#read",
+        "services/recurring-appointment-seeder.js#isMistingSystemIdentity (depth limit)"
       ],
-      "hash": "c2d6395263506053649c50f9f6217f80"
+      "hash": "9ff6927e54782962ac522c75bbb6b378"
     },
     {
       "endpoint": "/admin/invoices/:id/attachments",
@@ -1080,7 +1339,7 @@
     },
     {
       "endpoint": "/admin/invoices/:id/credit-context",
-      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end.",
+      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): the select adds amount_paid and amount_due comes from invoiceAmountDue (invoice-helpers.js, cents arithmetic only); response fields unchanged.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1088,7 +1347,7 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "96f15a81a78285f3484d4d3bb08829b7"
+      "hash": "966040c64648289015b4000eb9634955"
     },
     {
       "endpoint": "/admin/invoices/:id/receipt-address",
@@ -1163,11 +1422,19 @@
     },
     {
       "endpoint": "/admin/invoices/stats",
-      "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end.",
+      "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): total_outstanding also subtracts amount_paid; still aggregates only, no row data. Re-reviewed 2026-10-31 (after-visit prepay not overdue): the overdue count leaves out the annual prepays whose charge waits for the first visit (the list's overdue subquery, a read of annual_prepay_terms and estimates); the table check is annualPrepayInvoiceTableExists, whose optionalInvoiceRead is the write:transaction signal (a nested transaction around a schema read, as on /admin/invoices); still aggregates only, no row data.",
       "scope": "broad",
-      "signals": [],
-      "unresolved": [],
-      "hash": "5f1baede15ae671322a26b851bf0ac26"
+      "acceptSignals": [
+        "write:transaction"
+      ],
+      "signals": [
+        "write:transaction"
+      ],
+      "unresolved": [
+        "services/invoice.js#database.transaction",
+        "services/invoice.js#read"
+      ],
+      "hash": "3d561cd4c99776b5a8f0cf7727010fde"
     },
     {
       "endpoint": "/admin/job-forms/templates/by-service/:serviceType",
@@ -1183,6 +1450,23 @@
       "signals": [],
       "unresolved": [],
       "hash": "221af5cdec979b70c219d9f873ac8b98"
+    },
+    {
+      "endpoint": "/admin/kpi-targets",
+      "reviewed": "Handler (admin-kpi-targets.js GET /, behind the router's adminAuthenticate + requireAdmin and cacheRoute(60), a response cache): kpi_targets select of metric, target, amber band, lower-is-better, updated_by, updated_at, mapped to numbers. No customer data, no write; read end to end.",
+      "scope": "broad",
+      "keywords": [
+        "kpi targets",
+        "revenue target",
+        "dashboard targets",
+        "goal for a metric",
+        "what is our target"
+      ],
+      "signals": [],
+      "unresolved": [
+        "routes/admin-kpi-targets.js#middleware cacheRoute()"
+      ],
+      "hash": "2d7b6590446c2e3e496ac8263fafe670"
     },
     {
       "endpoint": "/admin/leads",
@@ -1600,14 +1884,14 @@
     },
     {
       "endpoint": "/admin/revenue/settings",
-      "reviewed": "Handler: latest company_financials row (cost and margin settings; technicians get a field subset); read end to end.",
+      "reviewed": "Handler: latest company_financials row (cost and margin settings); the revenue router is owner-only, technicians get 403 (settings audit SET-01, 2026-10-31); read end to end.",
       "scope": "broad",
       "freeText": {
         "notes": "note"
       },
       "signals": [],
       "unresolved": [],
-      "hash": "b30ef0152427d3828bf50b862de3da03"
+      "hash": "d8be6622ba22d377d932198d0159ecdb"
     },
     {
       "endpoint": "/admin/route-scorecard/status",
@@ -1624,6 +1908,36 @@
       "signals": [],
       "unresolved": [],
       "hash": "ba82ea574fd8734f90e320a09edb33f4"
+    },
+    {
+      "endpoint": "/admin/schedule/blackout-dates",
+      "reviewed": "Handler (admin-schedule.js GET /blackout-dates): schedule_blackout_dates select from 30 days back, getWeeklyDaysOff and getClosedHolidays (blackout-dates.js: one system_settings read each through readOptional, which opens a SAVEPOINT only when handed a transaction; the route passes the plain db, so write:transaction is that read-only savepoint wrapper and is accepted), and upcomingHolidays (holidays.js: pure date math over the fixed HOLIDAYS table). No customer data, no write; read end to end. The blackout reason is staff-typed and stays withheld as a note.",
+      "scope": "broad",
+      "office": true,
+      "keywords": [
+        "blackout dates",
+        "days we are closed",
+        "closed days",
+        "holidays we are closed",
+        "weekly days off",
+        "are we open on a date",
+        "schedule closures"
+      ],
+      "freeText": {
+        "reason": "note"
+      },
+      "acceptSignals": [
+        "write:transaction"
+      ],
+      "signals": [
+        "write:transaction"
+      ],
+      "unresolved": [
+        "services/scheduling/blackout-dates.js#conn.transaction",
+        "services/scheduling/blackout-dates.js#fn",
+        "services/scheduling/holidays.js#holiday.dateIn"
+      ],
+      "hash": "9e35587b23a1c44cfd4e183dba6a15b0"
     },
     {
       "endpoint": "/admin/schedule/list",
@@ -1711,6 +2025,64 @@
       "signals": [],
       "unresolved": [],
       "hash": "bd907b8a4a1a71aa228546b03fdd60a9"
+    },
+    {
+      "endpoint": "/admin/settings/call-routing/status",
+      "reviewed": "Handler (admin-settings.js GET /call-routing/status, adminAuthenticate + requireAdmin): one system_settings read, mergeCallRoutingConfig (call-routing-config.js: pure normalization), isEnabled('voiceAiAgent') and decideVoiceRoute (voice-route-decision.js: pure decision on the config and the clock); returns booleans, the mode, the decision reason and two numbers. The agent endpoint URL is never returned (only whether one is set). No customer data, no write; read end to end. answersFirstReason is decideVoiceRoute's fixed reason code (system text), declared content.",
+      "scope": "broad",
+      "keywords": [
+        "call routing",
+        "where do calls ring",
+        "does the ai answer calls",
+        "voice agent status",
+        "call routing status",
+        "after hours calls"
+      ],
+      "signals": [
+        "effect_call:mergeCallRoutingConfig"
+      ],
+      "unresolved": [],
+      "hash": "6f5e691d782bb355a42980c2369ec13c",
+      "freeText": {
+        "answersFirstReason": "content"
+      }
+    },
+    {
+      "endpoint": "/admin/sms-templates",
+      "reviewed": "Handler (admin-sms-templates.js GET /, behind adminAuthenticate + requireTechOrAdmin): sms_templates ordered by category and sort order, optionally filtered to one category, each row decorated with can_delete. Handler read end to end, no write. The handler used to call ensureTable first (CREATE TABLE, ALTER TABLE and an INSERT .. ON CONFLICT DO NOTHING of the default templates, once per process); that call and the function are removed, so the list creates, alters and inserts nothing. It changes nothing on the page: the table, its trigger_event_key column and every default template come from the migrations (20260514000002 inserts each default; the default keys are protected from delete), and a real-database test pins that no default template is missing after the migrations. Keep mode: the wording is the point of the read, so each template's name, category, body, description (both business-authored reference text, declared content), the variable names, active and internal flags, sort order, can_delete and updated time return. Withheld: the template key and the trigger event key (identifiers the writers match on), and any column added later. A template body can carry a {token} placeholder, never a customer value.",
+      "scope": "broad",
+      "params": {},
+      "query": [
+        "category"
+      ],
+      "keywords": [
+        "sms templates",
+        "text message templates",
+        "what does our text say",
+        "wording of an automatic text",
+        "is a text template active",
+        "message templates"
+      ],
+      "keep": [
+        "templates.*.id",
+        "templates.*.name",
+        "templates.*.category",
+        "templates.*.body",
+        "templates.*.description",
+        "templates.*.variables",
+        "templates.*.is_active",
+        "templates.*.is_internal",
+        "templates.*.sort_order",
+        "templates.*.can_delete",
+        "templates.*.updated_at"
+      ],
+      "freeText": {
+        "body": "content",
+        "description": "content"
+      },
+      "signals": [],
+      "unresolved": [],
+      "hash": "84eee65bb30a376ccfa98228a0b22e2d"
     }
   ]
 }

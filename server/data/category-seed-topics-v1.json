@@ -1952,6 +1952,71 @@
         "Southwest Florida framing throughout (Sarasota, Bradenton, Venice, Lakewood Ranch, North Port, Palmetto, Parrish, Port Charlotte); no statewide-only framing in title or H2s.",
         "Never promise elimination or that the lizards will leave (writer-agent-config PREVENTION_PROMISE). Reduced attractiveness only, always conditional: fewer insects means a lanai that offers them less to hunt. Do not write that they will leave, move on, relocate or stop coming back. The deterministic guardrail does not cover lizards, so this rule has to hold in the brief."
       ]
+    },
+    {
+      "id": "Q02",
+      "action": "new_supporting_blog",
+      "slug": "/lawn-care/top-dressing-lawn-with-topsoil-southwest-florida/",
+      "working_title": "Should You Top Dress Your Lawn With Topsoil? A Southwest Florida Answer",
+      "primary_kw": "top dressing lawn with topsoil",
+      "secondary_kws": [
+        "topsoil on st augustine grass",
+        "sand for low spots in lawn",
+        "compost on lawn florida"
+      ],
+      "intent": "informational how-to (customer question, 2026-10-29: is spreading topsoil the trick to a better-looking lawn?)",
+      "window": "2026-10-30",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "Spreading topsoil over an established St. Augustine lawn on sandy Southwest Florida soil is usually not the fix it sounds like: a UF/IFAS turfgrass specialist says topdressing home lawns has minimal agronomic benefits, UF/IFAS describes topdressing as a thin (about ¼ inch) layer of weed- and nematode-free soil that matches the soil already under the turf, and a thicker, greener lawn depends mostly on the basics UF/IFAS lists — proper fertilization, mowing at the right height, watering as needed and integrated pest management.",
+      "outline": [
+        "Quick answer: on an established St. Augustine lawn, skip bagged or hauled-in topsoil; if you topdress at all, UF/IFAS describes about ¼ inch of weed- and nematode-free soil that matches the soil under the grass, used mainly to manage thatch; for color and thickness, put the effort into fertilization, mowing height, watering and pest checks",
+        "What topdressing is and what UF/IFAS says it does: a uniform thin layer of soil spread over the grass; the UF/IFAS St. Augustinegrass guide (ENH5) describes ¼ inch of soil similar to the soil under the turf as a way to ease thatch, notes that the physical labor limits its practicality for most homeowners, and says not to exceed recommended rates; a UF/IFAS turfgrass specialist calls the benefit to home lawns minimal",
+        "Why the material has to match the soil you already have: UF/IFAS Extension says topdressing soil should be free of weeds and nematodes and the same soil type (texture) as the soil the turf is growing in, and that routinely applying a layer of soil or sand to a lawn can cause more damage than good; most Florida soils are sandy with little organic matter (ENH02), so a bagged or hauled topsoil of a different texture does not match what is underneath",
+        "Low spots, the one job where adding sand makes sense: UF/IFAS Extension says minor low spots can be corrected by shoveling sand into the spot no more than about an inch or two deep, maintaining the lawn normally until the grass grows through, and repeating until the spot is filled; it warns that it is easy to overdo it and smother the lawn, and that topdressing a lawn with sand on a regular basis is not a recommended practice",
+        "What about compost: UF/IFAS guidance on compost for lawns centers on working it and other organic amendments into the soil before a lawn is planted, where they can improve drainage and water- and nutrient-holding capacity (ENH02); for an established St. Augustine lawn, the UF/IFAS topdressing guidance describes soil similar to what is already under the turf (ENH5)",
+        "What actually makes St. Augustine thick and green, the UF/IFAS basics (ENH5): fertilize on a Florida-Friendly schedule that follows your county's fertilizer rules; mow standard cultivars at 3.5–4 inches and remove no more than one-third of the leaf blade at a time; leave the clippings; water as needed, when blades fold, wilt or turn blue-gray or footprints stay visible; watch for the southern chinch bug, the major insect pest of St. Augustinegrass; and avoid excess nitrogen, which encourages large patch",
+        "What Waves does and does not do: our lawn program puts its effort into those basics (fertilization, weed control, and insect and disease checks on a set schedule); we do not add topsoil to lawns; for a cost question, request a lawn care quote through the contact page",
+        "FAQ: can I spread topsoil over my lawn to thicken it; is sand or topsoil better for filling low spots; how thick should a topdressing layer be; should I mix compost into the soil before laying new sod; will topdressing fix chinch bug or large patch damage (UF/IFAS describes replanting large bare areas with sprigs, plugs or sod)"
+      ],
+      "sources": [
+        "https://edis.ifas.ufl.edu/publication/LH010",
+        "https://edis.ifas.ufl.edu/publication/LH012",
+        "https://niceville.com/be-careful-when-topdressing-lawn/",
+        "ENH5 (St. Augustinegrass for Florida Lawns, revised July 2024) may not open for automated readers at the EDIS link; verify its wording against the UF/IFAS-hosted copy at https://sfyl.ifas.ufl.edu/media/sfylifasufledu/hillsborough/docs/pdf/irrigationevaluations/St-Augustinegrass-for-Florida-Lawns.pdf and cite the EDIS link: topdressing with ¼ inch of soil similar to that underlying the turf alleviates thatch; the physical labor limits its practicality for most homeowners; use soil free of weed seeds and nematodes and do not exceed recommended rates; standard cultivars are mowed at 3.5–4 inches with no more than one-third of the blade removed; clippings stay on the lawn; irrigate as needed (folding, wilting or blue-gray blades, footprints that stay); the southern chinch bug is the major insect pest; large patch is encouraged by excessive nitrogen; large bare areas are replanted with sprigs, plugs or sod.",
+        "ENH02 (Preparing to Plant a Florida Lawn): if the EDIS link does not open, verify against https://journals.flvc.org/edis/article/view/117943 and cite the EDIS link: most Florida soils are sandy with little organic matter and low water- and nutrient-holding capacity; organic amendments such as compost can improve drainage and water- and nutrient-holding capacity when applied to the soil before planting.",
+        "The Extension column is by Larry Williams, UF/IFAS Extension agent, Okaloosa County (March 9, 2022). It quotes Dr. Bryan Unruh, University of Florida Extension turfgrass specialist: 'Topdressing home lawns has minimal agronomic benefits.' Attribute each statement to the right person, and quote rather than paraphrase into a stronger claim."
+      ],
+      "internal_links": [
+        "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/",
+        "/lawn-care/large-patch-fungus-lakewood-ranch-fl/",
+        "/lawn-care/overwatering-lawn-vs-underwatering/",
+        "/lawn-care/fertilizer-blackout-sarasota-county/",
+        "/lawn-care/plugging-st-augustine-grass-bradenton-fl/",
+        "/lawn-care-lakewood-ranch-fl/"
+      ],
+      "verify_notes": [
+        "Every agronomic statement must match ENH5, ENH02 or the UF/IFAS Extension column. Add no claims about soil layering, perched water, root depth, the nutrient content of topsoil or compost, or any figure the sources do not state.",
+        "Name no product, brand, retailer, supplier, equipment maker, lawn company, YouTube channel or influencer, and present no soil, sand or compost product as an option. Cite UF/IFAS only as the source of the guidance, never as a provider of lawn work.",
+        "Say nothing about how county fertilizer ordinances treat compost, topsoil or sand. For fertilizer timing, say only to follow your county's fertilizer rules and link /lawn-care/fertilizer-blackout-sarasota-county/; never advise applying nitrogen or phosphorus during the county restricted season.",
+        "Do not say that topdressing, sand or compost cures chinch bug damage, large patch or any other disease, and do not describe pesticide or fungicide applications.",
+        "No promises or guarantees about results (no 'will turn green', 'will fix' or 'guaranteed'), no negated promises, and no prices or dollar amounts.",
+        "In the what-Waves-does section, state only that our lawn program focuses on fertilization, weed control, and insect and disease checks, and that we do not add topsoil to lawns. Do not offer leveling, sand fill, topdressing or compost application as a Waves service.",
+        "Author is Adam Benetti per the author record. No invented personal history, years of experience or first-person field stories.",
+        "Southwest Florida framing: name cities such as Bradenton, Parrish, Lakewood Ranch, Sarasota or Venice only in passing, and make no city-specific soil claims beyond the ENH02 statement that most Florida soils are sandy."
+      ],
+      "image_avoid": [
+        "any person spreading topsoil, compost or sand over a lawn",
+        "bags, piles or trucks of soil, sand or compost with brand names or logos",
+        "branded equipment or logos other than the Waves uniform",
+        "a dead or scalped lawn as the main image"
+      ]
     }
   ]
 }

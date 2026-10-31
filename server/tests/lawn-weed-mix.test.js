@@ -105,6 +105,8 @@ describe('buildWeedMix', () => {
     expect(mix.note).toBe('Bravo yearly limit reached; left out.');
     // The decision names it as forbidden by a read limit: the sheet's search leaves it out.
     expect(mix.blockedIds).toEqual([CERT]);
+    // Its limit's own words ride along for the sheet's warning (a limit is a warning, never a block).
+    expect(mix.limitMessages).toEqual({ [CERT]: 'limit' });
   });
 
   test('every decision names what a read limit forbids: nothing when nothing is capped, the lead at its cap', async () => {

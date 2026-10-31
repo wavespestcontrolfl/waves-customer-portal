@@ -24,6 +24,9 @@ jest.mock('../services/content-astro/github-client', () => ({
   listDir: jest.fn(),
   compareFiles: jest.fn(),
   getBranchSha: jest.fn(),
+  // Default: the astro brand-isolation job is green on whatever head is asked.
+  listWorkflowRunsForHead: jest.fn(async (sha) => [{ id: 1, path: '.github/workflows/brand-isolation.yml', status: 'completed', conclusion: 'success', head_sha: sha }]),
+  listWorkflowRunJobs: jest.fn(async () => [{ name: 'brand-isolation', status: 'completed', conclusion: 'success' }, { name: 'meta-descriptions', status: 'completed', conclusion: 'success' }]),
   env: jest.fn(() => ({ defaultBranch: 'main' })),
   retireBranch: jest.fn().mockResolvedValue(true),
 }));
@@ -1734,8 +1737,9 @@ describe('Content scheduler scheduling timezone handling', () => {
   });
 
   test('stores naive blog schedule times as Eastern Time instants', async () => {
-    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1' }) });
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1', content: '# body' }) });
     const write = chain({
+      whereNull: jest.fn().mockReturnThis(),
       update: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'post-1', title: 'Scheduled blog' }]),
     });
@@ -1748,6 +1752,36 @@ describe('Content scheduler scheduling timezone handling', () => {
       scheduled_publish_at: expect.any(Date),
     }));
     expect(write.update.mock.calls[0][0].scheduled_publish_at.toISOString()).toBe('2026-07-01T13:00:00.000Z');
+  });
+
+  test.each([
+    ['an open preview PR', { astro_status: 'pr_open', astro_pr_number: 12, content: '# body' }, /Astro state 'pr_open' \(PR #12\)/],
+    ['a failed publish', { astro_status: 'publish_failed', content: '# body' }, /Astro state 'publish_failed'/],
+    ['a run already publishing it', { publish_status: 'publishing', content: '# body' }, /already started/],
+    ['no content', { content: null }, /no content/],
+  ])('refuses a row the scheduled run would skip: %s (audit BLOG-03)', async (_label, row, message) => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1', ...row }) });
+    const write = chain({ whereNull: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis() });
+    const queries = [read, write];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(ContentScheduler.scheduleBlogPost('post-1', '2026-07-01T09:00:00', true))
+      .rejects.toMatchObject({ statusCode: 409, isOperational: true, message: expect.stringMatching(message) });
+    expect(write.update).not.toHaveBeenCalled();
+  });
+
+  test('a row that changed between the read and the guarded write is refused, not reported scheduled', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1', content: '# body' }) });
+    const write = chain({
+      whereNull: jest.fn().mockReturnThis(),
+      update: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([]),
+    });
+    const queries = [read, write];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(ContentScheduler.scheduleBlogPost('post-1', '2026-07-01T09:00:00', true))
+      .rejects.toMatchObject({ statusCode: 409 });
   });
 
   test('stores naive social schedule times as Eastern Time instants', async () => {
@@ -3548,6 +3582,12 @@ describe('publishMetadataRewrite casing-aware meta fields', () => {
   });
 });
 
+// Per-test overrides of the Actions readers must not leak into later suites.
+function restoreBrandIsolationGreen() {
+  gh.listWorkflowRunsForHead.mockReset().mockImplementation(async (sha) => [{ id: 1, path: '.github/workflows/brand-isolation.yml', status: 'completed', conclusion: 'success', head_sha: sha }]);
+  gh.listWorkflowRunJobs.mockReset().mockImplementation(async () => [{ name: 'brand-isolation', status: 'completed', conclusion: 'success' }, { name: 'meta-descriptions', status: 'completed', conclusion: 'success' }]);
+}
+
 describe('mergeAstro head pinning (audit regression — merge was not sha-pinned)', () => {
   const HEAD_SHA = 'abcdef1234567890abcdef1234567890abcdef12';
 
@@ -3586,6 +3626,7 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
     process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = 'false';
   });
   afterEach(() => { delete process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE; });
+  afterEach(restoreBrandIsolationGreen);
 
   test('a clean merge is pinned to the exact head the gates vetted (sha param)', async () => {
     const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
@@ -3650,6 +3691,37 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
     }));
   });
 
+  function setupCleanMerge() {
+    const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
+    const queries = [read];
+    db.mockImplementation(() => queries.shift() || chain());
+    gh.getPr.mockResolvedValue({ number: 42, state: 'open', merged: false, head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA } });
+    mockHubOnlyBranchFile();
+    gh.listIssueComments.mockResolvedValue([{ user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z' }]);
+    gh.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, body: "Codex Review: Didn't find any major issues.", state: 'COMMENTED', commit_id: HEAD_SHA, submitted_at: '2026-07-02T12:05:00Z' }]);
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha' });
+  }
+
+  test('a failed brand-isolation job on the head refuses the merge even with a clean Codex round', async () => {
+    setupCleanMerge();
+    gh.listWorkflowRunJobs.mockResolvedValueOnce([{ name: 'brand-isolation', status: 'completed', conclusion: 'failure' }]);
+    await expect(AstroPublisher.mergeAstro('post-pin-1')).rejects.toMatchObject({ code: 'BRAND_ISOLATION_REQUIRED', reason: 'brand_isolation_failure' });
+    expect(gh.listWorkflowRunsForHead).toHaveBeenCalledWith(HEAD_SHA);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('an unpublish PR merges without consulting brand-isolation', async () => {
+    setupCleanMerge();
+    const read = chain({ first: jest.fn().mockResolvedValue({ ...hubOnlyPost(), astro_status: 'unpublish_pending' }) });
+    const queries = [read];
+    db.mockImplementation(() => queries.shift() || chain());
+    gh.listWorkflowRunsForHead.mockResolvedValue([]);
+    const result = await AstroPublisher.mergeAstro('post-pin-1');
+    expect(result.merged).toBe(true);
+    expect(gh.listWorkflowRunsForHead).not.toHaveBeenCalled();
+    expect(gh.mergePr).toHaveBeenCalled();
+  });
+
   test('expectHeadSha mismatch (green build of an older commit) refuses to merge', async () => {
     const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
     const queries = [read];
@@ -3688,6 +3760,110 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
     const result = await AstroPublisher.mergeAstro('post-pin-1', { expectBaseSha: 'main-tip-1' });
     expect(result.merged).toBe(true);
     expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: HEAD_SHA }));
+  });
+});
+
+describe('assertBrandIsolationClear (astro brand-isolation job must pass on the PR head)', () => {
+  const HEAD = 'abcdef1234567890abcdef1234567890abcdef12';
+  const WF = '.github/workflows/brand-isolation.yml';
+  const pr = { number: 99, head: { sha: HEAD } };
+  const okRun = (over = {}) => ({ id: 10, path: WF, status: 'completed', conclusion: 'success', head_sha: HEAD, ...over });
+  const job = (over = {}) => ({ name: 'brand-isolation', status: 'completed', conclusion: 'success', ...over });
+  let saved;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    saved = process.env.ASTRO_REQUIRE_BRAND_ISOLATION;
+    delete process.env.ASTRO_REQUIRE_BRAND_ISOLATION;
+    gh.listWorkflowRunsForHead.mockResolvedValue([okRun()]);
+    gh.listWorkflowRunJobs.mockResolvedValue([job()]);
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.ASTRO_REQUIRE_BRAND_ISOLATION; else process.env.ASTRO_REQUIRE_BRAND_ISOLATION = saved;
+    restoreBrandIsolationGreen();
+  });
+
+  async function failure(p = pr) {
+    try { await AstroPublisher.assertBrandIsolationClear(p); } catch (err) { return err; }
+    throw new Error('expected assertBrandIsolationClear to throw');
+  }
+
+  test('passes when the brand-isolation job succeeded on the head', async () => {
+    await expect(AstroPublisher.assertBrandIsolationClear(pr)).resolves.toBe(true);
+    expect(gh.listWorkflowRunsForHead).toHaveBeenCalledWith(HEAD);
+    expect(gh.listWorkflowRunJobs).toHaveBeenCalledWith(10);
+  });
+
+  test('ASTRO_REQUIRE_BRAND_ISOLATION=false skips the check entirely', async () => {
+    process.env.ASTRO_REQUIRE_BRAND_ISOLATION = 'false';
+    gh.listWorkflowRunsForHead.mockRejectedValue(new Error('should not be called'));
+    await expect(AstroPublisher.assertBrandIsolationClear(pr)).resolves.toBe(true);
+    expect(gh.listWorkflowRunsForHead).not.toHaveBeenCalled();
+  });
+
+  test('a PR with no head sha cannot be checked and is refused', async () => {
+    const err = await failure({ number: 99 });
+    expect(err).toMatchObject({ code: 'BRAND_ISOLATION_REQUIRED', transient: false });
+  });
+
+  test('no run yet on the head is pending and transient', async () => {
+    gh.listWorkflowRunsForHead.mockResolvedValue([]);
+    const err = await failure();
+    expect(err).toMatchObject({ code: 'BRAND_ISOLATION_REQUIRED', reason: 'brand_isolation_pending', transient: true });
+    expect(err.message).toContain('#99');
+  });
+
+  test('a run still in progress is pending (not transient)', async () => {
+    gh.listWorkflowRunsForHead.mockResolvedValue([okRun({ status: 'in_progress', conclusion: null })]);
+    const err = await failure();
+    expect(err).toMatchObject({ code: 'BRAND_ISOLATION_REQUIRED', reason: 'brand_isolation_pending', transient: false });
+    expect(gh.listWorkflowRunJobs).not.toHaveBeenCalled();
+  });
+
+  test('a failed brand-isolation job reports brand_isolation_failure', async () => {
+    gh.listWorkflowRunJobs.mockResolvedValue([job({ conclusion: 'failure' }), { name: 'meta-descriptions', status: 'completed', conclusion: 'success' }]);
+    const err = await failure();
+    expect(err).toMatchObject({ code: 'BRAND_ISOLATION_REQUIRED', reason: 'brand_isolation_failure', transient: false });
+  });
+
+  test('a run without a brand-isolation job is refused as job_missing', async () => {
+    gh.listWorkflowRunJobs.mockResolvedValue([{ name: 'meta-descriptions', status: 'completed', conclusion: 'success' }]);
+    const err = await failure();
+    expect(err).toMatchObject({ code: 'BRAND_ISOLATION_REQUIRED', reason: 'brand_isolation_job_missing' });
+  });
+
+  test('the newest run wins over an older failed run on the same head', async () => {
+    gh.listWorkflowRunsForHead.mockResolvedValue([okRun({ id: 5, conclusion: 'failure' }), okRun({ id: 12 })]);
+    gh.listWorkflowRunJobs.mockImplementation(async (id) => [job(id === 5 ? { conclusion: 'failure' } : {})]);
+    await expect(AstroPublisher.assertBrandIsolationClear(pr)).resolves.toBe(true);
+    expect(gh.listWorkflowRunJobs).toHaveBeenCalledWith(12);
+
+    // ...and a newer failure beats an older success.
+    gh.listWorkflowRunsForHead.mockResolvedValue([okRun({ id: 5 }), okRun({ id: 12 })]);
+    gh.listWorkflowRunJobs.mockImplementation(async (id) => [job(id === 12 ? { conclusion: 'failure' } : {})]);
+    expect((await failure()).reason).toBe('brand_isolation_failure');
+  });
+
+  test('runs of other workflows or for another head sha are ignored', async () => {
+    gh.listWorkflowRunsForHead.mockResolvedValue([
+      okRun({ id: 50, path: '.github/workflows/other.yml' }),
+      okRun({ id: 51, head_sha: '1111111111111111111111111111111111111111' }),
+    ]);
+    const err = await failure();
+    expect(err).toMatchObject({ reason: 'brand_isolation_pending', transient: true });
+    expect(gh.listWorkflowRunJobs).not.toHaveBeenCalled();
+  });
+
+  test('a lookup error from either Actions reader is a transient BRAND_ISOLATION_LOOKUP_FAILED', async () => {
+    gh.listWorkflowRunsForHead.mockRejectedValue(new Error('github 502'));
+    let err = await failure();
+    expect(err).toMatchObject({ code: 'BRAND_ISOLATION_LOOKUP_FAILED', reason: 'brand_isolation_lookup_failed', transient: true });
+    expect(err.message).toContain('github 502');
+
+    gh.listWorkflowRunsForHead.mockResolvedValue([okRun()]);
+    gh.listWorkflowRunJobs.mockRejectedValue(new Error('github 503'));
+    err = await failure();
+    expect(err).toMatchObject({ code: 'BRAND_ISOLATION_LOOKUP_FAILED', transient: true });
   });
 });
 

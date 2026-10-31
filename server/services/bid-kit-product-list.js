@@ -14,7 +14,9 @@
 //   - no product was REMOVED. A product leaves the list when it is not used in 12 months, but also when a technician takes it off
 //     a recent visit record; a removal says nothing about purchases and can hide a product from a bid document, so it is always
 //     reviewed by the owner,
-//   - no NEW free-text visit line (no catalog product) appeared: nothing prints for it, so it is never signed off unseen.
+//   - no NEW free-text visit line (no catalog product) appeared: nothing prints for it, so it is never signed off unseen,
+//   - no BID product was added, removed or changed (owner 2026-10-28). A bid product is an active catalog row an admin ticked
+//     (products_catalog.bid_list) that no visit applied in the 12 months; a tick is an owner choice, not a SiteOne purchase.
 // Anything else replaces the file, leaves it NOT signed off and raises ONE admin bell (one open episode per item; a later run
 // rewrites it). Nothing is sent to a customer, an agency or anyone else; the outputs are the kit row, its private file, activity
 // rows and the admin bell. Gate off = the job returns before any query.
@@ -33,6 +35,7 @@ const { validEpaRegNumber, PESTICIDE_CATEGORIES, isPesticideCategory } = require
 const { normalizeForMatch } = require('./purchase-receipts/product-matcher');
 const { buildProductListPdf, fileNameFor } = require('./pdf/product-list-pdf');
 const { WAVES_BUSINESS_NAME, WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
+const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 
 const ITEM_KEY = 'product_list';
 const AREA = 'Estimates';
@@ -44,6 +47,18 @@ const AUTO_SIGN_OFF = 'siteone_purchases';
 // service_products row was written: editing an old recap deletes and reinserts its lines with a fresh created_at. applied_at is no
 // better (it defaults to the insert time), so the visit date is the one date that is reliably the visit's.
 const WINDOW_SQL = "sr.service_date > ((now() AT TIME ZONE 'America/New_York')::date - 365)";
+// Visits on the owner's internal test accounts (internal-test-customers.js, the same list business metrics exclude) never count:
+// a dummy account's seeded and test visits list products no customer was treated with (owner 2026-10-26: "adam m is a dummy
+// account"). Matched by "first last" name, lowercased, exactly as that list is kept. A left join: a visit whose customer row is
+// gone still counts, as before.
+const INTERNAL_NAME_SQL = "LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))";
+function customerVisitsOnly(query) {
+  query.leftJoin('customers as c', 'c.id', 'sr.customer_id');
+  if (INTERNAL_TEST_CUSTOMERS.length) {
+    query.whereRaw(`${INTERNAL_NAME_SQL} NOT IN (${INTERNAL_TEST_CUSTOMERS.map(() => '?').join(', ')})`, INTERNAL_TEST_CUSTOMERS);
+  }
+  return query;
+}
 const MAX_NAMED = 2; // names in the bell's one sentence; the rest go to its full text
 
 // ---- the list ----
@@ -86,22 +101,33 @@ function foldUnlinked(linked, unlinked, catalog) {
 
 // Every product applied in the last 12 months, once each, plus the free-text lines that match no catalog product. Read only.
 async function readProductList(conn = db) {
-  const linked = await conn('service_products as sp')
+  const linked = await customerVisitsOnly(conn('service_products as sp')
     .join('products_catalog as p', 'p.id', 'sp.product_id')
     .join('service_records as sr', 'sr.id', 'sp.service_record_id')
-    .whereRaw(WINDOW_SQL)
+    .whereRaw(WINDOW_SQL))
     .groupBy('p.id', 'p.name', 'p.category', 'p.active_ingredient', 'p.epa_reg_number', 'p.label_url', 'p.sds_url')
     .select('p.id as product_id', 'p.name', 'p.category', 'p.active_ingredient', 'p.epa_reg_number', 'p.label_url', 'p.sds_url')
     .count('sp.id as uses');
-  const unlinked = await conn('service_products as sp')
+  const unlinked = await customerVisitsOnly(conn('service_products as sp')
     .join('service_records as sr', 'sr.id', 'sp.service_record_id')
     .whereNull('sp.product_id')
-    .whereRaw(WINDOW_SQL)
+    .whereRaw(WINDOW_SQL))
     .groupBy('sp.product_name')
     .select('sp.product_name')
     .count('sp.id as uses');
   const catalog = unlinked.length ? await conn('products_catalog').select(CATALOG_COLUMNS) : [];
-  return foldUnlinked(linked, unlinked, catalog);
+  const folded = foldUnlinked(linked, unlinked, catalog);
+  return { ...folded, bidRows: await readBidRows(folded.rows, conn) };
+}
+
+// The bid products: active catalog rows an admin ticked (bid_list) that are not already in the applied rows. Same columns and
+// the same sort as the applied rows; `uses` is 0. Read only.
+async function readBidRows(appliedRows, conn = db) {
+  const applied = new Set(appliedRows.map((row) => String(row.product_id)));
+  const ticked = await conn('products_catalog')
+    .where({ bid_list: true, active: true })
+    .select('id as product_id', 'name', 'category', 'active_ingredient', 'epa_reg_number', 'label_url', 'sds_url');
+  return sortRows(ticked.filter((row) => !applied.has(String(row.product_id))).map((row) => ({ ...row, uses: 0 })));
 }
 
 async function readProductRows(conn = db) {
@@ -126,8 +152,11 @@ const short = (value) => crypto.createHash('sha1').update(text(value)).digest('h
 
 // One row as the kit remembers it: the product id and name, and a short hash of each field the PDF shows. The hashes keep the
 // stored snapshot small (the kit list sends every row's details to the page) while still telling WHICH field changed.
-function snapshotOf(row) {
+// A bid product (ticked, not applied) carries `bid: 1`; an applied row has no such key, so a snapshot stored before bid products
+// existed is unchanged.
+function snapshotOf(row, { bid = false } = {}) {
   return {
+    ...(bid ? { bid: 1 } : {}),
     id: String(row.product_id),
     name: text(row.name),
     cat: short(text(row.category).toLowerCase()),
@@ -138,7 +167,7 @@ function snapshotOf(row) {
   };
 }
 
-const FIELD_WORDS = { name: 'name', cat: 'category', ai: 'active ingredient', epa: 'EPA number', label: 'label link', sds: 'SDS link' };
+const FIELD_WORDS = { bid: 'bid list', name: 'name', cat: 'category', ai: 'active ingredient', epa: 'EPA number', label: 'label link', sds: 'SDS link' };
 
 // unmatched: the free-text visit lines that match no catalog product. Their distinct normalized names are part of the input, so
 // the list counts as changed when that set changes (and, with none, the fingerprint is the same as without the argument).
@@ -148,27 +177,31 @@ const unmatchedNames = (unmatched = []) => [...new Set(unmatched.map((line) => l
 function fingerprintOf(snapshots, unmatched = []) {
   const sorted = [...snapshots].sort((a, b) => a.id.localeCompare(b.id));
   const names = unmatchedNames(unmatched);
-  const input = sorted.map((s) => [s.id, s.name, s.cat, s.ai, s.epa, s.label, s.sds]);
+  // The bid marker is appended only on a bid row, so a list with no bid rows keeps the fingerprint it had before.
+  const input = sorted.map((s) => [s.id, s.name, s.cat, s.ai, s.epa, s.label, s.sds, ...(s.bid ? ['bid'] : [])]);
   return crypto.createHash('sha256').update(JSON.stringify(names.length ? [input, names] : input)).digest('hex');
 }
 
 // What moved between two snapshots: products added, products removed, and products whose name or a shown field changed.
+// `bid` (only when non-empty): the ids among those that are, or were, bid products.
 function diffSnapshots(previous, next) {
   const before = new Map((previous || []).map((s) => [s.id, s]));
   const after = new Map((next || []).map((s) => [s.id, s]));
   const added = [];
   const removed = [];
   const changed = [];
+  // ids of the entries above that touch a bid row on either side (ticked, unticked, moved between the tables, or edited).
+  const bid = new Set();
   for (const [id, now] of after) {
     const was = before.get(id);
-    if (!was) { added.push({ id, name: now.name }); continue; }
+    if (!was) { added.push({ id, name: now.name }); if (now.bid) bid.add(id); continue; }
     // A snapshot stored before the category was part of it has no `cat`: that alone is not a change.
-    const fields = Object.keys(FIELD_WORDS).filter((field) => !(field === 'cat' && was.cat === undefined) && was[field] !== now[field]);
-    if (fields.length) changed.push({ id, name: now.name, fields });
+    const fields = Object.keys(FIELD_WORDS).filter((field) => !(field === 'cat' && was.cat === undefined) && (was[field] || undefined) !== (now[field] || undefined));
+    if (fields.length) { changed.push({ id, name: now.name, fields }); if (now.bid || was.bid) bid.add(id); }
   }
-  for (const [id, was] of before) if (!after.has(id)) removed.push({ id, name: was.name });
+  for (const [id, was] of before) if (!after.has(id)) { removed.push({ id, name: was.name }); if (was.bid) bid.add(id); }
   const byName = (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
-  return { added: added.sort(byName), removed: removed.sort(byName), changed: changed.sort(byName) };
+  return { added: added.sort(byName), removed: removed.sort(byName), changed: changed.sort(byName), ...(bid.size ? { bid: [...bid].sort() } : {}) };
 }
 
 // Complete = every registered pesticide has both links, and no pesticide-category product lacks its EPA number.
@@ -194,14 +227,18 @@ function listIsComplete(rows) {
 // A pesticide typed as free text produces no row in the PDF, so it must never be signed off unseen: it asks. Names the previous
 // snapshot already had, and names that dropped out, do not block. Any REMOVED product asks too (reason 'removed'): the SiteOne
 // rule is about purchases and covers added and changed rows only.
+// A change to a bid product (diff.bid) always asks, with the reason 'bid_products': a tick is an owner action, never a purchase, so
+// even a bid product with a SiteOne purchase line is not signed off unseen. Bid products are left out of `outside`.
 function decideSignOff({ previous, wasSignedOff, complete, diff, bought, newUnmatched = [] }) {
   const reasons = [];
   let outside = [];
+  const bid = new Set(diff.bid || []);
   if (previous !== 'ok') reasons.push(previous);
   if (!complete) reasons.push('incomplete');
   if (previous === 'ok') {
-    outside = [...diff.added, ...diff.changed].filter((product) => !bought.has(product.id));
+    outside = [...diff.added, ...diff.changed].filter((product) => !bought.has(product.id) && !bid.has(product.id));
     if (outside.length) reasons.push('not_siteone');
+    if (bid.size) reasons.push('bid_products');
     if (diff.removed.length) reasons.push('removed');
     if (newUnmatched.length) reasons.push('unmatched_new');
     if (!wasSignedOff) reasons.push('unsigned_before');
@@ -235,15 +272,21 @@ function joinNames(products, limit = MAX_NAMED) {
 function segmentsFor({ diff, decision }) {
   const fresh = decision.newUnmatched || [];
   const outside = new Set(decision.outside.map((product) => product.id));
+  const bid = new Set(diff.bid || []);
+  const plain = (products) => products.filter((product) => !bid.has(product.id));
+  const bidOf = (products) => products.filter((product) => bid.has(product.id));
   const addedOut = diff.added.filter((product) => outside.has(product.id));
   const changedOut = diff.changed.filter((product) => outside.has(product.id));
   const segments = [];
+  if (bidOf(diff.added).length) segments.push(`Added for bid work: ${joinNames(bidOf(diff.added))}`);
+  if (bidOf(diff.changed).length) segments.push(`Changed for bid work: ${joinNames(bidOf(diff.changed))}`);
+  if (bidOf(diff.removed).length) segments.push(`Removed from bid work: ${joinNames(bidOf(diff.removed))}`);
   if (addedOut.length) segments.push(`Added ${joinNames(addedOut)} (not a SiteOne purchase)`);
   if (changedOut.length) segments.push(`${joinNames(changedOut)} changed (not a SiteOne purchase)`);
-  if (diff.removed.length && decision.reasons.includes('removed')) segments.push(`Removed ${joinNames(diff.removed)}`);
+  if (plain(diff.removed).length && decision.reasons.includes('removed')) segments.push(`Removed ${joinNames(plain(diff.removed))}`);
   if (decision.reasons.includes('incomplete')) segments.push('a pesticide is missing its EPA number, label or SDS');
   if (fresh.length) segments.push(`New visit lines recorded without a catalog product: ${joinNames(fresh)}`);
-  const quiet = diff.added.length - addedOut.length + diff.changed.length - changedOut.length + (decision.reasons.includes('removed') ? 0 : diff.removed.length);
+  const quiet = plain(diff.added).length - addedOut.length + plain(diff.changed).length - changedOut.length + (decision.reasons.includes('removed') ? 0 : plain(diff.removed).length);
   if (quiet && segments.length) segments.push(`${quiet} other ${quiet === 1 ? 'change' : 'changes'}`);
   if (!segments.length) {
     const n = diff.added.length + diff.changed.length + diff.removed.length;
@@ -274,10 +317,17 @@ function detailFor({ diff, decision, previous, unmatched = [] }) {
   const outside = new Set(decision.outside.map((product) => product.id));
   const mark = (products) => products.map((p) => ({ ...p, name: outside.has(p.id) ? `${p.name} (not a SiteOne purchase)` : p.name }));
   const changedWords = diff.changed.map((p) => ({ ...p, name: `${p.name} (${p.fields.map((f) => FIELD_WORDS[f]).join(', ')})` }));
+  const bid = new Set(diff.bid || []);
+  const plain = (products) => products.filter((product) => !bid.has(product.id));
+  const bidOf = (products) => products.filter((product) => bid.has(product.id));
+  const removedPlain = plain(diff.removed);
   const lines = [
-    productLine('Added', mark(diff.added)),
-    productLine('Changed', mark(changedWords)),
-    decision.reasons.includes('removed') && diff.removed.length ? `Removed (no longer on a visit in the last 12 months, or taken off a visit record): ${diff.removed.map((p) => tidy(p.name)).join(', ')}.` : productLine('Removed', diff.removed),
+    productLine('Added for bid work', bidOf(diff.added)),
+    productLine('Changed for bid work', bidOf(changedWords)),
+    productLine('Removed from bid work', bidOf(diff.removed)),
+    productLine('Added', mark(plain(diff.added))),
+    productLine('Changed', mark(plain(changedWords))),
+    decision.reasons.includes('removed') && removedPlain.length ? `Removed (no longer on a visit in the last 12 months, or taken off a visit record): ${removedPlain.map((p) => tidy(p.name)).join(', ')}.` : productLine('Removed', removedPlain),
     decision.reasons.includes('incomplete') ? 'The list is incomplete: a pesticide is missing its EPA number, label or SDS.' : '',
     (decision.newUnmatched || []).length ? `New visit lines recorded without a catalog product (they cannot be printed or checked): ${decision.newUnmatched.map((line) => tidy(line.name)).join(', ')}.` : '',
     decision.reasons.includes('unsigned_before') ? 'The earlier version is still not signed off.' : '',
@@ -354,9 +404,9 @@ const fileIsOurs = (prior, info) => Boolean(prior && info && info.key && prior.f
 // Builds the PDF, stores it and puts it on the row in one fenced update. When the owner must be asked, the bell's words go into
 // the SAME update as `pending_alert`, so a failure or a stop before the bell is raised leaves the words on the row and the next
 // run raises it. Returns { outcome } or { skipped }; throws on a failed write.
-async function storeRebuild(item, { rows, snapshots, fingerprint, plan, now }) {
+async function storeRebuild(item, { rows, bidRows = [], snapshots, fingerprint, plan, now }) {
   const asOf = catalog.etToday(now);
-  const buffer = await buildProductListPdf({ rows, asOf, businessName: WAVES_BUSINESS_NAME, licenseNumber: WAVES_FDACS_LICENSE_NUMBER });
+  const buffer = await buildProductListPdf({ rows, bidRows, asOf, businessName: WAVES_BUSINESS_NAME, licenseNumber: WAVES_FDACS_LICENSE_NUMBER });
   const stored = await files.putFile(item.id, { buffer, originalname: fileNameFor(asOf), mimetype: 'application/pdf', size: buffer.length });
   const { decision } = plan;
   const pending = decision.auto ? null : alertFor(item.id, plan);
@@ -475,19 +525,21 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
       await closeBell(item.id, 'signed_off', 'Cleared: the product list was signed off');
     }
     item = await settlePending(item);
-    const { rows, unmatched } = await readProductList();
-    if (!rows.length) {
-      logger.warn('[bid-kit] product list sync found no applied products; the file was left alone');
+    const { rows, unmatched, bidRows } = await readProductList();
+    const prior = item.details && item.details.product_list_sync;
+    const snapshots = [...rows.map((row) => snapshotOf(row)), ...bidRows.map((row) => snapshotOf(row, { bid: true }))];
+    // Nothing to print and no stored list (a new or empty database): leave the file alone. After a stored list, an empty read is a
+    // change like any other: each product reads as removed, and a removal always asks for a sign-off.
+    if (!snapshots.length && !prior) {
+      logger.warn('[bid-kit] product list sync found no products and no stored list; the file was left alone');
       return { skipped: 'no_products' };
     }
-    const snapshots = rows.map(snapshotOf);
     const fingerprint = fingerprintOf(snapshots, unmatched);
-    const prior = item.details && item.details.product_list_sync;
     const info = await store.fileInfo(item.id);
     // Unchanged only while the file on the row is still the one this job stored: a file replaced by hand is rebuilt and flagged.
     if (prior && prior.fingerprint === fingerprint && fileIsOurs(prior, info)) return { changed: false };
-    const plan = await planRebuild(item, rows, snapshots, info, unmatched);
-    const stored = await storeRebuild(item, { rows, snapshots, fingerprint, plan, now });
+    const plan = await planRebuild(item, [...rows, ...bidRows], snapshots, info, unmatched);
+    const stored = await storeRebuild(item, { rows, bidRows, snapshots, fingerprint, plan, now });
     if (stored.skipped) return { skipped: stored.skipped };
     return await reportRebuild(item, { snapshots, fingerprint, plan });
   } catch (err) {
@@ -497,6 +549,6 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
 }
 
 module.exports = {
-  unmatchedNames, runBidKitProductListSync, readProductRows, readProductList, foldUnlinked, unmatchedSentence, sortRows, snapshotOf, fingerprintOf, diffSnapshots, listIsComplete, decideSignOff,
+  unmatchedNames, runBidKitProductListSync, readProductRows, readProductList, readBidRows, foldUnlinked, unmatchedSentence, sortRows, snapshotOf, fingerprintOf, diffSnapshots, listIsComplete, decideSignOff,
   siteOnePurchased, alertFor, detailFor, closeStaleBells, isPesticideCategory, keyFor, KEY_PREFIX, AUTO_SIGN_OFF, PESTICIDE_CATEGORIES,
 };

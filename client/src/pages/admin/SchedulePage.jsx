@@ -67,6 +67,8 @@ import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/sche
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import {
   MAX_REVIEW_DELAY_MS,
+  COMPLAINT_ON_SITE_REASON,
+  FIRST_ASK_OPT_OUT_PROMPT,
   REVIEW_TIMING_DEFAULT,
   REVIEW_TIMING_OPTIONS,
   completionReportTextExpected,
@@ -75,9 +77,13 @@ import {
   completionTimeOnSiteBody,
   completionWillReview,
   customReviewTimeProblem,
+  firstReviewAskFrom,
   formatReentryStepperMinutes,
+  nextReviewChoice,
   normalizeReviewTiming,
+  reviewBoxLabel,
   reviewDelayMinutesOf,
+  reviewOptOutFields,
   reviewPreviewSubmitVerdict,
   reviewScheduledForOf,
 } from "../../lib/completion-review-timing";
@@ -158,7 +164,7 @@ import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
-import { showScheduleSaveNotice } from "../../components/schedule/ScheduleSaveNotice";
+import { seriesScopeSaveNotice, showScheduleSaveNotice } from "../../components/schedule/ScheduleSaveNotice";
 import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
@@ -1255,6 +1261,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
   "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
+  "proposal_terms_unread",               // an invoice-mode commercial proposal's Net terms could not be read; the resume re-reads them and mints
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -1508,6 +1515,15 @@ const EDIT_FREQUENCIES = [
   { value: "seasonal_feb_oct", label: "Seasonal (Feb–Oct, monthly)" },
   { value: "custom", label: "Custom (every N days)" },
 ];
+// A lawn 9x rounds series (lawn_rounds_9) shows and keeps its own pattern in the
+// select, so a save does not overwrite it with the first option. It is offered
+// only to a series already on it, never as a choice for other series.
+const LAWN_ROUNDS_FREQUENCY = { value: "lawn_rounds_9", label: "Lawn rounds (9 a year)" };
+function editFrequenciesFor(storedPattern) {
+  if (storedPattern !== LAWN_ROUNDS_FREQUENCY.value) return EDIT_FREQUENCIES;
+  const customAt = EDIT_FREQUENCIES.findIndex((f) => f.value === "custom");
+  return [...EDIT_FREQUENCIES.slice(0, customAt), LAWN_ROUNDS_FREQUENCY, ...EDIT_FREQUENCIES.slice(customAt)];
+}
 const EDIT_NTH_OPTIONS = [
   { value: 1, label: "1st" },
   { value: 2, label: "2nd" },
@@ -3655,12 +3671,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       // A 'following' scope rewrites visits the operator can't see from this
       // modal — report what actually moved rather than closing silently.
-      if (result?.priceServiceScope?.scope === "following") {
-        const n = Number(result.priceServiceScope.updatedVisits) || 0;
-        showScheduleSaveNotice(
-          `Price/service change applied to this visit and ${n} other upcoming visit${n === 1 ? "" : "s"} in the series. Visits the plan schedules later will use the new values too.`,
-        );
-      }
+      const scopeNotice = seriesScopeSaveNotice(result);
+      if (scopeNotice) showScheduleSaveNotice(scopeNotice);
       // Resizing a plan moves visits the operator can't see from this modal —
       // say what happened rather than closing on a silent change. The count
       // itself may fall short of the target when the cadence has nowhere left
@@ -6173,7 +6185,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         className="font-medium"
                         style={inputStyle}
                       >
-                        {EDIT_FREQUENCIES.map((f) => (
+                        {editFrequenciesFor(
+                          service.recurringPattern || service.recurring_pattern,
+                        ).map((f) => (
                           <option key={f.value} value={f.value}>
                             {f.label}
                           </option>
@@ -6813,6 +6827,8 @@ const JOB_CARD_CHIP = {
   ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
   // GATE_SPRAY_RAIN_RULES: rain likely but the dose stays on the card; neutral, as red is for a hold.
   caution: { label: "Caution", bg: "#F4F4F5", fg: "#3F3F46" },
+  // Rain very likely (owner 2026-10-29, step 2): the dose still shows. Dark, not red: the admin stays monochrome.
+  warning: { label: "Warning", bg: "#18181B", fg: "#FFFFFF" },
   hold: { label: "Hold", bg: "#C8312F", fg: "#FFFFFF" },
   unknown: { label: "Unknown", bg: "#F4F4F5", fg: "#71717A" },
 };
@@ -6949,7 +6965,7 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
       title="Spray check"
       defaultOpen
       D={D}
-      right={sprayCheck?.hold ? <JobCardChip tone="hold" D={D} /> : null}
+      right={sprayCheck?.hold ? <JobCardChip tone="hold" D={D} /> : products.some((p) => p.verdictLevel === "warning") ? <JobCardChip tone="warning" D={D} /> : null}
     >
       <div style={{ fontSize: 13, color: D.text, marginTop: 10 }}>
         {f ? (
@@ -6969,7 +6985,7 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
                   {p.verdict !== "ok" && p.verdictReason && (
                     <span style={{ fontSize: 12, color: p.verdict === "hold" ? "#C8312F" : D.muted }}>{p.verdictReason}</span>
                   )}
-                  <JobCardChip tone={p.verdict} D={D} />
+                  <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
                 </span>
               </div>
             ))}
@@ -7066,7 +7082,7 @@ function JobCardProduct({ p, serviceId, D }) {
     <>
       {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
       {p.short && <JobCardChip tone="hold" label="Short" D={D} />}
-      <JobCardChip tone={p.verdict} D={D} />
+      <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
     </>
   );
@@ -7078,6 +7094,7 @@ function JobCardProduct({ p, serviceId, D }) {
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
+        {p.verdictAction && <div style={{ fontSize: 14, color: D.text }}>{p.verdictAction}</div>}
         {p.precautions && <div>{p.precautions}</div>}
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
         {p.short && (
@@ -7257,11 +7274,12 @@ function JobCardTank({ tank, serviceId, D }) {
           <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: 12, display: "grid", gap: 8 }}>
             <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
               <span>{picked.name}</span>
-              {mix?.sprayCheck && <JobCardChip tone={mix.sprayCheck.verdict} D={D} />}
+              {mix?.sprayCheck && <JobCardChip tone={mix.sprayCheck.level === "warning" ? "warning" : mix.sprayCheck.verdict} D={D} />}
             </div>
             {mix?.sprayCheck && mix.sprayCheck.verdict !== "ok" && mix.sprayCheck.reason && (
               <div style={{ fontSize: 12, color: mix.sprayCheck.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {mix.sprayCheck.reason}</div>
             )}
+            {mix?.sprayCheck?.action && <div style={{ fontSize: 14, color: D.text }}>{mix.sprayCheck.action}</div>}
             {mix?.context?.line && <div style={{ fontSize: 12, color: D.muted }}>Under add-on: {mix.context.line}{mix.context.conditional ? " · if needed" : ""}</div>}
             {busy ? (
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
@@ -12369,6 +12387,10 @@ export function CompletionPanel({
   // identically.
   const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
+  // First review ask (GATE_REVIEW_FIRST_ASK_LOCK): the server's read that this visit's customer was
+  // never asked, and the one reason the tech confirmed for turning the box off.
+  const [reviewFirstAsk, setReviewFirstAsk] = useState(false);
+  const [reviewOptOutReason, setReviewOptOutReason] = useState(null);
   const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
   // Server preview of the "Automatic" send time + whether cadence mode owns
@@ -14174,13 +14196,13 @@ export function CompletionPanel({
   // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
   const previewFailureNoticedRef = useRef(false);
   const fetchReviewSendPreview = useCallback(() => {
-    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
+    const qs = new URLSearchParams({ serviceType: service?.serviceType || "", ...(service?.id ? { serviceId: String(service.id) } : {}) });
     return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
     })
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
-  }, [service?.serviceType]);
+  }, [service?.id, service?.serviceType]);
   useEffect(() => {
     if (!willReview || oneTimeRecapOnly) {
       // Polling stops here; a preview cached from before must not survive
@@ -14188,10 +14210,22 @@ export function CompletionPanel({
       // the submit guard would trust it (codex #4140 r24 P1). Unknown reads
       // as fail-closed; re-enabling the controls re-fetches.
       setReviewSendPreview(null);
-      return undefined;
+      if (oneTimeRecapOnly) return undefined;
+      // One read still names the first ask (GATE_REVIEW_FIRST_ASK_LOCK), so a box restored off from a
+      // draft knows the server will keep that ask on. No poll, and the timing preview stays unknown.
+      let gone = false;
+      fetchReviewSendPreview().then((data) => {
+        const firstAsk = firstReviewAskFrom(data);
+        if (!gone && firstAsk !== null) setReviewFirstAsk(firstAsk);
+      });
+      return () => { gone = true; };
     }
     let cancelled = false;
     const load = () => fetchReviewSendPreview().then((data) => {
+      // The first-ask verdict lands even if the box was just turned off (that stops the poll): the box
+      // then turns itself back on unless the one reason was confirmed.
+      const firstAsk = firstReviewAskFrom(data);
+      if (firstAsk !== null) setReviewFirstAsk(firstAsk);
       if (cancelled) return;
       setReviewSendPreview(data);
       if (data) previewFailureNoticedRef.current = false;
@@ -14203,6 +14237,17 @@ export function CompletionPanel({
     const timer = setInterval(load, 60 * 1000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly]);
+  // A first ask stays on: a draft restored with the box off, or a verdict that lands late, turns it
+  // back on unless the tech already confirmed the one reason.
+  useEffect(() => {
+    if (reviewFirstAsk && !requestReview && !reviewOptOutReason) setRequestReview(true);
+  }, [reviewFirstAsk, requestReview, reviewOptOutReason]);
+  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk });
+  const handleReviewToggle = (checked) => {
+    const next = nextReviewChoice({ checked, firstAsk: reviewFirstAsk, confirmOptOut: () => window.confirm(FIRST_ASK_OPT_OUT_PROMPT) });
+    setRequestReview(next.requestReview);
+    setReviewOptOutReason(next.reviewOptOutReason);
+  };
   const recapStatusText = recapLoading
     ? "Drafting customer recap..."
     : recapError
@@ -15231,6 +15276,9 @@ export function CompletionPanel({
         sendSms,
         includePayLink,
         requestReview,
+        // The confirmed "Complaint on site" reason (GATE_REVIEW_FIRST_ASK_LOCK): without it a restored
+        // draft's box re-arms on.
+        reviewOptOutReason,
         clientPestRating,
         // Tells restore whether a null rating was a deliberate clear or an
         // untouched picker (pre-2026-09-24 drafts never set it).
@@ -15375,6 +15423,7 @@ export function CompletionPanel({
     sendSms,
     includePayLink,
     requestReview,
+    reviewOptOutReason,
     clientPestRating,
     clientPestRatingDefault,
     reviewTiming,
@@ -15537,6 +15586,7 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
+    setReviewOptOutReason(savedDraft.reviewOptOutReason === COMPLAINT_ON_SITE_REASON ? COMPLAINT_ON_SITE_REASON : null);
     // An untouched picker (legacy drafts stored null for it) keeps whatever
     // is showing now — including the first-visit 5; a tap or a deliberate
     // clear is restored and locks out the late prefill.
@@ -16909,6 +16959,7 @@ export function CompletionPanel({
     if (checked) {
       setSendSms(true);
       setRequestReview(true);
+      setReviewOptOutReason(null);
     }
   }
   function addProduct(product) {
@@ -18415,6 +18466,7 @@ export function CompletionPanel({
           ? undefined
           : (isInspectionVisit ? offerInspectionCredit : true),
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
+        ...reviewOptOutFields({ firstAsk: reviewFirstAsk, willReview, reviewOptOutReason }),
         reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
         reviewDelayMinutes: selectedReviewDelayMinutes,
         reviewScheduledFor: oneTimeRecapOnly
@@ -21869,15 +21921,11 @@ export function CompletionPanel({
                   type="checkbox"
                   checked={willReview}
                   disabled={!!reviewSuppressionReason || oneTimeRecapOnly}
-                  onChange={(e) => setRequestReview(e.target.checked)}
+                  onChange={(e) => handleReviewToggle(e.target.checked)}
                   style={{ width: 18, height: 18, accentColor: M.ink }}
                 />{" "}
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
-                  {reviewSuppressionReason
-                    ? "Review request suppressed"
-                    : oneTimeRecapOnly
-                      ? "Review request included"
-                      : "Send review request"}
+                  {reviewBoxText}
                 </span>{" "}
               </label>{" "}
               {willReview && !oneTimeRecapOnly && (
@@ -24154,15 +24202,9 @@ export function CompletionPanel({
               type="checkbox"
               checked={willReview}
               disabled={!!reviewSuppressionReason || oneTimeRecapOnly}
-              onChange={(e) => setRequestReview(e.target.checked)}
+              onChange={(e) => handleReviewToggle(e.target.checked)}
             />{" "}
-            <span>
-              {reviewSuppressionReason
-                ? "Review request suppressed"
-                : oneTimeRecapOnly
-                  ? "Review request included"
-                  : "Send review request"}
-            </span>{" "}
+            <span>{reviewBoxText}</span>{" "}
           </label>
           {willReview && !oneTimeRecapOnly && (
             <div
@@ -25396,6 +25438,8 @@ const PRODUCT_DESCRIPTIONS_V13 = {
     "slow-release nitrogen fertilizer that feeds the lawn for 3 to 4 months",
   "lesco black out 0-0-24":
     "potassium fertilizer with no nitrogen for winter hardiness",
+  "k-acetate":
+    "potassium that helps the lawn handle summer heat and stress",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

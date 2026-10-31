@@ -652,6 +652,22 @@ async function syncPermits(options = {}) {
   return out;
 }
 
+/**
+ * True when BOTH report sections finished a sync at or after `since`. Each
+ * section writes in ONE transaction that stamps last_seen_at on every row
+ * it upserts, and nothing else writes that column, so one fresh row proves
+ * its whole section committed. The deploy-kill retry reads this to skip a
+ * report step the killed run already finished.
+ */
+async function reportSyncedSince(since) {
+  const seenSince = (table) => db(table).where('last_seen_at', '>=', since).first('last_seen_at');
+  const [pool, construction] = await Promise.all([
+    seenSince('pool_permit_records'),
+    seenSince('construction_permit_records'),
+  ]);
+  return Boolean(pool && construction);
+}
+
 const CONSTRUCTION_ACTIVE_MONTHS = 24;
 const NEW_BUILD_CO_MONTHS = 18;
 // A permit absent from the weekly full-range report re-sync (canceled or
@@ -754,6 +770,7 @@ module.exports = {
   syncPoolPermits,
   syncConstructionPermits,
   syncPermits,
+  reportSyncedSince,
   findSyncedPoolPermit,
   findConstructionActivity,
   looseAddressKey,

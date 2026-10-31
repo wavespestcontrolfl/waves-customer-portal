@@ -208,7 +208,7 @@ it("saving only the type does not send the prefilled site visit or questions dat
   fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
   await waitFor(() => expect(patch).toHaveBeenCalled());
   const body = patch.mock.calls[0][0].body;
-  expect(body).toEqual({ solicitationType: "itb", scored: null, jobWalkMandatory: false });
+  expect(body).toEqual({ solicitationType: "itb" });
   expect(body).not.toHaveProperty("jobWalkAt");
   expect(body).not.toHaveProperty("questionsDueAt");
 });
@@ -224,7 +224,7 @@ it("sends a date only after the operator edits that field", async () => {
   fireEvent.change(await screen.findByLabelText(/Site visit or job walk/), { target: { value: "2026-10-10T10:00" } });
   fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
   await waitFor(() => expect(patch).toHaveBeenCalled());
-  expect(patch.mock.calls[0][0].body).toEqual({ solicitationType: null, scored: null, jobWalkMandatory: false, jobWalkAt: "2026-10-10T10:00" });
+  expect(patch.mock.calls[0][0].body).toEqual({ jobWalkAt: "2026-10-10T10:00" });
 });
 
 it("ticking a checklist line moves the chip in the list row at once", async () => {

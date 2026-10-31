@@ -1026,3 +1026,149 @@ describe("Invoice foundation workflow preservation", () => {
     expect(discountLine.amount).toBe(-10);
   });
 });
+
+describe("Undo payment (GATE_UNDO_MANUAL_PAYMENT)", () => {
+  const paidToday = (over = {}) => ({ ...invoice, status: "paid", payment_method: "check", payment_recorded_at: new Date().toISOString(), ...over });
+  const undoKey = `/api/admin/invoices/${invoice.id}/undo-payment`;
+  const listWith = (undoPaymentEnabled) => overrides.set("GET /api/admin/invoices", () => response({ invoices: rows, total: rows.length, page: 1, undoPaymentEnabled }));
+  async function expandPaid() {
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example.*WPC-QA-001/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Avery Example.*WPC-QA-001/ })).toHaveAttribute("aria-expanded", "true"));
+    await screen.findByRole("button", { name: "Send receipt", exact: true });
+  }
+
+  it("shows the button only while the gate is on, and only for a recent off-card payment", async () => {
+    rows = [paidToday()]; listWith(false);
+    await openPage(); await expandPaid();
+    expect(screen.queryByRole("button", { name: "Undo payment", exact: true })).not.toBeInTheDocument();
+    cleanup(); listWith(true);
+    for (const over of [{ payment_method: "card" }, { payment_recorded_at: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString() }]) {
+      rows = [paidToday(over)];
+      await openPage(); await expandPaid();
+      expect(screen.queryByRole("button", { name: "Undo payment", exact: true })).not.toBeInTheDocument();
+      cleanup();
+    }
+    rows = [paidToday()];
+    await openPage(); await expandPaid();
+    expect(screen.getByRole("button", { name: "Undo payment", exact: true })).toBeInTheDocument();
+  });
+
+  it("asks the server first and shows its refusal in plain words, with no way to submit", async () => {
+    rows = [paidToday()]; listWith(true);
+    const message = "This payment can only be undone on the day it was recorded, before any receipt or reminder.";
+    overrides.set(`GET ${undoKey}`, () => response({ eligible: false, code: "receipt", message }));
+    await openPage(); await expandPaid();
+    const dialog = await dialogFrom("Undo payment", "Undo payment");
+    expect(await dialog.findByText(message)).toBeInTheDocument();
+    expect(dialog.queryByLabelText(/Reason/)).not.toBeInTheDocument();
+    expect(dialog.queryByRole("button", { name: "Undo payment", exact: true })).not.toBeInTheDocument();
+    expect(requests.some(request => request.key === `POST ${undoKey}`)).toBe(false);
+  });
+
+  it("will not undo without a reason, then sends the reason and closes", async () => {
+    rows = [paidToday()]; listWith(true);
+    overrides.set(`GET ${undoKey}`, () => response({ eligible: true, payment: { id: "payment-a", amount: 120, method: "check", recordedAt: rows[0].payment_recorded_at } }));
+    overrides.set(`POST ${undoKey}`, () => response({ ok: true, remindersRearmed: true }));
+    await openPage(); await expandPaid();
+    const dialog = await dialogFrom("Undo payment", "Undo payment");
+    const confirm = await dialog.findByRole("button", { name: "Undo payment", exact: true });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(dialog.getByLabelText(/Reason/), { target: { value: "   " } });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(dialog.getByLabelText(/Reason/), { target: { value: "Recorded on the wrong invoice" } });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(requests.find(request => request.key === `POST ${undoKey}`)?.body).toEqual({ reason: "Recorded on the wrong invoice", paymentId: "payment-a" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Undo payment" })).not.toBeInTheDocument());
+  });
+});
+
+describe("Part payments (GATE_PARTIAL_PAYMENTS)", () => {
+  const key = `POST /api/admin/invoices/${invoice.id}/record-payment`;
+  const listWith = (partialPaymentsEnabled) => overrides.set("GET /api/admin/invoices", () => response({ invoices: rows, total: rows.length, page: 1, partialPaymentsEnabled }));
+
+  it("shows no amount field while the gate is off, and the request carries no amount", async () => {
+    listWith(false);
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    expect(dialog.queryByLabelText("Amount received")).not.toBeInTheDocument();
+    overrides.set(key, () => response({ ok: true, invoice: rows[0], receipt: null }));
+    fireEvent.click(dialog.getByRole("button", { name: /Record/, exact: false }));
+    await waitFor(() => expect(requests.find(request => request.key === key)).toBeTruthy());
+    expect(requests.find(request => request.key === key).body).not.toHaveProperty("amount");
+  });
+
+  it("starts at the amount still owed; the whole amount keeps the receipt choice and sends the amount as the figure to check", async () => {
+    rows = [{ ...invoice, amount_paid: 0 }]; listWith(true);
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    expect(dialog.getByLabelText("Amount received")).toHaveValue("120.00");
+    expect(dialog.getByRole("checkbox", { name: /Send receipt now/ })).toBeInTheDocument();
+    overrides.set(key, () => response({ ok: true, invoice: rows[0], receipt: { email: { ok: true } } }));
+    await dialog.findByText(/billing@example.invalid/);
+    fireEvent.click(dialog.getByRole("button", { name: "Record & send receipt", exact: true }));
+    await waitFor(() => expect(requests.find(request => request.key === key)).toBeTruthy());
+    expect(requests.find(request => request.key === key).body).toMatchObject({ method: "cash", amount: 120, sendReceipt: true });
+  });
+
+  it("a smaller amount is a part payment: no receipt choice, its own button and words, the amount sent, and the answer reports what is still owed", async () => {
+    listWith(true);
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    fireEvent.change(dialog.getByLabelText("Amount received"), { target: { value: "45.50" } });
+    expect(dialog.queryByRole("checkbox", { name: /Send receipt now/ })).not.toBeInTheDocument();
+    expect(dialog.getByText(/The invoice stays open, reminders continue for what is still owed, and no receipt is sent/)).toBeInTheDocument();
+    overrides.set(key, () => response({ ok: true, invoice: rows[0], receipt: null, partial: { amount: 45.5, remaining: 74.5 } }));
+    fireEvent.click(dialog.getByRole("button", { name: "Record part payment", exact: true }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add payment" })).not.toBeInTheDocument());
+    expect(requests.find(request => request.key === key).body).toEqual({ method: "cash", amount: 45.5, owedSeen: 120, sendReceipt: false });
+    expect(await screen.findByText("Part payment recorded · $74.50 still owed")).toBeInTheDocument();
+  });
+
+  it("blocks an amount of zero, over the amount owed, or not money, and shows the server's refusal inline", async () => {
+    listWith(true);
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    for (const bad of ["0", "120.01", "12.345", "abc", ""]) {
+      fireEvent.change(dialog.getByLabelText("Amount received"), { target: { value: bad } });
+      expect(dialog.getByRole("button", { name: /Record/, exact: false })).toBeDisabled();
+      expect(dialog.getByText("Enter an amount above $0.00, up to $120.00")).toBeInTheDocument();
+    }
+    fireEvent.change(dialog.getByLabelText("Amount received"), { target: { value: "20" } });
+    overrides.set(key, () => response({ error: "This customer is on Auto Pay, so a part payment cannot be recorded on this invoice yet. Nothing was recorded." }, 409));
+    fireEvent.click(dialog.getByRole("button", { name: "Record part payment", exact: true }));
+    await dialog.findByText(/Record payment failed: This customer is on Auto Pay/);
+    expect(dialog.getByLabelText("Amount received")).toHaveValue("20");
+  });
+
+  it("shows Paid so far beside the amount still owed on an open invoice, and starts the amount at what is left", async () => {
+    rows = [{ ...invoice, amount_paid: "45.50" }]; listWith(true);
+    await openPage();
+    expect(screen.getByText("Paid so far $45.50 · $74.50 owed")).toBeInTheDocument();
+    await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    expect(dialog.getByText(/Paid so far \$45\.50 · \$74\.50 still owed/)).toBeInTheDocument();
+    expect(dialog.getByLabelText("Amount received")).toHaveValue("74.50");
+  });
+
+  it("a paid invoice shows no Paid so far line", async () => {
+    rows = [{ ...invoice, status: "paid", amount_paid: 0 }]; listWith(true);
+    await openPage();
+    expect(screen.queryByText(/Paid so far/)).not.toBeInTheDocument();
+  });
+
+  it("offers Undo on an open invoice with a part payment recorded today, and says what it reverses", async () => {
+    rows = [{ ...invoice, amount_paid: "40.00", payment_recorded_at: new Date().toISOString() }];
+    overrides.set("GET /api/admin/invoices", () => response({ invoices: rows, total: 1, page: 1, undoPaymentEnabled: true, partialPaymentsEnabled: true }));
+    const undoKey = `/api/admin/invoices/${invoice.id}/undo-payment`;
+    overrides.set(`GET ${undoKey}`, () => response({ eligible: true, payment: { id: "payment-part", amount: 40, method: "cash", part: true } }));
+    overrides.set(`POST ${undoKey}`, () => response({ ok: true, remindersRearmed: true }));
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Undo payment", "Undo payment");
+    expect(await dialog.findByText("This reverses the $40.00 cash part payment. The invoice stays open and reminders are not changed.")).toBeInTheDocument();
+    fireEvent.change(dialog.getByLabelText(/Reason/), { target: { value: "Typed the wrong amount" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Undo payment", exact: true }));
+    await waitFor(() => expect(requests.find(request => request.key === `POST ${undoKey}`)?.body).toEqual({ reason: "Typed the wrong amount", paymentId: "payment-part" }));
+    expect(await screen.findByText("Part payment undone")).toBeInTheDocument();
+  });
+});

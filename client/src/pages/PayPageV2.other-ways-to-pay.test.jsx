@@ -327,3 +327,12 @@ describe('pay page — other ways to pay (Zelle)', () => {
     expect(screen.queryByRole('button', { name: /Other ways to pay/ })).not.toBeInTheDocument();
   });
 });
+
+describe('pay page — printing', () => {
+  it('keeps the payment panel off the invoice printout', async () => {
+    stubFetch(payload());
+    renderPage();
+    await screen.findByText('Review and pay');
+    expect(document.querySelector('.waves-pay-payment-panel')).toHaveClass('waves-no-print');
+  });
+});

@@ -47,7 +47,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ alerts: [] }) })));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); localStorage.removeItem('waves_admin_user'); });
 
 function deferred() {
   let resolve;
@@ -65,8 +65,54 @@ function schedulePayload(date, customerName) {
   };
 }
 
+it('retries a generic schedule load failure when feedback=1 and recovers', async () => {
+  let scheduleLoads = 0;
+  let finishRetry;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-09-30') {
+      scheduleLoads += 1;
+      if (scheduleLoads === 1) return Promise.reject(new Error('Network unavailable'));
+      return new Promise((resolve) => { finishRetry = resolve; });
+    }
+    return Promise.resolve({});
+  });
+  render(
+    <MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-30&feedback=1']}>
+      <DispatchPageV2 activeTab="board" />
+    </MemoryRouter>,
+  );
 
-vi.mock('../../components/schedule/TimeGridDays', () => ({ default: ({ date, dayCount, onEdit }) => <div>Grid date: {date}<button onClick={() => onEdit(enabledVisit)}>Open {dayCount}-day visit</button></div> }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Failed to load schedule: Network unavailable');
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  expect(await screen.findByText('Loading schedule…')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+
+  await act(async () => finishRetry(schedulePayload('2026-09-30', 'Recovered visit')));
+  expect(await screen.findByText(/Recovered visit/)).toBeInTheDocument();
+});
+
+it.each(['', '&feedback=0'])(
+  'preserves the static generic schedule error when feedback is not exactly 1: %s',
+  async (feedbackQuery) => {
+    vi.mocked(adminFetch).mockImplementation((url) => (
+      url === '/admin/schedule?date=2026-09-30'
+        ? Promise.reject(new Error('Network unavailable'))
+        : Promise.resolve({ products: [] })
+    ));
+    render(
+      <MemoryRouter initialEntries={[`/admin/dispatch?date=2026-09-30${feedbackQuery}`]}>
+        <DispatchPageV2 activeTab="board" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Failed to load schedule: Network unavailable')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  },
+);
+
+
+vi.mock('../../components/schedule/TimeGridDays', () => ({ default: ({ date, dayCount, onEdit, onChange }) => <div>Grid date: {date}<button onClick={() => onEdit(enabledVisit)}>Open {dayCount}-day visit</button><button onClick={() => onChange()}>Grid changed {dayCount}</button></div> }));
 vi.mock('../../components/schedule/CalendarViewsV2', async importOriginal => ({
   ...await importOriginal(), MonthViewV2: ({date}) => <div>Month date: {date}</div>,
 }));
@@ -322,6 +368,8 @@ it('preserves a consumed missing-appointment message during background refresh',
 });
 
 it('shows a held visit above the stops and Book it opens the new-appointment modal on its day, time and customer', async () => {
+  // The held-visits strip is office-only (a technician's request answers 403).
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   const held = {
     call_log_id: 'call-held', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM',
     caller_name: 'Pat Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' },
@@ -355,6 +403,7 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
 });
 
 it('only the newest Book it click opens the form when an earlier customer lookup is slow', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   const row = (id, customerId) => ({
     call_log_id: id, kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: `Caller ${id}`,
     phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
@@ -380,6 +429,7 @@ it('only the newest Book it click opens the form when an earlier customer lookup
 });
 
 it('a Book it lookup still pending when the day changes does not open the form', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   const held = {
     call_log_id: 'call-late', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: 'Pat Sample',
     phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
@@ -399,4 +449,30 @@ it('a Book it lookup still pending when the day changes does not open the form',
   await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-15'));
   await act(async () => { releaseSlow(); await slow; });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+// Dispatch audit 2026-10-29 (Codex pre-push P1): a week grid's onChange after a
+// committed move reloads the page QUIETLY, so a failed reload never swaps the
+// grid (its committed move and its Refresh notice) for the page error screen.
+it.each([['5-Day', 5], ['Week', 7]])('a %s grid change reloads quietly: a failed reload keeps the grid mounted', async (mode, dayCount) => {
+  let failSchedule = false;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-09-30') {
+      return failSchedule ? Promise.reject(new Error('Service unavailable')) : Promise.resolve(schedulePayload('2026-09-30', 'First day'));
+    }
+    return Promise.resolve({});
+  });
+  const scheduleCalls = () => vi.mocked(adminFetch).mock.calls.filter(([url]) => url === '/admin/schedule?date=2026-09-30').length;
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-30']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click((await screen.findAllByRole('button', { name: mode, exact: true }))[0]);
+  await screen.findByText('Grid date: 2026-09-30');
+  const before = scheduleCalls();
+  failSchedule = true;
+  fireEvent.click(screen.getByRole('button', { name: `Grid changed ${dayCount}` }));
+  await waitFor(() => expect(scheduleCalls()).toBe(before + 1));
+  await act(async () => {});
+  expect(screen.getByText('Grid date: 2026-09-30')).toBeInTheDocument();
+  expect(screen.queryByText('Loading schedule…')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Failed to load schedule/)).not.toBeInTheDocument();
 });

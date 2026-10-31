@@ -48,7 +48,8 @@ jest.mock('../services/proposal-win', () => ({
   ensureCustomerForProposalWin: jest.fn(),
   promoteLinkedCustomerForProposalWin: jest.fn(),
   flagProposalCustomerCommercialIfTaxable: jest.fn(),
-  createProposalAcceptanceInvoice: jest.fn(),
+  recordProposalBuildingUse: jest.fn(),
+  assertProposalTermsMatchPayer: jest.fn(),
 }));
 
 const {

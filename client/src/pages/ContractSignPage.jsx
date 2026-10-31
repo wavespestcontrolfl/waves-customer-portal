@@ -2,12 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import DocumentActionBar from '../components/DocumentActionBar';
 import DrawnSignaturePad from '../components/DrawnSignaturePad';
-import { FieldDocumentBody, FieldMasthead, FieldTitle, FieldFooter } from '../components/FieldDocument';
 import {
   WavesShell,
   CustomerColumn,
   BrandCard,
   BrandButton,
+  SerifHeading,
   HelpPhoneLink,
   PublicStateCard,
 } from '../components/brand';
@@ -84,11 +84,13 @@ function ContractBodyText({ text }) {
 }
 
 // A Florida consumer notice or a residential service agreement opened from the estimate page (the server marks it
-// fromEstimate) offers the way back, when this tab has a page to go back to.
+// fromEstimate) offers the way back, when this tab has a page to go back to. The commercial agreement is marked only
+// while GATE_COMMERCIAL_FIRST_VISIT is on: the first visit is picked back on the proposal page.
 const FROM_ESTIMATE_TEMPLATE_KEYS = new Set([
   'consumer_notice.fdacs_13692',
   'service_agreement.residential_pest',
   'service_agreement.lawn_ornamental',
+  'service_agreement.commercial_pest',
 ]);
 function BackToEstimateButton({ contract }) {
   if (contract.fromEstimate !== true || !FROM_ESTIMATE_TEMPLATE_KEYS.has(contract.documentTemplateKey)) return null;
@@ -304,6 +306,20 @@ export default function ContractSignPage() {
   return (
     <WavesShell variant="customer" topBar="solid">
       <CustomerColumn>
+        <div className="waves-flow-header">
+          <div>
+            <div style={{ ...DOC_EYEBROW, marginBottom: SP.xs }}>{documentKindLabel}</div>
+            <SerifHeading style={{ marginTop: 0, marginBottom: SP.xs }}>{documentTitle}</SerifHeading>
+            <p style={{ margin: 0, color: DOC.muted, fontSize: FS.lead, lineHeight: LH.body, maxWidth: 660 }}>
+              {isAutopay
+                ? 'Review the saved-payment authorization, then sign electronically to keep AutoPay active for approved Waves services.'
+                : needsSignature
+                  ? 'Review this Waves document, then sign electronically to acknowledge and accept the terms shown below.'
+                  : 'Review this Waves document. No signature is required.'}
+            </p>
+          </div>
+        </div>
+
         {/* Unsigned render only: the customer-facing token is single-use and
             BURNED after signing (contracts-public.js returns 410), so on the
             signed-success state there is nothing valid to download OR share —
@@ -316,17 +332,10 @@ export default function ContractSignPage() {
           />
         )}
 
+        {/* Print shows the whole terms box, not only its 420px scroll window. */}
+        <style>{'@media print { .waves-contract-terms { max-height: none !important; overflow: visible !important; } }'}</style>
         <div className="waves-contract-grid">
-          <FieldDocumentBody className="waves-contract-document">
-            <FieldMasthead />
-            <FieldTitle eyebrow={documentKindLabel} title={documentTitle} reference={fmtDate(contract.sharedAt || contract.createdAt)} />
-            <p className="waves-field-no-print" style={{ margin: `0 0 ${SP.lg}px`, color: DOC.muted, fontSize: FS.lead, lineHeight: LH.body }}>
-              {isAutopay
-                ? 'Review the saved-payment authorization, then sign electronically to keep AutoPay active for approved Waves services.'
-                : needsSignature
-                  ? 'Review this Waves document, then sign electronically to acknowledge and accept the terms shown below.'
-                  : 'Review this Waves document. No signature is required.'}
-            </p>
+          <BrandCard padding={28}>
             {/* Stacked contact block, same as the estimate / report header
                 (owner 2026-09-03): one line each, no label grid. */}
             {(() => {
@@ -343,16 +352,16 @@ export default function ContractSignPage() {
             })()}
 
             <div style={{ marginTop: SP.xl }}>
-              <div className="field-section-heading">{termsLabel}</div>
-              <div className="field-document-scroll" style={{
+              <div style={DOC_EYEBROW}>{termsLabel}</div>
+              <div className="waves-contract-terms" style={{
                 border: `1px solid ${DOC.border}`,
-                borderRadius: 0,
+                borderRadius: RADIUS.input,
                 background: DOC.surface,
                 padding: SP.md,
                 maxHeight: 420,
                 overflow: 'auto',
                 whiteSpace: 'pre-line',
-                fontSize: FS.bodyLg,
+                fontSize: FS.body,
                 lineHeight: LH.body,
                 color: DOC.ink,
               }}>
@@ -361,10 +370,9 @@ export default function ContractSignPage() {
               {/* In-card Download link superseded by the DocumentActionBar
                   at the top of the page (owner 2026-07-09). */}
             </div>
-            <FieldFooter label={documentTitle} reference={signed ? `Signed ${fmtDate(contract.signedAt)} · ${contract.signedName || contract.recipientName}` : undefined} />
-          </FieldDocumentBody>
+          </BrandCard>
 
-          <BrandCard className="waves-field-no-print" padding={24} style={{ position: 'sticky', top: 20 }}>
+          <BrandCard padding={24} style={{ position: 'sticky', top: 20 }}>
             {signed ? (
               <div>
                 <div style={{ fontSize: FS.sub, fontWeight: FW.bold, color: DOC.ink }}>{isAutopay ? 'Authorization' : 'Document'} signed</div>

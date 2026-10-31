@@ -150,6 +150,9 @@ function isServingProtocol(protocol) {
 // that version's context and never a newer version's window by key collision.
 // Unpinned, those fields are null and the planning lookup picks the protocol.
 function visitProtocolQuery({ serviceDate, grassTrack, scheduledService }) {
+  // A visit on a 9x rounds series reads its round's step window (an unpinned one; a pin names its window) and the real date's weed
+  // rows (getProtocolWindowContext roundStep).
+  const roundStep = roundStepForPlan(scheduledService);
   return {
     serviceDate,
     grassTrack,
@@ -157,6 +160,7 @@ function visitProtocolQuery({ serviceDate, grassTrack, scheduledService }) {
     protocolKey: scheduledService?.lawn_protocol_key || null,
     protocolVersion: scheduledService?.lawn_protocol_version || null,
     planning: true,
+    ...(roundStep ? { roundStep: { round: roundStep.round, month: roundStep.month } } : {}),
   };
 }
 
@@ -183,6 +187,69 @@ function visitForCadence(visit, visitsPerYear) {
   return { visit, branch: null, unknownCadence: { variantProducts: [...new Set(names)], cadences: Object.keys(variants) } };
 }
 
+// ── 9x rounds visits (owner 2026-10-29) ─────────────────────────────────────────────────────────────────────────────────────────
+// A visit on a lawn_rounds_9 series takes the program step of its ROUND (lawn-rounds.js ROUND_STEPS), not the step of its calendar
+// month. Program products, nutrient targets and the program rules keyed by month follow the round's step; the weed and spot rows
+// and lines, and every real-date rule (ordinance blackout, heat, chinch season), follow the date the visit is actually on.
+const lawnRounds = require('./lawn-rounds');
+
+// The step a booked visit takes, or null (a 12x, legacy 9x, one-time or non-lawn visit, or v13 off: the round map names v13 steps, so
+// the old program keeps the calendar month). `row` needs recurring_pattern and scheduled_date.
+function roundStepForPlan(row) {
+  if (featureGates.lawnV13Live?.() !== true) return null;
+  return lawnRounds.roundStepForVisit(row);
+}
+
+// The weed and spot products of the v13 recipe: the Celsius weed mix (Celsius, Certainty, the nonionic surfactant), Blindside in its
+// place and Dismiss for sedge. Matched by name because the rows carry no weed flag; a bermuda removal row (gates.bermudaRemoval) is not one.
+const WEED_SPOT_NAME = /^(celsius|certainty|blindside|dismiss)\b|nonionic surfactant/i;
+const isWeedSpotName = (name) => WEED_SPOT_NAME.test(String(name || '').replace(/[^A-Za-z0-9/.]+/g, ' ').trim());
+function isWeedSpotRow(row) {
+  if (!row || row.gates?.bermudaRemoval) return false;
+  return isWeedSpotName(row.product_name) || isWeedSpotName(row.catalog_product_name);
+}
+
+// The as-needed rows of a v13 window: every spot product (weed, fungicide, insecticide, wetting agent: role `*_spot`), the curative grub
+// and mole cricket granule (`insect_curative`) and the optional fire ant add-on (`insecticide_optional_addon`). Each is applied only where
+// its trigger is found, and its window holds the seasonal rules (February Celsius alone, Blindside and Dismiss November to March, the
+// take-all, large patch, chinch bug and caterpillar months), so on a rounds visit they come from the spot month's window (the REAL date's,
+// with the St. Augustine green-up exception: lawn-rounds.js roundSpotMonth) while every other row comes from the round's step window: the
+// whole-lawn products, a trouble swap's replacement bag (the December 0-0-24), a sold area add-on. A bermuda removal row is not one.
+const AS_NEEDED_ROLES = new Set(['insect_curative', 'insecticide_optional_addon']);
+function isAsNeededRow(row) {
+  if (!row || row.gates?.bermudaRemoval) return false;
+  const role = String(row.role || '');
+  return role.endsWith('_spot') || AS_NEEDED_ROLES.has(role) || isWeedSpotRow(row);
+}
+
+const recipeLines = (text) => String(text || '').split('\n').filter((line) => line.trim());
+
+// The step visit a rounds visit reads: the round's step with its rounds-only variant applied (round 2: April's cadenceVariants["9"];
+// round 3: February's roundVariants.lawn_rounds_9), so the plan, the tank sheet, the brief and the completion actions state the same
+// bag and nitrogen target. `roundStep` is lawn-rounds.js roundStepForVisit's answer; null returns the visit untouched. A variant the
+// recipe does not carry leaves the step as written (`branch` null).
+function visitForRound(visit, roundStep) {
+  if (!visit || !roundStep) return { visit, branch: null };
+  if (roundStep.variant === 'cadence9') return visitForCadence(visit, 9);
+  if (roundStep.variant !== 'rounds') return { visit, branch: null };
+  const variant = visit.roundVariants?.[lawnRounds.LAWN_ROUNDS_9];
+  if (!variant) return { visit, branch: null };
+  return {
+    visit: { ...visit, primary: variant.primary, ...(variant.secondary ? { secondary: variant.secondary } : {}), ...(variant.notes ? { notes: variant.notes } : {}) },
+    branch: lawnRounds.LAWN_ROUNDS_9,
+  };
+}
+
+// The round's step with the as-needed LINES of the spot month's step: every `secondary` line (the weed, disease and insect spots, the
+// wetting agent, the curative granule, the fire ant add-on) is the spot month's, so the season decides them as it does for a 12x visit.
+// The planned treatment (`primary`, the notes, the round's variant) stays the round step's. The same visit back when the two steps are
+// the same month or the lines already agree.
+function visitWithSpotLines(stepVisit, spotVisit) {
+  if (!stepVisit || !spotVisit || stepVisit === spotVisit) return stepVisit;
+  const secondary = recipeLines(spotVisit.secondary).join('\n');
+  return secondary === String(stepVisit.secondary || '') ? stepVisit : { ...stepVisit, secondary };
+}
+
 // The warning for a visit whose plan cadence is unknown (visitForCadence's
 // unknownCadence): it kept the 12x step and says what a known plan would have used.
 function unknownCadenceWarning(unknownCadence) {
@@ -192,4 +259,4 @@ function unknownCadenceWarning(unknownCadence) {
   };
 }
 
-module.exports = { BAHIA_TRACK, isBahiaGrass, lawnV13NoBahiaProgram, bahiaHasNoProgram, lawnTrackKnowledgeLines, lawnTrackNames, lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };
+module.exports = { BAHIA_TRACK, isBahiaGrass, lawnV13NoBahiaProgram, bahiaHasNoProgram, lawnTrackKnowledgeLines, lawnTrackNames, lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning, roundStepForPlan, isWeedSpotName, isWeedSpotRow, isAsNeededRow, visitForRound, visitWithSpotLines };

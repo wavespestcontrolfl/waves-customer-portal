@@ -393,6 +393,14 @@ function emptyInstruction() {
   };
 }
 
+// Owner 2026-10-27: a lawn visit closed on a later day than it was worked
+// (lawn-watering-late-close.js) gets no steps: its "today" would be the close
+// day. The same empty, state-null shape as every other no claim, so nothing
+// freezes and no banner, text or mow line is built.
+function lateCloseInstruction() {
+  return withNoClaim(emptyInstruction(), 'late_close');
+}
+
 /**
  * @param {object} input
  * @param {Array}  input.rules        per applied product: a rule object, null,
@@ -889,6 +897,7 @@ function withAmountLine(instruction) {
 
 module.exports = {
   buildWateringInstruction,
+  lateCloseInstruction,
   composeBannerLines,
   withAmountLine,
   formatInches,

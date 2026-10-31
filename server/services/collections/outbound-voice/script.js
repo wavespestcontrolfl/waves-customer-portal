@@ -17,6 +17,7 @@
  */
 
 const TWILIO_NUMBERS = require('../../../config/twilio-numbers');
+const { agentName } = require('../../voice-agent/relay-protocol');
 
 // The callback number spoken in every fixed line — the same number the call
 // presents as caller ID (call_log.from_phone: the customer's home line under
@@ -84,7 +85,7 @@ const TRANSFER_ANNOUNCEMENT = 'One moment while I connect you to our office.';
 // (ledger-enforced), and NEVER on an uncertain AMD result.
 function genericCallbackVoicemail(callerId) {
   return (
-    'Hi, this is Sandy calling from Waves Pest Control. '
+    `Hi, this is ${agentName()} calling from Waves Pest Control. `
     + `When you have a moment, please give our office a call back at ${callbackNumber(callerId)}. `
     + 'Thank you, and have a great day.'
   );
@@ -97,7 +98,7 @@ function genericCallbackVoicemail(callerId) {
 function relayGreeting({ firstName } = {}) {
   const who = firstName ? String(firstName).trim() : 'the account holder';
   return (
-    "Thanks. This is Sandy, the automated assistant at Waves Pest Control, and this call may be recorded. "
+    `Thanks. This is ${agentName()}, the automated assistant at Waves Pest Control, and this call may be recorded. `
     + `Before I continue, am I speaking with ${who}?`
   );
 }

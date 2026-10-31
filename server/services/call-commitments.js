@@ -1168,6 +1168,7 @@ async function recordCallCommitments({
   modelClient = null,
   runModel = true,
   historicalReplay,
+  thirdPartyCall = false,
 } = {}) {
   const summary = { seeds: 0, model: 0, written: 0, dropped: 0, ownershipLost: false, skipped: null };
   try {
@@ -1201,7 +1202,8 @@ async function recordCallCommitments({
     const replayOmits = (item) => historicalReplay && item.kind === 'send_reschedule_link';
     const omitted = [...seeds, ...modelItems].filter(replayOmits);
     summary.omittedLinkPromises = omitted.length;
-    const items = [...seeds, ...modelItems].filter((item) => !replayOmits(item)).map((item) => ({
+    const items = [...seeds, ...modelItems].filter((item) => !replayOmits(item))
+      .map((item) => (thirdPartyCall === true ? asThirdPartyPromise(item) : item)).map((item) => ({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));
@@ -1229,6 +1231,28 @@ async function recordCallCommitments({
     logger.warn(`[call-commitments] recording failed for call ${call?.id}: ${err.message}`);
     return { ...summary, error: err.message };
   }
+}
+
+// GATE_CALL_APPLICANT_HANDLING. On a call from a job applicant or a vendor, what
+// the office promised (an interview, a call back, "come by Monday") is not a
+// customer promise. Stored as kind 'other', which is in neither SLA_KINDS (the
+// pager) nor PROMPT_KINDS (the implicit deadline), and with no stated due_at
+// (the daily overdue watchdog judges any Waves row whose due_at passed, whatever
+// its kind). The stated time moves into the description, so staff still read it.
+// Customer-party rows and every other nature are returned untouched.
+function asThirdPartyPromise(item) {
+  if (!item || item.party === 'customer') return item;
+  const out = { ...item, party: 'waves', kind: 'other' };
+  if (item.due_at) {
+    const at = new Date(item.due_at);
+    const when = item.due_text
+      || (Number.isNaN(at.getTime()) ? null : `${at.toLocaleString('en-US', { timeZone: 'America/New_York' })} ET`);
+    out.due_text = when;
+    out.due_at = null;
+    out.due_basis = null;
+    out.due_type = null;
+  }
+  return out;
 }
 
 // ── Reads ──────────────────────────────────────────────────────────────────
@@ -4269,6 +4293,7 @@ async function buildCallOutcomes(conn, call) {
 }
 
 module.exports = {
+  asThirdPartyPromise,
   COMMITMENT_KINDS,
   normalizeChannel,
   normalizeKind,

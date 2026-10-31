@@ -24,6 +24,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
 const { applyAssignable } = require('../services/technician-eligibility');
+const { seriesNoticeNameVars } = require('../services/placement-service-name');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 
@@ -4733,7 +4734,11 @@ router.get('/:serviceId/reschedule-options', async (req, res, next) => {
     // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees why.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
-    const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId);
+    // GATE_ROUTE_CHECK_STAFF_LISTS: only an admin's list may buy Google road
+    // times; a technician's stays on the estimate.
+    const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId, undefined, {
+      caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
+    });
     res.json({ options });
   } catch (err) { next(err); }
 });
@@ -5420,6 +5425,8 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // the lock above releases still makes the write miss and 409, instead
       // of silently letting the former technician's move commit.
       requireAssignedTechnicianId: req.techRole !== 'admin' ? req.technicianId : null,
+      // GATE_SAVE_ROAD_BUY: only an admin's Quick Move buys road times.
+      ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
     });
 
     if (!result.ok) {
@@ -5899,7 +5906,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // uses), never a direct customers.phone text: a primary who opted out,
       // has no phone, or routes appointment texts to an authorized service
       // contact gets exactly what the single-visit notice would do.
-      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id');
+      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id', 'service_type');
       const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
       // The text quotes the slot the series move RECORDED for the anchor —
       // date and arrival window. A replayed/retried pass whose anchor was
@@ -5958,12 +5965,19 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           // Visit-aware (app property scope, PR 3): the anchor visit's NON-primary
           // saved property owns notify-primary for the series notice.
           const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
+          // The placement text names the anchor's service (owner 2026-10-26:
+          // a customer with a pest series and a mosquito series read the
+          // mosquito placement as her pest visit moving). Same customer-facing
+          // label the reminders use; "visit" when the visit has no clean name.
+          // The series-moved copy has no {service_name}, so it is not looked up.
+          const nameVars = await seriesNoticeNameVars(notice.templateKey, serviceId, svc.service_type);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
             return renderRequiredTemplate(notice.templateKey, {
               first_name: firstName,
               start_date: displayDate,
               window_text: windowText,
+              ...nameVars,
             }, {
               workflow: 'dispatch_series_reschedule',
               entity_type: 'scheduled_service',
@@ -6399,6 +6413,10 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
   rescheduleOptions.overlapAdvisory = true;
   rescheduleOptions.adminWindowRules = !keepSlot;
+  // GATE_SAVE_ROAD_BUY: an ADMIN's move buys the Google road times its check
+  // and route number read, before the rebooker's transaction (the staff user
+  // pays). A technician never buys: no spender, no purchase.
+  if (actor.techRole === 'admin' && actor.technicianId) rescheduleOptions.roadSpender = actor.technicianId;
   // ...and a service already under way (en route / on site) is not rewound:
   // a move may override a live visit, a reassignment may not.
   if (keepSlot) Object.assign(rescheduleOptions, { keepStatus: true, allowLive: false });
@@ -6664,6 +6682,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // Staff surface: occupancy clashes commit with a warning instead of
         // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
         overlapAdvisory: true,
+        // GATE_SAVE_ROAD_BUY: the admin's anchor hour buys its road times
+        // before the series transaction (a technician is refused above).
+        ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
         // Same staleness fence via the series writer's own expectAnchor
         // mechanism, on the FULL pin the resolution read (date, start, end,
         // duration — rescheduleExpectPredicate, the shape the non-series
@@ -7443,6 +7464,7 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
       jobId: req.params.id,
       technicianId: req.body ? req.body.technicianId : undefined,
       actorId: req.technicianId,
+      place: true, // GATE_ROUTE_CHECK_ASSIGN_SAVES: the office board numbers the stop
     });
     res.json({ job: result.job, ...(result.warnings ? { warnings: result.warnings } : {}) });
   } catch (err) {
@@ -7454,22 +7476,18 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
 
 router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   try {
-    const { resolveAlert, DECISION_ONLY_ALERT_TYPES } = require('../services/dispatch-alerts');
-    // A decision-only card (a visit not closed out) is settled by its own
-    // decision routes; a bare resolve would close it and record nothing.
-    const target = await db('dispatch_alerts').where({ id: req.params.id }).first('type', 'resolved_at');
-    if (target && !target.resolved_at && DECISION_ONLY_ALERT_TYPES.includes(target.type)) {
-      return res.status(409).json({ error: 'This card needs a decision. Use "This was a miss" or "Not a miss".', code: 'DECISION_REQUIRED' });
-    }
-    const row = await resolveAlert({
+    // One shared function (services/dispatch-alerts.js): the Intelligence Bar's
+    // resolve_dispatch_alert card runs the same resolve.
+    const { resolveAlertAsDispatcher } = require('../services/dispatch-alerts');
+    const result = await resolveAlertAsDispatcher({
       id: req.params.id,
       resolvedBy: req.technicianId,
     });
-    if (row) return res.json({ alert: row });
-
-    const existing = await db('dispatch_alerts').where({ id: req.params.id }).first();
-    if (!existing) return res.status(404).json({ error: 'alert not found' });
-    return res.json({ alert: existing });
+    if (result.outcome === 'decision_required') {
+      return res.status(409).json({ error: 'This card needs a decision. Use "This was a miss" or "Not a miss".', code: 'DECISION_REQUIRED' });
+    }
+    if (result.outcome === 'not_found') return res.status(404).json({ error: 'alert not found' });
+    return res.json({ alert: result.alert });
   } catch (err) {
     logger.error(`[dispatch/alerts/resolve] failed for ${req.params.id}: ${err.message}`);
     next(err);

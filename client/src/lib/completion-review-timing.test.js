@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import {
   customReviewTimeProblem,
   reviewDelayMinutesOf,
@@ -8,6 +8,12 @@ import {
   reviewSendPreviewPath,
   timedReviewHint,
   completionReviewHint,
+  COMPLAINT_ON_SITE_REASON,
+  FIRST_REVIEW_ASK_LABEL,
+  firstReviewAskFrom,
+  nextReviewChoice,
+  reviewBoxLabel,
+  reviewOptOutFields,
 } from './completion-review-timing';
 
 describe('the review timing a completion posts', () => {
@@ -38,6 +44,45 @@ describe('the review timing a completion posts', () => {
   test('the preview path carries the service type', () => {
     expect(reviewSendPreviewPath('Lawn Care')).toBe('/admin/reviews/send-time-preview?serviceType=Lawn+Care');
     expect(reviewSendPreviewPath()).toBe('/admin/reviews/send-time-preview?serviceType=');
+  });
+
+  test('a visit id rides along only when given', () => {
+    expect(reviewSendPreviewPath('Lawn Care', 'svc-1')).toBe('/admin/reviews/send-time-preview?serviceType=Lawn+Care&serviceId=svc-1');
+  });
+});
+
+describe('the first review ask box (GATE_REVIEW_FIRST_ASK_LOCK)', () => {
+  test('the label: suppressed and included wordings win; a first ask reads "First review ask"; else today\'s', () => {
+    expect(reviewBoxLabel({ reviewSuppressionReason: 'customer_concern', firstAsk: true })).toBe('Review request suppressed');
+    expect(reviewBoxLabel({ oneTimeRecapOnly: true, firstAsk: true })).toBe('Review request included');
+    expect(reviewBoxLabel({ firstAsk: true })).toBe(FIRST_REVIEW_ASK_LABEL);
+    expect(reviewBoxLabel({ firstAsk: false })).toBe('Send review request');
+    expect(reviewBoxLabel({})).toBe('Send review request');
+  });
+
+  test('the verdict is read only when the server sent one', () => {
+    expect(firstReviewAskFrom({ firstReviewAsk: true })).toBe(true);
+    expect(firstReviewAskFrom({ firstReviewAsk: false })).toBe(false);
+    expect(firstReviewAskFrom({ at: 'x' })).toBeNull();
+    expect(firstReviewAskFrom(null)).toBeNull();
+  });
+
+  test('toggling: checking always turns it on; unchecking a first ask needs the confirmed reason', () => {
+    const yes = () => true;
+    const no = () => false;
+    expect(nextReviewChoice({ checked: true, firstAsk: true, confirmOptOut: no })).toEqual({ requestReview: true, reviewOptOutReason: null });
+    expect(nextReviewChoice({ checked: false, firstAsk: true, confirmOptOut: yes })).toEqual({ requestReview: false, reviewOptOutReason: COMPLAINT_ON_SITE_REASON });
+    expect(nextReviewChoice({ checked: false, firstAsk: true, confirmOptOut: no })).toEqual({ requestReview: true, reviewOptOutReason: null });
+    const never = vi.fn();
+    expect(nextReviewChoice({ checked: false, firstAsk: false, confirmOptOut: never })).toEqual({ requestReview: false, reviewOptOutReason: null });
+    expect(never).not.toHaveBeenCalled();
+  });
+
+  test('the body carries the reason only beside a first ask turned off', () => {
+    expect(reviewOptOutFields({ firstAsk: true, willReview: false, reviewOptOutReason: COMPLAINT_ON_SITE_REASON })).toEqual({ reviewOptOutReason: 'complaint_on_site' });
+    expect(reviewOptOutFields({ firstAsk: true, willReview: true, reviewOptOutReason: COMPLAINT_ON_SITE_REASON })).toEqual({});
+    expect(reviewOptOutFields({ firstAsk: false, willReview: false, reviewOptOutReason: COMPLAINT_ON_SITE_REASON })).toEqual({});
+    expect(reviewOptOutFields({ firstAsk: true, willReview: false, reviewOptOutReason: null })).toEqual({});
   });
 });
 

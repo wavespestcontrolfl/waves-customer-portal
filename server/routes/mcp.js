@@ -13,7 +13,9 @@
  * `Authorization: Bearer` or `X-MCP-Token`), constant-time compare, behind
  * GATE_MCP_READ_TOOLS. Fails closed exactly like hermes-auth: 403 gate off,
  * 503 unconfigured, 401 mismatch. No customer-PII tools live here — the
- * write surface stays IB-only behind write-gates.
+ * write surface stays IB-only behind write-gates. Every call is a
+ * tool_health_events row (source 'mcp-knowledge'), never its arguments or
+ * answer, like /api/mcp-admin.
  *
  * Hand-rolled JSON-RPC on purpose: three methods (initialize, tools/list,
  * tools/call) don't justify an SDK dependency.
@@ -28,6 +30,7 @@ const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retire
 const { embedQuery } = require('../services/llm/embed');
 const { rrfFuse, applyRecencyDecay, vectorRows, chunkFtsRows } = require('../services/knowledge-index/hybrid-search');
 const { toVectorLiteral } = require('../services/knowledge-index/ingest');
+const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 
 const router = express.Router();
 
@@ -156,7 +159,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'get_service',
-    description: 'Fetch one catalog service by service_key (name, description, category, frequency).',
+    description: "Fetch one catalog service by service_key (name, description, category, frequency). A service_key is the sourceId of a search_knowledge result with sources ['service'].",
     inputSchema: {
       type: 'object',
       properties: { service_key: { type: 'string' } },
@@ -166,7 +169,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'get_protocol',
-    description: "Fetch one treatment protocol from the static protocol config by dotted key (e.g. 'pest', 'termite', 'lawn.st_augustine').",
+    description: "Fetch one treatment protocol from the static protocol config by dotted key (e.g. 'pest', 'termite', 'lawn.st_augustine'). Other keys are the sourceId of a search_knowledge result with sources ['protocol'].",
     inputSchema: {
       type: 'object',
       properties: { protocol_key: { type: 'string' } },
@@ -186,8 +189,25 @@ const MCP_TOOLS = [
 
 const { createMcpRpc, createBodyErrorHandler } = require('../services/mcp-rpc');
 
+// The tools as served: each call is logged once, with its outcome and time only.
+const loggedTools = MCP_TOOLS.map((tool) => ({
+  ...tool,
+  execute: async (args) => {
+    const startedAt = Date.now();
+    let result;
+    try {
+      result = await tool.execute(args);
+    } catch (err) {
+      recordToolEvent({ source: 'mcp-knowledge', context: 'mcp', toolName: tool.name, success: false, durationMs: Date.now() - startedAt });
+      throw err;
+    }
+    recordToolEvent({ source: 'mcp-knowledge', context: 'mcp', toolName: tool.name, success: !(result && result.error), durationMs: Date.now() - startedAt });
+    return result;
+  },
+}));
+
 const rpc = createMcpRpc({
-  tools: MCP_TOOLS,
+  tools: loggedTools,
   serverInfo: { name: 'waves-knowledge', version: '1.0.0' },
   protocolVersion: PROTOCOL_VERSION,
   logPrefix: 'mcp',

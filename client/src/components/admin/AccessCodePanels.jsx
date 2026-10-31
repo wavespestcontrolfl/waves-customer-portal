@@ -273,25 +273,34 @@ function LinkToCustomer({ row, onLink, onSearch, busy, run }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
+  // A search that answered with no one ("No customer matches") is told apart
+  // from one that failed (an error with Try again, which reruns the same term).
+  const [searched, setSearched] = useState(false);
+  const [searchFailed, setSearchFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     const term = query.trim();
     // Results from an earlier term are gone at once, so no click can link to a customer the new term did not find.
     setResults([]);
+    setSearched(false);
+    setSearchFailed(false);
     if (term.length < 2) { setSearching(false); return undefined; }
     let cancelled = false;
     setSearching(true);
     const timer = setTimeout(async () => {
       try {
         const list = await onSearch(term);
-        if (!cancelled) setResults(Array.isArray(list) ? list : []);
+        if (cancelled) return;
+        setResults(Array.isArray(list) ? list : []);
+        setSearched(true);
       } catch {
-        if (!cancelled) setResults([]);
+        if (!cancelled) setSearchFailed(true);
       } finally {
         if (!cancelled) setSearching(false);
       }
     }, 250);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [query]);
+  }, [query, attempt]);
   const link = (customerId) => run(() => onLink(customerId), "Could not link the code");
   const suggested = row.suggestedCustomer;
   return (
@@ -319,6 +328,8 @@ function LinkToCustomer({ row, onLink, onSearch, busy, run }) {
         />
       </label>
       {searching && <div className="text-ui-label text-ink-secondary">Searching…</div>}
+      {searchFailed && <ActionFeedback error onRetry={() => setAttempt((n) => n + 1)}>Could not search customers</ActionFeedback>}
+      {searched && results.length === 0 && <div className="text-ui-label text-ink-secondary">No customer matches.</div>}
       {results.length > 0 && (
         <ul className="grid gap-1" aria-label="Matching customers">
           {results.map((c) => (

@@ -122,6 +122,12 @@ describe('request URL log redaction', () => {
     expect(redactRequestUrl('/estimate/jane-doe-9f8e7d6c')).toBe('/estimate/[REDACTED]');
     expect(redactRequestUrl('/api/estimates/jane-doe-9f8e7d6c/data')).toBe('/api/estimates/[REDACTED]/data');
     expect(redactRequestUrl('/api/estimates/jane-doe-9f8e7d6c/pdf?download=1')).toBe('/api/estimates/[REDACTED]/pdf?download=1');
+    // The estimate-token assessment booking page and every route of its API (GATE_ESTIMATE_ASSESSMENT_FIRST,
+    // Codex #6877 security P2): read, find-slots and the commit.
+    expect(redactRequestUrl('/estimate/jane-doe-9f8e7d6c/assessment')).toBe('/estimate/[REDACTED]/assessment');
+    expect(redactRequestUrl('/api/public/estimate-assessment/jane-doe-9f8e7d6c')).toBe('/api/public/estimate-assessment/[REDACTED]');
+    expect(redactRequestUrl('/api/public/estimate-assessment/jane-doe-9f8e7d6c/find-slots'))
+      .toBe('/api/public/estimate-assessment/[REDACTED]/find-slots');
     // Scoped to estimate parents: the same shape elsewhere is a slug, not
     // a token, and admin fixed children / row ids stay readable.
     expect(redactRequestUrl('/learn/pest-guide-deadbeef')).toBe('/learn/pest-guide-deadbeef');

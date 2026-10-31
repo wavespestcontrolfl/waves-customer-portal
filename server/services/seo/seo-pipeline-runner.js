@@ -133,6 +133,10 @@ async function runClaimedSeoPipeline({ pipelineRun, domain, daysBack = 7, logPre
           timeoutMs,
           message: `GSC sync timed out after ${timeoutMs}ms`,
         });
+        // syncDailyData resolves { synced: false } instead of throwing; count that as a failed step.
+        if (detail?.synced === false) {
+          throw new Error(detail.error || 'GSC sync did not run: Search Console is not configured');
+        }
         return { detail };
       },
     });

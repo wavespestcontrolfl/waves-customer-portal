@@ -37,6 +37,8 @@ const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, 
 const mockIbBookingOverlapProposal = jest.fn(async () => null);
 // Who the overlapping visit is (card text only): nobody named by default.
 const mockIbBookingOverlapWho = jest.fn(async () => []);
+// Default: no property choice needed (one property, or the address switch off).
+const mockIbBookingPropertyProposal = jest.fn(async () => ({ stamp: null }));
 const mockRateChangeProposal = jest.fn(async () => null);
 const mockTierEmailProposal = jest.fn(async () => null);
 const mockResolveLeadForUpdate = jest.fn();
@@ -91,6 +93,8 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   ibBookingProposal: (...args) => mockIbBookingProposal(...args),
   ibBookingOverlapProposal: (...args) => mockIbBookingOverlapProposal(...args),
   ibBookingOverlapWho: (...args) => mockIbBookingOverlapWho(...args),
+  ibBookingPropertyProposal: (...args) => mockIbBookingPropertyProposal(...args),
+  bookingPropertyLabel: (stamp) => (stamp ? `${stamp.service_address_line1}, ${stamp.service_address_city}` : null),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -1248,6 +1252,43 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
       expect(stored.summary).not.toMatch(/_booking|svc-otp/);
       expect(JSON.stringify(body.pendingActions[0].contract)).not.toMatch(/_booking|svc-otp/);
+    });
+  });
+
+  test('create_appointment at a named property: the card shows its address, the stamp is pinned server-side, a model-supplied pin never survives', async () => {
+    const stamp = { property_id: 'prop-rental', service_address_line1: '12 Sample Ct', service_address_line2: '', service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34202', lat: null, lng: null };
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: 250, source: 'catalog', serviceId: 'svc-otp', serviceName: 'One-Time Pest Control Service' });
+    mockIbBookingPropertyProposal.mockResolvedValueOnce({ stamp });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service', property_id: 'prop-rental', _booking_property: { property_id: 'forged' } } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit at the rental', context: 'schedule' });
+      expect(mockIbBookingPropertyProposal).toHaveBeenCalledWith('c1', 'prop-rental');
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.property_id).toBe('prop-rental');
+      expect(stored.params._booking_property).toEqual(stamp);
+      expect(body.pendingActions[0].params.address).toBe('12 Sample Ct, Bradenton');
+      expect(body.pendingActions[0].params).not.toHaveProperty('property_id');
+    });
+  });
+
+  test('create_appointment for a customer with several properties and none named: the model is asked which one, and no card is made', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: 250, source: 'catalog', serviceId: 'svc-otp', serviceName: 'One-Time Pest Control Service' });
+    mockIbBookingPropertyProposal.mockResolvedValueOnce({ error: 'This customer has 2 active properties.', code: 'property_choice_required', properties: [] });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service' } }],
+      [{ type: 'text', text: 'Which property?' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit', context: 'schedule' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions || []).toHaveLength(0);
     });
   });
 

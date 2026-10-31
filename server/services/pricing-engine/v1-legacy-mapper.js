@@ -12,7 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
-const { isMistingSelection } = require('../../utils/mosquito-misting-system');
+const { isMistingSelection, mistingCustomerFacts } = require('../../utils/mosquito-misting-system');
 const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRows, storedMistingRows } = require('../estimate-result-container');
 
 const RECURRING_SERVICES = new Set([
@@ -269,6 +269,7 @@ const SERVICE_LABEL = {
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
   rodent_sanitation: 'Rodent Sanitation',
+  rodent_dead_animal_removal: 'Dead Rodent Removal & Odor Treatment',
   rodent_bundle_discount: 'Rodent Bundle Discount',
   rodent_guarantee: 'Rodent Guarantee Service',
   trap_only_retainer: 'Trap-Only Monitoring Retainer',
@@ -967,6 +968,8 @@ function mapV1ToLegacyShape(v1Result) {
       service: 'mosquito_misting',
       annual: Number(mmLI.annual) || null,
       pricingKnobs: mmLI.pricingKnobs || null,
+      // The customer-safe layout and refill facts the public estimate page and PDF print (no cost field).
+      misting: mistingCustomerFacts(mmLI),
       detail: `${mmLI.nozzles} nozzles · ${mmLI.visitsPerYear} applications/yr · $${mmLI.perApp} per application · ${mmLI.refill?.label || ''} refill $${mmLI.refill?.perFill ?? ''} per refill application`,
       discountable: false,
       discountEligible: false,
@@ -1249,6 +1252,12 @@ function mapV1ToLegacyShape(v1Result) {
           ? { retainerBilling: li.retainerBilling || li.trapOnlyRetainerBilling } : {}),
         ...(li.atticSqFt !== undefined ? { atticSqFt: Number(li.atticSqFt) > 0 ? Number(li.atticSqFt) : null } : {}),
         ...(li.surfaceSqFt !== undefined ? { surfaceSqFt: Number(li.surfaceSqFt) > 0 ? Number(li.surfaceSqFt) : null } : {}),
+        // Dead Rodent Removal & Odor Treatment: the access tier and the engine's on-site minutes
+        // travel with the sold row so the booking sizes its slot by the tier (45 or 90 minutes),
+        // not only by the catalog default.
+        ...(li.service === 'rodent_dead_animal_removal'
+          ? { deadAnimalTier: li.tier || null, ...(Number(li.durationMin) > 0 ? { onSiteMinutes: Number(li.durationMin) } : {}) }
+          : {}),
         fleaExteriorZones: li.fleaExteriorZones || [],
         addOns: li.addOns || [],
         serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied,
@@ -1358,7 +1367,13 @@ function mapV1ToLegacyShape(v1Result) {
   const quoteRequired = quoteRequiredItems.length > 0;
 
   const topDressingLI = lineItems.find(l => l.service === 'top_dressing');
-  if (topDressingLI) {
+  // A quote-only top dressing line (owner 2026-10-29) maps to a null-price
+  // Quote Required row above, so no depth tier may carry a number the office
+  // could read as a sendable price: R.td / R.tdTiers stay unset. Lines saved
+  // before the rule carry no flag and keep their stored tiers.
+  const topDressingQuoteOnly = !!(topDressingLI
+    && (topDressingLI.quoteRequired === true || topDressingLI.requiresCustomQuote === true));
+  if (topDressingLI && !topDressingQuoteOnly) {
     const pricedLawnSqFt = Number(topDressingLI.lawnSqFt || 0);
     const eighth = priceTopDressing(pricedLawnSqFt, 'eighth', true);
     const quarter = priceTopDressing(pricedLawnSqFt, 'quarter', true);

@@ -240,13 +240,13 @@ async function callClaudeVision(base64Image, mimeType, context = {}, deadline = 
 // Single attempt against one Gemini model. Returns the parsed scores, or null on
 // any miss (HTTP error / empty output / unparseable JSON) so the caller can retry.
 async function geminiVisionAttempt(model, base64Image, mimeType, context = {}, deadline = null) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const budget = remainingMs(deadline);
   const response = await fetch(url, {
     method: 'POST',
     ...(budget ? { signal: AbortSignal.timeout(budget) } : {}),
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
     body: JSON.stringify({
       contents: [{
         parts: [

@@ -171,8 +171,6 @@ function chain(overrides = {}) {
       wdo_signature: {},
       wdo_sent_filings: {},
       portal_visible: {},
-      report_hold_status: {},
-      report_hold_attempts: {},
     }),
     ...overrides,
   };
@@ -229,30 +227,9 @@ describe('POST /:id/send dry_run', () => {
         recipient: 'cust@example.com',
         report_copies: ['jane@realty.com'],
       });
-      expect(body.releases_payment_hold).toBe(false);
       // Preview must be side-effect free: no claim, no token mint, no email.
       expect(projects.update).not.toHaveBeenCalled();
       expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
-    });
-  });
-
-  test('a held report previews releases_payment_hold: true', async () => {
-    mockTables({
-      projects: chain({ first: jest.fn().mockResolvedValue(wdoProject({ report_hold_status: 'held' })) }),
-      customers: chain({ first: jest.fn().mockResolvedValue(CUSTOMER) }),
-      notification_prefs: chain({ first: jest.fn().mockResolvedValue(null) }),
-    });
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
-        method: 'POST',
-        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dry_run: true }),
-      });
-      const body = await res.json();
-      const cols = await chain().columnInfo();
-      expect(cols.wdo_signature).toBeDefined(); // scaffolding sanity
-      expect(res.status).toBe(200);
-      expect(body.releases_payment_hold).toBe(true);
     });
   });
 });
@@ -406,25 +383,6 @@ describe('POST /:id/send concurrency claim', () => {
         delivery_claim_token: null,
       }));
       expect(photos.update).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  test('photo mutations 409 while the payment-hold release is delivering', async () => {
-    // The release sweep claims report_hold_status='releasing' without ever
-    // setting delivery_status — the photo guard must respect that claim too.
-    const projects = chain({ first: jest.fn().mockResolvedValue(wdoProject({ report_hold_status: 'releasing' })) });
-    const photos = chain({ update: jest.fn().mockResolvedValue(1) });
-    mockTables({ projects, project_photos: photos });
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-9`, {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caption: 'Late edit' }),
-      });
-      const body = await res.json();
-      expect(res.status).toBe(409);
-      expect(body.code).toBe('send_in_progress');
-      expect(photos.update).not.toHaveBeenCalled();
     });
   });
 });

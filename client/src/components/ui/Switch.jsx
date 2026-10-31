@@ -21,7 +21,9 @@ export const Switch = forwardRef(function Switch(
         'u-touch-hit relative inline-flex shrink-0 items-center h-4 w-7 rounded-full transition-colors',
         'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-1',
         checked ? 'bg-zinc-900' : 'bg-zinc-300',
-        disabled && 'opacity-50 cursor-not-allowed',
+        // :disabled, not the prop, so a switch inside a disabled fieldset
+        // looks locked too (matches Button).
+        'disabled:opacity-50 disabled:cursor-not-allowed',
         className
       )}
       {...rest}

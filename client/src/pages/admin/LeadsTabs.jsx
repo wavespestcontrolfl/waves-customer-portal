@@ -25,6 +25,9 @@ import {
   Input,
   Select,
   Table,
+  TableColumnPicker,
+  TablePagination,
+  TableToolbar,
   TBody,
   TD,
   TH,
@@ -34,7 +37,10 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { leadAddressUnverifiedNotice } from "../../lib/leadAddressUnverified";
+import { etDateString } from "../../lib/timezone";
+import { isConsultationVisit } from "../../lib/consultationVisit";
 import ConsultationStatsPanel from "./ConsultationStatsPanel";
+import { leadServiceAddress } from "../../utils/format-address";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const CONTACT_EVIDENCE_LABELS = new Map([
@@ -379,7 +385,8 @@ function leadEstimateParams(lead) {
   if (customerName) params.set("customerName", customerName);
   if (lead.phone) params.set("customerPhone", lead.phone);
   if (lead.email) params.set("customerEmail", lead.email);
-  if (lead.address) params.set("address", lead.address);
+  const address = leadServiceAddress(lead);
+  if (address) params.set("address", address);
   if (lead.service_interest)
     params.set("serviceInterest", lead.service_interest);
   return params;
@@ -648,6 +655,47 @@ function LeadsWorkspaceNav({ active, onChange }) {
     </nav>
   );
 }
+const SOURCE_READ_COPY = {
+  roi: {
+    loading: "Loading source ROI…",
+    refreshing: "Refreshing source ROI…",
+    error:
+      "Source ROI is unavailable. Lead counts and configured costs remain visible.",
+    refreshError:
+      "Source ROI could not be refreshed. The last loaded ROI remains visible.",
+  },
+  detail: {
+    loading: "Loading source details…",
+    refreshing: "Refreshing source details…",
+    error: "Source funnel and ROI details are unavailable.",
+    refreshError:
+      "Source details could not be refreshed. The last loaded totals remain visible.",
+  },
+};
+function SourceReadFeedback({
+  enabled,
+  active = true,
+  read,
+  hasData,
+  kind,
+  onRetry,
+}) {
+  if (!enabled || !active || (!read.loading && !read.error)) return null;
+  const failed = Boolean(read.error);
+  const copy = SOURCE_READ_COPY[kind];
+  const message = failed
+    ? copy[hasData ? "refreshError" : "error"]
+    : copy[hasData ? "refreshing" : "loading"];
+  return (
+    <ActionFeedback
+      error={failed}
+      onRetry={failed ? onRetry : undefined}
+      className="mb-4"
+    >
+      {message}
+    </ActionFeedback>
+  );
+}
 function LeadField({
   label,
   value,
@@ -868,15 +916,48 @@ const LEAD_FILTER_KEYS = {
   search: "leadSearch",
   sort: "leadSort",
   page: "leadPage",
+  pageSize: "leadPageSize",
   source_name: "source_name",
   start_date: "start_date",
   end_date: "end_date",
   builder_warranty: "builder_warranty",
 };
+const LEAD_PAGE_SIZES = [25, 50, 100, 200];
+const LEAD_VIEWS = [
+  { value: "table", label: "List" },
+  { value: "board", label: "Board" },
+];
+const BUILDER_WARRANTY_FILTER_LABELS = {
+  expiring: "Builder warranty expiring",
+};
+const LEAD_TABLE_COLUMNS = [
+  { id: "identity", label: "Name / Phone", required: true, width: 26 },
+  { id: "source", label: "Source", width: 13 },
+  { id: "service", label: "Service", width: 19 },
+  { id: "urgency", label: "Urgency", width: 8 },
+  { id: "status", label: "Status", required: true, width: 18 },
+  { id: "response", label: "Response", width: 10 },
+  { id: "actions", label: "Actions", required: true, width: 6 },
+];
+const ALL_LEAD_TABLE_COLUMNS = LEAD_TABLE_COLUMNS.map((column) => column.id);
+
+function leadPageSizeFromParams(params) {
+  const requested = Number.parseInt(params.get("leadPageSize"), 10);
+  if (!Number.isFinite(requested)) return 50;
+  return LEAD_PAGE_SIZES.reduce(
+    (closest, size) =>
+      Math.abs(size - requested) < Math.abs(closest - requested)
+        ? size
+        : closest,
+    50,
+  );
+}
+
 function leadFiltersFromParams(params) {
   const drill = readSourceDrillParams(params);
   const status = params.get("leadStatus");
   const hasLinkedLead = params.has("lead") || params.has("leadId");
+  const tableControlsEnabled = params.get("tableControls") === "1";
   return {
     status:
       status === "all"
@@ -889,6 +970,7 @@ function leadFiltersFromParams(params) {
     search: params.get("leadSearch") || "",
     sort: params.get("leadSort") || "first_contact_at",
     page: Math.max(1, Number.parseInt(params.get("leadPage"), 10) || 1),
+    pageSize: tableControlsEnabled ? leadPageSizeFromParams(params) : 50,
     source_name: params.get("source_name") || "",
     start_date: params.get("start_date") || drill?.start_date || "",
     end_date: params.get("end_date") || drill?.end_date || "",
@@ -899,7 +981,9 @@ function leadFiltersFromParams(params) {
 export function LeadsSection({ newLeadRequest = 0 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const isMobile = useIsMobile();
+  const feedbackEnabled = searchParams.get("feedback") === "1";
+  const feedbackEnabledRef = useRef(feedbackEnabled);
+  feedbackEnabledRef.current = feedbackEnabled;
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const compactQueue = useIsMobile(1280);
   const [tab, setTab] = useState("pipeline");
@@ -943,6 +1027,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // sources and is fetched only on the Sources tab, so a late-resolving response
   // can never overwrite the Analytics tab's active-only `bySource`.
   const [sourcesRoi, setSourcesRoi] = useState([]);
+  const [sourceRoiRead, setSourceRoiRead] = useState({
+    loading: false,
+    error: null,
+  });
+  const sourceRoiRequestRef = useRef(0);
   const [byChannel, setByChannel] = useState([]);
   const [responseBuckets, setResponseBuckets] = useState([]);
   const [lostReasons, setLostReasons] = useState([]);
@@ -961,6 +1050,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
   const [contactMatches, setContactMatches] = useState(null);
+  const tableControlsEnabled = searchParams.get("tableControls") === "1";
+  const [visibleLeadColumns, setVisibleLeadColumns] = useState(
+    ALL_LEAD_TABLE_COLUMNS,
+  );
   useEffect(() => {
     setContactMatches(null);
     if (showModal !== "newLead" || (!formData.phone && !formData.email))
@@ -1006,7 +1099,14 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           if (!next.source_name) updated.delete("period_label");
           for (const [key, param] of Object.entries(LEAD_FILTER_KEYS)) {
             if (key === "status") updated.set(param, next[key] || "all");
-            else if (next[key] && !(key === "page" && next[key] === 1))
+            else if (key === "pageSize") {
+              if (
+                params.get("tableControls") === "1" &&
+                next[key] !== 50
+              )
+                updated.set(param, String(next[key]));
+              else updated.delete(param);
+            } else if (next[key] && !(key === "page" && next[key] === 1))
               updated.set(param, String(next[key]));
             else updated.delete(param);
           }
@@ -1140,11 +1240,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         params.set("sort", filters.sort);
         params.set("order", filters.sort === "name" ? "asc" : "desc");
         params.set("page", filters.page);
-        params.set("limit", "50");
+        params.set("limit", String(filters.pageSize));
         const data = await adminFetch(`/admin/leads?${params}`);
         if (requestId !== leadsRequestRef.current) return; // superseded
+        const total = data.total || 0;
         setLeads(data.leads || []);
-        setLeadsTotal(data.total || 0);
+        setLeadsTotal(total);
         setConsultationGate(data.consultationLinksEnabled === true);
         // A list reload follows every lead edit on this page — drop cached
         // availability so the expanded row re-probes against the edited lead
@@ -1166,6 +1267,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       filters.status,
       filters.sort,
       filters.page,
+      filters.pageSize,
       filters.source_name,
       filters.start_date,
       filters.end_date,
@@ -1173,6 +1275,19 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       debouncedSearch,
     ],
   );
+  useEffect(() => {
+    if (!tableControlsEnabled || pipelineLoadState !== "success") return;
+    const lastPage = Math.max(1, Math.ceil(leadsTotal / filters.pageSize));
+    if (filters.page > lastPage)
+      setFilters((current) => ({ ...current, page: lastPage }));
+  }, [
+    tableControlsEnabled,
+    pipelineLoadState,
+    leadsTotal,
+    filters.page,
+    filters.pageSize,
+    setFilters,
+  ]);
   const loadSources = useCallback(async ({ silent = false } = {}) => {
     try {
       if (!silent) setLoadError(null);
@@ -1189,6 +1304,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // `bySource` via loadAnalytics, so this avoids double-running the expensive
   // calculateAllSourceROI on those tabs.
   const loadSourceROI = useCallback(async () => {
+    const requestId = ++sourceRoiRequestRef.current;
+    if (feedbackEnabledRef.current) {
+      setSourceRoiRead({ loading: true, error: null });
+    }
     try {
       // include_inactive: the Sources table lists inactive sources too and needs
       // their ROI. The Analytics tab (loadAnalytics) calls without it, so its
@@ -1196,9 +1315,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       const bs = await adminFetch(
         "/admin/leads/analytics/by-source?include_inactive=1",
       );
+      if (requestId !== sourceRoiRequestRef.current) return;
       setSourcesRoi(bs.sources || []);
     } catch (e) {
+      if (requestId !== sourceRoiRequestRef.current) return;
       console.error("loadSourceROI", e);
+      if (feedbackEnabledRef.current) {
+        setSourceRoiRead({ loading: false, error: e });
+      } else {
+        setSourceRoiRead({ loading: false, error: null });
+      }
+      return;
+    }
+    if (requestId === sourceRoiRequestRef.current) {
+      setSourceRoiRead({ loading: false, error: null });
     }
   }, []);
   const loadAnalytics = useCallback(async ({ silent = false } = {}) => {
@@ -1537,9 +1667,45 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // PIPELINE TAB
   // ═════════════════════════════════════════════════════════════════════════
   const renderPipeline = () => {
-    const draggingLead = draggingLeadId
-      ? leads.find((lead) => lead.id === draggingLeadId)
-      : null;
+    const draggingLead = leads.find((lead) => lead.id === draggingLeadId);
+    const resetLeadFilters = () => {
+      setFilters({
+        status: "open",
+        search: "",
+        sort: "first_contact_at",
+        page: 1,
+        pageSize: 50,
+      });
+      setSourcePeriodLabel("");
+    };
+    const canResetLeadFilters = [
+      filters.status !== "open",
+      filters.search,
+      filters.sort !== "first_contact_at",
+      filters.pageSize !== 50,
+      filters.source_name,
+      filters.start_date,
+      filters.end_date,
+      filters.builder_warranty,
+    ].some(Boolean);
+    const columnMode = tableControlsEnabled
+      ? "preview"
+      : compactQueue
+        ? "compact"
+        : "full";
+    const renderedColumnIds = {
+      preview: visibleLeadColumns,
+      compact: ["identity", "status"],
+      full: ALL_LEAD_TABLE_COLUMNS,
+    }[columnMode];
+    const renderedColumns = LEAD_TABLE_COLUMNS.filter((column) =>
+      renderedColumnIds.includes(column.id),
+    );
+    const renderedColumnSet = new Set(renderedColumnIds);
+    const renderedColumnWidth = renderedColumns.reduce(
+      (sum, column) => sum + column.width,
+      0,
+    );
     const handleBoardDrop = (event, stage) => {
       event.preventDefault();
       const droppedId = event.dataTransfer.getData("text/plain");
@@ -1547,73 +1713,118 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage, lead.status, lead.updated_at);
       setDraggingLeadId(null);
     };
+    const viewSwitcher = (
+      <div
+        role="group"
+        aria-label="Lead view"
+        className="hidden gap-[4px] md:flex"
+      >
+        {LEAD_VIEWS.map((view) => (
+          <Button
+            key={view.value}
+            onClick={() => setPipelineView(view.value)}
+            aria-pressed={pipelineView === view.value}
+            variant={pipelineView === view.value ? "primary" : "secondary"}
+          >
+            {view.label}
+          </Button>
+        ))}
+      </div>
+    );
+    const hasLegacyActiveFilters = [
+      filters.status !== "open",
+      filters.source_name,
+      filters.builder_warranty,
+      filters.sort !== "first_contact_at",
+    ].some(Boolean);
+    const legacyFilterMarker = hasLegacyActiveFilters && (
+      <span
+        aria-label="Active filters"
+        className="h-[6px] w-[6px] rounded-sm bg-white"
+      />
+    );
+    const previewColumnPicker = tableControlsEnabled && (
+      <TableColumnPicker
+        label="Leads"
+        columns={LEAD_TABLE_COLUMNS}
+        visibleColumns={visibleLeadColumns}
+        onChange={setVisibleLeadColumns}
+      />
+    );
+    const filterButton = (
+      <Button
+        onClick={() => setFiltersOpen((open) => !open)}
+        aria-expanded={filtersOpen}
+        aria-controls="lead-queue-filters"
+        variant={tableControlsEnabled ? "secondary" : "primary"}
+        className="inline-flex gap-[6px] items-center"
+      >
+        <SlidersHorizontal size={18} aria-hidden /> Filters
+        {!tableControlsEnabled && legacyFilterMarker}
+      </Button>
+    );
+    const queueActions = (
+      <>
+        {filterButton}
+        {previewColumnPicker}
+        {viewSwitcher}
+      </>
+    );
+    const queueToolbar = tableControlsEnabled ? (
+      <TableToolbar
+        label="Leads"
+        search={filters.search}
+        onSearchChange={(search) =>
+          setFilters((current) => ({ ...current, search, page: 1 }))
+        }
+        searchPlaceholder="Search leads"
+        onReset={resetLeadFilters}
+        canReset={canResetLeadFilters}
+      >
+        {queueActions}
+      </TableToolbar>
+    ) : (
+      <div className="flex gap-[8px] items-center flex-wrap">
+        <div className="relative flex-[1_1_180px] min-w-[0px]">
+          <Search
+            size={18}
+            aria-hidden
+            className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-ink-secondary"
+          />
+          <Input
+            type="search"
+            aria-label="Search leads"
+            placeholder="Search leads"
+            value={filters.search}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                search: event.target.value,
+                page: 1,
+              }))
+            }
+            className="w-full pl-10"
+          />
+        </div>
+        {queueActions}
+      </div>
+    );
+    const pipelineResultText = {
+      loading: "Loading leads…",
+      error: "Lead results unavailable",
+      success:
+        leadsTotal === 0
+          ? "No matching leads"
+          : `${(filters.page - 1) * filters.pageSize + 1}–${Math.min(filters.page * filters.pageSize, leadsTotal)} of ${leadsTotal} matching leads`,
+    }[pipelineLoadState];
     return (
       <>
         <div className="mb-[16px]">
-          <div className="flex gap-[8px] items-center flex-wrap">
-            <div className="relative flex-[1_1_180px] min-w-[0px]">
-              <Search
-                size={18}
-                aria-hidden
-                className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-ink-secondary"
-              />
-              <Input
-                type="search"
-                aria-label="Search leads"
-                placeholder="Search leads"
-                value={filters.search}
-                onChange={(event) =>
-                  setFilters((f) => ({
-                    ...f,
-                    search: event.target.value,
-                    page: 1,
-                  }))
-                }
-                className="w-full pl-10"
-              />
-            </div>
-            <Button
-              onClick={() => setFiltersOpen((open) => !open)}
-              aria-expanded={filtersOpen}
-              aria-controls="lead-queue-filters"
-              variant="primary"
-              className="inline-flex gap-[6px] items-center"
-            >
-              <SlidersHorizontal size={18} aria-hidden /> Filters
-              {(filters.status !== "open" ||
-                filters.source_name ||
-                filters.builder_warranty ||
-                filters.sort !== "first_contact_at") && (
-                <span
-                  aria-label="Active filters"
-                  className="h-[6px] w-[6px] rounded-sm bg-white"
-                />
-              )}
-            </Button>
-            {!isMobile && (
-              <div
-                role="group"
-                aria-label="Lead view"
-                className="flex gap-[4px]"
-              >
-                {["table", "board"].map((view) => (
-                  <Button
-                    key={view}
-                    onClick={() => setPipelineView(view)}
-                    aria-pressed={pipelineView === view}
-                    variant={pipelineView === view ? "primary" : "secondary"}
-                  >
-                    {view === "table" ? "List" : "Board"}
-                  </Button>
-                ))}
-              </div>
-            )}
-          </div>
-          {(filtersOpen || !isMobile) && (
-            <div
-              id="lead-queue-filters"
-              className="flex flex-wrap items-end gap-[12px] mt-[12px]"
-            >
+          {queueToolbar}
+          <div
+            id="lead-queue-filters"
+            className={`flex flex-wrap items-end gap-[12px] mt-[12px] ${filtersOpen ? "" : "hidden md:flex"}`}
+          >
               <LeadField
                 label="Stage"
                 value={filters.status || "all"}
@@ -1672,63 +1883,39 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   },
                 ]}
               />
-              {isMobile && (
+              <div className="md:hidden">
                 <LeadField
                   label="View"
                   value={pipelineView}
                   onChange={setPipelineView}
-                  options={[
-                    {
-                      value: "table",
-                      label: "List",
-                    },
-                    {
-                      value: "board",
-                      label: "Board",
-                    },
-                  ]}
+                  options={LEAD_VIEWS}
                 />
+              </div>
+              <p className="text-ui-body">
+                {[
+                  filters.source_name,
+                  sourcePeriodLabel,
+                  BUILDER_WARRANTY_FILTER_LABELS[filters.builder_warranty],
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+              {!tableControlsEnabled && (
+                <Button
+                  onClick={resetLeadFilters}
+                  variant="secondary"
+                  className="mb-[12px]"
+                >
+                  Reset filters
+                </Button>
               )}
-              {(filters.source_name || filters.builder_warranty) && (
-                <p className="text-ui-body">
-                  {[
-                    filters.source_name,
-                    sourcePeriodLabel,
-                    filters.builder_warranty && "Builder warranty expiring",
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </p>
-              )}
-              <Button
-                onClick={() => {
-                  setFilters({
-                    status: "open",
-                    search: "",
-                    sort: "first_contact_at",
-                    page: 1,
-                  });
-                  setSourcePeriodLabel("");
-                }}
-                variant="secondary"
-                className="mb-[12px]"
-              >
-                Reset filters
-              </Button>
-            </div>
-          )}
+          </div>
           <div
             role="status"
             aria-live="polite"
             className="mt-[12px] text-ink-secondary text-ui-body"
           >
-            {pipelineLoadState === "loading"
-              ? "Loading leads…"
-              : pipelineLoadState === "error"
-                ? "Lead results unavailable"
-                : leadsTotal === 0
-                  ? "No matching leads"
-                  : `${(filters.page - 1) * 50 + 1}–${Math.min(filters.page * 50, leadsTotal)} of ${leadsTotal} matching leads`}
+            {pipelineResultText}
             {pipelineView === "board" ? " · column counts show this page" : ""}
           </div>
         </div>
@@ -1741,35 +1928,35 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             Loading leads…
           </Card>
         )}
-        {pipelineLoadState === "success" && pipelineView === "table" && (
+        {pipelineLoadState === "success" && ({
+          table: (
           <>
             {/* Leads Table */}
             <Card className="p-[0px]">
               {" "}
-              <Table className="lead-queue-table table-fixed" layout="records">
-                {!compactQueue && (
-                  <colgroup>
-                    {[26, 13, 19, 8, 18, 10, 6].map((width, index) => (
-                      <col key={index} style={{ width: `${width}%` }} />
+              <Table
+                className="lead-queue-table table-fixed"
+                data-table-controls={tableControlsEnabled}
+                layout="records"
+              >
+                  <colgroup className="hidden xl:table-column-group">
+                    {renderedColumns.map((column) => (
+                      <col
+                        key={column.id}
+                        style={{
+                          width: `${(column.width / renderedColumnWidth) * 100}%`,
+                        }}
+                      />
                     ))}
                   </colgroup>
-                )}
-                <THead className={compactQueue ? "hidden" : ""}>
+                <THead className="hidden xl:table-header-group">
                   <TR>
-                    {(compactQueue
-                      ? ["Name / Phone", "Status"]
-                      : [
-                          "Name / Phone",
-                          "Source",
-                          "Service",
-                          "Urgency",
-                          "Status",
-                          "Response",
-                          "Actions",
-                        ]
-                    ).map((h) => (
-                      <TH key={h} className="text-left text-ink-secondary">
-                        {h}
+                    {renderedColumns.map((column) => (
+                      <TH
+                        key={column.id}
+                        className="text-left text-ink-secondary"
+                      >
+                        {column.label}
                       </TH>
                     ))}
                   </TR>
@@ -1783,7 +1970,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                           className={`lead-queue-record cursor-pointer ${isExpanded ? "bg-zinc-50" : ""}`}
                           onClick={() => expandLead(lead)}
                         >
-                          <TD>
+                          {[
+                            ["identity", <TD key="identity">
                             {" "}
                             <div className="flex flex-wrap items-center gap-[8px]">
                               {" "}
@@ -1806,7 +1994,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                             <div className="text-ink-secondary text-ui-body">
                               {lead.phone || lead.email || "--"}
                             </div>{" "}
-                            {compactQueue && lead.service_interest && (
+                            {compactQueue &&
+                              !tableControlsEnabled &&
+                              lead.service_interest && (
                               <div className="text-zinc-900 text-ui-body" title={lead.service_interest}>
                                 {leadServiceName(lead)}
                               </div>
@@ -1821,10 +2011,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 ? `Follow up ${fmtShortDate(lead.next_follow_up_at)}`
                                 : `Added ${fmtShortDate(lead.first_contact_at)}`}
                             </div>
-                          </TD>
-                          {!compactQueue && (
-                            <>
-                              <TD>
+                            </TD>],
+                            ["source", <TD key="source" data-label="Source">
                                 {lead.source_name ? (
                                   <LeadBadge
                                     label={lead.source_name}
@@ -1835,19 +2023,19 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     --
                                   </span>
                                 )}
-                              </TD>
-                              <TD className="text-zinc-900" title={lead.service_interest || undefined}>
-                                {leadServiceName(lead) || "--"}
-                                {lead.builder_warranty_expires_on && (
-                                  <LeadBadge
-                                    label={`warranty exp ${String(lead.builder_warranty_expires_on).slice(0, 10)}`}
-                                    tone={"neutral"}
-                                    className="ml-[6px]"
-                                  />
-                                )}
-                              </TD>
-                              <TD>
-                                {" "}
+                            </TD>],
+                            ["service", <TD key="service" data-label="Service" className="text-zinc-900" title={lead.service_interest || undefined}>
+                                <div className="flex flex-wrap items-center gap-[6px]">
+                                  <span>{leadServiceName(lead) || "--"}</span>
+                                  {lead.builder_warranty_expires_on && (
+                                    <LeadBadge
+                                      label={`warranty exp ${String(lead.builder_warranty_expires_on).slice(0, 10)}`}
+                                      tone={"neutral"}
+                                    />
+                                  )}
+                                </div>
+                            </TD>],
+                            ["urgency", <TD key="urgency" data-label="Urgency">
                                 <LeadBadge
                                   label={lead.urgency || "normal"}
                                   tone={
@@ -1865,12 +2053,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       ? "!bg-zinc-600/15 !text-zinc-600"
                                       : undefined
                                   }
-                                />{" "}
-                              </TD>
-                            </>
-                          )}
-                          <TD onClick={(e) => e.stopPropagation()}>
-                            {" "}
+                                />
+                            </TD>],
+                            ["status", <TD
+                            key="status"
+                            data-label={tableControlsEnabled ? "Status" : undefined}
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             <Select
                               aria-label={`Stage for ${[lead.first_name, lead.last_name].filter(Boolean).join(" ") || "lead"}`}
                               value={lead.status}
@@ -1886,10 +2075,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 </option>
                               ))}
                             </Select>{" "}
-                          </TD>
-                          {!compactQueue && (
-                            <>
-                              <TD
+                            </TD>],
+                            ["response", <TD
+                                key="response"
+                                data-label="Response"
                                 className={
                                   lead.response_time_minutes != null
                                     ? lead.response_time_minutes < 15
@@ -1909,8 +2098,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 ) : (
                                   fmtTime(lead.response_time_minutes)
                                 )}
-                              </TD>
-                              <TD onClick={(e) => e.stopPropagation()}>
+                            </TD>],
+                            ["actions", <TD
+                                key="actions"
+                                data-label={tableControlsEnabled ? "Actions" : undefined}
+                                onClick={(e) => e.stopPropagation()}
+                              >
                                 <Button
                                   onClick={() => expandLead(lead)}
                                   aria-expanded={isExpanded}
@@ -1919,14 +2112,17 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 >
                                   Open
                                 </Button>
-                              </TD>
-                            </>
-                          )}
+                            </TD>],
+                          ]
+                            .filter(([columnId]) =>
+                              renderedColumnSet.has(columnId),
+                            )
+                            .map(([, cell]) => cell)}
                         </TR>
                         {isExpanded && (
                           <TR>
                             <TD
-                              colSpan={compactQueue ? 2 : 7}
+                              colSpan={renderedColumns.length}
                               className="p-[0px]"
                             >
                               {" "}
@@ -2686,6 +2882,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         onClick={() => {
                                           setFormData({
                                             leadId: lead.id,
+                                            // Opens on the current assignee; "-- Select --" ('')
+                                            // sends an explicit unassign, never a missing key.
+                                            technician_id: lead.assigned_to || "",
                                           });
                                           setShowModal("assign");
                                         }}
@@ -2802,6 +3001,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     <div className="flex gap-[8px] mb-[8px]">
                                       <Input
                                         type="date"
+                                        // The server refuses a day that has passed (ET).
+                                        min={etDateString()}
                                         value={apptForm.date}
                                         onChange={(e) =>
                                           setApptForm((prev) => ({
@@ -2887,7 +3088,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         <option value="">— Unassigned —</option>
                                         {techs.map((t) => (
                                           <option key={t.id} value={t.id}>
-                                            {t.first_name} {t.last_name || ""}
+                                            {t.name}
                                           </option>
                                         ))}
                                       </Select>
@@ -2904,9 +3105,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       className="w-full min-h-[40px] resize-y box-border mb-[8px]"
                                     />
                                     <div className="text-ui-body text-ink-secondary mb-[8px]">
-                                      Saving creates a customer from this lead
-                                      (if not already linked) and marks the lead
-                                      won.
+                                      {/* The server books a Waves Assessment without
+                                          winning the lead (owner ruling 2026-09-08). */}
+                                      {isConsultationVisit({
+                                        serviceType: apptForm.serviceType,
+                                      })
+                                        ? "Saving creates a customer from this lead (if not already linked) and books the assessment. It does not mark the lead won; the lead converts when a quote is accepted or a paid service books."
+                                        : "Saving creates a customer from this lead (if not already linked) and marks the lead won."}
                                     </div>
                                     <div className="flex gap-[8px]">
                                       <Button
@@ -3108,7 +3313,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   {leads.length === 0 && (
                     <TR>
                       <TD
-                        colSpan={compactQueue ? 2 : 7}
+                        colSpan={renderedColumns.length}
                         className="p-[40px] text-center text-ink-secondary"
                       >
                         No leads found
@@ -3119,9 +3324,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               </Table>{" "}
             </Card>
           </>
-        )}
-
-        {pipelineLoadState === "success" && pipelineView === "board" && (
+          ),
+          board: (
           <div
             role="region"
             aria-label="Lead board"
@@ -3267,40 +3471,58 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               );
             })}
           </div>
-        )}
+          ),
+        }[pipelineView])}
         {/* Pagination */}
-        {pipelineLoadState === "success" && leadsTotal > 50 && (
-          <div className="flex justify-center gap-[8px] mt-[16px]">
-            {" "}
-            <Button
-              variant="secondary"
-              disabled={filters.page <= 1}
-              onClick={() =>
-                setFilters((f) => ({
-                  ...f,
-                  page: f.page - 1,
-                }))
+        {pipelineLoadState === "success" && (
+          tableControlsEnabled ? (
+            <TablePagination
+              label="Leads"
+              page={filters.page}
+              totalPages={Math.ceil(leadsTotal / filters.pageSize)}
+              total={leadsTotal}
+              pageSize={filters.pageSize}
+              itemLabel="leads"
+              pageSizeOptions={LEAD_PAGE_SIZES}
+              onPageChange={(page) =>
+                setFilters((current) => ({ ...current, page }))
               }
-            >
-              Prev
-            </Button>{" "}
-            <span className="text-ink-secondary text-ui-body self-center">
-              Page {filters.page} of {Math.ceil(leadsTotal / 50)}
-            </span>{" "}
-            <Button
-              variant="secondary"
-              disabled={filters.page >= Math.ceil(leadsTotal / 50)}
-              onClick={() =>
-                setFilters((f) => ({
-                  ...f,
-                  page: f.page + 1,
-                }))
+              onPageSizeChange={(pageSize) =>
+                setFilters((current) => ({ ...current, pageSize, page: 1 }))
               }
-            >
-              Next
-            </Button>{" "}
-          </div>
-        )}
+            />
+          ) : leadsTotal > 50 && (
+            <div className="flex justify-center gap-[8px] mt-[16px]">
+              {" "}
+              <Button
+                variant="secondary"
+                disabled={filters.page <= 1}
+                onClick={() =>
+                  setFilters((f) => ({
+                    ...f,
+                    page: f.page - 1,
+                  }))
+                }
+              >
+                Prev
+              </Button>{" "}
+              <span className="text-ink-secondary text-ui-body self-center">
+                Page {filters.page} of {Math.ceil(leadsTotal / 50)}
+              </span>{" "}
+              <Button
+                variant="secondary"
+                disabled={filters.page >= Math.ceil(leadsTotal / 50)}
+                onClick={() =>
+                  setFilters((f) => ({
+                    ...f,
+                    page: f.page + 1,
+                  }))
+                }
+              >
+                Next
+              </Button>{" "}
+            </div>
+          ))}
       </>
     );
   };
@@ -3309,24 +3531,68 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // SOURCES TAB
   // ═════════════════════════════════════════════════════════════════════════
   const [expandedSource, setExpandedSource] = useState(null);
-  const [sourceROI, setSourceROI] = useState(null);
+  const expandedSourceRef = useRef(null);
+  const [sourceDetails, setSourceDetails] = useState({});
+  const [sourceDetailRead, setSourceDetailRead] = useState({
+    sourceId: null,
+    loading: false,
+    error: null,
+  });
+  const sourceDetailRequestRef = useRef(0);
+  const loadSourceDetail = async (sourceId) => {
+    const requestId = ++sourceDetailRequestRef.current;
+    if (feedbackEnabledRef.current) {
+      setSourceDetailRead({ sourceId, loading: true, error: null });
+    }
+    try {
+      const data = await adminFetch(`/admin/leads/sources/${sourceId}`);
+      if (
+        requestId !== sourceDetailRequestRef.current ||
+        expandedSourceRef.current !== sourceId
+      ) {
+        return;
+      }
+      setSourceDetails((current) => ({ ...current, [sourceId]: data }));
+      setSourceDetailRead({ sourceId, loading: false, error: null });
+    } catch (e) {
+      if (
+        requestId !== sourceDetailRequestRef.current ||
+        expandedSourceRef.current !== sourceId
+      ) {
+        return;
+      }
+      if (feedbackEnabledRef.current) {
+        console.error("loadSourceDetail", e);
+        setSourceDetailRead({ sourceId, loading: false, error: e });
+      } else {
+        setSourceDetails((current) => {
+          if (!Object.prototype.hasOwnProperty.call(current, sourceId))
+            return current;
+          const next = { ...current };
+          delete next[sourceId];
+          return next;
+        });
+        setSourceDetailRead({ sourceId, loading: false, error: null });
+      }
+    }
+  };
   const expandSource = async (source) => {
     if (expandedSource === source.id) {
+      sourceDetailRequestRef.current += 1;
+      expandedSourceRef.current = null;
       setExpandedSource(null);
       return;
     }
+    expandedSourceRef.current = source.id;
     setExpandedSource(source.id);
-    try {
-      const data = await adminFetch(`/admin/leads/sources/${source.id}`);
-      setSourceROI(data);
-    } catch (e) {
-      setSourceROI(null);
-    }
+    await loadSourceDetail(source.id);
   };
   const renderSources = () => {
     // Real revenue-based ROI per source from /analytics/by-source (same backend
     // as Channel Comparison / ROI Matrix / Phone Number ROI), keyed by id.
     const roiBySourceId = new Map(sourcesRoi.map((b) => [b.source?.id, b]));
+    const expandedDetail =
+      roiBySourceId.get(expandedSource) || sourceDetails[expandedSource];
     return (
       <>
         {" "}
@@ -3350,6 +3616,21 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             </Button>{" "}
           </div>{" "}
         </div>{" "}
+        <SourceReadFeedback
+          enabled={feedbackEnabled}
+          read={sourceRoiRead}
+          hasData={sourcesRoi.length > 0}
+          kind="roi"
+          onRetry={loadSourceROI}
+        />
+        <SourceReadFeedback
+          enabled={feedbackEnabled}
+          active={sourceDetailRead.sourceId === expandedSource}
+          read={sourceDetailRead}
+          hasData={Boolean(expandedDetail)}
+          kind="detail"
+          onRetry={() => loadSourceDetail(expandedSource)}
+        />
         <Card className="p-[0px] overflow-auto">
           {" "}
           <Table className="w-full min-w-[900px]">
@@ -3405,7 +3686,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 // Expanded-row totals come from the globally-attributed table row
                 // (r) so they agree with the row above; /sources/:id (sourceROI)
                 // has no winner map and would show un-attributed revenue.
-                const detail = r || sourceROI;
+                const detail = r || sourceDetails[src.id];
                 const isExp = expandedSource === src.id;
                 return (
                   <React.Fragment key={src.id}>
@@ -4464,7 +4745,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             }
             options={techs.map((t) => ({
               value: t.id,
-              label: `${t.first_name} ${t.last_name || ""}`,
+              label: t.name,
             }))}
           />{" "}
           <Button onClick={submitForm} disabled={loading} variant={"primary"}>
@@ -4655,7 +4936,18 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           .lead-queue-record > td:last-child { padding-top: 8px !important; }
           .lead-queue-record select { width: 100%; }
           .lead-queue-table > tbody > tr:not(.lead-queue-record) > td > div { padding: 16px !important; }
+          .lead-queue-table[data-table-controls="true"] .lead-queue-record > td[data-label] {
+            display: grid !important;
+            grid-template-columns: 116px minmax(0, 1fr);
+            column-gap: 12px;
+          }
+          .lead-queue-table[data-table-controls="true"] .lead-queue-record > td[data-label]::before {
+            content: attr(data-label);
+            color: #71717a;
+            text-align: left;
+          }
         }
+        .lead-queue-table[data-table-controls="true"] td { overflow-wrap: normal; }
       `}</style>
       <LeadsWorkspaceNav
         active={tab}

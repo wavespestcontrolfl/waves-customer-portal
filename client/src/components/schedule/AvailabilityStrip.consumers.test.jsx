@@ -227,7 +227,8 @@ it('open times, Quick Move: asks for the box on the visit\'s own route', async (
   hooks.availability = openTimesAt();
   render(<RainOutSheet service={{ id: 'svc-1', technicianId: 'tech-1', customerId: 'cust-1', scheduledDate: '2035-01-01' }} onClose={vi.fn()} onDone={vi.fn()} />);
   await screen.findByTestId('open-times-box');
-  expect(hooks.bestTimesArgs).toMatchObject({ openTimes: true, technicianId: 'tech-1' });
+  // The server decides whether Quick Move gets the route check (GATE_PICKER_ROAD_CHECK).
+  expect(hooks.bestTimesArgs).toMatchObject({ openTimes: true, technicianId: 'tech-1', quickMove: true });
   expect(hooks.bestTimesArgs.techPick).toBeFalsy();
 });
 
@@ -255,4 +256,23 @@ it('open times, New Appointment: every route is listed, and a row books its tech
   fireEvent.click(screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('11 AM')));
   // The row took the date, the hour and its technician: it is the booking's time now.
   await waitFor(() => expect(screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('11 AM'))).toHaveAttribute('aria-pressed', 'true'));
+});
+
+// GATE_ROUTE_CHECK_LATE_DAYS: a Quick Move day whose booked stops already arrive late is offered with a small tag.
+it('rain-out: a day option the server marks dayAlreadyLate shows the "already late" tag; the other day shows none', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/rain-out-options')
+    ? json({
+      sameDay: [],
+      days: [
+        { kind: 'day', date: DATE, window: { start: '15:00', end: '16:00' }, display: 'Late day, 3:00 PM-4:00 PM', dayAlreadyLate: true },
+        { kind: 'day', date: '2035-01-03', window: { start: '09:00', end: '10:00' }, display: 'Clean day, 9:00 AM-10:00 AM' },
+      ],
+      service: { window: { start: '08:00', end: '09:00' } },
+    })
+    : json({}))));
+  render(<RainOutSheet service={{ id: 'svc-1', technicianId: 'tech-1', customerId: 'cust-1', scheduledDate: '2035-01-01' }} onClose={vi.fn()} onDone={vi.fn()} />);
+  const late = (await screen.findByText(/Late day/)).closest('button');
+  expect(late).toHaveTextContent('already late');
+  expect(screen.getByText(/Clean day/).closest('button')).not.toHaveTextContent('already late');
+  expect(screen.getAllByTestId('already-late-tag')).toHaveLength(1);
 });

@@ -5,9 +5,13 @@
  * snapshotted into auto_dispatch_runs.config_snapshot on every run so a past
  * run's behavior is always reconstructable even after the env changes.
  *
- * Safety posture: dry_run by default, lock window 14 days, capped changes per
- * run, customer notifications OFF (the move itself is silent — comms are a
- * separate, gated step).
+ * Safety posture: dry_run by default, capped changes per run, customer
+ * notifications OFF (the move itself is silent — comms are a separate, gated
+ * step). The day-move guard (guardMode) is one of three: 'legacy' = the flat
+ * lock window (lockWindowDays, 14 days by default); 'tiers' (GATE_ROUTE_TIERS) =
+ * the days-out tier ladder with a 5-day destination floor; 'flex'
+ * (GATE_AUTO_DISPATCH_FLEX_TIER, wins over tiers) = a 73-hour freeze and a
+ * 5-day destination floor.
  */
 
 function intEnv(name, def, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -97,6 +101,17 @@ function isRoadCheckEnabled() {
   }
 }
 
+// GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28, Google cost "way too
+// high"): same convention. Only road-check.js deferredToApply() acts on it.
+function isRoadCheckAtApplyEnabled() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  try {
+    return gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY');
+  } catch {
+    return false;
+  }
+}
+
 // GATE_AUTO_DISPATCH_PROOFREADER: same call-time, fail-closed convention.
 function isProofreaderEnabled() {
   const { gateEnvValue } = require('../../config/feature-gates');
@@ -174,6 +189,10 @@ function moveRuleConfig(overrides) {
     roadCheckEnabled: overrides.roadCheckEnabled ?? isRoadCheckEnabled(),
     roadCheckMaxElements: overrides.roadCheckMaxElements
       ?? intEnv('AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS', 600, { min: 0, max: 5000 }),
+    // GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY: in apply mode, pass 1 judges on
+    // the model and Google is asked only in pass 2, for a move about to be
+    // written (never for a cap-held one). Dry runs keep today's behavior.
+    roadCheckAtApply: overrides.roadCheckAtApply ?? isRoadCheckAtApplyEnabled(),
     // MOVE PROOFREADER (GATE_AUTO_DISPATCH_PROOFREADER, proofreader/nightly.js;
     // owner 2026-10-12): one model reads the customer record before a move in
     // apply mode. Allow moves the visit; hold and unknown leave it, and an

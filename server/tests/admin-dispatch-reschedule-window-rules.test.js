@@ -217,6 +217,15 @@ test('an on-the-hour window opts into the same staff arrival check for a one-off
   expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ overlapAdvisory: true, adminWindowRules: true });
 });
 
+// GATE_SAVE_ROAD_BUY: an admin's move hands the rebooker its staff user as the
+// road-time spender (single and series); the rebooker buys before its transaction.
+test('an admin move carries the staff spender to the rebooker, single and series', async () => {
+  await reschedule({ newDate: TARGET, newWindow: '09:00-10:00' });
+  expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ roadSpender: 'staff-1' });
+  await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', scope: 'series' });
+  expect(SmartRebooker.rescheduleSeries.mock.calls[0][5]).toMatchObject({ roadSpender: 'staff-1' });
+});
+
 test('a SUPPLIED but malformed window (truncated range / end-only object / {}) is 422, never a silent date-only move', async () => {
   for (const bad of ['09:00-', '9am-10am', { end: '10:00' }, {}]) {
     const { status, body } = await reschedule({ newDate: TARGET, newWindow: bad });
@@ -375,6 +384,8 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
       // Staff surface — occupancy clashes commit with a warning (owner
       // ruling 2026-08-25, rebooker.overlapAdvisory).
       overlapAdvisory: true,
+      // GATE_SAVE_ROAD_BUY: the admin's staff id; the rebooker buys road times with it.
+      roadSpender: 'staff-1',
       // The anchor state this route's window resolution read, pinned through
       // the series writer's existing expectAnchor fence.
       expectAnchor: { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null },

@@ -21,6 +21,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: jest.fn(),
   cancelPaymentIntent: jest.fn(async () => ({ status: 'canceled' })),
@@ -38,7 +39,6 @@ jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async 
 jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => undefined) }));
-jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 jest.mock('../services/payment-plans', () => ({ completeActivePlansForInvoice: jest.fn(async () => undefined) }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn(async () => true) }));
@@ -63,7 +63,8 @@ function recorder({ first = null, returning = [] } = {}) {
   ['where', 'whereIn', 'whereNotIn', 'andWhere', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.update = jest.fn(() => q);
-  q.insert = jest.fn(async () => undefined);
+  // insert() is awaited bare (most callers) or chained to returning() (the payments row, whose id the Undo marker names).
+  q.insert = jest.fn(() => Object.assign(Promise.resolve(undefined), { returning: jest.fn(async () => [{ id: 'pay-1' }]) }));
   q.returning = jest.fn(async () => returning);
   return q;
 }
@@ -533,22 +534,16 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
   const card = (over = {}) => openInvoice({ updated_at: SEEN, ...over });
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
-  // `projects` / `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onRelease = null, projects = [], termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
-    const calls = { update: null, updateArgs: null, paymentsInsert: null, projectsLocked: false };
+  // `terms` feed the fence's own lookups on the plain connection and on the trx.
+  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
+    const calls = { update: null, updateArgs: null, paymentsInsert: null };
     const answer = (table, row) => {
-      if (table === 'projects') {
-        const r = recorder();
-        r.forUpdate = jest.fn(() => { calls.projectsLocked = true; return r; });
-        r.select = jest.fn(async () => projects);
-        return r;
-      }
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
       return null || row;
     };
     db.mockImplementation((table) => {
       if (table === 'invoices') return recorder({ first: { ...pre } });
-      if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
+      if (table === 'annual_prepay_terms') return answer(table);
       if (table === 'scheduled_services') return recorder({ first: visit });
       if (table === 'time_entries') return recorder({ first: timer });
       if (table === 'activity_log') return recorder();
@@ -568,7 +563,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
         if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
         if (table === 'scheduled_services') return recorder({ first: visit });
         if (table === 'time_entries') return recorder({ first: timer });
-        if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
+        if (table === 'annual_prepay_terms') return answer(table);
         throw new Error(`unexpected trx table ${table}`);
       });
       trx.fn = { now: () => 'NOW()' };
@@ -590,6 +585,32 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(fence.mock.calls[1][0]).toEqual(expect.any(Function));
       expect(fence.mock.calls[1][1]).toMatchObject({ id: 'inv-1', status: 'sent' });
       expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+
+    test('writes the completion marker last, after every post-commit effect, naming the same ledger row', async () => {
+      const { recordAuditEvent } = require('../services/audit-log');
+      settle();
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
+      const actions = recordAuditEvent.mock.calls.map(([event]) => event.action);
+      expect(actions).toEqual(['invoice.manual_payment_recorded', 'invoice.manual_payment_effects_done']);
+      expect(recordAuditEvent.mock.calls[1][0]).toMatchObject({ resource_id: 'inv-1', metadata: { paymentId: 'pay-1' } });
+      expect(recordAuditEvent.mock.calls[1][0].trx).toBeUndefined();
+    });
+
+    test('writes the Undo marker in the settlement transaction: the ledger row id, the tender, who recorded it and the pre-payment values', async () => {
+      settle({ locked: card({ status: 'viewed', notes: 'Seed note' }) });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, recordedBy: 'Synthetic Office' });
+      expect(require('../services/audit-log').recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'invoice.manual_payment_recorded',
+        resource_type: 'invoices',
+        resource_id: 'inv-1',
+        critical: true,
+        trx: expect.any(Function),
+        metadata: expect.objectContaining({
+          paymentId: 'pay-1', method: 'check', automated: false, recordedBy: 'Synthetic Office',
+          previous: expect.objectContaining({ status: 'viewed', notes: 'Seed note', paid_at: null }),
+        }),
+      }));
     });
 
     test('a stale card refuses BEFORE the open card session is retired (edit time compared on the plain read)', async () => {
@@ -658,32 +679,6 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
       expect(out.invoice).toBeDefined();
       expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
-    });
-
-    test.each(['held', 'releasing'])('a %s report that appeared by the lock refuses and rolls back; the project rows are locked FOR UPDATE', async (status) => {
-      const calls = settle({ projects: [{ id: 'p1', report_hold_status: status }] });
-      const fence = settlementFenceFor(pin());
-      // The plain-connection run sees the report too, so the Stripe session is never retired for it.
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence }));
-      expect(err).toMatchObject({ statusCode: 409, drift: true });
-      expect(err.message).toMatch(/releases a held report to the customer/);
-      expect(calls.paymentsInsert).toBeNull();
-      expect(require('../services/project-report-hold').scheduleHoldReleaseSweep).not.toHaveBeenCalled();
-    });
-
-    test('the lock-time report check locks the project rows, and a released or absent report records', async () => {
-      const calls = settle({ projects: [{ id: 'p1', report_hold_status: 'released' }, { id: 'p2', report_hold_status: null }] });
-      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
-      expect(calls.projectsLocked).toBe(true);
-      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
-    });
-
-    test('a report lookup that throws aborts the settlement and records nothing (fail closed)', async () => {
-      const calls = settle();
-      const base = db.getMockImplementation();
-      db.mockImplementation((table) => { if (table === 'projects') throw new Error('column report_hold_status does not exist'); return base(table); });
-      await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) })).rejects.toThrow(/report_hold_status/);
-      expect(calls.paymentsInsert).toBeNull();
     });
 
     test.each([

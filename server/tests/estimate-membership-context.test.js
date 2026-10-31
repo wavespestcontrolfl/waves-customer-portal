@@ -7,18 +7,32 @@
 // real test-env behavior (all gates dark); the extension suite flips ONLY
 // waveguardExtendExisting.
 let mockExtendExistingGate = false;
+let mockLawnRoundsGate = false;
 let mockAutoTierGate = false;
 jest.mock('../config/feature-gates', () => ({
+  // The real adapter and engine (tick-list margins) read the named gate
+  // helpers too: those stay real, so dark in the test env.
+  ...jest.requireActual('../config/feature-gates'),
   isEnabled: (gate) => {
     if (gate === 'waveguardExtendExisting') return mockExtendExistingGate;
+    if (gate === 'lawn9xRounds') return mockLawnRoundsGate;
     if (gate === 'autoWaveguardTierEnroll') return mockAutoTierGate;
     return false;
   },
 }));
+// The tick list's margin re-prices the setup estimate on today's engine: the
+// translator and the engine are spies the today's-engine tests run as the
+// real modules (only that path loads them).
+jest.mock('../routes/property-lookup-v2', () => ({ translateV2CallToV1Input: jest.fn() }));
+jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }));
+const { translateV2CallToV1Input: mockTranslate } = require('../routes/property-lookup-v2');
+const { generateEstimate: mockGenerate } = require('../services/pricing-engine');
 
 const {
   computeMembershipContext,
+  currentServiceTierOffer,
   loadCurrentServiceSpendContext,
+  membershipScopeArgs,
   publicMembershipView,
 } = require('../services/estimate-membership-context');
 
@@ -54,12 +68,18 @@ function fakeDb({
   cadenceQueryThrows = false,
   // knex_migrations row for the rodent realignment — the rollout instant.
   migrationRow = null,
+  // The creating estimate a tick-list margin reads (estimates .first()).
+  marginEstimate = null,
+  // 'waveguard_tier_extension_applied' audit rows (activity_log).
+  extensionAudits = [],
+  extensionAuditsThrows = false,
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
     // invoices query keyed by scheduled_service_id — the last-paid lookup
     // keys by customer/service_type and must keep returning paidInvoices.
     let probesServiceIds = false;
+    let idFilter = null;
     const builder = {
       // coveredTermsAsOf always leftJoins, so the join must exist whenever a
       // terms fixture is in play. The catalog loader's degrade-on-no-join
@@ -75,8 +95,10 @@ function fakeDb({
       whereNull: () => builder,
       whereRaw: () => builder,
       join: () => builder,
-      whereIn: (col) => {
+      whereIn: (col, values) => {
         if (col === 'scheduled_service_id') probesServiceIds = true;
+        // A visit read by id returns only those rows, as the database does.
+        if (col === 'id' && table === 'scheduled_services') idFilter = new Set([].concat(values).map(String));
         return builder;
       },
       whereNot: () => builder,
@@ -98,6 +120,7 @@ function fakeDb({
         if (table === 'customers') return customer;
         if (table === 'annual_prepay_terms') return prepaidTerm;
         if (table === 'knex_migrations') return migrationRow;
+        if (table === 'estimates') return marginEstimate;
         return null;
       },
       select: async (...cols) => {
@@ -130,7 +153,9 @@ function fakeDb({
           if (prepaidTermsQueryThrows) throw new Error('relation does not exist');
           return prepaidTerms;
         }
-        if (table === 'scheduled_services') return scheduledRows;
+        if (table === 'scheduled_services') {
+          return idFilter ? scheduledRows.filter((row) => idFilter.has(String(row.id))) : scheduledRows;
+        }
         if (table === 'estimates') {
           if (estimatesQueryThrows) throw new Error('relation does not exist');
           return estimateRows;
@@ -146,6 +171,10 @@ function fakeDb({
         if (table === 'scheduled_service_addons') {
           if (addonQueryThrows) throw new Error('relation does not exist');
           return addonRows;
+        }
+        if (table === 'activity_log') {
+          if (extensionAuditsThrows) throw new Error('relation does not exist');
+          return extensionAudits;
         }
         return [];
       },
@@ -1583,6 +1612,22 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
+  test('a lawn rounds series reads as the 9x lawn plan, with the every-6-weeks wording', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 90 }),
+      scheduledRows: [{ id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-03-05' }],
+      catalogRows: [{ id: 'l1', recurring_pattern: 'lawn_rounds_9', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Every 6 weeks',
+      visitsPerYear: 9,
+      currentPerVisit: 120,
+    }));
+  });
+
   test('an unaverageable prepaid contract withholds even when an older invoice exists', async () => {
     const database = fakeDb({
       scheduledRows: [
@@ -2884,5 +2929,254 @@ describe('existing-service tier extension snapshot', () => {
     ]) {
       expect(json).not.toContain(staffMarker);
     }
+  });
+});
+
+// Staff pick (owner 2026-10-30 option B): the
+// estimate tool lists the member's current services at the new tier and only
+// the ticked ones freeze — from ANY starting tier, at the old-rate-to-new-rate
+// price, never 5 more points off an already-discounted contract.
+describe('staff-picked tier extension (option B)', () => {
+  afterEach(() => {
+    mockExtendExistingGate = false;
+    mockLawnRoundsGate = false;
+    mockTranslate.mockReset();
+    mockGenerate.mockReset();
+  });
+
+  // Pest + lawn on the account (Silver); the estimate adds mosquito (Gold).
+  const silverRows = () => [
+    ...futurePestRows(),
+    { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-02-01', estimated_price: 80 },
+  ];
+  const mosquitoEstimate = () => ({
+    result: {
+      recurring: {
+        discount: 0.15,
+        annualBeforeDiscount: 500,
+        annualAfterDiscount: 425,
+        services: [{ name: 'Mosquito Treatment', mo: 41.67 }],
+      },
+    },
+  });
+
+  test('a Silver start freezes only the ticked service, moved from the Silver rate to the Gold rate', async () => {
+    mockExtendExistingGate = true;
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+      extensionPick: { ticked: ['pest_control'], unticked: ['lawn_care'] },
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Silver', toLabel: 'Gold' });
+    // $120 at Silver is $133.33 before discount; Gold is $113.33 — not the
+    // $114 that 5 more points off $120 would give.
+    expect(ctx.existingServices).toEqual([expect.objectContaining({
+      key: 'pest_control', currentPerVisit: 120, newPerVisit: 113.33, perVisitSavings: 6.67,
+    })]);
+    expect(ctx.discountAppliesTo).toBe('new_and_existing_services');
+    expect(ctx.extensionKeptKeys).toEqual(['lawn_care']);
+  });
+
+  test('no pick sent (an older tab): a Silver start stays plan-less and a Bronze start keeps its automatic plan', async () => {
+    mockExtendExistingGate = true;
+    const silver = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+    });
+    expect(silver.existingServices).toEqual([]);
+    expect(silver).not.toHaveProperty('extensionKeptKeys');
+    const bronze = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData(),
+    });
+    expect(bronze.existingServices.map((svc) => [svc.key, svc.newPerVisit])).toEqual([['pest_control', 108]]);
+  });
+
+  test('a Bronze start honors an empty pick: nothing freezes and the unticked service is kept, not reviewed', async () => {
+    mockExtendExistingGate = true;
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData(),
+      extensionPick: { ticked: [], unticked: ['pest_control'] },
+    });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.extensionKeptKeys).toEqual(['pest_control']);
+  });
+
+  test('a service the list never showed is never recorded as kept — it stays on the office review path', async () => {
+    mockExtendExistingGate = true;
+    // Lawn was not on the list staff saw (say its next visit was already
+    // invoiced), so it is neither ticked nor unticked.
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+      extensionPick: { ticked: ['pest_control'], unticked: [] },
+    });
+    expect(ctx.existingServices.map((svc) => svc.key)).toEqual(['pest_control']);
+    expect(ctx.extensionKeptKeys).toEqual([]);
+  });
+
+  test('a pick on a quote that raises no tier freezes and keeps nothing', async () => {
+    mockExtendExistingGate = true;
+    // The quote re-prices pest only: no new family, no tier change.
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true,
+      estData: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }] } } },
+      extensionPick: { ticked: [], unticked: ['pest_control'] },
+    });
+    expect(ctx.upgrade).toBeNull();
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx).not.toHaveProperty('extensionKeptKeys');
+  });
+
+  test('appointments an earlier extension already covered never freeze, so the card never shows a price the accept parks', async () => {
+    mockExtendExistingGate = true;
+    const pick = { extensionPick: { ticked: ['pest_control', 'lawn_care'], unticked: [] } };
+    const freeze = (database) => computeMembershipContext(database, {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(), ...pick,
+    });
+    // A Bronze-to-Silver accept already repriced s1 and s2.
+    const covered = await freeze(fakeDb({
+      scheduledRows: silverRows(),
+      extensionAudits: [{ metadata: JSON.stringify({ estimateId: 'est-old', families: ['pest_control'], appliedRowIds: ['s1', 's2'] }) }],
+    }));
+    expect(covered.existingServices.map((svc) => [svc.key, svc.rowIds])).toEqual([['lawn_care', ['l1']], ['pest_control', ['s3']]]);
+    // An audit without appointment ids covers its whole family, as the converter reads it.
+    const wholeFamily = await freeze(fakeDb({
+      scheduledRows: silverRows(),
+      extensionAudits: [{ metadata: { estimateId: 'est-old', families: ['lawn_care'] } }],
+    }));
+    expect(wholeFamily.existingServices.map((svc) => svc.key)).toEqual(['pest_control']);
+    // An unreadable audit trail freezes nothing.
+    const unreadable = await freeze(fakeDb({ scheduledRows: silverRows(), extensionAuditsThrows: true }));
+    expect(unreadable.existingServices).toEqual([]);
+  });
+
+  test('the tick list offers each eligible service with a margin from the estimate that set it up', async () => {
+    const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
+    const primaryKey = normalizedStampedStreet('123 Main St', null, 'Venice', '34285');
+    const stamped = (row) => ({
+      ...row, source_estimate_id: 'est-setup', service_address_line1: '123 Main St', service_address_city: 'Venice', service_address_zip: '34285',
+    });
+    const database = fakeDb({
+      scheduledRows: silverRows().map(stamped),
+      // The setup estimate's engine lines: list per-visit price and list margin.
+      marginEstimate: {
+        estimate_data: {
+          engineResult: {
+            lineItems: [
+              { service: 'pest_control', perApp: 133.33, margin: 0.6, annual: 533.32 },
+              { service: 'lawn_care', perApp: 88.89, margin: 0.2, annual: 800 },
+            ],
+          },
+        },
+      },
+    });
+    const scope = { groupedEstimate: false, perPropertyStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey } };
+    expect(await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope })).toBeNull();
+    mockExtendExistingGate = true;
+    const offer = await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
+    expect(offer).toMatchObject({ fromTierLabel: 'Silver', tierLabel: 'Gold', tierDiscountPct: 15 });
+    // Cost per visit = list price x (1 - list margin): pest $53.33 against
+    // $113.33 (52.9%); lawn $71.11 against $75.56 (5.9%).
+    expect(offer.services.map((svc) => [svc.key, svc.currentPerVisit, svc.newPerVisit, svc.marginPct])).toEqual([
+      ['lawn_care', 80, 75.56, 5.9],
+      ['pest_control', 120, 113.33, 52.9],
+    ]);
+    // No single creating estimate = no margin, never a guess.
+    const unknown = await currentServiceTierOffer(fakeDb({
+      scheduledRows: silverRows().map((row) => ({ ...stamped(row), source_estimate_id: null })),
+    }), { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
+    expect(unknown.services.map((svc) => svc.marginPct)).toEqual([null, null]);
+  });
+
+  // Pest every other month and a 9x lawn series (its stored recurrence in
+  // lawnSeries; extraRows adds its root), both set up by one estimate that
+  // quoted pest quarterly. The real adapter and engine price the plan; each
+  // line's money fields are pinned so the margins are exact, and pricedPlans
+  // records the plan each line priced (pest frequency, lawn visits a year).
+  const engineProfile = { homeSqFt: 2000, lotSqFt: 8000, measuredTurfSf: 6800 };
+  const pinnedMoney = {
+    pest_control: { perApp: 140, margin: 0.6 },
+    lawn_care: { perApp: 100, margin: 0.3, costs: { annualAdmin: 51, annualCallbackReserve: 63 } },
+  };
+  let pricedPlans;
+  async function todayEngineOffer(lawnSeries, extraRows = [], plans = { pest: 'bimonthly', lawn: 'every_6_weeks' }) {
+    const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
+    const primaryKey = normalizedStampedStreet('123 Main St', null, 'Venice', '34285');
+    const stamped = (row) => ({
+      ...row, source_estimate_id: 'est-setup', service_address_line1: '123 Main St', service_address_city: 'Venice', service_address_zip: '34285',
+    });
+    const { visitsPerYearForCadence } = require('../services/prepay-cadence');
+    const catalog = (frequency) => ({ frequency, visits_per_year: visitsPerYearForCadence(frequency) });
+    const database = fakeDb({
+      scheduledRows: [...silverRows(), ...extraRows].map(stamped)
+        .map((row) => (row.id === 'l1' ? { ...row, ...lawnSeries } : row)),
+      catalogRows: [
+        ...['s1', 's2', 's3'].map((id) => ({ id, ...catalog(plans.pest) })),
+        { id: 'l1', ...catalog(plans.lawn), ...lawnSeries },
+      ],
+      marginEstimate: { estimate_data: { engineRequest: { profile: engineProfile, options: { pestFreq: 4, lawnFreq: 9 } } } },
+    });
+    pricedPlans = [];
+    mockTranslate.mockImplementation(jest.requireActual('../routes/property-lookup-v2').translateV2CallToV1Input);
+    mockGenerate.mockImplementation((input) => {
+      const lines = jest.requireActual('../services/pricing-engine').generateEstimate(input).lineItems
+        .filter((item) => pinnedMoney[item.service]);
+      pricedPlans.push(...lines.map((item) => [item.service, item.frequency]));
+      return { lineItems: lines.map((item) => ({ ...item, ...pinnedMoney[item.service] })) };
+    });
+    const scope = { groupedEstimate: false, perPropertyStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey } };
+    return currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
+  }
+
+  test("pest and lawn margins re-price the setup estimate on today's engine at the plan the customer has now", async () => {
+    mockExtendExistingGate = true;
+    const offer = await todayEngineOffer({ recurring_pattern: 'every_6_weeks' });
+    expect(mockTranslate).toHaveBeenCalledWith(engineProfile, ['PEST'], { pestFreq: 6, lawnFreq: 9 });
+    expect(mockTranslate).toHaveBeenCalledWith(engineProfile, ['LAWN'], { pestFreq: 4, lawnFreq: 9 });
+    expect(pricedPlans).toEqual(expect.arrayContaining([['pest_control', 'bimonthly'], ['lawn_care', 9]]));
+    // Pest: $140 x 0.4 = $56.00 against $113.33 = 50.6%. Lawn: $70.00 plus
+    // its 42-day spread (below) against $75.56 = 6.8%.
+    expect(offer.services.map((svc) => [svc.key, svc.marginPct])).toEqual([['lawn_care', 6.8], ['pest_control', 50.6]]);
+  });
+
+  test('a plan the engine prices as another plan shows no margin, never the default plan\'s', async () => {
+    mockExtendExistingGate = true;
+    // The engine prices pest 3x a year as quarterly, and lawn 2x, 4x (retired)
+    // and 6x (hidden tier) as 9x.
+    for (const lawn of ['semiannual', 'quarterly', 'bimonthly']) {
+      const offer = await todayEngineOffer({}, [], { pest: 'triannual', lawn });
+      expect(pricedPlans).toEqual(expect.arrayContaining([['pest_control', 'quarterly'], ['lawn_care', 9]]));
+      expect([lawn, offer.services.map((svc) => [svc.key, svc.marginPct])])
+        .toEqual([lawn, [['lawn_care', null], ['pest_control', null]]]);
+    }
+  });
+
+  test('the lawn 42-day spread follows the stored series, never the 9-rounds gate', async () => {
+    mockExtendExistingGate = true;
+    // A 42-day series makes ~8.7 visits a year, so the line's $114 of yearly
+    // costs spread over fewer visits than the 9 it prices: $70.00 + $114 x
+    // (42/365 - 1/9) = $70.45 against $75.56 = 6.8%. Nine rounds make 9
+    // visits: $70.00 = 7.4%. The gate decides only how NEW series are written.
+    const root = { id: 'l0', service_type: 'lawn_care', scheduled_date: '2020-01-06', estimated_price: 80, recurring_pattern: 'every_6_weeks' };
+    const cases = [
+      ['every_6_weeks', { recurring_pattern: 'every_6_weeks' }, [], 6.8],
+      ['custom, 42 days', { recurring_pattern: 'custom', recurring_interval_days: 42 }, [], 6.8],
+      ['a child that carries no pattern, under an every_6_weeks root', { recurring_parent_id: 'l0' }, [root], 6.8],
+      ['lawn_rounds_9', { recurring_pattern: 'lawn_rounds_9' }, [], 7.4],
+    ];
+    for (const rounds of [false, true]) {
+      mockLawnRoundsGate = rounds;
+      for (const [series, lawnSeries, extraRows, marginPct] of cases) {
+        const offer = await todayEngineOffer(lawnSeries, extraRows);
+        expect([series, rounds, offer.services.find((svc) => svc.key === 'lawn_care').marginPct])
+          .toEqual([series, rounds, marginPct]);
+      }
+    }
+  });
+
+  test('the save and the tick list share one property scope', () => {
+    const scope = { estimateStreet: 'a', customerPrimaryStreet: 'b' };
+    expect(membershipScopeArgs({ groupedEstimate: true, perPropertyStreetScope: scope }))
+      .toEqual({ streetScope: scope, freezeExtensionPlan: true });
+    expect(membershipScopeArgs({ groupedEstimate: true })).toEqual({ excludeExistingRows: true, freezeExtensionPlan: false });
+    expect(membershipScopeArgs({ perPropertyStreetScope: scope })).toEqual({ extensionStreetScope: scope, freezeExtensionPlan: true });
+    expect(membershipScopeArgs({})).toEqual({ freezeExtensionPlan: false });
   });
 });

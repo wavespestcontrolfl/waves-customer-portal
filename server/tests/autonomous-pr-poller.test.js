@@ -41,6 +41,8 @@ jest.mock('../services/content-astro/pages-poll', () => ({
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
+  // Default: the astro brand-isolation job is green on the head.
+  assertBrandIsolationClear: jest.fn().mockResolvedValue(true),
   assertBodyImagesAtHead: jest.fn().mockResolvedValue({ ok: true, reason: 'gate_off' }),
   planInternalLinksForTarget: jest.fn(),
   resolveExistingAstroFileForTarget: jest.fn(),
@@ -438,6 +440,18 @@ describe('helpers', () => {
     expect(target.planLinks).toBe(false);
   });
 
+  test('targetForRun: a template canonical ({{siteUrl}}/…) is not a URL in any lane', () => {
+    const refresh = poller._internals.targetForRun(makeRun({
+      action_type: 'refresh_existing_page',
+      draft_payload: { type: 'draft', frontmatter: { title: 'Refresh', canonical: '{{siteUrl}}/termite-control-venice-fl/' } },
+    }));
+    expect(refresh.url).toBeNull();
+    const blog = poller._internals.targetForRun(makeRun({
+      draft_payload: { type: 'draft', frontmatter: { title: 'Post', canonical: '{{siteUrl}}/pest-control/test-post/' } },
+    }));
+    expect(blog.url).toBeNull();
+  });
+
   test('auto-merge defaults on only for supporting blogs and honors explicit configuration', () => {
     expect(poller._internals.autoMergeEnabled('new_supporting_blog')).toBe(true);
     expect(poller._internals.autoMergeEnabled('refresh_existing_page')).toBe(false);
@@ -687,6 +701,27 @@ describe('merged-by-human reconciliation', () => {
       // no safe slug -> null, never a guess
       expect(poller._internals.deriveBlogRouteUrl(makeRun({ draft_payload: JSON.stringify({ frontmatter: {} }) }))).toBeNull();
     });
+  });
+
+  test('a merged refresh whose draft carries only the template canonical is live-checked at the brief target_url and completes', async () => {
+    const briefUrl = 'https://www.wavespestcontrol.com/termite-control-venice-fl/';
+    const updates = setupDb({
+      pending: [makeRun({
+        action_type: 'refresh_existing_page',
+        brief_id: 'brief-r',
+        draft_payload: JSON.stringify({ type: 'draft', frontmatter: { title: 'Termite Control in Venice, FL', canonical: '{{siteUrl}}/termite-control-venice-fl/' }, body: 'x' }),
+      })],
+      briefs: [{ id: 'brief-r', target_url: briefUrl, target_keyword: 'termite control venice', city: 'Venice' }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-10-27T22:03:05Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].merged).toBe(true);
+    expect(pagesPoll.liveUrlResponds).toHaveBeenCalledWith(briefUrl);
+    expect(pagesPoll.liveUrlResponds).not.toHaveBeenCalledWith(expect.stringContaining('{{'));
+    expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published', published_url: briefUrl });
   });
 
   test('merged with NO resolvable target URL (draft + brief blank): fails closed, never completed_published with null URL', async () => {
@@ -2419,6 +2454,61 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published', published_url: CANONICAL });
     expect(indexNow.submit).toHaveBeenCalledWith(CANONICAL);
     expect(publisher.planInternalLinksForTarget).toHaveBeenCalled();
+  });
+
+  describe('astro brand-isolation gate', () => {
+    function readyToMerge() {
+      process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+      setupDb({ pending: [makeRun()] });
+      gh.getPr.mockResolvedValue(openPr());
+      pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+      pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+      pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+      publisher.assertCodexReviewClear.mockResolvedValue(true);
+      gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha' });
+    }
+    const brandErr = (reason, over = {}) => Object.assign(new Error(`brand-isolation: ${reason}`), { code: 'BRAND_ISOLATION_REQUIRED', reason, transient: false, ...over });
+
+    test('a failed brand-isolation job on a Codex-clean, green-preview head defers the merge', async () => {
+      readyToMerge();
+      publisher.assertBrandIsolationClear.mockRejectedValueOnce(brandErr('brand_isolation_failure'));
+
+      const res = await poller.pollPending();
+
+      expect(publisher.assertBrandIsolationClear).toHaveBeenCalledWith(expect.objectContaining({ number: 42 }));
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'brand_isolation_failure' });
+      expect(res.results[0].transient).toBeUndefined();
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    });
+
+    test('brand-isolation not started yet defers as transient pending, and a lookup outage does too', async () => {
+      readyToMerge();
+      publisher.assertBrandIsolationClear.mockRejectedValueOnce(brandErr('brand_isolation_pending', { transient: true }));
+      let res = await poller.pollPending();
+      expect(res.results[0]).toMatchObject({ pending: true, transient: true, reason: 'brand_isolation_pending' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+
+      readyToMerge();
+      publisher.assertBrandIsolationClear.mockRejectedValueOnce(Object.assign(new Error('github 502'), { code: 'BRAND_ISOLATION_LOOKUP_FAILED', reason: 'brand_isolation_lookup_failed', transient: true }));
+      res = await poller.pollPending();
+      expect(res.results[0]).toMatchObject({ pending: true, transient: true, reason: 'brand_isolation_lookup_failed' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    });
+
+    test('with Codex findings the Codex remediation path runs first and the brand gate is not consulted', async () => {
+      readyToMerge();
+      const codexErr = Object.assign(new Error('findings on head'), { code: 'CODEX_REVIEW_REQUIRED' });
+      publisher.assertCodexReviewClear.mockRejectedValue(codexErr);
+      const rem = require('../services/content/codex-remediation');
+      const barSpy = jest.spyOn(rem, 'p2OnlyMergeEligible').mockResolvedValue({ eligible: false, reason: 'findings' });
+      try {
+        const res = await poller.pollPending();
+        expect(res.results[0].reason).toMatch(/codex_review_pending/);
+        expect(barSpy).toHaveBeenCalled();
+        expect(publisher.assertBrandIsolationClear).not.toHaveBeenCalled();
+        expect(gh.mergePr).not.toHaveBeenCalled();
+      } finally { barSpy.mockRestore(); }
+    });
   });
 
   test('per-poll cap: only one auto-merge per tick, the rest defer', async () => {

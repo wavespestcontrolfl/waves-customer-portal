@@ -665,6 +665,9 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   const [confirmationBusy, setConfirmationBusy] = useState(false);
   const [confirmationError, setConfirmationError] = useState("");
   const confirmationInFlightRef = useRef(false);
+  // Latest-request counter for load(): a slower response for an intent the
+  // operator has since left must not replace the rows of the current one.
+  const loadSeqRef = useRef(0);
 
   const requestConfirmation = useCallback((nextConfirmation, trigger) => {
     trigger?.focus({ preventScroll: true });
@@ -712,6 +715,8 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   }, []);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
+    const isStale = () => seq !== loadSeqRef.current;
     setLoading(true);
     setError("");
     setErrorRetry(null);
@@ -722,6 +727,7 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
         adminFetch("/admin/agents/shadow-scores"),
         adminFetch("/admin/agents/intent-modes"),
       ]);
+      if (isStale()) return;
       setData(drafts);
       setScores(scoreRows);
       setModes(modeRows);
@@ -730,28 +736,38 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
       // established Shadow Drafts tab, so it loads outside the shared
       // Promise.all and degrades to "no card".
       try {
-        setProfiles(await adminFetch("/admin/agents/voice-profiles"));
+        const profileRows = await adminFetch("/admin/agents/voice-profiles");
+        if (isStale()) return;
+        setProfiles(profileRows);
       } catch {
+        if (isStale()) return;
         setProfiles(null);
       }
       // Sealed exam is additive the same way — a failure (migration not yet
       // run) degrades to "no section", never a blank tab.
       try {
-        setExam(await adminFetch("/admin/agents/sealed-eval"));
+        const examRows = await adminFetch("/admin/agents/sealed-eval");
+        if (isStale()) return;
+        setExam(examRows);
       } catch {
+        if (isStale()) return;
         setExam(null);
       }
       // Pathology ledger is additive the same way — a failure (migration not
       // yet run) degrades to "no section", never a blank tab.
       try {
-        setPathology(await adminFetch("/admin/agents/pathology"));
+        const pathologyRows = await adminFetch("/admin/agents/pathology");
+        if (isStale()) return;
+        setPathology(pathologyRows);
       } catch {
+        if (isStale()) return;
         setPathology(null);
       }
     } catch (err) {
+      if (isStale()) return;
       setError(err.message || "Failed to load shadow drafts.");
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }, [intentFilter]);
 

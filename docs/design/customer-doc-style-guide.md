@@ -2,14 +2,21 @@
 
 ## Field document standard (owner approved 2026-10-25)
 
-The authored document body uses the approved **Field** design: white paper,
-blue left rail, navy masthead rule, gold reference accent, ruled metadata and
-tables, and quiet continuation/footer treatment. Apply this to service and
-project reports, proposals, invoices/receipts, account statements, agreements,
-prep guides, treatment records, annual-plan summaries, warranties,
-price-change/rate-review notices and service/program outlines. Invoice browser
-printing uses the same Field document boundary as the other customer exports;
-payment controls stay outside the paper output.
+The **Field** design is the layout of the PDFs: white paper, blue left rail,
+navy masthead rule, gold reference accent, ruled metadata and tables, and quiet
+continuation/footer treatment. It applies to every generated customer PDF:
+service and project reports, proposals and estimates, invoices/receipts,
+account statements, agreements, prep guides, treatment records, annual-plan
+summaries, warranties, price-change/rate-review notices and service/program
+outlines.
+
+**Web pages keep their own layout (owner 2026-10-26):** "the glass UI should
+have stayed as glass UI, like it was before"; the Field layout "should have
+been the pdfs". The customer web pages (`/estimate`, `/report`, `/receipt`,
+`/pay`, `/pay/statement`, `/contract`, `/prep`, rate notices, service outlines)
+render no Field masthead or paper body. Field renders only inside the PDF
+documents (`EstimateProposalDocument`, `ServiceReportDocument`, the pdfkit
+builders) and in staff printouts.
 
 - React: `FIELD_DOCUMENT` in `client/src/theme-doc.js` and the shared
   `components/FieldDocument.jsx` / `field-document.css` boundary. Use
@@ -48,6 +55,14 @@ controls retain their neutral styling. This document-body boundary also applies
 when the reader is embedded in the admin Staff page. Issued wording, version
 hashes, review dates, citations, acknowledgments and completed-record evidence
 remain unchanged; uploaded originals retain their existing format.
+
+Payroll stubs and tank-mix references use the same text-only staff masthead
+inside their printable document bodies. Hours, pay and withholding values,
+product quantities, eligibility rules and safety directions stay authoritative.
+Staff estimate printing uses the canonical customer proposal projection from
+the verified staff preview route; unsent drafts carry an explicit internal
+draft marker. Print controls remain outside the paper, and the staff preview
+stays inert before and after printing.
 
 The tokened document surfaces — `/estimate/:token`, `/report/*`, `/prep`,
 `/receipt`, `/pay`, `/pay/statement/:token`, `/contract`, `/service-outlines`,

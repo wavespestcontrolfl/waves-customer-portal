@@ -83,9 +83,9 @@ async function checkGemini(model) {
   if (!key) return { ok: false, failureType: 'missing_key', detail: 'GEMINI_API_KEY / GOOGLE_API_KEY not set' };
   const started = Date.now();
   try {
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify({
         contents: [{ parts: [{ text: PROMPT('gemini') }] }],
         // Generous budget so a "thinking" Flash model can reason AND still emit the JSON.

@@ -47,7 +47,7 @@ function sameCustomer(row, service) {
 
 // A row a different technician works is not this technician's stop — but only
 // once the schedule itself is technician-scoped (occupancy.js
-// techScopedConfirmActive: the multi-tech gate AND capacity mode). Until
+// techScopedConfirmActive: the multi-tech gate, in hour or capacity mode). Until
 // then occupancy is tech-blind and any overlapping row is a double-booking
 // (Codex #6207 r3 P1).
 function isOtherStop(row, service) {

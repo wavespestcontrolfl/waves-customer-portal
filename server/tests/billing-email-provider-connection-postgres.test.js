@@ -137,7 +137,7 @@ postgres('billing Email provider preparation on its held connection', () => {
     await mockPg.schema.createTable('invoices', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.uuid('payer_id');
       table.text('status'); table.text('send_claim_token'); table.text('scheduled_send_error');
-      table.text('total'); table.decimal('credit_applied'); table.jsonb('line_items'); table.text('notes');
+      table.text('total'); table.decimal('credit_applied'); table.decimal('amount_paid').notNullable().defaultTo(0); table.jsonb('line_items'); table.text('notes');
     });
   }, 30000);
 

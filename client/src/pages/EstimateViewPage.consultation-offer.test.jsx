@@ -7,7 +7,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ConsultationOfferSection, carryRefreshProjections } from './EstimateViewPage';
+import { AssessmentFirstSection, ConsultationOfferSection, carryRefreshProjections } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -64,6 +64,14 @@ describe('carryRefreshProjections', () => {
     expect(carryRefreshProjections(prev, body, true).consultationOffer).toBeUndefined();
   });
 
+  it('a refresh that now offers the free Waves Assessment drops the carried consultation offer (one offer, never two)', () => {
+    const estimate = { address: '123 Palm St, Bradenton, FL 34205' };
+    const body = { cta: {}, estimate: { ...estimate }, assessmentFirst: { url: '/estimate/tok/assessment' } };
+    const next = carryRefreshProjections({ consultationOffer: offer, estimate }, body, true);
+    expect(next.consultationOffer).toBeUndefined();
+    expect(next.assessmentFirst).toEqual({ url: '/estimate/tok/assessment' });
+  });
+
   it('a refresh keeps returnVisit the same way', () => {
     expect(carryRefreshProjections({ returnVisit: visit }, { cta: {} }, true).returnVisit).toBe(visit);
   });
@@ -81,5 +89,30 @@ describe('carryRefreshProjections', () => {
   it('returns the body itself when nothing needs carrying', () => {
     const body = { cta: {}, consultationOffer: offer };
     expect(carryRefreshProjections({ consultationOffer: { url: 'old' } }, body, true)).toBe(body);
+  });
+});
+
+// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST): renders only from the server-composed
+// `assessmentFirst` field, as a glass card with a real heading and the centered gold link to the estimate-token
+// booking page.
+describe('AssessmentFirstSection', () => {
+  it('renders nothing without a url', () => {
+    expect(render(<AssessmentFirstSection assessmentFirst={null} />).container).toBeEmptyDOMElement();
+    cleanup();
+    expect(render(<AssessmentFirstSection assessmentFirst={{ url: '' }} />).container).toBeEmptyDOMElement();
+  });
+
+  it('a glass card: the h2, the no-commitment line, and Pick a time to the booking page in a new tab', () => {
+    render(<AssessmentFirstSection assessmentFirst={{ url: '/estimate/tok/assessment' }} />);
+    const card = screen.getByTestId('assessment-first');
+    expect(card).toHaveAttribute('data-glass', 'card');
+    expect(screen.getByRole('heading', { level: 2, name: 'Book a free Waves Assessment first' })).toBeInTheDocument();
+    expect(card).toHaveTextContent(/A Waves technician can visit, walk the property with you and answer your questions\. It.s free, and there.s no commitment\./);
+    const link = screen.getByRole('link', { name: 'Pick a time' });
+    expect(link).toHaveAttribute('href', '/estimate/tok/assessment');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(link).toHaveAttribute('data-glass-accent');
+    expect(screen.queryByText(/\bAdam\b/)).not.toBeInTheDocument();
   });
 });

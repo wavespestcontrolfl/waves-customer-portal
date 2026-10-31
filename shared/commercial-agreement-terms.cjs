@@ -18,14 +18,29 @@ const AGREEMENT_TERMS = Object.freeze({
  * {{agreement.payment_terms}} (template version 2). Auto Pay is the commercial default (owner 2026-10-24,
  * "autopay default", text approved verbatim; timing owner 2026-10-24 "after the service is completed", which is when
  * the completion auto-charge runs; GATE_COMMERCIAL_AUTOPAY). Net 30 is for a Bill-by-invoice proposal
- * (the 2026-06-24 text, the paragraph version 1 printed). Changing either text changes what a customer signs:
- * owner approval first.
+ * (the 2026-06-24 text, the paragraph version 1 printed). Net 60 is the other Bill-by-invoice choice (owner 2026-10-29
+ * "lets create the option net-60, just to have it"): the Net 30 paragraph with sixty days. Changing any text changes
+ * what a customer signs: owner approval first.
  */
 const AUTOPAY_PAYMENT_TERMS = 'autopay';
+// The Bill-by-invoice default; INVOICE_PAYMENT_TERM_CHOICES is every invoice term the agreement can carry.
 const INVOICE_PAYMENT_TERMS = 'net30';
+const NET60_PAYMENT_TERMS = 'net60';
+const INVOICE_PAYMENT_TERM_CHOICES = Object.freeze([INVOICE_PAYMENT_TERMS, NET60_PAYMENT_TERMS]);
 const AGREEMENT_PAYMENT_TEXT = Object.freeze({
   [AUTOPAY_PAYMENT_TERMS]: "You authorize Waves to charge the card or bank account on file after each service is completed, plus applicable tax. You may change the payment method any time, and cancel autopay with 30 days' written notice, after which invoices are due Net 30.",
   [INVOICE_PAYMENT_TERMS]: 'Services are invoiced on Net 30 terms — payment is due within thirty (30) days of the invoice date. Past-due balances may be subject to a late fee and/or suspension of service until the account is brought current.',
+  [NET60_PAYMENT_TERMS]: 'Services are invoiced on Net 60 terms — payment is due within sixty (60) days of the invoice date. Past-due balances may be subject to a late fee and/or suspension of service until the account is brought current.',
 });
 
-module.exports = { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, AGREEMENT_PAYMENT_TEXT };
+/**
+ * How a typed term compares with the agreement's text: case, whitespace and apostrophe style do not matter
+ * ("30 days\u2019" typed on a phone equals "30 days'"). The signing check and the builder's Standard / Custom
+ * choice both compare through this, so the builder never calls a term Custom that signing accepts as standard.
+ */
+const normalizeTermText = (value) => String(value).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+
+module.exports = {
+  AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, NET60_PAYMENT_TERMS, INVOICE_PAYMENT_TERM_CHOICES,
+  AGREEMENT_PAYMENT_TEXT, normalizeTermText,
+};

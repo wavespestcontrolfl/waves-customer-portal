@@ -201,7 +201,7 @@ function render(rows) {
     '',
     'A route being listed as reachable means a technician may call it; routers still scope records to the assigned technician where they did before (schedule, customers, visits, timetracking).',
     '',
-    'Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, admin-revenue, …) run a router-level function that admits a technician only on the router\'s own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.',
+    'Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, …) run a router-level function that admits a technician only on the router\'s own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.',
     '',
     `Allow-list buckets: ${[...new Set(TECHNICIAN_ALLOW_LIST.map((e) => e.bucket))].join(', ')}.`,
     '',

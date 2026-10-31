@@ -1753,6 +1753,36 @@ function decodeEntities(value) {
     .replace(/&amp;/g, '&'); // amp last so "&amp;lt;" decodes to "&lt;", not "<"
 }
 
+// The one blog feed this service ever reads. Routes and defaults all use it;
+// no caller can point the fetch at another destination.
+const RSS_FEED_URL = 'https://www.wavespestcontrol.com/feed.xml';
+
+// One platform entry of a publish result -> 'success' | 'skipped' | 'failed',
+// or null when the entry carries no outcome at all (a bare {platform} marker).
+// Skipped covers explicit skips (disabled, no image, compliance-judge content
+// rejection, daily cap) and dry runs, where nothing was posted.
+function platformEntryOutcome(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (entry.success === true) return 'success';
+  if (entry.skipped || entry.dryRun) return 'skipped';
+  if (entry.success === false || entry.error) return 'failed';
+  return null;
+}
+
+// One checkAndPublish item result -> 'published' | 'skipped' | 'failed'.
+function rssItemOutcome(result) {
+  if (!result || result.error) return 'failed';
+  if (result.success === true) return result.dryRun ? 'skipped' : 'published';
+  const platforms = Array.isArray(result.platforms) ? result.platforms : [];
+  return platforms.some((p) => platformEntryOutcome(p) === 'failed') ? 'failed' : 'skipped';
+}
+
+function countRssOutcomes(results) {
+  const counts = { published: 0, skipped: 0, failed: 0 };
+  for (const r of results) counts[rssItemOutcome(r)] += 1;
+  return counts;
+}
+
 async function fetchRSSFeed(feedUrl) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
@@ -1797,20 +1827,20 @@ const SocialMediaService = {
    * Check RSS feed for new posts and publish to all platforms.
    * Called by cron job or manually from admin.
    */
-  async checkAndPublish(feedUrl = 'https://www.wavespestcontrol.com/feed.xml', { manual = false } = {}) {
+  async checkAndPublish(feedUrl = RSS_FEED_URL, { manual = false } = {}) {
     if (!manual) {
       if (!SOCIAL_FLAGS.automationEnabled || !SOCIAL_FLAGS.rssAutopublish) {
         logger.info('[social] RSS auto-publish skipped — automation or RSS flag disabled');
-        return { processed: 0, results: [], skipped: true };
+        return { processed: 0, published: 0, failed: 0, results: [], skipped: true };
       }
       if (await isPausedByAdmin()) {
         logger.info('[social] RSS auto-publish skipped — paused by admin');
-        return { processed: 0, results: [], skipped: true };
+        return { processed: 0, published: 0, failed: 0, results: [], skipped: true };
       }
     }
 
     const items = await fetchRSSFeed(feedUrl);
-    if (!items.length) return { processed: 0, results: [] };
+    if (!items.length) return { processed: 0, published: 0, skipped: 0, failed: 0, results: [] };
 
     // Only render+upload brand cards when the run will actually publish AND the
     // image can be hosted — otherwise a manual /check-rss while paused/disabled,
@@ -2005,8 +2035,8 @@ const SocialMediaService = {
       }
     });
 
-    if (!lockAcquired) return { processed: 0, results: [], locked: true };
-    return { processed: results.length, results };
+    if (!lockAcquired) return { processed: 0, published: 0, skipped: 0, failed: 0, results: [], locked: true };
+    return { processed: results.length, ...countRssOutcomes(results), results };
   },
 
   /**
@@ -2818,7 +2848,7 @@ const SocialMediaService = {
   /**
    * Fetch recent RSS items (for admin preview).
    */
-  async getRSSItems(feedUrl = 'https://www.wavespestcontrol.com/feed.xml') {
+  async getRSSItems(feedUrl = RSS_FEED_URL) {
     return fetchRSSFeed(feedUrl);
   },
 
@@ -2870,6 +2900,9 @@ module.exports.renderBrandCardUrl = renderBrandCardUrl;
 module.exports.normalizePublishChannels = normalizePublishChannels;
 module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
+module.exports.RSS_FEED_URL = RSS_FEED_URL;
+module.exports.platformEntryOutcome = platformEntryOutcome;
+module.exports.rssItemOutcome = rssItemOutcome;
 module.exports.buildSocialFailureAlert = buildSocialFailureAlert;
 // Reused by tech-social-caption.js so field-photo captions share one brand voice.
 module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;

@@ -24,7 +24,7 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 
-const { hasAlignedAuth } = require('../services/email/inbox-hygiene');
+const { hasAlignedAuth, hasStrictDmarcPass } = require('../services/email/inbox-hygiene');
 const { processVendorInvoice } = require('../services/email/invoice-processor');
 
 const FORGED = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=victim.example y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=victim.example y"@evil.example';
@@ -125,5 +125,25 @@ describe('processVendorInvoice authentication', () => {
     process.env[GATE] = 'true';
     await processVendorInvoice(email(REAL_DKIM), CLASSIFICATION);
     expect(inserted()).toEqual(['expenses', 'insert', expect.objectContaining({ amount: 412.5 })]);
+  });
+});
+
+describe('hasStrictDmarcPass', () => {
+  // The SHAPE of a county bounce: broken DKIM, SPF naming the MAIL FROM only in a quoted string, DMARC pass.
+  const QUOTED_SPF_DMARC = 'mx.google.com;       dkim=permerror (no key for signature) header.i=@victim.example header.s=s1 header.b=abc;       spf=pass (google.com: domain of bounces+1-2@em1.victim.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="bounces+1-2@em1.victim.example";       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=victim.example';
+
+  test('Google\'s own dmarc=pass for the From domain counts, even where the strict SPF/DKIM reader finds nothing', () => {
+    expect(hasAlignedAuth(QUOTED_SPF_DMARC, 'victim.example', { strict: true })).toBe(false);
+    expect(hasStrictDmarcPass(QUOTED_SPF_DMARC, 'victim.example')).toBe(true);
+    expect(hasStrictDmarcPass(REAL_DKIM, 'victim.example')).toBe(true);
+  });
+
+  test('a quoted MAIL FROM carrying fake dmarc text, another domain, a failed verdict or a foreign authserv-id never counts', () => {
+    const forged = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dmarc=pass header.from=victim.example y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dmarc=pass header.from=victim.example y"@evil.example; dmarc=fail header.from=victim.example';
+    expect(hasStrictDmarcPass(forged, 'victim.example')).toBe(false);
+    expect(hasStrictDmarcPass(QUOTED_SPF_DMARC, 'other.example')).toBe(false);
+    expect(hasStrictDmarcPass(QUOTED_SPF_DMARC, 'em1.victim.example')).toBe(false);
+    expect(hasStrictDmarcPass(QUOTED_SPF_DMARC.replace('mx.google.com', 'mx.evil.example'), 'victim.example')).toBe(false);
+    expect(hasStrictDmarcPass(REAL_SPF, 'victim.example')).toBe(false);
   });
 });

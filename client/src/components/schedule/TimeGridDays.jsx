@@ -223,6 +223,40 @@ function CloseoutOwedChip() {
   );
 }
 
+// The customer name (opens the profile), closeout-owed chip and prepaid chip,
+// shared by the week-grid block and the unassigned-rail card. `showPrepaid` is
+// off on blocks too short to carry the chip.
+function VisitNameRow({ service, onViewCustomer, owesCompletion, showPrepaid = true }) {
+  const customerId = service.customerId || service.customer_id;
+  return (
+    <div className="flex items-center gap-1 min-w-0">
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (customerId) onViewCustomer?.(service);
+        }}
+        className={cn(
+          'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
+          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
+        )}
+        title={customerId ? 'Open customer profile' : undefined}
+      >
+        {service.customerName || 'Unassigned'}
+      </button>
+      {owesCompletion?.(service) && <CloseoutOwedChip />}
+      {showPrepaid && service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
+        <span
+          className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
+          style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
+          title="Prepaid"
+        >$</span>
+      )}
+    </div>
+  );
+}
+
 function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
@@ -232,6 +266,11 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : {};
+  // Visit labels sit at the 14px readability floor. A block shorter than an
+  // hour (under two 32px slots) cannot stack time / name / service at 14px
+  // without clipping, so the time shares the name's row there; the full text
+  // stays on the block's title either way. Hour-plus blocks stack as before.
+  const compact = height < SLOT_HEIGHT * 2;
 
   return (
     <div
@@ -244,7 +283,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         onEdit?.(service);
       }}
       className={cn(
-        'absolute px-1.5 py-0.5 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
+        'absolute px-1.5 py-0.5 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-14 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
@@ -258,37 +297,19 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       }}
       title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowStart || ''}${service.technicianName ? ' · ' + service.technicianName : ''}`}
     >
-      <div className="opacity-90 truncate text-10">
-        {(() => {
-          const min = parseHHMM(service.windowStart);
-          return min == null ? '' : minutesToLabel(min);
-        })()}
-      </div>
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            const customerId = service.customerId || service.customer_id;
-            if (customerId) onViewCustomer?.(service);
-          }}
-          className={cn(
-            'text-left text-11 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
-            'text-inherit bg-transparent border-0 p-0 cursor-pointer'
-          )}
-          title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
-        >
-          {service.customerName || 'Unassigned'}
-        </button>
-        {owesCompletion?.(service) && <CloseoutOwedChip />}
-        {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && height >= SLOT_HEIGHT * 2 && (
-          <span
-            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
-            title="Prepaid"
-          >$</span>
-        )}
+      <div className={compact ? 'flex items-center gap-1' : undefined}>
+        <div className={cn('opacity-90 truncate', compact && 'shrink-0')}>
+          {(() => {
+            const min = parseHHMM(service.windowStart);
+            return min == null ? '' : minutesToLabel(min);
+          })()}
+        </div>
+        <VisitNameRow
+          service={service}
+          onViewCustomer={onViewCustomer}
+          owesCompletion={owesCompletion}
+          showPrepaid={!compact}
+        />
       </div>
       {isLawnService(service) && onTreatmentPlan && (
         <button
@@ -306,7 +327,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         </button>
       )}
       {height > SLOT_HEIGHT && (
-        <div className="opacity-80 truncate text-10">
+        <div className="opacity-80 truncate">
           {serviceDisplayName(service)}{service.technicianName ? ` · ${service.technicianName}` : ''}
         </div>
       )}
@@ -570,42 +591,17 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer, 
         onEdit?.(service);
       }}
       className={cn(
-        'px-2 py-2 rounded-[3px] cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
+        'px-2 py-2 rounded-[3px] cursor-grab active:cursor-grabbing select-none text-14 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
       style={{ background: statusBlockFill(service.status) || undefined, border: `1px solid ${statusBlockFill(service.status) || '#E4E4E7'}`, ...dragStyle }}
       title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${dayLabel} ${timeLabel}`}
     >
-      <div className="u-nums text-10 opacity-90 mb-0.5">
+      <div className="u-nums opacity-90 mb-0.5">
         {dayLabel} · {timeLabel}
       </div>
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            const customerId = service.customerId || service.customer_id;
-            if (customerId) onViewCustomer?.(service);
-          }}
-          className={cn(
-            'text-left text-11 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
-            'text-inherit bg-transparent border-0 p-0 cursor-pointer'
-          )}
-          title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
-        >
-          {service.customerName || 'Unassigned'}
-        </button>
-        {owesCompletion?.(service) && <CloseoutOwedChip />}
-        {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
-          <span
-            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
-            title="Prepaid"
-          >$</span>
-        )}
-      </div>
+      <VisitNameRow service={service} onViewCustomer={onViewCustomer} owesCompletion={owesCompletion} />
       {serviceDisplayName(service) && (
         <div className="truncate opacity-90">{serviceDisplayName(service)}</div>
       )}
@@ -617,7 +613,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer, 
             e.stopPropagation();
             onTreatmentPlan(service);
           }}
-          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-zinc-900 text-white text-10 uppercase tracking-label u-focus-ring"
+          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-zinc-900 text-white text-14 uppercase tracking-label u-focus-ring"
         >
           <Leaf size={12} strokeWidth={1.75} />
           Plan
@@ -661,11 +657,11 @@ function UnassignedRail({ items, onEdit, onTreatmentPlan, onViewCustomer, owesCo
           </button>
         ) : (
           <>
-            <span className="uppercase tracking-label text-ink-tertiary font-medium text-11">Unassigned</span>
+            <span className="uppercase tracking-label text-ink-tertiary font-medium text-14">Unassigned</span>
             <div className="flex items-center gap-2">
               {/* Count rendered in waves-blue + bold so the dispatcher can
                   spot a non-zero unassigned backlog at a glance. */}
-              <span className="u-nums text-11 font-bold text-waves-blue" style={{ color: '#2E7DB3' }}>{items.length}</span>
+              <span className="u-nums text-14 font-bold text-waves-blue" style={{ color: '#2E7DB3' }}>{items.length}</span>
               <button
                 type="button"
                 onClick={onToggleCollapsed}
@@ -681,7 +677,7 @@ function UnassignedRail({ items, onEdit, onTreatmentPlan, onViewCustomer, owesCo
       </div>
       {!collapsed && (
         items.length === 0 ? (
-          <div className="px-3 py-6 text-11 text-ink-tertiary text-center">
+          <div className="px-3 py-6 text-14 text-ink-tertiary text-center">
             Drop here to unassign
           </div>
         ) : (
@@ -729,31 +725,42 @@ export default function TimeGridDays({
   const [loadError, setLoadError] = useState(null);
   const [retryKey, setRetryKey] = useState(0);
   const [optimistic, setOptimistic] = useState(null);
-  const [busy, setBusy] = useState(false);
+  // The one status line under the grid: { text, retry? }. 'Saving…' while a
+  // write is in flight; after a write COMMITTED but the week read failed it
+  // says so and offers a refresh-only retry (the committed result stays shown).
+  const [status, setStatus] = useState(null);
   const [pending, setPending] = useState(null);
   const [unassignedCollapsed, setUnassignedCollapsed] = useState(false);
 
   const monday = useMemo(() => startOfWeek(date), [date]);
 
+  // Request generation. The week load below owns one value per week/refreshKey/
+  // retry; every post-write re-read (reloadWeek) bumps it; navigating away or
+  // unmounting bumps it. An async continuation applies its result only while
+  // the generation it captured is still current, so a late week, refresh or
+  // POST response can never land on a week the grid no longer shows.
+  const genRef = useRef(0);
+
   useEffect(() => {
-    let active = true;
+    const gen = genRef.current;
     setLoading(true);
     setLoadError(null);
     setData(null);
     setOptimistic(null);
+    setStatus(null);
     adminFetch(`/admin/schedule/week?start=${monday}`)
       .then((j) => {
-        if (!active) return;
+        if (gen !== genRef.current) return;
         setData(j);
         setLoading(false);
       })
       .catch((err) => {
-        if (!active) return;
+        if (gen !== genRef.current) return;
         console.error(err);
         setLoadError(err);
         setLoading(false);
       });
-    return () => { active = false; };
+    return () => { genRef.current += 1; };
   }, [monday, refreshKey, retryKey]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
@@ -945,10 +952,29 @@ export default function TimeGridDays({
     });
   }, [data]);
 
+  // The one week re-read after a committed write, used by the commit path and
+  // the refresh-only retry. A failed read never undoes the committed result.
+  const reloadWeek = useCallback(async () => {
+    const gen = ++genRef.current;
+    setStatus({ text: 'Refreshing…' });
+    let next = null;
+    try {
+      next = await adminFetch(`/admin/schedule/week?start=${monday}`);
+    } catch (err) {
+      console.error(err);
+    }
+    // Navigated away or superseded by a newer re-read: drop everything.
+    if (gen !== genRef.current) return;
+    if (next) setData(next);
+    setStatus(next ? null : { text: 'Moved. Could not refresh the schedule.', retry: true });
+    onChange?.();
+  }, [monday, onChange]);
+
   const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
     if (!pending) return;
     const { mode, svc, toDate, newWindow } = pending;
-    setBusy(true);
+    const gen = genRef.current;
+    setStatus({ text: 'Saving…' });
     try {
       if (mode === 'assign') {
         await adminFetch(`/admin/schedule/${svc.id}/assign`, {
@@ -980,22 +1006,33 @@ export default function TimeGridDays({
           showScheduleSaveNotice(`Moved.\n\n${result.warnings.join('\n\n')}`);
         }
       }
-      const j = await adminFetch(`/admin/schedule/week?start=${monday}`);
-      setData(j);
-      setOptimistic(null);
-      setPending(null);
-      onChange?.();
     } catch (err) {
       // A refused collective-move ack carries a refreshed preview — the modal
       // re-renders it and stays open; nothing moved, nothing to revert.
+      setStatus(null);
       if (parseSeriesAckError(err)?.code === SERIES_ACK_REQUIRED) throw err;
       alert('Reschedule failed: ' + apiErrorMessage(err));
       setOptimistic(null);
       setPending(null);
-    } finally {
-      setBusy(false);
+      return;
     }
-  }, [pending, monday, onChange]);
+
+    // The write committed. From here a failure is a failed REFRESH, never a
+    // failed move: promote the committed result into the baseline (a later
+    // drag, or a cancelled one, starts from it; a good refresh replaces it
+    // with server data), close the confirmation and tell the parent either
+    // way (its own read may also fail).
+    setPending(null);
+    // The week changed while the write was in flight: the move is saved, but
+    // this week's optimistic copy must not become the new week's baseline.
+    if (gen !== genRef.current) return;
+    setData(optimistic || data);
+    setOptimistic(null);
+    // Not awaited: the confirmation resolves once the write commits, so a slow
+    // refresh never holds its busy state over the next drag (reloadWeek catches
+    // its own failure and is generation-guarded).
+    void reloadWeek();
+  }, [pending, optimistic, data, reloadWeek]);
 
   const cancelReschedule = useCallback(() => {
     setOptimistic(null);
@@ -1003,11 +1040,11 @@ export default function TimeGridDays({
   }, []);
 
   if (loading) {
-    return <div className="py-10 text-center text-13 text-ink-secondary">Loading…</div>;
+    return <div className="py-10 text-center text-14 text-ink-secondary">Loading…</div>;
   }
   if (loadError) {
     return (
-      <div className="py-10 text-center text-13 text-alert-fg">
+      <div className="py-10 text-center text-14 text-alert-fg">
         <div>Failed to load this week: {loadError.message || String(loadError)}</div>
         <button type="button" className="underline mt-2" onClick={() => setRetryKey((key) => key + 1)}>
           Retry
@@ -1017,7 +1054,7 @@ export default function TimeGridDays({
   }
   if (!days.length) {
     return (
-      <div className="py-10 text-center text-13 text-ink-secondary">
+      <div className="py-10 text-center text-14 text-ink-secondary">
         No services scheduled this week.
       </div>
     );
@@ -1070,11 +1107,17 @@ export default function TimeGridDays({
           </div>
         </div>
       </DndContext>
-      {busy && (
+      {status && (
         <div
-          className="px-3 py-1 text-11 text-ink-secondary"
+          role="status"
+          className="px-3 py-2 text-14 text-ink-secondary flex flex-wrap items-center gap-3"
           style={{ borderTop: '1px solid #E4E4E7' }}
-        >Saving…</div>
+        >
+          <span>{status.text}</span>
+          <button type="button" className="underline" hidden={!status.retry} onClick={reloadWeek}>
+            Refresh
+          </button>
+        </div>
       )}
       <RescheduleConfirmModal
         open={!!pending}

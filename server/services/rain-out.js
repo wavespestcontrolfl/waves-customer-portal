@@ -905,6 +905,145 @@ function sameDayOptions(now = new Date()) {
   return options;
 }
 
+// Route-checked "later today" hours (GATE_TECH_MOVE_ROUTE_TIMES, dark; owner
+// 2026-10-28, "yes techs can move visits from their own app"). Read at CALL
+// time so an unset is the kill switch. The tech sheet used to guess now + 2h
+// and now + 4h with no route check; on, it offers the hours the technician's
+// route can actually keep, each with the minutes of drive it adds. The free
+// straight-line estimate only: a technician's request never buys Google road
+// times (those stay staff-only, GATE_PICKER_ROAD_CHECK).
+const TECH_MOVE_ROUTE_MAX_OPTIONS = 4;
+const SAME_DAY_LEAD_MINUTES = 60;
+// The stop the tech is at or driving to cannot be routed from itself
+// (arrival-route resolvePlacementOrigin refuses an active target).
+const ACTIVE_TARGET_STATUSES = new Set(['en_route', 'on_site']);
+
+function techMoveRouteTimesLive() {
+  return require('../config/feature-gates').gateEnvValue('GATE_TECH_MOVE_ROUTE_TIMES');
+}
+
+// Added drive of a finder slot in whole minutes; null when the finder has no
+// number for it (such an hour sorts after every hour that has one).
+function slotDriveMinutes(slot) {
+  const drive = Number(slot.detour_minutes);
+  return slot.detour_minutes == null || !Number.isFinite(drive) ? null : Math.round(drive);
+}
+
+// The feasible on-the-hour starts for today, one per hour (lowest added drive
+// wins a shared hour), lowest drive first, ties earlier start, at most 4.
+function pickRouteHours(slots, { todayStr, firstStart }) {
+  const byStart = new Map();
+  for (const slot of slots) {
+    const start = hhmmToMinutes(slot.start_time);
+    const inBounds = start != null && start % 60 === 0 && start >= firstStart && start <= SAME_DAY_LAST_START_MINUTES;
+    if (slot.date !== todayStr || !inBounds) continue;
+    const drive = slotDriveMinutes(slot);
+    const kept = byStart.get(start);
+    if (!kept || (drive ?? Infinity) < (kept.drive ?? Infinity)) byStart.set(start, { start, drive });
+  }
+  return [...byStart.values()]
+    .sort((a, b) => ((a.drive ?? Infinity) - (b.drive ?? Infinity)) || a.start - b.start)
+    .slice(0, TECH_MOVE_ROUTE_MAX_OPTIONS);
+}
+
+function routeHourOption({ start, drive }, todayStr) {
+  const window = { start: minutesToHHMM(start), end: minutesToHHMM(start + RESCHEDULE_WINDOW_MINUTES) };
+  return {
+    kind: 'same_day',
+    date: todayStr,
+    window,
+    label: 'Later today',
+    display: `Today, ${displayWindow(window)}`,
+    ...(drive != null ? { driveMinutes: drive } : {}),
+  };
+}
+
+// The visit's saved service location, by the staff finder's rule
+// (day-stops serviceLocationSelects + resolveServiceLocation): its own pin,
+// else its stamped service address (geocode cache only, never a paid lookup),
+// else the customer's pin. A secondary property never searches from home.
+async function visitServiceLocation(service) {
+  if (!service.service_address_line1) {
+    return { lat: service.lat ?? service.customer_latitude, lng: service.lng ?? service.customer_longitude };
+  }
+  const { resolveServiceLocation } = require('./scheduling/day-stops');
+  return resolveServiceLocation({
+    lat: service.lat, lng: service.lng, address_line1: service.service_address_line1,
+    city: service.service_address_city, state: service.service_address_state, zip: service.service_address_zip,
+  }, undefined, { cacheOnly: true });
+}
+
+// True when the finder judged today's route and refused every hour for a
+// real reason (arrival window, return time, an overcommitted day); only
+// route_unverified refusals (or none) mean it could not judge the route.
+function routeJudgedFull(result, todayStr) {
+  const reasons = Object.keys(result?.rejections_by_date?.[todayStr] || {});
+  return reasons.some((reason) => reason !== 'route_unverified');
+}
+
+// null = no route answer (an active target, the finder threw or answered
+// with an error, or it could not verify the route): the caller falls back to
+// sameDayOptions(). [] = the route was judged and keeps no hour today, so the
+// sheet offers no same-day hour rather than an unchecked guess.
+async function routeSameDayOptions(service, now = new Date()) {
+  if (ACTIVE_TARGET_STATUSES.has(service.status)) return null;
+  const parts = etParts(now);
+  const todayStr = etDateString(now);
+  const firstStart = Math.max(
+    Math.ceil((parts.hour * 60 + parts.minute + SAME_DAY_LEAD_MINUTES) / 60) * 60,
+    SAME_DAY_FIRST_START_MINUTES,
+  );
+  try {
+    const location = await visitServiceLocation(service);
+    // No usable pin: the route cannot be judged, so the guesses stay.
+    if (location?.lat == null || location?.lng == null) return null;
+    const { findAvailableSlots } = require('./scheduling/find-time');
+    const result = await findAvailableSlots({
+      lat: location.lat,
+      lng: location.lng,
+      durationMinutes: RESCHEDULE_WINDOW_MINUTES,
+      dateFrom: todayStr,
+      dateTo: todayStr,
+      ...(service.technician_id ? { technicianId: service.technician_id } : {}),
+      excludeServiceIds: [service.id],
+      // A shared stop is not asked as a whole visit (only the staff box asks
+      // that, arrival-route-visit-unit wiring test): its route_unverified
+      // answer keeps the +2h/+4h guesses below.
+      arrivalWindow: { serviceId: service.id },
+      // Today is the only date: a Sunday route is searched too (the blackout
+      // check above already covers a closed day).
+      includeWeekends: true,
+      // The sheet commits on-the-hour one-hour blocks; rank every hour.
+      slotStepMinutes: 60,
+      everyStepStart: true,
+      earliestStartMin: firstStart,
+      topN: Number.POSITIVE_INFINITY,
+      // A tech moves a visit mid-route: today's route continues from the
+      // current stop (an active stop otherwise leaves every hour unverified).
+      fromActiveStop: true,
+      // No Google drive times for a technician's request, the model only.
+      providerTravel: false,
+    });
+    if (result?.error) {
+      logger.warn(`[rain-out] tech route hours unavailable for ${service.id}, using the +2h/+4h guesses: ${result.error}`);
+      return null;
+    }
+    const picked = pickRouteHours(Array.isArray(result?.slots) ? result.slots : [], { todayStr, firstStart });
+    if (picked.length) return picked.map((hour) => routeHourOption(hour, todayStr));
+    return routeJudgedFull(result, todayStr) ? [] : null;
+  } catch (err) {
+    logger.warn(`[rain-out] tech route hours failed for ${service.id}, using the +2h/+4h guesses: ${err.message}`);
+    return null;
+  }
+}
+
+// Gate off = sameDayOptions() exactly as before.
+async function sameDayChoices(service) {
+  if (!techMoveRouteTimesLive()) return sameDayOptions();
+  const routed = await routeSameDayOptions(service);
+  return routed === null ? sameDayOptions() : routed;
+}
+
 // Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:
 // picking a time that overlaps another appointment gave no warning until
 // commit's SLOT_TAKEN). Same tech-blind predicate — occupancy.js's own
@@ -990,7 +1129,7 @@ function conflictsForTarget(occupancy, serviceId, date, window, {
   routeSiblingIds = null, excludeServiceIds = null, technicianId = null,
 } = {}) {
   const { windowsOverlap, techScopedConfirmActive } = require('./scheduling/occupancy');
-  // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark): with a
+  // Second technician (GATE_MULTI_TECH_CONFIRM, dark; hour or capacity mode): with a
   // technician named, only that route's rows and unassigned rows count —
   // findConflictingVisits' applyTechScope predicate. Gate off = tech-blind.
   const scopeTechId = technicianId != null && technicianId !== '' && techScopedConfirmActive()
@@ -1329,6 +1468,10 @@ async function checkSlots({ targets, caller = null } = {}) {
   }));
   // results[i] answers targets[i] — the bulk bars rely on the alignment.
   const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
+  // One Google budget for the whole batch (up to 25 checks at once), so an
+  // admin's batch keeps the per-request limit and buys a shared leg once
+  // (GATE_PICKER_ROAD_CHECK). A technician's checks never use it.
+  const batchBudget = require('./scheduling/hint-road-times').createPickerBudget();
   const results = await Promise.all(parsed.map(async (p) => {
     if (p.serviceId && arrivalWindowRoutingEnabled()) {
       try {
@@ -1336,6 +1479,15 @@ async function checkSlots({ targets, caller = null } = {}) {
           serviceId: p.serviceId, date: p.date, technicianId: p.technicianId,
           windowStart: p.window.start, windowEnd: p.window.end,
           durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
+          // GATE_ROUTE_WARNING_DETAIL: the warning names the stop, window and minutes (no customer
+          // name, so a technician's row reads the same).
+          ...require('./scheduling/route-warning-detail').detailOption(),
+          // The pickers' Google road times are staff-only: a technician's
+          // check stays on the model. Counted against the admin who asked
+          // (picker-road-spend.js).
+          roads: caller?.isAdmin === true,
+          roadSpender: caller?.isAdmin === true ? caller.technicianId || null : null,
+          pickerBudget: batchBudget,
         });
         return { conflicts: fit.feasible ? [] : [{ id: p.serviceId, warning: fit.warning, reason: fit.reason }] };
       } catch (err) {
@@ -1367,13 +1519,20 @@ async function getOptions(serviceId, { caller = null } = {}) {
   // not be offered (findRescheduleOptions covers tomorrow onward; same-day
   // candidates are built here). Fail-open helper.
   const { isBlackoutDate } = require('./scheduling/blackout-dates');
-  const sameDay = (await isBlackoutDate(todayStr)) ? [] : sameDayOptions();
+  const sameDay = (await isBlackoutDate(todayStr)) ? [] : await sameDayChoices(service);
 
   // probeSpanMinutes: 60 — the sheet OFFERS what commit() actually BOOKS
   // (the on-the-hour one-hour block), not the visit's stored span: a 2h
   // stored window would hide bookable options and a sub-hour one would
   // offer slots the commit then SLOT_TAKENs (codex P2).
-  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', { probeSpanMinutes: 60, travelGap: true });
+  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', {
+    probeSpanMinutes: 60,
+    travelGap: true,
+    // GATE_ROUTE_CHECK_STAFF_LISTS: the route check buys Google road times
+    // only for an admin caller; the tech route (isAdmin: false) and a call
+    // with no caller stay on the estimate.
+    caller,
+  });
 
   // Rain badges — best effort, never blocking. Customer coords first,
   // falling back to nothing (options render without percentages).
@@ -1417,6 +1576,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
       display: `${opt.displayDate}, ${displayWindow(window)}`,
       ...optionRain(opt.date, window),
       shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
+      ...(opt.dayAlreadyLate === true ? { dayAlreadyLate: true } : {}),
     };
   });
 
@@ -2096,7 +2256,7 @@ async function prepareNoteRungSms({ serviceId, service, target, note, reasonCode
   return { ok: true, prebuiltSms };
 }
 
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null, allowSeriesForAssignedTechnician = false, roadSpender = null }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -2353,14 +2513,20 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // check believing no series-widening is possible while THIS read
     // disagrees, reaching the series branch with no ownership enforcement
     // at all (requireAssignedTechnicianId only fenced the single-job
-    // fallback). A restricted (technician) caller can never take the
-    // series-shift branch here, full stop, regardless of any race — every
-    // technician request is forced onto the single-job path below, which
-    // is unconditionally fenced by requireAssignedTechnicianId's CAS.
+    // fallback). So a restricted (technician) caller can never take the
+    // series-shift branch by default: it is forced onto the single-job path
+    // below, which is fenced by requireAssignedTechnicianId's CAS.
+    //
+    // The tech-portal Quick Move is the one exception (owner ruling
+    // 2026-10-28: technicians move visits from their own app, and a recurring
+    // date move shifts its series): it passes allowSeriesForAssignedTechnician,
+    // and the series call is fenced to the same technician through
+    // expectAnchor.technician_id (rebooker assertAnchorPin, judged on the
+    // locked read), so no series write happens without the ownership check.
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
       && String(target.date) !== jobDateStr
-      && !requireAssignedTechnicianId;
+      && (!requireAssignedTechnicianId || allowSeriesForAssignedTechnician === true);
     // The anchor's on-the-hour normalization for this path lives at the
     // TOP of commit() (before the custom move's SMS pre-render) — by here
     // target.window is already the window that books.
@@ -2398,6 +2564,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             // The day options came from the staff arrival check, so the move
             // numbers the day the way it checked (GATE_STAFF_ROUTE_INSERTION).
             placeInRoute: true,
+            // GATE_SAVE_ROAD_BUY: an admin's move buys its road times before
+            // the series transaction (the dispatch route passes none for a technician).
+            ...(roadSpender ? { roadSpender } : {}),
             sourceSurface: 'quick_move',
             qualityDates: rebookerQualityDates,
             // The intent is recorded WITH the operation (durable): the live
@@ -2408,7 +2577,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             notifyRequested: notifyCustomer === true,
             // Pin the anchor to the state this loop read — a concurrent
             // move means the delta is stale and the series must not shift.
-            expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
+            expectAnchor: {
+              scheduled_date: job.scheduled_date,
+              window_start: job.window_start,
+              ...(requireAssignedTechnicianId ? { technician_id: requireAssignedTechnicianId } : {}),
+            },
           });
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
             ? seriesResult.rescheduledOccurrences
@@ -2458,6 +2631,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           overlapAdvisory: true,
           // Same as the series call above (GATE_STAFF_ROUTE_INSERTION).
           placeInRoute: true,
+          ...(roadSpender ? { roadSpender } : {}),
           excludeServiceIds: [job.id],
           qualityDates: rebookerQualityDates,
           // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_
@@ -2690,6 +2864,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 
     results.push({
       id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason,
+      // applySeriesMoveEffects already broadcast this stop's board update; a
+      // caller that emits one per moved stop must skip it (no double emit).
+      ...(shiftedOccurrences ? { boardBroadcastBySeriesEffects: true } : {}),
       ...(memberWarnings.length ? { warnings: memberWarnings } : {}),
       // The repair the alert names must match the actual failure (codex
       // #3609 r34): a parent-retarget failure has ZERO stragglers — every

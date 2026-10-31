@@ -1373,7 +1373,12 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
           : paymentIntent.latest_charge?.id || null,
         updated_at: trx.fn.now(),
       };
-      if (invoiceStatus === 'paid') invoiceUpdates.paid_at = new Date().toISOString();
+      if (invoiceStatus === 'paid') {
+        invoiceUpdates.paid_at = new Date().toISOString();
+        // This share was priced from what was still owed (amountDueCents); any part payment received earlier goes with the paid flip,
+        // since the column holds money received on a still-open invoice. total is not rewritten here, so the paid invoice reads as the whole bill.
+        invoiceUpdates.amount_paid = 0;
+      }
       if (details.paymentMethod) invoiceUpdates.payment_method = details.paymentMethod;
       if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
       if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;

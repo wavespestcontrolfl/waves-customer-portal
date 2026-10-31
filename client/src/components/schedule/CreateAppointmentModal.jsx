@@ -37,8 +37,8 @@ import useModalFocus from '../../hooks/useModalFocus';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
+import CancelCallNotice from './CancelCallNotice';
 import { useSlotConflicts } from './useSlotConflicts';
-import { detourPhrase } from './detour-phrase';
 import HourTechCompare from './HourTechCompare';
 import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
 import { useBestTimes } from './useBestTimes';
@@ -242,6 +242,10 @@ const CADENCE_OPTIONS = [
   { value: 'custom', label: 'Custom (every N days)' },
 ];
 
+// Lawn 9x rounds (lawn_rounds_9) is never a choice in the cadence select; a line
+// can still carry it (an existing 9x lawn plan), so it needs a staff label here.
+const LAWN_ROUNDS_LABEL = 'Lawn rounds (9 a year)';
+
 const NTH_OPTIONS = [
   { value: 1, label: '1st' }, { value: 2, label: '2nd' },
   { value: 3, label: '3rd' }, { value: 4, label: '4th' },
@@ -274,29 +278,12 @@ const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', l
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
 
-// Second line of a Find-a-Time result: the drive the van makes INTO the
-// stop from the anchor it leaves (home base for the first stop), then what
-// the insertion adds to the route — same wording as the picker hint, so
-// "+57 min" never reads as a drive time. A result without a single
-// insertion leg (arrival-window mode) keeps the detour-only form.
-export function findTimeSlotDetail(slot) {
-  const added = detourPhrase({ detourMinutes: slot.detour_minutes });
-  const driveIn = Math.round(Number(slot.drive_in_minutes));
-  if (slot.drive_in_minutes == null || !Number.isFinite(driveIn) || !slot.insertion) return added;
-  const from = slot.insertion.after_stop_id ? (slot.insertion.after_name || 'the previous stop') : 'home base';
-  return `${driveIn} min drive from ${from} · ${added} · before ${slot.insertion.before}`;
-}
-
 function normalizeHourTime(value, fallback = '09:00') {
   const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
   if (!match) return fallback;
   const hour = Number.parseInt(match[1], 10);
   if (!Number.isFinite(hour)) return fallback;
   return `${String(Math.min(23, Math.max(0, hour))).padStart(2, '0')}:00`;
-}
-
-function isHourTime(value) {
-  return /^\d{2}:00(?::00)?$/.test(String(value || '').trim());
 }
 
 function inferServiceCadence(service) {
@@ -455,6 +442,8 @@ function visitsPerYearForCadence(cadence) {
     // fall to the null default and the prepay choice stays disabled.
     case 'monthly': return 12;
     case 'every_6_weeks': return 9;
+    // Lawn 9x rounds: prepay coverage follows the round calendar server-side.
+    case 'lawn_rounds_9': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
     case 'quarterly': return 4;
     case 'triannual': case 'every_4_months': return 3;
@@ -540,12 +529,6 @@ export function pickAutoScheduleEstimate({
   return { estimate, key };
 }
 
-// Request body for POST /admin/schedule/find-time from the CREATE modal.
-// Deliberately sends NO `serviceId`: the server treats that field as an
-// existing scheduled_services (visit) id and 404s "Visit not found" when it
-// doesn't resolve. A new appointment has no visit yet, and the selected
-// service here is a service-LIBRARY catalog row — its id is not a visit id.
-// Ranking is anchored on the customer instead.
 // Quick-add phone-match confirm support (server gate on
 // /admin/customers/quick-add): a 409 DUPLICATE_PROFILE / PHONE_MATCH_CONFIRM
 // becomes a conflict object the UI renders as an explicit choice, and the
@@ -648,34 +631,6 @@ export function formatBookingPropertyAddress(property) {
   const street = [property.address_line1, property.address_line2].filter(Boolean).join(', ');
   const locality = [property.city, [property.state, property.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
   return { street, locality };
-}
-
-export function buildFindTimeRequestBody({
-  customerId,
-  serviceName,
-  durationMinutes,
-  dateFrom,
-  dateTo,
-  technicianId,
-  horizonDays = 7,
-  // Chosen service address (bookingPropertyTarget); absent → the server
-  // resolves the customer's primary as before.
-  address,
-  lat,
-  lng,
-}) {
-  return {
-    customerId,
-    address: address || undefined,
-    lat: lat ?? undefined,
-    lng: lng ?? undefined,
-    serviceType: serviceName,
-    durationMinutes,
-    dateFrom,
-    dateTo,
-    technicianId: technicianId || undefined,
-    topN: horizonDays > 7 ? 100 : 25,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,6 +1249,13 @@ export function decideAnnualPrepayAttachment({
   return { attach, billingTerm: attach ? 'prepay_annual' : undefined };
 }
 
+// GATE_CALL_PREPAY_CHOICE: Book it on a held call where the caller chose annual prepay opens the form with "Annual prepay"
+// preselected, but only when the linked quote is open and the SERVER says it is prepay-eligible. Everything else stays Standard.
+// The save still goes through decideAnnualPrepayAttachment and the server's own eligibility and pricing checks.
+export function preselectAnnualPrepay({ preferAnnualPrepay, linkedEstimate }) {
+  return !!preferAnnualPrepay && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
+}
+
 // The series a manual prepay preview priced, matched by GROUP IDENTITY —
 // NOT "the first result" (a booking can post a one-time group first).
 export function matchesPrepayTarget({ targetKey, key, result }) {
@@ -1472,6 +1434,7 @@ const AUTO_UNASSIGNED_REASONS = {
   none_assignable: 'No technician is available that day.',
   several_assignable: 'More than one technician could take it.',
   none_free: 'No technician is free at that time.',
+  line_none: 'The technicians for this service are not free that day.',
   absent_on_series_date: 'The technician is out on a later date of the series.',
 };
 export function autoAssignWarning(results) {
@@ -1605,7 +1568,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1788,7 +1751,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [scheduleEstimateError, setScheduleEstimateError] = useState('');
   const [linkedEstimate, setLinkedEstimate] = useState(null);
   const autoAppliedScheduleEstimateRef = useRef(null);
-  const selectedService = services[0] || null;
 
   // Lock body scroll while the modal is open. The modal is portaled to
   // document.body (so it isn't trapped inside the admin shell's
@@ -1959,16 +1921,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Deliberately keyed on the customer and default estimate only.
   }, [selectedCustomer?.id, defaultEstimateId]);
 
-  // True once a Find-a-Time result or best-time chip filled the time/tech —
+  // True once a best-time chip filled the time/tech —
   // that pair was scored at ONE address and is dropped on a property switch.
   const appliedSuggestionRef = useRef(false);
   // Everything derived from the service address, dropped on EVERY property
-  // change (initial default, operator pick, estimate-driven switch): the
-  // in-flight / shown Find-a-Time results and an already-applied suggestion.
+  // change (initial default, operator pick, estimate-driven switch): an
+  // already-applied suggestion.
   const resetAddressDerivedState = () => {
-    findTimesRequestRef.current += 1;
-    setTimeSlots(null);
-    setFindingTimes(false);
     if (appliedSuggestionRef.current) {
       // The adopted technician/time was a detour scored at the previous
       // address; back to auto-assign so the save re-evaluates at this one.
@@ -1996,9 +1955,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // must not hide a bookable secondary — the server's sole-property
         // anchor sees both rows and would fall back to the profile address).
         if (data?.canChangeAppointmentAddress === true && all.length > 1 && complete.length > 0) {
-          // Same invalidation as applyBookingProperty: a Find-a-Time search
-          // started before this list arrived was scored at the primary, and
-          // the default here may be a complete SECONDARY.
+          // Same invalidation as applyBookingProperty: a suggestion applied
+          // before this list arrived was scored at the primary, and the
+          // default here may be a complete SECONDARY.
           resetAddressDerivedState();
           setSelectedPropertyId(defaultBookingPropertyId(complete));
           setBookingPropertyState('ready');
@@ -2014,9 +1973,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // picker on that property so the estimate stays selectable.
   // EVERY property change — the operator's pick or the estimate-driven
   // switch below — goes through here: slot suggestions were scored at the
-  // previous address, so drop what is shown AND invalidate any search still
-  // in flight (handleFindTimes checks this counter before applying its
-  // response).
+  // previous address, so drop what was applied from them.
   const applyBookingProperty = (propertyId) => {
     if (String(propertyId) === String(selectedPropertyId)) return false;
     // After a partial split save (one cadence group committed, a later one
@@ -2075,13 +2032,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     [scheduleEstimates, propertyPickerActive, selectedPropertyId, bookingPropertyState],
   );
 
-  // Find-a-Time state
-  const [findingTimes, setFindingTimes] = useState(false);
-  const findTimesRequestRef = useRef(0);
-  const [timeSlots, setTimeSlots] = useState(null); // null = hidden, [] = searched but none, [...] = results
-  const [slotError, setSlotError] = useState('');
-  const [findTimeHorizonDays, setFindTimeHorizonDays] = useState(7);
-
   // Date/Time/Tech state — default to today + next clean hour in local time
   const _now = new Date();
   const _ymd = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}-${String(_now.getDate()).padStart(2, '0')}`;
@@ -2124,7 +2074,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // quote — the option is quote-specific (eligibility + invoice amount).
   const linkedEstimateIdForPrepay = linkedEstimate?.id ?? null;
   useEffect(() => {
-    setBillAsAnnualPrepay(false);
+    const preselect = preselectAnnualPrepay({ preferAnnualPrepay: defaultAnnualPrepay, linkedEstimate });
+    setBillAsAnnualPrepay(preselect);
+    // Annual prepay and "collect prepayment in person" are mutually exclusive.
+    if (preselect) setCollectPrepay(false);
   }, [linkedEstimateIdForPrepay]);
   // Annual prepay on a MANUAL booking — the phone-"yes" case with no quote
   // behind it, where billAsAnnualPrepay above has nothing to price. Every
@@ -2312,6 +2265,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   }, [reserviceProbeCustomerId]);
   // A different customer's suggestion or words never carry over.
   useEffect(() => { setCustomerWords(''); setUsedSuggestion(null); }, [reserviceProbeCustomerId]);
+  // "Canceled on a call" (GATE_CALL_CANCEL_GUARD): the chosen customer's latest call, when it was a cancellation.
+  // A warning only. The probe doubles as the gate read: the route answers {enabled:false} while the lane is dark,
+  // and a failed fetch shows nothing, so a dark lane renders as before. It runs for every chosen customer, so a fetch
+  // that throws synchronously is turned into that same quiet failure.
+  const cancelProbeCustomerId = selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
+  const [cancelCallProbe, setCancelCallProbe] = useState({ customerId: '', call: null });
+  useEffect(() => {
+    if (!cancelProbeCustomerId) return undefined;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => adminFetch(`/admin/schedule/cancel-call-notice?customerId=${encodeURIComponent(cancelProbeCustomerId)}`))
+      .then((r) => {
+        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: r?.enabled ? (r.call || null) : null });
+      })
+      .catch(() => {
+        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: null });
+      });
+    return () => { cancelled = true; };
+  }, [cancelProbeCustomerId]);
+  const cancelCallNotice = cancelCallProbe.customerId === cancelProbeCustomerId ? cancelCallProbe.call : null;
   const reserviceRequestActive = !!reserviceProbeCustomerId
     && reserviceRequestProbe.customerId === reserviceProbeCustomerId
     && reserviceRequestProbe.enabled;
@@ -3179,71 +3152,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
   };
 
-  // Find best times — calls /api/admin/schedule/find-time
-  const handleFindTimes = async ({ horizonDays = 7 } = {}) => {
-    if (!selectedCustomer || !selectedService) return;
-    // Version the request: a property switch (or a newer search) while this
-    // one is in flight bumps the counter, and the stale response is dropped
-    // instead of repopulating slots scored at the previous address.
-    const requestId = findTimesRequestRef.current + 1;
-    findTimesRequestRef.current = requestId;
-    setFindTimeHorizonDays(horizonDays);
-    setFindingTimes(true);
-    setSlotError('');
-    setTimeSlots(null);
-    try {
-      const dur = totalDuration || 60;
-      const today = new Date();
-      const from = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-      const searchFrom = apptDate && apptDate > from ? apptDate : from;
-      const endD = new Date(searchFrom + 'T12:00:00'); endD.setDate(endD.getDate() + horizonDays);
-      const to = `${endD.getFullYear()}-${String(endD.getMonth() + 1).padStart(2, '0')}-${String(endD.getDate()).padStart(2, '0')}`;
-      const r = await adminFetch('/admin/schedule/find-time', {
-        method: 'POST',
-        body: JSON.stringify(buildFindTimeRequestBody({
-          customerId: selectedCustomer.id,
-          ...bookingPropertyTarget(selectedBookingProperty),
-          serviceName: selectedService.name,
-          durationMinutes: dur,
-          dateFrom: searchFrom,
-          dateTo: to,
-          technicianId: techMode === 'choose' && techId ? techId : undefined,
-          horizonDays,
-        })),
-      });
-      if (findTimesRequestRef.current !== requestId) return;
-      setTimeSlots((r.slots || [])
-        .filter((slot) => isHourTime(slot.start_time))
-        .slice(0, 8)
-        .map((slot, index) => ({ ...slot, rank: index + 1 })));
-    } catch (e) {
-      if (findTimesRequestRef.current !== requestId) return;
-      setSlotError(e.message || 'Failed to find times');
-      setTimeSlots(null);
-    }
-    setFindingTimes(false);
-  };
-
-  const applySlot = (slot) => {
-    setApptDate(slot.date);
-    setWindowStart(normalizeHourTime(slot.start_time, windowStart));
-    setTechMode('choose');
-    setTechId(slot.technician.id);
-    appliedSuggestionRef.current = true;
-    setTimeSlots(null);
-  };
-
-  const fmtSlotDay = (d) => {
-    const dt = new Date(d + 'T12:00:00');
-    return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  };
-
-  const fmtTime = (t) => {
-    if (!t) return '';
-    const [h, m] = t.split(':').map(Number);
-    return `${h > 12 ? h - 12 : h}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
-  };
-
   // Group services into appointment payloads. Lines that share a cadence
   // (and interval, when custom) ride a single parent appointment as
   // add-ons; lines on different cadences fan out into their own parent
@@ -3272,6 +3180,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const wOpt = WEEKDAY_OPTIONS.find((o) => o.value === parseInt(group.weekday));
       return `${nthOpt?.label || group.nth} ${wOpt?.label || ''}`.trim();
     }
+    if (group.cadence === 'lawn_rounds_9') return LAWN_ROUNDS_LABEL;
     const found = CADENCE_OPTIONS.find((o) => o.value === group.cadence);
     return found ? found.label : group.cadence;
   };
@@ -3287,6 +3196,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (cadence === 'daily') return 1;
     if (cadence === 'weekly') return 7;
     if (cadence === 'biweekly') return 14;
+    if (cadence === 'lawn_rounds_9') return 42; // ranks like the 42-day 9x cadence
     const months = {
       monthly: 30,
       monthly_nth_weekday: 30,
@@ -4207,8 +4117,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       : null,
   });
   // Advisory drive-detour suggestions for the picked day — a chip only sets
-  // the start time (window end is derived from durations at submit), and is
-  // separate from the ranged "Find best times" panel above.
+  // the start time (window end is derived from durations at submit).
   // No customer yet (a new caller): with the gate on, the New customer
   // block's picked address is the search subject instead. Only while the
   // block is open: collapsing it hides the address, so the chips for it go too.
@@ -4238,7 +4147,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Before a service is picked the search stands on a 30-minute visit
     // (owner 2026-10-24); the lines' own durations take over once added.
     durationMinutes: slotCheckDuration > 0 ? slotCheckDuration : PRE_SERVICE_SEARCH_MINUTES,
-    // Same tech scoping as the ranged search — auto mode searches all techs.
+    // Chosen technician scopes the search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
     // The picked-hour verdict is priced on ONE technician's route. In Auto
     // mode the booking's server-side matcher picks its own tech (or leaves
@@ -5690,6 +5599,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               >✕</button>
             </div>
           )}
+          {selectedCustomer && cancelCallNotice && <CancelCallNotice call={cancelCallNotice} />}
           {selectedCustomer && quickAddSaveNotice && (
             <div role="status" style={{ fontSize: 14, color: '#18181B', marginTop: 10 }}>{quickAddSaveNotice}</div>
           )}
@@ -5799,91 +5709,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         {/* Section 3: Date — above Services (owner 2026-10-24): the best
             times answer "when can we come" as soon as there is an address. */}
         <div ref={dateSectionRef} style={sectionStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Date</div>
-            {selectedCustomer && selectedService && (
-              <button
-                onClick={() => handleFindTimes({ horizonDays: 7 })}
-                disabled={findingTimes}
-                style={{
-                  padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
-                  color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
-                  fontSize: 12, fontWeight: 500, cursor: findingTimes ? 'default' : 'pointer',
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                }}
-                title="Rank the best slots by drive-time detour"
-              >
-                {findingTimes ? 'Finding...' : 'Find best times'}
-              </button>
-            )}
-          </div>
-          {selectedCustomer && selectedService && (
-            <button
-              onClick={() => handleFindTimes({ horizonDays: 90 })}
-              disabled={findingTimes}
-              style={{
-                width: '100%', marginBottom: 10, padding: '8px 12px',
-                background: '#FFFFFF', color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
-                fontSize: 12, fontWeight: 500, cursor: findingTimes ? 'default' : 'pointer',
-              }}
-              title="Search up to 90 days from the selected date"
-            >
-              Find more dates
-            </button>
-          )}
-
-          {slotError && (
-            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
-              {slotError}
-            </div>
-          )}
-
-          {timeSlots !== null && (
-            <div style={{ marginBottom: 12, background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <div style={{ fontSize: 11, fontWeight: 500, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : `No feasible slots in next ${findTimeHorizonDays} days`}
-                </div>
-                <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
-              </div>
-              {timeSlots.length > 0 && (
-                <>
-                {!timeSlots.some(slot => Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= 15) && (
-                  <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
-                    No route near this customer that day yet — here's what's close.
-                  </div>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
-                  {timeSlots.map((slot) => (
-                    <button
-                      key={`${slot.date}-${slot.technician.id}-${slot.start_time}`}
-                      onClick={() => applySlot(slot)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                        background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
-                        cursor: 'pointer', textAlign: 'left', minHeight: 52,
-                      }}
-                    >
-                      <div style={{
-                        fontSize: 11, fontWeight: 500, color: D.teal, background: `${D.teal}15`,
-                        borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
-                      }}>#{slot.rank}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 500, color: '#18181B' }}>
-                          {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
-                        </div>
-                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          {findTimeSlotDetail(slot)}
-                        </div>
-                      </div>
-                      <div style={{ fontSize: 11, color: D.teal, fontWeight: 500 }}>Use →</div>
-                    </button>
-                  ))}
-                </div>
-                </>
-              )}
-            </div>
-          )}
+          <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B', marginBottom: 10 }}>Date</div>
 
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
             <div>

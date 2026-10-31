@@ -19,8 +19,13 @@
  * Nobody free → null: the caller saves the visit unassigned, which blocks the
  * time for everyone until the office assigns it.
  *
- * Active only when the tech-aware save scope is (GATE_MULTI_TECH_CONFIRM +
- * capacity mode, occupancy.techScopedConfirmActive). Otherwise `active` is
+ * With GATE_SERVICE_LINE_MAP=live a service line that has a home or gap
+ * technician set skips steps 3 and 4: the line's technician takes it when
+ * fit and free (line-technician.pickLineTechnician), else nobody (step 2's list
+ * still bounds who may be named). An unmapped line keeps steps 3 and 4.
+ *
+ * Active only when the tech-aware save scope is (GATE_MULTI_TECH_CONFIRM, in
+ * hour or capacity mode, occupancy.techScopedConfirmActive). Otherwise `active` is
  * false and the caller keeps its own default, byte for byte.
  *
  * Reads only. The route estimate spends none of the shared Google allowance
@@ -137,13 +142,31 @@ function rankCandidates(candidates, lastTechnicianId) {
 }
 
 /**
+ * Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): when the visit's line has a
+ * home or gap technician set, the line decides among `techs` (the callers' own
+ * assignable / present / capable list) instead of the closest route: the home
+ * technician when free, else the gap technician, else nobody. The result in
+ * pickTechnicianForVisit's shape ('line_home' | 'line_gap_<why>' | 'line_none'),
+ * or null (gate not live, no line, line unmapped): the closest-route pick stands.
+ * Required lazily: line-technician requires this module for the free-time probe.
+ */
+async function pickByServiceLine(conn, techs, visit) {
+  const lineTech = require('./line-technician');
+  if (!lineTech.lineMapLive()) return null;
+  const pick = await lineTech.pickLineTechnician(conn, { ...visit, candidateIds: techs.map((t) => t.id), checkFree: true });
+  if (!pick.mapped) return null;
+  const tech = pick.technicianId ? techs.find((t) => String(t.id) === String(pick.technicianId)) : null;
+  return { active: true, technician: tech ? { id: tech.id, name: tech.name || null } : null, reason: `line_${pick.reason}` };
+}
+
+/**
  * @returns {Promise<{active: boolean, technician: {id, name}|null, reason: string, candidates?: Array}>}
  *   active false → the caller keeps its own default. active true + technician
  *   null → save unassigned (reason: 'none_assignable' | 'none_free').
  */
 async function pickTechnicianForVisit({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = DEFAULT_DURATION_MINUTES,
-  lat = null, lng = null, serviceType = null, serviceId = null, serviceKey = null, customerId = null, excludeServiceIds = [],
+  lat = null, lng = null, zip = null, serviceType = null, serviceId = null, serviceKey = null, customerId = null, excludeServiceIds = [],
   // Whose rows the availability probe skips. Default: the customer's own (a
   // fresh booking, where the caller's same-day guard owns same-customer
   // overlaps — parity with its save probe). A caller assigning an EXISTING
@@ -165,6 +188,13 @@ async function pickTechnicianForVisit({
     techs = techs.filter((t) => !offIds.has(t.id));
   }
   if (!techs.length) return { active: true, technician: null, reason: 'none_assignable' };
+
+  // The visit's place (customer, map position) rides along for GATE_TERRITORY_ROUTING.
+  const linePick = await pickByServiceLine(conn, techs, {
+    serviceId, serviceKey, serviceType, date, windowStart, windowEnd, durationMinutes, excludeCustomerId, excludeServiceIds,
+    zip, customerId, lat, lng,
+  });
+  if (linePick) return linePick;
 
   // Free = the save probe, scoped to each technician (their rows + unassigned),
   // and no tech_schedule_blocks row over the window. The probe does not model

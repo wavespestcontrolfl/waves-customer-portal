@@ -19,10 +19,7 @@ const D = {
   heading: "#09090B",
   text: "#27272A",
   muted: "#71717A",
-  green: "#15803D",
-  amber: "#A16207",
   red: "#991B1B",
-  blue: "#1D4ED8",
   accent: "#18181B",
 };
 
@@ -39,30 +36,20 @@ const STATUS_ORDER = [
   "matched",
 ];
 
+// Only alert states get a colour: admin keeps red for genuine alerts and the
+// zinc ramp for everything else (waves-design; audit BLOG-15).
 const STATUS_TONE = {
   conflict: "red",
   db_published_missing_astro: "red",
-  source_missing_since_sync: "amber",
-  db_changed_since_sync: "amber",
-  astro_changed_since_sync: "amber",
-  db_only: "amber",
-  astro_only: "neutral",
-  matched: "green",
 };
 
 const LIVE_TONE = {
-  live: "green",
-  redirected: "blue",
-  canonicalized: "blue",
-  noindex: "amber",
   missing: "red",
   error: "red",
   // Shared live-status classifier (#5123): 5xx split out of `error`, plus
   // body-aware verdicts — keep them in the same alert tones.
   server_error: "red",
   soft_404: "red",
-  blocked: "amber",
-  challenge: "amber",
 };
 
 function labelize(value) {
@@ -113,10 +100,7 @@ function arrayValue(value) {
 
 function Chip({ children, tone = "neutral" }) {
   const colors = {
-    green: { bg: "#DCFCE7", fg: D.green },
-    amber: { bg: "#FEF3C7", fg: D.amber },
     red: { bg: "#FEE2E2", fg: D.red },
-    blue: { bg: "#DBEAFE", fg: D.blue },
     neutral: { bg: D.bg, fg: D.text },
   }[tone] || { bg: D.bg, fg: D.text };
   return (
@@ -129,7 +113,7 @@ function Chip({ children, tone = "neutral" }) {
         borderRadius: 6,
         background: colors.bg,
         color: colors.fg,
-        fontSize: 12,
+        fontSize: 14,
         fontWeight: 700,
         whiteSpace: "nowrap",
       }}
@@ -140,10 +124,10 @@ function Chip({ children, tone = "neutral" }) {
 }
 
 function Kpi({ label, value, tone = "neutral" }) {
-  const color = tone === "red" ? D.red : tone === "amber" ? D.amber : tone === "green" ? D.green : D.heading;
+  const color = tone === "red" ? D.red : D.heading;
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14 }}>
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>{label}</div>
+      <div style={{ fontSize: 14, color: D.muted, fontWeight: 700 }}>{label}</div>
       <div style={{ fontSize: 24, color, fontWeight: 700, fontFamily: MONO, marginTop: 4 }}>{Number(value || 0).toLocaleString()}</div>
     </div>
   );
@@ -152,23 +136,44 @@ function Kpi({ label, value, tone = "neutral" }) {
 function Field({ label, value, mono = false }) {
   return (
     <div>
-      <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>{label}</div>
-      <div style={{ color: D.text, fontSize: 13, fontFamily: mono ? MONO : undefined, overflowWrap: "anywhere", marginTop: 4 }}>
+      <div style={{ fontSize: 14, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ color: D.text, fontSize: 14, fontFamily: mono ? MONO : undefined, overflowWrap: "anywhere", marginTop: 4 }}>
         {value || "-"}
       </div>
     </div>
   );
 }
 
-function buildQuery({ status, contentType, source, liveStatus, search }) {
+// One page of the inventory. The API pages by offset and reports the full
+// filtered total, so the list can reach every match (audit BLOG-12).
+const REGISTRY_PAGE_SIZE = 100;
+
+function buildQuery({ status, contentType, source, liveStatus, search, offset = 0 }) {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (contentType) params.set("content_type", contentType);
   if (source) params.set("source", source);
   if (liveStatus) params.set("live_status", liveStatus);
   if (search.trim()) params.set("search", search.trim());
-  params.set("limit", "100");
+  params.set("limit", String(REGISTRY_PAGE_SIZE));
+  if (offset) params.set("offset", String(offset));
   return `/admin/content-registry?${params.toString()}`;
+}
+
+function registryRangeLabel({ offset, shown, total }) {
+  if (total <= shown || shown === 0) return `${total.toLocaleString()} filtered`;
+  return `${offset + 1}–${offset + shown} of ${total.toLocaleString()} filtered`;
+}
+
+function RegistryPager({ offset, shown, total, onPage }) {
+  if (offset === 0 && shown >= total) return null;
+  const buttonStyle = { minHeight: 40, padding: "0 14px", borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, fontSize: 14, cursor: "pointer" };
+  return (
+    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: `1px solid ${D.border}` }}>
+      <button type="button" disabled={offset === 0} onClick={() => onPage(Math.max(0, offset - REGISTRY_PAGE_SIZE))} style={buttonStyle}>Previous</button>
+      <button type="button" disabled={offset + shown >= total} onClick={() => onPage(offset + shown)} style={buttonStyle}>Next</button>
+    </div>
+  );
 }
 
 export default function ContentRegistryPage({ embedded = false } = {}) {
@@ -178,6 +183,11 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
   const [source, setSource] = useState("");
   const [liveStatus, setLiveStatus] = useState("");
   const [search, setSearch] = useState("");
+  // The page belongs to the filters it was picked under: any filter change
+  // starts again at the first page without a request for the old offset.
+  const filterKey = JSON.stringify([status, contentType, source, liveStatus, search]);
+  const [page, setPage] = useState({ key: filterKey, offset: 0 });
+  const offset = page.key === filterKey ? page.offset : 0;
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -191,7 +201,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
     if (!background) setLoading(true);
     setReadError("");
     try {
-      const next = await adminFetch(buildQuery({ status, contentType, source, liveStatus, search }));
+      const next = await adminFetch(buildQuery({ status, contentType, source, liveStatus, search, offset }));
       if (gen !== loadGen.current) return;
       setData(next);
       setReadError("");
@@ -204,7 +214,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
     } finally {
       if (gen === loadGen.current) setLoading(false);
     }
-  }, [status, contentType, source, liveStatus, search]);
+  }, [status, contentType, source, liveStatus, search, offset]);
 
   const runSync = useCallback(async () => {
     loadGen.current += 1;
@@ -240,6 +250,10 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
   );
 
   const items = data?.items || [];
+  const filteredTotal = Number(data?.total || 0);
+  // The offset of the rows on screen (the response echoes it), so the range
+  // never names a page whose rows have not arrived yet.
+  const shownOffset = Number(data?.offset || 0);
   const counts = data?.counts || {};
   const selected = items.find((item) => item.id === selectedId) || null;
   const totalRows = countSum(counts);
@@ -275,7 +289,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
             type="button"
             onClick={runSync}
             disabled={loading || syncing}
-            style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 14px", borderRadius: 6, border: `1px solid ${D.heading}`, background: D.heading, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 14px", borderRadius: 6, border: `1px solid ${D.heading}`, background: D.heading, color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}
           >
             <RefreshCw size={14} strokeWidth={2} /> {syncing ? "Syncing..." : "Sync"}
           </button>
@@ -285,14 +299,14 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
       {syncError && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
           <AlertTriangle size={16} strokeWidth={2} />
-          <span style={{ fontSize: 13, fontWeight: 700 }}>{syncError}</span>
+          <span style={{ fontSize: 14, fontWeight: 700 }}>{syncError}</span>
         </div>
       )}
 
       {readError && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
           <AlertTriangle size={16} strokeWidth={2} />
-          <span style={{ fontSize: 13, fontWeight: 700 }}>{readError}</span>
+          <span style={{ fontSize: 14, fontWeight: 700 }}>{readError}</span>
           <button
             type="button"
             onClick={() => load()}
@@ -305,19 +319,19 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
       )}
 
       {syncNotice && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.green, background: "#DCFCE7", border: `1px solid ${D.green}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.text, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
           <CheckCircle2 size={16} strokeWidth={2} />
-          <span style={{ fontSize: 13, fontWeight: 700 }}>{syncNotice}</span>
+          <span style={{ fontSize: 14, fontWeight: 700 }}>{syncNotice}</span>
         </div>
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
         <Kpi label="Registry Rows" value={totalRows || data?.total || 0} />
-        <Kpi label="Conflicts" value={counts.conflict || 0} tone={(counts.conflict || 0) > 0 ? "red" : "green"} />
-        <Kpi label="DB Missing Astro" value={counts.db_published_missing_astro || 0} tone={(counts.db_published_missing_astro || 0) > 0 ? "red" : "green"} />
-        <Kpi label="DB Only" value={counts.db_only || 0} tone={(counts.db_only || 0) > 0 ? "amber" : "green"} />
+        <Kpi label="Conflicts" value={counts.conflict || 0} tone={(counts.conflict || 0) > 0 ? "red" : "neutral"} />
+        <Kpi label="DB Missing Astro" value={counts.db_published_missing_astro || 0} tone={(counts.db_published_missing_astro || 0) > 0 ? "red" : "neutral"} />
+        <Kpi label="DB Only" value={counts.db_only || 0} />
         <Kpi label="Astro Only" value={counts.astro_only || 0} />
-        <Kpi label="Matched" value={counts.matched || 0} tone="green" />
+        <Kpi label="Matched" value={counts.matched || 0} />
       </div>
 
       <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, marginBottom: 16, overflow: "hidden" }}>
@@ -328,13 +342,13 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search title, URL, slug, or source path"
-              style={{ flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent", color: D.text, fontSize: 13 }}
+              style={{ flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent", color: D.text, fontSize: 14 }}
             />
           </label>
           <select
             value={contentType}
             onChange={(e) => setContentType(e.target.value)}
-            style={{ minHeight: 40, border: `1px solid ${D.border}`, borderRadius: 6, background: "#FAFAFA", color: D.text, padding: "0 10px", fontSize: 13 }}
+            style={{ minHeight: 40, border: `1px solid ${D.border}`, borderRadius: 6, background: "#FAFAFA", color: D.text, padding: "0 10px", fontSize: 14 }}
           >
             <option value="">All content types</option>
             {contentTypes.map((type) => <option key={type} value={type}>{labelize(type)}</option>)}
@@ -342,7 +356,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
           <select
             value={source}
             onChange={(e) => setSource(e.target.value)}
-            style={{ minHeight: 40, border: `1px solid ${D.border}`, borderRadius: 6, background: "#FAFAFA", color: D.text, padding: "0 10px", fontSize: 13 }}
+            style={{ minHeight: 40, border: `1px solid ${D.border}`, borderRadius: 6, background: "#FAFAFA", color: D.text, padding: "0 10px", fontSize: 14 }}
           >
             <option value="">All sources</option>
             {sources.map((item) => <option key={item} value={item}>{labelize(item)}</option>)}
@@ -350,7 +364,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
           <select
             value={liveStatus}
             onChange={(e) => setLiveStatus(e.target.value)}
-            style={{ minHeight: 40, border: `1px solid ${D.border}`, borderRadius: 6, background: "#FAFAFA", color: D.text, padding: "0 10px", fontSize: 13 }}
+            style={{ minHeight: 40, border: `1px solid ${D.border}`, borderRadius: 6, background: "#FAFAFA", color: D.text, padding: "0 10px", fontSize: 14 }}
           >
             <option value="">All live statuses</option>
             {liveStatuses.map((item) => <option key={item} value={item}>{labelize(item)}</option>)}
@@ -375,8 +389,8 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
               <FileSearch size={16} strokeWidth={2} />
               Inventory
             </div>
-            <div style={{ color: D.muted, fontSize: 12 }}>
-              {loading ? "Loading..." : `${Number(data?.total || 0).toLocaleString()} filtered`}
+            <div style={{ color: D.muted, fontSize: 14 }}>
+              {loading ? "Loading..." : registryRangeLabel({ offset: shownOffset, shown: items.length, total: filteredTotal })}
             </div>
           </div>
           {loading && !data ? (
@@ -389,7 +403,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
                 <thead>
                   <tr>
                     {["Content", "Reconciliation", "Type", "Source", "Astro / DB", "Live", "Synced"].map((heading) => (
-                      <th key={heading} style={{ textAlign: "left", padding: "10px 12px", color: D.muted, fontSize: 12, fontWeight: 700, borderBottom: `1px solid ${D.border}` }}>
+                      <th key={heading} style={{ textAlign: "left", padding: "10px 12px", color: D.muted, fontSize: 14, fontWeight: 700, borderBottom: `1px solid ${D.border}` }}>
                         {heading}
                       </th>
                     ))}
@@ -405,26 +419,34 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
                         style={{ cursor: "pointer", background: active ? "#F8FAFC" : D.card }}
                       >
                         <td style={cellStyle}>
-                          <div style={{ color: D.heading, fontWeight: 700, fontSize: 13, lineHeight: 1.25 }}>{item.title || item.slug || item.canonical_url_normalized || "Untitled"}</div>
-                          <div style={{ color: D.muted, fontSize: 12, marginTop: 4, fontFamily: MONO, overflowWrap: "anywhere" }}>{item.canonical_url_normalized || item.live_url || "-"}</div>
+                          <div style={{ color: D.heading, fontWeight: 700, fontSize: 14, lineHeight: 1.25 }}>{item.title || item.slug || item.canonical_url_normalized || "Untitled"}</div>
+                          <div style={{ color: D.muted, fontSize: 14, marginTop: 4, fontFamily: MONO, overflowWrap: "anywhere" }}>{item.canonical_url_normalized || item.live_url || "-"}</div>
                         </td>
                         <td style={cellStyle}><Chip tone={STATUS_TONE[item.reconciliation_status]}>{labelize(item.reconciliation_status)}</Chip></td>
                         <td style={cellStyle}>{labelize(item.content_type)}</td>
                         <td style={cellStyle}>{labelize(item.source)}</td>
                         <td style={cellStyle}>
                           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                            <Chip tone={item.astro_status === "present" ? "green" : item.astro_status === "missing" ? "red" : "neutral"}>Astro {labelize(item.astro_status)}</Chip>
-                            <Chip tone={item.db_status === "present" ? "green" : item.db_status === "missing" ? "amber" : "neutral"}>DB {labelize(item.db_status)}</Chip>
+                            <Chip tone={item.astro_status === "missing" ? "red" : "neutral"}>Astro {labelize(item.astro_status)}</Chip>
+                            <Chip>DB {labelize(item.db_status)}</Chip>
                           </div>
                         </td>
                         <td style={cellStyle}><Chip tone={LIVE_TONE[item.live_status] || "neutral"}>{labelize(item.live_status)}</Chip></td>
-                        <td style={{ ...cellStyle, color: D.muted, fontSize: 12 }}>{formatDate(item.last_synced_at)}</td>
+                        <td style={{ ...cellStyle, color: D.muted, fontSize: 14 }}>{formatDate(item.last_synced_at)}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
+          )}
+          {!loading && (
+            <RegistryPager
+              offset={shownOffset}
+              shown={items.length}
+              total={filteredTotal}
+              onPage={(next) => setPage({ key: filterKey, offset: next })}
+            />
           )}
         </section>
 
@@ -443,8 +465,8 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
                   <Chip tone={STATUS_TONE[selected.reconciliation_status]}>{labelize(selected.reconciliation_status)}</Chip>
                   <Chip tone={LIVE_TONE[selected.live_status] || "neutral"}>{labelize(selected.live_status)}</Chip>
                   <Chip>{labelize(selected.workflow_status)}</Chip>
-                  {selected.noindex_detected && <Chip tone="amber">Noindex</Chip>}
-                  {selected.match_confidence && <Chip tone="blue">{labelize(selected.match_confidence)}</Chip>}
+                  {selected.noindex_detected && <Chip>Noindex</Chip>}
+                  {selected.match_confidence && <Chip>{labelize(selected.match_confidence)}</Chip>}
                 </div>
               </div>
 
@@ -453,7 +475,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
                   href={selectedHref}
                   target="_blank"
                   rel="noreferrer"
-                  style={{ minHeight: 40, borderRadius: 6, border: `1px solid ${D.border}`, color: D.heading, textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 13, fontWeight: 700 }}
+                  style={{ minHeight: 40, borderRadius: 6, border: `1px solid ${D.border}`, color: D.heading, textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 14, fontWeight: 700 }}
                 >
                   <ExternalLink size={15} strokeWidth={2} />
                   Open Live URL
@@ -478,19 +500,19 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
 
               {mismatchReasons.length > 0 && (
                 <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 14 }}>
-                  <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase", marginBottom: 8 }}>Mismatch Reasons</div>
+                  <div style={{ fontSize: 14, color: D.muted, fontWeight: 700, textTransform: "uppercase", marginBottom: 8 }}>Mismatch Reasons</div>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {mismatchReasons.map((reason) => <Chip key={reason} tone="amber">{labelize(reason)}</Chip>)}
+                    {mismatchReasons.map((reason) => <Chip key={reason}>{labelize(reason)}</Chip>)}
                   </div>
                 </div>
               )}
 
               <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, color: selected.astro_status === "present" ? D.green : D.muted, fontSize: 13, fontWeight: 700 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: selected.astro_status === "present" ? D.heading : D.muted, fontSize: 14, fontWeight: 700 }}>
                   <CheckCircle2 size={15} strokeWidth={2} />
                   Astro {labelize(selected.astro_status)}
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, color: selected.db_status === "present" ? D.green : D.muted, fontSize: 13, fontWeight: 700 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: selected.db_status === "present" ? D.heading : D.muted, fontSize: 14, fontWeight: 700 }}>
                   <CheckCircle2 size={15} strokeWidth={2} />
                   DB {labelize(selected.db_status)}
                 </div>
@@ -501,7 +523,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
       </div>
 
       {data?.latest_sync_run && (
-        <div style={{ marginTop: 16, color: D.muted, fontSize: 12 }}>
+        <div style={{ marginTop: 16, color: D.muted, fontSize: 14 }}>
           Latest sync: <span style={{ color: D.text, fontWeight: 700 }}>{labelize(data.latest_sync_run.status)}</span> at {formatDate(data.latest_sync_run.completed_at || data.latest_sync_run.started_at)}
           {data.latest_sync_run.astro_repo_sha ? <span style={{ fontFamily: MONO }}> - {data.latest_sync_run.astro_repo_sha.slice(0, 8)}</span> : null}
         </div>
@@ -515,7 +537,7 @@ const cellStyle = {
   borderBottom: `1px solid ${D.border}`,
   verticalAlign: "top",
   color: D.text,
-  fontSize: 13,
+  fontSize: 14,
 };
 
 function tabStyle(active) {
@@ -529,7 +551,7 @@ function tabStyle(active) {
     display: "inline-flex",
     alignItems: "center",
     gap: 6,
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 700,
     cursor: "pointer",
   };

@@ -221,3 +221,44 @@ describe('buildBookingAvailability — commit-gate occupancy mirror', () => {
     expect(result.days.find((d) => d.date === D)).toBeDefined();
   });
 });
+
+// Same-hour technicians in hour mode (owner 2026-10-30): the mirror scopes the offer to the slot's
+// technician when capacity mode OR GATE_MULTI_TECH_CONFIRM is on; the commit probes scope on the
+// gate alone (multi-tech-confirm-scope.test.js, same-hour-techs-db.test.js), so an offered hour commits.
+describe('buildBookingAvailability — technician-scoped mirror (GATE_MULTI_TECH_CONFIRM, hour mode)', () => {
+  const ENV_KEYS = ['GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY'];
+  const saved = {};
+  beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
+  afterAll(() => {
+    for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    for (const k of ENV_KEYS) delete process.env[k];
+    wireDayCapCounts([]);
+    findAvailableSlots.mockResolvedValue({ slots: [slot('09:00', 1), slot('14:00', 2)], total_feasible: 2 });
+  });
+
+  const startsOf = (result) => (result.days.find((d) => d.date === D)?.slots || []).map((s) => s.start_time);
+  // The slot's technician is tech-1; the 09:00 row below is somebody else's route unless noted.
+  const row = (technicianId) => ({ id: 'row-1', technician_id: technicianId, customer_id: 'cust-2', date: D, startMin: 540, endMin: 600 });
+
+  test('gate unset, capacity off (prod today): another technician\'s 09:00 row drops technician 1\'s 09:00 hour', async () => {
+    listOccupiedWindows.mockResolvedValue([row('tech-2')]);
+    expect(startsOf(await build())).toEqual(['14:00']);
+  });
+
+  test('gate on, capacity off: another technician\'s 09:00 row does NOT drop technician 1\'s 09:00 hour', async () => {
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    listOccupiedWindows.mockResolvedValue([row('tech-2')]);
+    expect(startsOf(await build())).toEqual(['09:00', '14:00']);
+  });
+
+  test('gate on, capacity off: technician 1\'s own 09:00 row and an unassigned 09:00 row still drop the hour', async () => {
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    listOccupiedWindows.mockResolvedValue([row('tech-1')]);
+    expect(startsOf(await build())).toEqual(['14:00']);
+    listOccupiedWindows.mockResolvedValue([row(null)]);
+    expect(startsOf(await build())).toEqual(['14:00']);
+  });
+});

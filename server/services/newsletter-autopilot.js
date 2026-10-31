@@ -1,8 +1,11 @@
 /**
  * Newsletter Autopilot — guarded auto-draft for the weekly digest.
  *
- * Called by the Monday 7 AM ET cron in scheduler.js. Never auto-sends;
- * creates a draft in newsletter_sends for admin review + manual send.
+ * Called by the Monday 7 AM ET cron in scheduler.js. Creates the week's
+ * draft in newsletter_sends and hands it to the proof step: with
+ * GATE_NEWSLETTER_AUTO_SEND on, a draft that passes every check queues
+ * itself for Tuesday 6:00 AM ET (owner 2026-10-30, option A); off, it waits
+ * for the owner's APPROVED reply to the proof.
  *
  * Flow:
  *   1. Compute the upcoming issue Tuesday
@@ -15,7 +18,8 @@
  *   6. Build a prompt incorporating calendar topic / homeowner minute
  *   7. Delegate AI drafting to shared createNewsletterDraft() service
  *   8. Link the resulting send to the calendar entry (or create one)
- *   9. Notify admin that a draft is ready
+ *   9. Proof step (queues the issue under the auto-send switch), then notify
+ *      admin that a draft is ready unless the proof step queued it
  */
 
 const db = require('../models/db');
@@ -813,29 +817,34 @@ async function autoDraftFlagship() {
 
   logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${actualLineup.length}`);
 
-  // 10. Notify admin that a draft is ready
-  try {
-    const { triggerNotification } = require('./notification-triggers');
-    await triggerNotification('newsletter_autopilot_draft', {
-      sendId: send.id,
-      subject: send.subject,
-      eventCount: actualLineup.length,
-      calendarWeek: weekOf,
-      hadCalendarEntry: !!calendarEntry,
-      preflightWarnings: preflight.warnings,
-    });
-  } catch (e) {
-    logger.warn(`[newsletter-autopilot] draft notification failed: ${e.message}`);
-  }
-
-  // 11. Proof-approval flow (gated OFF by default): email the owner a proof
-  //     copy; replying "approved" queues Tuesday's 6 AM send. A proof failure
-  //     never kills the draft — the admin notification above still fired.
+  // 10. Proof-approval flow (gated OFF by default): email the owner a proof
+  //     copy; replying "approved" queues Tuesday's 6 AM send. Under
+  //     GATE_NEWSLETTER_AUTO_SEND the proof step queues it itself and the
+  //     copy is FYI. A proof failure never kills the draft.
+  let proof = null;
   try {
     const { sendNewsletterProof } = require('./newsletter-proof');
-    await sendNewsletterProof(send.id);
+    proof = await sendNewsletterProof(send.id);
   } catch (e) {
     logger.warn(`[newsletter-autopilot] proof send failed: ${e.message}`);
+  }
+
+  // 11. Notify admin that a draft is ready, unless the proof step queued it:
+  //     a queued issue needs no one, and a blocked one raised its own alert.
+  if (!proof?.queued) {
+    try {
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('newsletter_autopilot_draft', {
+        sendId: send.id,
+        subject: send.subject,
+        eventCount: actualLineup.length,
+        calendarWeek: weekOf,
+        hadCalendarEntry: !!calendarEntry,
+        preflightWarnings: preflight.warnings,
+      });
+    } catch (e) {
+      logger.warn(`[newsletter-autopilot] draft notification failed: ${e.message}`);
+    }
   }
 
   return { skipped: false, sendId: send.id, eventCount: actualLineup.length };

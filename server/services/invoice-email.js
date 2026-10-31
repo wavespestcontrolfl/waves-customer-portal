@@ -281,8 +281,76 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     codePrefix: invoiceShortCodePrefix(invoice),
     ...payerCodeMarker(invoice, recipient, [customer.email, getInvoiceEmailRecipients(customer, prefs || {})[0]?.email]),
   });
+  // The previous-balance read behind the email note below AND the attached
+  // PDF's "Previous balance" block, so the two always agree. Same gate and
+  // recipient rules as the note (see its comment). Lookup failure sends
+  // exactly as today.
+  // A customer under a collections DISPUTE hold was told all billing
+  // follow-up is on hold (owner ruling 2026-09-30). An operator or customer
+  // exemption still sends THIS invoice, but it never names the rest of the
+  // balance: the shared messaging predicate is asked WITHOUT the exemption,
+  // so any hold, or a hold read that fails, leaves the balance out.
+  let previousBalance = null;
+  if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
+    try {
+      const { messagingHeldByCollectionHold } = require('./collections/collection-hold');
+      const hold = await messagingHeldByCollectionHold(invoice.customer_id);
+      if (!hold.held) {
+        const { openBalanceSummary } = require('./open-balance');
+        previousBalance = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id, displayLimit: 10 });
+      }
+    } catch (prevErr) {
+      logger.warn(`[invoice-email] previous-balance lookup failed for ${invoice.invoice_number}: ${prevErr.message}`);
+    }
+  }
+  // "Pay everything at once" (the note below) AND the PDF's itemized block
+  // only when this invoice's Pay button would really collect the WHOLE stated
+  // balance: the pay page's combined selection must cover every open invoice
+  // counted here. It leaves out invoices on a payment plan or with reminders
+  // stopped, a disputed customer's invoices, and micro-deposit or in-flight
+  // payments, and credit or a capture hold make the charge single-invoice.
+  // Its siblings come from the same open-invoice read, so the same count and
+  // cents mean the same invoices. Otherwise the note keeps pointing at each
+  // invoice's own link and the PDF prints no block, so the PDF never shows an
+  // invoice in red that the pay page and reminders have set aside. It also
+  // needs a COMPLETE read: the block prints a "Total account balance", and a
+  // total missing a row is worse than no block. Any lookup failure keeps the
+  // original email.
+  let combined = null;
+  let linkPaysEverything = false;
+  if (previousBalance?.complete && previousBalance.total > 0 && isEnabled('payIncludeBalance')) {
+    try {
+      combined = await require('../routes/pay-v2').payPageCombinedBalance(invoice);
+      linkPaysEverything = !!combined
+        && combined.invoices.length === previousBalance.count
+        && Math.round(combined.total * 100) === Math.round(previousBalance.total * 100);
+    } catch (combinedErr) {
+      logger.warn(`[invoice-email] combined-balance check failed for ${invoice.invoice_number}: ${combinedErr.message}`);
+    }
+  }
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   invoiceForPdf.annual_prepay = await loadInvoiceAnnualPrepay(invoiceForPdf);
+  if (linkPaysEverything) {
+    const totalCents = Math.round(previousBalance.total * 100);
+    invoiceForPdf.previous_balance = {
+      invoices: previousBalance.invoices.map((inv) => ({
+        invoiceNumber: inv.invoice_number,
+        // Service names ride the EMAILED PDF only: it reaches the customer's
+        // own saved recipient. The public /pay surfaces never carry them.
+        serviceType: inv.service_type || null,
+        serviceDate: inv.service_date,
+        dueDate: inv.due_date,
+        pastDue: inv.is_overdue === true,
+        amountDue: invoiceAmountDue(inv),
+      })),
+      moreCount: previousBalance.moreCount,
+      total: totalCents / 100,
+      // The bottom line is the pay page's own figure: this invoice plus every
+      // other open one, what the Pay button charges.
+      combinedTotal: combined.combinedTotal,
+      totalLabel: 'Total account balance',
+    };
+  }
   let pdfBuffer;
   try {
     pdfBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
@@ -342,16 +410,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // saved billing recipient may see the note. (effectiveOverride also covers
   // the payer-AP reroute, belt-and-braces with the payer_id check.)
   let previousBalanceNote = '';
-  if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
-    try {
-      const { openBalanceSummary } = require('./open-balance');
-      const prev = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id });
-      if (prev.total > 0) {
-        previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(prev.total)} from ${prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
-      }
-    } catch (prevErr) {
-      logger.warn(`[invoice-email] previous-balance lookup failed for ${invoice.invoice_number}: ${prevErr.message}`);
-    }
+  // linkPaysEverything was decided above, with the PDF block (see there).
+  if (previousBalance?.total > 0 && linkPaysEverything) {
+    previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}. You can pay everything at once from this invoice's payment link, or see each invoice in your customer portal at portal.wavespestcontrol.com or in the Waves app.`;
+  } else if (previousBalance?.total > 0) {
+    previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the text or email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
   }
   const previousBalanceEscaped = previousBalanceNote
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

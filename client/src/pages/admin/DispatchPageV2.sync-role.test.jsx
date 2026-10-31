@@ -50,3 +50,31 @@ describe('dispatch Sync AI Data', () => {
     expect(screen.queryByRole('button', { name: /Sync AI Data/ })).not.toBeInTheDocument();
   });
 });
+
+// The held-visits strip and the recurring-series alerts read office-only
+// routes; a technician's schedule never asks for them (it would get a 403).
+describe('office-only schedule strips', () => {
+  function mountDay(role) {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role }));
+    render(
+      <MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-05']}>
+        <DispatchPageV2 activeTab="board" />
+      </MemoryRouter>,
+    );
+  }
+  const heldVisitsAsked = () => vi.mocked(adminFetch).mock.calls.some(([path]) => String(path).startsWith('/admin/schedule/held-visits'));
+  const alertsAsked = () => fetch.mock.calls.some(([url]) => String(url).includes('/admin/schedule/recurring-alerts'));
+
+  it('load for an admin', async () => {
+    mountDay('admin');
+    await vi.waitFor(() => expect(heldVisitsAsked()).toBe(true));
+    await vi.waitFor(() => expect(alertsAsked()).toBe(true));
+  });
+
+  it('are never requested for a technician', async () => {
+    mountDay('technician');
+    await vi.waitFor(() => expect(vi.mocked(adminFetch).mock.calls.some(([path]) => String(path).startsWith('/admin/schedule?'))).toBe(true));
+    expect(heldVisitsAsked()).toBe(false);
+    expect(alertsAsked()).toBe(false);
+  });
+});

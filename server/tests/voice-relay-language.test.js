@@ -47,7 +47,7 @@ test('deterministic closes: English strings are the prior literals verbatim; Spa
 
 describe('Spanish greeting validation arms', () => {
   test('default keeps a one-clause recorded-line notice (the English MP3 may have been cut by the key press) and NO AI mention', () => {
-    expect(spanishWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING_ES);
+    expect(spanishWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING_ES.replace('{name}', 'Jennifer'));
     expect(DEFAULT_WELCOME_GREETING_ES).toMatch(/puede ser grabada/);
     expect(DEFAULT_WELCOME_GREETING_ES).not.toMatch(/automatizad|asistente|IA\b/);
     process.env.VOICE_AGENT_NAME = 'Marisol';
@@ -64,10 +64,10 @@ describe('Spanish greeting validation arms', () => {
     'Hola, está hablando con una persona real.',
   ])('a negated-recording or human-claiming override is discarded: %s', (bad) => {
     process.env.VOICE_RELAY_GREETING_ES = bad;
-    expect(spanishWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING_ES);
+    expect(spanishWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING_ES.replace('{name}', 'Jennifer'));
   });
   test('the English opener never carries a notice', () => {
     delete process.env.VOICE_RELAY_GREETING;
-    expect(defaultWelcomeGreeting()).toMatch(/^Waves, this is Sandy\. How can I help you this (morning|afternoon|evening)\?$/);
+    expect(defaultWelcomeGreeting()).toMatch(/^Waves, this is Jennifer\. How can I help you this (morning|afternoon|evening)\?$/);
   });
 });

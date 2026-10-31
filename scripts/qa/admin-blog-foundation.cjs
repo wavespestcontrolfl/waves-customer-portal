@@ -59,17 +59,6 @@ function bodyFor(url, method) {
     return { byStatus: { published: 4, draft: 1, queued: 2, idea: 3 } };
   if (url.pathname === "/api/admin/content/blog")
     return { posts: [post], counts: {} };
-  if (url.pathname === "/api/admin/content/weather")
-    return {
-      weather: {
-        temp: 88,
-        humidity: 70,
-        rainfall: 1.2,
-        soilTemp: 81,
-        station: "Synthetic station",
-      },
-      signals: ["Termite pressure is elevated in the synthetic fixture."],
-    };
   if (url.pathname === "/api/admin/content/authors")
     return {
       authors: [
@@ -119,8 +108,6 @@ function bodyFor(url, method) {
     return { post };
   if (url.pathname === "/api/admin/content/blog/post-17" && method === "GET")
     return { post };
-  if (url.pathname === "/api/admin/content/generate" && method === "POST")
-    return { id: "generated-post" };
   if (url.pathname === "/api/admin/usage/track") return { ok: true };
   return null;
 }
@@ -454,21 +441,12 @@ async function main() {
       await page.waitForURL((url) => !url.searchParams.has("post"));
 
       const blogNav = page.getByRole("navigation", { name: "Blog section" });
-      await blogNav.getByRole("button", { name: "Generate" }).click();
-      await page.getByText("FAWN Weather", { exact: true }).waitFor();
-      await capture("generate-disabled");
-      await page
-        .getByPlaceholder("Describe the topic or paste a working title...")
-        .fill("Synthetic refresh topic");
-      await page.getByText("Page Refresh", { exact: true }).click();
-      await page.getByRole("button", { name: "Sarasota", exact: true }).click();
-      await capture("generate");
-      await Promise.all([
-        page.waitForResponse((response) =>
-          response.url().endsWith("/api/admin/content/generate"),
-        ),
-        page.getByRole("button", { name: "Generate Page Refresh" }).click(),
-      ]);
+      // Manual create is retired (owner 2026-10-30): no Generate tab.
+      assert.equal(
+        await blogNav.getByRole("button", { name: "Generate" }).count(),
+        0,
+        `Generate tab still shown at ${width}`,
+      );
 
       await blogNav.getByRole("button", { name: "Audit" }).click();
       await page.getByText("Synthetic content gap", { exact: true }).waitFor();
@@ -486,17 +464,6 @@ async function main() {
       assert.ok(save, `missing save request at ${width}`);
       assert.equal(save.body.title, "Edited synthetic guide");
       assert.deepEqual(save.body.target_sites, ["wavespestcontrol.com"]);
-      const generate = report.requests.find(
-        (request) =>
-          request.width === width &&
-          request.method === "POST" &&
-          request.path === "/api/admin/content/generate",
-      );
-      assert.deepEqual(generate.body, {
-        topic: "Synthetic refresh topic",
-        contentType: "page_refresh",
-        targetCity: "Sarasota",
-      });
     }
     assert.deepEqual(report.unmatched, []);
     assert.deepEqual(report.pageErrors, []);

@@ -1,10 +1,11 @@
 /**
  * Shared MCP JSON-RPC plumbing — one implementation of the stateless
  * single-response wire protocol (initialize / ping / tools/list /
- * tools/call, notifications, batches) used by BOTH MCP routes:
+ * tools/call, notifications, batches) used by every MCP route:
  *
  *   - /api/mcp        (routes/mcp.js — machine-auth knowledge tools)
  *   - /api/public/mcp (routes/public-mcp.js — anonymous public tools)
+ *   - /api/mcp-admin  (routes/mcp-admin.js — the owner's read-only admin tools)
  *
  * Extracted from routes/mcp.js verbatim so the two servers cannot drift
  * into two divergent parsers of one syntax. Behavior is pinned by
@@ -16,7 +17,7 @@ const logger = require('./logger');
 const rpcResult = (id, result) => ({ jsonrpc: '2.0', id, result });
 const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
 
-function createMcpRpc({ tools, serverInfo, protocolVersion, logPrefix = 'mcp' }) {
+function createMcpRpc({ tools, serverInfo, protocolVersion, instructions = null, logPrefix = 'mcp' }) {
   async function executeTool(name, args = {}) {
     const tool = tools.find((t) => t.name === name);
     if (!tool) return { error: `unknown tool: ${name}` };
@@ -43,6 +44,9 @@ function createMcpRpc({ tools, serverInfo, protocolVersion, logPrefix = 'mcp' })
           protocolVersion,
           capabilities: { tools: {} },
           serverInfo,
+          // MCP's optional server guidance: Claude Code puts it in each session's
+          // system prompt. A server that passes none answers without the key.
+          ...(instructions ? { instructions } : {}),
         });
       case 'ping':
         return respond({});

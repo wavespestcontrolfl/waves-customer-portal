@@ -845,6 +845,11 @@ export class ApiClient {
     return this.request('/property/watering-plan');
   }
 
+  // Home-tab misting system card (dark behind GATE_MOSQUITO_MISTING: gate off = { system: null }).
+  getMistingSystem() {
+    return this.request('/misting-system');
+  }
+
   getStationMap() {
     return this.request('/property/station-map');
   }

@@ -123,6 +123,8 @@ const FIELD_GROUPS = {
     // hallucinating one) must show up here, not just in a triage-flag count.
     'caller_id_disclaimed',
     'phone_note',
+    // The plan the caller chose for a recurring plan (schema 1.29.0): drift must show.
+    'billing_choice',
     // ani_cannot_text / text_phone (schema 1.25.0) — decide which number a
     // call's texts go to (new customer phone, the swap card, the booking-link
     // text); a model that drifts on them must show up here.
@@ -162,6 +164,7 @@ const EXPECTATION_KEYS = new Set([
   'current_flags_exclude',
   'current_call_nature_in',
   'current_recommended_disposition_in',
+  'current_callback_asked',
   'legacy_schedule_variance_fields',
 ]);
 
@@ -787,6 +790,18 @@ function evaluateFixtureExpectation(result, fixtureCase, context = {}) {
       );
     } else {
       fixtureError('invalid_current_recommended_disposition_in', expect.current_recommended_disposition_in, 'array');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_callback_asked')) {
+    if (typeof expect.current_callback_asked === 'boolean') {
+      check(
+        'current_callback_asked',
+        result.current.callbackAsked === expect.current_callback_asked,
+        result.current.callbackAsked,
+        expect.current_callback_asked
+      );
+    } else {
+      fixtureError('invalid_current_callback_asked', expect.current_callback_asked, 'boolean');
     }
   }
 
@@ -1636,6 +1651,11 @@ async function replayCall(call, context) {
       serviceCategory: currentExtraction?.service_request?.primary_service_category || null,
       callNature: currentExtraction?.call_nature || null,
       recommendedDisposition: currentExtraction?.recommended_disposition || null,
+      // Production's own callback verdict (it rings the bell). The model's
+      // disposition label wobbles between callback_task_created and
+      // voicemail_processed for the same message, so voicemail cases assert this.
+      // v2Primary forced true: the eval measures V2 as the primary extractor.
+      callbackAsked: CRP._test.voicemailCallbackAsked(current, { v2Primary: true }),
       // Answer-key view (enums/booleans/dates only — safe to emit unredacted).
       fields: currentExtraction ? goldFieldValues(currentExtraction, currentSchedule) : null,
     },
@@ -1706,6 +1726,7 @@ function buildReplayErrorResult(call, err, context = {}) {
       serviceCategory: null,
       callNature: null,
       recommendedDisposition: null,
+      callbackAsked: null,
       fields: null,
     },
     variance: {

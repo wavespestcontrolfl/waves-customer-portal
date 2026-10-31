@@ -280,14 +280,14 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
 
   test('a month without the add-ons offers nothing, and nothing is read', async () => {
     const offers = await run([candidate(P_CEL, 'Weed')]);
-    expect(offers).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [] });
+    expect(offers).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [], limitWarned: {} });
     expect(engine.v13VisitLimits).not.toHaveBeenCalled();
   });
 
-  test('a product at a limit, or one the city holds, is never suggested; the next fungicide is not substituted', async () => {
-    limited([[P_ART, [{ type: 'annual_max_apps', message: 'limit' }]], [P_DISP, [{ message: 'read failed' }]]]);
+  test('a pick whose limit read failed, or one the city holds, is never suggested; the next fungicide is not substituted', async () => {
+    limited([[P_ART, [{ message: 'read failed' }]], [P_DISP, [{ message: 'read failed' }]]]);
     const offers = await run();
-    expect(offers).toEqual({ fungus: null, caterpillars: { item: { productId: P_ACE, name: 'Acelepryn' } }, dry_spots: null, blocked: [P_ART], unreadable: [P_DISP] });
+    expect(offers).toEqual({ fungus: null, caterpillars: { item: { productId: P_ACE, name: 'Acelepryn' } }, dry_spots: null, blocked: [], unreadable: [P_ART, P_DISP], limitWarned: {} });
     noLimits();
     const held = [candidate(P_ART, 'Artavia', { unavailable: { kind: 'city_hold' } }), candidate(P_VEL, 'Velista')];
     const heldOffers = await run(held);
@@ -295,10 +295,40 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
     expect(heldOffers.blocked).toEqual([P_ART]);
   });
 
+  // Owner 2026-10-30: a yearly limit is a warning, never a block. A pick closed ONLY by a limit that was read (count, interval or
+  // amount) is offered with the limit's own words and is in neither `blocked` nor `unreadable`.
+  test.each(['annual_max_apps', 'min_interval_days', 'annual_max_rate'])('a pick at a %s limit is offered with a warning, not blocked', async (type) => {
+    limited([[P_ART, [{ type, message: 'Artavia limit words' }]], [P_DISP, [{ type, message: 'Dispatch limit words' }]]]);
+    const offers = await run();
+    expect(offers.fungus).toEqual({ item: { productId: P_ART, name: 'Artavia' }, limitWarning: 'Artavia limit words' });
+    expect(offers.dry_spots).toEqual({ item: { productId: P_DISP, name: 'Dispatch' }, limitWarning: 'Dispatch limit words' });
+    expect(offers.caterpillars).toEqual({ item: { productId: P_ACE, name: 'Acelepryn' } });
+    expect(offers.blocked).toEqual([]);
+    expect(offers.unreadable).toEqual([]);
+    expect(offers.limitWarned).toEqual({ [P_ART]: 'Artavia limit words', [P_DISP]: 'Dispatch limit words' });
+  });
+
+  test('a city hold stays a block even when a limit is also reached; the label prohibition (not a limit row) stays a block', async () => {
+    limited([[P_ART, [{ type: 'annual_max_apps', message: 'limit' }]], [P_ACE, [{ type: 'lawn_product_not_for_home_lawns', message: 'not for home lawns' }]]]);
+    const offers = await run([candidate(P_ART, 'Artavia', { unavailable: { kind: 'city_hold' } }), candidate(P_ACE, 'Acelepryn')]);
+    expect(offers.fungus).toBeNull();
+    expect(offers.caterpillars).toBeNull();
+    expect(offers.blocked.sort()).toEqual([P_ART, P_ACE].sort());
+    expect(offers.limitWarned).toEqual({});
+  });
+
+  test('a limit-warned card carries the limit words and the promise in its line', async () => {
+    limited([[P_ART, [{ type: 'annual_max_apps', message: 'Artavia limit words' }]], [P_ACE, [{ type: 'min_interval_days', message: 'Acelepryn limit words' }]]]);
+    const offers = await run();
+    const cards = buildCards({ signals: { fungus: 'minor', insect: 'moderate', drought: 'none' }, month: 5, offers });
+    expect(cards.find((card) => card.kind === 'fungus')).toMatchObject({ productIds: [P_ART], note: 'Artavia limit words You can still complete. The office gets an alert.' });
+    expect(cards.find((card) => card.kind === 'caterpillars')).toMatchObject({ productIds: [P_ACE], note: 'Acelepryn limit words You can still complete. The office gets an alert.' });
+  });
+
   test('a limit read that fails offers nothing', async () => {
     engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
     // The read failed: every pick is unreadable (not forbidden, not merely without a finding).
-    expect(await run()).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [P_ART, P_ACE, P_DISP] });
+    expect(await run()).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [P_ART, P_ACE, P_DISP], limitWarned: {} });
   });
 
   test('take-all is told by the staged trigger, or by the protocol line; large patch and gray leaf spot are not', async () => {
@@ -316,11 +346,15 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
     expect((await take('mapped_large_patch_with_velista_and_take_all_fall_2')).fungus).toEqual({ item: expect.anything() });
   });
 
-  test('a take-all fungicide at a limit stays as the check-only offer (it names no product)', async () => {
+  test('a take-all fungicide at a limit is a warning, not a hold; one the city holds stays the check-only offer (it names no product)', async () => {
     limited([[P_ART, [{ type: 'annual_max_apps', message: 'limit' }]]]);
-    const c = candidate(P_ART, 'Artavia');
-    const offers = await addOnOffers({ candidates: [c], rows: new Map([[P_ART, { role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_1' } }]]), svc, knex: {} });
-    expect(offers.fungus).toMatchObject({ takeAll: true, blocked: true });
+    const rows = new Map([[P_ART, { role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_1' } }]]);
+    const offers = await addOnOffers({ candidates: [candidate(P_ART, 'Artavia')], rows, svc, knex: {} });
+    expect(offers.fungus).toMatchObject({ takeAll: true, blocked: false, limitWarning: 'limit' });
+    expect(offers.blocked).toEqual([]);
+    const held = await addOnOffers({ candidates: [candidate(P_ART, 'Artavia', { unavailable: { kind: 'city_hold' } })], rows, svc, knex: {} });
+    expect(held.fungus).toMatchObject({ takeAll: true, blocked: true });
+    expect(held.limitWarned).toEqual({});
   });
 
   test('a visit\'s substitute stands on its original\'s row', async () => {
@@ -369,7 +403,7 @@ describe('take-all fungicide rows are governed in every month they are staged (t
     }
   });
 
-  test('the October Headway row follows the large patch row, so the first-fungicide pick passes it over: it is still read, and a forbidden one is blocked', async () => {
+  test('the October Headway row follows the large patch row, so the first-fungicide pick passes it over: it is still read, and one at a limit is warned, not blocked', async () => {
     const rowsOf = windowRows(matrix.WINDOWS.OCT);
     const rows = new Map(rowsOf.map((row) => [idFor(matrix.WINDOWS.OCT, row.name), { role: row.role, gates: { trigger: row.trigger } }]));
     const candidates = rowsOf.map((row) => ({ raw: { product: { id: idFor(matrix.WINDOWS.OCT, row.name), name: row.name } }, item: { productId: idFor(matrix.WINDOWS.OCT, row.name), name: row.name, line: null } }));
@@ -378,7 +412,9 @@ describe('take-all fungicide rows are governed in every month they are staged (t
     limited([[head, [{ type: 'min_interval_days', message: 'too soon' }]]]);
     const offers = await addOnOffers({ candidates, rows, svc, knex: {} });
     expect(offers.fungus.item.productId).toBe(art);
-    expect(offers.blocked).toEqual([head]);
+    // A limit is a warning (owner 2026-10-30): the Headway row is read, kept in the search, and not blocked.
+    expect(offers.blocked).toEqual([]);
+    expect(offers.limitWarned).toEqual({ [head]: 'too soon' });
     // The limit read is asked about the pick and the take-all row, nothing else.
     expect(engine.v13VisitLimits.mock.calls[0][2].map((entry) => entry.product.id).sort()).toEqual([art, head].sort());
     // A read that failed releases it to the search with the note, as for any governed product.
@@ -397,12 +433,26 @@ describe('take-all fungicide rows are governed in every month they are staged (t
 });
 
 describe('blockedProductIds: what the fresh read kept out, per governed kind', () => {
-  const { blockedProductIds } = require('../services/lawn-treatment-guide');
+  const { blockedProductIds, limitWarnedProducts } = require('../services/lawn-treatment-guide');
   test('a clean read blocks nothing, and a pick with no finding is not blocked', () => {
     expect(blockedProductIds({ offers: { blocked: [] }, chinch: { blockedIds: [] }, weedMix: { mode: 'lead', groupProductIds: [P_CEL, P_CERT], productIds: [P_CEL, P_CERT] } })).toEqual([]);
     expect(blockedProductIds({})).toEqual([]);
-    // A member at its own yearly cap while the lead stays open is blocked too (the decision's blockedIds).
-    expect(blockedProductIds({ weedMix: { mode: 'lead', groupProductIds: [P_CEL, P_CERT], productIds: [P_CEL], blockedIds: [P_CERT] } })).toEqual([P_CERT]);
+    // A member at its own yearly cap while the lead stays open is a warning, never a block (owner 2026-10-30).
+    expect(blockedProductIds({ weedMix: { mode: 'lead', groupProductIds: [P_CEL, P_CERT], productIds: [P_CEL], blockedIds: [P_CERT] } })).toEqual([]);
+  });
+  test('a product closed only by a read limit is warned, with the limit\'s words; a city hold or the Group 11 hold stays blocked', () => {
+    const input = {
+      offers: { blocked: [P_ART], limitWarned: { [P_ACE]: 'Acelepryn: 3/3 — LIMIT REACHED.' } },
+      chinch: { blockedIds: [P_ARENA, P_TALAK], limitedIds: [P_ARENA], limitMessages: { [P_ARENA]: 'Arena: 2/2 — LIMIT REACHED.' } },
+      weedMix: { mode: 'none', groupProductIds: [P_CEL, P_CERT], productIds: [], blockedIds: [P_CEL], limitMessages: { [P_CEL]: 'Celsius: LIMIT REACHED.' } },
+    };
+    expect(limitWarnedProducts(input)).toEqual({ [P_ACE]: 'Acelepryn: 3/3 — LIMIT REACHED.', [P_ARENA]: 'Arena: 2/2 — LIMIT REACHED.', [P_CEL]: 'Celsius: LIMIT REACHED.' });
+    // Blocked: the held pick, and what no limit explains (a rung a sibling holds, the other weed member), never a warned id.
+    expect(blockedProductIds(input).sort()).toEqual([P_ART, P_TALAK, P_CERT].sort());
+    // A limited id with no words still warns, with the fallback line.
+    expect(limitWarnedProducts({ chinch: { limitedIds: [P_ARENA] } })).toEqual({ [P_ARENA]: 'A yearly limit is reached for this product.' });
+    // A weed member whose read failed is unreadable, not warned.
+    expect(limitWarnedProducts({ weedMix: { mode: 'unavailable', blockedIds: [P_CEL], unreadableIds: [P_CEL] } })).toEqual({});
   });
   test('the picks, the chinch rungs and the weed group are all named, each once', () => {
     const ids = blockedProductIds({
@@ -437,9 +487,9 @@ describe('unreadableProductIds: what the fresh read could not read (not forbidde
     expect(unreadableProductIds(input).sort()).toEqual([P_ART, P_ACE, P_ARENA, P_TALAK, P_CEL, P_CERT].sort());
     expect(blockedProductIds(input)).toEqual([]);
   });
-  test('an unavailable weed mix: members read as forbidden stay blocked; the rest are released (the mix is withheld as a whole)', () => {
+  test('an unavailable weed mix: members read as at a limit are warned (not blocked); the rest are released (the mix is withheld as a whole)', () => {
     const weedMix = { mode: 'unavailable', groupProductIds: [P_CEL, P_CERT, uuid(9)], productIds: [], blockedIds: [P_CEL] };
-    expect(blockedProductIds({ weedMix })).toEqual([P_CEL]);
+    expect(blockedProductIds({ weedMix })).toEqual([]);
     expect(unreadableProductIds({ weedMix }).sort()).toEqual([P_CERT, uuid(9)].sort());
     // A whole-read failure names no blocked member: all are released.
     const threw = { mode: 'unavailable', groupProductIds: [P_CEL, P_CERT], productIds: [], blockedIds: [] };
@@ -479,11 +529,12 @@ describe('per-place offers: a product is held back only when NO place permits it
     expect(calls.slice(1).map((c) => [c[2].map((l) => l.product.id), c[5]])).toEqual(PLACES.map((place) => [[P_ART], { place }]));
   });
 
-  test('capped at every place: blocked, with no offer', async () => {
+  test('capped at every place: a warning, not a block; still offered with the limit\'s words', async () => {
     cappedAt(P_ART, ...PLACES);
     const offers = await run();
-    expect(offers.fungus).toBeNull();
-    expect(offers.blocked).toEqual([P_ART]);
+    expect(offers.fungus).toEqual({ item: { productId: P_ART, name: 'Artavia' }, limitWarning: 'Artavia: 2/2 — LIMIT REACHED.' });
+    expect(offers.blocked).toEqual([]);
+    expect(offers.limitWarned).toEqual({ [P_ART]: 'Artavia: 2/2 — LIMIT REACHED.' });
     expect(offers.caterpillars).toEqual({ item: { productId: P_ACE, name: 'Acelepryn' } });
   });
 
@@ -539,8 +590,9 @@ describe('per-place offers: a product is held back only when NO place permits it
   test('no places asked: the lawn-wide answer, five arguments', async () => {
     cappedAt(P_ART, 'front');
     const offers = await addOnOffers({ candidates: both(), rows: ROWS, svc, knex: {} });
-    expect(offers.fungus).toBeNull();
-    expect(offers.blocked).toEqual([P_ART]);
+    expect(offers.fungus).toEqual({ item: { productId: P_ART, name: 'Artavia' }, limitWarning: 'Artavia: 2/2 — LIMIT REACHED.' });
+    expect(offers.blocked).toEqual([]);
+    expect(offers.limitWarned).toEqual({ [P_ART]: 'Artavia: 2/2 — LIMIT REACHED.' });
     expect(engine.v13VisitLimits.mock.calls.every((c) => c.length === 5)).toBe(true);
   });
 
@@ -589,10 +641,11 @@ describe('per-place offers: a product is held back only when NO place permits it
       offers = await run2();
       expect(offers.fungus).toEqual({ item: { productId: P_ART, name: 'Artavia' } });
       expect(offers.unreadable).toEqual([]);
-      // Capped at every place that was read, none unknown: still blocked.
+      // Capped at every place that was read, none unknown: a warning, not a block (owner 2026-10-30).
       readsBy({ front: { [P_ART]: TYPED }, back: { [P_ART]: TYPED }, left_side: { [P_ART]: TYPED }, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
       offers = await run2();
-      expect(offers.blocked).toEqual([P_ART]);
+      expect(offers.blocked).toEqual([]);
+      expect(offers.limitWarned).toEqual({ [P_ART]: 'limit' });
       expect(offers.unreadable).toEqual([]);
     });
 
@@ -613,7 +666,8 @@ describe('per-place offers: a product is held back only when NO place permits it
       // Artavia: capped everywhere. Acelepryn: unknown everywhere. Neither read changes the other's verdict.
       readsBy(Object.fromEntries(PLACES.map((p) => [p, { [P_ART]: TYPED, [P_ACE]: TYPELESS }])), { [P_ART]: TYPED, [P_ACE]: TYPELESS });
       const offers = await addOnOffers({ candidates: cs, rows: ROWS3, svc, knex: {}, places: PLACES });
-      expect(offers.blocked).toEqual([P_ART]);
+      expect(offers.blocked).toEqual([]);
+      expect(offers.limitWarned).toEqual({ [P_ART]: 'limit' });
       expect(offers.unreadable).toEqual([P_ACE]);
     });
 
@@ -684,6 +738,14 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
   test('Arena at its yearly cap: the bifenthrin product, and the note says so', async () => {
     limited([[P_ARENA, CAP]]);
     expect(await run()).toMatchObject({ productId: P_TALAK, name: 'Atticus Talak 7.9 F', note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA] });
+  });
+
+  test('a rung at a limit that was read carries the limit\'s words for the sheet\'s warning (Arena stays reachable by the search)', async () => {
+    limited([[P_ARENA, CAP]]);
+    const found = await run();
+    expect(found.limitedIds).toEqual([P_ARENA]);
+    expect(found.limitMessages).toEqual({ [P_ARENA]: 'Arena: 2/2 other applications — LIMIT REACHED.' });
+    expect((await (async () => { noLimits(); return run(); })()).limitMessages).toBeUndefined();
   });
 
   test('both at their yearly cap: nothing to offer, and why', async () => {

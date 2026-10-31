@@ -30,6 +30,19 @@ describe('EstimateProvenanceCard quoted framing', () => {
     expect(screen.queryByText(/vs quoted/i)).toBeNull();
   });
 
+  it('labels a lawn rounds line for staff instead of the raw token', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={90}
+        onetimeTotal={0}
+        currentPrice={90}
+        lines={[{ name: 'Lawn Care', cadence: 'lawn_rounds_9', price: 90, perApplicationPrice: 90 }]}
+        estimateRef="EST-2026-0002"
+      />,
+    );
+    expect(screen.getByText(/\$90\.00\/application · Lawn rounds \(9 a year\)/)).toBeTruthy();
+  });
+
   it('group scope compares against recurring + schedulable one-time (the booked visit charge)', () => {
     render(
       <EstimateProvenanceCard
@@ -214,5 +227,60 @@ describe('EstimateProvenanceCard quoted framing', () => {
       />,
     );
     expect(screen.queryByText('Setup fee not invoiced')).toBeNull();
+  });
+
+  // GATE_PAF_PREPAY: the year's invoice stays a draft on purpose and the card
+  // on file is charged after the first visit — "not sent to the customer yet"
+  // read as a step someone owes, and the held visit is not collected.
+  const pendingYear = {
+    status: 'payment_pending',
+    paid: false,
+    refunded: false,
+    prepayAmount: 368,
+    coverageServiceType: 'Pest Control',
+    coverageVisitCount: 4,
+    termEnd: '2027-12-01',
+    invoiceStatus: 'draft',
+  };
+
+  it('says a pay-after-first-visit year is charged after the first visit, and not to collect', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={30.67}
+        currentPrice={null}
+        payment={{
+          billingTerm: 'prepay_annual',
+          paymentPreference: 'prepay_annual',
+          annualPrepay: { ...pendingYear, coversThisVisit: true, chargeAfterFirstVisit: true },
+          acceptanceInvoice: null,
+          setupFeeMissing: null,
+        }}
+        estimateRef="EST-2026-9904"
+      />,
+    );
+    expect(screen.getByText('Annual prepay — pending')).toBeTruthy();
+    expect(screen.getByText(/Charged to the card on file after the first visit.* — do not collect at the visit$/)).toBeTruthy();
+    expect(screen.queryByText(/Invoice drafted — not sent/)).toBeNull();
+    expect(screen.queryByText('Per application')).toBeNull();
+    expect(screen.queryByText('Setup fee not invoiced')).toBeNull();
+  });
+
+  it('keeps the draft note for a pending year that is not charged after the first visit', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={30.67}
+        currentPrice={null}
+        payment={{
+          billingTerm: 'prepay_annual',
+          paymentPreference: 'prepay_annual',
+          annualPrepay: { ...pendingYear, coversThisVisit: false, chargeAfterFirstVisit: false },
+          acceptanceInvoice: null,
+          setupFeeMissing: null,
+        }}
+        estimateRef="EST-2026-9905"
+      />,
+    );
+    expect(screen.getByText(/Invoice drafted — not sent to the customer yet/)).toBeTruthy();
+    expect(screen.queryByText(/do not collect at the visit/)).toBeNull();
   });
 });

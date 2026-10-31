@@ -172,13 +172,14 @@ async function analyzePhotos(photos = []) {
 
 /**
  * Findings ladder — NEVER BLOCKS, but never publishes an UN-CHALLENGED diagnosis.
- *   multimodel (L1) ...... Gemini perceive + Opus challenge → diagnosis-level.
+ *   multimodel (L1) ...... Gemini perceive (OpenAI backup on a miss) + Opus challenge → diagnosis-level.
  *   challenge_degraded (L2) perception ok but challenge unavailable → SYMPTOM-only
  *                          (deterministic downgrade; names no cause, field-check copy).
  *   deterministic (L4) ... perception unusable → Claude+Gemini composite findings.
  *   minimal .............. nothing usable → no-diagnosis report.
  * The Claude+Gemini composite is the fallback only (analyzePhotos runs lazily), so
- * the happy path uses Gemini for vision and never touches Claude vision.
+ * the happy path uses Gemini for vision and never touches Claude vision. When Gemini
+ * misses, runPerception's OpenAI backup reads the photos before this ladder drops a rung.
  *
  * Returns { findings, findingsSource, fallbackReason, photoAnalysis, provenance }.
  * The caller supplies (and may pre-populate) nothing — provenance is built here.
@@ -270,13 +271,21 @@ function severityCeiling(diagnosis = {}) {
   return { ceiling: 100, fallback: 85 };
 }
 
+// A posted score, or null when none was posted. Number(null) and Number('') are 0, which
+// would read as a real score of 0 ("Needs attention") instead of "no score".
+function postedScore(value) {
+  if (value == null || (typeof value === 'string' && !value.trim())) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
 function deriveOverallScore(contract = {}, clientScore = null) {
   const diagnosis = contract.diagnosis || {};
   // Minimal / no-defensible-finding reports stay UNSCORED so the public label reads
   // "Reviewed", not a default-severity "Keep an eye on it".
   if (!Array.isArray(diagnosis.findings) || !diagnosis.findings.length) return null;
   const { ceiling, fallback } = severityCeiling(diagnosis);
-  const base = Number.isFinite(Number(clientScore)) ? Math.round(Number(clientScore)) : fallback;
+  const base = postedScore(clientScore) ?? fallback;
   return Math.max(0, Math.min(ceiling, base));
 }
 
@@ -288,5 +297,6 @@ module.exports = {
   scoreSeverity,
   confidenceFromDivergence,
   severityCeiling,
+  postedScore,
   deriveOverallScore,
 };

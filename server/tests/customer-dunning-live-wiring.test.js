@@ -50,13 +50,26 @@ function mockChain(table) {
   return chain;
 }
 jest.mock('../models/db', () => {
-  const fake = jest.fn((table) => { mockDb.log.push({ table }); mockDb.chains.push([table, mockChain(table)]); return mockDb.chains.at(-1)[1]; });
+  const fake = jest.fn((table) => {
+    // runPending opens with the reopened-invoice revival read on
+    // `invoice_followup_sequences as s` (nothing to revive here): answered
+    // empty and kept out of the log / chains so the batch read stays first.
+    if (table === 'invoice_followup_sequences as s' && mockDb.skipRevival) {
+      mockDb.skipRevival = false;
+      const empty = new Proxy({}, { get: (_t, prop) => (prop === 'then'
+        ? (resolve, reject) => Promise.resolve([]).then(resolve, reject)
+        : () => empty) });
+      return empty;
+    }
+    mockDb.log.push({ table }); mockDb.chains.push([table, mockChain(table)]); return mockDb.chains.at(-1)[1]; });
   fake.fn = { now: () => 'now()' };
   fake.raw = jest.fn((sql, bindings) => { mockDb.log.push({ raw: sql, bindings }); return mockDb.raw ? mockDb.raw(sql, bindings) : Promise.resolve({ rows: [] }); });
   fake.transaction = jest.fn(async (fn) => fn(fake));
   return fake;
 });
 mockDb.chains = [];
+// Arms the revival-read skip above, then runs runPending.
+const runPendingT = () => { mockDb.skipRevival = true; return require('../services/invoice-followups').runPending(); };
 
 const mockGates = { live: false, shadow: false, prereqs: true, allow: null };
 jest.mock('../config/feature-gates', () => ({
@@ -107,7 +120,7 @@ beforeEach(() => {
   jest.setSystemTime(NOW);
   jest.clearAllMocks();
   Object.assign(mockGates, { live: false, shadow: false, prereqs: true, allow: null });
-  Object.assign(mockDb, { results: {}, firsts: {}, log: [], raw: null, throwOn: {}, chains: [] });
+  Object.assign(mockDb, { results: {}, firsts: {}, log: [], raw: null, throwOn: {}, chains: [], skipRevival: false });
   require('../services/customer-dunning/wiring')._test.resetReadMemory();
 });
 // Only the spies are restored: the db / gate / runner fakes keep their implementations.
@@ -135,7 +148,7 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
     mockGates.live = true;
     mockGates.shadow = true;
     const order = trace();
-    await expect(Followups.runPending()).resolves.toEqual({ sent: 0, skipped: 0 });
+    await expect(runPendingT()).resolves.toEqual({ sent: 0, skipped: 0 });
     expect(order).toEqual(['releaseIfDark', 'promote', 'batch', 'runCustomerSchedules']);
     expect(Wiring.releaseIfDark).toHaveBeenCalledWith(NOW);
     expect(Schedule.promote).toHaveBeenCalledWith(NOW);
@@ -146,7 +159,7 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
   test('shadow only: the kill switch still runs first, no promotion, shadowRun after the batch', async () => {
     mockGates.shadow = true;
     const order = trace();
-    await Followups.runPending();
+    await runPendingT();
     expect(order).toEqual(['releaseIfDark', 'batch', 'shadowRun']);
   });
 
@@ -154,7 +167,7 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
     mockGates.live = true;
     mockGates.prereqs = false;
     const order = trace();
-    await Followups.runPending();
+    await runPendingT();
     expect(order).toEqual(['releaseIfDark', 'batch']);
   });
 
@@ -162,7 +175,7 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
     jest.setSystemTime(new Date('2026-10-05T14:16:00Z')); // Monday
     mockGates.live = true;
     const order = trace();
-    await Followups.runPending();
+    await runPendingT();
     expect(order).toEqual([]);
   });
 
@@ -171,7 +184,7 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
     trace();
     Schedule.promote.mockRejectedValueOnce(new Error('promote blew up'));
     Runner.runCustomerSchedules.mockRejectedValueOnce(new Error('engine blew up'));
-    await expect(Followups.runPending()).resolves.toEqual({ sent: 0, skipped: 0 });
+    await expect(runPendingT()).resolves.toEqual({ sent: 0, skipped: 0 });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('promote blew up'));
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('engine blew up'));
   });
@@ -180,14 +193,14 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
     mockGates.live = true;
     const order = trace();
     Wiring.releaseIfDark.mockRejectedValueOnce(new Error('kill switch blew up'));
-    await expect(Followups.runPending()).resolves.toEqual({ sent: 0, skipped: 0 });
+    await expect(runPendingT()).resolves.toEqual({ sent: 0, skipped: 0 });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('kill switch blew up'));
     expect(order).toEqual(['batch', 'runCustomerSchedules']);
   });
 
   test('the batch carries the ownership predicate: NOT EXISTS an OPEN schedule for the row\'s customer', async () => {
     trace();
-    await Followups.runPending();
+    await runPendingT();
     const [, batch] = mockDb.chains.find(([t]) => t === 'invoice_followup_sequences as s');
     const predicate = Followups._test.notOwnedByCustomerSchedule;
     expect(batch.calls.some(([m, arg]) => m === 'where' && arg === predicate)).toBe(true);
@@ -202,7 +215,7 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
   test('PIN — live gate off, no schedule rows: one read of the schedule table, no write, no alert, no engine', async () => {
     mockGates.shadow = false;
     mockDb.results.customer_dunning_schedules = [];
-    await expect(Followups.runPending()).resolves.toEqual({ sent: 0, skipped: 0 });
+    await expect(runPendingT()).resolves.toEqual({ sent: 0, skipped: 0 });
     expect(tablesRead().filter((t) => t === 'customer_dunning_schedules')).toHaveLength(1);
     expect(writes()).toEqual([]);
     expect(mockNotify).not.toHaveBeenCalled();
@@ -266,7 +279,7 @@ describe('an owned customer\'s invoice waiting on micro-deposit verification kee
 
   test('the batch predicate keeps an owned customer\'s PaymentIntent rows as candidates (gate on); gate off it is the plain ownership predicate', async () => {
     jest.spyOn(Wiring, 'releaseIfDark').mockResolvedValue({});
-    await Followups.runPending();
+    await runPendingT();
     let [, batch] = mockDb.chains.find(([t]) => t === 'invoice_followup_sequences as s');
     const predicate = Followups._test.notOwnedOrMicrodepositCandidate;
     expect(batch.calls.some(([m, arg]) => m === 'where' && arg === predicate)).toBe(true);
@@ -277,7 +290,7 @@ describe('an owned customer\'s invoice waiting on micro-deposit verification kee
     expect(bindings).toEqual([...OPEN_STATUSES]);
     delete FeatureGatesMock.gates.divertMicrodepositDunning;
     mockDb.chains = [];
-    await Followups.runPending();
+    await runPendingT();
     [, batch] = mockDb.chains.find(([t]) => t === 'invoice_followup_sequences as s');
     expect(batch.calls.some(([m, arg]) => m === 'where' && arg === Followups._test.notOwnedByCustomerSchedule)).toBe(true);
   });
@@ -295,7 +308,7 @@ describe('an owned customer\'s invoice waiting on micro-deposit verification kee
     ];
     waiting.add('inv-md');
     mockDb.results.customer_dunning_schedules = [{ customer_id: CUST }];
-    await expect(Followups.runPending()).resolves.toEqual({ sent: 2, skipped: 0 });
+    await expect(runPendingT()).resolves.toEqual({ sent: 2, skipped: 0 });
     // the ownership read names only the PaymentIntent rows' customers, open statuses only
     const [, ownersRead] = mockDb.chains.find(([t]) => t === 'customer_dunning_schedules');
     expect(ownersRead.calls).toEqual(expect.arrayContaining([['whereIn', 'customer_id', [CUST, CUST2]], ['whereIn', 'status', [...OPEN_STATUSES]]]));

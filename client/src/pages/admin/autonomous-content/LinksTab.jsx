@@ -90,7 +90,7 @@ function LinkDetail({
       <LinkContext title="After" value={selectedLink.link_context_after} />
 
       <Section title="Validation">
-        <div className="grid gap-1 text-13 text-zinc-600">
+        <div className="grid gap-1 text-14 text-zinc-600">
           <div>
             Target: HTTP {selectedLink.target_http_status ?? "—"} · indexable {yesNo(selectedLink.target_indexable)} ·
             canonical {yesNo(selectedLink.target_canonical_matches)}
@@ -108,7 +108,7 @@ function LinkDetail({
 
       {selectedLink.reviewer_notes && (
         <Section title="Reviewer notes">
-          <div className="whitespace-pre-wrap text-13 leading-relaxed text-zinc-600">{selectedLink.reviewer_notes}</div>
+          <div className="whitespace-pre-wrap text-14 leading-relaxed text-zinc-600">{selectedLink.reviewer_notes}</div>
         </Section>
       )}
     </CardBody>
@@ -159,7 +159,7 @@ export default function LinksTab({
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="truncate text-14 font-medium text-zinc-900">{item.anchor_text || "—"}</div>
-                      <div className="mt-0.5 truncate text-12 text-zinc-500">
+                      <div className="mt-0.5 truncate text-14 text-zinc-500">
                         {[item.anchor_type, scorePercent(item.topical_relevance_score)].filter(Boolean).join(" · ")}
                       </div>
                     </div>
@@ -167,7 +167,7 @@ export default function LinksTab({
                       {item.status}
                     </Tag>
                   </div>
-                  <div className="mt-2 grid gap-0.5 text-12 text-zinc-500">
+                  <div className="mt-2 grid gap-0.5 text-14 text-zinc-500">
                     <div className="truncate">
                       <span className="text-zinc-400">→</span> {item.target_url || "—"}
                     </div>

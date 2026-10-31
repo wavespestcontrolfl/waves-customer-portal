@@ -195,6 +195,9 @@ describe('CompliancePage Staff authentication', () => {
     renderCompliance('/admin/compliance?tab=licenses');
 
     await screen.findByText('Fixture technician');
+    // The table shows the expiry like every other date on the page; the
+    // dialog still edits the YYYY-MM-DD value.
+    expect(screen.getByText('2/1/2027')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     expect(screen.getByRole('dialog', { name: 'Edit license' })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('License #'), { target: { value: 'NEW-2' } });
@@ -211,6 +214,131 @@ describe('CompliancePage Staff authentication', () => {
         }),
       }),
     ));
+    // Gate off (no idCard block from the server): no training column or buttons, no new request.
+    expect(screen.queryByText('ID card and training')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Training log' })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('training'))).toBe(true);
+  });
+
+  // GATE_TECH_TRAINING_DATES (dark): the server adds the blocks only for a technician with a hire date.
+  describe('ID card and training dates', () => {
+    const ID = '11111111-1111-4111-8111-111111111111';
+    const employee = {
+      id: ID,
+      name: 'Fixture employee',
+      license: null,
+      licenseExpiry: '2027-06-30',
+      licenseCategories: null,
+      licenseStatus: 'none',
+      training: { days: 2, hours: 16, categories: ['GHP'], fiveDaysDone: false, fortyHoursDone: false },
+      idCard: { appliedOn: null, applicationDueOn: '2026-10-31', issuedOn: null, status: 'overdue' },
+      classroom: { dueOn: null, doneOn: null, status: null },
+      renewalTraining: { dueBy: '2027-06-30', doneOn: null, status: 'due' },
+    };
+    const owner = { id: '22222222-2222-4222-8222-222222222222', name: 'Fixture owner', license: null, licenseExpiry: null, licenseCategories: null, licenseStatus: 'none' };
+
+    function stubFetch(extra = () => null) {
+      const fetchMock = vi.fn(async (url, init = {}) => {
+        const made = extra(String(url), init);
+        if (made) return made;
+        return { ok: true, json: async () => (String(url).endsWith('/licenses') ? { technicians: [employee, owner] } : {}) };
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('shows the dates and statuses for an employee only, and sends the four dates with the edit', async () => {
+      localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+      const fetchMock = stubFetch();
+      renderCompliance('/admin/compliance?tab=licenses');
+
+      await screen.findByText('Fixture employee');
+      expect(screen.getByText('ID card and training')).toBeInTheDocument();
+      expect(screen.getByText(/apply by/)).toBeInTheDocument();
+      expect(screen.getByText('overdue')).toBeInTheDocument();
+      expect(screen.getByText('5-day check open')).toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: 'Training log' })).toHaveLength(1);
+      expect(screen.getAllByRole('button', { name: 'Print record' })).toHaveLength(1);
+
+      fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+      fireEvent.change(screen.getByLabelText('ID card applied'), { target: { value: '2026-10-28' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+        `/api/admin/compliance-v2/licenses/${ID}`,
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify({
+            fl_applicator_license: '', license_expiry: '2027-06-30', license_categories: [],
+            id_card_applied_on: '2026-10-28', id_card_issued_on: '', classroom_hours_done_on: '', renewal_training_done_on: '',
+          }),
+        }),
+      ));
+    });
+
+    it('adds a training day from the log and removes one', async () => {
+      localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+      const days = [{ id: 'd1', trainingDate: '2026-10-02', hours: 8, category: 'GHP', topics: 'Label reading', trainerName: 'Fixture operator', materials: null }];
+      const fetchMock = stubFetch((url, init) => {
+        if (!url.endsWith('/training-days') && !url.includes('/training-days/')) return null;
+        if (init.method === 'POST' || init.method === 'DELETE') return { ok: true, json: async () => ({ success: true }) };
+        return { ok: true, json: async () => ({ days, summary: { days: 1, hours: 8, categories: ['GHP'], fiveDaysDone: false, fortyHoursDone: false } }) };
+      });
+      renderCompliance('/admin/compliance?tab=licenses');
+
+      await screen.findByText('Fixture employee');
+      fireEvent.click(screen.getByRole('button', { name: 'Training log' }));
+      await screen.findByText('Label reading');
+      expect(screen.getByText(/1 day, 8 of 40 hours/)).toBeInTheDocument();
+
+      fireEvent.change(screen.getByLabelText(/^Date/), { target: { value: '2026-10-03' } });
+      fireEvent.change(screen.getByLabelText(/^Topics covered/), { target: { value: 'Termite biology' } });
+      fireEvent.change(screen.getByLabelText(/^Trainer/), { target: { value: 'Fixture operator' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Add day' }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+        `/api/admin/compliance-v2/licenses/${ID}/training-days`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ training_date: '2026-10-03', hours: 8, category: 'GHP', topics: 'Termite biology', trainer_name: 'Fixture operator', materials: null }),
+        }),
+      ));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+        `/api/admin/compliance-v2/licenses/${ID}/training-days/d1`,
+        expect.objectContaining({ method: 'DELETE' }),
+      ));
+    });
+
+    it('shows the printable record heading and prints it with the typed syllabus note, escaped', async () => {
+      localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+      const record = {
+        heading: 'Initial five-day (40-hour) pesticide applicator employee training record',
+        authority: 'Rule 5E-14.1421, Florida Administrative Code; F.S. 482.091(3)',
+        retention: 'Keep this record for 2 years.',
+        technician: { id: ID, name: 'Fixture employee', hireDate: '2026-10-01' },
+        days: [{ id: 'd1', trainingDate: '2026-10-02', hours: 8, category: 'GHP', topics: 'Label <b>reading</b>', trainerName: 'Fixture operator', materials: null }],
+        totals: { days: 1, hours: 8, categories: ['GHP'], fiveDaysDone: false, fortyHoursDone: false },
+        signatures: [{ role: 'Certified operator in charge', lines: ['Printed name', 'Signature'] }],
+      };
+      stubFetch((url) => (url.endsWith('/training-record') ? { ok: true, json: async () => record } : null));
+      const written = [];
+      const print = vi.fn();
+      vi.stubGlobal('open', vi.fn(() => ({ document: { open: vi.fn(), write: (html) => written.push(html), close: vi.fn() }, focus: vi.fn(), print })));
+      renderCompliance('/admin/compliance?tab=licenses');
+
+      await screen.findByText('Fixture employee');
+      fireEvent.click(screen.getByRole('button', { name: 'Print record' }));
+      await screen.findByText(record.heading);
+      fireEvent.change(screen.getByLabelText(/^Course syllabus/), { target: { value: 'Syllabus <script>x</script>' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Print' }));
+      expect(print).toHaveBeenCalledOnce();
+      const html = written.join('');
+      expect(html).toContain('Rule 5E-14.1421');
+      expect(html).toContain('Label &lt;b&gt;reading&lt;/b&gt;');
+      expect(html).toContain('Syllabus &lt;script&gt;x&lt;/script&gt;');
+      expect(html).toContain('Certified operator in charge');
+      expect(html).not.toContain('<script>');
+    });
   });
 });
 
@@ -254,5 +382,69 @@ describe('CompliancePage dashboard failure states', () => {
     renderCompliance();
     expect(await screen.findByRole('alert')).toHaveTextContent(/Failed to fetch/);
     expect(screen.queryByText('Loading dashboard…')).not.toBeInTheDocument();
+  });
+});
+
+// Operations audit OP-08/OP-09: a failed restriction read is "unknown", never
+// "No Active Nitrogen Blackout" or "No lawn customers found", and a failed
+// Check Limits says so for the customer that was checked.
+describe('CompliancePage nitrogen and limits failure states', () => {
+  const ok = (body) => ({ ok: true, json: async () => body });
+  const fail = (status) => ({ ok: false, status, json: async () => ({ error: `HTTP ${status}` }) });
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('waves_admin_token', 'test-token');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the blackout status as unknown with Retry when only the nitrogen read fails', async () => {
+    let nitrogenFails = true;
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes('/nitrogen-status')) {
+        return nitrogenFails ? fail(503) : ok({ activeBlackoutCount: 0, blackoutPeriods: [] });
+      }
+      return ok({ ytdApplications: 3, recentApplications: [] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderCompliance();
+    expect(await screen.findByText('Nitrogen Blackout Status Unknown')).toBeInTheDocument();
+    expect(screen.queryByText('No Active Nitrogen Blackout')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/Couldn't load nitrogen status — HTTP 503/);
+    nitrogenFails = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('No Active Nitrogen Blackout')).toBeInTheDocument();
+  });
+
+  it('never reports "No lawn customers found" for a failed nitrogen read on Limits', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/nitrogen-status') ? fail(503) : ok({}))));
+    renderCompliance('/admin/compliance?tab=limits');
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Couldn't load nitrogen status — HTTP 503/);
+    expect(screen.queryByText('No lawn customers found')).not.toBeInTheDocument();
+  });
+
+  it('shows a failed Check Limits for the submitted customer and clears the old result', async () => {
+    let limitsFail = false;
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/product-limits')) {
+        return limitsFail ? fail(503) : ok({ customerName: 'Synthetic Customer', limits: [{ limitType: 'annual_max_apps', limitValue: 4, currentUsage: 1, status: 'ok' }] });
+      }
+      return ok({ customers: [] });
+    }));
+    renderCompliance('/admin/compliance?tab=limits');
+    fireEvent.change(screen.getByPlaceholderText('Customer ID…'), { target: { value: 'cust-1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check Limits' }));
+    expect(await screen.findByText('Synthetic Customer')).toBeInTheDocument();
+
+    limitsFail = true;
+    fireEvent.change(screen.getByPlaceholderText('Customer ID…'), { target: { value: 'cust-2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check Limits' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't check limits for customer cust-2 — HTTP 503");
+    expect(screen.queryByText('Synthetic Customer')).not.toBeInTheDocument();
+    expect(screen.queryByText('Checking…')).not.toBeInTheDocument();
   });
 });

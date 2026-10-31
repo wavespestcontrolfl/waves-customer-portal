@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import React from 'react';
+import { IDBFactory } from 'fake-indexeddb';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { BrowserRouter, MemoryRouter, Route, Routes, useNavigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, MemoryRouter, Outlet, Route, Routes, useNavigate, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
 vi.mock('../../components/admin/Customer360ProfileV2', () => ({
-  default: function Profile({ customerId, initialTab, onCustomerMutation, onDraftActiveChange }) {
+  default: function Profile({ customerId, initialTab, onCustomerMutation, onDraftActiveChange, feedbackEnabled }) {
     const [tab, setTab] = React.useState(initialTab);
     // Stands in for the embedded address-review panel's own draft-active
     // signal (CustomerGeocodeReviewPanel -> useCustomerProfileNavigation),
@@ -15,6 +16,7 @@ vi.mock('../../components/admin/Customer360ProfileV2', () => ({
     const [draftOpen, setDraftOpen] = React.useState(false);
     return <div data-testid="customer-profile">Profile {customerId}
       <span data-testid="profile-active-tab">{tab}</span>
+      <span data-testid="profile-feedback-enabled">{String(feedbackEnabled)}</span>
       <span data-testid="draft-open">{String(draftOpen)}</span>
       <button onClick={() => setTab('overview')}>Profile overview</button>
       <button onClick={() => onCustomerMutation?.({ customerId, action: 'update' })}>Save profile address</button>
@@ -87,6 +89,15 @@ function RepeatCommsNotification({ workspace = false }) {
   return <button onClick={() => navigate('/admin/customers?customerId=customer-a&tab=comms' + (workspace ? '&customer360=workspace' : ''))}>Open SMS notification</button>;
 }
 
+function HealthRiskHistoryControls() {
+  const navigate = useNavigate();
+  return <>
+    <button onClick={() => navigate('/admin/customers')}>Bare customers</button>
+    <button onClick={() => navigate(-1)}>Risk history back</button>
+    <button onClick={() => navigate(1)}>Risk history forward</button>
+  </>;
+}
+
 function RemountableDirectory() {
   const location = useLocation();
   const [version, setVersion] = React.useState(0);
@@ -95,6 +106,25 @@ function RemountableDirectory() {
     <button onClick={() => setVersion((value) => value + 1)}>Remount directory</button>
     <CustomersPageV2 key={version} />
   </>;
+}
+
+function VerifiedAdminOutlet() {
+  return <Outlet context={{ user: { id: 'verified-admin', role: 'admin' } }} />;
+}
+
+const CUSTOMER_VIEW_STORAGE_KEY = 'waves_admin_table_views:v1:verified-admin:admin:customers';
+
+function storeCustomerViews(current, views = []) {
+  localStorage.setItem(CUSTOMER_VIEW_STORAGE_KEY, JSON.stringify({ version: 1, current }));
+  localStorage.setItem(`${CUSTOMER_VIEW_STORAGE_KEY}:views`, JSON.stringify({ version: 1, views }));
+}
+
+function VerifiedDirectory({ remountable = false }) {
+  return <Routes>
+    <Route element={<VerifiedAdminOutlet />}>
+      <Route path="/admin/customers" element={remountable ? <RemountableDirectory /> : <CustomersPageV2 />} />
+    </Route>
+  </Routes>;
 }
 
 describe('CustomersPageV2 workflow state', () => {
@@ -179,7 +209,32 @@ describe('CustomersPageV2 workflow state', () => {
     expect(requests.at(-1).has('healthRisk')).toBe(false);
   });
 
-  it('retains an edit through workspace navigation and a failed save without creating a membership', async () => {
+  it('clears an explicit URL health risk when history returns to a bare Customers URL', async () => {
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname === '/api/admin/customers') requests.push(parsed.searchParams);
+      return response(list);
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?healthRisk=at_risk']}>
+      <HealthRiskHistoryControls />
+      <CustomersPageV2 />
+    </MemoryRouter>);
+
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(requests.at(-1).get('healthRisk')).toBe('at_risk');
+    fireEvent.click(screen.getByRole('button', { name: 'Bare customers' }));
+    await waitFor(() => expect(requests.at(-1).has('healthRisk')).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Risk history back' }));
+    await waitFor(() => expect(requests.at(-1).get('healthRisk')).toBe('at_risk'));
+    fireEvent.click(screen.getByRole('button', { name: 'Risk history forward' }));
+    await waitFor(() => expect(requests.at(-1).has('healthRisk')).toBe(false));
+  });
+
+  it.each([
+    ['absent', '/admin/customers?customer360=workspace'],
+    ['zero', '/admin/customers?customer360=workspace&feedback=0'],
+  ])('retains an edit and the existing alert path when feedback is %s', async (_gate, route) => {
     const writes = [];
     const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
@@ -190,7 +245,7 @@ describe('CustomersPageV2 workflow state', () => {
       }
       return response(parsed.pathname === '/api/admin/customers' ? list : {});
     }));
-    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={[route]}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
     fireEvent.click(screen.getByLabelText('Actions for Avery Customer'));
     fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
@@ -210,6 +265,48 @@ describe('CustomersPageV2 workflow state', () => {
       body: { firstName: 'Edited name', tier: null, serviceContactEmail: '' },
     });
     alert.mockRestore();
+  });
+
+  it('shows gated inline save feedback, retries the same draft, and keeps the write payload unchanged', async () => {
+    const writes = [];
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (options.method === 'PUT') {
+        writes.push({ path: parsed.pathname, body: JSON.parse(options.body) });
+        return writes.length === 1 ? response({ error: 'Try again' }, 500) : response({ success: true });
+      }
+      return response(parsed.pathname === '/api/admin/customers' ? list : {});
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&feedback=1']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    fireEvent.click(screen.getByLabelText('Actions for Avery Customer'));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
+    fireEvent.change(screen.getByDisplayValue('Avery'), { target: { value: 'Edited inline' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Save failed: Try again');
+    expect(alert).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue('Edited inline')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByDisplayValue('Edited inline')).not.toBeInTheDocument());
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toEqual(writes[0]);
+    expect(writes[0]).toMatchObject({
+      path: '/api/admin/customers/customer-a',
+      body: { firstName: 'Edited inline', tier: null, serviceContactEmail: '' },
+    });
+    alert.mockRestore();
+  });
+
+  it.each([
+    ['/admin/customers?customerId=customer-a', 'false'],
+    ['/admin/customers?customerId=customer-a&feedback=0', 'false'],
+    ['/admin/customers?customerId=customer-a&feedback=1', 'true'],
+  ])('enables profile feedback only for the exact feedback=1 query (%s)', async (route, expected) => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={[route]}><CustomersPageV2 /></MemoryRouter>);
+    expect(await screen.findByTestId('profile-feedback-enabled')).toHaveTextContent(expected);
   });
 
   it('refreshes the address review queue after a successful city save and customer deletion', async () => {
@@ -335,10 +432,16 @@ describe('CustomersPageV2 workflow state', () => {
     const dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
     fireEvent.change(dialog.getByLabelText('Health grade'), { target: { value: 'A' } });
     fireEvent.change(dialog.getByLabelText('Health / churn risk'), { target: { value: 'low' } });
+    fireEvent.change(dialog.getByLabelText('Minimum health score'), { target: { value: '50' } });
+    const maximum = dialog.getByLabelText('Maximum health score');
+    fireEvent.change(maximum, { target: { value: '8' } });
+    expect(maximum).toHaveValue(8);
+    fireEvent.change(maximum, { target: { value: '80' } });
+    expect(maximum).toHaveValue(80);
     fireEvent.change(dialog.getByLabelText('Minimum health score'), { target: { value: '0' } });
     fireEvent.change(dialog.getByLabelText('Retention outcome'), { target: { value: 'saved' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
-    await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({ page: '1', search: 'Avery', healthGrade: 'A', healthRisk: 'low', minHealthScore: '0', retention: 'saved' }));
+    await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({ page: '1', search: 'Avery', healthGrade: 'A', healthRisk: 'low', minHealthScore: '0', maxHealthScore: '80', retention: 'saved' }));
     fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
     fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
     fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
@@ -349,6 +452,45 @@ describe('CustomersPageV2 workflow state', () => {
     expect(requests.at(-1).has('retention')).toBe(false);
   });
 
+  it('refetches page one when an unchanged filter or clear-all only resets pagination', async () => {
+    const requestedPages = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      const requestedPage = Number(parsed.searchParams.get('page'));
+      requestedPages.push(requestedPage);
+      return response({
+        customers: [{
+          ...list.customers[0],
+          id: `page-${requestedPage}`,
+          firstName: `Page ${requestedPage}`,
+        }],
+        total: 200,
+        totalPages: 2,
+      });
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers?tableControls=1']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Page 1 Customer customer profile' });
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByRole('button', { name: 'Open Page 2 Customer customer profile' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Filter customers' }));
+    let dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'All', exact: true }));
+    await screen.findByRole('button', { name: 'Open Page 1 Customer customer profile' });
+    expect(requestedPages).toEqual([1, 2, 1]);
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByRole('button', { name: 'Open Page 2 Customer customer profile' });
+    fireEvent.click(screen.getByRole('button', { name: 'Filter customers' }));
+    dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Clear all' }));
+    await screen.findByRole('button', { name: 'Open Page 1 Customer customer profile' });
+    expect(requestedPages).toEqual([1, 2, 1, 2, 1]);
+  });
+
   it('restores legacy controls and the 500-row request with tableControls=0', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
@@ -357,7 +499,7 @@ describe('CustomersPageV2 workflow state', () => {
       return response(list);
     }));
 
-    render(<MemoryRouter initialEntries={['/admin/customers?tableControls=0']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={['/admin/customers?tableControls=0&savedViews=1']}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
 
     expect(requests.at(-1).get('limit')).toBe('500');
@@ -365,7 +507,112 @@ describe('CustomersPageV2 workflow state', () => {
     expect(screen.queryByRole('searchbox', { name: 'Customers search' })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Customers sort' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Columns' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Customers saved views' })).not.toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'Customers pagination' })).not.toBeInTheDocument();
+  });
+
+  it('hydrates remembered settings before the first request, sanitizes columns, and persists current paging on remount', async () => {
+    storeCustomerViews({
+      search: 'Remembered',
+      filterStage: 'active_customer',
+      healthFilters: { healthRisk: 'low' },
+      page: 3,
+      pageSize: 25,
+      visibleColumns: ['attention', 'unknown', 'attention'],
+      customerId: 'must-not-survive',
+    });
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname === '/api/admin/customers') {
+        requests.push(parsed.searchParams);
+        return response({ ...list, total: 125, totalPages: 5 });
+      }
+      return response({});
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers?savedViews=1']}>
+      <VerifiedDirectory remountable />
+    </MemoryRouter>);
+
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(requests).toHaveLength(1);
+    expect(Object.fromEntries(requests[0])).toMatchObject({
+      search: 'Remembered', stage: 'active_customer', healthRisk: 'low', page: '3', limit: '25',
+    });
+    expect(screen.getByRole('columnheader', { name: /Customer/ })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Attention' })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Property' })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Customers search' }), {
+      target: { value: 'Changed' },
+    });
+    await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({
+      search: 'Changed', page: '1', limit: '25',
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(requests.at(-1).get('page')).toBe('2'));
+    const beforeRemount = requests.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Remount directory' }));
+    await waitFor(() => expect(requests.length).toBeGreaterThan(beforeRemount));
+    expect(Object.fromEntries(requests.at(-1))).toMatchObject({
+      search: 'Changed', page: '2', limit: '25',
+    });
+  });
+
+  it('lets an explicit health-risk URL win, then removes it when a named view without risk is applied', async () => {
+    storeCustomerViews(
+      {
+        search: '',
+        healthFilters: { healthRisk: 'low' },
+        page: 4,
+        pageSize: 25,
+      },
+      [{
+        id: 'all-healthy',
+        name: 'All healthy',
+        state: { search: 'Named', healthFilters: { healthRisk: '' }, pageSize: 50 },
+      }],
+    );
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname === '/api/admin/customers') {
+        requests.push(parsed.searchParams);
+        return response({ ...list, total: 200, totalPages: 8 });
+      }
+      return response({});
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers?savedViews=1&healthRisk=at_risk']}>
+      <VerifiedDirectory remountable />
+    </MemoryRouter>);
+
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(Object.fromEntries(requests[0])).toMatchObject({ healthRisk: 'at_risk', page: '1', limit: '25' });
+    fireEvent.click(screen.getByRole('button', { name: 'Customers saved views' }));
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Customers saved view' }), {
+      target: { value: 'all-healthy' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Use view' }));
+
+    await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({
+      search: 'Named', page: '1', limit: '50',
+    }));
+    expect(requests.at(-1).has('healthRisk')).toBe(false);
+    expect(screen.getByTestId('directory-url')).not.toHaveTextContent('healthRisk');
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(requests.at(-1).get('page')).toBe('2'));
+    fireEvent.click(screen.getByRole('button', { name: 'Customers saved views' }));
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Customers saved view' }), {
+      target: { value: 'all-healthy' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Use view' }));
+    await waitFor(() => expect(requests.at(-1).get('page')).toBe('1'));
+    const beforeRemount = requests.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Remount directory' }));
+    await waitFor(() => expect(requests.length).toBeGreaterThan(beforeRemount));
+    expect(requests.at(-1).has('healthRisk')).toBe(false);
   });
 
   it('pages and sorts server requests with shared controls by default', async () => {
@@ -437,6 +684,118 @@ describe('CustomersPageV2 workflow state', () => {
     expect(await screen.findByRole('searchbox', { name: 'Customers search' })).toBeInTheDocument();
   });
 
+  it('keeps saved Directory settings across a failed and retried 500-row Map view', async () => {
+    storeCustomerViews({ page: 2, pageSize: 25, search: 'Map-safe' });
+    const requests = [];
+    let mapReads = 0;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      requests.push(parsed.searchParams);
+      if (parsed.searchParams.get('limit') === '500') {
+        mapReads += 1;
+        if (mapReads === 1) return response({ error: 'Map customers unavailable' }, 503);
+        return response({ ...list, total: 50, totalPages: 1 });
+      }
+      return response({ ...list, total: 50, totalPages: 2 });
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers?savedViews=1']}>
+      <VerifiedDirectory />
+    </MemoryRouter>);
+    await screen.findByRole('button', { name: 'Customers saved views' });
+    expect(Object.fromEntries(requests.at(-1))).toMatchObject({ page: '2', search: 'Map-safe', limit: '25' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Map', exact: true }));
+    expect(await screen.findByText('Map customers unavailable')).toBeInTheDocument();
+    expect(requests.filter((params) => params.get('limit') === '500').map(Object.fromEntries)).toEqual([
+      expect.objectContaining({ page: '1', search: 'Map-safe', limit: '500' }),
+    ]);
+    expect(screen.queryByRole('button', { name: 'Customers saved views' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(mapReads).toBe(2));
+    expect(requests.filter((params) => params.get('limit') === '500').map(Object.fromEntries)).toEqual([
+      expect.objectContaining({ page: '1', search: 'Map-safe', limit: '500' }),
+      expect.objectContaining({ page: '1', search: 'Map-safe', limit: '500' }),
+    ]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Directory', exact: true }));
+    await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({
+      page: '2', search: 'Map-safe', limit: '25',
+    }));
+    expect(await screen.findByRole('button', { name: 'Customers saved views' })).toBeInTheDocument();
+  });
+
+  it('shows every row the server returned for Last visited, even after 8 PM Eastern', async () => {
+    // 10 PM EDT on Oct 29 is already Oct 30 in UTC. A visit on Sep 29 is 30
+    // calendar days back (inside "30 days" for the server) but 31 elapsed UTC
+    // days, which the old browser re-filter used to drop.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-30T02:00:00Z'));
+    try {
+      const requests = [];
+      vi.stubGlobal('fetch', vi.fn((url) => {
+        const parsed = new URL(String(url), 'http://fixture.invalid');
+        if (parsed.pathname !== '/api/admin/customers') return response({});
+        requests.push(parsed.searchParams);
+        const row = { ...list.customers[0], lastServiceDate: '2026-09-29', balanceOwed: 0, cardsOnFile: 0 };
+        return response({ ...list, customers: [row], total: 1, totalPages: 1 });
+      }));
+      render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+      await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+      fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
+      fireEvent.click(within(screen.getByRole('dialog', { name: 'Filter customers' })).getByRole('button', { name: '≤ 30 days' }));
+      await waitFor(() => expect(requests.at(-1).get('lastVisited')).toBe('30'));
+      fireEvent.click(within(screen.getByRole('dialog', { name: 'Filter customers' })).getByRole('button', { name: 'Done' }));
+      expect(await screen.findByRole('button', { name: 'Open Avery Customer customer profile' })).toBeInTheDocument();
+      expect(screen.queryByText('No customers found')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not hide server-returned rows the old client re-filter rejected (balance and card filters)', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      const row = { ...list.customers[0], balanceOwed: 0, cardsOnFile: 0 };
+      return response({ ...list, customers: [row], total: 1, totalPages: 1 });
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
+    const dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Has card' }));
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('cards=has'))).toBe(true));
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByRole('button', { name: 'Open Avery Customer customer profile' })).toBeInTheDocument();
+    expect(screen.queryByText('No customers found')).not.toBeInTheDocument();
+  });
+
+  it('keeps legacy Directory page labels aligned with rows after returning from Map', async () => {
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      requests.push(parsed.searchParams);
+      return response({ ...list, total: 1100, totalPages: 3,
+        customers: [{ ...list.customers[0], firstName: `Page ${parsed.searchParams.get('page')}` }] });
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?tableControls=0']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Page 1 Customer customer profile' });
+    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+    await screen.findByRole('button', { name: 'Open Page 2 Customer customer profile' });
+    fireEvent.click(screen.getByRole('button', { name: 'Map', exact: true }));
+    // The Map starts at page one and then reads the remaining 500-row pages.
+    await waitFor(() => expect(requests.at(-1).get('page')).toBe('3'));
+    fireEvent.click(screen.getByRole('button', { name: 'Directory', exact: true }));
+    await screen.findByText('Page 1 of 3 (1100 total)');
+    expect(screen.getByRole('button', { name: 'Open Page 1 Customer customer profile' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+    await screen.findByRole('button', { name: 'Open Page 2 Customer customer profile' });
+    expect(requests.at(-1).get('page')).toBe('2');
+  });
+
   it('keeps explicit overlay mode on legacy controls and limit despite the preview query', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
@@ -445,12 +804,13 @@ describe('CustomersPageV2 workflow state', () => {
       return response(list);
     }));
 
-    render(<MemoryRouter initialEntries={['/admin/customers?customer360=overlay&tableControls=1']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=overlay&tableControls=1&savedViews=1']}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('searchbox', { name: 'Search customers' });
     expect(requests.at(-1).get('limit')).toBe('500');
     expect(screen.queryByRole('searchbox', { name: 'Customers search' })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Customers rows per page' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Columns' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Customers saved views' })).not.toBeInTheDocument();
   });
 
   it('clamps and refetches when a refresh removes the current final page', async () => {
@@ -667,6 +1027,7 @@ describe('CustomersPageV2 workflow state', () => {
   });
 
   beforeEach(() => {
+    globalThis.indexedDB = new IDBFactory();
     localStorage.clear();
     localStorage.setItem('waves_admin_token', 'test-token');
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));

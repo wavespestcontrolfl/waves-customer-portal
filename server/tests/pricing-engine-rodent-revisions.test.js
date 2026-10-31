@@ -784,3 +784,287 @@ describe('commercial bait setup is never membership-waived (codex #3591 r56 loca
     expect(residential.lineItems.find((i) => i.service === 'rodent_bait_setup')).toBeUndefined();
   });
 });
+
+describe('rodent package discount sees the V2 exclusion section rows (owner 2026-10-30)', () => {
+  const v2Exclusion = { pricingVersion: 'v2', standardWireMeshPoints: 10, meshSoftLF: 100 };
+  const bundleOf = (estimate) => estimate.lineItems.filter((i) => i.service === 'rodent_bundle_discount');
+
+  test('trapping + V2 exclusion: one trapExclusion line, $2,500 -> $2,330, in the one-time total', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+    }));
+    // Exclusion is several section rows, all service 'rodent_exclusion'.
+    expect(estimate.lineItems.filter((i) => i.service === 'rodent_exclusion').length).toBeGreaterThan(1);
+    const bundles = bundleOf(estimate);
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]).toMatchObject({
+      bundleKind: 'trapExclusion',
+      floor: 895,
+      componentTotal: 2500,
+      bundledTotal: 2330,
+      price: -170,
+    });
+    expect(estimate.summary.oneTimeTotal).toBe(2330);
+  });
+
+  test('trapping + V2 exclusion + sanitation: fullRemediation 10% at the light floor', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        rodentTrapping: { plan: 'standard' },
+        exclusion: v2Exclusion,
+        sanitation: { affectedSqFt: 300, tier: 'light' },
+      },
+    }));
+    const bundles = bundleOf(estimate);
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]).toMatchObject({
+      bundleKind: 'fullRemediation',
+      floor: 1195,
+      componentTotal: 2895,
+      bundledTotal: 2610,
+    });
+    expect(estimate.summary.oneTimeTotal).toBe(2610);
+  });
+
+  test('the legacy single "exclusion" row still qualifies', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        rodentTrapping: { plan: 'standard' },
+        exclusion: { simple: 10, moderate: 4 },
+      },
+    }));
+    expect(estimate.lineItems.some((i) => i.service === 'exclusion')).toBe(true);
+    expect(bundleOf(estimate)).toHaveLength(1);
+    expect(bundleOf(estimate)[0].bundleKind).toBe('trapExclusion');
+  });
+
+  test('V2 exclusion alone earns no package discount', () => {
+    const estimate = generateEstimate(baseInput({ services: { exclusion: v2Exclusion } }));
+    expect(bundleOf(estimate)).toHaveLength(0);
+  });
+
+  test('trapping + quote-required exclusion rows get no exclusion package and no exclusion dollars', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../services/pricing-engine/service-pricing', () => {
+        const actual = jest.requireActual('../services/pricing-engine/service-pricing');
+        return {
+          ...actual,
+          priceRodentExclusionV2: (opts) => {
+            const result = actual.priceRodentExclusionV2(opts);
+            return { ...result, lineItems: result.lineItems.map((row) => ({ ...row, quoteRequired: true })) };
+          },
+        };
+      });
+      const isolated = require('../services/pricing-engine');
+      const withSanitation = isolated.generateEstimate(baseInput({
+        services: {
+          rodentTrapping: { plan: 'standard' },
+          exclusion: v2Exclusion,
+          sanitation: { affectedSqFt: 2000, tier: 'standard' },
+        },
+      }));
+      // The bad row does not qualify exclusion: trapping + sanitation only.
+      const [bundle] = bundleOf(withSanitation);
+      expect(bundle.bundleKind).toBe('trapSanitation');
+      expect(bundle.componentTotal).toBe(350 + 1070);
+      const exclusionOnly = isolated.generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+      }));
+      expect(bundleOf(exclusionOnly)).toHaveLength(0);
+    });
+    jest.dontMock('../services/pricing-engine/service-pricing');
+  });
+
+  test('a manual percent discount applies to the package net of its savings (pre-push P0)', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+      manualDiscount: { type: 'PERCENT', value: 10 },
+    }));
+    // 10% of $2,330 = $233, not 10% of the $2,500 component total.
+    expect(estimate.summary.manualDiscount.amount).toBe(233);
+    expect(estimate.summary.oneTimeTotal).toBe(2097);
+  });
+
+  test('a manual fixed discount stacks on the package total without double counting', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+      manualDiscount: { type: 'FIXED', value: 100 },
+    }));
+    expect(estimate.summary.manualDiscount.amount).toBe(100);
+    expect(estimate.summary.oneTimeTotal).toBe(2230);
+  });
+
+  describe('staff service credits on a package component re-select the package', () => {
+    const credit = (service, extra = {}) => ({
+      source: 'catalog_preset',
+      presetKey: `credit_${service}`,
+      catalogName: `Credit ${service}`,
+      catalogCategory: 'service_specific_credit',
+      discountType: extra.requestedAmount ? 'fixed' : 'free_service',
+      service,
+      label: `Credit ${service}`,
+      ...extra,
+    });
+
+    test('no credit: the package numbers do not change', () => {
+      const trapEx = generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+      }));
+      expect(trapEx.summary.oneTimeTotal).toBe(2330);
+      const full = generateEstimate(baseInput({
+        services: {
+          rodentTrapping: { plan: 'standard' },
+          exclusion: v2Exclusion,
+          sanitation: { affectedSqFt: 300, tier: 'light' },
+        },
+      }));
+      expect(full.summary.oneTimeTotal).toBe(2610);
+    });
+
+    test('free exclusion credit: no package line, one-time total is the trapping price', () => {
+      const estimate = generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+        serviceSpecificDiscounts: [credit('rodent_exclusion')],
+      }));
+      expect(bundleOf(estimate)).toHaveLength(0);
+      expect(estimate.summary.oneTimeTotal).toBe(350);
+    });
+
+    test('partial $100 exclusion credit: package re-priced on $2,400, total $2,230', () => {
+      const estimate = generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+        serviceSpecificDiscounts: [credit('rodent_exclusion', { requestedAmount: 100 })],
+      }));
+      const [bundle] = bundleOf(estimate);
+      expect(bundle).toMatchObject({
+        bundleKind: 'trapExclusion',
+        componentTotal: 2400,
+        bundledTotal: 2230,
+        price: -170,
+        priceBeforeDiscount: -170,
+        priceAfterDiscount: -170,
+      });
+      expect(estimate.summary.oneTimeTotal).toBe(2230);
+    });
+
+    test('fractional credit keeps cents: component total minus savings equals the bundled total and the charged total', () => {
+      const estimate = generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+        serviceSpecificDiscounts: [credit('rodent_exclusion', { requestedAmount: 100.25 })],
+      }));
+      const [bundle] = bundleOf(estimate);
+      expect(bundle.componentTotal).toBe(2399.75);
+      expect(bundle.bundledTotal).toBe(2230);
+      expect(bundle.price).toBe(-169.75);
+      expect(bundle.componentTotal + bundle.price).toBeCloseTo(bundle.bundledTotal, 2);
+      expect(estimate.summary.oneTimeTotal).toBe(2230);
+    });
+
+    test('free sanitation credit: full package falls back to trapping + exclusion', () => {
+      const estimate = generateEstimate(baseInput({
+        services: {
+          rodentTrapping: { plan: 'standard' },
+          exclusion: v2Exclusion,
+          sanitation: { affectedSqFt: 300, tier: 'light' },
+        },
+        serviceSpecificDiscounts: [credit('rodent_sanitation')],
+      }));
+      const [bundle] = bundleOf(estimate);
+      expect(bundleOf(estimate)).toHaveLength(1);
+      expect(bundle).toMatchObject({ bundleKind: 'trapExclusion', componentTotal: 2500, bundledTotal: 2330 });
+      expect(estimate.summary.oneTimeTotal).toBe(2330);
+    });
+
+    test('free trapping credit on the full package falls back to exclusion + sanitation: no package', () => {
+      const estimate = generateEstimate(baseInput({
+        services: {
+          rodentTrapping: { plan: 'standard' },
+          exclusion: v2Exclusion,
+          sanitation: { affectedSqFt: 300, tier: 'light' },
+        },
+        serviceSpecificDiscounts: [credit('rodent_trapping')],
+      }));
+      expect(bundleOf(estimate)).toHaveLength(0);
+      expect(estimate.summary.oneTimeTotal).toBe(2545);
+    });
+  });
+
+  describe('the package is priced once, on each component\'s final net', () => {
+    const trapEx = { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion };
+    const fullPackage = { ...trapEx, sanitation: { affectedSqFt: 300, tier: 'light' } };
+
+    test('recurring customer: the 15% one-time perk applies first, then the package', () => {
+      const estimate = generateEstimate(baseInput({ recurringCustomer: true, services: trapEx }));
+      const [bundle] = bundleOf(estimate);
+      // 2,500 x 0.85 = 2,125; 7% = 1,976.25, rounded to the $10 step = 1,980.
+      expect(bundle).toMatchObject({
+        bundleKind: 'trapExclusion',
+        discount: 0.07,
+        componentTotal: 2125,
+        bundledTotal: 1980,
+        price: -145,
+        priceBeforeDiscount: -145,
+        priceAfterDiscount: -145,
+      });
+      expect(estimate.summary.oneTimeTotal).toBe(1980);
+    });
+
+    test('recurring customer: a $1 exclusion credit never raises the bill', () => {
+      const noCredit = generateEstimate(baseInput({ recurringCustomer: true, services: trapEx }));
+      const credited = generateEstimate(baseInput({
+        recurringCustomer: true,
+        services: trapEx,
+        serviceSpecificDiscounts: [{
+          source: 'catalog_preset',
+          presetKey: 'credit_one_dollar',
+          catalogCategory: 'service_specific_credit',
+          discountType: 'fixed',
+          requestedAmount: 1,
+          service: 'rodent_exclusion',
+          label: 'Credit',
+        }],
+      }));
+      expect(credited.summary.oneTimeTotal).toBeLessThanOrEqual(noCredit.summary.oneTimeTotal);
+      expect(bundleOf(credited)[0].componentTotal).toBe(2124);
+    });
+
+    test('a trapping price override moves the package base: $350 -> $100 prices on $2,250', () => {
+      const estimate = generateEstimate(baseInput({
+        services: trapEx,
+        linePriceOverrides: { rodent_trapping: { price: 100 } },
+      }));
+      const [bundle] = bundleOf(estimate);
+      expect(bundle).toMatchObject({ componentTotal: 2250, bundledTotal: 2090, price: -160 });
+      expect(estimate.summary.oneTimeTotal).toBe(2090);
+    });
+
+    test('a sanitation price override moves the full-package base', () => {
+      const estimate = generateEstimate(baseInput({
+        services: fullPackage,
+        linePriceOverrides: { rodent_sanitation: { price: 200 } },
+      }));
+      const [bundle] = bundleOf(estimate);
+      // 350 + 2,150 + 200 = 2,700; 10% = 2,430 (above the $1,195 light floor).
+      expect(bundle).toMatchObject({
+        bundleKind: 'fullRemediation',
+        discount: 0.1,
+        componentTotal: 2700,
+        bundledTotal: 2430,
+        price: -270,
+      });
+      expect(estimate.summary.oneTimeTotal).toBe(2430);
+    });
+  });
+
+  test('commercial property gets no rodent package discount', () => {
+    const commercial = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: 'office',
+      buildingSizeMeasured: true,
+      homeSqFt: 5000,
+      services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+    }));
+    expect(bundleOf(commercial)).toHaveLength(0);
+  });
+});

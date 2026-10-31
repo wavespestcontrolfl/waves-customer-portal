@@ -1,13 +1,14 @@
-// Owner planning minutes (2026-09-25) and the capacity picker's stale-order
+// Owner planning minutes (2026-09-25; recurring pest and lawn 35 minutes from
+// 2026-10-30, the owner ruling this file pins) and the capacity picker's stale-order
 // fallback: the table itself, its gate, the placed-visit exemption, the
 // clock-order rescue of a leftover stored order, and the day_overcommitted
 // diagnosis.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { plannedWorkMinutes } = require('../services/scheduling/planning-minutes');
+const { plannedWorkMinutes, placedVisitMinutes } = require('../services/scheduling/planning-minutes');
 const { workDuration } = require('../services/route-reorder-window-fit');
-const { evaluateArrivalPlacement, _internals: { clockOrder, storedOrderStale } } = require('../services/scheduling/arrival-route');
+const { evaluateArrivalPlacement, _internals: { clockOrder, storedOrderStale, buildPlacementTarget } } = require('../services/scheduling/arrival-route');
 const { ROUTE_WRITE_GUARD_COLUMNS } = require('../services/route-reorder');
 
 const date = '2027-01-15';
@@ -28,13 +29,14 @@ describe('planning minutes table', () => {
     estimated_duration_minutes: 60, ...extra });
 
   test.each([
-    ['Quarterly Pest Control Service', {}, 25],
-    ['Bi-Monthly Pest Control Service', {}, 25],
-    ['Pest Control Service', { is_recurring: true }, 25],
+    // Owner 2026-10-30: recurring pest and lawn plan 35 (was 25 and 20).
+    ['Quarterly Pest Control Service', {}, 35],
+    ['Bi-Monthly Pest Control Service', {}, 35],
+    ['Pest Control Service', { is_recurring: true }, 35],
     ['One-Time Pest Control', { is_recurring: true }, 45],
     ['Pest Control Service', {}, 45],
-    ['Every 6 Weeks Lawn Care Service', {}, 20],
-    ['Monthly Lawn Care Service', {}, 20],
+    ['Every 6 Weeks Lawn Care Service', {}, 35],
+    ['Monthly Lawn Care Service', {}, 35],
     ['Quarterly Pest Control Service', { is_callback: true }, 15],
     ['Pest Re-Service', {}, 15],
     ['Lawn Assessment', {}, 30],
@@ -62,7 +64,7 @@ describe('planning minutes table', () => {
       { window_start: '09:00', window_end: '11:00', estimated_duration_minutes: 120 }))).toBe(120);
     // A wide window with the default estimate charges the table, not the span.
     expect(plannedWorkMinutes(row('Quarterly Pest Control Service',
-      { window_start: '13:00', window_end: '16:00', estimated_duration_minutes: 60 }))).toBe(25);
+      { window_start: '13:00', window_end: '16:00', estimated_duration_minutes: 60 }))).toBe(35);
   });
 
   test('gate off and the placed visit are not planned; a route group keeps its members\' sum', () => {
@@ -74,11 +76,24 @@ describe('planning minutes table', () => {
     expect(workDuration(pest)).toBe(60);
   });
 
-  test('an existing row being re-saved keeps its own allowance, not the table', () => {
+  test('the visit being placed plans the table too when its allowance is the legacy hour or less (owner 2026-10-30)', () => {
+    // Before 2026-10-30 the placed visit was planning_exempt and kept its caller's 60.
     const target = stop('existing', 9 * 60, 60, { service_type: 'Quarterly Pest Control Service', technician_id: null });
     const fit = evaluateArrivalPlacement({ date, now, rows: [], target, travel },
       { windowStart: '09:00', windowEnd: '10:00', durationMinutes: 0 });
-    expect(fit.target.estimated_duration_minutes).toBe(60);
+    expect(fit.target.estimated_duration_minutes).toBe(35);
+    expect(workDuration(fit.target)).toBe(35);
+    // A stored estimate above the hour is real work and keeps its allowance.
+    const long = { ...target, estimated_duration_minutes: 120 };
+    const longFit = evaluateArrivalPlacement({ date, now, rows: [], target: long, travel },
+      { windowStart: '09:00', windowEnd: '11:00', durationMinutes: 0 });
+    expect(longFit.target.estimated_duration_minutes).toBe(120);
+    // Gate off: the placed visit keeps its own allowance, byte for byte.
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const off = evaluateArrivalPlacement({ date, now, rows: [], target, travel },
+      { windowStart: '09:00', windowEnd: '10:00', durationMinutes: 0 });
+    expect(off.target.estimated_duration_minutes).toBe(60);
+    expect(off.target.planning_exempt).toBe(true);
   });
 
   test('every planning input rides the route-write guard on both sides of the lock', () => {
@@ -90,7 +105,7 @@ describe('planning minutes table', () => {
 
   test('existing recurring stops open room a 60-minute charge would not', () => {
     // Two promises each at 09:00, 10:00 and 11:00. Charged 60 minutes apiece
-    // the second 10:00 stop cannot arrive by 12:00; at the planned 25 the
+    // the second 10:00 stop cannot arrive by 12:00; at the planned 35 the
     // morning finishes before noon and a 12:00 visit fits.
     const day = (service_type) => [9, 9, 10, 10, 11, 11].map((h, i) => stop(`s${i}`, h * 60, 60,
       { route_order: i + 1, service_type }));
@@ -194,8 +209,8 @@ describe('preserveCapacity (a version-2 hold accepted after a gate rollback)', (
     // ...but a row arrival-route.js stamped for a persisted preserveCapacity
     // path (a reservation_policy_version===2 hold committing while
     // GATE_SCHEDULING_CAPACITY is rolled back) keeps its owner minutes.
-    expect(plannedWorkMinutes({ ...pest, preserveCapacity: true })).toBe(25);
-    expect(workDuration({ ...pest, preserveCapacity: true })).toBe(25);
+    expect(plannedWorkMinutes({ ...pest, preserveCapacity: true })).toBe(35);
+    expect(workDuration({ ...pest, preserveCapacity: true })).toBe(35);
   });
 
   test('evaluateArrivalPlacement threads context.preserveCapacity onto every row, not just capacityEnabled()', () => {
@@ -206,7 +221,7 @@ describe('preserveCapacity (a version-2 hold accepted after a gate rollback)', (
     // gate. Charged the legacy 60 minutes apiece — what plannedWorkMinutes
     // returned before it also honored preserveCapacity, even though
     // `capacity` (arrival-route.js) was already true via preserveCapacity —
-    // the day cannot keep noon; planned at owner minutes (25 each) it can.
+    // the day cannot keep noon; planned at owner minutes (35 each) it can.
     const day = [9, 9, 10, 10, 11, 11].map((h, i) => stop(`s${i}`, h * 60, 60,
       { route_order: i + 1, service_type: 'Quarterly Pest Control Service' }));
     const fit = evaluateArrivalPlacement({ ...context(day), preserveCapacity: true }, options(12 * 60, 60));
@@ -224,5 +239,120 @@ describe('preserveCapacity (a version-2 hold accepted after a gate rollback)', (
     expect(workDuration({ ...day[0], preserveCapacity: true })).toBe(60);
     const fit = evaluateArrivalPlacement({ ...context(day), preserveCapacity: true }, options(12 * 60, 60));
     expect(fit.feasible).toBe(false);
+  });
+});
+
+// Owner 2026-10-30: the visit being PLACED plans at the table too, in capacity mode, unless the table does not
+// name it, its allowance is above the legacy hour (real work), or the call turned planning minutes off.
+describe('placedVisitMinutes (the visit being placed)', () => {
+  const pest = { service_type: 'Quarterly Pest Control Service' };
+
+  test('the table applies when it names the service and the allowance is the legacy hour or less', () => {
+    expect(placedVisitMinutes(pest, 60)).toBe(35);
+    expect(placedVisitMinutes(pest, 30)).toBe(35);
+    expect(placedVisitMinutes({ service_type: 'Lawn Care Service', is_recurring: true }, 60)).toBe(35);
+    expect(placedVisitMinutes({ service_type: 'One-Time Pest Control' }, 60)).toBe(45);
+    expect(placedVisitMinutes({ service_type: 'Pest Re-Service' }, 60)).toBe(15);
+    expect(placedVisitMinutes({ service_type: 'Rodent Control' }, 60)).toBe(30);
+  });
+
+  test('a longer allowance is real work and never shrinks (add-on minutes, attic 90, pest + termite 120)', () => {
+    expect(placedVisitMinutes({ service_type: 'One-Time Pest Control' }, 90)).toBeNull();
+    expect(placedVisitMinutes({ service_type: 'Pest Control + Termite Bait' }, 120)).toBeNull();
+    expect(placedVisitMinutes(pest, 61)).toBeNull();
+  });
+
+  test('an unnamed service, a combined visit, a bad allowance or no target keeps the caller allowance', () => {
+    expect(placedVisitMinutes({ service_type: 'Mosquito' }, 60)).toBeNull();
+    expect(placedVisitMinutes({ service_type: 'Pest & Lawn Combo' }, 60)).toBeNull();
+    expect(placedVisitMinutes({ ...pest, combined_services: true }, 60)).toBeNull();
+    expect(placedVisitMinutes(pest, 0)).toBeNull();
+    expect(placedVisitMinutes(pest, NaN)).toBeNull();
+    expect(placedVisitMinutes(null, 60)).toBeNull();
+  });
+
+  test('gate off: nothing, unless the persisted preserveCapacity path asks (a version-2 hold)', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    expect(placedVisitMinutes(pest, 60)).toBeNull();
+    expect(placedVisitMinutes(pest, 60, { preserveCapacity: true })).toBe(35);
+  });
+});
+
+describe('buildPlacementTarget plans the placed visit (capacity mode)', () => {
+  const win = ['09:00', '10:00'];
+  const quarterly = { service_type: 'Quarterly Pest Control Service', is_recurring: true, estimated_duration_minutes: 60 };
+  const placed = (context, duration = 60) => buildPlacementTarget({ date, now, rows: [], travel, ...context }, ...win, duration);
+
+  test('a recurring pest visit from /book or the picker (allowance 60) plans 35 and reads the table', () => {
+    const target = placed({ prospective: true, target: quarterly });
+    expect(target.estimated_duration_minutes).toBe(35);
+    expect(target.planning_exempt).toBe(false);
+    expect(workDuration(target)).toBe(35);
+    // The window it is tested at stays the hour: only the plan changes.
+    expect(target).toMatchObject({ window_start: '09:00', window_end: '10:00' });
+  });
+
+  test('an existing recurring row being saved plans the same 35 as the offer did', () => {
+    expect(placed({ target: quarterly }, 0).estimated_duration_minutes).toBe(35);
+    expect(placed({ target: quarterly }, 60).estimated_duration_minutes).toBe(35);
+  });
+
+  test('a one-time visit with 90 add-on minutes keeps 90; so do dead-rodent attic and pest + termite', () => {
+    const oneTime = { service_type: 'One-Time Pest Control', estimated_duration_minutes: 90 };
+    expect(placed({ prospective: true, target: oneTime }, 90).estimated_duration_minutes).toBe(90);
+    expect(placed({ prospective: true, target: { service_type: 'Dead Rodent Removal' } }, 90).estimated_duration_minutes).toBe(90);
+    const combo = placed({ prospective: true, target: { service_type: 'Pest Control + Termite Bait' } }, 120);
+    expect(combo.estimated_duration_minutes).toBe(120);
+    expect(combo.planning_exempt).toBe(true);
+  });
+
+  test('the night arrival search (planningMinutes false) keeps the caller allowance, byte for byte', () => {
+    const target = placed({ prospective: true, target: quarterly, planningMinutes: false });
+    expect(target.estimated_duration_minutes).toBe(60);
+    expect(target.planning_exempt).toBe(true);
+    expect(workDuration(target)).toBe(60);
+  });
+
+  test('gate off: exempt and unchanged; a version-2 hold (preserveCapacity) plans the table and is stamped', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const off = placed({ prospective: true, target: quarterly });
+    expect(off).toMatchObject({ estimated_duration_minutes: 60, planning_exempt: true });
+    expect(off).not.toHaveProperty('preserveCapacity');
+    const held = placed({ prospective: true, target: quarterly, preserveCapacity: true });
+    expect(held).toMatchObject({ estimated_duration_minutes: 35, planning_exempt: false, preserveCapacity: true });
+    expect(workDuration(held)).toBe(35);
+  });
+
+  test('a whole visit adds its siblings\' work to the tapped member\'s planned minutes', () => {
+    const unit = { ...quarterly, siblingWorkMinutes: 35 };
+    expect(placed({ target: unit }).estimated_duration_minutes).toBe(70);
+  });
+
+  test('a combined prospective visit (several services under one joined label) keeps its allowance', () => {
+    const joined = { service_type: 'Quarterly Pest Control Lawn Care', combined_services: true };
+    expect(placed({ prospective: true, target: joined }, 60).estimated_duration_minutes).toBe(60);
+  });
+});
+
+describe('placement fit with the placed visit planned (capacity mode)', () => {
+  // The same route, the same window and the same 16:00 promise. Only the placed visit's plan differs:
+  // 35 minutes (table) against the caller's 60. A route that must be home by 16:50 fits the first only.
+  const day = [9, 10, 11, 12, 13, 14, 15].map((h, i) => stop(`s${i}`, h * 60, 60, { route_order: i + 1 }));
+  const candidate = { ...stop('__candidate__', 16 * 60, 60, { service_type: 'Quarterly Pest Control Service', route_order: null }) };
+  const fit = (extra = {}) => evaluateArrivalPlacement({ date, now, rows: day, prospective: true, target: candidate, travel, ...extra },
+    { windowStart: '16:00', windowEnd: '17:00', durationMinutes: 60, returnByMin: 16 * 60 + 40 });
+
+  test('a recurring pest placement fits where the caller allowance of 60 would not', () => {
+    expect(fit().feasible).toBe(true);
+  });
+
+  test('the night arrival search (planningMinutes false) plans the placed visit at its allowance, as before', () => {
+    expect(fit({ planningMinutes: false })).toMatchObject({ feasible: false, reason: 'return_time' });
+  });
+
+  test('gate off: the placed visit keeps its allowance', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    // Gate off, every stop plans its window/estimate too, so the day is its legacy self.
+    expect(fit().feasible).toBe(false);
   });
 });

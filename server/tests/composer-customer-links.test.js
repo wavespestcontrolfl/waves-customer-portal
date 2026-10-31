@@ -54,7 +54,6 @@ jest.mock('../services/appointment-card-request', () => ({
   renderTemplate: jest.fn(),
   requestCardForAppointment: jest.fn(),
   dateLineFor: jest.fn(() => ' on Tue, Sep 8'),
-  cancelFeeLine: jest.fn(() => ''),
 }));
 jest.mock('../services/appointment-link', () => ({ buildAppointmentLink: jest.fn() }));
 jest.mock('../services/prep-guide-sender', () => ({
@@ -1267,19 +1266,18 @@ describe('buildReceiptLink', () => {
 });
 
 describe('buildProjectReportLink', () => {
-  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held', sent_at: '2026-09-01T12:00:00Z' };
-  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null, sent_at: '2026-08-11T12:00:00Z' };
+  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), sent_at: '2026-08-11T12:00:00Z' };
 
-  test('the account\'s newest issued report, skipping one on a payment hold; the viewer\'s vanity path, nothing minted', async () => {
+  test('the account\'s newest issued report; the viewer\'s vanity path, nothing minted', async () => {
     mockBuilders = {
-      projects: chainBuilder({ rows: [HELD, ISSUED], firstRow: ISSUED }),
+      projects: chainBuilder({ rows: [ISSUED], firstRow: ISSUED }),
       customers: chainBuilder({ firstRow: { first_name: 'Dana', last_name: 'Lee' } }),
     };
     const r = await buildProjectReportLink(['c1', 'c2']);
     // The scan carries eligibility columns only — projects holds multi-MB
     // blobs (wdo_signature …); the chosen project's title fields are loaded
     // once (r16 P2).
-    expect(mockBuilders.projects.select).toHaveBeenCalledWith('id', 'customer_id', 'report_hold_status');
+    expect(mockBuilders.projects.select).toHaveBeenCalledWith('id', 'customer_id');
     expect(mockBuilders.projects.first).toHaveBeenCalledWith('id', 'customer_id', 'title', 'project_type', 'project_date', 'report_token', 'findings', 'wdo_sent_filings');
     expect(mockBuilders.projects.where).toHaveBeenCalledWith({ id: 'p-ok' });
     expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
@@ -1308,12 +1306,12 @@ describe('buildProjectReportLink', () => {
     expect(r.projectReport).toEqual({ id: 'p-ok', title: '[safe] Termite Treatment', projectType: 'termite', projectDate: '2026-08-10' });
   });
 
-  test('no issued report (or only held ones) → reason, nothing else loaded', async () => {
-    mockBuilders = { projects: chainBuilder({ rows: [HELD] }) };
+  test('no issued report → reason, nothing else loaded', async () => {
+    mockBuilders = { projects: chainBuilder({ rows: [] }) };
     const r = await buildProjectReportLink(['c1']);
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/No project report/);
-    expect(mockBuilders.projects.first).not.toHaveBeenCalled();
+    expect(mockBuilders.projects.first).not.toHaveBeenCalledWith(...['id', 'customer_id', 'title', 'project_type', 'project_date', 'report_token', 'findings', 'wdo_sent_filings']);
   });
 });
 
@@ -2313,7 +2311,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
     describe('project report links resolve as the viewer does and bind to the account', () => {
       const FULL = 'f'.repeat(32);
-      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', sent_at: '2026-08-11T12:00:00Z', report_token: FULL, report_hold_status: null, ...over });
+      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', sent_at: '2026-08-11T12:00:00Z', report_token: FULL, ...over });
       function wireProject({ full = project(), byPrefix = [project()], ...account } = {}) {
         wireAccount(account);
         mockBuilders.projects = chainBuilder({ firstRow: full, rows: byPrefix });
@@ -2328,7 +2326,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
         expect(mockBuilders.projects.where).toHaveBeenCalledWith({ report_token: FULL });
         // Eligibility columns only, never `*` (r16 P2).
-        const LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
+        const LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token'];
         expect(mockBuilders.projects.first).toHaveBeenCalledWith(...LINK_COLUMNS);
         // The service-report seam never sees the project run.
         expect(mockBuilders.service_records.where).not.toHaveBeenCalled();
@@ -2343,7 +2341,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK('sent'));
       });
 
-      test('an ambiguous prefix, a vanished project, a payment-held report, or another account\'s report refuses', async () => {
+      test('an ambiguous prefix, a vanished project, or another account\'s report refuses', async () => {
         wireProject({ byPrefix: [project(), project({ id: 'p2' })] });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/dana-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
         wireProject({ full: null });
@@ -2368,8 +2366,6 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
         wireProject({ full: project({ delivery_status: 'legacy_sent' }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
-        wireProject({ full: project({ report_hold_status: 'held' }) });
-        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/payment hold/);
         wireProject({ full: project({ customer_id: 'c9' }), linkCustomer: acct('c9', 'other') });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
         // A look-alike host or a non-report segment is not ours.

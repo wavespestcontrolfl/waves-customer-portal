@@ -211,6 +211,39 @@ const DETECTORS = Object.freeze([
       return { count: ids.length, ids, detail: { checked: Math.min(visits.length, CLOSEOUT_VISIT_CAP), unevaluable, date: yesterday, truncated } };
     },
   },
+  {
+    key: 'street_line_holds_locality',
+    label: 'Street lines that also hold the city, state or ZIP (one house saved as two)',
+    href: '/admin/customers',
+    provenance: 'owner 2026-10-30 — a lead address copied unsplit; a merge kept both copies (#7131, 14 repaired)',
+    async run() {
+      const { customersWithStreetLineHoldingLocality } = require('./customer-properties');
+      const ids = await customersWithStreetLineHoldingLocality(db);
+      return { count: ids.length, ids };
+    },
+  },
+  {
+    key: 'saved_address_without_pin',
+    label: 'Saved addresses with no map pin (outside the address review queue)',
+    href: '/admin/customers',
+    provenance: 'owner 2026-10-30 — the hourly geocode backstop never pins a saved address; 14 had no pin',
+    async run() {
+      const { customersWithUnpinnedSavedAddress } = require('./customer-properties');
+      const ids = await customersWithUnpinnedSavedAddress(db);
+      return { count: ids.length, ids };
+    },
+  },
+  {
+    key: 'address_missing_city_or_zip',
+    label: 'Addresses with a street but no city, state or ZIP (booking shows "Address incomplete")',
+    href: '/admin/customers',
+    provenance: 'owner 2026-10-30 — 37 pinned customers had no ZIP or city; the review queue only judges unpinned ones',
+    async run() {
+      const { customersWithIncompleteAddress } = require('./customer-properties');
+      const ids = await customersWithIncompleteAddress(db);
+      return { count: ids.length, ids };
+    },
+  },
   // History-wide completion ↔ report record invariants (integrity audit
   // 2026-09-02). closeout_failed_facts above reads yesterday only and skips
   // `pending` facts, so a missing record / token / tracker stamp / customer

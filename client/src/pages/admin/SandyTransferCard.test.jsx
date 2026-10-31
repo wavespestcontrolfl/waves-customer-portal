@@ -29,7 +29,7 @@ describe("SandyTransferCard", () => {
         }}
       />,
     );
-    expect(screen.getByText("Sandy transfer")).toBeInTheDocument();
+    expect(screen.getByText("Jennifer transfer")).toBeInTheDocument();
     expect(screen.getByText("Verified caller")).toBeInTheDocument();
     expect(screen.getByText("billing dispute")).toBeInTheDocument();
     expect(screen.getByText("June invoice charged twice, wants a refund")).toBeInTheDocument();

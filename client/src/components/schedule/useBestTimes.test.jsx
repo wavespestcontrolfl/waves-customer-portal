@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
-import { useBestTimes, resetHintsGated, resetOpenTimesUi } from './useBestTimes';
+import { useBestTimes, resetHintsGated, resetOpenTimesUi, normalizeAvailability, normalizeOpenTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -354,6 +354,8 @@ it('open times: one search from today for four weeks on every route; a new hour 
   expect(body).toMatchObject({ summary: true, openTimes: true, dateFrom: today, dateTo: addDays(today, 27), serviceId: 'fixture', hint: true });
   expect(body).not.toHaveProperty('pickedStart');
   expect(body).not.toHaveProperty('bestRows');
+  // Only Quick Move's sheet sends quickMove.
+  expect(body).not.toHaveProperty('quickMove');
   // Tech pick: the list covers every technician's route.
   expect(body).not.toHaveProperty('technicianId');
   expect(result.current.availability.days[0].hours[0]).toMatchObject({ start: '10:00', technicianName: 'Fixture Tech', rainTier: 2, detourMinutes: 6 });
@@ -441,4 +443,69 @@ it('open times: a far day whose lookup failed is marked unchecked, never shown a
   const { result } = renderHook(() => useBestTimes({ date: far, serviceId: 'fixture', technicianId: 'tech', openTimes: true }));
   await waitFor(() => expect(result.current.availability?.openTimes?.from).toBe(today));
   expect(result.current.availability.days.find((day) => day.date === far)).toEqual({ date: far, status: 'unchecked', hours: [] });
+});
+
+it('Quick Move: the search says so, for the server to pick its route check', async () => {
+  const fetch = routedFetch({ ui: true, answer: listOf });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    serviceId: 'fixture', technicianId: 'tech', bestRows: true, openTimes: true, quickMove: true, date: addDays(etDateString(), 1),
+  }));
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBeTruthy());
+  expect(searches(fetch)[0]).toMatchObject({ hint: true, openTimes: true, quickMove: true });
+});
+
+// GATE_ROUTE_CHECK_LATE_DAYS: the day tag rides through both list shapes, and only when the server sent it.
+it('an already_late day and its day_already_late hours reach the strip and the open-times box; a clean day gets neither', () => {
+  const hourOf = (date, start, over = {}) => ({ start_time: start, end_time: `${Number(start.slice(0, 2)) + 1}:00`, detour_minutes: 3, technician: { id: 't1', name: 'T' }, ...over });
+  const data = {
+    summary: {
+      open_times: { from: '2035-01-01', to: '2035-01-02' },
+      days: [
+        { date: '2035-01-01', status: 'open', already_late: true, hours: [hourOf('2035-01-01', '15:00', { day_already_late: true })] },
+        { date: '2035-01-02', status: 'open', hours: [hourOf('2035-01-02', '10:00')] },
+      ],
+    },
+  };
+  for (const out of [normalizeAvailability(data, { date: '2035-01-01', scopedToTech: false }), normalizeOpenTimes(data, { date: '2035-01-01' })]) {
+    expect(out.days[0]).toMatchObject({ alreadyLate: true });
+    expect(out.days[0].hours[0]).toMatchObject({ dayAlreadyLate: true });
+    expect(out.days[1]).not.toHaveProperty('alreadyLate');
+    expect(out.days[1].hours[0]).not.toHaveProperty('dayAlreadyLate');
+  }
+});
+
+// ---- the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE, owner 2026-10-29) ----
+
+const LIMIT_NOTE = 'Google road times paused: daily limit reached. Times marked ~ use the estimate.';
+const road_limit = { reason: 'daily_cap', note: LIMIT_NOTE };
+
+it('road limit: the strip answer carries the server\'s line; an answer without it has no such field', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ...summaryAnswer, road_limit }) }));
+  const stopped = renderHook(() => useBestTimes({ date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00' }));
+  await waitFor(() => expect(stopped.result.current.availability).not.toBeNull());
+  expect(stopped.result.current.availability.roadLimit).toBe(LIMIT_NOTE);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => summaryAnswer }));
+  const quiet = renderHook(() => useBestTimes({ date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '15:00' }));
+  await waitFor(() => expect(quiet.result.current.availability).not.toBeNull());
+  expect('roadLimit' in quiet.result.current.availability).toBe(false);
+});
+
+it('road limit: a line only the week row\'s own search carried still reaches the strip', async () => {
+  const far = { ...summaryAnswer, summary: { ...summaryAnswer.summary, best: { day: [], week: [], week_covered: false } } };
+  const week = { slots: [], road_limit, summary: { days: [], best: { day: [], week: [], week_covered: true } } };
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => far })
+    .mockResolvedValueOnce({ ok: true, json: async () => week }));
+  const { result } = renderHook(() => useBestTimes({ bestRows: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00' }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(result.current.availability.roadLimit).toBe(LIMIT_NOTE);
+});
+
+it('road limit: the open-times list carries the line too', async () => {
+  const today = etDateString();
+  vi.stubGlobal('fetch', routedFetch({ ui: true, answer: (body) => ({ ...listOf(body), road_limit }) }));
+  const { result } = renderHook(() => useBestTimes({ date: addDays(today, 3), serviceId: 'fixture', technicianId: 'tech', openTimes: true }));
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBe(today));
+  expect(result.current.availability.roadLimit).toBe(LIMIT_NOTE);
 });

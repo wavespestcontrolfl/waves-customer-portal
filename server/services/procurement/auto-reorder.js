@@ -143,11 +143,19 @@ async function ringRestockBell({ notify, product, request }) {
 // notifyAdmin resolves NULL when it could not persist the notification
 // (its own catch), so the resolved row is checked like a rejection (Codex
 // r13 P2). The request row stays; the next sweep re-rings it.
+// Both bell paths (a new request's first bell, an open request's re-ring) re-read the request's
+// SiteOne order email right after ringing: an email claim that landed while the bell was being
+// written retired the bells that existed then, not this one, so it is retired here (the
+// dispatcher hand-off's post-ring re-check; pre-push audit P1 on e60861f599, Codex #6866 r4 P2).
+// The claim retires inside its own transaction, so a claim landing after this read retires it.
 async function bellOrWarn(ctx, product, request, bucket) {
   try {
     const row = await ringRestockBell({ notify: ctx.notify, product, request });
     if (!row) throw new Error('notification not persisted');
     ctx.result[bucket].push({ productId: product.id, requestId: request.id });
+    if (await require('./order-dispatch').emailOrderOutFor(ctx.conn, request.id)) {
+      await require('./order-dispatch').retireRequestBell(ctx.conn, request.id);
+    }
   } catch (notifyErr) {
     logger.error(`[auto-reorder] bell NOT delivered for ${product.name} (request ${request.id}): ${notifyErr.message}`);
     ctx.result.errors.push({ productId: product.id, name: product.name, requestId: request.id, message: `bell: ${notifyErr.message}` });
@@ -226,6 +234,10 @@ async function handleLiveRequest(ctx, p, existing) {
   // retired since must not ring "order manually" on top of it (hook r27
   // P0). Reconciliation — receive or revoke — is what reopens the lane.
   if (await require('./order-dispatch').findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
+  // An order EMAILED to SiteOne for this request (vendor_order_emails: sent, or sending with the
+  // outcome unknown) may already be with the vendor: the same stand-down, never "order manually"
+  // on top of it. The Restock tab shows the emailed order; receiving it closes the request.
+  if (await require('./order-dispatch').emailOrderOutFor(ctx.conn, request.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'email_order_out' }); return; }
   // A pre-submit park (no_price, dry_run, …) left this request a versioned
   // ledger bell that already says "order manually": the generic hand-off
   // must not ring beside it. Settle the ledger's bell first; when that

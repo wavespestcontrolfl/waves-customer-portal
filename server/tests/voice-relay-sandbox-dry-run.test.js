@@ -174,7 +174,6 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/voice-agent/relay-tools.js': 'keyed by the session CallSid (write tools run dry on a sandbox session)',
     'services/voice-agent/relay-conversation.js': 'keyed by the session CallSid (its own row is the artifact)',
     'routes/admin-import-sheets.js': 'writer',
-    'routes/lead-webhook.js': 'keyed by CallSid',
     'services/lead-from-extraction.js': 'keyed by CallSid',
     'services/estimate-clarify-asks.js': 'keyed by id',
     'services/slot-reservation.js': 'keyed by id',

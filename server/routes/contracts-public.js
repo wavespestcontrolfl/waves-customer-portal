@@ -35,8 +35,13 @@ const DRAWN_SIGNATURE_LIMITS = Object.freeze({
 // mark their snapshots) also carries fromEstimate: true, so the signing page can offer "Back to your
 // estimate". The estimate id and token never leave the server.
 const FROM_ESTIMATE_SOURCES = new Set(['estimate_consumer_notice', 'estimate_service_agreement']);
+// A Commercial Pest Service Agreement issued from the proposal page offers the way back too while
+// GATE_COMMERCIAL_FIRST_VISIT is on: the first visit is picked back on the estimate page.
 function publicContract(row) {
-  const fromEstimate = FROM_ESTIMATE_SOURCES.has(row.document_variables_snapshot?.estimate?.source);
+  const source = row.document_variables_snapshot?.estimate?.source;
+  const fromEstimate = FROM_ESTIMATE_SOURCES.has(source)
+    || (source === require('../services/commercial-proposal-agreement').SNAPSHOT_SOURCE
+      && require('../config/feature-gates').commercialFirstVisitLive());
   return { ...serializeContract(row, { includeAudit: false }), ...(fromEstimate ? { fromEstimate: true } : {}) };
 }
 
@@ -118,19 +123,22 @@ function isExpired(contract) {
   return !!(contract?.share_token_expires_at && new Date(contract.share_token_expires_at) < new Date());
 }
 
+// Why a token read cannot be shown ({ status, body }), or null when it can.
+function unavailableLink(contract) {
+  if (!contract) return { status: 404, body: { error: 'Contract not found' } };
+  if (isExpired(contract)) return { status: 410, body: { error: 'Contract link expired' } };
+  if (contract.status === 'signed') return { status: 410, body: { error: 'Contract has already been signed', status: contract.status } };
+  if (['cancelled', 'voided'].includes(contract.status)) {
+    return { status: 410, body: { error: 'Contract is no longer available', status: contract.status } };
+  }
+  return null;
+}
+
 router.get('/:token', async (req, res, next) => {
   try {
     const contract = await loadByToken(req.params.token);
-    if (!contract) return res.status(404).json({ error: 'Contract not found' });
-    if (isExpired(contract)) {
-      return res.status(410).json({ error: 'Contract link expired' });
-    }
-    if (contract.status === 'signed') {
-      return res.status(410).json({ error: 'Contract has already been signed', status: contract.status });
-    }
-    if (['cancelled', 'voided'].includes(contract.status)) {
-      return res.status(410).json({ error: 'Contract is no longer available', status: contract.status });
-    }
+    const refusal = unavailableLink(contract);
+    if (refusal) return res.status(refusal.status).json(refusal.body);
 
     if (contract.status === 'sent') {
       await db.transaction(async (trx) => {
@@ -143,7 +151,13 @@ router.get('/:token', async (req, res, next) => {
       });
     }
 
+    // Read again for the response, and check it again: a signature or a link
+    // rotation that committed since the first read burned or replaced this
+    // token (the re-read finds no row, or a signed/cancelled one). That
+    // answers like any spent link, never a server error.
     const latest = await loadByToken(req.params.token);
+    const latestRefusal = unavailableLink(latest);
+    if (latestRefusal) return res.status(latestRefusal.status).json(latestRefusal.body);
 
     // Branded PDF "review copy" served from this already-approved public
     // surface (/api/contracts/:token) via ?format=pdf — not a new route.

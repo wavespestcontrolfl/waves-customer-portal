@@ -707,6 +707,75 @@ async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 }
 }
 
 /**
+ * Live customers whose street line, on the profile or an active saved address,
+ * also holds its city, state or ZIP (streetLineHoldsLocality): the same house
+ * then keys twice and a merge keeps both copies (owner 2026-10-30, #7131).
+ * Read-only; the daily lead-to-cash sweep reports the ids. The SQL keeps only
+ * lines with a comma or a state word; the predicate decides.
+ */
+async function customersWithStreetLineHoldingLocality(conn = db) {
+  const { streetLineHoldsLocality } = require('../utils/address-normalizer');
+  const candidate = (column) => `(${column} LIKE '%,%' OR ${column} ~* '\\s(fl|florida)\\M')`;
+  const [profiles, saved] = await Promise.all([
+    conn('customers as c').whereNull('c.deleted_at').whereRaw(candidate('c.address_line1'))
+      .select('c.id', 'c.address_line1', 'c.city'),
+    conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
+      .where('p.active', true).whereRaw(candidate('p.address_line1'))
+      .select('p.customer_id as id', 'p.address_line1', 'p.city'),
+  ]);
+  return [...new Set([...profiles, ...saved].filter(streetLineHoldsLocality).map((row) => row.id))].sort();
+}
+
+// A customer with no effective map pin is the address-review queue's (its
+// 15-minute bell). The effective pin is the queue's own: the profile's pin, or
+// the pin of a primary saved address that is the same address
+// (customer-geocode-review PRIMARY_HAS_PIN_SQL). The two address checks below
+// leave that customer's primary saved address to the queue and report the rest.
+const PROFILE_HAS_PIN_SQL = 'c.latitude IS NOT NULL AND c.longitude IS NOT NULL AND c.latitude <> 0 AND c.longitude <> 0';
+const OUTSIDE_REVIEW_QUEUE = (q) => q.where('p.is_primary', false)
+  .orWhereRaw(PROFILE_HAS_PIN_SQL)
+  .orWhereRaw(require('./customer-geocode-review').PRIMARY_HAS_PIN_SQL);
+
+/**
+ * Live customers with an active saved address that has no map pin (owner
+ * 2026-10-30: the hourly geocode backstop pins the profile and the visits,
+ * never a saved address). Read-only; the daily lead-to-cash sweep reports the
+ * ids.
+ */
+async function customersWithUnpinnedSavedAddress(conn = db) {
+  const rows = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
+    .whereNull('c.deleted_at').where('p.active', true)
+    .whereRaw('(p.latitude IS NULL OR p.longitude IS NULL OR p.latitude = 0 OR p.longitude = 0)')
+    .where(OUTSIDE_REVIEW_QUEUE)
+    .select('p.customer_id as id');
+  return [...new Set(rows.map((row) => row.id))].sort();
+}
+
+/**
+ * Live customers with a street but no city, state or ZIP: on the profile of a
+ * pinned customer, or on an active saved address (the booking screen calls
+ * that saved address "Address incomplete"). A profile with no pin of its own
+ * whose matching primary is pinned is caught through that primary (same
+ * address, same blanks). Owner 2026-10-30: 37 pinned customers had no ZIP or
+ * city, and the review queue only judges customers without a pin. Read-only;
+ * the daily lead-to-cash sweep reports the ids.
+ */
+async function customersWithIncompleteAddress(conn = db) {
+  const street = (t) => `btrim(coalesce(${t}.address_line1, '')) <> ''`;
+  const missing = (t) => ['city', 'state', 'zip'].map((f) => `btrim(coalesce(${t}.${f}, '')) = ''`).join(' OR ');
+  const [profiles, saved] = await Promise.all([
+    conn('customers as c').whereNull('c.deleted_at').whereRaw(PROFILE_HAS_PIN_SQL)
+      .whereRaw(street('c')).whereRaw(`(${missing('c')})`)
+      .select('c.id'),
+    conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
+      .where('p.active', true).whereRaw(street('p')).whereRaw(`(${missing('p')})`)
+      .where(OUTSIDE_REVIEW_QUEUE)
+      .select('p.customer_id as id'),
+  ]);
+  return [...new Set([...profiles, ...saved].map((row) => row.id))].sort();
+}
+
+/**
  * The UNAMBIGUOUS property for a booking that carries no explicit property
  * identity: the customer's sole ACTIVE property (GH codex #3699 r3 — the
  * visit-group stamp needs a property anchor, and the estimate-linkage
@@ -1449,6 +1518,9 @@ module.exports = {
   removeManualProperty,
   addressCanNameProperty,
   sweepMissingPrimaryProperties,
+  customersWithStreetLineHoldingLocality,
+  customersWithUnpinnedSavedAddress,
+  customersWithIncompleteAddress,
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,

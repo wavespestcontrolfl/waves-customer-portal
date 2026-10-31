@@ -11,7 +11,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 const { isPromoterPhoneCollision, PHONE_COLLISION_MESSAGE, PHONE_COLLISION_CODE } = require('../services/referral-errors');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendCustomerMessage, classifyDeliveryCertainty } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 
@@ -276,19 +276,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     // promoter's owner (GH codex #3850 r2 P2); the code stays the household's.
     const self = await db('customers').where({ id: req.customerId }).first('first_name').catch(() => null);
 
-    // Cooldown: same promoter+phone within 24 hours = no-op (idempotent double-tap protection)
     const cleanPhone = phone.replace(/\s+/g, '');
-    const cooldownStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const recent = await db('referral_invites')
-      .where({ promoter_id: promoter.id, phone: cleanPhone })
-      .where('sent_at', '>=', cooldownStart)
-      .first()
-      .catch(() => null);
-
-    if (recent) {
-      return res.json({ success: true, deduped: true });
-    }
-
     const friendly = friendName ? friendName.replace(/[<>]/g, '') : 'there';
     const body = await renderRequiredSmsTemplate('referral_invite', {
       referee_name: friendly,
@@ -300,40 +288,102 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
       entity_id: promoter.id,
     });
 
-    const smsResult = await sendCustomerMessage({
-      to: cleanPhone,
-      body,
-      channel: 'sms',
-      audience: 'lead',
-      purpose: 'referral',
-      identityTrustLevel: 'phone_provided_unverified',
-      consentBasis: {
-        status: 'transactional_allowed',
-        source: 'referral_invite_form',
-        capturedAt: new Date().toISOString(),
-      },
-      entryPoint: 'referrals_v2_invite',
-      metadata: {
-        original_message_type: 'referral_invite',
-        promoter_id: promoter.id,
-      },
-    });
+    // Cooldown: same promoter+phone within 24 hours = no-op (idempotent
+    // double-tap protection). The receipt is reserved ATOMICALLY before the
+    // send, like /invite-email below: the advisory xact lock serializes
+    // concurrent same-promoter+phone taps, so two overlapping requests can't
+    // both pass the read and both text the friend (referrals audit 10-29, F6).
+    // A tap that lands while the first is still mid-send answers deduped too;
+    // a second text is the worse outcome.
+    const cooldownStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    let reservedRowId = null;
+    let reserved = false;
+    try {
+      const verdict = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`referral-invite-sms:${promoter.id}:${cleanPhone}`]);
+        const recent = await trx('referral_invites')
+          .where({ promoter_id: promoter.id, phone: cleanPhone })
+          .where('sent_at', '>=', cooldownStart)
+          .first();
+        if (recent) return { state: 'cooldown' };
+        const inserted = await trx('referral_invites')
+          .insert({
+            promoter_id: promoter.id,
+            phone: cleanPhone,
+            sent_at: new Date(),
+          })
+          .returning('id');
+        return { state: 'reserved', id: inserted?.[0]?.id ?? inserted?.[0] ?? null };
+      });
+      if (verdict.state === 'cooldown') {
+        return res.json({ success: true, deduped: true });
+      }
+      reserved = true;
+      reservedRowId = verdict.id;
+    } catch (reserveErr) {
+      // referral_invites is a best-effort tracking table — if the reservation
+      // can't be taken (e.g. migration not applied yet), send without it.
+      // Code only: a Knex error message renders the bound phone.
+      logger.warn(`[referrals-v2] invite SMS cooldown reservation unavailable for promoter ${promoter.id}: ${reserveErr.code || 'unknown'}`);
+    }
+    // Released only when the text definitely did not go out, so a retry is
+    // not locked out for 24 hours. A sent or uncertain outcome keeps the row:
+    // a retry then could text the friend twice. Deletes only OUR row (by id
+    // when the driver returned one).
+    const releaseUnlessMaybeSent = (outcome) => {
+      if (!reserved || classifyDeliveryCertainty(outcome) !== 'not_sent') return Promise.resolve();
+      const q = reservedRowId != null
+        ? db('referral_invites').where({ id: reservedRowId })
+        : db('referral_invites')
+            .where({ promoter_id: promoter.id, phone: cleanPhone })
+            .where('sent_at', '>=', cooldownStart);
+      return q.del().catch(() => {});
+    };
+
+    let smsResult;
+    try {
+      smsResult = await sendCustomerMessage({
+        to: cleanPhone,
+        body,
+        channel: 'sms',
+        audience: 'lead',
+        purpose: 'referral',
+        identityTrustLevel: 'phone_provided_unverified',
+        consentBasis: {
+          status: 'transactional_allowed',
+          source: 'referral_invite_form',
+          capturedAt: new Date().toISOString(),
+        },
+        entryPoint: 'referrals_v2_invite',
+        metadata: {
+          original_message_type: 'referral_invite',
+          promoter_id: promoter.id,
+        },
+      });
+    } catch (sendErr) {
+      await releaseUnlessMaybeSent(sendErr.providerOutcome);
+      throw sendErr;
+    }
     // No quiet-hours requeue: referrals_v2_invite is a customer-action
     // entry point (owner ruling 2026-08-29, referral invites confirmed
     // explicitly) — the customer clicked "text a friend" now, so the
     // invite sends immediately, at any hour, and QUIET_HOURS_HOLD cannot
     // surface here.
     if (!smsResult.sent) {
+      await releaseUnlessMaybeSent(smsResult);
       logger.warn(`[referrals-v2] Invite SMS blocked/failed for promoter ${promoter.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
     }
 
-    // Best-effort log of the invite for cooldown tracking
-    await db('referral_invites').insert({
-      promoter_id: promoter.id,
-      phone: cleanPhone,
-      sent_at: new Date(),
-    }).catch(() => { /* table may not exist yet */ });
+    if (!reserved) {
+      // Sent without a reservation — best-effort log of the invite for
+      // cooldown tracking.
+      await db('referral_invites').insert({
+        promoter_id: promoter.id,
+        phone: cleanPhone,
+        sent_at: new Date(),
+      }).catch(() => { /* table may not exist yet */ });
+    }
 
     // Update share timestamp
     await db('referral_promoters').where({ id: promoter.id }).update({

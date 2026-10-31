@@ -24,6 +24,8 @@ const migration = require('../models/migrations/20261005120000_lawn_protocol_v13
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
+// August and September hose visits: the liquid potassium (20261029170000), one more whole-lawn tool beside Nutra-TECH.
+const potassiumMigration = require('../models/migrations/20261029170000_lawn_v13_summer_potassium');
 
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 // The v13 recipe has no bahia track (owner 2026-10-06); protocols.json (gate off) still does.
@@ -301,7 +303,7 @@ const advionMigration = require('../models/migrations/20261023140000_lawn_v13_ad
 const F10_22 = decemberMigration.NEW_NAME;
 // April's 12x whole-lawn bag is the LESCO 44-0-0 polymer row (20261022195000 swaps it in for the staged 24-0-11 line).
 const F44_0_0 = aprilPolymerMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -491,8 +493,8 @@ describe('completion defaults with the v13 protocol resolved', () => {
     5: [migration.NAMES.TET],
     6: [migration.NAMES.NT, migration.NAMES.DIM],
     7: [],
-    8: [migration.NAMES.NT],
-    9: [migration.NAMES.NT],
+    8: [migration.NAMES.NT, potassiumMigration.NAME],
+    9: [migration.NAMES.NT, potassiumMigration.NAME],
     10: [DIMENSION_18],
     11: [migration.NAMES.F24],
     12: [F10_22],
@@ -528,7 +530,11 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const added = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => (spec.name === matrixMigration.ADVION ? { ...spec, name: granuleMigration.GRANULE } : spec)).map((spec) => ({
       productId: idOf(spec.name), defaultInPlan: spec.defaultInPlan, gates: spec.gates, applicationMode: spec.mode, ratePer1000: spec.rate, rateUnit: spec.unit,
     }));
-    const products = [...staged, ...added];
+    // 20261029170000 adds the liquid potassium row to the August and September windows (a whole-lawn tool, default in the plan).
+    const potassium = potassiumMigration.WINDOWS.filter((w) => w.key === windowKey).map((w) => ({
+      productId: idOf(potassiumMigration.NAME), defaultInPlan: potassiumMigration.ROW.default_in_plan, gates: w.gates, applicationMode: potassiumMigration.ROW.application_mode, ratePer1000: potassiumMigration.RATE, rateUnit: potassiumMigration.ROW.rate_unit,
+    }));
+    const products = [...staged, ...added, ...potassium];
     const items = resolved.filter((i) => i.product).map((i) => ({ ...i, product: { id: i.product.id, name: i.product.name, active: true }, mix: { amount: 1, amountUnit: 'fl oz', treatedSqft: 4000 } }));
     return {
       serviceId: 'visit', appointmentAssignment: {},

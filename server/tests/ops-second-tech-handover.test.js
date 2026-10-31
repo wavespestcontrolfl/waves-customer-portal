@@ -21,6 +21,10 @@ const TUE = '2099-07-07';
 const WED = '2099-07-08';
 const THU = '2099-07-09';
 const FRI = '2099-07-10';
+const SAT = '2099-07-11';
+// After the 13-week weekend-customer window (--start 2099-07-06: dates before 2099-10-05 are inside it).
+const MON_LATE = '2099-10-12';
+const FRI_LATE = '2099-10-09';
 
 let seq = 0;
 const id = (p) => `${p}-${++seq}`;
@@ -43,18 +47,18 @@ const plan = (parents, visits, o = {}) => buildPlan({
 
 describe('second-tech-handover planner', () => {
   test('a series whose template changes but has no visit to move now is still listed (template-only)', () => {
-    const fridayOnly = parent();
+    const lateFridayOnly = parent();
     const noChildren = parent();
     const moving = parent();
-    const p = plan([fridayOnly, noChildren, moving], [visit(fridayOnly, FRI), visit(moving, MON)]);
+    const p = plan([lateFridayOnly, noChildren, moving], [visit(lateFridayOnly, FRI_LATE), visit(moving, MON)]);
     expect(p.series.retemplate).toBe(3);
-    expect(new Set(p.ids.retemplate)).toEqual(new Set([fridayOnly.id, noChildren.id, moving.id]));
+    expect(new Set(p.ids.retemplate)).toEqual(new Set([lateFridayOnly.id, noChildren.id, moving.id]));
     expect(p.ids.series).toEqual([moving.id]);
   });
 
-  test('a pest series on the owner moves its Mon-Thu visits; the Friday visit stays (stays_off_day)', () => {
+  test('a pest series on the owner moves its Mon-Thu visits; a Friday after the 13 weeks stays (stays_off_day)', () => {
     const s = parent();
-    const vs = [MON, TUE, WED, THU, FRI].map((d) => visit(s, d));
+    const vs = [MON, TUE, WED, THU, FRI_LATE].map((d) => visit(s, d));
     const p = plan([s], vs);
     expect(p.would_change).toMatchObject({ series: 1, visits: 4, by_line: { general: { series: 1, visits: 4 } } });
     expect(p.would_change.by_weekday).toEqual({ Mon: 1, Tue: 1, Wed: 1, Thu: 1 });
@@ -214,7 +218,7 @@ describe('second-tech-handover planner', () => {
 
   test('--to with explicit work_days changes the off days', () => {
     const s = parent();
-    const vs = [MON, TUE, WED, THU, FRI].map((d) => visit(s, d));
+    const vs = [MON_LATE, TUE, WED, THU, FRI].map((d) => visit(s, d));
     const p = plan([s], vs, { to: { id: HIRE, work_days: [2, 3, 4, 5] } });
     expect(p.target).toBe(HIRE);
     expect(p.target_work_days_source).toBe('technician_row');
@@ -223,6 +227,48 @@ describe('second-tech-handover planner', () => {
     const every = plan([s], vs, { to: { id: HIRE, work_days: null } });
     expect(every.would_change.visits).toBe(5);
     expect(every.stays_off_day.visits).toBe(0);
+  });
+
+  test('question 1 = C: a customer with a weekend visit in the 13 weeks keeps the owner, whole', () => {
+    const customerId = 'C-weekend';
+    const general = parent({ customer_id: customerId });
+    const mosquito = parent({ customer_id: customerId, line: 'mosquito' });
+    const weekday = parent();
+    const p = plan([general, mosquito, weekday], [visit(general, MON), visit(general, SAT), visit(mosquito, TUE), visit(weekday, WED)]);
+    // Both series of the weekend customer stay: no template change and no visit moves, the weekday ones included.
+    expect(p.skipped.off_day_customer).toEqual({ series: 2, visits: 3, customers: 1 });
+    expect(p.ids.retemplate).toEqual([weekday.id]);
+    expect(p.would_change.visits).toBe(1);
+    expect(p.stays_off_day.visits).toBe(0);
+    expect(p.off_day_policy).toBe('weekend_customer_stays_whole');
+    expect(p.off_day_customer_until).toBe('2099-10-05');
+  });
+
+  test('the 13 weeks end before day 91: a weekend visit on day 90 keeps the customer, one after the window does not', () => {
+    const inside = parent();
+    const after = parent();
+    // 2099-10-04 is a Sunday inside the window; 2099-10-10 a Saturday after it.
+    const p = plan([inside, after], [visit(inside, MON), visit(inside, '2099-10-04'), visit(after, MON), visit(after, '2099-10-10')]);
+    expect(p.skipped.off_day_customer).toEqual({ series: 1, visits: 2, customers: 1 });
+    expect(p.ids.retemplate).toEqual([after.id]);
+    expect(p.stays_off_day).toEqual({ visits: 1, by_weekday: { Sat: 1 } });
+  });
+
+  test('only a visit the run would move makes a weekend customer: done, someone else\'s, before --start, grouped or lawn do not', () => {
+    const s = parent();
+    const lawn = parent({ customer_id: s.customer_id, line: 'lawn' });
+    const vs = [
+      visit(s, MON),
+      visit(s, SAT, { status: 'completed' }),
+      visit(s, '2099-07-12', { technician_id: OTHER }),
+      visit(s, '2099-07-05'), // a Sunday before --start
+      visit(s, SAT, { visit_id: 'G-1', group_status: 'open' }),
+      visit(lawn, SAT),
+    ];
+    const p = plan([s, lawn], vs);
+    expect(p.skipped.off_day_customer).toBeUndefined();
+    expect(p.ids.retemplate).toEqual([s.id]);
+    expect(p.ids.visits).toEqual([vs[0].id]);
   });
 
   test('a series with no line is reported, not moved', () => {
@@ -255,14 +301,182 @@ describe('second-tech-handover arguments and source', () => {
     expect(parseArgs(['--from', OWNER]).lines).toEqual(['general', 'rodent', 'mosquito']);
   });
 
-  test('the file has no write path', () => {
+  test('the planner file has no write path: --execute hands off to the execute file', () => {
     const src = fs.readFileSync(script, 'utf8');
-    const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
-    expect(src.split('\n')[1]).toBe('// READ-ONLY');
+    // crypto's hash .update() is not a database write.
+    const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n').replace(/createHash\('sha256'\)\.update\(/g, 'createHash(');
+    expect(src.split('\n')[1]).toMatch(/^\/\/ MUTATES \(dry-run default/);
     expect(code).not.toMatch(/\.(insert|update|del|delete|truncate|upsert)\s*\(/);
     expect(code).not.toMatch(/\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|TRUNCATE|DROP\s+TABLE|ALTER\s+TABLE)\b/i);
     expect(code).toMatch(/SET TRANSACTION READ ONLY/);
-    expect(code).not.toMatch(/--execute/);
+    expect(code).toMatch(/require\('\.\/second-tech-handover-execute'\)\.main\(args\)/);
+  });
+});
+
+describe('second-tech-handover PLAN ID', () => {
+  const HIRE_ROW = { id: HIRE, work_days: [1, 2, 3, 4] };
+  const build = (parents, visits, o = {}) => plan(parents, visits, { to: HIRE_ROW, ...o });
+  const fixture = () => {
+    const s = parent();
+    return { s, vs: [MON, TUE, WED, THU, FRI_LATE].map((d) => visit(s, d)) };
+  };
+
+  test('the same plan gives the same 64-character id, whatever order the rows arrive in', () => {
+    const { s, vs } = fixture();
+    const a = build([s], vs);
+    const b = build([s], [...vs].reverse());
+    expect(a.planId).toMatch(/^[0-9a-f]{64}$/);
+    expect(b.planId).toBe(a.planId);
+    expect(a.ids.moves).toHaveLength(4);
+  });
+
+  test('the id changes when a visit, its date, the target, the start or the lines change', () => {
+    const { s, vs } = fixture();
+    const base = build([s], vs).planId;
+    // one fewer visit to move (it was completed)
+    expect(build([s], vs.map((v, i) => (i === 0 ? { ...v, status: 'completed' } : v))).planId).not.toBe(base);
+    // a visit's date moved (still a target work day)
+    expect(build([s], vs.map((v, i) => (i === 0 ? { ...v, scheduled_date: '2099-07-13' } : v))).planId).not.toBe(base);
+    // a different hire
+    expect(build([s], vs, { to: { id: OTHER, work_days: [1, 2, 3, 4] } }).planId).not.toBe(base);
+    // the hire's day off changes which visits move
+    expect(build([s], vs, { to: { id: HIRE, work_days: [1, 2, 3, 4, 5] } }).planId).not.toBe(base);
+    // a later start
+    expect(build([s], vs, { start: TUE }).planId).not.toBe(base);
+    // a narrower line set
+    expect(build([s], vs, { lines: ['rodent'] }).planId).not.toBe(base);
+  });
+
+  test('a series that only changes template (no visit to move) is part of the id', () => {
+    const { s, vs } = fixture();
+    const extra = parent();
+    expect(build([s, extra], vs).planId).not.toBe(build([s], vs).planId);
+  });
+
+  test('the id is in the dry-run text and in --json, and the list shows every change as ids only', () => {
+    const { printPlan } = require(script);
+    const { s, vs } = fixture();
+    const p = build([s], vs);
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      printPlan(p, { list: false });
+      expect(log.mock.calls[0][0]).toContain(`PLAN ID: ${p.planId}`);
+    } finally {
+      log.mockRestore();
+    }
+    expect(JSON.parse(JSON.stringify(p)).planId).toBe(p.planId);
+  });
+});
+
+describe('second-tech-handover execute flags and refusals', () => {
+  const PLAN = 'a'.repeat(64);
+  const exit = () => jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
+  const quiet = () => jest.spyOn(console, 'error').mockImplementation(() => {});
+
+  test('parseArgs reads --execute, --plan, --rollback and --out-dir', () => {
+    expect(parseArgs(['--from', OWNER, '--to', HIRE, '--execute', '--plan', PLAN, '--out-dir', '/tmp/x'])).toMatchObject({
+      execute: true, plan: PLAN, outDir: '/tmp/x', rollback: null,
+    });
+    expect(parseArgs(['--rollback', '/tmp/f.json'])).toMatchObject({ rollback: '/tmp/f.json', execute: false, from: null });
+    expect(parseArgs(['--from', OWNER]).execute).toBe(false);
+  });
+
+  test('--execute without --to, without --plan, or with a bad plan id exits 2 before any connection', () => {
+    const ex = exit(); const err = quiet();
+    try {
+      expect(() => parseArgs(['--from', OWNER, '--execute', '--plan', PLAN])).toThrow('exit 2');
+      expect(() => parseArgs(['--from', OWNER, '--to', HIRE, '--execute'])).toThrow('exit 2');
+      expect(() => parseArgs(['--from', OWNER, '--to', HIRE, '--execute', '--plan', 'abc'])).toThrow('exit 2');
+      expect(() => parseArgs(['--from', OWNER, '--to', HIRE, '--plan', PLAN])).toThrow('exit 2');
+      expect(() => parseArgs(['--from', OWNER, '--to', OWNER, '--execute', '--plan', PLAN])).toThrow('exit 2');
+      expect(() => parseArgs(['--rollback', '/tmp/f.json', '--execute', '--plan', PLAN])).toThrow('exit 2');
+    } finally {
+      ex.mockRestore(); err.mockRestore();
+    }
+  });
+
+  const { executeHandover, rollbackHandover, restartWindowReason, checkTarget, summaryCard, Refusal } = require('../../ops/agents/second-tech-handover-execute.js');
+  const base = { from: OWNER, to: HIRE, start: START, planId: PLAN, now: new Date('2099-07-01T16:00:00Z') };
+
+  test('executeHandover refuses with no connection used: no --to, same technician, no plan id', async () => {
+    await expect(executeHandover(null, { ...base, to: null })).rejects.toMatchObject({ code: 'NO_TARGET' });
+    await expect(executeHandover(null, { ...base, to: OWNER })).rejects.toMatchObject({ code: 'SAME_TECHNICIAN' });
+    await expect(executeHandover(null, { ...base, planId: null })).rejects.toMatchObject({ code: 'NO_PLAN_ID' });
+    await expect(executeHandover(null, { ...base, planId: 'abc' })).rejects.toBeInstanceOf(Refusal);
+  });
+
+  test('the target must be assignable and have an explicit work-days list', () => {
+    const ok = { id: HIRE, employment_status: 'active', field_dispatchable: true, work_days: [1, 2, 3, 4] };
+    expect(() => checkTarget(ok)).not.toThrow();
+    expect(() => checkTarget(null)).toThrow(/no technician row/);
+    expect(() => checkTarget({ ...ok, employment_status: 'prospective' })).toThrow(/not assignable/);
+    expect(() => checkTarget({ ...ok, field_dispatchable: false })).toThrow(/not assignable/);
+    for (const work_days of [null, [], '{}', [0, 1, 2, 3, 4, 5, 6]]) {
+      expect(() => checkTarget({ ...ok, work_days })).toThrow(/no work days set/);
+    }
+    expect(() => checkTarget({ ...ok, work_days: '{1,2,3,4}' })).not.toThrow();
+  });
+
+  test('restart windows: 03:50-04:20 ET daily and 06:40-07:02 ET Mondays', () => {
+    // 2099-07-06 is a Monday; EDT = UTC-4.
+    const et = (day, hhmm) => new Date(`${day}T${hhmm}:00-04:00`);
+    expect(restartWindowReason(et('2099-07-07', '03:49'))).toBeNull();
+    expect(restartWindowReason(et('2099-07-07', '03:50'))).toMatch(/04:10 auto-dispatch/);
+    expect(restartWindowReason(et('2099-07-07', '04:10'))).toMatch(/04:10 auto-dispatch/);
+    expect(restartWindowReason(et('2099-07-07', '04:20'))).toMatch(/04:10 auto-dispatch/);
+    expect(restartWindowReason(et('2099-07-07', '04:21'))).toBeNull();
+    expect(restartWindowReason(et('2099-07-07', '06:50'))).toBeNull(); // Tuesday
+    expect(restartWindowReason(et('2099-07-06', '06:39'))).toBeNull();
+    expect(restartWindowReason(et('2099-07-06', '06:40'))).toMatch(/Monday/);
+    expect(restartWindowReason(et('2099-07-06', '07:02'))).toMatch(/Monday/);
+    expect(restartWindowReason(et('2099-07-06', '07:03'))).toBeNull();
+  });
+
+  test('both writers refuse inside a restart window before touching the database', async () => {
+    const inWindow = new Date('2099-07-07T04:10:00-04:00');
+    await expect(executeHandover(null, { ...base, now: inWindow })).rejects.toMatchObject({ code: 'RESTART_WINDOW' });
+    const file = path.join(require('os').tmpdir(), `handover-unit-${process.pid}.json`);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, run_id: '00000000-0000-4000-8000-0000000000aa', plan_id: PLAN, from: OWNER, to: HIRE, series: [], visits: [] }));
+    try {
+      await expect(rollbackHandover(null, { file, now: inWindow })).rejects.toMatchObject({ code: 'RESTART_WINDOW' });
+      await expect(rollbackHandover(null, { file: `${file}.missing` })).rejects.toMatchObject({ code: 'BAD_ROLLBACK_FILE' });
+    } finally {
+      fs.unlinkSync(file);
+    }
+  });
+
+  test('the summary card carries counts only', () => {
+    expect(summaryCard({ visits: 12, customers: 9, series: 7 })).toEqual({
+      type: 'series_handover',
+      message: 'You now have 12 visits across 9 customers. They are on your schedule.',
+      payload: { headline: 'Visits moved to your schedule', visits: 12, customers: 9, series: 7 },
+    });
+    expect(summaryCard({ visits: 1, customers: 1, series: 1 }).message).toBe('You now have 1 visit across 1 customer. They are on your schedule.');
+  });
+
+  test('the execute file reaches no sender: no per-visit notice, push, text, email or board broadcast', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover-execute.js'), 'utf8');
+    const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+    expect(src.split('\n')[0]).toBe('// MUTATES');
+    for (const banned of [
+      'tech-visit-notifications', 'dispatch-assignment', 'push-notifications', 'twilio', 'sendgrid', 'sms', 'notification-service',
+      'admin-alert', 'visit-groups', 'appointment-reminders', 'rebooker', 'sockets', 'notifyAssignmentChange',
+    ]) expect(code.toLowerCase()).not.toContain(banned.toLowerCase());
+    // The one message is the hire's card, through the tech feed's own writer.
+    expect(code.match(/sendTechNotification\(/g)).toHaveLength(1);
+  });
+
+  test('the series-maintenance fence uses the same key as admin-schedule acquireRecurringSeriesMaintenanceLock', () => {
+    const { SERIES_MAINTENANCE_LOCK } = require('../../ops/agents/second-tech-handover-execute.js');
+    const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    const start = schedule.indexOf('async function acquireRecurringSeriesMaintenanceLock(');
+    expect(start).toBeGreaterThan(-1);
+    const body = schedule.slice(start, schedule.indexOf('\n}\n', start));
+    // Same two-key advisory lock, same first key: a drift here would let a nightly top-up slip past the run.
+    expect(body).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?::text))');
+    expect(body).toContain(`'${SERIES_MAINTENANCE_LOCK}'`);
+    const execSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover-execute.js'), 'utf8');
+    expect(execSrc).toContain("trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SERIES_MAINTENANCE_LOCK, id])");
   });
 });
 
@@ -338,5 +552,52 @@ describe('tlsFor (connection TLS)', () => {
     } finally {
       fs.unlinkSync(file);
     }
+  });
+});
+
+// Territories by ZIP, build 6 (owner 2026-10-30): --zips moves only the listed ZIPs' series, and
+// the plan carries each listed ZIP's territory technician so --execute can hand the ZIP over too.
+describe('second-tech-handover planner — --zips (territory handover)', () => {
+  const crypto = require('crypto');
+  const { planIdOf } = require(script);
+  const territory = [{ zip: '34293', area: 'venice', technician_id: null }, { zip: '34285', area: 'venice', technician_id: null }];
+
+  test('parseArgs takes a sorted, de-duplicated ZIP list and refuses anything else', () => {
+    expect(parseArgs(['--from', OWNER, '--zips', '34293, 34285,34293']).zips).toEqual(['34285', '34293']);
+    expect(parseArgs(['--from', OWNER]).zips).toBeNull();
+    const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => parseArgs(['--from', OWNER, '--zips', '3429'])).toThrow('exit 2');
+    expect(() => parseArgs(['--from', OWNER, '--zips', 'FL 34293'])).toThrow('exit 2');
+    exit.mockRestore(); err.mockRestore();
+  });
+
+  test('a series outside the listed ZIPs stays whole (outside_zips); a listed one moves', () => {
+    const south = parent({ zip: '34293' });
+    const north = parent({ zip: '34219' });
+    const noZip = parent({ zip: null });
+    const p = plan([south, north, noZip], [visit(south, MON), visit(north, TUE), visit(noZip, WED)], { zips: ['34285', '34293'], territory });
+    expect(p.ids.series).toEqual([south.id]);
+    expect(p.skipped.outside_zips).toMatchObject({ series: 2, visits: 2 });
+    // The line count still counts every series of these lines.
+    expect(p.series.in_lines).toBe(3);
+    expect(p.zips).toEqual(['34285', '34293']);
+    expect(p.territory).toEqual(territory);
+  });
+
+  test('without --zips the PLAN ID is exactly the pre-territory id', () => {
+    const args = { from: OWNER, to: HIRE, start: START, lines: ['general'], retemplate: ['S-a'], moves: [{ series_id: 'S-a', visit_id: 'V-a', date: MON }] };
+    const rows = [JSON.stringify(['S-a', '', '', OWNER]), JSON.stringify(['S-a', 'V-a', MON, OWNER])].sort();
+    const legacy = crypto.createHash('sha256')
+      .update(JSON.stringify({ v: 1, from: OWNER, to: HIRE, start: START, lines: ['general'], rows })).digest('hex');
+    expect(planIdOf(args)).toBe(legacy);
+  });
+
+  test('the ZIP list and each ZIP\'s current territory technician are part of the PLAN ID', () => {
+    const args = { from: OWNER, to: HIRE, start: START, lines: ['general'], retemplate: [], moves: [] };
+    const withZips = planIdOf({ ...args, zips: ['34293'], territory: [{ zip: '34293', technician_id: null }] });
+    expect(withZips).not.toBe(planIdOf(args));
+    expect(planIdOf({ ...args, zips: ['34293'], territory: [{ zip: '34293', technician_id: OTHER }] })).not.toBe(withZips);
+    expect(planIdOf({ ...args, zips: ['34285'], territory: [{ zip: '34285', technician_id: null }] })).not.toBe(withZips);
   });
 });

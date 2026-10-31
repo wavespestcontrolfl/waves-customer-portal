@@ -661,7 +661,7 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
   // create() a REAL distinct trx object: a NET-terms accrual re-enters
   // create() with { database: trx } and insertInvoiceRow savepoints on it —
   // passing `db` itself through would re-trigger the preflight forever.
-  function setupPayerDb({ sourceEstimateId = null } = {}) {
+  function setupPayerDb({ sourceEstimateId = null, paymentTerms = 'net30' } = {}) {
     let insertedInvoice = null;
     const handler = (table) => {
       if (table === 'service_records') {
@@ -711,7 +711,7 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
           forShare: jest.fn(() => q),
           select: jest.fn(async () => [{ id: 9 }]),
           first: jest.fn(async () => ({
-            id: 9, active: true, payment_terms: 'net30', tax_exempt: false,
+            id: 9, active: true, payment_terms: paymentTerms, tax_exempt: false,
             company_name: 'Homes by West Bay', ap_email: 'ap@westbay.com',
           })),
         };
@@ -764,6 +764,16 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
     expect(row.payer_id).toBe(9);
     expect(mockRollupStatement).toHaveBeenCalledWith(501, expect.anything());
     expect(inv.payer_statement_id).toBe(501);
+  });
+
+  it('a Net 60 payer is a NET-terms payer too: its completion invoice accrues the same way (owner 2026-10-29)', async () => {
+    const { getInsertedInvoice } = setupPayerDb({ paymentTerms: 'net60' });
+    await InvoiceService.createFromService('sr-1', { amount: 250, description: 'Quarterly service' });
+    expect(mockGetOrCreateOpenStatement).toHaveBeenCalledWith(
+      expect.objectContaining({ payerId: 9, termsSnapshot: 'net60' }),
+    );
+    expect(getInsertedInvoice().payer_statement_id).toBe(501);
+    expect(mockRollupStatement).toHaveBeenCalledWith(501, expect.anything());
   });
 
   it('skipAccrual mints the same invoice UNATTACHED — statement never touched, rollup never runs, still payer-billed at face value', async () => {

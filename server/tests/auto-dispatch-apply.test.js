@@ -660,6 +660,38 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(pestPrimary({ trx, technicianId: 't1', service: { id: 's2', service_type: 'Lawn Fertilization' } })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
   });
 
+  test('move guard: the moving visit\'s territory is read again at apply (GATE_TERRITORY_NIGHT_RUN) — a ZIP that changed hands after the run scored it refuses', async () => {
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const candidateSlots = require('../services/auto-dispatch/candidate-slots');
+    const prior = process.env.GATE_TERRITORY_NIGHT_RUN;
+    const own = jest.spyOn(candidateSlots, 'territoryTechnicianForVisit');
+    try {
+      process.env.GATE_TERRITORY_NIGHT_RUN = 'true';
+      const unassigned = { ...SERVICE, technician_id: null, service_type: 'General Pest Control', service_address_zip: '34293' };
+      const guard = makeMoveGuard({ service: unassigned, best: { ...BEST, technician_id: 't2' } });
+      // The run scored t2's slot; the ZIP now belongs to t9.
+      own.mockResolvedValue('t9');
+      await expect(guard({ trx: fakeTrx(), technicianId: 't2' })).rejects.toMatchObject({
+        code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('belongs to another technician\'s territory'),
+      });
+      expect(own).toHaveBeenCalledWith(expect.objectContaining({ id: 's1', service_address_zip: '34293' }), null);
+      // Still t2's territory, or no territory technician: the move goes on.
+      for (const owner of ['t2', null]) {
+        own.mockResolvedValue(owner);
+        await expect(guard({ trx: fakeTrx(), technicianId: 't2' })).resolves.toBeUndefined();
+      }
+      // Gate off: no territory read at all.
+      delete process.env.GATE_TERRITORY_NIGHT_RUN;
+      own.mockClear();
+      own.mockResolvedValue('t9');
+      await expect(guard({ trx: fakeTrx(), technicianId: 't2' })).resolves.toBeUndefined();
+      expect(own).not.toHaveBeenCalled();
+    } finally {
+      own.mockRestore();
+      if (prior === undefined) delete process.env.GATE_TERRITORY_NIGHT_RUN; else process.env.GATE_TERRITORY_NIGHT_RUN = prior;
+    }
+  });
+
   describe('move guard: the start points the move was scored from (GATE_TECH_START_POINTS)', () => {
     const { makeMoveGuard } = require('../services/auto-dispatch/apply');
     const ORIGINAL = process.env.GATE_TECH_START_POINTS;
@@ -707,6 +739,17 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       await expect(toT2({ trx: fakeTrx({ techRows: { t1: row(OTHER_HOME), t2: row(null) } }), technicianId: 't1' })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
     });
 
+    test('gate on, an unassigned visit whose current day was scored on t1\'s route, moving to t2: t1 is fenced too', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      const toT2 = makeMoveGuard({
+        service: { ...SERVICE, technician_id: null }, best: { ...BEST, technician_id: 't2' }, config: { startPointFor: scoredFrom, sourceDayTechnicianId: 't1' },
+      });
+      await expect(toT2({ trx: fakeTrx({ techRows: { t1: row(OTHER_HOME), t2: row(null) } }), technicianId: null })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
+      const trx = fakeTrx({ techRows: { t1: row(HOME), t2: row(null) } });
+      await expect(toT2({ trx, technicianId: null })).resolves.toBeUndefined();
+      expect(trx.__calls.filter((t) => t === 'technicians')).toHaveLength(3); // t2 capability lock + t1 and t2 fence
+    });
+
     test('gate off: no extra technicians query (office everywhere)', async () => {
       delete process.env.GATE_TECH_START_POINTS;
       const trx = fakeTrx({ techRows: { t1: row(OTHER_HOME) } });
@@ -736,6 +779,30 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
           const trx = fakeTrx({ techRows: { t1: row(OTHER_HOME) } });
           await expect(call[5].moveGuard({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
         }
+      } finally {
+        delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+      }
+    });
+
+    test('a fallback authorized by a re-evaluation fences THAT evaluation\'s current-day technician', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+      try {
+        const unassigned = { ...SERVICE, technician_id: null };
+        const fresh = { ...BEST, start_time: '13:00', end_time: '15:00' };
+        // The rescore after SLOT_TAKEN scored the unassigned visit's current day on t2's route.
+        const rescore = jest.fn().mockResolvedValue({ kind: 'move', rankedCandidates: [fresh], current: { day_technician_id: 't2' } });
+        const live = readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: null, status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false });
+        const queue = [live, live];
+        db.mockImplementation(() => queue.shift() || { where() { return this; }, update: jest.fn().mockResolvedValue(1), insert: jest.fn(), first: async () => null });
+        SmartRebooker.reschedule.mockRejectedValueOnce(Object.assign(new Error('taken'), { code: 'SLOT_TAKEN' }));
+        await applyAutoDispatchMove(unassigned, BEST, 'run1', { startPointFor: scoredFrom, sourceDayTechnicianId: 't1', rescore });
+        expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(2);
+        const [first, fallback] = SmartRebooker.reschedule.mock.calls.map((call) => call[5].moveGuard);
+        // t2's start address moved: only the fallback, scored on t2's day, is refused.
+        const t2Moved = () => fakeTrx({ techRows: { t1: row(HOME), t2: row(OTHER_HOME) } });
+        await expect(first({ trx: t2Moved(), technicianId: null })).resolves.toBeUndefined();
+        await expect(fallback({ trx: t2Moved(), technicianId: null })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
       } finally {
         delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
       }

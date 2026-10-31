@@ -28,6 +28,10 @@ describe('email shouldSkipAutoAction — operational-sender guard', () => {
     expect(shouldSkipAutoAction('marketing_newsletter', 'newsletter@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
     expect(shouldSkipAutoAction('spam', 'contact@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
     expect(shouldSkipAutoAction('marketing_newsletter', 'noreply@portal.wavespestcontrol.com', GOOG('portal.wavespestcontrol.com'))).toBe(true);
+    // The newsletter's sending subdomain (owner 2026-10-31), signed as itself.
+    expect(shouldSkipAutoAction('marketing_newsletter', 'events@news.wavespestcontrol.com', GOOG('news.wavespestcontrol.com'))).toBe(true);
+    // Non-destructive handlers must not match or draft for our own subdomain copies either.
+    expect(shouldSkipAutoAction('customer_request', 'events@news.wavespestcontrol.com', GOOG('news.wavespestcontrol.com'))).toBe(true);
   });
 
   test('skips destructive actions for other operational domains (Google security notices etc.)', () => {
@@ -109,6 +113,16 @@ describe('email government-sender guard (outside review 2026-10-25)', () => {
       'freshfromflorida.com.evil.example', '', null]) {
       expect(isGovernmentDomain(domain)).toBe(false);
     }
+  });
+
+  test('every public bid portal the Bid Desk reads is a government sender, never a look-alike (inbox replay 2026-10-28)', () => {
+    const { PUBLIC_PORTAL_DOMAINS } = require('../services/bid-desk/detector');
+    expect(PUBLIC_PORTAL_DOMAINS).toEqual(expect.arrayContaining(['myvendorlink.com', 'demandstar.com', 'bidnetdirect.com']));
+    for (const domain of PUBLIC_PORTAL_DOMAINS) expect(isGovernmentDomain(domain)).toBe(true);
+    for (const domain of ['myvendorlink.com.evil.example', 'notmyvendorlink.com']) expect(isGovernmentDomain(domain)).toBe(false);
+    // One spam label blocked VendorLink, and its Gmail filter trashed every later bid notice.
+    expect(shouldSkipAutoAction('spam', 'vendorlink@myvendorlink.com', GOOG('myvendorlink.com'))).toBe(true);
+    expect(shouldSkipAutoAction('spam', 'vendorlink@myvendorlink.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none')).toBe(false);
   });
 
   test('a regulator notice classified spam or newsletter is never auto-actioned when its auth aligns', () => {
