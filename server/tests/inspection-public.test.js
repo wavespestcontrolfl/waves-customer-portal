@@ -4027,7 +4027,7 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
 
   // Seeds the world and commits. `shell`, `lead`, `earlierLead`, `otherProvenance`
   // and `journal` vary one condition each; the rest is the clean case.
-  async function commitWith({ shell = SHELL, lead = SHELL_LEAD, earlierLead = null, otherProvenance = null, journal = () => null, otherProfile = null } = {}) {
+  async function commitWith({ shell = SHELL, lead = SHELL_LEAD, earlierLead = null, otherProvenance = null, journal = () => null, otherProfile = null, body = BOOK_BODY } = {}) {
     firstResults.leads = (q) => (q.conds.customer_id ? earlierLead : lead);
     // An account-scoped read is the "only live profile of its account" check.
     firstResults.customers = (q) => (q.conds.id === SHELL_ID ? shell : (q.conds.account_id ? otherProfile : null));
@@ -4038,7 +4038,7 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
     gateState.reuseShell = true;
-    const res = await callPost(mintLeadConsultationToken(LEAD_ID), BOOK_BODY);
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), body);
     expect(res.statusCode).toBe(200);
     return res;
   }
@@ -4111,6 +4111,9 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     ['the shell has no street', { shell: { ...SHELL, address_line1: '' } }],
     ['the shell has no city', { shell: { ...SHELL, city: '' } }],
     ['the shell has no ZIP', { shell: { ...SHELL, zip: null } }],
+    // Codex #7250 r2 P2: the booked unit must equal the stored one exactly.
+    ['the booking names an apartment the shell does not have', { body: { ...BOOK_BODY, address: '123 Any St Apt 4, Bradenton, FL 34209' } }],
+    ['the shell stores a building unit and the booking names an apartment', { shell: { ...SHELL, address_line1: '123 Any St Bldg 4' }, body: { ...BOOK_BODY, address: '123 Any St Apt 4, Bradenton, FL 34209' } }],
   ])('gate on, but %s: a new prospect is created', async (_label, { blockers, ...seed }) => {
     if (blockers) mockLoserBlockers.mockImplementation(async () => blockers);
     await commitWith(seed);
@@ -4125,6 +4128,12 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     expect(customerInserts()).toHaveLength(0);
     expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe(SHELL_ID);
     expect(updateCalls.some((c) => c.table === 'customers' && 'address_line1' in c.payload)).toBe(false);
+  });
+
+  test('gate on: the same unit in another notation is still the shell (Apt 4 stored, Unit 4 booked)', async () => {
+    await commitWith({ shell: { ...SHELL, address_line2: 'Apt 4' }, body: { ...BOOK_BODY, address: '123 Any St Unit 4, Bradenton, FL 34209' } });
+    expect(customerInserts()).toHaveLength(0);
+    expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe(SHELL_ID);
   });
 
   test('gate on, VERIFIED lead (call caller ID): the shell test is never consulted, the linked customer books as before', async () => {

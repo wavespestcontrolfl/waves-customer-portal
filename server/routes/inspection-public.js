@@ -176,7 +176,7 @@
  *   most 10 minutes before the lead, this lead first on it, no billing/
  *   visit/login/merge history, same phone identity and email, no other
  *   lead's provenance, the primary and only live profile of its account,
- *   a complete stored street/city/ZIP) books onto that customer instead of a second row,
+ *   a complete stored street/city/ZIP, the same unit as the booking) books onto that customer instead of a second row,
  *   with outright (not requires_verification) provenance. Gate off = the
  *   paragraph above holds without exception.
  *
@@ -1628,6 +1628,21 @@ function shellAddressComplete(shell) {
   return ['address_line1', 'city', 'zip'].every((column) => String(shell[column] || '').trim());
 }
 
+// The full unit identity of an address, read through the shared address
+// normalizer: a trailing inline unit peeled off line 1 (splitStreetLineUnit)
+// plus line 2, compared by unitLineValueKey (Apt/Unit/Suite/# are one dwelling
+// designator; Bldg/Floor/Space/Lot stay, so "Bldg 2" never equals "Apt 2").
+// '' = no unit. Reuse needs it EQUAL to the booked address's (Codex #7250 r2
+// P2): a stored shell with no unit would otherwise absorb a booking for
+// "Apt 4" and dispatch to the building without the apartment.
+function premiseUnitKey(line1, line2) {
+  const { splitStreetLineUnit, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const keyOf = (unitText) => (String(unitText || '').trim() ? unitLineValueKey(normalizeUnitLine(unitText)) : '');
+  const inlineKey = keyOf(splitStreetLineUnit(String(line1 || '')).unit);
+  const line2Key = keyOf(line2);
+  return inlineKey && line2Key && inlineKey !== line2Key ? `${inlineKey} ${line2Key}` : (inlineKey || line2Key);
+}
+
 async function leadOwnIntakeShell(dbConn, lead) {
   if (!lead?.customer_id || !lead.created_at) return null;
   const shell = await dbConn('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first(...OWN_SHELL_COLUMNS);
@@ -1652,6 +1667,7 @@ async function tryReuseOwnIntakeShell(trx, freshLead, resolved) {
   const shell = await leadOwnIntakeShell(trx, freshLead);
   if (!shell) return null;
   if (profileAffirmativelyDiffers(shell, resolved.address)) return null;
+  if (premiseUnitKey(shell.address_line1, shell.address_line2) !== premiseUnitKey(resolved.address?.line1, resolved.address?.line2)) return null;
   const reused = await reuseMatchedProfile(trx, freshLead, shell, resolved);
   if (reused.eligibility) return reused;
   if (!reused.customer) return null;

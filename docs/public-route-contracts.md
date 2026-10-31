@@ -6864,8 +6864,10 @@ profile (`leadOwnIntakeShell`: active, `new_lead`, created at most 10 minutes
 before the lead, this lead the first live lead on it, no billing, visit,
 login or merge history, the same full phone identity and email as the lead,
 no other lead's consultation provenance naming it, the primary AND only live
-profile of its own account, and a complete stored street, city and ZIP)
-books onto that profile instead of a new prospect, with an outright
+profile of its own account, a complete stored street, city and ZIP, and the
+same unit as the booked address by the shared normalizer's
+`unitLineValueKey`, so a stored building with no apartment never absorbs an
+"Apt 4" booking) books onto that profile instead of a new prospect, with an outright
 `consultation_prospect` provenance row and no write to the profile; a profile
 filed under another household's account (a last-ten phone suffix match), a
 partial address, a stored street that affirmatively differs from the booked
