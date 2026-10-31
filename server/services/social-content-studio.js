@@ -1668,6 +1668,20 @@ function selectAutonomousCampaign(now = new Date(), { recent = new Set() } = {})
   };
 }
 
+const REVIEW_TESTIMONIAL_LINK = 'https://www.wavespestcontrol.com/pest-control-reviews/';
+
+// Per-channel copy for a 5-star review testimonial post. The autonomous review
+// run and the Saved Graphics Approve button both build their post text here,
+// so a graphic posts the same words an approved review run would.
+function buildReviewTestimonialDrafts({ excerpt, reviewerDisplayName, city }) {
+  return {
+    facebook: `"${excerpt}"\n\nA real 5-star Google review from ${reviewerDisplayName}. Local service, clear communication, and follow-through matter.`,
+    instagram: `"${excerpt}"\n\nThanks for trusting Waves, ${city}.\n\n#wavespestcontrol #swfl #pestcontrol #googlereview`,
+    linkedin: `Customer trust compounds when service teams communicate clearly and follow through. Recent 5-star feedback from ${city}: "${excerpt}"`,
+    gbp: `A ${city} customer left Waves a 5-star Google review: "${excerpt}" Thanks for trusting our local team.`,
+  };
+}
+
 async function selectAutonomousReviewPlan(now = new Date()) {
   if (!AUTONOMOUS_FLAGS.includeReviews) return null;
   const { day } = etParts(now); // Eastern business date, not UTC (see selectAutonomousCampaign)
@@ -1680,12 +1694,7 @@ async function selectAutonomousReviewPlan(now = new Date()) {
   const city = candidate.city || 'SWFL';
   const topic = `5-star review from ${city}`;
   const excerpt = reviewExcerpt(candidate.excerpt, 180);
-  const drafts = {
-    facebook: `"${excerpt}"\n\nA real 5-star Google review from ${candidate.reviewerDisplayName}. Local service, clear communication, and follow-through matter.`,
-    instagram: `"${excerpt}"\n\nThanks for trusting Waves, ${city}.\n\n#wavespestcontrol #swfl #pestcontrol #googlereview`,
-    linkedin: `Customer trust compounds when service teams communicate clearly and follow through. Recent 5-star feedback from ${city}: "${excerpt}"`,
-    gbp: `A ${city} customer left Waves a 5-star Google review: "${excerpt}" Thanks for trusting our local team.`,
-  };
+  const drafts = buildReviewTestimonialDrafts({ excerpt, reviewerDisplayName: candidate.reviewerDisplayName, city });
   return {
     topic,
     city,
@@ -1703,7 +1712,7 @@ async function selectAutonomousReviewPlan(now = new Date()) {
         cta: 'book inspection',
         channels: AUTONOMOUS_FLAGS.channels,
       },
-      suggestedLink: 'https://www.wavespestcontrol.com/pest-control-reviews/',
+      suggestedLink: REVIEW_TESTIMONIAL_LINK,
       drafts: Object.fromEntries(AUTONOMOUS_FLAGS.channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
       validation: validateDrafts(drafts),
       sources: [{
@@ -3648,6 +3657,145 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
   return result;
 }
 
+// Why a testimonial publish was refused before any provider call (review
+// lane only — the milestone variants live in approveAutonomousRun).
+function testimonialBlockedMessage(outcome) {
+  if (outcome.lockBusy) return 'review sync is in progress for this location — approve again in a moment';
+  if (outcome.consumed) return 'this review was already published as a testimonial';
+  if (outcome.missing) return 'source Google review no longer exists — testimonial cannot be published';
+  return 'source Google review has been removed from Google — testimonial cannot be published';
+}
+
+// Short, owner-readable reason when a real publish reached no channel.
+function describePublishFailure(publishResult) {
+  const reasons = (Array.isArray(publishResult?.platforms) ? publishResult.platforms : [])
+    .map((p) => `${p.platform}${p.location ? `/${p.location}` : ''}: ${p.error || p.skipped || 'failed'}`);
+  return reasons.length ? ` (${reasons.join('; ')})` : '';
+}
+
+// Approve on a Saved Graphic POSTS it, through the same testimonial publish
+// path an approved autonomous review run uses (approveAutonomousRun): review
+// liveness gate, publishWithReviewLivenessLock with rejectConsumed, the durable
+// published stamp on the first provider success, and the claim handling. The
+// graphic becomes 'approved' — which retires the review from every candidate
+// list — ONLY after a real post. A blocked, failed, or dry-run attempt leaves
+// the graphic and the review available.
+async function approveReviewGraphic(graphicId) {
+  if (!(await hasTable('review_graphics'))) {
+    return { ok: false, status: 503, error: 'review_graphics table is unavailable' };
+  }
+  // Per-graphic advisory lock: a double click (or two admin tabs) must not post
+  // twice. Non-blocking — the loser gets a 409, not a queue.
+  const result = await runExclusive(`social_review_graphic_approve_${graphicId}`, async () => {
+    const graphic = await db('review_graphics').where({ id: graphicId }).first().catch(() => null); // bad :id → 404
+    if (!graphic) return { ok: false, status: 404, error: 'review graphic not found' };
+    if (graphic.status === 'approved') {
+      return { ok: false, status: 409, error: 'this review graphic was already approved and posted' };
+    }
+    // Never post a graphic with no rendered image — a blank card is worse than none.
+    const imageUrl = httpUrlOrNull(graphic.image_url);
+    if (!imageUrl) {
+      return { ok: false, status: 400, error: 'review graphic has no rendered image; regenerate it before approving' };
+    }
+    const channels = normalizeChannels(toJson(graphic.channels, null));
+    if (!channels.length) return { ok: false, status: 400, error: 'review graphic has no publishable channels' };
+
+    const reviewId = graphic.google_review_id;
+    const ownerToken = `graphic:${graphic.id}`;
+    const source = await db('google_reviews').where({ id: reviewId }).first().catch(() => null);
+    if (!source) {
+      return { ok: false, status: 409, error: 'source Google review no longer exists — testimonial cannot be published' };
+    }
+    if (source.missing_since) {
+      return { ok: false, status: 409, error: 'source Google review has been removed from Google — testimonial cannot be published' };
+    }
+
+    const markApproved = async () => {
+      const [updated] = await db('review_graphics')
+        .where({ id: graphic.id })
+        .update({ status: 'approved', approved_at: new Date(), updated_at: new Date() })
+        .returning('*');
+      return updated || { ...graphic, status: 'approved' };
+    };
+    // This graphic already posted but its status never flipped (the update
+    // failed after a live post): finish the bookkeeping, never post again.
+    if (source.testimonial_published_at && String(source.testimonial_published_run) === ownerToken) {
+      return { ok: true, published: true, dryRun: false, publishResult: null, graphic: await markApproved() };
+    }
+
+    const city = graphic.city || 'SWFL';
+    const drafts = buildReviewTestimonialDrafts({
+      excerpt: graphic.excerpt,
+      reviewerDisplayName: graphic.reviewer_display_name,
+      city,
+    });
+    const link = (await linkIsLive(REVIEW_TESTIMONIAL_LINK)) ? REVIEW_TESTIMONIAL_LINK : '';
+    const gbpLocationId = WAVES_LOCATIONS.some((loc) => loc.id === graphic.location_id)
+      ? graphic.location_id
+      : locationForCity(city).id;
+    const publishOutcome = await publishWithReviewLivenessLock(reviewId, () => SocialMediaService.publishToAll({
+      title: `5-star review from ${city}`,
+      description: 'review proof',
+      link,
+      guid: `${AUTONOMOUS_SOURCE}_review_graphic_${graphic.id}`,
+      source: AUTONOMOUS_SOURCE,
+      customContent: Object.fromEntries(channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
+      channels,
+      imageUrl,
+      // The one stored card for every channel; its chrome already carries the logo.
+      gbpImageUrl: imageUrl,
+      gbpImageBranded: true,
+      noAiImage: true, // stored image only — never a fresh literal AI image
+      gbpLocationIds: [gbpLocationId],
+      // Durable stamp at the FIRST provider success (same as the run path).
+      onFirstPlatformSuccess: SOCIAL_FLAGS.dryRun ? null : () => recordTestimonialPublished(reviewId, ownerToken),
+    }), { rejectConsumed: true, allowConsumedByRunId: ownerToken });
+    if (publishOutcome.blocked) {
+      return { ok: false, status: 409, error: testimonialBlockedMessage(publishOutcome) };
+    }
+
+    const publishResult = publishOutcome.result;
+    // Claim held through the durable stamp; retained only if the stamp failed
+    // after a live post (the recovery loop then owns the release).
+    let claimRetained = false;
+    try {
+      const posted = !SOCIAL_FLAGS.dryRun && !!publishResult?.success;
+      if (posted) {
+        try {
+          await recordTestimonialPublished(reviewId, ownerToken);
+        } catch (err) {
+          logger.error(`[studio] testimonial-published stamp FAILED after review-graphic post (review ${reviewId}): ${err.message} — claim retained, recovery loop will write the durable record`);
+          claimRetained = true;
+          void holdClaimUntilPublishRecorded({
+            googleReviewId: reviewId,
+            record: () => recordTestimonialPublished(reviewId, ownerToken),
+            claim: publishOutcome,
+          });
+        }
+      }
+      if (SOCIAL_FLAGS.dryRun) {
+        return { ok: true, published: false, dryRun: true, publishResult, graphic };
+      }
+      if (!posted) {
+        return { ok: false, status: 502, error: `nothing was posted — the graphic and review stay available${describePublishFailure(publishResult)}` };
+      }
+      const approved = await markApproved().catch((err) => {
+        logger.error(`[studio] review graphic ${graphic.id} posted but status update failed: ${err.message} — a repeat Approve finishes the bookkeeping without posting again`);
+        return graphic;
+      });
+      return { ok: true, published: true, dryRun: false, publishResult, graphic: approved };
+    } finally {
+      if (!claimRetained) await publishOutcome.releaseClaim();
+    }
+    // recordHealth: false — per-graphic approval lock, not a scheduled job.
+  }, { recordHealth: false });
+
+  if (result?.skipped) {
+    return { ok: false, status: 409, error: 'an approval for this graphic is already in progress' };
+  }
+  return result;
+}
+
 async function rejectAutonomousRun(runId, { reason } = {}) {
   if (!(await hasTable('social_content_studio_runs'))) {
     return { ok: false, status: 503, error: 'social_content_studio_runs table is unavailable' };
@@ -4138,6 +4286,7 @@ module.exports = {
   planMilestone,
   selectAutonomousMilestonePlan,
   approveAutonomousRun,
+  approveReviewGraphic,
   assessApprovalPublish,
   autonomousStatus,
   buildCampaignCardInput,
