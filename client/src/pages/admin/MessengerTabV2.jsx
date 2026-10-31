@@ -139,8 +139,9 @@ function ReplyBox({ threadId, canReply, ready, onSend }) {
 }
 
 // onCount(n): how many threads wait for an answer, so the tab label follows
-// the list as replies go out.
-export default function MessengerTabV2({ onCount }) {
+// the list as replies go out. routeHash: the page's router hash, so a link to another thread
+// opens it while the tab is already showing.
+export default function MessengerTabV2({ onCount, routeHash = "" }) {
   // list: the loaded threads, whether older ones exist, and the server's count of threads
   // waiting for an answer (the whole inbox, not just the loaded page).
   const [list, setList] = useState(null);
@@ -225,8 +226,10 @@ export default function MessengerTabV2({ onCount }) {
       if (!current()) return;
       setDetail(d);
       if (d.thread?.unread > 0) {
-        await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}/read`, { method: "POST" });
-        setList((prev) => prev && { ...prev, items: prev.items.map((t) => (t.id === id ? { ...t, unread: 0 } : t)) });
+        // Read only up to the newest message on screen: one that arrives meanwhile stays unread.
+        const newest = d.messages?.[d.messages.length - 1]?.createdAt;
+        if (newest) await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({ readBefore: newest }) });
+        if (newest) setList((prev) => prev && { ...prev, items: prev.items.map((t) => (t.id === id ? { ...t, unread: 0 } : t)) });
       }
     } catch (err) {
       if (refresh || !current()) return;
@@ -238,8 +241,22 @@ export default function MessengerTabV2({ onCount }) {
   }, []);
   const openThread = loadDetail;
 
-  // A thread named in the page link opens once, when the tab first renders.
-  useEffect(() => { if (selectedId) openThread(selectedId); }, []);
+  // A thread named in the page link opens when the tab first renders and whenever the link changes
+  // while the tab stays open (the bell navigates by hash). Same guards as a click.
+  useEffect(() => {
+    const follow = () => {
+      const id = threadFromHash();
+      if (id && id !== picked.current) openThread(id);
+    };
+    if (selectedId) openThread(selectedId);
+    window.addEventListener("hashchange", follow);
+    return () => window.removeEventListener("hashchange", follow);
+  }, []);
+  // A router navigation to another thread in the same page changes the location without a hashchange.
+  useEffect(() => {
+    const id = threadFromHash();
+    if (id && id !== picked.current) openThread(id);
+  }, [routeHash, openThread]);
 
   // While the tab is open and visible, the list and the open thread refresh every minute, and
   // once when the page comes back into view. A refresh never touches the draft or the selection.

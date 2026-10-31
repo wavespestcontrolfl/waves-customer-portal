@@ -65,10 +65,15 @@ router.get('/threads/:id', requireLive, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/messenger/threads/:id/read -> { updated }
+// POST /api/admin/messenger/threads/:id/read { readBefore } -> { updated }
+// readBefore (ISO) is the newest message the person saw; only customer messages up to it are marked read.
 router.post('/threads/:id/read', requireLive, async (req, res, next) => {
   try {
-    const result = await messenger.markThreadRead(req, req.params.id, req.technicianId);
+    const readBefore = new Date(req.body?.readBefore);
+    if (typeof req.body?.readBefore !== 'string' || Number.isNaN(readBefore.getTime())) {
+      return res.status(400).json({ error: 'readBefore must be a timestamp' });
+    }
+    const result = await messenger.markThreadRead(req, req.params.id, req.technicianId, readBefore);
     if (!result) return res.status(404).json({ error: 'not_found' });
     res.json(result);
   } catch (err) { next(err); }

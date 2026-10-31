@@ -58,6 +58,8 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       }
       const parts = url.pathname.split('/').filter(Boolean);
       const [, id, edge] = parts;
+      if (id === 'me' && !edge) return json({ id: fb.meId || PAGE, name: 'Waves Pest Control' });
+      const pageEntry = fb.pageAs || { id: PAGE, name: 'Waves Pest Control' };
       if (edge === 'conversations') {
         const sorted = [...fb.conversations].sort((a, b) => b.updated - a.updated);
         const at = Number(url.searchParams.get('__page') || 0);
@@ -66,7 +68,7 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
         return json({
           data: slice.map((c) => ({
             id: c.id, updated_time: c.updated.toISOString(), unread_count: c.unread, message_count: c.messages.length,
-            participants: { data: [{ id: PAGE, name: 'Waves Pest Control' }, { id: c.psid, name: c.name }] },
+            participants: { data: [pageEntry, { id: c.psid, name: c.name }, ...(c.extraParticipants || [])] },
           })),
           ...(more ? { paging: { next: `https://graph.facebook.com/v25.0/${PAGE}/conversations?__page=${at + 1}&access_token=${url.searchParams.get('access_token')}` } } : {}),
         });
@@ -82,7 +84,7 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
           ...(more ? { paging: { next: `https://graph.facebook.com/v25.0/${id}/messages?__page=${at + 1}&access_token=${url.searchParams.get('access_token')}` } } : {}),
           data: newestFirst.slice(at * size, (at + 1) * size).map((m) => ({
             id: m.id, message: m.text, created_time: m.at.toISOString(),
-            from: m.fromPage ? { id: PAGE, name: 'Waves Pest Control' } : { id: conv.psid, name: conv.name },
+            from: m.fromPage ? pageEntry : { id: conv.psid, name: conv.name },
             ...(m.files ? { attachments: { data: m.files.map((mime_type) => ({ id: 'att', mime_type })) } } : {}),
           })),
         });
@@ -140,6 +142,7 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    messenger._private.resetPageIdentity();
     process.env.GATE_MESSENGER_INBOX = 'true';
     process.env.FACEBOOK_ACCESS_TOKEN = 'synthetic-page-token';
     process.env.FACEBOOK_PAGE_ID = PAGE;
@@ -452,6 +455,69 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(await bellsOf('bad')).toHaveLength(1);
     });
 
+    test('the page under an alias id: the id the page token reports is also the page, and direction follows the customer id', async () => {
+      fb.meId = `true-${RUN}`;
+      fb.pageAs = { id: fb.meId, name: 'Renamed Page Label' };
+      conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'question', at: ago(5) }, { fromPage: true, text: 'answer', at: ago(4) }, { fromPage: false, text: 'follow up', at: ago(3) }] });
+      await messenger.pollMessenger();
+      expect(await threadOf('a')).toMatchObject({ contact_external_id: `messenger:${psid('a')}`, our_endpoint_id: `messenger:${PAGE}` });
+      expect((await messagesOf('a')).map((m) => [m.direction, m.body])).toEqual([['inbound', 'question'], ['outbound', 'answer'], ['inbound', 'follow up']]);
+    });
+
+    test('the page under an unknown id is recognised by its name; the one remaining participant is the customer', async () => {
+      fb.meId = `true-${RUN}`;
+      fb.pageAs = { id: `unknown-${RUN}`, name: 'Waves Pest Control' };
+      conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'question', at: ago(5) }, { fromPage: true, text: 'answer', at: ago(4) }] });
+      await messenger.pollMessenger();
+      expect((await messagesOf('a')).map((m) => m.direction)).toEqual(['inbound', 'outbound']);
+      expect((await threadOf('a')).contact_label).toBe('Pat Synthetic');
+    });
+
+    test('a conversation with two unknown participants is skipped, nothing is stored, and the cursor holds', async () => {
+      fb.meId = `true-${RUN}`;
+      fb.pageAs = { id: `unknown-${RUN}`, name: 'Some Other Label' };
+      conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'question', at: ago(5) }] });
+      await expect(messenger.pollMessenger()).rejects.toThrow(/left 1 conversation/);
+      expect(await threadOf('a')).toBeUndefined();
+      expect(await db('messages').whereIn('conversation_id', db('conversations').where({ our_endpoint_id: `messenger:${PAGE}` }).select('id'))).toHaveLength(0);
+      expect(await cursor()).toBeUndefined();
+      expect(await db('system_settings').where({ key: 'messenger_inbox_bootstrap_done' }).first()).toBeUndefined();
+    });
+
+    test('a failed page identity read does not stop the poll: the configured id still works', async () => {
+      const fetchSpy = global.fetch;
+      global.fetch = jest.fn(async (rawUrl, init) => (new URL(rawUrl).pathname.endsWith('/me')
+        ? { ok: false, status: 500, json: async () => ({ error: { code: 1 } }) }
+        : fetchSpy(rawUrl, init)));
+      try {
+        conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'question', at: ago(5) }] });
+        expect(await messenger.pollMessenger()).toMatchObject({ inserted: 1 });
+      } finally {
+        global.fetch = fetchSpy;
+      }
+    });
+
+    test('closing the bell is fenced to the customer message the decision saw: a bell refreshed to a newer one stays open', async () => {
+      const conv = conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'message A', at: ago(4) }] });
+      await messenger.pollMessenger();
+      const thread = await threadOf('a');
+      const seenA = (await messagesOf('a'))[0];
+
+      // Customer message B arrives and rings the bell (version B) after the decision was made from A.
+      conv.messages.push({ id: mid('a', 1), fromPage: false, text: 'message B', at: ago(2) });
+      conv.updated = ago(2);
+      await messenger.pollMessenger();
+      expect((await bellsOf('a'))[0].metadata.dedupeVersion).toBe(messenger.messageKey(mid('a', 1)));
+
+      expect(await messenger._private.closeBell(thread.id, { through: seenA })).toBe(0);
+      expect((await bellsOf('a'))[0].done_at).toBeNull();
+
+      // Decided from B (or later), the same close goes through.
+      const seenB = (await messagesOf('a'))[1];
+      expect(await messenger._private.closeBell(thread.id, { through: seenB })).toBe(1);
+      expect((await bellsOf('a'))[0]).toMatchObject({ done_by: 'messenger-inbox' });
+    });
+
     test('a linked customer thread keeps its customer and takes new messages', async () => {
       const conv = conversation('a', { name: 'Pat Synthetic', unread: 0, messages: [{ fromPage: false, text: 'hi', at: ago(50) }] });
       await messenger.pollMessenger();
@@ -562,14 +628,44 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(new Set(seen).size).toBe(3);
     });
 
-    test('opening a thread marks its customer messages read', async () => {
+    test('opening a thread marks its customer messages read, up to the newest one on screen', async () => {
       await seed();
       const { threads } = await (await get('/threads')).json();
       const open = threads.find((t) => t.name === 'Pat Synthetic');
-      expect(await (await post(`/threads/${open.id}/read`)).json()).toEqual({ updated: 1 });
+      const detail = await (await get(`/threads/${open.id}`)).json();
+      const readBefore = detail.messages[detail.messages.length - 1].createdAt;
+      expect((await post(`/threads/${open.id}/read`, {})).status).toBe(400);
+      expect((await post(`/threads/${open.id}/read`, { readBefore: 'later' })).status).toBe(400);
+      expect(await (await post(`/threads/${open.id}/read`, { readBefore })).json()).toEqual({ updated: 1 });
       const after = (await (await get('/threads')).json()).threads.find((t) => t.name === 'Pat Synthetic');
       expect(after.unread).toBe(0);
-      expect(await (await post(`/threads/${open.id}/read`)).json()).toEqual({ updated: 0 });
+      expect(await (await post(`/threads/${open.id}/read`, { readBefore })).json()).toEqual({ updated: 0 });
+    });
+
+    test('a customer message stored after the snapshot stays unread and still rings', async () => {
+      const conv = conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'first', at: ago(3) }] });
+      await messenger.pollMessenger();
+      const thread = await threadOf('a');
+      const detail = await (await get(`/threads/${thread.id}`)).json();
+      const readBefore = detail.messages[detail.messages.length - 1].createdAt;
+
+      // The poll stores a newer customer message after the person's view was served, before the read lands.
+      const { appendMessage } = require('../services/conversations');
+      const later = ago(1);
+      await appendMessage({
+        conversationId: thread.id, channel: 'facebook_messenger', direction: 'inbound', authorType: 'customer', body: 'second, after the snapshot',
+        twilioSid: messenger.messageKey(mid('a', 1)), createdAt: later, isRead: false, metadata: { graph_mid: mid('a', 1), source: 'facebook' },
+      });
+      expect(await (await post(`/threads/${thread.id}/read`, { readBefore })).json()).toEqual({ updated: 1 });
+      expect((await messagesOf('a')).map((m) => [m.body, m.is_read])).toEqual([['first', true], ['second, after the snapshot', false]]);
+
+      // The next poll finds the unread message and rings for it.
+      conv.messages.push({ id: mid('a', 1), fromPage: false, text: 'second, after the snapshot', at: later });
+      conv.updated = later;
+      await messenger.pollMessenger();
+      const [bell] = await bellsOf('a');
+      expect(bell.done_at).toBeNull();
+      expect(bell.metadata.dedupeVersion).toBe(messenger.messageKey(mid('a', 1)));
     });
 
     test('a reply inside the window goes to Facebook, is stored under the sender, and closes the bell', async () => {

@@ -170,13 +170,36 @@ async function readMessages({ token }, conversationId, from, maxPages) {
   return all.sort((a, b) => a.createdAt - b.createdAt);
 }
 
-// The customer in a conversation: the participant that is not the page, else
-// the sender of an inbound message.
-function contactOf(conv, messages, pageId) {
-  const person = (conv.participants?.data || []).find((p) => p?.id && String(p.id) !== pageId);
-  if (person) return { psid: String(person.id), name: person.name || null };
-  const inbound = messages.find((m) => m.from?.id && String(m.from.id) !== pageId);
-  return inbound ? { psid: String(inbound.from.id), name: inbound.from.name || null } : null;
+// The page's identities. FACEBOOK_PAGE_ID can be a New Pages Experience alias of the page's true id
+// (social-feed.js), so the id the page token reports for itself counts too. Read once per process
+// (a failed read is retried on the next poll and the configured id stands meanwhile).
+let pageIdentity = null;
+async function resolvePage(config) {
+  if (!pageIdentity) {
+    try {
+      const me = await graph('me', { token: config.token, params: { fields: 'id,name' } });
+      pageIdentity = { id: me?.id ? String(me.id) : null, name: me?.name ? String(me.name) : null };
+    } catch (err) {
+      logger.warn(`[messenger-inbox] page identity not read: ${safeError(err)}`);
+    }
+  }
+  const ids = new Set([config.pageId, pageIdentity?.id].filter(Boolean));
+  return { ids, name: pageIdentity?.name || null };
+}
+
+// Whether a participant or sender is the page itself: one of its ids, or its name.
+const isPage = (person, page) => Boolean(person) && (page.ids.has(String(person.id)) || (page.name && person.name === page.name));
+
+// The customer in a conversation: the ONE participant that is not the page (the senders of its messages when
+// Facebook returned no participant list). Anything else is not guessed: the caller fails the conversation.
+function customerOf(conv, messages, page) {
+  const listed = conv.participants?.data;
+  const people = Array.isArray(listed) ? listed : messages.map((m) => m.from);
+  const others = new Map();
+  for (const person of people) if (person?.id && !isPage(person, page)) others.set(String(person.id), person);
+  if (others.size !== 1) return null;
+  const [person] = others.values();
+  return { psid: String(person.id), name: person.name || null };
 }
 
 // ── thread + bell ─────────────────────────────────────────────
@@ -188,15 +211,29 @@ async function findThread(psid, pageId) {
     .first();
 }
 
-async function closeBell(conversationId) {
-  const rows = await db('notifications')
-    .where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [bellKey(conversationId)])
-    .whereNull('done_at')
-    .select('id');
-  if (!rows.length) return 0;
+// Closes the thread's open bell, but only if the decision to close saw the customer message the bell
+// stands for: `through` is the latest customer message that decision was made from (null: none stored).
+// The bell's dedupe version is the key of the message it last rang for; a version whose message is newer than
+// `through` means a customer message landed since, and that bell stays open. The check and the close run
+// under the key's advisory lock, the one notifyAdmin takes to refresh the bell, so a refresh is either
+// before the check (and keeps it open) or after the close (and reopens it). No row locks.
+async function closeBell(conversationId, { through = null } = {}) {
+  const key = bellKey(conversationId);
   const NotificationService = require('./notification-service');
-  return NotificationService.markAdminDone(rows.map((r) => r.id), { by: BELL_ACTOR, resolution: BELL_RESOLUTION });
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
+    const stale = through
+      ? 'NOT EXISTS (SELECT 1 FROM messages nm WHERE nm.conversation_id = ? AND nm.twilio_sid = notifications.metadata->>\'dedupeVersion\' AND nm.created_at > ?)'
+      : "notifications.metadata->>'dedupeVersion' IS NULL";
+    const rows = await trx('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [key])
+      .whereNull('done_at')
+      .whereRaw(stale, through ? [conversationId, through.created_at] : [])
+      .select('id');
+    if (!rows.length) return 0;
+    return NotificationService.markAdminDone(rows.map((r) => r.id), { by: BELL_ACTOR, resolution: BELL_RESOLUTION }, trx);
+  });
 }
 
 // "<Area> — reply to <name> on Facebook", the words behind it in the why.
@@ -263,18 +300,18 @@ async function reconcileBell(thread) {
   const latestOut = await db('messages').where({ conversation_id: thread.id, direction: 'outbound' })
     .max({ at: 'created_at' }).first();
   const answered = latestOut?.at && (!latestIn || new Date(latestOut.at) >= new Date(latestIn.created_at));
-  if (answered) return closeBell(thread.id);
+  if (answered) return closeBell(thread.id, { through: latestIn || null });
   if (latestIn && latestIn.is_read !== true) return ringBell(thread, { body: latestIn.body, key: latestIn.twilio_sid });
   return null;
 }
 
 // One conversation: read it, store what is new, then settle its bell.
-async function importConversation(config, conv, { since, firstRun, limits }) {
+async function importConversation(config, conv, { since, firstRun, limits, page }) {
   const { pageId } = config;
   const messages = await readMessages(config, conv.id, new Date(since.getTime() - MESSAGE_OVERLAP_MS), limits.messagePages);
   if (!messages.length) return { inserted: 0 };
-  const contact = contactOf(conv, messages, pageId);
-  if (!contact) return { inserted: 0, skipped: 'no_contact' };
+  const contact = customerOf(conv, messages, page);
+  if (!contact) throw new Error('Messenger conversation does not have exactly one customer');
 
   const keys = messages.map((m) => messageKey(m.id));
   const known = new Set((await db('messages').where({ channel: CHANNEL }).whereIn('twilio_sid', keys).select('twilio_sid')).map((r) => r.twilio_sid));
@@ -285,7 +322,7 @@ async function importConversation(config, conv, { since, firstRun, limits }) {
   // First run: what Facebook already shows as read stays read here.
   const importRead = firstRun && !(Number(conv.unread_count) > 0);
   for (const msg of fresh) {
-    const outbound = String(msg.from?.id) === pageId;
+    const outbound = String(msg.from?.id) !== contact.psid;
     await appendMessage({
       conversationId: thread.id,
       channel: CHANNEL,
@@ -333,6 +370,7 @@ async function pollMessenger({ now = new Date(), limits: override } = {}) {
   const cursor = firstRun ? null : await readCursor();
   const since = cursor || new Date(now.getTime() - FIRST_RUN_DAYS * 24 * 60 * 60 * 1000);
   const { changed, complete } = await listChangedConversations(config, since, limits.conversationPages);
+  const page = await resolvePage(config);
 
   let inserted = 0;
   let failed = 0;
@@ -340,7 +378,7 @@ async function pollMessenger({ now = new Date(), limits: override } = {}) {
   for (let i = 0; i < changed.length; i += 1) {
     const conv = changed[i];
     try {
-      inserted += (await importConversation(config, conv, { since, firstRun, limits })).inserted;
+      inserted += (await importConversation(config, conv, { since, firstRun, limits, page })).inserted;
     } catch (err) {
       failed += 1;
       logger.warn(`[messenger-inbox] conversation not imported: ${safeError(err)}`);
@@ -463,11 +501,14 @@ async function getThread(req, id, now = new Date(), { limit = THREAD_MESSAGE_LIM
   };
 }
 
-async function markThreadRead(req, id, technicianId) {
+// Marks read only what the person saw: inbound messages up to `readBefore`, the newest message of the
+// thread view they read. A message the poll stored after that stays unread and keeps its bell.
+async function markThreadRead(req, id, technicianId, readBefore) {
   const row = await loadThread(req, id);
   if (!row) return null;
   const updated = await db('messages')
     .where({ conversation_id: row.id, direction: 'inbound' })
+    .where('created_at', '<=', readBefore)
     .where((q) => q.where('is_read', false).orWhereNull('is_read'))
     .update({ is_read: true, read_at: new Date(), read_by_admin_user_id: technicianId || null });
   return { updated };
@@ -547,6 +588,7 @@ async function sendReply(req, id, text, { now = new Date() } = {}) {
 
 module.exports = {
   CHANNEL,
+  _private: { closeBell, resetPageIdentity: () => { pageIdentity = null; } },
   REPLY_MAX_CHARS,
   bellKey,
   messageKey,

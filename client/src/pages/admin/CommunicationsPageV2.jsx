@@ -4333,7 +4333,7 @@ export default function CommunicationsPageV2() {
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
       {activeTab === "portal" && <PortalInboxTabV2 onCount={setPortalCount} />}
-      {activeTab === "messenger" && <MessengerTabV2 onCount={setMessengerCount} />}
+      {activeTab === "messenger" && <MessengerTabV2 onCount={setMessengerCount} routeHash={location.hash} />}
       {activeTab === "owed" && <OwedTabV2 />}
       {activeTab === "templates" && (
         <>

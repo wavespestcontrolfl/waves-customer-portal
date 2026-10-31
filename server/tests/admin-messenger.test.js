@@ -118,6 +118,21 @@ describe('admin messenger routes', () => {
     expect(mockService.listThreads).toHaveBeenCalledTimes(1);
   });
 
+  test('mark read needs readBefore and passes it to the service as a date', async () => {
+    process.env.GATE_MESSENGER_INBOX = 'true';
+    mockService.markThreadRead.mockResolvedValue({ updated: 2 });
+    const read = (base, body) => fetch(`${base}/threads/${ID}/read`, { method: 'POST', headers: auth('admin'), body: JSON.stringify(body) });
+    await withServer(async (base) => {
+      for (const body of [{}, { readBefore: 'later' }, { readBefore: 12 }]) expect((await read(base, body)).status).toBe(400);
+      expect(mockService.markThreadRead).not.toHaveBeenCalled();
+      const ok = await read(base, { readBefore: '2026-10-31T15:00:00.000Z' });
+      expect(await ok.json()).toEqual({ updated: 2 });
+    });
+    const [, id, , readBefore] = mockService.markThreadRead.mock.calls[0];
+    expect(id).toBe(ID);
+    expect(readBefore.toISOString()).toBe('2026-10-31T15:00:00.000Z');
+  });
+
   test('reply refuses an empty or over-long text before calling Facebook', async () => {
     process.env.GATE_MESSENGER_INBOX = 'true';
     await withServer(async (base) => {

@@ -73,7 +73,7 @@ describe("Messenger tab", () => {
     fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
     const detail = await screen.findByTestId("messenger-detail");
     expect(within(detail).getByText("Can someone call me about wasps?")).toBeInTheDocument();
-    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/messenger/threads/t-open/read", { method: "POST" }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/messenger/threads/t-open/read", { method: "POST", body: JSON.stringify({ readBefore: open.lastInboundAt }) }));
     await waitFor(() => expect(within(screen.getByTestId("messenger-thread-t-open")).queryByText("2 new")).not.toBeInTheDocument());
   });
 
@@ -244,6 +244,32 @@ describe("Messenger tab", () => {
     render(<MessengerTabV2 />);
     fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
     expect(await screen.findByText("Showing the latest 500 messages.")).toBeInTheDocument();
+  });
+
+  it("opens the thread named in the link when only the hash changes while the tab stays open", async () => {
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    await screen.findByTestId("messenger-detail");
+    act(() => {
+      window.location.hash = "#tab=messenger&thread=t-late";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    await waitFor(() => expect(within(screen.getByTestId("messenger-detail")).getByText("Kim Sample")).toBeInTheDocument());
+    expect(screen.getByTestId("messenger-thread-t-late")).toHaveAttribute("aria-current", "true");
+  });
+
+  it("follows a router hash change too, and ignores a link to the thread already open", async () => {
+    const { rerender } = render(<MessengerTabV2 routeHash="" />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    await screen.findByTestId("messenger-detail");
+    const detailCalls = () => adminFetch.mock.calls.filter(([url]) => url === "/admin/messenger/threads/t-open").length;
+    const before = detailCalls();
+    window.location.hash = "#tab=messenger&thread=t-open";
+    rerender(<MessengerTabV2 routeHash="#tab=messenger&thread=t-open" />);
+    expect(detailCalls()).toBe(before);
+    window.location.hash = "#tab=messenger&thread=t-done";
+    rerender(<MessengerTabV2 routeHash="#tab=messenger&thread=t-done" />);
+    await waitFor(() => expect(within(screen.getByTestId("messenger-detail")).getByText("Lee Example")).toBeInTheDocument());
   });
 
   describe("keeping the open inbox fresh", () => {
