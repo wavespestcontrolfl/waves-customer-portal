@@ -15,6 +15,7 @@ const IMAGE_ERRORS = {
   too_small: 'That image is too small to identify. Try a bigger photo, or a closer one.',
   page_blocked: "Chrome didn't let the extension capture this page. Right-click the page and choose “Select a bug on this page to identify”, or choose a photo instead. Pages like chrome:// and the Chrome Web Store can't be captured.",
   capture_failed: "We couldn't capture that. Please try again, or choose a photo instead.",
+  tab_changed: 'You switched tabs before we could capture the bug. Go back to that page and try again.',
 };
 const API_ERRORS = {
   unavailable: "Bug identification isn't available yet. Please check back soon.",

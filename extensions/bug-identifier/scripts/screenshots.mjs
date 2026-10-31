@@ -310,6 +310,24 @@ try {
     await page.close();
   });
 
+  await check('a capture is refused once its tab is no longer showing; nothing is sent', async () => {
+    const other = await context.newPage();
+    await other.goto(`http://127.0.0.1:${site.address().port}/`);
+    await other.bringToFront();
+    const before = apiCalls.length;
+    // The panel tab, now in the background, stands in for the page the user
+    // picked from: its region message reaches the service worker as that tab's.
+    await panel.evaluate(() => chrome.runtime.sendMessage({
+      type: 'bugid:region', rect: { x: 0, y: 0, width: 200, height: 200, viewportW: 400 },
+    }));
+    await panel.locator('#error').waitFor({ timeout: 10_000 });
+    assert.match(await panel.locator('#error-text').textContent(), /switched tabs/);
+    assert.equal(apiCalls.length, before);
+    await other.close();
+    await panel.bringToFront();
+    await panel.locator('#error-retry').click();
+  });
+
   // ── store images ──
   await check('store screenshots (1280x800) and small promo tile (440x280)', async () => {
     const stage = await context.newPage();

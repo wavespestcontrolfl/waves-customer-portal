@@ -65,7 +65,7 @@ async function identifyImage(info, tab) {
       await startRegionSelect(tab, 'not_found');
       return;
     }
-    await setJob(tab.windowId, { status: 'ready', photo: await captureVisible(tab.windowId, rect) });
+    await setJob(tab.windowId, { status: 'ready', photo: await captureVisible(tab, rect) });
   } catch (err) {
     await failJob(tab.windowId, err);
   }
@@ -149,13 +149,18 @@ async function captureRegion(tab, rect) {
   }
   await setJob(tab.windowId, { status: 'working', step: 'capture' });
   try {
-    await setJob(tab.windowId, { status: 'ready', photo: await captureVisible(tab.windowId, rect) });
+    await setJob(tab.windowId, { status: 'ready', photo: await captureVisible(tab, rect) });
   } catch (err) {
     await failJob(tab.windowId, err);
   }
 }
 
-async function captureVisible(windowId, rect) {
-  const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+// captureVisibleTab takes whatever tab the window shows now. Capture only while
+// that is still the tab the user picked from, so a tab switch during the image
+// fetch or the scroll never sends another page (Codex #7295 r1).
+async function captureVisible(tab, rect) {
+  const [active] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+  if (!active || active.id !== tab.id) throw new ImageError('tab_changed');
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   return toJpegPhoto(dataUrlToBlob(dataUrl), rect);
 }
