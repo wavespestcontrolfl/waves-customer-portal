@@ -95,6 +95,8 @@ const SECRET_PATTERNS = Object.freeze([
   { name: 'anthropic_api_key', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
   { name: 'openai_api_key', re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g },
   { name: 'google_api_key', re: /\bAIza[0-9A-Za-z_-]{35}/g },
+  // Google's newer key format (an AI Studio key bound to a service account): "AQ." + 50 base64url characters.
+  { name: 'google_bound_api_key', re: /\bAQ\.[0-9A-Za-z_-]{40,}/g },
   { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g },
   { name: 'pem_private_key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
   // An Authorization header (any scheme: Basic, Bearer, Digest, Negotiate, a

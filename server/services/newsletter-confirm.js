@@ -282,8 +282,9 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
         // Newsletter confirmation is the legitimate use of the `newsletter@`
         // identity — name it explicitly so the intent is durable rather than
         // depending on sendgrid-mail's default (other callers should declare
-        // their own identity; defaults are not policy).
-        fromEmail: 'newsletter@wavespestcontrol.com',
+        // their own identity; defaults are not policy). It sends from the
+        // newsletter subdomain with the issues and win-backs (owner 2026-10-31).
+        fromEmail: 'newsletter@news.wavespestcontrol.com',
         fromName: 'Waves Newsletter',
         subject: 'Confirm your Waves Newsletter signup',
         html,

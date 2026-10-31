@@ -53,6 +53,8 @@ describe('runPerception: Gemini first, OpenAI backup on any miss', () => {
     expect(out).toEqual({ ok: true, observations: OBSERVATIONS.observations, overall_notes: OBSERVATIONS.overall_notes, model: LAWN_PIPELINE_MODELS.vision });
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(global.fetch.mock.calls[0][0]).toContain('generativelanguage.googleapis.com');
+    expect(global.fetch.mock.calls[0][0]).not.toMatch(/[?&]key=/);
+    expect(global.fetch.mock.calls[0][1].headers['x-goog-api-key']).toBe('test-gemini-key');
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 

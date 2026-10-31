@@ -139,7 +139,10 @@ The portal's PWA never hand-rolls a `wavespay://` URL; it always calls
 JWT with an embedded `jti`, `invoice_id`, and `amount_cents`, and returns
 the deep link. iOS parses the `t` parameter, decodes the JWT's `jti` claim
 locally (the server verified the signature), and hits `/validate-handoff`
-to atomically burn the `jti` and fetch the authoritative invoice state.
+to atomically burn the `jti` and fetch the authoritative invoice state,
+including the invoice number and what the customer pays for: its service
+lines and the totals rows the invoice PDF prints, down to the amount due
+(prices are left off when those rows do not add up to the charge).
 The tech then taps **Tap to Pay on iPhone**; iOS hits `/payment-intent` with the `jti`
 to create a `card_present` PaymentIntent scoped to that handoff row.
 Stripe Terminal's on-device flow takes over: discover the synthetic

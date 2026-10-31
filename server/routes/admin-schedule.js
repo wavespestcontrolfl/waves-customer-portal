@@ -151,6 +151,11 @@ const {
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 
+// The technician an edit leaves the row with: the one the save sets, else the stored one.
+function savedTechnicianId(updates, row) {
+  return (updates.technician_id !== undefined ? updates.technician_id : row.technician_id) || null;
+}
+
 // Whether overlap probes are technician-scoped (occupancy.js techScopedConfirmActive). Looked
 // up at call time and guarded: suites mock the occupancy module down to a few functions, and a
 // missing reader reads as off (tech-blind), today's behavior.
@@ -1199,7 +1204,7 @@ async function guardRecurrenceDestination(trx, { lockedDates, date, row, exclude
     windowEnd: block.end,
     excludeServiceIds,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark): the
+    // Second technician (GATE_MULTI_TECH_CONFIRM, dark; hour or capacity mode): the
     // series row's own technician plus unassigned rows; gate off = tech-blind.
     technicianId: row.technician_id || null,
   });
@@ -9721,7 +9726,7 @@ async function scheduleCreateHandler(req, res, next) {
           windowStart: insertData.window_start,
           windowEnd: insertData.window_end,
           excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-          // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark):
+          // Second technician (GATE_MULTI_TECH_CONFIRM, dark; hour or capacity mode):
           // the booked technician's route plus unassigned rows, as the
           // picker's strip and the edit save's route check score it. Gate
           // off or no technician = tech-blind, byte for byte.
@@ -15805,6 +15810,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
                 id: req.params.id, parentBefore: recurringParentBefore, updates,
               }),
               excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+              // The technician the row is SAVED with (GATE_MULTI_TECH_CONFIRM scopes this
+              // advisory overlap read to that route plus unassigned rows; gate off or
+              // unassigned = tech-blind, as before).
+              technicianId: savedTechnicianId(updates, occRow),
               arrivalWindow: { serviceId: req.params.id, changes: updates, roads: 'cache' },
             });
             if (adminMoveClash.length) {
@@ -29230,8 +29239,10 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
   try {
     const date = typeof req.body?.date === 'string' ? req.body.date.trim() : '';
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 200) : null;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
+    // A real calendar day, not just the shape: 2026-02-31 used to reach the
+    // date insert and come back as a 500 (settings audit SET-02).
+    if (!validDateOnly(date)) {
+      return res.status(400).json({ error: 'date must be a calendar date (YYYY-MM-DD)' });
     }
     // Upsert keeps the button idempotent — re-adding a date just updates
     // the reason instead of tripping the unique constraint.
@@ -29258,6 +29269,11 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
 
 router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
   try {
+    // A malformed id is not found, like an unknown one: the uuid column
+    // would throw on it and the error came back as a 500 (settings audit).
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.id || ''))) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     const { lockClosureState } = require('../services/scheduling/blackout-dates');
     // Exclusive closure-state lock before the write — see the weekly-days-off
     // handler above / blackout-dates.js for why and the lock order. The date

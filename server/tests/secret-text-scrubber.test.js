@@ -20,6 +20,7 @@ const FORMATS = {
   anthropic_api_key: ['sk-' + 'ant-' + x(30, 'a')],
   openai_api_key: ['sk-' + x(30, 'a'), 'sk-' + 'proj-' + x(30, 'a')],
   google_api_key: ['AI' + 'za' + x(35, 'a')],
+  google_bound_api_key: ['A' + 'Q.' + b64(40) + 'x_' + x(8, 'z')],
   jwt: ['ey' + 'Jhbgci0i.' + 'eyJ' + 'zdWIiOjEy.' + b64(20)],
   pem_private_key: ['-----BEGIN ' + 'PRIVATE KEY-----\n' + b64(30) + '\n-----END ' + 'PRIVATE KEY-----', '-----BEGIN RSA ' + 'PRIVATE KEY-----\n' + b64(30)],
   authorization_header: ['Authorization: Basic ' + x(12, 'b')],
@@ -50,7 +51,7 @@ describe('known secret formats', () => {
     expect(scrubSecretText(`Keys ${pub} and ${sid}`)).toEqual({ text: `Keys ${pub} and ${sid}`, removed: 0 });
   });
   test('short look-alikes stay', () => {
-    expect(scrubSecretText('sk-short, AKIA123, ghp_abc, Bearer abc').removed).toBe(0);
+    expect(scrubSecretText('sk-short, AKIA123, ghp_abc, Bearer abc, AQ.abc, AQ. next').removed).toBe(0);
   });
 });
 

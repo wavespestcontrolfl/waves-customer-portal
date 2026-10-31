@@ -365,6 +365,24 @@ describe('routes', () => {
     try { return await fn(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise((r) => server.close(r)); }
   }
 
+  test('hub probe reports the Hygiene review tab from GATE_DATA_HYGIENE_UI and fails closed on anything but true', async () => {
+    const featureGates = require('../config/feature-gates');
+    const real = featureGates.isEnabled;
+    let hygiene = false;
+    const spy = jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => (g === 'dataHygieneReviewUi' ? hygiene : real(g)));
+    try {
+      await withServer(async (base) => {
+        const admin = { headers: { Authorization: 'Bearer admin' } };
+        const probe = async () => (await (await fetch(`${base}/api/admin/agents/control/hub`, admin)).json()).features.hygiene;
+        expect(await probe()).toBe(false);
+        hygiene = 'yes';
+        expect(await probe()).toBe(false);
+        hygiene = true;
+        expect(await probe()).toBe(true);
+      });
+    } finally { spy.mockRestore(); }
+  });
+
   test('gate off → probe says no ledger and both reads 404; gate on → admin reads, tech 403, bad param 400', async () => {
     await withServer(async (base) => {
       const admin = { headers: { Authorization: 'Bearer admin' } };

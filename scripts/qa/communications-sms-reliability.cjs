@@ -47,6 +47,7 @@ async function main() {
         } else if (api === '/admin/communications/stats') body = { totalSent: 8, totalReceived: 12, channelStats: [] };
         else if (api === '/admin/communications/blocked-numbers') body = { numbers: [] };
         else if (api === '/admin/communications/agent-draft') body = { draft: null };
+        else if (api === '/admin/portal-inbox/summary') body = { enabled: false };
         else if (api === '/admin/communications/messages/read') body = { success: true };
         else { report.unmatched.push(api); status = 404; body = { error: 'No fixture' }; }
         return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });

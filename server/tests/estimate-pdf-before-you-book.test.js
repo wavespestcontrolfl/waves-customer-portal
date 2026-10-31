@@ -364,6 +364,31 @@ describe('Before you book: commercial page', () => {
     expect(residential.closing.text).toMatch(/^Questions before you book\?/);
   });
 
+  test('the misting section prints only for an estimate that carries the misting system (owner wording 2026-10-30)', () => {
+    const MISTING_LINES = ['The date you pick is your first monthly service visit.', 'We call you to book the install day.', 'The install charge is on your first invoice.'];
+    // The signal alone: no signal, or any other value, leaves the page exactly as it was.
+    for (const signals of [{ planTerms: true }, { planTerms: false }, { planTerms: true, misting: false }]) {
+      expect(buildBeforeYouBook(signals, {}).sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
+    }
+    const withMisting = buildBeforeYouBook({ planTerms: true, misting: true }, { phone: '(941) 555-0100' });
+    expect(withMisting.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent', 'misting']);
+    const section = withMisting.sections.find((s) => s.key === 'misting');
+    expect(section.heading).toBe('If your estimate includes a misting system');
+    expect(section.lines.map((l) => l.text)).toEqual(MISTING_LINES);
+    // Every other section is untouched by the misting signal.
+    expect(sha(buildBeforeYouBook({ planTerms: true }, { phone: '(941) 555-0100' }).sections)).toBe(sha(withMisting.sections.filter((s) => s.key !== 'misting')));
+
+    // End to end on stored estimates: the misting plan row (or the stored misting input) turns it on; nothing else does.
+    const misting = { service: 'mosquito_misting', name: 'Mosquito Misting Service Plan', visitsPerYear: 12 };
+    expect(pageOf(fixture('byb-misting', [misting])).sections.map((s) => s.key)).toContain('misting');
+    expect(pageOf(fixture('byb-pest-misting', [pest, misting])).sections.map((s) => s.key)).toContain('misting');
+    const inputOnly = { ...fixture('byb-misting-input', [pest]), estimate_data: { engineInputs: { services: { pest: true, mosquitoMisting: true } } } };
+    expect(pageOf(inputOnly).sections.map((s) => s.key)).toContain('misting');
+    for (const services of [[pest], [pest, lawn], [{ service: 'mosquito', name: 'Mosquito', visitsPerYear: 12 }]]) {
+      expect(pageOf(fixture('byb-no-misting', services)).sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
+    }
+  });
+
   test('a commercial pest-only proposal prints exactly the approved strings', () => {
     const page = pageOf(authored(['Commercial pest control, monthly service']));
     expect(page.title).toBe('Before you start service');

@@ -439,6 +439,23 @@ postgres('annual prepay charged after the first visit', () => {
     expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
   });
 
+  // The draft carries the approval day as its due date until the release
+  // dates it, so the Invoices page's Overdue filter and count leave the year
+  // out while it waits; once the charge failed and the pay link went out, it
+  // is overdue like any sent invoice.
+  it('a year waiting for its first visit is never overdue on the Invoices page', async () => {
+    const InvoiceService = require('../services/invoice');
+    const f = await deferredAccept({ acceptedDaysAgo: 3 });
+    const overdueIds = async () => (await InvoiceService.list({ status: 'overdue', customerId: f.customerId })).invoices.map((row) => row.id);
+    expect(await overdueIds()).toEqual([]);
+    const waitingCount = (await InvoiceService.getStats()).overdue;
+    await trx('estimates').where({ id: f.estimateId })
+      .update({ estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,status}', '\"delivered_fallback\"')") });
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent' });
+    expect(await overdueIds()).toEqual([f.invoiceId]);
+    expect((await InvoiceService.getStats()).overdue).toBe(waitingCount + 1);
+  });
+
   describe('the first visit\'s completion text (owner ruling 2026-10-03, neutral wording)', () => {
     async function completeWithText(f, visitId) {
       const techId = randomUUID();

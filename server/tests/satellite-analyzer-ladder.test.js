@@ -149,6 +149,9 @@ describe('analyze() — Gemini → OpenAI Sol ladder', () => {
     const geminiCalls = providerCalls('generativelanguage.googleapis.com');
     expect(geminiCalls).toHaveLength(1);
     expect(String(geminiCalls[0][0])).toContain('/gemini-3.8-flash:generateContent');
+    // The key rides in the header, never the URL (URLs reach logs and traces).
+    expect(String(geminiCalls[0][0])).not.toMatch(/[?&]key=/);
+    expect(geminiCalls[0][1].headers['x-goog-api-key']).toBe('test-gemini-key');
     const body = JSON.parse(geminiCalls[0][1].body);
     expect(body.contents[0].parts.filter((part) => part.inline_data)).toEqual([
       { inline_data: { mime_type: 'image/png', data: expect.any(String) } },

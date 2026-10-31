@@ -10,6 +10,7 @@ import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
 import ServiceLinesCard from "./ServiceLinesCard";
+import TerritoryReadoutCard from "./TerritoryReadoutCard";
 import usePayrollAvailable from "../../hooks/usePayrollAvailable";
 import TechPayStubs from "../../components/payroll/TechPayStubs";
 import useTechPayStubs from "../../hooks/useTechPayStubs";
@@ -2991,6 +2992,9 @@ export function TeamTab({ showToast }) {
   // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
   // Service lines card never renders and nothing is fetched.
   const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
+  // GATE_TERRITORY_READOUT: the server marks the roster response; off, the Territories
+  // card never renders and nothing is fetched.
+  const [territoryReadoutEnabled, setTerritoryReadoutEnabled] = useState(false);
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
@@ -3070,6 +3074,7 @@ export function TeamTab({ showToast }) {
       setTechs(res.technicians || []);
       setWorkDaysEnabled(res.workDaysEnabled === true);
       setServiceLinesEnabled(res.serviceLinesEnabled === true);
+      setTerritoryReadoutEnabled(res.territoryReadoutEnabled === true);
       setLoadFailed(false);
     } catch {
       if (request !== loadRequestRef.current) return;
@@ -4282,6 +4287,7 @@ export function TeamTab({ showToast }) {
       {isAdmin && serviceLinesEnabled && (
         <ServiceLinesCard techs={techs} showToast={showToast} />
       )}
+      {isAdmin && territoryReadoutEnabled && <TerritoryReadoutCard />}
       {earningsTech && (
         <EarningsModal
           tech={earningsTech}

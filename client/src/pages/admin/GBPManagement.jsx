@@ -112,8 +112,11 @@ export default function GBPManagement() {
       /* fallback to Places API data */
       try {
         const d = await adminFetch("/admin/reviews/gbp-locations");
+        // The Places rows name the Place ID `placeId`; the Google listing
+        // links read `googlePlaceId`, as the profile rows name it.
         const locs = (d.locations || []).map((l) => ({
           ...l,
+          googlePlaceId: l.placeId,
           gbp: null,
           hasCredentials: false,
           pendingUpdates: 0,
@@ -192,6 +195,10 @@ export default function GBPManagement() {
     setSyncing(false);
   };
   const handleSyncAll = async () => {
+    if (locations.length === 0) {
+      showToast("No locations to sync");
+      return;
+    }
     setSyncing(true);
     const failed = [];
     for (const loc of locations) {

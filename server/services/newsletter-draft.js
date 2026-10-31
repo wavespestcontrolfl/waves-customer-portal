@@ -2051,7 +2051,10 @@ async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db
     text_body: draft.textBody || null,
     preview_text: draft.previewText || null,
     from_name: 'Waves Pest Control',
-    from_email: 'events@wavespestcontrol.com',
+    // The newsletter signs as its own subdomain (SendGrid domain auth on
+    // news.wavespestcontrol.com, owner 2026-10-31), so list complaints stay off
+    // the domain that carries invoices and reminders. Replies still go to contact@.
+    from_email: 'events@news.wavespestcontrol.com',
     reply_to: 'contact@wavespestcontrol.com',
     status: 'draft',
     segment_filter: null,

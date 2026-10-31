@@ -236,7 +236,9 @@ postgres('payroll review bonus import', () => {
       expect((await importedLines()).map((l) => l.source_id)).toEqual([kept]);
       const events = await syncEvents();
       expect(events).toHaveLength(2);
-      expect(events[1].metadata).toMatchObject({ added_count: 0, removed_count: 1, removed_payout_ids: [byHand] });
+      // syncEvents() has no ORDER BY, so the row order is not insertion order: find the
+      // recompute's event by content, never by position.
+      expect(events.map((e) => e.metadata)).toContainEqual(expect.objectContaining({ added_count: 0, removed_count: 1, removed_payout_ids: [byHand] }));
 
       const done = await finalize(created.body.run.id);
       expect(done.status).toBe(200);

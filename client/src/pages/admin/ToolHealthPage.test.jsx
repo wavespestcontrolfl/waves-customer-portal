@@ -143,6 +143,28 @@ describe("ToolHealthPage foundation migration", () => {
     expect(errorRow).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("a failed refresh keeps the last snapshot, marked as not current", async () => {
+    mount();
+    expect(await screen.findByText(/auto-refreshes every 30s/)).toBeInTheDocument();
+    fetch.mockImplementation(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+    // useVisiblePageRefresh refreshes on window focus.
+    fireEvent(window, new Event("focus"));
+    expect(await screen.findByText(/^Refresh failed: HTTP 503\. Showing the 24h snapshot from \S+ ago\.$/)).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/admin/tool-health?hours=24")).toHaveLength(2);
+    expect(screen.getByText("Last known: Critical")).toBeInTheDocument();
+    expect(screen.getByText(/^Not current: last successful update \S+ ago · retrying every 30s$/)).toBeInTheDocument();
+    expect(screen.queryByText(/auto-refreshes every 30s/)).not.toBeInTheDocument();
+  });
+
+  it("a window whose first load fails names the window the snapshot covers", async () => {
+    mount();
+    await screen.findByText(/auto-refreshes every 30s/);
+    fetch.mockImplementation(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+    fireEvent.click(screen.getByRole("button", { name: "1h" }));
+    expect(await screen.findByText(/^Refresh failed: HTTP 503\. Showing the 24h snapshot from \S+ ago\.$/)).toBeInTheDocument();
+    expect(screen.getByText(/^Not current: last successful update \S+ ago \(24h window\) · retrying every 30s$/)).toBeInTheDocument();
+  });
+
   it("keeps the owner-only integrations link hidden for a technician profile", async () => {
     profileRole = "technician";
     mount();

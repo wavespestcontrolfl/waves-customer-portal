@@ -22,13 +22,31 @@ const AGENT_SOURCES = [
   { source: 'tech-intelligence-bar', label: 'Tech Intelligence Bar', critical: false },
 ];
 
+const MAX_WINDOW_HOURS = 24 * 30;
+
+// The window is a whole number of hours, 1 to 30 days; anything else is a
+// 400. "-1" used to move `since` into the future and report an idle window,
+// and parseInt read "1.5" or "24abc" as a window (health audit HE-01).
+function parseWindowHours(raw) {
+  if (raw === undefined || raw === '') return 24;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return null;
+  const hours = Number(raw);
+  return hours >= 1 && hours <= MAX_WINDOW_HOURS ? hours : null;
+}
+
+const STATUS_RANK = { ok: 0, warning: 1, critical: 2 };
+const worseStatus = (a, b) => (STATUS_RANK[b] > STATUS_RANK[a] ? b : a);
+
 router.get('/', async (req, res, next) => {
   try {
-    const hours = Math.min(parseInt(req.query.hours || '24', 10) || 24, 24 * 30);
+    const hours = parseWindowHours(req.query.hours);
+    if (hours === null) {
+      return res.status(400).json({ error: `hours must be a whole number from 1 to ${MAX_WINDOW_HOURS}` });
+    }
     const since = new Date(Date.now() - hours * 3600 * 1000);
 
     const pdfSince = new Date(Date.now() - 3600 * 1000);
-    const [summary, bySource, byContext, byTool, recentErrors, pdfRenderer] = await Promise.all([
+    const [summary, bySource, byTool, recentErrors, pdfRenderer] = await Promise.all([
       db('tool_health_events')
         .where('created_at', '>=', since)
         .select(
@@ -49,22 +67,17 @@ router.get('/', async (req, res, next) => {
         .max('created_at as last_call_at')
         .groupBy('source'),
 
+      // A null context groups as "unknown" in SQL, so a request that named
+      // "unknown" itself shares the row instead of making a second one. The
+      // literal sits in the SQL text, not a binding, so SELECT and GROUP BY
+      // compile to the same expression.
       db('tool_health_events')
         .where('created_at', '>=', since)
-        .whereNotNull('context')
-        .select('context')
-        .count('* as total')
-        .select(db.raw('SUM(CASE WHEN NOT success THEN 1 ELSE 0 END)::int as failed'))
-        .countDistinct('tool_name as tools_used')
-        .groupBy('context'),
-
-      db('tool_health_events')
-        .where('created_at', '>=', since)
-        .select('context', 'tool_name', 'source')
+        .select(db.raw("COALESCE(context, 'unknown') as context"), 'tool_name', 'source')
         .count('* as total')
         .select(db.raw('SUM(CASE WHEN NOT success THEN 1 ELSE 0 END)::int as failed'))
         .avg('duration_ms as avg_duration_ms')
-        .groupBy('context', 'tool_name', 'source'),
+        .groupByRaw("COALESCE(context, 'unknown'), tool_name, source"),
 
       db('tool_health_events')
         .where('created_at', '>=', since)
@@ -109,51 +122,60 @@ router.get('/', async (req, res, next) => {
       };
     });
 
-    // Group tools by context for the dashboard sections
+    // Group tools by context for the dashboard sections. Each card's totals
+    // are summed from its own tool rows, so they always match them; events
+    // with no context (recordToolEvent stores null) are the "unknown" card.
+    // A separate per-context query used to skip null contexts, so that card
+    // showed its tool rows over zero totals (health audit HE-02).
     const contextsMap = new Map();
-    for (const row of byContext) {
-      contextsMap.set(row.context, {
-        context: row.context,
-        total: parseInt(row.total),
-        failed: parseInt(row.failed || 0),
-        toolsUsed: parseInt(row.tools_used || 0),
-        tools: [],
-      });
-    }
     for (const row of byTool) {
-      const ctx = row.context || 'unknown';
+      const ctx = row.context;
       if (!contextsMap.has(ctx)) {
-        contextsMap.set(ctx, { context: ctx, total: 0, failed: 0, toolsUsed: 0, tools: [] });
+        contextsMap.set(ctx, { context: ctx, total: 0, failed: 0, toolNames: new Set(), tools: [] });
       }
-      contextsMap.get(ctx).tools.push({
+      const card = contextsMap.get(ctx);
+      const total = parseInt(row.total);
+      const failed = parseInt(row.failed || 0);
+      card.total += total;
+      card.failed += failed;
+      card.toolNames.add(row.tool_name);
+      card.tools.push({
         toolName: row.tool_name,
         source: row.source,
-        total: parseInt(row.total),
-        failed: parseInt(row.failed || 0),
-        errorRate: parseInt(row.total) > 0 ? parseInt(row.failed || 0) / parseInt(row.total) : 0,
+        total,
+        failed,
+        errorRate: total > 0 ? failed / total : 0,
         avgDurationMs: row.avg_duration_ms ? Math.round(parseFloat(row.avg_duration_ms)) : null,
       });
     }
     const contexts = Array.from(contextsMap.values())
-      .map(c => ({ ...c, errorRate: c.total > 0 ? c.failed / c.total : 0 }))
+      .map(({ toolNames, ...c }) => ({ ...c, toolsUsed: toolNames.size, errorRate: c.total > 0 ? c.failed / c.total : 0 }))
       .sort((a, b) => b.failed - a.failed || b.total - a.total);
 
     const totalCalls = parseInt(summary?.total || 0);
     const totalFailed = parseInt(summary?.failed || 0);
     const overallErrorRate = totalCalls > 0 ? totalFailed / totalCalls : 0;
 
-    let overallStatus = 'ok';
-    if (totalCalls === 0) overallStatus = 'idle';
-    else if (overallErrorRate >= 0.2 || (summary?.circuit_open_count || 0) > 0) overallStatus = 'critical';
-    else if (overallErrorRate >= 0.05) overallStatus = 'warning';
-
-    // Alerts: circuit-open, tools with >20% error and >=5 calls
+    // Alerts: circuit-open, failing agent sources, tools with >20% error and
+    // >=5 calls, and the PDF renderer.
     const alerts = [];
     if ((summary?.circuit_open_count || 0) > 0) {
       alerts.push({
         severity: 'critical',
         title: 'Circuit breaker tripped',
         detail: `${summary.circuit_open_count} tool calls short-circuited in the last ${hours}h. Check error log below.`,
+      });
+    }
+    // An agent card that is not healthy gets an alert, so the banner below
+    // can name the source. A critical source keeps its card's severity; any
+    // other source counts as a warning at most (health audit HE-03).
+    for (const agent of agents) {
+      if (agent.status !== 'warning' && agent.status !== 'critical') continue;
+      alerts.push({
+        severity: agent.critical ? agent.status : 'warning',
+        // The word follows the card: Critical reads "failing", Degraded "degraded".
+        title: `${agent.label} ${agent.status === 'critical' ? 'failing' : 'degraded'}`,
+        detail: `${agent.failed}/${agent.total} calls failed (${Math.round(agent.errorRate * 100)}%) in the last ${hours}h.`,
       });
     }
     for (const ctx of contexts) {
@@ -177,6 +199,18 @@ router.get('/', async (req, res, next) => {
         title: 'PDF render success rate below threshold',
         detail: `${pdfSucceeded}/${pdfDenominator} terminal PDF renders succeeded (${Math.round(pdfSuccessRate * 100)}%) in the last hour.`,
       });
+    }
+
+    // The banner is the worst of the overall error rate and every alert, so
+    // it never reads Healthy over a failing source or a critical alert.
+    // Before, a fully failing low-volume source hid under a busy healthy one
+    // (health audit HE-03).
+    let overallStatus = 'ok';
+    if (totalCalls === 0) overallStatus = 'idle';
+    else {
+      if (overallErrorRate >= 0.2 || (summary?.circuit_open_count || 0) > 0) overallStatus = 'critical';
+      else if (overallErrorRate >= 0.05) overallStatus = 'warning';
+      for (const alert of alerts) overallStatus = worseStatus(overallStatus, alert.severity);
     }
 
     res.json({

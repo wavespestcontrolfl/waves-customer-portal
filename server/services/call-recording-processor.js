@@ -9088,11 +9088,11 @@ async function transcribeWithGemini(audioBuffer, opts = {}) {
     const direction = isOutboundCall(opts.call) ? 'outbound' : 'inbound';
     const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent`,
       {
         method: 'POST',
         signal: providerTimeoutSignal('transcription'),
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
           contents: [{
             parts: [
@@ -10095,11 +10095,11 @@ Return ONLY valid JSON.`;
   // sweep + triage machinery owns those); only the parse verdict is retried.
   const generateOnce = async () => {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent`,
       {
         method: 'POST',
         signal: providerTimeoutSignal('extraction'),
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
@@ -21083,8 +21083,8 @@ const CallRecordingProcessor = {
                 // resolved before the txn; if the FOR SHARE recheck below
                 // books unassigned instead, it re-fences the unassigned-day
                 // rung there (codex r1 P2).
-                // Two technicians (GATE_MULTI_TECH_CONFIRM + capacity mode,
-                // owner 2026-10-03): a FRESH call booking goes to the
+                // Two technicians (GATE_MULTI_TECH_CONFIRM, hour or capacity mode,
+                // owner 2026-10-03; hour mode owner 2026-10-30): a FRESH call booking goes to the
                 // technician who is free at this time and whose route that day
                 // is closest (scheduling/pick-technician.js), not to the one
                 // default technician. Nobody free → unassigned, and the
