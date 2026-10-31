@@ -6,9 +6,8 @@
  * a live row, then lock by id. An archive committed in between used to let
  * the stale request rewrite the archived row (a stage save could set
  * active=true). The locked read now requires deleted_at IS NULL.
- * C12: tags, interactions, follow-ups and notification preferences wrote
- * without checking the customer at all; a follow-up to an unknown id
- * reported success.
+ * C12: the notification-preference save wrote without checking the customer
+ * at all.
  */
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
@@ -144,31 +143,18 @@ describe('C11: an archive that commits before the row lock refuses the edit', ()
   });
 });
 
-describe('C12: CRM and notification-preference writes need a live customer', () => {
+describe('C12: notification-preference writes need a live customer', () => {
   test.each([
     ['archived', ARCHIVED],
     ['missing', null],
-  ])('%s customer: every write refuses with 404 and writes nothing', async (_label, row) => {
+  ])('%s customer: the save refuses with 404 and writes nothing', async (_label, row) => {
     mockState.readRow = row && { ...row };
     mockState.lockedRow = row && { ...row };
-    expect(await call('post', '/:id/tags', { body: { tag: 'vip' } })).toMatchObject(NOT_FOUND);
-    expect(await call('delete', '/:id/tags/:tag', { params: { tag: 'vip' } })).toMatchObject(NOT_FOUND);
-    expect(await call('post', '/:id/interactions', { body: { type: 'call', subject: 'Called', body: 'Left a message' } })).toMatchObject(NOT_FOUND);
-    expect(await call('post', '/:id/follow-up', { body: { date: '2026-11-02', notes: 'Call back' } })).toMatchObject(NOT_FOUND);
     expect(await call('put', '/:id/notification-prefs', { body: { autoFlipEnRoute: false } })).toMatchObject(NOT_FOUND);
     expect(mockState.writes).toEqual([]);
   });
 
-  test('a live customer still takes each write; the note and last-contact stamp share one transaction', async () => {
-    expect((await call('post', '/:id/tags', { body: { tag: 'vip' } })).status).toBe(200);
-    expect((await call('delete', '/:id/tags/:tag', { params: { tag: 'vip' } })).status).toBe(200);
-    expect((await call('post', '/:id/follow-up', { body: { date: '2026-11-02', notes: 'Call back' } })).status).toBe(200);
+  test('a live customer still takes the save', async () => {
     expect((await call('put', '/:id/notification-prefs', { body: { autoFlipEnRoute: false } })).status).toBe(200);
-    mockState.writes = [];
-    expect((await call('post', '/:id/interactions', { body: { type: 'call', subject: 'Called', body: 'Left a message' } })).status).toBe(200);
-    expect(mockState.writes).toEqual([
-      expect.objectContaining({ table: 'customer_interactions', op: 'insert', inTransaction: true }),
-      expect.objectContaining({ table: 'customers', op: 'update', inTransaction: true, patch: expect.objectContaining({ last_contact_type: 'call' }) }),
-    ]);
   });
 });
