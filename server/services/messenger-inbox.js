@@ -78,17 +78,14 @@ async function graph(urlOrPath, { token, params = {}, method = 'GET', body } = {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
   });
-  let json = {};
-  let readable = true;
-  try { json = await res.json(); } catch { readable = false; }
-  if (!res.ok) {
-    throw Object.assign(new Error(`Facebook Graph request failed (HTTP ${res.status}, code ${json?.error?.code ?? 'none'})`), {
-      status: res.status, fbCode: json?.error?.code ?? null,
-    });
-  }
-  // A success whose body cannot be read is not an empty answer: an empty list here would let a
-  // first import mark itself finished with nothing read. `unreadable` lets a send call it unconfirmed.
-  if (!readable || !json || typeof json !== 'object') {
+  let json = null;
+  try { json = await res.json(); } catch { /* unreadable: json stays null */ }
+  const fbCode = json?.error?.code ?? null;
+  if (!res.ok) throw Object.assign(new Error(`Facebook Graph request failed (HTTP ${res.status}, code ${fbCode})`), { status: res.status, fbCode });
+  // A success whose body is not an object (unparseable, null, a bare value) is not an empty answer:
+  // an empty list here would let a first import mark itself finished with nothing read.
+  // `unreadable` lets a send call it unconfirmed.
+  if (Object(json) !== json) {
     throw Object.assign(new Error(`Facebook Graph answer unreadable (HTTP ${res.status})`), { status: res.status, fbCode: null, unreadable: true });
   }
   return json;
@@ -321,8 +318,14 @@ async function importConversation(config, conv, { since, firstRun, limits, page 
   if (!contact) throw new Error('Messenger conversation does not have exactly one customer');
 
   const keys = messages.map((m) => messageKey(m.id));
-  const known = new Set((await db('messages').where({ channel: CHANNEL }).whereIn('twilio_sid', keys).select('twilio_sid')).map((r) => r.twilio_sid));
-  const fresh = messages.filter((m, i) => !known.has(keys[i]));
+  const stored = new Map((await db('messages').where({ channel: CHANNEL }).whereIn('twilio_sid', keys)
+    .select('id', 'twilio_sid', 'created_at')).map((r) => [r.twilio_sid, r]));
+  const fresh = messages.filter((m, i) => !stored.has(keys[i]));
+  // Facebook's created_time is the delivered order. A portal reply is stored when its send began,
+  // so a customer message sent meanwhile would sort after it; move stored times to Facebook's.
+  const moved = messages.map((m, i) => ({ row: stored.get(keys[i]), at: new Date(m.createdAt) }))
+    .filter(({ row, at }) => row && Math.abs(new Date(row.created_at) - at) > 1000);
+  for (const { row, at } of moved) await db('messages').where({ id: row.id }).update({ created_at: at, updated_at: new Date() });
   const thread = fresh.length ? await ensureThread(contact, pageId) : await findThread(contact.psid, pageId);
   if (!thread) return { inserted: 0 };
 

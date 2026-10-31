@@ -154,10 +154,13 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
   const [detailError, setDetailError] = useState("");
   const listSeq = useRef(0);
   const olderLoaded = useRef(false);
+  // An older page in flight: refreshes wait, so the first page cannot shift under its cursor.
+  const olderInFlight = useRef(false);
   const threads = list ? list.items : null;
 
   // Reloads the newest page. When older pages were loaded, they stay below the fresh page.
   const loadThreads = useCallback(() => {
+    if (olderInFlight.current) return Promise.resolve();
     listSeq.current += 1;
     const seq = listSeq.current;
     return adminFetch("/admin/messenger/threads")
@@ -184,6 +187,9 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
     const last = list?.items[list.items.length - 1];
     if (!last || loadingOlder) return;
     setLoadingOlder(true);
+    olderInFlight.current = true;
+    // A refresh already in flight must not replace the page this cursor was read from.
+    listSeq.current += 1;
     try {
       const d = await adminFetch(`/admin/messenger/threads?before=${encodeURIComponent(last.lastMessageAt)}&beforeId=${encodeURIComponent(last.id)}`);
       olderLoaded.current = true;
@@ -195,6 +201,7 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
     } catch (err) {
       setLoadError(isRateLimitError(err) ? SLOW_DOWN : "Failed to load older threads.");
     } finally {
+      olderInFlight.current = false;
       setLoadingOlder(false);
     }
   };

@@ -707,6 +707,26 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect((await messagesOf('open')).filter((m) => m.direction === 'outbound')).toHaveLength(1);
     });
 
+    test('a portal reply moves to Facebook\'s delivery time on the next poll, so a message sent during the send does not leave it unanswered', async () => {
+      await seed();
+      const open = (await (await get('/threads')).json()).threads.find((t) => t.name === 'Pat Synthetic');
+      expect((await post(`/threads/${open.id}/reply`, { text: 'We can call you at 3.' })).status).toBe(200);
+      // Facebook: the customer wrote while the send was in flight; the reply was delivered after it.
+      const conv = fb.conversations.find((c) => c.psid === psid('open'));
+      const later = new Date(Date.now() + 30 * 1000);
+      conv.messages.push({ id: `m_mid_${RUN}`, fromPage: false, text: 'Also the side gate', at: later });
+      conv.messages.push({ id: `m_sent_${RUN}`, fromPage: true, text: 'We can call you at 3.', at: new Date(later.getTime() + 30 * 1000) });
+      conv.updated = new Date(later.getTime() + 30 * 1000);
+      await messenger.pollMessenger();
+      const rows = await messagesOf('open');
+      const reply = rows.find((m) => m.twilio_sid === messenger.messageKey(`m_sent_${RUN}`));
+      expect(new Date(reply.created_at).getTime()).toBe(later.getTime() + 30 * 1000);
+      expect(rows[rows.length - 1].id).toBe(reply.id);
+      const thread = (await (await get('/threads')).json()).threads.find((t) => t.name === 'Pat Synthetic');
+      expect(thread.answered).toBe(true);
+      expect((await bellsOf('open'))[0].done_at).not.toBeNull();
+    });
+
     test('a reply does not close a bell raised for a customer message newer than the reply', async () => {
       await seed();
       const open = (await (await get('/threads')).json()).threads.find((t) => t.name === 'Pat Synthetic');

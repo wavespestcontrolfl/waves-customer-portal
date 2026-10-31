@@ -404,6 +404,25 @@ describe("Messenger tab", () => {
       expect(screen.getByTestId("messenger-thread-t-0tie")).toBeInTheDocument();
     });
 
+    it("holds the automatic refresh while an older page loads, then keeps both pages", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      let finishOlder;
+      let firstPageCalls = 0;
+      adminFetch.mockImplementation((url) => {
+        if (url === "/admin/messenger/threads") { firstPageCalls += 1; return Promise.resolve({ enabled: true, threads: [open], hasMore: true, unanswered: 1 }); }
+        if (url.startsWith("/admin/messenger/threads?before=")) return new Promise((resolve) => { finishOlder = () => resolve({ enabled: true, threads: [older], hasMore: false, unanswered: 1 }); });
+        return Promise.resolve({});
+      });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByRole("button", { name: "Show older" }));
+      const callsBefore = firstPageCalls;
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 1000); });
+      expect(firstPageCalls).toBe(callsBefore);
+      await act(async () => { finishOlder(); });
+      expect(await screen.findByTestId("messenger-thread-t-older")).toBeInTheDocument();
+      expect(screen.getByTestId("messenger-thread-t-open")).toBeInTheDocument();
+    });
+
     it("keeps loaded older threads below a refreshed first page", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       adminFetch.mockImplementation(async (url) => {
