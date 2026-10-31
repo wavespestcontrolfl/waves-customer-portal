@@ -21,8 +21,9 @@
 
 const path = require('path');
 const {
-  nameParts, scoreCandidate, decideReviewLink, SAID_REVIEWED_RE,
+  nameParts, firstKnownContactAt, dateVerdict, scoreCandidate, decideReviewLink, SAID_REVIEWED_RE,
 } = require(path.join(__dirname, '..', '..', 'server', 'services', 'review-link-evidence'));
+const { ASK_TOUCH_SQL } = require(path.join(__dirname, '..', '..', 'server', 'services', 'review-outreach-templates'));
 
 const CONTACT_COLUMNS = ['secondary_contact_name', 'service_contact_name', 'service_contact2_name', 'service_contact3_name'];
 const OWNED_RESULTS = new Set(['link', 'link_confirm', 'pause', 'household']);
@@ -58,12 +59,23 @@ async function loadData(trx) {
   const visits = (await trx.raw(`
     SELECT customer_id, scheduled_date::text AS on_day FROM scheduled_services
      WHERE status = 'completed' AND customer_id IS NOT NULL`)).rows;
-  // Every delivery of an ask: the text, the email, and a delivered follow-up (followup_sent_at is not
-  // one: it also stamps a suppressed follow-up).
+  // Every delivery of a review ask, read the way review-ask-history.js deliveredAskRows reads one
+  // customer: ASK_TOUCH_SQL drops the no-link check-in templates; the text, the email and a delivered
+  // follow-up each count, the follow-up from its column or from messaging_audit_log for sends before
+  // that column existed (followup_sent_at is not delivery: it also stamps a suppressed follow-up).
+  // Texts the office typed by hand are not counted.
   const asks = (await trx.raw(`
-    SELECT customer_id, sms_sent_at, sent_at, followup_delivered_at FROM review_requests
-     WHERE customer_id IS NOT NULL
-       AND (sms_sent_at IS NOT NULL OR sent_at IS NOT NULL OR followup_delivered_at IS NOT NULL)`)).rows;
+    SELECT rr.customer_id, rr.sms_sent_at, rr.sent_at, rr.followup_delivered_at, f.logged_at AS followup_logged_at
+      FROM review_requests rr
+      LEFT JOIN (
+        SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS logged_at
+          FROM messaging_audit_log
+         WHERE entry_point = 'review_request_followup' AND sent_at IS NOT NULL
+         GROUP BY metadata->>'review_request_id'
+      ) f ON f.review_request_id = rr.id::text
+     WHERE rr.customer_id IS NOT NULL
+       AND ${ASK_TOUCH_SQL}
+       AND (rr.sms_sent_at IS NOT NULL OR rr.sent_at IS NOT NULL OR rr.followup_delivered_at IS NOT NULL OR f.logged_at IS NOT NULL)`)).rows;
   // Server-observed taps only (review-click-correlation.js: the legacy promoter stamps redirected_at
   // before the browser navigates). Each timestamp keeps the profile it was stamped for.
   const taps = (await trx.raw(`
@@ -105,7 +117,9 @@ function buildCandidates({ customers, visits, asks, taps, texts }) {
       visitsOn: (visitsBy.get(cu.id) || []).map((v) => v.on_day),
       // One request can deliver on both sides of a review: a text before it, the email or the
       // follow-up after it. Each delivery counts on its own.
-      asksAt: (asksBy.get(cu.id) || []).flatMap((a) => [a.sms_sent_at, a.sent_at, a.followup_delivered_at]).filter(Boolean),
+      asksAt: (asksBy.get(cu.id) || [])
+        .flatMap((a) => [a.sms_sent_at, a.sent_at, a.followup_delivered_at, a.followup_logged_at])
+        .filter(Boolean),
       taps: (tapsBy.get(cu.id) || []).flatMap((t) => [
         { at: t.redirected_at, locationId: t.google_location },
         { at: t.last_redirected_at, locationId: t.last_google_location },
@@ -127,8 +141,10 @@ function auditReview(review, candidates, linkedBy, surnameHolderCount) {
   return decideReviewLink(scored, { surnameHolderCount });
 }
 
-function classifyLinked(review, decision) {
-  if ((decision.rejected || []).some((c) => c.customerId === review.customer_id)) return 'linked_date_clash';
+// The linked customer's dates are checked on their own: a link the name rules cannot explain (a click
+// auto-link, a manual match) never reaches the scored candidates, so it would never be rejected there.
+function classifyLinked(review, decision, linked) {
+  if (dateVerdict(review.review_created_at, firstKnownContactAt(linked.timeline)) === 'clash') return 'linked_date_clash';
   if (decision.top && decision.top.customerId !== review.customer_id && OWNED_RESULTS.has(decision.result)) return 'linked_elsewhere';
   return 'linked_ok';
 }
@@ -141,7 +157,7 @@ function asksAfter(candidate, reviewAt) {
 function rowFor(review, decision, byId) {
   const linked = review.customer_id ? byId.get(review.customer_id) : null;
   let section = `unlinked_${decision.result}`;
-  if (review.customer_id) section = linked ? classifyLinked(review, decision) : 'linked_archived';
+  if (review.customer_id) section = linked ? classifyLinked(review, decision, linked) : 'linked_archived';
   const ownerId = section === 'linked_ok' ? review.customer_id
     : (!review.customer_id && OWNED_RESULTS.has(decision.result) ? decision.top.customerId : null);
   const owner = ownerId ? byId.get(ownerId) : null;
@@ -250,7 +266,7 @@ async function main() {
   }
 }
 
-module.exports = { auditRows };
+module.exports = { loadData, auditRows };
 
 if (require.main === module) {
   main().catch((err) => { console.error(err.message || err); process.exit(1); });
