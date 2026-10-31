@@ -115,6 +115,41 @@ describe('currentW4For shape', () => {
     expect(JSON.stringify(viaService)).not.toMatch(/NaN|undefined/);
   });
 
+  // IRS Tax Topic 753: an exemption is valid only for the calendar year it was furnished; with no new
+  // W-4 by February 15 the employer withholds as single with no other entries. null makes the pay run
+  // use that default.
+  describe('an exempt W-4 signed 2026-03-01', () => {
+    const connWith = (patch) => Object.assign(() => ({
+      where() { return this; }, orderBy() { return this; }, first: async () => ({ ...row, ...patch }),
+    }), { raw: (sql) => sql });
+    const exempt = connWith({ exempt: true, signed_on: '2026-03-01', effective_on: '2026-03-01' });
+
+    // February 15, 2027 is Washington's Birthday, a legal holiday: the deadline moves to Tuesday the 16th.
+    it('is still in force through the deadline, February 16, 2027 (February 15 is a holiday)', async () => {
+      expect(await currentW4For(TECH_ID, '2027-02-15', exempt)).toMatchObject({ exempt: true, signedOn: '2026-03-01' });
+      expect(await currentW4For(TECH_ID, '2027-02-16', exempt)).toMatchObject({ exempt: true });
+    });
+
+    it('lapses the day after the deadline, February 17, 2027', async () => {
+      await expect(currentW4For(TECH_ID, '2027-02-17', exempt)).resolves.toBeNull();
+    });
+
+    it('lapses on February 16 when February 15 is a business day (Tuesday, February 15, 2028)', async () => {
+      const exempt2027 = connWith({ exempt: true, signed_on: '2027-03-01', effective_on: '2027-03-01' });
+      expect(await currentW4For(TECH_ID, '2028-02-15', exempt2027)).toMatchObject({ exempt: true });
+      await expect(currentW4For(TECH_ID, '2028-02-16', exempt2027)).resolves.toBeNull();
+    });
+
+    it('is in force for the rest of the year it was signed', async () => {
+      expect(await currentW4For(TECH_ID, '2026-12-25', exempt)).toMatchObject({ exempt: true });
+    });
+
+    it('does not lapse an election that is not exempt', async () => {
+      const plain = connWith({ exempt: false, signed_on: '2026-03-01', effective_on: '2026-03-01' });
+      expect(await currentW4For(TECH_ID, '2027-02-17', plain)).toMatchObject({ exempt: false });
+    });
+  });
+
   it('returns null when no election applies yet', async () => {
     const empty = Object.assign(() => ({ where() { return this; }, orderBy() { return this; }, first: async () => undefined }), { raw: (s) => s });
     await expect(currentW4For(TECH_ID, '2026-11-06', empty)).resolves.toBeNull();
