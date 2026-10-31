@@ -204,6 +204,27 @@ async function findAcceptanceInvoice(estimate) {
   }
 }
 
+// Pay after the first visit (GATE_PAF_PREPAY): the year's charge waits on the
+// accepting estimate's durable job (estimate_data.prepayAutoChargeJob) until a
+// visit is performed, and its draft invoice is never sent. True only while
+// that job still waits and is bound to this term's invoice. Fail-soft (false).
+async function chargesAfterFirstVisit(estimate, term) {
+  if (!term?.prepay_invoice_id) return false;
+  try {
+    let data = estimate.estimate_data;
+    if (data === undefined) {
+      data = (await db('estimates').where({ id: estimate.id }).first('estimate_data'))?.estimate_data;
+    }
+    if (typeof data === 'string') data = JSON.parse(data);
+    const job = data && typeof data === 'object' ? data.prepayAutoChargeJob : null;
+    return !!job && job.deferred_to_first_visit === true && job.status === 'awaiting_first_visit'
+      && String(job.invoice_id || '') === String(term.prepay_invoice_id);
+  } catch (err) {
+    logger.warn('[estimate-payment-context] deferred prepay job read failed', { error: err.message });
+    return false;
+  }
+}
+
 // The accept-time payment choice persisted on the committed scheduled service
 // ('card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual').
 async function readPaymentPreference(scheduledServiceId) {
@@ -292,6 +313,7 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
       // Money came in but coverage was killed (void/refund) — the card must
       // say "bill normally", not fall through to "payment not received yet".
       refunded: !paid && invoiceIsPaid(invoice),
+      chargeAfterFirstVisit: paid ? false : await chargesAfterFirstVisit(estimate, term),
       planLabel: term.plan_label || null,
       prepayAmount: num(term.prepay_amount),
       termStart: term.term_start || null,
@@ -329,7 +351,13 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   // money) also opens this section (Codex PR r3 P2): completion's
   // detector treats the fee as owed there, so the card must run the same
   // detector instead of hiding the warning behind prepay context.
-  if (!term || termIsDead || termCanonicallyCovered === false) {
+  // Except a visit the deferred pay-after-first-visit hold covers
+  // (GATE_PAF_PREPAY): its year waits unpaid by design, yet completion counts
+  // the visit annual-prepay covered (coversThisVisit is that same gate), mints
+  // nothing for it and raises no setup-fee alert, because the prepay waives
+  // the fee. Warning there would send staff to bill a waived $99.
+  const visitHeldByPrepay = annualPrepay?.coversThisVisit === true;
+  if (!term || termIsDead || (termCanonicallyCovered === false && !visitHeldByPrepay)) {
     const inv = await findAcceptanceInvoice(estimate);
     if (inv) {
       acceptanceInvoice = {
