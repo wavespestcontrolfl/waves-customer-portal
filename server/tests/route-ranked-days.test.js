@@ -61,7 +61,8 @@ const datesOf = (call) => {
   return out;
 };
 
-const ENV_KEYS = ['GATE_ROUTE_CHECK_STAFF_LISTS', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_PICKER_ROAD_CHECK', 'GATE_SCHEDULING_CAPACITY'];
+const ENV_KEYS = ['GATE_ROUTE_CHECK_STAFF_LISTS', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_PICKER_ROAD_CHECK', 'GATE_SCHEDULING_CAPACITY',
+  'GATE_AUTO_DISPATCH_DAY_RULES'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -309,5 +310,84 @@ describe('gate on', () => {
     expect(options.slice(0, 2).map((o) => o.date)).toEqual([dayOffset(2), dayOffset(1)]);
     expect(options[1]).toMatchObject({ routeChecked: true, dayAlreadyLate: true });
     expect(options[1].suggestedWindow.start).toBe('15:00');
+  });
+});
+
+// GATE_AUTO_DISPATCH_DAY_RULES (owner 2026-10-24: "think sundays should be a last resort", "sundays all"): a
+// Sunday follows every Monday-Saturday day on both lists, as on the staff time strip.
+describe('Sundays last (GATE_AUTO_DISPATCH_DAY_RULES)', () => {
+  const isSundayDate = (date) => new Date(`${date}T12:00:00Z`).getUTCDay() === 0;
+  // The first Sunday in the list's ten days and the next two Monday-Saturday days after it. Every other day is
+  // a blackout day, so the three candidates are known whatever weekday today is.
+  function threeDays() {
+    const dates = Array.from({ length: 10 }, (_, i) => dayOffset(i + 1));
+    const sunday = dates.find(isSundayDate);
+    const weekdays = dates.filter((date) => date > sunday && !isSundayDate(date)).slice(0, 2);
+    getBlackoutDates.mockResolvedValue(new Set(dates.filter((date) => date !== sunday && !weekdays.includes(date))));
+    return { sunday, weekdays };
+  }
+  const rulesOn = () => { process.env.GATE_AUTO_DISPATCH_DAY_RULES = 'true'; };
+  const sundayBest = ({ sunday, weekdays }) => async () => ({
+    slots: [slot(sunday, '10:00', 1), slot(weekdays[0], '10:00', 5), slot(weekdays[1], '10:00', 6)], rejections_by_date: {},
+  });
+
+  test('route-checked list: the engine\'s best day is a Sunday; it moves after the Monday-Saturday days', async () => {
+    gateOn();
+    const days = threeDays();
+    findAvailableSlots.mockImplementation(sundayBest(days));
+    const before = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
+    expect(before.map((o) => o.date)).toEqual([days.sunday, ...days.weekdays]);
+    rulesOn();
+    const after = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
+    expect(after.map((o) => o.date)).toEqual([...days.weekdays, days.sunday]);
+    expect(after[2]).toMatchObject({ routeChecked: true, dayOfWeek: 'Sunday' });
+  });
+
+  test('route-checked list: an unverified Monday-Saturday day comes before a checked Sunday', async () => {
+    gateOn();
+    rulesOn();
+    const { sunday, weekdays } = threeDays();
+    findAvailableSlots.mockImplementation(async () => ({
+      slots: [slot(sunday, '10:00', 1), slot(weekdays[0], '10:00', 5)],
+      rejections_by_date: { [weekdays[1]]: { route_unverified: 3 } },
+    }));
+    const options = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
+    expect(options.map((o) => [o.date, o.routeChecked])).toEqual([[weekdays[0], true], [weekdays[1], false], [sunday, true]]);
+  });
+
+  test('today\'s list (route check off): a Sunday follows the Monday-Saturday options', async () => {
+    const { sunday } = threeDays();
+    const before = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
+    expect(findAvailableSlots).not.toHaveBeenCalled();
+    expect(before.map((o) => o.date)).toContain(sunday);
+    // The Sunday is the soonest of the three days, so the old score never puts it last.
+    expect(before[before.length - 1].date).not.toBe(sunday);
+    rulesOn();
+    const after = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
+    expect(after.map((o) => o.date)).toEqual([...before.map((o) => o.date).filter((date) => date !== sunday), sunday]);
+  });
+
+  test('the Quick Move day options (a reason flow, no caller) follow the same rule', async () => {
+    gateOn();
+    rulesOn();
+    const days = threeDays();
+    findAvailableSlots.mockImplementation(sundayBest(days));
+    const options = await SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true });
+    expect(options.map((o) => o.date)).toEqual([...days.weekdays, days.sunday]);
+  });
+});
+
+describe('sundaysLast', () => {
+  const { sundaysLast } = require('../services/scheduling/route-ranked-days');
+  // 2026-11-01 and 2026-11-08 are Sundays.
+  const rows = ['2026-11-01', '2026-11-02', '2026-11-08', '2026-11-03'].map((date) => ({ date }));
+
+  test('gate off: the entries as given', () => {
+    expect(sundaysLast(rows, (row) => row.date)).toBe(rows);
+  });
+
+  test('gate on: Monday-Saturday first, then the Sundays, each group in its own order', () => {
+    process.env.GATE_AUTO_DISPATCH_DAY_RULES = 'true';
+    expect(sundaysLast(rows, (row) => row.date).map((row) => row.date)).toEqual(['2026-11-02', '2026-11-03', '2026-11-01', '2026-11-08']);
   });
 });

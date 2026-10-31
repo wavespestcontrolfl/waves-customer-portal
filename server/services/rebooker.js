@@ -1673,7 +1673,8 @@ class SmartRebooker {
     }
 
     options.sort((a, b) => b.score - a.score);
-    return options.slice(0, 3);
+    // GATE_AUTO_DISPATCH_DAY_RULES: a Sunday follows every Monday-Saturday option, as on the route-checked list.
+    return require('./scheduling/route-ranked-days').sundaysLast(options, (option) => option.date).slice(0, 3);
   }
 
   findBestWindow(service) {

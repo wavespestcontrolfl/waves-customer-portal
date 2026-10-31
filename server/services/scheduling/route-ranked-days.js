@@ -140,6 +140,21 @@ async function classifyDay(candidate, { byDate, rejections, clashesAt, durationM
   return { kind: onlyUnverified ? 'unverified' : 'refused', candidate };
 }
 
+/**
+ * GATE_AUTO_DISPATCH_DAY_RULES (owner 2026-10-24: "think sundays should be a
+ * last resort", "sundays all"): a Sunday is offered only after every
+ * Monday-Saturday day, the rule the staff time strip (find-time-hints.js
+ * loadSummaryDayFacts) and the night tool already follow. Stable: each group
+ * keeps its order. Gate off (or a partial test mock of the gates module):
+ * the entries as given.
+ */
+function sundaysLast(entries, dateOf) {
+  const gates = require('../../config/feature-gates');
+  if (typeof gates.autoDispatchDayRulesLive !== 'function' || !gates.autoDispatchDayRulesLive()) return entries;
+  const isSunday = (entry) => new Date(`${dateOf(entry)}T12:00:00Z`).getUTCDay() === 0;
+  return [...entries.filter((entry) => !isSunday(entry)), ...entries.filter(isSunday)];
+}
+
 const bySoonest = (a, b) => b.score - a.score || (a.dateStr < b.dateStr ? -1 : 1);
 
 // Least added drive first (the engine's own score), then its detour, then the old score.
@@ -189,7 +204,8 @@ async function rankRouteCheckedDays({ serviceId, service, candidates, durationMi
         ranked.push({ candidate, slot: null, window: candidate.window, routeChecked: false });
       }
     }
-    return ranked;
+    // A Sunday, checked or not, follows every Monday-Saturday day (GATE_AUTO_DISPATCH_DAY_RULES).
+    return sundaysLast(ranked, (entry) => entry.candidate.dateStr);
   } catch (err) {
     logger.warn(`[route-ranked-days] route check failed, keeping the old list: ${err.message}`);
     return null;
@@ -221,4 +237,4 @@ function withSearchedDays(result, routeChecked, dateFrom, dateTo) {
   return { ...result, searched_dates: enumerateDates(dateFrom, dateTo, { includeWeekends: true }) };
 }
 
-module.exports = { routeRankedDaysLive, staffRoadCheckOptions, newStopRouteOptions, withSearchedDays, rankRouteCheckedDays, _internals: { windowFor } };
+module.exports = { routeRankedDaysLive, staffRoadCheckOptions, newStopRouteOptions, withSearchedDays, rankRouteCheckedDays, sundaysLast, _internals: { windowFor } };
