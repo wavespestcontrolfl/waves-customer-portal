@@ -5086,6 +5086,32 @@ draft estimate stays mirrored to the run's own row, and `/upsell` reaches
 only the authenticated lead's draft. Resolving a repeat to its root at
 estimate acceptance / self-booking is PR B′ (services, not this route).
 Kill switch: unset the gate — rows already labelled keep their marker.
+
+Same-person customer link (owner 2026-10-31; DARK behind
+`GATE_QUOTE_SAME_PERSON_MATCH`, read at call time, strict `'true'`, default
+off in every environment — off, behavior is exactly as before): the
+post-pricing customer upsert in `/calculate` still links a typed phone that
+matches exactly ONE non-deleted customer row, and still declines a phone
+that matches several. With the gate on, a phone that matches 2 to 10 rows
+links the lead and draft estimate to ONE of them instead of inserting a new
+`customers` row, but only when every matched row is live (active, not
+deleted) and all rows plus the typed contact are one person at one premise:
+names compatible (`namesCompatible`), the same parsed street key, equal unit
+keys from the shared address normalizer (trailing inline units peeled by
+`splitStreetLineUnit`, compared with `unitLineValueKey`: Apt, Unit, Suite
+and # are one dwelling designator, while Bldg, Floor, Space and Lot stay, so
+"Bldg 2" never equals "Apt 2" and every part of a multi-part unit counts;
+no unit on both sides counts as equal), and equal 5-digit ZIPs, or, when either ZIP is blank,
+equal non-empty cities (`resolveSamePersonCluster`, `customer-dedupe.js`).
+The chosen row is the one the nightly duplicate sweep would keep
+(`pickWinner` with the sweep's business weighting). Any mismatch, an
+unparseable street, or more than 10 rows keeps the old behavior: a new row.
+The existing-row update is the same one a single match gets
+(`buildExistingCustomerPublicQuoteUpdates`: fill missing attribution, bump
+`last_contact_*`, never downgrade a stage). The link grants no identity:
+booking.js's contact-linked handoff guard still refuses to book a quote
+draft linked to an established customer. The pre-pricing rodent lookup is
+unchanged. Kill switch: unset the gate.
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
