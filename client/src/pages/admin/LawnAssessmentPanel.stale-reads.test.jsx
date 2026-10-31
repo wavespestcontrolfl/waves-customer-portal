@@ -115,3 +115,21 @@ it("history shows the stored calendar day, unscored metrics as not scored, and m
   expect(screen.getByText("40%")).toBeInTheDocument();
   expect(screen.getByText("Not confirmed")).toBeInTheDocument();
 });
+
+it("a late profile save for Alice never refills Blair's form", async () => {
+  answers["/admin/customers/customer-a/turf-profile"] = () => ok({ profile: { municipality: "Alice town" } });
+  answers["/admin/customers/customer-b/turf-profile"] = () => ok({ profile: { municipality: "Blair town" } });
+  render(<LawnAssessmentPanel embedded />);
+  await clickFor(alice, "Profile");
+  expect(await screen.findByDisplayValue("Alice town")).toBeInTheDocument();
+  // Hold Alice's save open: the PUT goes to the same path as the read.
+  delete answers["/admin/customers/customer-a/turf-profile"];
+  fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await clickFor(blair, "Profile");
+  expect(await screen.findByDisplayValue("Blair town")).toBeInTheDocument();
+  await act(async () => pending["/admin/customers/customer-a/turf-profile"](ok({ profile: { municipality: "Alice saved" } })));
+  expect(screen.getByDisplayValue("Blair town")).toBeInTheDocument();
+  expect(screen.queryByDisplayValue("Alice saved")).not.toBeInTheDocument();
+  expect(alert).toHaveBeenCalledWith("Turf profile saved");
+});

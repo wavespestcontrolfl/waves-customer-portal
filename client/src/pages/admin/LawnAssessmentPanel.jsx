@@ -414,6 +414,10 @@ export default function LawnAssessmentPanel({ embedded = false }) {
 
   const saveTurfProfile = async () => {
     if (!selectedCustomer) return;
+    // A save is not a view change: read the view number, never bump it. The
+    // server result still gets its alert, but a save that lands after the
+    // operator opened another customer must not refill that customer's form.
+    const seq = viewSeq.current;
     // Strip empty strings so the API receives null/undefined instead of
     // empty strings that fail numeric/date parsing on the server.
     const payload = {
@@ -434,6 +438,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
         },
       );
       alert("Turf profile saved");
+      if (seq !== viewSeq.current) return;
       setCountyTouched(false);
       setGrassTouched(false);
       // Reflect the saved row back into form state so the user sees
@@ -459,12 +464,14 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   // general profile save never carries it.
   const saveBermudaRemoval = async (enabled) => {
     if (!selectedCustomer) return;
+    const seq = viewSeq.current;
     setBermudaRemovalSaving(true);
     try {
       const d = await adminFetch(
         `/admin/customers/${selectedCustomer.id}/turf-profile/bermuda-removal`,
         { method: "PUT", body: JSON.stringify({ enabled }) },
       );
+      if (seq !== viewSeq.current) return;
       setTurfProfile((prev) => ({
         ...prev,
         bermuda_removal: d.profile?.bermuda_removal === true,
