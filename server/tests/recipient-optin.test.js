@@ -165,7 +165,7 @@ describe('yesWouldConfirmAsk: does a YES from this phone confirm an ask?', () =>
   }
 
   test('an ask that went out and is not confirmed yet: true, read with the confirm predicate', async () => {
-    const open = chain({ first: { id: 'row-1' } });
+    const open = chain({ first: { phone_key: '9415550123' } });
     const dbh = queued({ recipient_optin: [open] });
     await expect(yesWouldConfirmAsk('+19415550123', { dbh })).resolves.toBe(true);
     expect(open.calls).toEqual(expect.arrayContaining([
