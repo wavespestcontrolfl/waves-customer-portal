@@ -196,6 +196,7 @@ async function flushDates(db, dates, refresh) {
 async function executeHandover(db, opts) {
   const { from, to, start, planId } = opts;
   const lines = opts.lines || planner.MOVABLE_LINES;
+  const zips = opts.zips || null;
   const now = opts.now || new Date();
   const today = opts.today || etDateString(now);
   const outDir = opts.outDir || path.join(os.homedir(), 'handover-runs');
@@ -215,14 +216,14 @@ async function executeHandover(db, opts) {
       checkTarget(toRow);
       const mismatch = (got) => new Refusal('PLAN_MISMATCH', `the plan changed since the dry run: this run's PLAN ID is ${got}, --plan is ${planId}. Nothing was written. Run the dry run again and read it.`);
 
-      const first = await planner.planHandover(trx, { from, to, start, today, lines });
+      const first = await planner.planHandover(trx, { from, to, start, today, lines, zips });
       if (first.planId !== planId) throw mismatch(first.planId);
 
       // Fence recurring maintenance for every planned series, then the tech-day fence every
       // assignment writer takes, for every day the moves touch. Both hold through commit.
       await lockSeriesMaintenance(trx, first.ids.retemplate);
       await lockTechDays(trx, first.ids.moves.flatMap((m) => [{ techId: from, date: m.date }, { techId: to, date: m.date }]));
-      const plan = await planner.planHandover(trx, { from, to, start, today, lines });
+      const plan = await planner.planHandover(trx, { from, to, start, today, lines, zips });
       if (plan.planId !== planId) throw mismatch(plan.planId);
 
       // The app's save-time check, once per destination day (absence rows refuse the run).
@@ -258,6 +259,9 @@ async function executeHandover(db, opts) {
         plan_id: planId,
         created_at: new Date().toISOString(),
         from, to, start, lines,
+        // --zips (territory build 6): each listed ZIP's territory technician before this run.
+        zips,
+        territory: plan.territory.map((t) => ({ zip: t.zip, technician_id: t.technician_id || null })),
         series: oldSeries.map((r) => ({ id: r.id, recurring_technician_id: r.recurring_technician_id || null, recurring_technician_override: r.recurring_technician_override === true })),
         visits: plan.ids.moves.map((m) => ({
           id: m.visit_id, date: m.date, technician_id: from,
@@ -286,9 +290,17 @@ async function executeHandover(db, opts) {
           .update({ technician_id: to, route_order: null, updated_at: trx.fn.now() });
         if (n !== 1) throw new Error(`visit ${m.visit_id}: changed since the plan was read (rolled back)`);
       }
+      // --zips: --to becomes the territory technician of every listed ZIP, only while each row still holds
+      // what the plan read (the PLAN ID covers it).
+      for (const t of plan.territory) {
+        const n = await trx('territory_zips').where({ zip: t.zip })
+          .whereRaw('technician_id IS NOT DISTINCT FROM ?', [t.technician_id || null])
+          .update({ technician_id: to, updated_at: trx.fn.now() });
+        if (n !== 1) throw new Error(`territory ZIP ${t.zip}: changed since the plan was read (rolled back)`);
+      }
 
       const summary = {
-        planId, from, to, start, lines,
+        planId, from, to, start, lines, zips, territory: plan.territory.length,
         series: seriesIds.length, visits: visitIds.length, customers: customers.size,
         dates: [...new Set(plan.ids.moves.map((m) => m.date))],
         rollbackFile,
@@ -298,7 +310,7 @@ async function executeHandover(db, opts) {
         action: 'schedule.handover.execute',
         resource_type: 'technician_handover',
         metadata: {
-          plan_id: planId, from, to, start, lines, series: summary.series, visits: summary.visits, customers: summary.customers,
+          plan_id: planId, from, to, start, lines, zips, territory_zips: summary.territory, series: summary.series, visits: summary.visits, customers: summary.customers,
           run_id: record.run_id, rollback_file: path.basename(rollbackFile), source: 'ops/agents/second-tech-handover-execute.js',
         },
         critical: true,
@@ -363,7 +375,7 @@ async function rollbackHandover(db, opts) {
       await lockSeriesMaintenance(trx, record.series.map((s) => s.id));
       await lockTechDays(trx, record.visits.flatMap((v) => [{ techId: from, date: v.date }, { techId: to, date: v.date }]));
       await assertRunCommitted(trx, record.run_id);
-      const skipped = { series: [], visits: [] };
+      const skipped = { series: [], visits: [], territory: [] };
       let seriesRestored = 0;
       let visitsRestored = 0;
       // The original technician must still be able to take each day (the app's save-time check);
@@ -409,19 +421,27 @@ async function rollbackHandover(db, opts) {
           .update({ recurring_technician_id: s.recurring_technician_id, recurring_technician_override: s.recurring_technician_override, updated_at: new Date() });
         seriesRestored += 1;
       }
+      // --zips: a ZIP goes back to its earlier territory technician only while it still names --to.
+      let territoryRestored = 0;
+      for (const t of record.territory || []) {
+        const n = await trx('territory_zips').where({ zip: t.zip, technician_id: to })
+          .update({ technician_id: t.technician_id || null, updated_at: trx.fn.now() });
+        if (n === 1) territoryRestored += 1; else skipped.territory.push(t.zip);
+      }
       await auditLog.recordAuditEvent({
         actor_type: 'system',
         action: 'schedule.handover.rollback',
         resource_type: 'technician_handover',
         metadata: {
           plan_id: record.plan_id, run_id: record.run_id, from, to, series_restored: seriesRestored, visits_restored: visitsRestored,
-          series_skipped: skipped.series.length, visits_skipped: skipped.visits.length,
+          territory_restored: territoryRestored,
+          series_skipped: skipped.series.length, visits_skipped: skipped.visits.length, territory_skipped: skipped.territory.length,
           source: 'ops/agents/second-tech-handover-execute.js',
         },
         critical: true,
         trx,
       });
-      return { planId: record.plan_id, from, to, seriesRestored, visitsRestored, skipped, dates: [...new Set(record.visits.map((v) => v.date))] };
+      return { planId: record.plan_id, from, to, seriesRestored, visitsRestored, territoryRestored, skipped, dates: [...new Set(record.visits.map((v) => v.date))] };
     });
   } finally {
     await lock.release();
@@ -451,7 +471,9 @@ function printSummary(r, { rollback }) {
     out.push('Second-technician handover ROLLBACK (done; no message was sent)');
     out.push(`  PLAN ID rolled back: ${r.planId}`);
     out.push(`  series templates restored: ${r.seriesRestored}   visits restored: ${r.visitsRestored}`);
-    out.push(`  skipped (the row changed since): ${r.skipped.series.length} series, ${r.skipped.visits.length} visits`);
+    out.push(`  territory ZIPs restored: ${r.territoryRestored}`);
+    out.push(`  skipped (the row changed since): ${r.skipped.series.length} series, ${r.skipped.visits.length} visits, ${r.skipped.territory.length} territory ZIPs`);
+    for (const zip of r.skipped.territory) out.push(`    territory ZIP ${zip}`);
     for (const id of r.skipped.series) out.push(`    series ${id}`);
     for (const id of r.skipped.visits) out.push(`    visit ${id}`);
   } else {
@@ -459,6 +481,7 @@ function printSummary(r, { rollback }) {
     out.push(`  PLAN ID: ${r.planId}`);
     out.push(`  from: ${r.from}   to: ${r.to}   first solo day: ${r.start}`);
     out.push(`  series templates moved: ${r.series}   visits moved: ${r.visits}   customers: ${r.customers}   days: ${r.dateCount}`);
+    if (r.zips) out.push(`  territory: ${r.territory} ZIPs now belong to the target (${r.zips.join(', ')})`);
     out.push(`  summary card to the hire: ${r.cardSent ? 'written' : (r.visits > 0 ? 'NOT written (see the log); the moves are committed' : 'not needed (no visits moved)')}`);
     out.push(`  rollback file: ${r.rollbackFile}`);
     out.push(`  undo with: --rollback ${r.rollbackFile}`);
@@ -486,7 +509,7 @@ async function main(args) {
     } else {
       const start = args.start || planner.defaultStart();
       printSummary(await executeHandover(db, {
-        from: args.from, to: args.to, start, lines: args.lines, planId: args.plan, outDir: args.outDir || undefined,
+        from: args.from, to: args.to, start, lines: args.lines, zips: args.zips, planId: args.plan, outDir: args.outDir || undefined,
       }), { rollback: false });
     }
   } catch (err) {
