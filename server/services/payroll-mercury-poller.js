@@ -63,6 +63,11 @@ function patchForRequest(request) {
 
 // The transaction an approved request made, from the account's transactions (filtered by request id).
 function transactionFor(row, transactions) {
+  // The transaction already linked to this payment, when the list holds it.
+  if (row.mercury_transaction_id) {
+    const linked = transactions.find((t) => t.id === row.mercury_transaction_id);
+    if (linked) return linked;
+  }
   const mine = transactions.find((t) => t.requestId === row.mercury_request_id && t.amountCents === Number(row.amount_cents));
   if (mine) return mine;
   // Fallback when Mercury does not tie the request id: our note, this amount, this recipient.
@@ -168,8 +173,11 @@ async function stepApproved(row, ctx) {
 
 async function stepSent(row, ctx) {
   // From the day the request was made: Mercury's own default is the last 30 days, short of the 60-day watch.
-  const transactions = await ctx.client.listTransactions({ requestId: row.mercury_request_id, start: etDateString(new Date(row.created_at)) });
-  const result = patchForSentReread(row, transactionFor(row, transactions));
+  const start = etDateString(new Date(row.created_at));
+  let tx = transactionFor(row, await ctx.client.listTransactions({ requestId: row.mercury_request_id, start }));
+  // A transaction found without a request id link (approved step's fallback) is found again the same way.
+  if (!tx) tx = transactionFor(row, await ctx.client.listTransactions({ start }));
+  const result = patchForSentReread(row, tx);
   const changed = await applyPatch(ctx.conn, row, result.patch, ctx.now);
   if (changed && (result.patch.state || result.patch.posted_on)) await afterChange(row, result, resolveNow(result.patch, ctx.now), ctx.conn);
   return changed;

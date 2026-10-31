@@ -138,6 +138,8 @@ describe('poller decisions', () => {
     expect(poller.transactionFor(row, txs).id).toBe('c');
     expect(poller.transactionFor(row, [txs[0], txs[1]])).toBeNull();
     // Without a request id link, our note + amount + recipient still finds it.
+    // The transaction already linked to the payment is found by its id.
+    expect(poller.transactionFor({ ...row, mercury_transaction_id: 'z' }, [{ id: 'z', requestId: null, amountCents: 1, note: null, counterpartyId: 'x' }]).id).toBe('z');
     expect(poller.transactionFor(row, [{ id: 'd', requestId: null, amountCents: 81240, note: 'waves-pay:p1', counterpartyId: 'rec-1' }]).id).toBe('d');
   });
 
