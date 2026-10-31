@@ -7,7 +7,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { v4: uuidv4 } = require('uuid');
-const { etDateString, etParts, etYearStart, etCalendarDaysUntil, etCalendarDayOf, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, etYearStart, etCalendarDaysUntil, etCalendarDayOf, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { addMonthsSameDay } = require('../utils/date-only');
 
 // ─── Nightly Maintenance Check ───────────────────────────────────
 /**
@@ -190,12 +191,12 @@ async function recordMaintenance({
         if (hoursAtService) scheduleUpdates.last_performed_hours = hoursAtService;
 
         // Calculate next due from today's ET date (the UTC clock is a day
-        // ahead from 8 PM ET). Month overflow is unchanged: Jan 31 + 1 → Mar 3.
+        // ahead from 8 PM ET). Months use the shared same-day rule, clamped
+        // to the month's last day (Jan 31 + 1 → Feb 28/29).
         if (schedule.interval_days) {
           scheduleUpdates.next_due_at = etDateString(addETDays(new Date(), schedule.interval_days));
         } else if (schedule.interval_months) {
-          const { year, month, day } = etParts();
-          scheduleUpdates.next_due_at = new Date(Date.UTC(year, month - 1 + schedule.interval_months, day)).toISOString().slice(0, 10);
+          scheduleUpdates.next_due_at = addMonthsSameDay(etDateString(), schedule.interval_months);
         }
 
         if (schedule.interval_miles && milesAtService) {

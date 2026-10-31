@@ -44,11 +44,13 @@ test.each([
 
 // The next due date counts from today's ET date: at 10:30 PM ET on Oct 30 the
 // UTC clock already reads Oct 31, which stored every next due one day late.
+// A month interval uses the shared same-day rule, clamped to the month's end.
 test.each([
-  [{ interval_days: 30 }, '2026-11-29'],
-  [{ interval_months: 1 }, '2026-11-30'],
-])('a recorded service sets next due from the ET date: %o', async (interval, nextDue) => {
-  jest.useFakeTimers({ now: new Date('2026-10-31T02:30:00Z') });
+  [{ interval_days: 30 }, '2026-10-31T02:30:00Z', '2026-11-29'],
+  [{ interval_months: 1 }, '2026-10-31T02:30:00Z', '2026-11-30'],
+  [{ interval_months: 1 }, '2027-02-01T02:30:00Z', '2027-02-28'],
+])('a recorded service sets next due from the ET date: %o at %s', async (interval, now, nextDue) => {
+  jest.useFakeTimers({ now: new Date(now) });
   db.firstRows = { maintenance_schedules: { id: 'schedule-1', ...interval } };
   await recordMaintenance({ equipmentId: 'equipment-1', scheduleId: 'schedule-1', taskName: 'Oil change' });
   const update = db.calls.find(([table, name]) => table === 'maintenance_schedules' && name === 'update');
