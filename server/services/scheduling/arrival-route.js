@@ -1407,6 +1407,18 @@ function routeCheckAssignSavesLive() {
   return gateEnvValue('GATE_ROUTE_CHECK_ASSIGN_SAVES') && arrivalWindowRoutingEnabled();
 }
 
+// GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30, "ok go", Route Check
+// Everywhere follow-up): a new or moved customer-booked visit gets its stop
+// number in the booking's own save (placeMovedVisit). Covers /book and the
+// re-service, inspection and commercial first-visit pages (createSelfBooking),
+// the customer reschedule page, the voice agent's booking and the new-caller
+// visit. Stop numbers only:
+// no message, no notification, no Google call. Needs the arrival-window route
+// check itself.
+function routeCheckBookingSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_BOOKING_SAVES') && arrivalWindowRoutingEnabled();
+}
+
 // A staff save's travel for `date`: on a road day, the road times the pickers
 // bought (cache only, never a purchase); otherwise null, the model.
 function staffSaveTravel(date) {
@@ -1535,3 +1547,4 @@ module.exports.routeCheckStaffSavesLive = routeCheckStaffSavesLive;
 module.exports.routeCheckAutoSavesLive = routeCheckAutoSavesLive;
 module.exports.routeCheckAcceptSavesLive = routeCheckAcceptSavesLive;
 module.exports.routeCheckAssignSavesLive = routeCheckAssignSavesLive;
+module.exports.routeCheckBookingSavesLive = routeCheckBookingSavesLive;

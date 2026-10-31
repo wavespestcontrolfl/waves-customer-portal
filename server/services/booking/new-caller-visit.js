@@ -371,6 +371,10 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
       trx, cols, source: { sourceAction: NEW_CALLER_SOURCE_ACTION }, allowNewCallerVisit: true,
     });
     const [visit] = await trx('scheduled_services').insert(data).returning('*');
+    // GATE_ROUTE_CHECK_BOOKING_SAVES: number the visit on its technician's day
+    // (stop numbers only: no message, no notification, no Google call), in this
+    // transaction. Gate off: touches nothing. Never throws or fails the booking.
+    await require('../scheduling/staff-save-route-check').placeBookingSavedVisit(trx, { visit, source: 'new_caller' });
     await trx('activity_log').insert({
       admin_user_id: adminUserId,
       customer_id: null,

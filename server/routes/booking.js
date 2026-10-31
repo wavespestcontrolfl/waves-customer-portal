@@ -2538,6 +2538,17 @@ async function customerBookingLocation(customer) {
   return storedBookingPin({ latitude: location?.lat, longitude: location?.lng });
 }
 
+// The placement source for a self-booked visit (GATE_ROUTE_CHECK_BOOKING_SAVES):
+// /book itself is 'self_booking'; the internal callers pass callbackVisit: the
+// re-service page ('reservice'), the commercial first-visit page
+// ('commercial_first_visit', isCallback false with an estimateGuard) and the
+// inspection page ('inspection', isCallback false).
+function bookingPlacementSource(callbackVisit) {
+  if (!callbackVisit) return 'self_booking';
+  if (callbackVisit.isCallback !== false) return 'reservice';
+  return callbackVisit.estimateGuard ? 'commercial_first_visit' : 'inspection';
+}
+
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
 // extracted so non-HTTP callers (e.g. the voice agent's confirm_booking tool) run the
 // EXACT same path: customer resolution, advisory-locked conflict re-check, the two-row
@@ -4565,6 +4576,15 @@ async function createSelfBooking(payload = {}) {
       if (capacityCommitFit) {
         const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
         await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
+      } else {
+        // GATE_ROUTE_CHECK_BOOKING_SAVES: capacity did not number this visit
+        // (capacity mode is off), so the dispatcher's placement does, in this
+        // same transaction. The primary visit only: package visit 2 is placed
+        // by package-followup-booking. Nothing below changes this row's date,
+        // window or technician. Gate off: touches nothing. Never throws.
+        await require('../services/scheduling/staff-save-route-check').placeBookingSavedVisit(trx, {
+          serviceId: scheduledRow.id, source: bookingPlacementSource(callbackVisit),
+        });
       }
       // Two-treatment package (cockroach / flea / bed bug): visit 2 books with
       // visit 1 when the row carries the catalog identity (internal callers'
@@ -7251,6 +7271,7 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 module.exports = router;
 module.exports.preferredTimePreParserGuard = preferredTimePreParserGuard;
 module.exports._internals = {
+  bookingPlacementSource,
   assertContactLinkedHandoffProvisional,
   suppressRecoveryIntents,
   captureIpKey,
