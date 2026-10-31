@@ -747,9 +747,11 @@ function latestOptinAsk(dbh, key, customerId) {
 async function yesWouldConfirmAsk(phone, { dbh = db } = {}) {
   const key = recipientPhoneKey(phone);
   if (!key) return false;
+  // recipient_optin has no id column (its key is customer_id + phone_key):
+  // selecting one threw 42703 on every bare YES in production.
   const open = await whereYesConfirms(dbh('recipient_optin').where({ phone_key: key }))
     .whereNot({ status: 'confirmed' })
-    .first('id');
+    .first('phone_key');
   if (open) return true;
   const { isFailureStatus } = require('./twilio-failure-alerts');
   const pendingRows = await dbh('recipient_optin').where({ phone_key: key, status: 'pending' }).select('customer_id');
