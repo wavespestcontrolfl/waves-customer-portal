@@ -4133,9 +4133,10 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
     } else if (estimateSuggestionMatchesService(estimateSuggestion, nextServiceType, nextCoverageCadence, nextVisitCount)) {
       amountFromEstimateRef.current = true;
       setAmount(Number(estimateSuggestion.amount).toFixed(2));
-    } else if (amountFromEstimateRef.current) {
-      // The standing amount was the estimate's quoted year for a DIFFERENT
-      // service or schedule — clear rather than silently record it here.
+    } else {
+      // An untouched amount is always one this form suggested (the previous
+      // plan's total, or the estimate's quoted year) for a DIFFERENT service
+      // or schedule — clear rather than silently record it here.
       amountFromEstimateRef.current = false;
       setAmount("");
     }
@@ -4565,7 +4566,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
       activeTerm,
       prepaidPlans,
     );
-    if (nextSuggested > 0) setAmount(nextSuggested.toFixed(2));
+    // Untouched means the amount is this form's own suggestion for the previous
+    // plan, so a plan with no suggestion clears it rather than keeping that total.
+    setAmount(nextSuggested > 0 ? nextSuggested.toFixed(2) : "");
   };
 
   const handleServiceTypeChange = (value) => {
