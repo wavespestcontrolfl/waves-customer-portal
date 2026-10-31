@@ -135,6 +135,28 @@ describe("Portal inbox tab", () => {
     expect(adminFetch).toHaveBeenCalledWith("/admin/requests/req-1", { method: "PATCH", body: JSON.stringify({ status: "resolved" }) });
   });
 
+  it("tracks each row's Mark handled on its own: a second click on a row still saving sends nothing", async () => {
+    const onCount = vi.fn();
+    let finishChat;
+    adminFetch.mockImplementation((url) => {
+      if (url === "/admin/portal-inbox") return Promise.resolve(listing());
+      if (url.startsWith("/ai/admin/escalations/")) return new Promise((resolve) => { finishChat = () => resolve(updated(url)); });
+      return Promise.resolve(updated(url));
+    });
+    mount(onCount);
+    const chatRow = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    fireEvent.click(within(chatRow).getByRole("button", { name: "Mark handled" }));
+    const requestRow = screen.getByText("Kim Sample").closest("[data-testid]");
+    fireEvent.click(within(requestRow).getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(screen.queryByText("Kim Sample")).not.toBeInTheDocument());
+    expect(within(chatRow).getByRole("button", { name: "Saving…" })).toBeDisabled();
+    fireEvent.click(within(chatRow).getByRole("button", { name: "Saving…" }));
+    finishChat();
+    await waitFor(() => expect(screen.queryByText("Pat Synthetic")).not.toBeInTheDocument());
+    expect(adminFetch.mock.calls.filter(([url]) => url === "/ai/admin/escalations/esc-1")).toHaveLength(1);
+    await waitFor(() => expect(onCount).toHaveBeenLastCalledWith(0));
+  });
+
   it("keeps a request whose resolve lost a race, says so, and leaves the count alone", async () => {
     const onCount = vi.fn();
     adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox"

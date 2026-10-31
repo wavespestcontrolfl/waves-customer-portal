@@ -203,7 +203,10 @@ export default function PortalInboxTabV2({ onCount }) {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState("");
-  const [busyKey, setBusyKey] = useState(null);
+  // Rows with a Mark handled in flight. The ref guards a second click on the
+  // same row synchronously; the state drives each row's busy button.
+  const pendingKeys = useRef(new Set());
+  const [busyKeys, setBusyKeys] = useState(() => new Set());
   const [rowErrors, setRowErrors] = useState({});
   // Rows handled since the last load: when they empty a capped list that still
   // has more open items (total), the tab loads the next ones once.
@@ -232,9 +235,17 @@ export default function PortalInboxTabV2({ onCount }) {
 
   const rowKey = (item) => `${item.kind}:${item.id}`;
 
+  const setBusy = (key, on) => setBusyKeys((prev) => {
+    const next = new Set(prev);
+    if (on) next.add(key); else next.delete(key);
+    return next;
+  });
+
   const handle = async (item) => {
     const key = rowKey(item);
-    setBusyKey(key);
+    if (pendingKeys.current.has(key)) return;
+    pendingKeys.current.add(key);
+    setBusy(key, true);
     setRowErrors((prev) => ({ ...prev, [key]: "" }));
     try {
       const res = await markHandled(item);
@@ -243,12 +254,16 @@ export default function PortalInboxTabV2({ onCount }) {
         return;
       }
       handledSinceLoad.current += 1;
-      setData((prev) => ({ ...prev, items: prev.items.filter((row) => rowKey(row) !== key), total: Math.max(0, prev.total - 1) }));
+      // Lower the total only for a row still listed, so it drops once per row.
+      setData((prev) => (prev.items.some((row) => rowKey(row) === key)
+        ? { ...prev, items: prev.items.filter((row) => rowKey(row) !== key), total: Math.max(0, prev.total - 1) }
+        : prev));
     } catch (err) {
       const message = isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Could not mark this handled. Try again.";
       setRowErrors((prev) => ({ ...prev, [key]: message }));
     } finally {
-      setBusyKey(null);
+      pendingKeys.current.delete(key);
+      setBusy(key, false);
     }
   };
 
@@ -288,7 +303,7 @@ export default function PortalInboxTabV2({ onCount }) {
                 <InboxRow
                   key={rowKey(item)}
                   item={item}
-                  busy={busyKey === rowKey(item)}
+                  busy={busyKeys.has(rowKey(item))}
                   error={rowErrors[rowKey(item)]}
                   onHandled={handle}
                   onReply={reply}
