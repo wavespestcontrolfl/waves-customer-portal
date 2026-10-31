@@ -260,8 +260,8 @@ const GLASS_PACKS = {
     ],
   },
   // The misting SYSTEM plan (GATE_MOSQUITO_MISTING): an install, then a monthly service. Hero, eyebrow and Waves AI card are the
-  // owner-approved wording (2026-10-30, items B and E); the chips reuse the barrier pack's questions that hold for a system, and
-  // the CTA line is the terms-neutral one (no callback promise is made for the system).
+  // owner-approved wording (2026-10-30, items B and E); the chips reuse the barrier pack's questions that hold for a system. The
+  // CTA line is not set here: it stays the shared default the plan showed before (the owner approved no change to it).
   mosquito_misting: {
     heroH1: 'Hello {first}, your misting system estimate is ready!',
     heroSub: 'We install your misting system, then service it every month.',
@@ -273,7 +273,6 @@ const GLASS_PACKS = {
       'What precautions should I follow for pets and children?',
       'What about my pool area?',
     ],
-    ctaMicro: NEUTRAL_CTA_MICRO,
   },
   tree_shrub: {
     heroH1: 'Hello {first}, your landscape protection plan is ready!',
@@ -581,7 +580,9 @@ const TERMITE_SLUG_BY_SCOPE = Object.freeze({
   [TERMITE_SCOPE.RECURRING_FOAM]: 'foam_recurring',
   [TERMITE_SCOPE.TERMITE]: 'termite_bait',
 });
-const MISTING_SYSTEM_SLUG_PATTERN = /mosquito[\s_-]*misting|misting[\s_-]+(?:systems?|service[\s_-]+plans?)/;
+// Same rule as the server's isMistingSystemIdentity (server/utils/mosquito-misting-system.js): the exact key shape, or "misting
+// system" / "misting service plan" in a label. Bare "mosquito misting" is the barrier program's own wording and never matches.
+const MISTING_SYSTEM_SLUG_PATTERN = /^\s*mosquito_misting(?:_[a-z0-9_]+)?\s*$|\bmisting[\s_-]+(?:systems?|service[\s_-]+plans?)\b/;
 const PRIMARY_GLASS_SLUGS = Object.freeze([
   ['pest_control', /pest/],
   ['lawn_care', /lawn/],

@@ -714,13 +714,14 @@ describe('the mosquito misting system plan is its own service (owner wording 202
     for (const raw of ['mosquito_misting', 'Mosquito Misting Service Plan', 'Mosquito Misting Service Plan — 12 applications/yr', 'mosquito_misting_installation']) {
       expect(glassServiceSlug(raw)).toBe('mosquito_misting');
     }
-    for (const raw of ['mosquito', 'Mosquito', 'Monthly Mosquito Program (12 visits)', 'Seasonal Mosquito, 21-day misting cycle']) {
+    // Bare "mosquito misting" is the barrier program's own wording (the server's isMistingSystemIdentity rule).
+    for (const raw of ['mosquito', 'Mosquito', 'Monthly Mosquito Program (12 visits)', 'Seasonal Mosquito, 21-day misting cycle', 'Mosquito Misting', '21-day mosquito misting']) {
       expect(glassServiceSlug(raw)).toBe('mosquito');
     }
     expect(glassServiceSlug('commercial_mosquito')).toBe('mosquito');
   });
 
-  it('has the misting hero, Waves AI card and neutral CTA line, and the barrier pack is untouched', () => {
+  it('has the misting hero and Waves AI card, keeps the CTA line the plan showed before, and the barrier pack is untouched', () => {
     setGlassDefault(true);
     const pack = glassEstimateCopyFor('mosquito_misting');
     expect(pack).toMatchObject({
@@ -732,8 +733,9 @@ describe('the mosquito misting system plan is its own service (owner wording 202
     });
     expect(glassEstimateCopyFor('mosquito').heroH1).toBe('Hello {first}, your mosquito-free backyard plan is ready!');
     expect(glassEstimateCopyFor('mosquito').aiTitle).toBe('Priced from your actual lot — not a guess');
-    // No callback promise is made for the system.
-    expect(glassCtaMicroFor('mosquito_misting')).not.toMatch(/callbacks/i);
+    // The approved wording (A-F) did not change the approve-button line: the plan keeps the shared default it showed before.
+    expect(glassCtaMicroFor('mosquito_misting')).toBe(GLASS_COPY.ctaMicro);
+    expect(glassCtaMicroForKeys(['pest_control', 'mosquito_misting'])).toBe(GLASS_COPY.ctaMicro);
   });
 
   it('lists the three approved bullets, then the generic guarantee and cancel lines, never the barrier bullets', () => {

@@ -86,8 +86,9 @@ function normalizedTier(value) {
 
 function serviceKey(row = {}) {
   const raw = String(row.service || row.key || row.label || '').toLowerCase();
-  // The misting system plan carries 'mosquito' in its key and label but is not the barrier program.
-  if (/mosquito[\s_-]*misting|misting[\s_-]+(?:systems?|service[\s_-]+plans?)/.test(raw)) return 'mosquito_misting';
+  // The misting system plan carries 'mosquito' in its key and label but is not the barrier program. Same rule as the server's
+  // isMistingSystemIdentity: the exact key shape, or "misting system" / "misting service plan"; bare "mosquito misting" is barrier.
+  if (/^\s*mosquito_misting(?:_[a-z0-9_]+)?\s*$|\bmisting[\s_-]+(?:systems?|service[\s_-]+plans?)\b/.test(raw)) return 'mosquito_misting';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
