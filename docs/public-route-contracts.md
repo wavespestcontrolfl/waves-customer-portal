@@ -2216,6 +2216,16 @@ standard accept's first invoice carries the install as its own line (`<tier labe
 application, and the annual-prepay invoice carries it beside the prepay line; no WaveGuard setup fee is charged for a misting-only plan.
 With the gate on and no priced misting row, or with no misting row on the estimate, every body and status on these routes is
 unchanged. The gate is off by default, so today no public response changes.
+**Misting plan on the estimate page and PDF (2026-10-30, dark behind `GATE_MOSQUITO_MISTING`).** `GET /:token/data` and `?mode=pdf` serve a
+misting estimate's plan as its OWN service, never the barrier mosquito program: `pricing.services[]` carries a section with key and
+category `mosquito_misting` (`waveGuardTierEligible: false`, one monthly frequency of 12 applications read from the plan row, no
+WaveGuard tier, perks or setup fee) beside any pest or barrier mosquito section, and `estimate.serviceCategory` is `mosquito_misting`
+for a misting-only estimate. The section adds two customer-safe objects: `system` (`tierLabel`, `nozzles`, `risers`) and `refill`
+(`label` is a solution name such as "Standard solution", `perFill`, `refillsPerYear`). Plan and install `detail` strings drop the
+refill product text. For a misting-only estimate `estimate.intelligence` carries the system facts (System, Nozzles, Risers tiles).
+The pdf `beforeYouBook` page adds a `misting` section only when the estimate carries the misting system. No cost, margin, knob or
+product-name field is ever served (`productCost`, `hardwareCost`, `pricingKnobs`, labor and part costs stay server-side). The routes' auth,
+gate, rate limit, privacy headers and request shape are unchanged, and an estimate without the misting plan serves the same bodies as before.
 
 Which stored rows count (Codex round 17; no new status or body): the add-on rows are read from the estimate's AUTHORITATIVE result
 container only (`storedAreaAddOnRows`, `server/services/estimate-result-container.js`, the pick the Bermuda evidence detector uses: a

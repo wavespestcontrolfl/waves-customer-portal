@@ -147,10 +147,6 @@ const GLASS_PEST = {
 // hardcoded copy would drift if the config changes.
 const ONE_TIME_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · Approve online in 60 seconds';
 
-// Terms-neutral micro line: used whenever we cannot verify that the
-// recurring contract/callback/guarantee terms apply to EVERY service the
-// CTA covers (rodent plans, mixed non-termite compositions).
-const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready';
 
 // Termite work carries no guarantee of any kind (owner ruling: re-treatment
 // needs the paid bond; the estimate drip applies the same rule server-side,
@@ -165,6 +161,11 @@ const TERMITE_SLUGS = new Set([
 ]);
 const ONE_TIME_NO_GUARANTEE_CTA_MICRO = 'Licensed & insured · Approve online in 60 seconds';
 const NO_GUARANTEE_CTA_MICRO = 'Licensed & insured · No pressure — approve when you’re ready';
+
+// Terms-neutral micro line: used whenever we cannot verify that the
+// recurring contract/callback/guarantee terms apply to EVERY service the
+// CTA covers (rodent plans, mixed non-termite compositions).
+const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready';
 
 // Commercial pack — every claim is grounded in standing owner statements or
 // an already-shipped surface: interior treatment available on every visit
@@ -256,6 +257,21 @@ const GLASS_PACKS = {
       'What precautions should I follow for pets and children?',
       'What about my pool area?',
       'When does the season start?',
+    ],
+  },
+  // The misting SYSTEM plan (GATE_MOSQUITO_MISTING): an install, then a monthly service. Hero, eyebrow and Waves AI card are the
+  // owner-approved wording (2026-10-30, items B and E); the chips reuse the barrier pack's questions that hold for a system. The
+  // CTA line is not set here: it stays the shared default the plan showed before (the owner approved no change to it).
+  mosquito_misting: {
+    heroH1: 'Hello {first}, your misting system estimate is ready!',
+    heroSub: 'We install your misting system, then service it every month.',
+    eyebrow: 'Your misting system plan',
+    aiTitle: 'Priced from your system layout',
+    aiBody: 'Your price is set by your system size and your nozzle and riser count.',
+    askChips: [
+      'How long does each visit last?',
+      'What precautions should I follow for pets and children?',
+      'What about my pool area?',
     ],
   },
   tree_shrub: {
@@ -564,6 +580,9 @@ const TERMITE_SLUG_BY_SCOPE = Object.freeze({
   [TERMITE_SCOPE.RECURRING_FOAM]: 'foam_recurring',
   [TERMITE_SCOPE.TERMITE]: 'termite_bait',
 });
+// Same rule as the server's isMistingSystemIdentity (server/utils/mosquito-misting-system.js): the exact key shape, or "misting
+// system" / "misting service plan" in a label. Bare "mosquito misting" is the barrier program's own wording and never matches.
+const MISTING_SYSTEM_SLUG_PATTERN = /^\s*mosquito_misting(?:_[a-z0-9_]+)?\s*$|\bmisting[\s_-]+(?:systems?|service[\s_-]+plans?)\b/;
 const PRIMARY_GLASS_SLUGS = Object.freeze([
   ['pest_control', /pest/],
   ['lawn_care', /lawn/],
@@ -594,6 +613,9 @@ export function glassServiceSlug(keyOrLabel) {
   // off this falls through to the residential slugs, exactly today's
   // behavior.
   if (commercialGlassReleased && raw.includes('commercial') && raw.includes('pest')) return 'commercial_pest';
+  // The misting system plan is its own service: it must not read as the barrier mosquito program ('mosquito' is in its key and
+  // label). Bare "misting" (the barrier program's own cycle copy) never matches.
+  if (MISTING_SYSTEM_SLUG_PATTERN.test(raw)) return 'mosquito_misting';
   const primarySlug = PRIMARY_GLASS_SLUGS.find(([, pattern]) => pattern.test(raw))?.[0];
   if (primarySlug) return primarySlug;
   const termiteSlug = TERMITE_SLUG_BY_SCOPE[termiteScope];
@@ -650,6 +672,14 @@ const GLASS_SERVICE_INCLUSIONS = {
     'Barrier treatment where mosquitoes actually rest — shaded foliage and harborage, not a fog-and-go',
     'Standing-water and breeding-pressure checks every visit — we cut the problem at its source',
     'Weather-aware timing so treatments work instead of washing away',
+    'Money-back guarantee — if we can’t solve a covered problem, we refund your last service payment',
+    'No contract, no cancellation fee — cancel online anytime',
+  ],
+  // Owner-approved misting plan bullets (2026-10-30, item C), then the same generic guarantee and cancel lines the barrier list ends with.
+  mosquito_misting: [
+    'Every month, we check the tank, the timer, the tubing and the spray from each nozzle.',
+    'Every third visit, we clean every nozzle and replace the filter.',
+    'Only Waves technicians refill the tank, and the cabinet stays locked.',
     'Money-back guarantee — if we can’t solve a covered problem, we refund your last service payment',
     'No contract, no cancellation fee — cancel online anytime',
   ],

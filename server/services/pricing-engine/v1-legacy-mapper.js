@@ -12,7 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
-const { isMistingSelection } = require('../../utils/mosquito-misting-system');
+const { isMistingSelection, mistingCustomerFacts } = require('../../utils/mosquito-misting-system');
 const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRows, storedMistingRows } = require('../estimate-result-container');
 
 const RECURRING_SERVICES = new Set([
@@ -968,6 +968,8 @@ function mapV1ToLegacyShape(v1Result) {
       service: 'mosquito_misting',
       annual: Number(mmLI.annual) || null,
       pricingKnobs: mmLI.pricingKnobs || null,
+      // The customer-safe layout and refill facts the public estimate page and PDF print (no cost field).
+      misting: mistingCustomerFacts(mmLI),
       detail: `${mmLI.nozzles} nozzles · ${mmLI.visitsPerYear} applications/yr · $${mmLI.perApp} per application · ${mmLI.refill?.label || ''} refill $${mmLI.refill?.perFill ?? ''} per refill application`,
       discountable: false,
       discountEligible: false,

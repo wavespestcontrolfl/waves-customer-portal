@@ -81,6 +81,17 @@ const SECTIONS = [
       { rank: 1, text: 'Rodent trapping includes the setup visit and the trap checks listed on your estimate. Extra trap checks beyond those are quoted separately.' },
     ],
   },
+  // The misting system (owner 2026-10-30, item F). Unlike the sections above, it prints ONLY when the estimate includes the
+  // misting system (`signals.misting`), so every other estimate's page is unchanged.
+  {
+    key: 'misting',
+    heading: 'If your estimate includes a misting system',
+    lines: [
+      { rank: 1, text: 'The date you pick is your first monthly service visit.' },
+      { rank: 1, text: 'We call you to book the install day.' },
+      { rank: 1, text: 'The install charge is on your first invoice.' },
+    ].map((line) => ({ ...line, when: (s) => s.misting === true })),
+  },
 ];
 
 // The commercial page (owner 2026-10-24): an authored commercial proposal reads this page instead of the residential
@@ -239,7 +250,21 @@ function estimateSignals(estimate, proposal) {
       termsMatchAgreement: termsMatchAgreement(proposal), recurring: proposalIsRecurring(proposal),
     };
   }
-  return { planTerms: planTermsApply(estimate, proposal) };
+  // `misting` is set only when the estimate carries the misting system, so the signals of every other estimate are unchanged.
+  return { planTerms: planTermsApply(estimate, proposal), ...(estimateIncludesMisting(estimate) ? { misting: true } : {}) };
+}
+
+// Does the estimate include the mosquito misting system (the plan or its install)? The mapper's own stored-shape reader, so the
+// page agrees with the gate and acceptance refusals about what a misting estimate is. Fails closed: an unreadable answer is false.
+function estimateIncludesMisting(estimate) {
+  try {
+    return require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesMosquitoMisting(
+      estimate?.estimate_data,
+      { pricingAuthority: estimate?.pricing_authority || null },
+    ) === true;
+  } catch {
+    return false;
+  }
 }
 
 // The page for one estimate, untrimmed. `proposal` = normalizeProposal(estimate).
