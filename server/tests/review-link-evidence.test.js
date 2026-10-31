@@ -168,9 +168,14 @@ describe('saidLeftReview: a done-fact statement, strict enough to stop review as
     'I have already posted a review',
     'We’ve both just left a review',
     'I went ahead and left you a review',
-    // A past-tense time clause is still a done fact.
-    'After the visit I left a review',
+    // A past-tense time clause after the claim is still a done fact.
+    'I left a review after the visit',
     'Will do! Just left a review.',
+    // Courtesy words may open the sentence.
+    'Thanks so much, I left a review',
+    'Ok we left a review for the tech',
+    'Thanks for the reminder but I already left a review',
+    'Already left a review!',
   ])('counts %s', (text) => expect(saidLeftReview(text)).toBe(true));
 
   test.each([
@@ -190,6 +195,12 @@ describe('saidLeftReview: a done-fact statement, strict enough to stop review as
     'Once my review is posted, send me the coupon',
     'After my review is posted do I get the discount',
     'I may have left a review',
+    // A wish, a doubt or a guess around the claim: the claim must open its sentence.
+    'I wish I had left a review',
+    'I thought I had left a review but apparently not',
+    'Not sure if I left a review',
+    'I don’t think I left a review yet',
+    'Pretty sure we left a review',
   ])('never counts %s', (text) => expect(saidLeftReview(text)).toBe(false));
 });
 

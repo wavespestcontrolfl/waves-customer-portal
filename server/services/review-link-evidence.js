@@ -88,8 +88,18 @@ function saysReviewed(body) {
 // asks by itself, for good (review-click-guard.js), so a question, a plan, a condition, a promise or
 // a request never counts ("can you send the link so I can get my review posted?", "I will let you
 // know when I have left a review", "I'll confirm once I've left a review", "after my review is
-// posted"). Only helper words may stand between the subject and the verb ("I have already left").
-const DONE_REVIEW_RE = /\b(i|we|ive|weve)(\s+(have|has|had|already|just|also|actually|finally|recently|literally|both|each|went and|went ahead and|gone ahead and))*\s+(left|posted|wrote|submitted|gave)\b[^.!?]{0,25}\breview\b|\b(my|our|the) review\b[^.!?]{0,10}\b(is|was|has been)\b[^.!?]{0,8}\b(posted|done|submitted)\b|^\s*(just\s+)?(left|posted|submitted)\b[^.!?]{0,25}\breview\b|^\s*review\s+(posted|done|submitted|left)\b/i;
+// posted"). The claim must open its sentence, after courtesy words at most ("Thanks so much, I left
+// a review"), so a wish, a doubt or a guess around it never counts ("I wish I had left a review", "I
+// thought I had left one", "not sure if I left a review"); only helper words may stand between the
+// subject and the verb ("I have already left").
+// A closed list: no word here can open a doubt or a wish ("not sure", "I wish", "maybe").
+const DONE_LEAD_WORDS = '(hi|hello|hey|there|guys|thanks|thank you|thank u|thx|ty|so much|again|for asking|for the reminder|ok|okay|yes|yep|yeah|sure|great|perfect|awesome|fyi|btw|also|and|so|but)';
+const DONE_HELPER_WORDS = '(have|has|had|already|just|also|actually|finally|recently|literally|both|each|went and|went ahead and|gone ahead and)';
+const DONE_REVIEW_RE = new RegExp(`^\\s*(${DONE_LEAD_WORDS}\\b[\\s,:-]*)*(`
+  + `(i|we|ive|weve)(\\s+${DONE_HELPER_WORDS})*\\s+(left|posted|wrote|submitted|gave)\\b[^.!?]{0,25}\\breview\\b`
+  + '|(my|our|the) review\\b[^.!?]{0,10}\\b(is|was|has been)\\b[^.!?]{0,8}\\b(posted|done|submitted)\\b'
+  + '|((just|already|also)\\s+)*(left|posted|submitted)\\b[^.!?]{0,25}\\breview\\b'
+  + '|review\\s+(posted|done|submitted|left)\\b)', 'i');
 // On the sentence with apostrophes dropped ("I'll" reads "Ill"). A present-tense review inside a time
 // clause is a future one: "after I've posted", "before my review is done".
 const NOT_A_DONE_FACT_RE = /\?|\b(will|ill|would|could|can|should|going to|gonna|plan|planning|try|trying|when|whenever|once|until|till|unless|as soon as|if|let (you|u) know|so (i|we) can|need to|want to|how|where)\b|\b(after|before)\s+(ive|weve|i have|we have|(my|our|the) review (is|has been))\b/i;
