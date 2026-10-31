@@ -305,6 +305,18 @@ app.use('/api/public/map-image', require('./routes/public-map-image'));
 // parser). See docs/public-route-contracts.md "Typed-decision labeler token".
 app.use('/api/admin/typed-decisions', require('./routes/typed-decisions-labeler'));
 
+// Chrome extension bug identifier (routes/public-bug-id-extension.js): while
+// GATE_BUG_ID_EXTENSION is dark EVERY request, any method, gets the generic
+// 404 here — ABOVE the global cors() (which would answer an OPTIONS preflight
+// 204), the global /api/ limiter and the 50 MB photo parser — so a probe never
+// sees a 204 or a 429 and never costs parse work (Codex #7294 r1).
+app.use('/api/public/bug-id-extension', (req, res, next) => {
+  if (!require('./config/feature-gates').bugIdExtensionLive()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -643,8 +655,9 @@ app.use('/api/public/mcp', ...require('./routes/public-mcp').publicMcpPreParsers
 app.use('/api/public/a2a', ...require('./routes/public-a2a').publicA2aPreParsers);
 
 // Base64 media payloads (service/job photos, call-recording snippets, the
-// photo lead magnets' customer uploads) only travel on the staff surfaces and
-// the two public photo-analyze funnels — mount the big parser there ONLY.
+// photo lead magnets' customer uploads) only travel on the staff surfaces,
+// the two public photo-analyze funnels and the Chrome extension's identify
+// route — mount the big parser there ONLY.
 // Everything else gets a tight default: the old global 50 MB ceiling let any
 // anonymous endpoint force 50 MB of JSON parsing work per request.
 // (/api/admin/auth keeps its stricter cap — mounted above, first parser wins.)
@@ -662,7 +675,11 @@ const { requireStaffTokenForLargeBody } = require('./middleware/large-body-auth'
 for (const staffPrefix of ['/api/admin', '/api/tech']) {
   app.use(staffPrefix, requireStaffTokenForLargeBody, express.json({ limit: LARGE_BODY_LIMIT }));
 }
-for (const publicAnalyzePrefix of ['/api/public/lawn-assessment/analyze', '/api/public/pest-identifier/analyze']) {
+for (const publicAnalyzePrefix of [
+  '/api/public/lawn-assessment/analyze',
+  '/api/public/pest-identifier/analyze',
+  '/api/public/bug-id-extension/identify',
+]) {
   app.use(publicAnalyzePrefix, express.json({ limit: LARGE_BODY_LIMIT }));
 }
 // Customer service requests carry up to 3 base64 photos (validate caps each at
@@ -880,6 +897,7 @@ app.use('/api/public/price-change', require('./routes/price-change-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
 app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));
+app.use('/api/public/bug-id-extension', require('./routes/public-bug-id-extension'));
 app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));

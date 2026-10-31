@@ -45,7 +45,9 @@ jest.setTimeout(60000);
 
 const express = require('express');
 const logger = require('../services/logger');
-const { consumeSharedDailyCap, resolveMax, DAILY_LIMIT_MESSAGE, ASK_WAVES_CAP, PHOTO_ASSESSMENT_CAP } = require('../middleware/public-llm-shared-cap');
+const {
+  consumeSharedDailyCap, resolveMax, DAILY_LIMIT_MESSAGE, ASK_WAVES_CAP, PHOTO_ASSESSMENT_CAP, BUG_ID_EXTENSION_CAP,
+} = require('../middleware/public-llm-shared-cap');
 
 function appServer() {
   const app = express();
@@ -78,6 +80,7 @@ beforeEach(() => {
   mockProcess.mockResolvedValue({ reply: 'ok' });
   delete process.env.PUBLIC_LLM_DAILY_CAP_ASK_WAVES;
   delete process.env.PUBLIC_LLM_DAILY_CAP_PHOTO;
+  delete process.env.PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION;
 });
 
 describe('consumeSharedDailyCap', () => {
@@ -143,6 +146,28 @@ describe('consumeSharedDailyCap', () => {
     mockRaw.mockReset();
     mockRaw.mockResolvedValueOnce({ rows: [] });
     expect(await consumeSharedDailyCap(ASK_WAVES_CAP)).toEqual({ allowed: true });
+  });
+
+  test('failClosed budget (Chrome extension): counted with the gate off, 100 by default, refused on a DB error or no row', async () => {
+    mockSharedCapLive = false;
+    expect(BUG_ID_EXTENSION_CAP).toMatchObject({ bucket: 'bug-id-extension', defaultMax: 100, failClosed: true });
+    countIs(100);
+    expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: true });
+    countIs(101);
+    expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: false });
+    expect(mockRaw.mock.calls[0][1][0]).toBe('bug-id-extension');
+    process.env.PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION = '3';
+    countIs(4);
+    expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: false });
+    // Past the once-a-minute warning throttle, so this bucket's warning is logged.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout'] }).setSystemTime(Date.now() + 5 * 60 * 1000);
+    try {
+      mockRaw.mockRejectedValueOnce(new Error('connection refused'));
+      expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: false });
+      expect(logger.warn.mock.calls.at(-1)[0]).toMatch(/bug-id-extension: counter unavailable, failing closed/);
+    } finally { jest.useRealTimers(); }
+    mockRaw.mockResolvedValueOnce({ rows: [] });
+    expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: false });
   });
 });
 
