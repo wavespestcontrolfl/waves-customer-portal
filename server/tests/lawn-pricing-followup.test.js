@@ -92,7 +92,7 @@ describe('lawn pricing production follow-up', () => {
 
     const required = needsTurfManualConfirmation(profile, ['LAWN']);
     const pestOnly = needsTurfManualConfirmation(profile, ['PEST']);
-    const pluggingFallback = needsTurfManualConfirmation(profile, ['PLUGGING']);
+    const pluggingNoArea = needsTurfManualConfirmation(profile, ['PLUGGING']);
     const pluggingManualArea = needsTurfManualConfirmation(profile, ['PLUGGING'], { plugArea: 1000 });
     const lawnWithPlugArea = needsTurfManualConfirmation(profile, ['LAWN', 'PLUGGING'], { plugArea: 1000 });
     const confirmed = needsTurfManualConfirmation({ ...profile, measuredTurfSf: 15000 }, ['LAWN']);
@@ -108,10 +108,8 @@ describe('lawn pricing production follow-up', () => {
       'water adjacency',
     ]));
     expect(pestOnly).toBeNull();
-    expect(pluggingFallback).toMatchObject({
-      field: 'measuredTurfSf',
-      estimatedTurfSf: 28000,
-    });
+    // Plugging never prices from turf (owner 2026-10-31), so it never asks to confirm it.
+    expect(pluggingNoArea).toBeNull();
     expect(pluggingManualArea).toBeNull();
     expect(lawnWithPlugArea).toMatchObject({
       field: 'measuredTurfSf',

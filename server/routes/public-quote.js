@@ -127,6 +127,7 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
+const { PLUGGING_AREA_REQUIRED_REASON } = require('../services/pricing-engine/service-pricing');
 // customQuoteReason the engine stamps on every top dressing line (estimate-engine.js).
 const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
 // Reasons the office prices by hand: a keyed quote-on-request product and top
@@ -1915,8 +1916,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.plugging) {
       // Forward a positive patch area so the engine prices the patch; when
-      // absent the engine falls back to the whole lawn (the /estimate page's
-      // default behavior).
+      // absent the engine prices nothing and the quote goes to the office
+      // (owner 2026-10-31: never the whole lawn).
       const pluggingArea = Number(services.plugging.area);
       engineInput.services.plugging = {
         spacing: services.plugging.spacing || 12,
@@ -3583,6 +3584,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         `${quoteRequired
           ? (quoteIsPricedByTeam
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
+            : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
+              ? `${serviceInterest} · needs the area to plug (sq ft) · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
@@ -4198,6 +4201,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
           : quoteRequiredReason === 'low_confidence_turf_requires_field_verification'
           ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
+          : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
+          ? 'Lawn plugging is priced by the square feet that need plugs — the Waves team will confirm that area with you and send your exact price shortly.'
           : (quoteRequiredReason === 'unknown_grass_type_priced_st_augustine' || quoteRequiredReason === 'lawn_v13_bahia_no_program')
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')

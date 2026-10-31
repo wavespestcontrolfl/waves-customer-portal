@@ -195,10 +195,14 @@ describe('gate interaction (intentional behavior change)', () => {
     expect(
       needsTurfManualConfirmation(profile, ['TOPDRESS', 'PLUGGING'], { topDressArea: 4000, plugArea: 1000 }),
     ).toBeNull();
-    // If one of them is missing its area, the gate still fires.
+    // Top dressing without its area still fires the gate.
+    expect(
+      needsTurfManualConfirmation(profile, ['TOPDRESS', 'PLUGGING'], { plugArea: 1000 }),
+    ).not.toBeNull();
+    // Plugging without its area does not: it never prices from turf (owner 2026-10-31).
     expect(
       needsTurfManualConfirmation(profile, ['TOPDRESS', 'PLUGGING'], { topDressArea: 4000 }),
-    ).not.toBeNull();
+    ).toBeNull();
     // A whole-lawn service in the mix still requires confirmation.
     expect(
       needsTurfManualConfirmation(profile, ['TOPDRESS', 'LAWN'], { topDressArea: 4000 }),

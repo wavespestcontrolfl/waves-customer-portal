@@ -3893,10 +3893,11 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
   // Exempt only when EVERY selected turf service is such a bounded add-on, so a
   // Top Dressing + Plugging combo (each with its own area) clears together,
   // while any whole-lawn service (LAWN/OT_LAWN/DETHATCH) still requires it.
-  const plugArea = firstNonNegativeNumber(options.plugArea);
+  // Plugging is always exempt: it never prices from turf (no plug area = no
+  // price, owner 2026-10-31).
   const topDressArea = firstNonNegativeNumber(options.topDressArea);
   const areaBoundedExempt = {
-    PLUGGING: plugArea > 0,
+    PLUGGING: true,
     TOPDRESS: topDressArea > 0,
   };
   // (An empty turf list here means the unobservable mosquito case — never

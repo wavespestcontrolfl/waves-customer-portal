@@ -5049,6 +5049,22 @@ and no self-book handoff. The keyed `top_dressing` catalog key was already
 quote-on-request and is unchanged. Additive: no new field, no new copy, no new
 auth surface, no migration, no gate.
 
+Plugging is priced only from the area to plug (owner 2026-10-31: a blank area
+priced the whole lawn, so a 12,000 sq ft lawn at 12-inch spacing quoted about
+$29,300). `/calculate`
+still forwards only a positive finite `services.plugging.area`; the engine no
+longer falls back to the lawn. With no area the `plugging` line carries
+`price: null`, `quoteRequired`, `requiresMeasurement` and
+`manualReviewReasons: ['missing_plugging_area_sqft']`
+(`pluggingAreaRequiredLine`, `service-pricing.js`), so the request answers
+`202 { quote_required: true, service: 'plugging', reason:
+'missing_plugging_area_sqft', service_interest, message }` (it priced the whole
+lawn before). `message` is "Lawn plugging is priced by the square feet that need
+plugs — the Waves team will confirm that area with you and send your exact price
+shortly." and the office notice reads "needs the area to plug (sq ft)". A
+positive area prices exactly as before. The site's plugging forms require the
+area. No new field, no new auth surface, no migration, no gate.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed
