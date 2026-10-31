@@ -26,6 +26,7 @@ import IntegrationHealthSection from "../../components/admin/IntegrationHealthSe
 import PortalUsageTab from "../../components/admin/PortalUsageTab";
 import CostCardsSection from "./CostCardsSection";
 import { trackAdminPageView } from "../../lib/adminUsage";
+import { formatETDate, formatETDateTime } from "../../lib/timezone";
 import { DEFAULT_KPI_TARGETS } from "@kpi-targets";
 import { KPI_METRIC_LABELS } from "./dashboard/kpi-targets";
 import {
@@ -130,6 +131,22 @@ const SETTINGS_LEAF_META = {
   usage: { label: "Usage", Icon: Activity },
 };
 
+// Owner-only leaves. Service Reports, Scheduling, KPI targets, Operating
+// Costs (company financials), feature gates, System, Integrations and the
+// Link Library editor are requireAdmin server-side or owner-only under the
+// 2026-10-02 technician allow-list. A non-admin sees General + Portal Usage.
+const OWNER_ONLY_SETTINGS_LEAVES = [
+  "integrations",
+  "gates",
+  "link-library",
+  "service-reports",
+  "blackout-days",
+  "day-start",
+  "kpi-targets",
+  "operating-costs",
+  "system",
+];
+
 export default function SettingsPage() {
   const isMobile = useIsMobile();
   const [searchParams] = useSearchParams();
@@ -222,8 +239,7 @@ export default function SettingsPage() {
   // hooks must run on every render path or React throws "Rendered more
   // hooks than during the previous render" (codex P1).
   useEffect(() => {
-    if (user && user.role !== "admin"
-      && ["service-reports", "blackout-days", "day-start", "kpi-targets", "operating-costs", "integrations", "gates", "system", "link-library"].includes(tab)) {
+    if (user && user.role !== "admin" && OWNER_ONLY_SETTINGS_LEAVES.includes(tab)) {
       selectTab("general");
     }
     // selectTab is stable; errors-only lint config has no exhaustive-deps.
@@ -247,26 +263,22 @@ export default function SettingsPage() {
   }
 
 
-  // Service Reports (coverage config) and Scheduling (blackout days) are
-  // requireAdmin end to end server-side — hide the whole groups from
-  // non-admin roles instead of rendering panels that can only 403
-  // (2026-08-25 role lockdown). `user` is the server-verified /auth/me row.
+  // Owner-only groups are hidden from non-admin roles instead of rendering
+  // panels that can only 403 (2026-08-25 role lockdown). `user` is the
+  // server-verified /auth/me row; a failed read leaves it null, which counts
+  // as non-admin here.
   const isAdminRole = user?.role === "admin";
-  // Non-admin Settings: General (account view) + Portal Usage. Integrations
-  // (its tab renders "Admin access required"), Service Reports, Scheduling,
-  // KPI targets, feature gates, and System are owner-only.
-  // Operating Costs reads and writes /admin/revenue/settings (company
-  // financials), owner-only under the 2026-10-02 technician allow-list.
-  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "operating-costs", "gates", "system", "service-reports", "blackout-days", "day-start", "link-library"];
-  const visibleGroups = SETTINGS_TAB_GROUPS.filter(
-    (g) => isAdminRole || !["service-reports", "scheduling", "integrations"].includes(g.key),
-  ).map((g) => (
+  const visibleGroups = SETTINGS_TAB_GROUPS.map((g) => (
     isAdminRole
       ? g
       : { ...g, tabs: g.tabs.filter((t) => !OWNER_ONLY_SETTINGS_LEAVES.includes(t)) }
   )).filter((g) => g.tabs.length > 0);
+  // The leaf this render shows. A non-admin deep link to an owner leaf shows
+  // General at once: the redirect effect above runs only after this render,
+  // and by then the leaf would have mounted and fired its owner-only read.
+  const shownTab = !isAdminRole && OWNER_ONLY_SETTINGS_LEAVES.includes(tab) ? "general" : tab;
   const activeGroup =
-    visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
+    visibleGroups.find((g) => g.tabs.includes(shownTab)) || visibleGroups[0];
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
@@ -290,12 +302,12 @@ export default function SettingsPage() {
               }))
             : []
         }
-        secondaryActiveKey={tab}
+        secondaryActiveKey={shownTab}
         onSecondaryChange={selectTab}
         secondaryAriaLabel="Settings page"
         secondaryNavGridClassName="grid-cols-2 md:grid-cols-4"
       />
-      {tab === "general" && (
+      {shownTab === "general" && (
         <div className="space-y-5">
           {searchParams.get("passwordChanged") === "1" && (
             <ActionFeedback>
@@ -381,16 +393,16 @@ export default function SettingsPage() {
           )}
         </div>
       )}
-      {tab === "link-library" && <LinkLibraryTab />}
-      {tab === "integrations" && <IntegrationsTab canAdmin={user?.role === "admin"} />}
-      {tab === "gates" && isAdminRole && <FeatureGatesTab />}
-      {tab === "service-reports" && <ServiceCoverageSettingsTab />}
-      {tab === "blackout-days" && <BlackoutDaysTab />}
-      {tab === "day-start" && <DayStartTab />}
-      {tab === "kpi-targets" && <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />}
-      {tab === "operating-costs" && isAdminRole && <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />}
-      {tab === "system" && isAdminRole && <SystemTab health={health} />}
-      {tab === "usage" && <PortalUsageTab canAdmin={user?.role === "admin"} />}
+      {shownTab === "link-library" && <LinkLibraryTab />}
+      {shownTab === "integrations" && <IntegrationsTab canAdmin={user?.role === "admin"} />}
+      {shownTab === "gates" && <FeatureGatesTab />}
+      {shownTab === "service-reports" && <ServiceCoverageSettingsTab />}
+      {shownTab === "blackout-days" && <BlackoutDaysTab />}
+      {shownTab === "day-start" && <DayStartTab />}
+      {shownTab === "kpi-targets" && <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />}
+      {shownTab === "operating-costs" && <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />}
+      {shownTab === "system" && <SystemTab health={health} />}
+      {shownTab === "usage" && <PortalUsageTab canAdmin={user?.role === "admin"} />}
     </UiSurface>
   );
 }
@@ -497,7 +509,7 @@ function SystemTab({ health }) {
               { label: "Environment", value: health?.environment || "—" },
               { label: "Status", value: health?.status || "—" },
               { label: "Database", value: health?.database || "—" },
-              { label: "Server time", value: health?.timestamp ? new Date(health.timestamp).toLocaleString() : "—" },
+              { label: "Server time", value: health?.timestamp ? formatETDateTime(health.timestamp) : "—" },
             ].map((field) => (
               <div key={field.label} className="rounded-md bg-zinc-50 p-3">
                 <dt className="text-ui-caption text-ink-secondary">{field.label}</dt>
@@ -571,12 +583,14 @@ function deepMergeConfig(base = {}, override = {}) {
 function VisitTimelineSettingsCard() {
   const [config, setConfig] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  // { text, error }: an explicit flag, so a server refusal ("Admin access
+  // required", "Request failed (422)") never renders as a success.
+  const [message, setMessage] = useState(null);
 
   useEffect(() => {
     adminFetch("/admin/settings/visit-timeline")
       .then((data) => setConfig(data.config || data.defaults))
-      .catch((err) => setMessage(err.message || "Could not load Visit Timeline settings."));
+      .catch((err) => setMessage({ text: `Could not load Visit Timeline settings. ${err.message}`, error: true }));
   }, []);
 
   const update = (patch) => setConfig((current) => ({ ...(current || {}), ...patch }));
@@ -584,16 +598,16 @@ function VisitTimelineSettingsCard() {
   const save = async () => {
     if (!config) return;
     setSaving(true);
-    setMessage("");
+    setMessage(null);
     try {
       const data = await adminFetch("/admin/settings/visit-timeline", {
         method: "PUT",
         body: JSON.stringify({ config }),
       });
       setConfig(data.config || config);
-      setMessage("Visit Timeline settings saved.");
+      setMessage({ text: "Visit Timeline settings saved.", error: false });
     } catch (err) {
-      setMessage(err.message || "Could not save Visit Timeline settings.");
+      setMessage({ text: err.message || "Could not save Visit Timeline settings.", error: true });
     } finally {
       setSaving(false);
     }
@@ -601,20 +615,21 @@ function VisitTimelineSettingsCard() {
 
   const reset = async () => {
     setSaving(true);
-    setMessage("");
+    setMessage(null);
     try {
       const data = await adminFetch("/admin/settings/visit-timeline/reset", { method: "POST" });
       setConfig(data.config);
-      setMessage("Visit Timeline settings restored to defaults.");
+      setMessage({ text: "Visit Timeline settings restored to defaults.", error: false });
     } catch (err) {
-      setMessage(err.message || "Could not restore Visit Timeline settings.");
+      setMessage({ text: err.message || "Could not restore Visit Timeline settings.", error: true });
     } finally {
       setSaving(false);
     }
   };
 
+  // A failed load shows its error, not an endless "Loading".
   if (!config) {
-    return <ActionFeedback className="min-h-20">Loading Visit Timeline settings...</ActionFeedback>;
+    return <ActionFeedback error={message?.error} className="min-h-20">{message?.text || "Loading Visit Timeline settings..."}</ActionFeedback>;
   }
 
   return (
@@ -636,6 +651,9 @@ function VisitTimelineSettingsCard() {
         </div>
       </CardHeader>
       <CardBody>
+        {/* The save sends the whole config: no edit while it runs, or the
+            reply would overwrite it unsaved. */}
+        <fieldset disabled={saving} className="m-0 min-w-0 border-0 p-0">
         <Toggle checked={config.enabled !== false} onChange={(value) => update({ enabled: value })} label="Enable Visit Timeline" description="Show one unified customer-facing visit timeline on service reports." />
         <Toggle checked={config.showOnCustomerReports !== false} onChange={(value) => update({ showOnCustomerReports: value })} label="Show on customer reports" />
         <Toggle checked={config.showTechnicianEnRoute !== false} onChange={(value) => update({ showTechnicianEnRoute: value })} label="Show technician en route" description="Source: Bouncie." />
@@ -666,7 +684,8 @@ function VisitTimelineSettingsCard() {
             onChange={(event) => update({ dataSourceNote: event.target.value })}
           />
         </Field>
-        {message && <ActionFeedback error={message.includes("Could not")} className="mt-3">{message}</ActionFeedback>}
+        </fieldset>
+        {message && <ActionFeedback error={message.error} className="mt-3">{message.text}</ActionFeedback>}
       </CardBody>
     </Card>
   );
@@ -707,6 +726,8 @@ function OperatingCostsSettingsTab({ canAdmin }) {
     dirty[f.key] !== undefined ? dirty[f.key] : row?.[f.col] != null ? String(parseFloat(row[f.col])) : "";
 
   const save = async () => {
+    // Inputs stay editable while the PUT runs; only these values go out.
+    const submitted = dirty;
     const body = {};
     for (const f of OVH_FIELDS_UI) {
       if (dirty[f.key] === undefined) continue;
@@ -732,7 +753,11 @@ function OperatingCostsSettingsTab({ canAdmin }) {
       });
       if (result?.error) throw new Error(result.error);
       if (result?.settings) setRow(result.settings);
-      setDirty({});
+      // Clear only what this save sent: a figure typed while it ran stays
+      // "Unsaved" instead of being dropped.
+      setDirty((current) => Object.fromEntries(
+        Object.entries(current).filter(([key, value]) => value !== submitted[key]),
+      ));
       setMessage({ text: "Saved. The dashboard's EBITDA bridge switches to these entered costs on its next refresh.", error: false });
     } catch (err) {
       setMessage({ text: err.message || "Could not save operating costs.", error: true });
@@ -751,7 +776,8 @@ function OperatingCostsSettingsTab({ canAdmin }) {
     const v = Number(valueOf(f));
     return t + (Number.isFinite(v) ? v : 0);
   }, 0);
-  const enteredAt = row.overhead_entered_at ? String(row.overhead_entered_at).slice(0, 10) : null;
+  // A timestamp: the Eastern day it was entered, not the UTC one.
+  const enteredAt = row.overhead_entered_at ? formatETDate(row.overhead_entered_at) : null;
 
   return (
     <div className="space-y-5">
@@ -855,6 +881,8 @@ function KpiTargetsSettingsTab({ canAdmin }) {
     setDirty((d) => ({ ...d, [metric]: { ...(d[metric] || {}), ...patch } }));
 
   const save = async () => {
+    // Inputs stay editable while the save runs; only these rows go out.
+    const submitted = dirty;
     const changed = Object.keys(dirty);
     const targets = [];
     for (const metric of changed) {
@@ -904,7 +932,11 @@ function KpiTargetsSettingsTab({ canAdmin }) {
           return next;
         });
       }
-      setDirty({});
+      // edit() makes a new object for a metric on every change, so a target
+      // edited while the save ran stays "Unsaved" instead of being dropped.
+      setDirty((current) => Object.fromEntries(
+        Object.entries(current).filter(([metric, patch]) => patch !== submitted[metric]),
+      ));
       setMessage({ text: `Saved ${targets.length} target${targets.length === 1 ? "" : "s"}. Dashboard tiles pick this up on their next refresh.`, error: false });
     } catch (err) {
       setMessage({ text: err.message || "Could not save KPI targets.", error: true });
@@ -1047,15 +1079,22 @@ function LinkLibraryTab() {
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const [form, setForm] = useState({ name: "", url: "", category: "website", clause: "" });
+  // Every add, remove and sync reloads the list; only the newest read may
+  // land, or an older one can bring back a link just removed.
+  const loadSeq = useRef(0);
 
   const load = () => {
+    const seq = ++loadSeq.current;
     setLoadErr(null);
     adminFetch("/admin/communications/link-library")
       .then((d) => {
+        if (seq !== loadSeq.current) return;
         setLinks(Array.isArray(d.links) ? d.links : []);
         setLastSyncedAt(d.lastSyncedAt || null);
       })
-      .catch((e) => setLoadErr(e.message));
+      .catch((e) => {
+        if (seq === loadSeq.current) setLoadErr(e.message);
+      });
   };
   useEffect(load, []);
 
@@ -1150,7 +1189,7 @@ function LinkLibraryTab() {
         </p>
         <p className="text-ui-caption text-ink-secondary u-nums">
           {links === null && !loadErr ? "Loading…" : `${all.length} links (${sitemapCount} website pages)`}
-          {lastSyncedAt && ` · website pages last synced ${new Date(lastSyncedAt).toLocaleString()}`}
+          {lastSyncedAt && ` · website pages last synced ${formatETDateTime(lastSyncedAt)}`}
         </p>
         {loadErr && <ActionFeedback error onRetry={load}>{loadErr}</ActionFeedback>}
         {notice && (
@@ -1237,23 +1276,43 @@ function BlackoutDaysTab() {
   const [weeklySaving, setWeeklySaving] = useState(false);
   const [holidays, setHolidays] = useState([]);
   const [holidaySaving, setHolidaySaving] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const [date, setDate] = useState("");
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // Only the newest read may land. A read that started before a write
+  // finished can carry the old list or days off back over that write.
+  const loadSeq = useRef(0);
+  const readsInFlight = useRef(0);
 
   const load = () => {
+    const seq = ++loadSeq.current;
+    readsInFlight.current += 1;
+    setLoadError(null);
     adminFetch("/admin/schedule/blackout-dates")
       .then((d) => {
+        if (seq !== loadSeq.current) return;
         setBlackouts(d.blackouts || []);
         setWeeklyDaysOff(d.weeklyDaysOff || []);
         setHolidays(d.holidays || []);
+        setLoaded(true);
       })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (seq === loadSeq.current) setLoadError(e.message);
+      })
+      .finally(() => {
+        readsInFlight.current -= 1;
+      });
   };
   useEffect(load, []);
+
+  // After a write lands: a read still in flight may predate it, so start a
+  // newer one (load() retires the older read).
+  const rereadIfStale = () => {
+    if (readsInFlight.current > 0) load();
+  };
 
   const toggleWeeklyDay = async (dow) => {
     // Whole-array PUT: chips are disabled while a save is in flight so an
@@ -1273,6 +1332,7 @@ function BlackoutDaysTab() {
       });
       if (d?.error) throw new Error(d.error);
       setWeeklyDaysOff(d.weeklyDaysOff || next);
+      rereadIfStale();
     } catch (e) {
       setWeeklyDaysOff(prev);
       setError(e.message);
@@ -1298,6 +1358,7 @@ function BlackoutDaysTab() {
       if (d?.error) throw new Error(d.error);
       const closed = new Set(d.closedHolidays || []);
       setHolidays(next.map((h) => ({ ...h, closed: closed.has(h.key) })));
+      rereadIfStale();
     } catch (e) {
       setHolidays(prev);
       setError(e.message);
@@ -1334,6 +1395,7 @@ function BlackoutDaysTab() {
       const d = await adminFetch(`/admin/schedule/blackout-dates/${id}`, { method: "DELETE" });
       if (d?.error) throw new Error(d.error);
       setBlackouts((prev) => prev.filter((b) => b.id !== id));
+      rereadIfStale();
     } catch (e) {
       setError(e.message);
     }
@@ -1348,17 +1410,36 @@ function BlackoutDaysTab() {
     } catch { return d; }
   };
 
+  const header = (
+    <CardHeader>
+      <CardTitle>Blackout days</CardTitle>
+      <p className="mt-1 text-ui-body text-ink-secondary">
+      Days off. Customers can't book, reschedule into, or be offered these
+      dates anywhere — booking funnel, reschedule links, estimate slots, and
+      Waves AI searches all skip them. You can still schedule manually from
+      dispatch if you choose to.
+      </p>
+    </CardHeader>
+  );
+
+  // No controls until a read lands: a weekly chip clicked on the empty
+  // default would PUT a whole array that erases every stored day off.
+  if (!loaded) {
+    return (
+      <Card>
+        {header}
+        <CardBody>
+          {loadError
+            ? <ActionFeedback error onRetry={load} className="min-h-16">Could not load blackout days. {loadError}</ActionFeedback>
+            : <ActionFeedback className="min-h-16">Loading…</ActionFeedback>}
+        </CardBody>
+      </Card>
+    );
+  }
+
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>Blackout days</CardTitle>
-        <p className="mt-1 text-ui-body text-ink-secondary">
-        Days off. Customers can't book, reschedule into, or be offered these
-        dates anywhere — booking funnel, reschedule links, estimate slots, and
-        Waves AI searches all skip them. You can still schedule manually from
-        dispatch if you choose to.
-        </p>
-      </CardHeader>
+      {header}
       <CardBody>
       <h4 className="text-ui-body font-medium text-zinc-900">Weekly days off</h4>
       <p className="mt-1 text-ui-body text-ink-secondary">
@@ -1423,10 +1504,11 @@ function BlackoutDaysTab() {
       </div>
 
       {error && <ActionFeedback error className="mb-3">{error}</ActionFeedback>}
+      {loadError && (
+        <ActionFeedback error onRetry={load} className="mb-3">Could not refresh blackout days. {loadError}</ActionFeedback>
+      )}
 
-      {loading ? (
-        <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
-      ) : blackouts.length === 0 ? (
+      {blackouts.length === 0 ? (
         <div className="py-6 text-center text-ink-secondary">
           No blackout days set — every working day is offered.
         </div>
@@ -1552,7 +1634,9 @@ function ServiceCoverageSettingsTab() {
   const [defaults, setDefaults] = useState(null);
   const [serviceLine, setServiceLine] = useState("pest");
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  // { text, error }, like VisitTimelineSettingsCard: never infer a failure
+  // from the wording of the message.
+  const [message, setMessage] = useState(null);
 
   useEffect(() => {
     adminFetch("/admin/settings/service-coverage")
@@ -1560,7 +1644,7 @@ function ServiceCoverageSettingsTab() {
         setConfig(data.config || data.defaults);
         setDefaults(data.defaults || data.config);
       })
-      .catch((err) => setMessage(err.message || "Could not load Service Coverage settings."));
+      .catch((err) => setMessage({ text: `Could not load Service Coverage settings. ${err.message}`, error: true }));
   }, []);
 
   const update = (patch) => setConfig((current) => deepMergeConfig(current || defaults || {}, patch));
@@ -1572,16 +1656,16 @@ function ServiceCoverageSettingsTab() {
 
   const save = async () => {
     setSaving(true);
-    setMessage("");
+    setMessage(null);
     try {
       const data = await adminFetch("/admin/settings/service-coverage", {
         method: "PUT",
         body: JSON.stringify({ config }),
       });
       setConfig(data.config || config);
-      setMessage("Service Coverage settings saved.");
+      setMessage({ text: "Service Coverage settings saved.", error: false });
     } catch (err) {
-      setMessage(err.message || "Could not save Service Coverage settings.");
+      setMessage({ text: err.message || "Could not save Service Coverage settings.", error: true });
     } finally {
       setSaving(false);
     }
@@ -1589,20 +1673,21 @@ function ServiceCoverageSettingsTab() {
 
   const reset = async () => {
     setSaving(true);
-    setMessage("");
+    setMessage(null);
     try {
       const data = await adminFetch("/admin/settings/service-coverage/reset", { method: "POST" });
       setConfig(data.config || defaults);
-      setMessage("Service Coverage settings restored to defaults.");
+      setMessage({ text: "Service Coverage settings restored to defaults.", error: false });
     } catch (err) {
-      setMessage(err.message || "Could not restore Service Coverage settings.");
+      setMessage({ text: err.message || "Could not restore Service Coverage settings.", error: true });
     } finally {
       setSaving(false);
     }
   };
 
+  // A failed load shows its error, not an endless "Loading".
   if (!config) {
-    return <ActionFeedback className="min-h-20">Loading Service Coverage settings...</ActionFeedback>;
+    return <ActionFeedback error={message?.error} className="min-h-20">{message?.text || "Loading Service Coverage settings..."}</ActionFeedback>;
   }
 
   return (
@@ -1626,11 +1711,13 @@ function ServiceCoverageSettingsTab() {
             </Button>
           </div>
         </CardHeader>
-        {message && <CardBody><ActionFeedback error={message.includes("Could not")}>{message}</ActionFeedback></CardBody>}
+        {message && <CardBody><ActionFeedback error={message.error}>{message.text}</ActionFeedback></CardBody>}
       </Card>
 
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
-        <div className="space-y-5">
+        {/* The save sends the whole config: no edit while it runs, or the
+            reply would overwrite it unsaved. */}
+        <fieldset disabled={saving} className="m-0 min-w-0 space-y-5 border-0 p-0">
           <Card>
             <CardHeader><CardTitle>Visibility</CardTitle></CardHeader>
             <CardBody>
@@ -1723,7 +1810,7 @@ function ServiceCoverageSettingsTab() {
               ))}
             </CardBody>
           </Card>
-        </div>
+        </fieldset>
 
         <ServiceCoverageAdminPreview
           title={previewTitle}
@@ -1821,6 +1908,7 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
 function GbpConnectSection() {
   const [locations, setLocations] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [busy, setBusy] = useState(null);
 
   const params = new URLSearchParams(window.location.search);
@@ -1829,9 +1917,14 @@ function GbpConnectSection() {
 
   const load = () => {
     setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/gbp/locations")
       .then((d) => setLocations(d.locations || []))
-      .catch(() => setLocations([]))
+      // A failed read is not "no locations": say so, with a retry.
+      .catch((e) => {
+        setLocations([]);
+        setLoadError(e.message || "Request failed.");
+      })
       .finally(() => setLoading(false));
   };
   useEffect(load, []);
@@ -1870,6 +1963,10 @@ function GbpConnectSection() {
       )}
       {loading ? (
         <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
+      ) : loadError ? (
+        <ActionFeedback error onRetry={load} className="min-h-16">
+          Could not load the Google Business Profile locations. {loadError}
+        </ActionFeedback>
       ) : (
         <div className="divide-y divide-zinc-200">
           {locations.map((loc) => (
@@ -1900,6 +1997,7 @@ function GbpConnectSection() {
 function LinkedInConnectSection() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const params = new URLSearchParams(window.location.search);
@@ -1908,9 +2006,14 @@ function LinkedInConnectSection() {
 
   const load = () => {
     setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/settings/linkedin/status")
       .then((d) => setStatus(d))
-      .catch(() => setStatus(null))
+      // A failed read is not "Not configured": say so, with a retry.
+      .catch((e) => {
+        setStatus(null);
+        setLoadError(e.message || "Request failed.");
+      })
       .finally(() => setLoading(false));
   };
   useEffect(load, []);
@@ -1956,6 +2059,10 @@ function LinkedInConnectSection() {
       )}
       {loading ? (
         <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
+      ) : loadError ? (
+        <ActionFeedback error onRetry={load} className="min-h-16">
+          Could not load the LinkedIn connection status. {loadError}
+        </ActionFeedback>
       ) : !status?.configured ? (
         <p className="text-ui-body text-ink-secondary">
           Not configured — set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET in Railway.
@@ -1971,7 +2078,7 @@ function LinkedInConnectSection() {
                   ? "Connected"
                   : "Not connected"}
               {connected && !orgMismatch && status?.tokenExpiresAt
-                ? ` · token expires ${new Date(status.tokenExpiresAt).toLocaleDateString()}`
+                ? ` · token expires ${formatETDate(status.tokenExpiresAt)}`
                 : ""}
               {connected && !orgMismatch && !status?.hasRefreshToken
                 ? " · no refresh token (re-auth ~60 days)"
