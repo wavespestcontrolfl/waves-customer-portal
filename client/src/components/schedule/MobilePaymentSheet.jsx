@@ -2,7 +2,8 @@
 // MobileCheckoutSheet's "Charge $X.XX" button.
 //
 // Tender rows each open a dedicated Square-style sheet:
-//   Tap to Pay           → native Stripe Terminal (WavesPay iOS deep link)
+//   Tap to Pay           → native Stripe Terminal (WavesPay deep link; in-page
+//                          inside the Waves Admin app)
 //   Cash                 → MobileCashTenderSheet (numpad + Tender)
 //   Check                → MobileCheckTenderSheet (optional note + Record Payment)
 //   Manual Credit Card   → MobileManualCardSheet  (in-app Stripe card entry)
@@ -102,9 +103,23 @@ export default function MobilePaymentSheet({
     setCharging(true);
     setError(null);
     try {
-      await launchTapToPay(invoiceId);
-      // Control is now handed off to the native iOS shell. Leave the sheet
-      // open so the deep link has a stable document to return to; the
+      const outcome = await launchTapToPay(invoiceId);
+      if (outcome?.inApp) {
+        // Waves Admin took the payment over this page: finish the way the
+        // other card tenders do.
+        if (outcome.status === 'succeeded') {
+          onChargeSuccess?.({ paymentIntentId: outcome.paymentIntentId });
+          onClose?.();
+          return;
+        }
+        if (outcome.status === 'failed') {
+          setError(outcome.message || 'Tap to Pay did not go through. Try again or pick another way to pay.');
+        }
+        setCharging(false);
+        return;
+      }
+      // Safari: control is now handed off to the native iOS shell. Leave the
+      // sheet open so the deep link has a stable document to return to; the
       // parent will close it once the payment webhook updates status.
     } catch (e) {
       setError(e.message || 'Failed to open Tap to Pay');

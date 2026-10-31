@@ -5,6 +5,7 @@ import useModalFocus from '../hooks/useModalFocus';
 import { useBiometricLock } from './BiometricGate';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 import { isNativeApp, nativePushConnectionState, requestNativePushPermission } from '../native/nativePush.js';
+import { isWavesAdminApp } from '../native/platform';
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { captureNativeBadgeUpdate } from '../native/nativeBadge';
 import { UNREAD_CHANGED_EVENT } from '../hooks/useUnreadConversations';
@@ -426,7 +427,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   // "Enable push" strip. Admins get operational Web Push. In the native
   // customer app this strip supplies recovery if automatic permission setup
   // did not connect. Customer web stays strip-free.
-  const showPushStrip = (type === 'admin' || isNativeApp()) && !pushOn;
+  // Web Push does not run inside the Waves Admin app's web view, so the
+  // strip there could only fail; staff alerts stay in the home-screen app.
+  const showPushStrip = (type === 'admin' || isNativeApp()) && !pushOn && !isWavesAdminApp();
   useEffect(() => {
     if (!open) return;
     if (type === 'admin') {

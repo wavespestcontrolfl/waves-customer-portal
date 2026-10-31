@@ -4,6 +4,9 @@ struct CollectView: View {
     @EnvironmentObject var app: AppState
     let handoff: API.ValidatedHandoff
 
+    // Apple asks for its "How to Tap" lesson when Tap to Pay is first used.
+    @AppStorage("howToTapShown") private var howToTapShown = false
+
     private var dollarAmount: String { currency(handoff.amount_cents) }
 
     private func currency(_ cents: Int) -> String {
@@ -60,16 +63,26 @@ struct CollectView: View {
             .foregroundColor(.white)
             .cornerRadius(999)
 
-            Button("Cancel") { app.flow = .idle }
+            if #available(iOS 18.0, *) {
+                Button("How to Tap") { Task { await HowToTap.present() } }
+                    .font(.subheadline)
+            }
+
+            Button("Cancel") { app.close() }
                 .foregroundColor(.secondary)
                 .padding(.bottom, 10)
         }
         .padding(.horizontal, 28)
         .background(Color(.systemBackground))
+        .task {
+            guard !howToTapShown else { return }
+            howToTapShown = true
+            await HowToTap.present()
+        }
     }
 
     private func collect() {
-        app.flow = .collecting
+        app.beginCollecting()
         Task {
             do {
                 let pi = try await API.createPaymentIntent(jti: extractJti())
@@ -78,9 +91,9 @@ struct CollectView: View {
                     jti: extractJti(),
                     surchargeEnabled: handoff.surcharge_enabled == true
                 )
-                app.flow = .success(confirmed.stripeId ?? pi.paymentIntentId)
+                app.collected(paymentIntentId: confirmed.stripeId ?? pi.paymentIntentId)
             } catch {
-                app.flow = .failure(error.localizedDescription)
+                app.fail(error.localizedDescription)
             }
         }
     }
