@@ -1880,10 +1880,11 @@ function initScheduledJobs() {
       // runExclusive: read-then-act — an overlapping tick could pick the same
       // loser row before the first merge soft-deletes it.
       await runExclusive('customer-dedupe-auto-merge', async () => {
-        const { runAutoMergeSweep, runRedPairAutoDismissSweep } = require('./customer-dedupe');
+        const { runAutoMergeSweep, runRedPairAutoDismissSweep, summarizeSweepSkips } = require('./customer-dedupe');
         if (mergeOn) {
           const result = await runAutoMergeSweep();
-          logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+          const reasons = summarizeSweepSkips(result.skipped);
+          logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}${reasons ? ` reasons=${reasons}` : ''}`);
         }
         if (dismissRedOn) {
           const result = await runRedPairAutoDismissSweep();
