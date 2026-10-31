@@ -36,6 +36,7 @@
  */
 
 const { sameFirstName, foldNameLetters } = require('../utils/name-match');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PORTAL_ERA_START = Date.parse('2026-04-06T04:00:00Z');
@@ -66,8 +67,11 @@ const COMMON_SURNAMES = new Set([
 ]);
 
 // "I left you a review", "review posted", "just submitted my review". Not "did": "did you review
-// the estimate?" is a question about something else.
+// the estimate?" is a question about something else. A negated statement ("I have not left a review
+// yet", "my review isn't done") is not evidence.
 const SAID_REVIEWED_RE = /\b(left|posted|wrote|submitted|gave)\b[^.!?]{0,25}\breview\b|\breview\b[^.!?]{0,20}\b(posted|left|submitted|done)\b/i;
+const NOT_REVIEWED_RE = /\b(not|never|haven['’]?t|hasn['’]?t|didn['’]?t|isn['’]?t|wasn['’]?t)\b[^.!?]{0,20}\b(left|posted|wrote|submitted|gave|done)\b/i;
+const saysReviewed = (body) => SAID_REVIEWED_RE.test(body || '') && !NOT_REVIEWED_RE.test(body || '');
 
 function foldName(value) {
   return foldNameLetters(value)
@@ -142,9 +146,14 @@ function nameKind(reviewName, person) {
   return null;
 }
 
+// Milliseconds, or null. A date-only 'YYYY-MM-DD' (a visit day, member_since) is that day's Eastern
+// midnight: Date.parse reads it as UTC midnight, the evening before in Eastern time.
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const toTime = (value) => {
   if (value === null || value === undefined || value === '') return null;
-  const t = value instanceof Date ? value.getTime() : Date.parse(value);
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : null;
+  const text = String(value);
+  const t = DATE_ONLY_RE.test(text) ? parseETDateTime(`${text}T00:00`).getTime() : Date.parse(text);
   return Number.isFinite(t) ? t : null;
 };
 
@@ -185,7 +194,7 @@ function activityEvidence(reviewAt, activity = {}, { surnameClash = false, locat
     .map((tap) => tap.at);
   const said = (activity.inboundTexts || []).some((m) => {
     const t = toTime(m.at);
-    return t !== null && t >= at - SAID_REVIEWED_BEFORE_MS && t <= at + SAID_REVIEWED_AFTER_MS && SAID_REVIEWED_RE.test(m.body || '');
+    return t !== null && t >= at - SAID_REVIEWED_BEFORE_MS && t <= at + SAID_REVIEWED_AFTER_MS && saysReviewed(m.body);
   });
   return {
     tap: !surnameClash && within(tapsHere, at - TAP_BEFORE_MS, at + TAP_AFTER_MS),
@@ -294,7 +303,7 @@ module.exports = {
   activityEvidence,
   scoreCandidate,
   decideReviewLink,
-  SAID_REVIEWED_RE,
+  saysReviewed,
   COMMON_SURNAMES,
   PORTAL_ERA_START,
 };

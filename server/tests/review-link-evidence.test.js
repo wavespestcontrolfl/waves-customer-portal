@@ -14,7 +14,7 @@ const {
   activityEvidence,
   scoreCandidate,
   decideReviewLink,
-  SAID_REVIEWED_RE,
+  saysReviewed,
 } = require('../services/review-link-evidence');
 
 const REVIEW_AT = '2026-10-20T18:00:00.000Z';
@@ -70,8 +70,9 @@ describe('names', () => {
 
 describe('first known contact', () => {
   test('an imported row\'s created_at is the import day, not a first contact', () => {
+    // A date-only start is that day's Eastern midnight (05:00Z in winter).
     expect(firstKnownContactAt({ leadSource: 'square', createdAt: '2026-04-06T12:00:00Z', memberSince: '2024-03-01' }))
-      .toEqual(new Date('2024-03-01'));
+      .toEqual(new Date('2024-03-01T05:00:00Z'));
     expect(firstKnownContactAt({ leadSource: 'square', createdAt: '2026-04-06T12:00:00Z' })).toBeNull();
   });
 
@@ -116,14 +117,24 @@ describe('activity around the review', () => {
     expect(activityEvidence(REVIEW_AT, { asksAt: [at(HOUR)] }).recent).toBe(false);
   });
 
+  test('a visit day is an Eastern day: a review at 10 PM gets no credit for the next day\'s visit', () => {
+    const lateEvening = '2026-10-20T02:00:00Z'; // October 19, 10 PM Eastern
+    expect(activityEvidence(lateEvening, { visitsOn: ['2026-10-20'] }).recent).toBe(false);
+    expect(activityEvidence(lateEvening, { visitsOn: ['2026-10-19'] }).recent).toBe(true);
+  });
+
   test('an inbound "I left a review" text counts from an hour before to a day after', () => {
     const said = (offset, body) => activityEvidence(REVIEW_AT, { inboundTexts: [{ at: at(offset), body }] }).saidReviewed;
     expect(said(2 * HOUR, 'Just left you a review!')).toBe(true);
     expect(said(-(HOUR + MINUTE), 'Just left you a review!')).toBe(false);
     expect(said(25 * HOUR, 'Just left you a review!')).toBe(false);
     expect(said(2 * HOUR, 'Did you review the estimate?')).toBe(false);
-    expect(SAID_REVIEWED_RE.test('Review posted. Thank you!')).toBe(true);
-    expect(SAID_REVIEWED_RE.test('I submitted my review on Google')).toBe(true);
+    expect(saysReviewed('Review posted. Thank you!')).toBe(true);
+    expect(saysReviewed('I submitted my review on Google')).toBe(true);
+    // A negated statement is not evidence.
+    expect(said(2 * HOUR, 'I have not left a review yet, sorry!')).toBe(false);
+    expect(saysReviewed('I haven\u2019t posted my review')).toBe(false);
+    expect(saysReviewed('My review isn\'t done yet')).toBe(false);
   });
 });
 

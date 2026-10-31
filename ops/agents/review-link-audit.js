@@ -21,8 +21,9 @@
 
 const path = require('path');
 const {
-  nameParts, firstKnownContactAt, dateVerdict, scoreCandidate, decideReviewLink, SAID_REVIEWED_RE,
+  nameParts, firstKnownContactAt, dateVerdict, scoreCandidate, decideReviewLink, saysReviewed,
 } = require(path.join(__dirname, '..', '..', 'server', 'services', 'review-link-evidence'));
+const { etDateString } = require(path.join(__dirname, '..', '..', 'server', 'utils', 'datetime-et'));
 const { ASK_TOUCH_SQL } = require(path.join(__dirname, '..', '..', 'server', 'services', 'review-outreach-templates'));
 
 const CONTACT_COLUMNS = ['secondary_contact_name', 'service_contact_name', 'service_contact2_name', 'service_contact3_name'];
@@ -33,7 +34,7 @@ const initials = (value) => {
   const { first, last } = nameParts(value);
   return `${(first[0] || '?').toUpperCase()}.${last ? `${last[0].toUpperCase()}.` : ''}`;
 };
-const day = (value) => (value ? new Date(value).toISOString().slice(0, 10) : '-');
+const day = (value) => (value ? etDateString(new Date(value)) : '-');
 
 function groupBy(rows, key) {
   const out = new Map();
@@ -48,7 +49,9 @@ function groupBy(rows, key) {
 async function loadData(trx) {
   const customers = (await trx.raw(`
     SELECT cu.id, cu.first_name, cu.last_name, ${CONTACT_COLUMNS.map((c) => `cu.${c}`).join(', ')},
-           cu.has_left_google_review, cu.created_at, cu.member_since, cu.customer_since, cu.lead_source,
+           cu.has_left_google_review, cu.created_at, cu.lead_source,
+           -- date columns as 'YYYY-MM-DD': the evidence module reads a date-only value as Eastern midnight
+           cu.member_since::text AS member_since, cu.customer_since::text AS customer_since,
            (SELECT min(coalesce(l.first_contact_at, l.created_at)) FROM leads l WHERE l.customer_id = cu.id) AS first_lead_at,
            (SELECT min(s.created_at) FROM sms_log s WHERE s.customer_id = cu.id) AS first_sms_at,
            (SELECT min(k.created_at) FROM call_log k WHERE k.customer_id = cu.id) AS first_call_at,
@@ -126,7 +129,7 @@ function buildCandidates({ customers, visits, asks, taps, texts }) {
         { at: t.last_redirected_at, locationId: t.last_google_location },
       ]).filter((t) => t.at),
       // Only texts the matcher would count, so no other body is held.
-      inboundTexts: (textsBy.get(cu.id) || []).filter((m) => SAID_REVIEWED_RE.test(m.body || '')).map((m) => ({ at: m.at, body: m.body })),
+      inboundTexts: (textsBy.get(cu.id) || []).filter((m) => saysReviewed(m.body)).map((m) => ({ at: m.at, body: m.body })),
     },
     linkedProfiles: [],
   }));
