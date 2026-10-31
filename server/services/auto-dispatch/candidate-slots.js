@@ -1049,6 +1049,35 @@ async function territoryTechnicianForVisit(service, geo) {
   }
 }
 
+// Two restricted members that name different territory technicians: no slot can satisfy both.
+const NO_SINGLE_TERRITORY = 'no-single-territory';
+
+/**
+ * The territory restriction for the whole moving unit (Codex r1 P2 on #7182): a grouped
+ * move gives every member the slot's technician, so each unassigned pest / termite member
+ * must land in its own territory. One territory technician shared by every restricted
+ * member = that technician; two different ones = NO_SINGLE_TERRITORY (every candidate
+ * drops and the stop keeps its place); none = null. The apply-time member guard checks the
+ * same rule against the committed rows (apply.js assertMembersInTerritory).
+ */
+async function unitTerritoryTechnician(service, geo, ctx) {
+  const own = await territoryTechnicianForVisit(service, geo);
+  const siblingIds = ((ctx.groupContext && ctx.groupContext.siblings) || []).map((sib) => sib.id);
+  if (!siblingIds.length) return own;
+  const gates = require('../../config/feature-gates');
+  if (typeof gates.territoryNightRunLive !== 'function' || !gates.territoryNightRunLive()) return own;
+  const db = ctx.db || require('../../models/db');
+  const rows = await db('scheduled_services').whereIn('id', siblingIds)
+    .select('id', 'technician_id', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'service_address_zip', 'lat', 'lng');
+  const named = new Set(own ? [String(own)] : []);
+  for (const row of rows) {
+    const tech = await territoryTechnicianForVisit(row, row.lat != null && row.lng != null ? { lat: row.lat, lng: row.lng } : null);
+    if (tech) named.add(String(tech));
+  }
+  if (named.size > 1) return NO_SINGLE_TERRITORY;
+  return named.size ? [...named][0] : null;
+}
+
 async function findValidCandidateSlots(service, prefs, baseCtx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
@@ -1127,7 +1156,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // better available" rather than an opaque NO_VALID_SLOT.
   // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
-  const territoryTechId = await territoryTechnicianForVisit(service, geo);
+  const territoryTechId = await unitTerritoryTechnician(service, geo, ctx);
   const drops = {
     blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0,
     ...(ctx.keepTech === true ? { other_tech: 0 } : {}),
@@ -1158,11 +1187,12 @@ module.exports = {
   CURRENT_DAY_TECH_UNRESOLVED,
   findValidCandidateSlots,
   computeCurrentPlacement,
+  territoryTechnicianForVisit,
   inBlackout,
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    candidateFromSlot, territoryTechnicianForVisit, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
+    candidateFromSlot, unitTerritoryTechnician, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

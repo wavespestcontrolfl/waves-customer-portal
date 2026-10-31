@@ -15,6 +15,7 @@ const db = require('../../models/db');
 const SmartRebooker = require('../rebooker');
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
+const { resolveGeo } = require('./geo');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveLimit = require('./move-limit');
@@ -528,7 +529,22 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     // Every sibling against the receiving tech, committed rows, tech changed
     // or not (see assertCapabilitiesActive).
     await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);
+    // GATE_TERRITORY_NIGHT_RUN: an unassigned pest / termite sibling lands only in its own territory.
+    await assertMembersInTerritory(rows, best.technician_id || service.technician_id || null, refuse);
   };
+}
+
+// The candidate side restricts the whole unit (candidate-slots unitTerritoryTechnician); this re-checks the
+// committed sibling rows at apply, so a grouped move never gives a sibling another territory's technician.
+async function assertMembersInTerritory(rows, targetTechId, refuse) {
+  // Gate off: no read at all (read off the module: a partial feature-gates mock reads off).
+  const gates = require('../../config/feature-gates');
+  if (typeof gates.territoryNightRunLive !== 'function' || !gates.territoryNightRunLive()) return;
+  const { territoryTechnicianForVisit } = require('./candidate-slots');
+  for (const row of rows) {
+    const own = await territoryTechnicianForVisit(row, resolveGeo(row));
+    if (own && String(own) !== String(targetTechId)) throw refuse(row.id, 'belongs to another technician\'s territory');
+  }
 }
 
 // A run can move 100 rows, so a reminder store that fails for every one of
