@@ -171,6 +171,24 @@ describe('stripe banking service', () => {
     });
   });
 
+  test('getBalance totals count USD only: payouts are USD, so a CAD bucket is never offered as dollars', async () => {
+    stripeClient.balance.retrieve.mockResolvedValue({
+      available: [{ currency: 'usd', amount: 10000 }, { currency: 'cad', amount: 10000 }],
+      pending: [{ currency: 'cad', amount: 2500 }],
+      instant_available: [{ currency: 'usd', amount: 4000 }, { currency: 'cad', amount: 9000 }],
+    });
+    stripeClient.payouts.list.mockResolvedValue({ data: [], has_more: false });
+
+    const result = await service.getBalance();
+
+    expect(result.total_available).toBe(100);
+    expect(result.total_pending).toBe(0);
+    expect(result.total_instant_available).toBe(40);
+    // the per-currency lists still carry every bucket, unconverted
+    expect(result.available).toEqual([{ currency: 'usd', amount: 100 }, { currency: 'cad', amount: 100 }]);
+    expect(result.pending).toEqual([{ currency: 'cad', amount: 25 }]);
+  });
+
   test('getBalance pages payouts to find an in-transit next payout', async () => {
     stripeClient.balance.retrieve.mockResolvedValue({
       available: [{ currency: 'usd', amount: 178315 }],

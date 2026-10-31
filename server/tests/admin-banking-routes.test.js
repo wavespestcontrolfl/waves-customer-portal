@@ -116,6 +116,70 @@ describe('admin banking routes', () => {
     });
   });
 
+  test('a failed cash-flow read is a 500 the page shows as unavailable, never a zero report', async () => {
+    StripeBanking.getCashFlow.mockRejectedValue(new Error('select ... - relation "stripe_payouts" does not exist'));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/banking/cash-flow?start_date=2026-07-01&end_date=2026-07-31&period=daily`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(500);
+      expect(body).toEqual({ error: 'the cash-flow read failed' });
+    });
+  });
+
+  test('a bad cash-flow date is still a 400 with its reason', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/banking/cash-flow?start_date=07/01/2026`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/start_date/);
+      expect(StripeBanking.getCashFlow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Eastern calendar defaults on the UTC server clock', () => {
+    // 2026-11-01 00:30 UTC is still Oct 31, 8:30 PM ET. Only Date is faked:
+    // the test server's sockets keep their real timers.
+    const ALL_BUT_DATE = ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate',
+      'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'];
+    beforeEach(() => jest.useFakeTimers({ now: new Date('2026-11-01T00:30:00Z'), doNotFake: ALL_BUT_DATE }));
+    afterEach(() => jest.useRealTimers());
+
+    test('MTD stats start on the Eastern month', async () => {
+      const statsQuery = {
+        where: jest.fn().mockReturnThis(),
+        whereRaw: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ mtd_deposited: '250.00', mtd_fees: '0', payout_count: '1', avg_payout: '250' }),
+      };
+      db.mockImplementation((table) => {
+        if (table === 'stripe_payouts') return statsQuery;
+        throw new Error(`Unexpected table ${table}`);
+      });
+      db.raw = jest.fn((sql) => sql);
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/banking/stats`, { headers: { Authorization: 'Bearer admin' } });
+        expect(res.status).toBe(200);
+        expect((await res.json()).mtd_deposited).toBe(250);
+      });
+      expect(statsQuery.whereRaw).toHaveBeenCalledWith('DATE(arrival_date) >= ?::date', ['2026-10-01']);
+    });
+
+    test('a cash-flow request without dates covers the Eastern month to date', async () => {
+      StripeBanking.getCashFlow.mockResolvedValue({ summary: {}, daily: [] });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/banking/cash-flow`, { headers: { Authorization: 'Bearer admin' } });
+        expect(res.status).toBe(200);
+      });
+      expect(StripeBanking.getCashFlow).toHaveBeenCalledWith('2026-10-01', '2026-10-31');
+    });
+  });
+
   test('reconciliation records the authenticated admin as actor', async () => {
     StripeBanking.reconcilePayout.mockResolvedValue({ payout_id: 'payout-1', status: 'confirmed' });
 

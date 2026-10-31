@@ -1016,7 +1016,7 @@ function ReconciliationTab() {
                     color: "#09090B",
                   }}
                 >
-                  {fmtD(item.date || item.created)}
+                  {fmtDay(item.arrival_date)}
                 </div>{" "}
                 <div
                   style={{
