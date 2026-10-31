@@ -128,6 +128,13 @@ describe('runReviewNameMatch', () => {
     expect(conn.updates[0].wheres).toContainEqual(['raw', 'name_match_dismissed_at IS NOT DISTINCT FROM ?::timestamptz', [dismissedAt]]);
   });
 
+  test('a click auto-link is never disputed: it already waits in the queue for its own confirm', async () => {
+    const conn = fakeConn([review('r3', 'Gwen Harlowe', { customer_id: 'c3', link_source: 'click_auto' })]);
+    loadEvidenceCandidates.mockResolvedValue([candidate('c3', 'Gwen', 'Harlowe', { timeline: { createdAt: '2026-10-25T14:00:00Z' } })]);
+    const out = await runReviewNameMatch({ conn, mode: 'on' });
+    expect(out).toMatchObject({ counts: { none: 1 }, written: 0 });
+  });
+
   test('an inactive customer is never suggested: the queue could not confirm them', async () => {
     const conn = fakeConn([review('r1', 'Marlow Pemberton')]);
     loadEvidenceCandidates.mockResolvedValue([candidate('c1', 'Marlow', 'Pemberton', { active: false })]);

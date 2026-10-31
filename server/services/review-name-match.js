@@ -49,10 +49,10 @@ function decideUnlinked(review, candidates, { linkedBy, surnameHolderCount }) {
 
 // A linked review is disputed when its customer's first known contact came after it (older clashes
 // too: this only lists the link for a person, it never unlinks). A person who kept the link is not
-// asked again.
+// asked again, and a click auto-link is left to its own confirm row in the queue.
 function decideLinked(review, byId) {
   const linked = byId.get(idOf(review.customer_id));
-  if (!linked || ruledOut(review).has(idOf(review.customer_id))) return NO_DECISION;
+  if (!linked || review.link_source === 'click_auto' || ruledOut(review).has(idOf(review.customer_id))) return NO_DECISION;
   const dates = dateVerdict(review.review_created_at, firstKnownContactAt(linked.timeline));
   if (dates !== 'clash' && dates !== 'clash_early') return NO_DECISION;
   return { result: 'disputed', customerId: review.customer_id, reason: dates };
@@ -67,7 +67,7 @@ async function computeDecisions(conn) {
   const reviews = await conn('google_reviews')
     .whereRaw("(reviewer_name IS NULL OR reviewer_name <> '_stats')")
     .whereNull('missing_since')
-    .select('id', 'location_id', 'reviewer_name', 'review_created_at', 'customer_id',
+    .select('id', 'location_id', 'reviewer_name', 'review_created_at', 'customer_id', 'link_source',
       'name_match_result', 'name_match_customer_id', 'name_match_reason', 'name_match_dismissed_customer_ids', 'name_match_dismissed_at');
   const candidates = await loadEvidenceCandidates(conn);
   const byId = new Map(candidates.map((c) => [idOf(c.customerId), c]));

@@ -515,6 +515,14 @@ describe('review incentives', () => {
     await expect(ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: disputed, policy }))
       .rejects.toMatchObject({ code: 'disputed_link_move', statusCode: 409 });
     expect(disputed.__state.rows.google_reviews[0].customer_id).toBe('customer-first');
+
+    // A disputed click auto-link keeps its own correction path (its reversal owns the flag).
+    const clickAuto = make({
+      customer_id: 'customer-first', link_source: 'click_auto', auto_linked_at: '2025-12-13T16:05:00.000Z',
+      name_match_result: 'disputed', name_match_customer_id: 'customer-first', name_match_reason: 'clash_early',
+    });
+    await ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: clickAuto, policy });
+    expect(clickAuto.__state.rows.google_reviews[0]).toMatchObject({ customer_id: 'customer-dana', link_source: 'manual_no_visit' });
   });
 
   test('candidate search puts the matcher\'s suggestion first even when the name search misses it', async () => {

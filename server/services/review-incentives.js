@@ -1065,8 +1065,9 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // A disputed link (its customer's first contact came after the review) cannot move to another
   // customer here: nothing can prove the first customer's review flag came from this link, so it
   // would stay set with no review behind it. Keep link settles the dispute; a move waits for a safe
-  // flag reversal.
-  if (openNameMatch(review) && review.customer_id && String(review.customer_id) !== String(customerId)) {
+  // flag reversal. A click auto-link keeps its own correction path: its reversal below owns the flag.
+  if (openNameMatch(review) && review.customer_id && review.link_source !== 'click_auto'
+    && String(review.customer_id) !== String(customerId)) {
     throw operationalError('This link is disputed: its customer\'s first contact came after the review. Use Keep link, or ask for the link to be fixed by hand.', 409, 'disputed_link_move');
   }
   let payoutEligible = true;
