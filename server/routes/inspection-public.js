@@ -175,7 +175,8 @@
  *   untouched intake shell (leadOwnIntakeShell: new_lead, active, created at
  *   most 10 minutes before the lead, this lead first on it, no billing/
  *   visit/login/merge history, same phone identity and email, no other
- *   lead's provenance) books onto that customer instead of a second row,
+ *   lead's provenance, the primary and only live profile of its account,
+ *   a complete stored street/city/ZIP) books onto that customer instead of a second row,
  *   with outright (not requires_verification) provenance. Gate off = the
  *   paragraph above holds without exception.
  *
@@ -1553,7 +1554,7 @@ async function reuseWithProvenance(trx, freshLead, matched, resolved) {
 // before. Reads only (callers hold the comms fence and the lead row lock).
 const OWN_SHELL_MAX_AGE_MS = 10 * 60 * 1000;
 const OWN_SHELL_COLUMNS = [
-  'id', 'first_name', 'last_name', 'phone', 'email', 'account_id', 'active', 'pipeline_stage', 'created_at',
+  'id', 'first_name', 'last_name', 'phone', 'email', 'account_id', 'is_primary_profile', 'active', 'pipeline_stage', 'created_at',
   'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude',
   // The columns customer-dedupe's loserAutoBlockers reads off the row.
   'stripe_customer_id', 'password_hash', 'payer_id', 'billing_mode', 'monthly_rate',
@@ -1603,28 +1604,38 @@ async function shellOwnedOnlyByLead(dbConn, shell, lead) {
   return !otherProvenance;
 }
 
+// The shell must be the primary AND only live profile of its own account
+// (Codex #7250 security P2): an existing account whose full phone differs but
+// shares the last ten digits is missed by the webhook's exact match, and
+// ensureCustomerAccount's suffix match then files the shell as that unrelated
+// household's "Additional property". Outright trust there would book a real
+// assessment under another account.
+async function shellAloneInAccount(dbConn, shell) {
+  if (shell.is_primary_profile !== true || !shell.account_id) return false;
+  const sibling = await dbConn('customers')
+    .where({ account_id: shell.account_id, active: true })
+    .whereNull('deleted_at')
+    .whereNot('id', shell.id)
+    .first('id');
+  return !sibling;
+}
+
+// A complete stored address (street, city and ZIP). A partial one is never
+// reused (Codex #7250 r1 P2): the booking would keep the incomplete dispatch
+// address, and writing the fill would also have to update the profile's
+// property rows; a new prospect gets the validated address instead.
+function shellAddressComplete(shell) {
+  return ['address_line1', 'city', 'zip'].every((column) => String(shell[column] || '').trim());
+}
+
 async function leadOwnIntakeShell(dbConn, lead) {
   if (!lead?.customer_id || !lead.created_at) return null;
   const shell = await dbConn('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first(...OWN_SHELL_COLUMNS);
   if (!shell || shell.active !== true || shell.pipeline_stage !== 'new_lead') return null;
-  if (!shellMintedForLead(shell, lead) || !shellIdentityMatches(shell, lead)) return null;
+  if (!shellMintedForLead(shell, lead) || !shellIdentityMatches(shell, lead) || !shellAddressComplete(shell)) return null;
+  if (!(await shellAloneInAccount(dbConn, shell))) return null;
   if (!(await shellOwnedOnlyByLead(dbConn, shell, lead))) return null;
   return (await shellUntouched(dbConn, shell)) ? shell : null;
-}
-
-// Fills ONLY the shell's empty address fields from the validated address (the
-// comms fence is already held by the caller); a stored value is never
-// overwritten. Returns the customer with the filled values.
-async function fillEmptyShellAddress(trx, customer, address) {
-  if (!address?.line1 || String(customer.address_line1 || '').trim()) return customer;
-  const fresh = await trx('customers').where({ id: customer.id }).first('address_line1', 'address_line2', 'city', 'state', 'zip');
-  const fills = {};
-  for (const [column, key] of [['address_line1', 'line1'], ['address_line2', 'line2'], ['city', 'city'], ['state', 'state'], ['zip', 'zip']]) {
-    if (!String(fresh?.[column] || '').trim() && address[key]) fills[column] = address[key];
-  }
-  if (!Object.keys(fills).length) return customer;
-  await trx('customers').where({ id: customer.id }).update({ ...fills, updated_at: new Date() });
-  return { ...customer, ...fills };
 }
 
 // Books an unverified lead onto its own intake shell. Returns the same shape
@@ -1640,11 +1651,11 @@ async function tryReuseOwnIntakeShell(trx, freshLead, resolved) {
   if (!(await tryLockCustomerComms(trx, freshLead.customer_id))) return null;
   const shell = await leadOwnIntakeShell(trx, freshLead);
   if (!shell) return null;
-  if (String(shell.address_line1 || '').trim() && profileAffirmativelyDiffers(shell, resolved.address)) return null;
+  if (profileAffirmativelyDiffers(shell, resolved.address)) return null;
   const reused = await reuseMatchedProfile(trx, freshLead, shell, resolved);
   if (reused.eligibility) return reused;
   if (!reused.customer) return null;
-  const customer = await fillEmptyShellAddress(trx, reused.customer, resolved.address);
+  const { customer } = reused;
   await trx('lead_activities').insert({
     lead_id: freshLead.id,
     activity_type: CONSULTATION_PROSPECT_ACTIVITY,

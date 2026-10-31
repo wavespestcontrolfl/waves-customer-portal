@@ -4019,17 +4019,18 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
   const SHELL_ID = 'cust-shell';
   const SHELL = {
     id: SHELL_ID, first_name: 'Pat', last_name: 'Lee', phone: '(941) 555-0101', email: null, account_id: 'acct-shell',
-    active: true, pipeline_stage: 'new_lead', created_at: '2026-10-31T14:00:00Z',
-    address_line1: '', address_line2: null, city: '', state: 'FL', zip: '', latitude: null, longitude: null,
+    is_primary_profile: true, active: true, pipeline_stage: 'new_lead', created_at: '2026-10-31T14:00:00Z',
+    address_line1: '123 Any St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5,
   };
   const SHELL_LEAD = { ...LEAD_ROW, customer_id: SHELL_ID, created_at: '2026-10-31T14:00:30Z' };
   const BOOK_BODY = { date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209' };
 
   // Seeds the world and commits. `shell`, `lead`, `earlierLead`, `otherProvenance`
   // and `journal` vary one condition each; the rest is the clean case.
-  async function commitWith({ shell = SHELL, lead = SHELL_LEAD, earlierLead = null, otherProvenance = null, journal = () => null } = {}) {
+  async function commitWith({ shell = SHELL, lead = SHELL_LEAD, earlierLead = null, otherProvenance = null, journal = () => null, otherProfile = null } = {}) {
     firstResults.leads = (q) => (q.conds.customer_id ? earlierLead : lead);
-    firstResults.customers = (q) => (q.conds.id === SHELL_ID ? shell : null);
+    // An account-scoped read is the "only live profile of its account" check.
+    firstResults.customers = (q) => (q.conds.id === SHELL_ID ? shell : (q.conds.account_id ? otherProfile : null));
     firstResults.lead_activities = (q) => (q.conds.lead_id ? null : otherProvenance);
     firstResults.customer_merge_journal = journal;
     listResults.scheduled_services = [];
@@ -4084,13 +4085,9 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     expect(reloaded.id).toBe(SHELL_ID);
   });
 
-  test('gate on: only the shell\'s EMPTY address fields are filled; a stored value is never overwritten', async () => {
-    await commitWith({ shell: { ...SHELL, city: 'Palmetto' } });
-    const fill = updateCalls.find((c) => c.table === 'customers' && 'address_line1' in c.payload);
-    expect(fill.payload.address_line1).toBe('123 Any St');
-    expect(fill.payload.zip).toBe('34209');
-    expect(fill.payload.state).toBeUndefined();
-    expect(fill.payload.city).toBeUndefined();
+  test('gate on: a reused shell keeps its stored address; nothing is written to the customers row', async () => {
+    await commitWith();
+    expect(updateCalls.some((c) => c.table === 'customers' && 'address_line1' in c.payload)).toBe(false);
   });
 
   test.each([
@@ -4106,6 +4103,14 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     ['the shell is inactive', { shell: { ...SHELL, active: false } }],
     ['another lead\'s consultation provenance names the shell', { otherProvenance: { lead_id: 'lead-other' } }],
     ['the shell\'s stored address clearly differs from the booking address', { shell: { ...SHELL, address_line1: '9 Other Rd', city: 'Sarasota', zip: '34242', latitude: 27.3, longitude: -82.5 } }],
+    // Codex #7250 security P2: only the primary, only live profile of its own account.
+    ['the shell is an additional property of an account (not primary)', { shell: { ...SHELL, is_primary_profile: false } }],
+    ['another live profile shares the shell\'s account', { otherProfile: { id: 'cust-sibling' } }],
+    ['the shell has no account', { shell: { ...SHELL, account_id: null } }],
+    // Codex #7250 r1 P2: a partial stored address is never reused (no fill).
+    ['the shell has no street', { shell: { ...SHELL, address_line1: '' } }],
+    ['the shell has no city', { shell: { ...SHELL, city: '' } }],
+    ['the shell has no ZIP', { shell: { ...SHELL, zip: null } }],
   ])('gate on, but %s: a new prospect is created', async (_label, { blockers, ...seed }) => {
     if (blockers) mockLoserBlockers.mockImplementation(async () => blockers);
     await commitWith(seed);
