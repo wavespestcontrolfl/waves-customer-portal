@@ -10,7 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { zipForPoint, territoryTechnicianFor, TERRITORY_LINES } = require('../services/territory');
 const { _internals } = require('../services/scheduling/line-technician');
 
-const { withTerritory } = _internals;
+const { withTerritory, shadowPlace } = _internals;
 
 describe('zipForPoint (Census 2020 ZIP areas)', () => {
   test.each([
@@ -99,5 +99,49 @@ describe('withTerritory (a territory over a service line)', () => {
     expect(withTerritory(entry, 'lawn', 'hire')).toBe(entry);
     expect(withTerritory(entry, 'general', null)).toBe(entry);
     expect(withTerritory(null, 'general', null)).toBeNull();
+  });
+});
+
+describe('shadowPlace (the shadow row reads the saved visit\'s own place)', () => {
+  const prior = process.env.GATE_TERRITORY_ROUTING;
+  afterEach(() => {
+    if (prior === undefined) delete process.env.GATE_TERRITORY_ROUTING; else process.env.GATE_TERRITORY_ROUTING = prior;
+  });
+  function fakeDb(visit, { fail = false } = {}) {
+    return jest.fn(() => ({
+      where: () => ({ first: async () => { if (fail) throw new Error('db down'); return visit; } }),
+    }));
+  }
+
+  test('gate off: no place and no read', async () => {
+    delete process.env.GATE_TERRITORY_ROUTING;
+    const db = fakeDb({ service_address_zip: '34293' });
+    await expect(shadowPlace(db, { scheduledServiceId: 'visit-1', customerId: 'cust-1' })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the visit\'s service ZIP and map position, the customer as fallback', async () => {
+    process.env.GATE_TERRITORY_ROUTING = 'true';
+    const db = fakeDb({ service_address_zip: '34293', lat: '27.05', lng: '-82.40' });
+    await expect(shadowPlace(db, { scheduledServiceId: 'visit-1', customerId: 'cust-1' }))
+      .resolves.toEqual({ zip: '34293', lat: '27.05', lng: '-82.40', customerId: 'cust-1' });
+    await expect(shadowPlace(fakeDb(null, { fail: true }), { scheduledServiceId: 'visit-1', customerId: 'cust-1' }))
+      .resolves.toEqual({ zip: null, lat: null, lng: null, customerId: 'cust-1' });
+  });
+});
+
+describe('call bookings route by the booked property (source guard)', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+
+  test('a fresh call booking passes the linked property\'s ZIP and map position', () => {
+    const call = source.slice(source.indexOf('const bookingLineTech = await lineDefaultCallBookingTechnician(trx, {'));
+    expect(call.slice(0, 700)).toContain('zip: propertyLinkage.address?.zip || null,');
+    expect(call.slice(0, 700)).toContain('lat: propertyLinkage.lat ?? null,');
+  });
+
+  test('a reused visit passes its own stamped ZIP and map position', () => {
+    const call = source.slice(source.indexOf('const reuseLineTech = await lineDefaultCallBookingTechnician(trx, {'));
+    expect(call.slice(0, 700)).toContain('zip: existing.service_address_zip || null,');
+    expect(call.slice(0, 700)).toContain('lat: existing.lat ?? null,');
   });
 });

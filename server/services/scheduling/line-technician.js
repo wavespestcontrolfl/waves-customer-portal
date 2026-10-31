@@ -426,6 +426,29 @@ const withCommittedVisit = (row, visit) => ({
   actualTechnicianId: visit.technician_id || null,
 });
 
+/**
+ * A shadow row's territory place, read only while GATE_TERRITORY_ROUTING is on: the saved
+ * visit's own service ZIP and map position (a multi-property customer's other property
+ * must not read as the main one), with the customer row as the last fallback.
+ */
+async function shadowPlace(db, row) {
+  if (!territoryOn()) return null;
+  let visit = null;
+  if (row.scheduledServiceId) {
+    try {
+      visit = await db('scheduled_services').where({ id: row.scheduledServiceId }).first('service_address_zip', 'lat', 'lng');
+    } catch (err) {
+      logger.warn(`[line-technician] shadow visit place unreadable (customer row used): ${err.message}`);
+    }
+  }
+  return {
+    zip: (visit && visit.service_address_zip) || null,
+    lat: visit ? visit.lat : null,
+    lng: visit ? visit.lng : null,
+    customerId: row.customerId || null,
+  };
+}
+
 async function writeShadowRow(row) {
   const db = defaultDb;
   const date = row.date ? dateOnlyString(row.date) : null;
@@ -433,7 +456,7 @@ async function writeShadowRow(row) {
   try {
     pick = await resolveLineTechnician(db, {
       serviceId: row.serviceId, serviceKey: row.serviceKey, serviceType: row.serviceType, date,
-      place: row.customerId ? { customerId: row.customerId } : null,
+      place: await shadowPlace(db, row),
     });
   } catch (err) {
     logger.warn(`[line-technician] shadow resolve failed: ${err.message}`);
@@ -517,5 +540,5 @@ module.exports = {
   lineOfferRanking,
   pickLineTechnician,
   liveServiceLine,
-  _internals: { loadLineMap, windowEndOf, isAssessmentIdentity, withTerritory },
+  _internals: { loadLineMap, windowEndOf, isAssessmentIdentity, withTerritory, shadowPlace },
 };

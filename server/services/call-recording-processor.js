@@ -20560,6 +20560,10 @@ const CallRecordingProcessor = {
                       serviceKey: existing.service_key_snapshot || null,
                       serviceType: existing.service_type || serviceType,
                       date: callBookingDateOnly(existing.scheduled_date),
+                      // The reused visit's own property first (GATE_TERRITORY_ROUTING), the customer last.
+                      zip: existing.service_address_zip || null,
+                      lat: existing.lat ?? null,
+                      lng: existing.lng ?? null,
                       customerId: existing.customer_id || null,
                     });
                     if (reuseLineTech) {
@@ -21100,6 +21104,10 @@ const CallRecordingProcessor = {
                   serviceKey: callBookingCatalogRow?.service_key || null,
                   serviceType,
                   date: scheduledDate,
+                  // The booked property first (GATE_TERRITORY_ROUTING), the customer last.
+                  zip: propertyLinkage.address?.zip || null,
+                  lat: propertyLinkage.lat ?? null,
+                  lng: propertyLinkage.lng ?? null,
                   customerId,
                 });
                 if (bookingLineTech) {
