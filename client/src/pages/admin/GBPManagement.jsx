@@ -159,6 +159,10 @@ export default function GBPManagement() {
     loadLocations();
   }, [loadLocations]);
   useEffect(() => {
+    // The last filter's rows never stand in for this one's: History reads
+    // "Loading" (null) until this filter's reply lands.
+    setUpdates(null);
+    setUpdatesError("");
     loadUpdates(updatesFilter);
   }, [updatesFilter]);
   // Entering the Queue always reads the pending rows fresh.
@@ -1421,7 +1425,7 @@ function ChangeHistoryTab({
           </TR>
         </THead>
         <TBody>
-          {updates.map((u) => (
+          {(updates || []).map((u) => (
             <TR key={u.id}>
               <TD>{locName(u.location_id)}</TD>
               <TD className="text-zinc-900">{fieldLabel(u.field_name)}</TD>
@@ -1440,13 +1444,23 @@ function ChangeHistoryTab({
               </TD>
             </TR>
           ))}
-          {updates.length === 0 && !error && (
+          {updates?.length === 0 && !error && (
             <TR>
               <TD
                 colSpan={6}
                 className="p-[30px] text-center text-ink-secondary"
               >
                 No changes found
+              </TD>
+            </TR>
+          )}
+          {!updates && !error && (
+            <TR>
+              <TD
+                colSpan={6}
+                className="p-[30px] text-center text-ink-secondary"
+              >
+                Loading changes...
               </TD>
             </TR>
           )}

@@ -153,6 +153,20 @@ describe("Google profile workspace", () => {
     expect(screen.queryByText("All changes have been reviewed")).toBeNull();
   });
 
+  it("a History filter whose read fails shows the failure, not the last filter's rows", async () => {
+    routes["GET /admin/gbp/updates"] = (url) =>
+      url.includes("status=approved")
+        ? response({ error: "down" }, 503)
+        : response({ updates: [PENDING] });
+    await open();
+    fireEvent.click(screen.getByRole("button", { name: "Updates" }));
+    fireEvent.click(await screen.findByRole("button", { name: "History" }));
+    expect(await screen.findByText("Business Name")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "approved" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the change history: HTTP 503");
+    expect(screen.queryByText("Business Name")).toBeNull();
+  });
+
   it("Sync All reports the locations that failed", async () => {
     routes["POST /admin/gbp/locations/:id/sync"] = () => response({ error: "down" }, 503);
     await open();
