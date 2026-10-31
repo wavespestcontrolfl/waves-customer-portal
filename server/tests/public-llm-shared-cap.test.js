@@ -159,8 +159,13 @@ describe('consumeSharedDailyCap', () => {
     process.env.PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION = '3';
     countIs(4);
     expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: false });
-    mockRaw.mockRejectedValueOnce(new Error('connection refused'));
-    expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: false });
+    // Past the once-a-minute warning throttle, so this bucket's warning is logged.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout'] }).setSystemTime(Date.now() + 5 * 60 * 1000);
+    try {
+      mockRaw.mockRejectedValueOnce(new Error('connection refused'));
+      expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: false });
+      expect(logger.warn.mock.calls.at(-1)[0]).toMatch(/bug-id-extension: counter unavailable, failing closed/);
+    } finally { jest.useRealTimers(); }
     mockRaw.mockResolvedValueOnce({ rows: [] });
     expect(await consumeSharedDailyCap(BUG_ID_EXTENSION_CAP)).toEqual({ allowed: false });
   });

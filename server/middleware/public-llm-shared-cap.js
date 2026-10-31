@@ -31,11 +31,12 @@ const { etDateString } = require('../utils/datetime-et');
 const WARN_EVERY_MS = 60 * 1000;
 let lastWarnAt = 0;
 
-function warnOncePerMinute(err, bucket) {
+function warnOncePerMinute(err, bucket, failClosed = false) {
   const now = Date.now();
   if (now - lastWarnAt < WARN_EVERY_MS) return;
   lastWarnAt = now;
-  logger.warn(`[public-llm-shared-cap] ${bucket}: counter unavailable, failing open (per-IP limiter still applies): ${err && err.message}`);
+  const outcome = failClosed ? 'failing closed (refusing until it is back)' : 'failing open (per-IP limiter still applies)';
+  logger.warn(`[public-llm-shared-cap] ${bucket}: counter unavailable, ${outcome}: ${err && err.message}`);
 }
 
 // Positive integer from the env var, else the default.
@@ -77,7 +78,7 @@ async function consumeSharedDailyCap({ bucket, envVar, defaultMax, failClosed = 
     if (!Number.isFinite(count)) throw new Error('counter returned no row');
     return { allowed: count <= resolveMax(envVar, defaultMax) };
   } catch (err) {
-    warnOncePerMinute(err, bucket);
+    warnOncePerMinute(err, bucket, failClosed);
     return { allowed: !failClosed };
   }
 }
