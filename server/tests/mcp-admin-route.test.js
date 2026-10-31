@@ -249,11 +249,13 @@ describe('answers', () => {
     expect(mockRecordToolEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'mcp-admin', toolName: 'needs_me', success: true }));
   });
 
-  test('get_day_summary keeps customer names and the visit fields', async () => {
+  test('get_day_summary keeps customer names, the visit fields and the visit price counts', async () => {
     mockExecute.mockResolvedValue({
       date: '2026-10-30',
       total_services: 2,
-      estimated_revenue: 1423.3,
+      visit_price_total: 923.3,
+      visits_with_price: 1,
+      visits_without_price: 1,
       unassigned: [{ id: 's1', customer: 'Pat Example', city: 'Venice', service_type: 'pest', notes: 'dog in yard, call first' }],
       by_tech: [{ name: 'Tech One', total: 1, completed: 0, remaining: 1, zones: { south: 1 }, services: [{ id: 's2', customer: 'Sam Example', city: 'Nokomis', status: 'scheduled', notes: 'gate code 4455' }] }],
     });
@@ -261,9 +263,7 @@ describe('answers', () => {
     expect(answer.data.unassigned[0]).toEqual({ id: 's1', customer: 'Pat Example', city: 'Venice', service_type: 'pest' });
     expect(answer.data.by_tech[0].services[0]).toEqual({ id: 's2', customer: 'Sam Example', city: 'Nokomis', status: 'scheduled' });
     expect(JSON.stringify(answer)).not.toMatch(/gate code|call first/);
-    // It counts $125 for every unpriced visit, so it never leaves as revenue.
-    expect(answer.data.total_services).toBe(2);
-    expect(answer.data).not.toHaveProperty('estimated_revenue');
+    expect(answer.data).toMatchObject({ total_services: 2, visit_price_total: 923.3, visits_with_price: 1, visits_without_price: 1 });
   });
 
   test('list_gap_reports withholds words quoted from someone other than the owner', async () => {
