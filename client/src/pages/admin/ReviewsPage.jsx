@@ -834,6 +834,39 @@ function PolicyInfoCard({ Icon, label, value, sub, color }) {
 // One customer row in the attribution repair panel — used by both the
 // click-correlated "likely reviewers" list (with a badge) and the plain
 // name/phone/address search results.
+// The evidence the review matcher weighs (server review-link-evidence.js), so a person sees why a
+// candidate fits this review or not before matching it.
+const NAME_EVIDENCE = {
+  exact: "Same name",
+  variant: "Nickname or one-letter spelling",
+  // A surname one letter off, or a shortened first name with the same surname.
+  near: "Close name, not the same",
+  initial: "Last initial only",
+  household: "Same surname, different first name",
+  first_only: "First name only",
+};
+
+function linkEvidenceFacts(evidence) {
+  const facts = [NAME_EVIDENCE[evidence.nameKind] || "Name does not match"];
+  if (evidence.nameKind && evidence.role === "contact") facts.push("a listed contact");
+  if (evidence.dates === "unknown" || !evidence.firstContactAt) {
+    facts.push("First contact unknown");
+  } else {
+    const firstContact = new Date(evidence.firstContactAt).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "America/New_York",
+    });
+    facts.push(`First contact ${firstContact}${evidence.contactAfterReview ? ", after this review" : ""}`);
+  }
+  if (evidence.tap) facts.push("Tapped the review link within 3 hours");
+  if (evidence.recent) facts.push("Visit or review text in the 14 days before");
+  if (evidence.saidReviewed) facts.push('Texted "I left a review"');
+  if (evidence.alreadyLinkedHere) facts.push("Already linked to another review on this profile");
+  return facts;
+}
+
 function RepairCandidateCard({
   review,
   candidate,
@@ -854,6 +887,14 @@ function RepairCandidateCard({
           .filter(Boolean)
           .join(" | ")}
       </div>
+      {candidate.evidence && (
+        <div
+          className="text-ui-body text-zinc-900 mt-[4px]"
+          data-testid="link-evidence"
+        >
+          {linkEvidenceFacts(candidate.evidence).join(" | ")}
+        </div>
+      )}
       <div className="flex gap-[8px] flex-wrap mt-[10px]">
         {(candidate.services || []).length === 0 ? (
           review.reason === "click_auto_confirm" ? (

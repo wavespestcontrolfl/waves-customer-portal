@@ -909,11 +909,55 @@ async function searchAttributionCandidates(options = {}) {
     });
   }
 
+  await attachLinkEvidence(review, [...candidates, ...likelyReviewers], conn);
+
   return {
     review: serializeAttributionQueueItem(review, null, review.customer_id ? 'missing_technician' : 'missing_customer'),
     candidates,
     likelyReviewers,
   };
+}
+
+// Why each candidate fits this review or not (owner 2026-10-31): the name evidence, the first known
+// contact against the review date, and activity around it (review-link-evidence.js). Display only:
+// nothing here links, marks or sends. A failed read leaves the cards without evidence.
+async function attachLinkEvidence(review, cards, conn) {
+  const ids = [...new Set(cards.map((card) => String(card.id)))];
+  if (!ids.length) return;
+  try {
+    const { loadEvidenceCandidates } = require('./review-link-candidates');
+    const { describeCandidate } = require('./review-link-evidence');
+    const found = await loadEvidenceCandidates(conn, { customerIds: ids });
+    // Other live reviews already linked to these customers: one Google account reviews a profile once.
+    const linked = await conn('google_reviews')
+      .whereIn('customer_id', ids)
+      .whereNull('missing_since')
+      .whereNot('id', review.id)
+      .select('customer_id', 'location_id');
+    const byId = new Map(found.map((c) => [String(c.customerId), c]));
+    const subject = { reviewerName: review.reviewer_name, reviewedAt: review.review_created_at, locationId: review.location_id };
+    for (const card of cards) {
+      const candidate = byId.get(String(card.id));
+      if (!candidate) continue;
+      const linkedProfiles = linked.filter((r) => String(r.customer_id) === String(card.id)).map((r) => r.location_id);
+      const seen = describeCandidate(subject, { ...candidate, linkedProfiles });
+      const reviewedAt = review.review_created_at ? new Date(review.review_created_at).getTime() : NaN;
+      card.evidence = seen && {
+        nameKind: seen.nameKind,
+        role: seen.role,
+        dates: seen.dates,
+        firstContactAt: seen.firstContactAt ? seen.firstContactAt.toISOString() : null,
+        // Plain chronology for the person matching: true even inside the matcher's 3-day allowance.
+        contactAfterReview: Boolean(seen.firstContactAt && Number.isFinite(reviewedAt) && seen.firstContactAt.getTime() > reviewedAt),
+        tap: seen.activity.tap,
+        recent: seen.activity.recent,
+        saidReviewed: seen.activity.saidReviewed,
+        alreadyLinkedHere: seen.alreadyLinkedHere,
+      };
+    }
+  } catch (err) {
+    logger.warn(`[review-incentives] link evidence for review ${review.id} failed: ${err.message}`);
+  }
 }
 
 async function manualAttributeGoogleReview(attrs = {}, options = {}) {

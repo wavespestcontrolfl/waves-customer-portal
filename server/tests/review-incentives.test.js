@@ -27,7 +27,10 @@ jest.mock('../services/email-template-automation-emitters', () => ({
   recordAutomationIntent: jest.fn(async () => ({ id: 'intent-mock' })),
 }));
 
+// The match queue's evidence reader runs raw SQL the query-builder mock below does not model.
+jest.mock('../services/review-link-candidates', () => ({ loadEvidenceCandidates: jest.fn(async () => []) }));
 const ReviewIncentives = require('../services/review-incentives');
+const { loadEvidenceCandidates } = require('../services/review-link-candidates');
 const { emitReviewLinked5Star, recordAutomationIntent } = require('../services/email-template-automation-emitters');
 
 function createDbMock(initialRows = {}) {
@@ -986,6 +989,75 @@ describe('review incentives', () => {
     conn.__state.rows.google_reviews[0].link_source = null;
     const paged = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn, limit: 1 });
     expect(paged.candidates.map((c) => c.id)).toEqual(['customer-sam']);
+  });
+
+  test('candidate search shows each candidate\'s evidence: name, first contact against the review, activity (owner 2026-10-31)', async () => {
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-late', first_name: 'Gwen', last_name: 'Northgate', active: true },
+        { id: 'customer-sam', first_name: 'Sam', last_name: 'Northgate', active: true },
+      ],
+      google_reviews: [
+        {
+          id: 'google-1',
+          customer_id: null,
+          reviewer_name: 'Sam Northgate',
+          star_rating: 5,
+          review_created_at: '2026-09-01T15:00:00.000Z',
+          location_id: 'bradenton',
+          google_review_id: 'accounts/1/locations/2/reviews/northgate',
+        },
+        // Sam already has a live linked review on this profile.
+        { id: 'google-2', customer_id: 'customer-sam', reviewer_name: 'Sam N', review_created_at: '2026-06-01T15:00:00.000Z', location_id: 'bradenton' },
+      ],
+    });
+    loadEvidenceCandidates.mockResolvedValueOnce([
+      {
+        customerId: 'customer-sam',
+        holder: { first: 'Sam', last: 'Northgate' },
+        contacts: [],
+        timeline: { memberSince: '2025-02-01' },
+        activity: { visitsOn: ['2026-08-25'] },
+        linkedProfiles: [],
+      },
+      {
+        customerId: 'customer-late',
+        holder: { first: 'Gwen', last: 'Northgate' },
+        contacts: [],
+        timeline: { createdAt: '2026-10-05T14:00:00.000Z', leadSource: 'website' },
+        activity: {},
+        linkedProfiles: [],
+      },
+    ]);
+
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(loadEvidenceCandidates).toHaveBeenLastCalledWith(conn, { customerIds: expect.arrayContaining(['customer-sam', 'customer-late']) });
+    const byId = Object.fromEntries(result.candidates.map((c) => [c.id, c.evidence]));
+    expect(byId['customer-sam']).toEqual({
+      nameKind: 'exact',
+      role: 'holder',
+      dates: 'fits',
+      firstContactAt: '2025-02-01T05:00:00.000Z',
+      contactAfterReview: false,
+      tap: false,
+      recent: true,
+      saidReviewed: false,
+      alreadyLinkedHere: true,
+    });
+    expect(byId['customer-late']).toMatchObject({ nameKind: 'household', dates: 'clash', firstContactAt: '2026-10-05T14:00:00.000Z', contactAfterReview: true });
+  });
+
+  test('candidate search still answers when the evidence read fails', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-sam', first_name: 'Sam', last_name: 'Northgate', active: true }],
+      google_reviews: [{
+        id: 'google-1', customer_id: null, reviewer_name: 'Sam Northgate', star_rating: 5,
+        review_created_at: '2026-09-01T15:00:00.000Z', location_id: 'bradenton', google_review_id: 'accounts/1/locations/2/reviews/x',
+      }],
+    });
+    loadEvidenceCandidates.mockRejectedValueOnce(new Error('synthetic read failure'));
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(result.candidates.map((c) => [c.id, c.evidence])).toEqual([['customer-sam', undefined]]);
   });
 
   // The surname clause: the folded column (lowercase, apostrophe-free,

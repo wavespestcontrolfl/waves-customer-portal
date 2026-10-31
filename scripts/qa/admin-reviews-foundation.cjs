@@ -189,7 +189,32 @@ async function main() {
         else if (
           url.pathname === "/api/admin/reviews/incentives/attribution-queue"
         )
-          body = { items: [] };
+          body = {
+            items: url.searchParams.get("days") === "90" ? [{
+              id: "review-unmatched",
+              reviewerName: "Taylor Exampel",
+              reason: "missing_customer",
+              starRating: 5,
+              reviewText: "Fast and friendly service.",
+              locationId: "sarasota",
+            }] : [],
+          };
+        else if (
+          url.pathname === "/api/admin/reviews/incentives/attribution-candidates"
+        )
+          body = {
+            candidates: [
+              {
+                id: "customer-17", name: "Taylor Example", city: "Sarasota", phone: "+19415550117", services: [],
+                evidence: { nameKind: "near", role: "holder", dates: "fits", firstContactAt: "2025-06-12T04:00:00.000Z", contactAfterReview: false, tap: true, recent: true, saidReviewed: true, alreadyLinkedHere: false },
+              },
+              {
+                id: "customer-18", name: "Jordan Example", city: "Sarasota", services: [],
+                evidence: { nameKind: "household", role: "holder", dates: "clash", firstContactAt: "2026-10-05T14:00:00.000Z", contactAfterReview: true, tap: false, recent: false, saidReviewed: false, alreadyLinkedHere: true },
+              },
+            ],
+            likelyReviewers: [],
+          };
         else if (url.pathname === "/api/admin/gbp/locations")
           body = { locations: [location] };
         else if (url.pathname === "/api/admin/gbp/updates")
@@ -362,6 +387,21 @@ async function main() {
       ]);
       await page.getByText("Synthetic Technician", { exact: true }).waitFor();
       await capture("incentives-ledger");
+      // The match panel shows why each candidate fits the review or not.
+      await Promise.all([
+        page.waitForResponse((res) => res.url().endsWith("/attribution-queue?days=90")),
+        page.getByRole("combobox").selectOption("90"),
+      ]);
+      await page.getByRole("button", { name: "Match", exact: true }).click();
+      await page.getByTestId("link-evidence").first().waitFor();
+      assert.deepEqual(
+        await page.getByTestId("link-evidence").allTextContents(),
+        [
+          'Close name, not the same | First contact Jun 12, 2025 | Tapped the review link within 3 hours | Visit or review text in the 14 days before | Texted "I left a review"',
+          "Same surname, different first name | First contact Oct 5, 2026, after this review | Already linked to another review on this profile",
+        ],
+      );
+      await capture("incentives-match");
       await page.getByRole("button", { name: "GBP", exact: true }).click();
       await page.getByText("Waves Pest Control", { exact: true }).waitFor();
       await capture("gbp");
