@@ -88,6 +88,7 @@ import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
 import PortalInboxTabV2 from "./PortalInboxTabV2";
+import MessengerTabV2 from "./MessengerTabV2";
 import OwedTabV2 from "./OwedTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
@@ -297,6 +298,17 @@ const TABS = [
 // portal and nobody answered. Owner-only; added to the nav only when the
 // summary endpoint answers enabled:true, right after Triage.
 const PORTAL_TAB = { key: "portal", label: "Portal", Icon: MessagesSquare, adminOnly: true };
+// Messenger (GATE_MESSENGER_INBOX): the Facebook page's Messenger threads. Every
+// staff role (the server scopes a technician to their own customers); added to
+// the nav only when the summary endpoint answers enabled:true, right after the
+// Portal tab, else after Triage, else after SMS.
+const MESSENGER_TAB = { key: "messenger", label: "Messenger", Icon: MessagesSquare };
+// A tab placed right after the first of `anchors` that is in the nav.
+function insertTabAfter(tabs, tab, anchors) {
+  const index = anchors.map((key) => tabs.findIndex((t) => t.key === key)).find((i) => i >= 0);
+  const at = index === undefined ? 0 : index + 1;
+  return [...tabs.slice(0, at), tab, ...tabs.slice(at)];
+}
 const SMS_LOG_PAGE_SIZE = 500;
 
 // Short reviewer-facing labels for an Agent Review draft's intended_actions
@@ -4210,17 +4222,36 @@ export default function CommunicationsPageV2() {
     })();
     return () => { cancelled = true; };
   }, [isAdminRole]);
+  // messengerCount: the same one-time read, for every staff role; null (no tab)
+  // when the gate is off or the read fails.
+  const [messengerCount, setMessengerCount] = useState(null);
+  const messengerOn = messengerCount !== null;
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const summary = await adminFetch("/admin/messenger/summary");
+        if (!cancelled && summary?.enabled === true) setMessengerCount(Number(summary.unanswered) || 0);
+      } catch {
+        /* no Messenger tab when the summary cannot be read */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const tabs = useMemo(() => {
     const visible = TABS.filter((t) => !t.adminOnly || isAdminRole);
-    if (!isAdminRole || !portalOn) return visible;
-    const at = visible.findIndex((t) => t.key === "triage") + 1;
-    return [...visible.slice(0, at), PORTAL_TAB, ...visible.slice(at)];
-  }, [isAdminRole, portalOn]);
+    const withPortal = isAdminRole && portalOn ? insertTabAfter(visible, PORTAL_TAB, ["triage"]) : visible;
+    return messengerOn ? insertTabAfter(withPortal, MESSENGER_TAB, ["portal", "triage", "sms"]) : withPortal;
+  }, [isAdminRole, portalOn, messengerOn]);
   // The count rides in the label (the nav has no badge slot); label changes do
   // not change `tabs`, so the hash-sync effect below never re-runs for them.
   const navSections = useMemo(
-    () => tabs.map((t) => (t.key === "portal" && portalCount > 0 ? { ...t, label: `Portal (${portalCount})` } : t)),
-    [tabs, portalCount],
+    () => tabs.map((t) => {
+      if (t.key === "portal" && portalCount > 0) return { ...t, label: `Portal (${portalCount})` };
+      if (t.key === "messenger" && messengerCount > 0) return { ...t, label: `Messenger (${messengerCount})` };
+      return t;
+    }),
+    [tabs, portalCount, messengerCount],
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
   const smsParams = new URLSearchParams(location.search);
@@ -4302,6 +4333,7 @@ export default function CommunicationsPageV2() {
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
       {activeTab === "portal" && <PortalInboxTabV2 onCount={setPortalCount} />}
+      {activeTab === "messenger" && <MessengerTabV2 onCount={setMessengerCount} />}
       {activeTab === "owed" && <OwedTabV2 />}
       {activeTab === "templates" && (
         <>

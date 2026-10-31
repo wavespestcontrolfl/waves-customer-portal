@@ -38,6 +38,7 @@ function fixture(url) {
   if (p === "/api/admin/communications/ai-auto-reply-status") return { enabled: false };
   if (p === "/api/admin/communications/agent-draft") return { draft: null };
   if (p === "/api/admin/portal-inbox/summary") return { enabled: false };
+  if (p === "/api/admin/messenger/summary") return { enabled: false };
   if (p === "/api/admin/communications/link-library") return { links: [] };
   if (p === "/api/admin/communications/sender") return { fromNumber: null };
   if (p === "/api/tech/dictation/availability") return { available: false };
