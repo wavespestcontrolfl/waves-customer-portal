@@ -128,6 +128,10 @@ postgres('payroll Mercury paychecks', () => {
   const sendRun = (runId, client) => mercury.sendRun(runId, ADMIN_ID, { client });
   const poll = (client, now = new Date()) => poller.pollPayments({ client, now });
   const setState = (id, patch) => trx('payroll_payments').where({ id }).update(patch);
+  // The open payroll bell keys: real notification rows, written through the rolled-back transaction.
+  const openBellKeys = async () => (await trx('notifications').where({ recipient_type: 'admin', category: 'payroll' })
+    .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
+    .select(trx.raw("metadata->>'dedupeKey' as key"))).map((r) => r.key).sort();
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -399,6 +403,19 @@ postgres('payroll Mercury paychecks', () => {
       expect(rows.map((r) => [r.attempt, r.state])).toEqual([[1, state], [2, 'requested']]);
       expect(rows[1].idempotency_key).not.toBe(rows[0].idempotency_key);
       expect(rows[1].note).not.toBe(rows[0].note);
+    });
+
+    it('after a return it closes the returned bell but keeps the month-mismatch bell open for the tax fix', async () => {
+      const { run, check } = await bankRun();
+      await sendRun(run.id, fakeClient());
+      const old = await firstPayment(check('Sample Alpha'));
+      await setState(old.id, { state: 'returned', posted_on: '2026-10-01', resolved_at: new Date() });
+      const row = await trx('payroll_payments').where({ id: old.id }).first();
+      await alerts.raisePaymentAlert('month_mismatch', row);
+      await alerts.raisePaymentAlert('returned', row);
+      expect(await openBellKeys()).toEqual([`payroll-pay:${old.id}:month_mismatch`, `payroll-pay:${old.id}:returned`]);
+      await sendAgain(check('Sample Alpha').id, {}, fakeClient());
+      expect(await openBellKeys()).toEqual([`payroll-pay:${old.id}:month_mismatch`]);
     });
 
     it.each(['queued', 'requested', 'approved', 'sent'])('is refused while the payment is %s', async (state) => {
@@ -953,16 +970,13 @@ postgres('payroll Mercury paychecks', () => {
         const ctx = await unknownPayment();
         const client = fakeClient();
         const request = { requestId: 'req-found', recipientId: ctx.recipient, amountCents: ctx.check.netCents, createdAt: new Date(NOW.getTime() - 39 * 60 * 1000).toISOString() };
-        const openKeys = async () => (await trx('notifications').where({ recipient_type: 'admin', category: 'payroll' })
-          .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
-          .select(trx.raw("metadata->>'dedupeKey' as key"))).map((r) => r.key).sort();
         client.listRequests.mockResolvedValue([{ ...request, status: 'pendingApproval', memo: null }]);
         await poll(client, NOW);
-        expect(await openKeys()).toEqual([`payroll-pay:${ctx.id}:probably_ours`, `payroll-pay:${ctx.id}:unknown`]);
+        expect(await openBellKeys()).toEqual([`payroll-pay:${ctx.id}:probably_ours`, `payroll-pay:${ctx.id}:unknown`]);
         client.listRequests.mockResolvedValue([{ ...request, status, memo: `waves-pay:${ctx.id}` }]);
         await poll(client, new Date(NOW.getTime() + 15 * 60 * 1000));
         expect(await ctx.row()).toMatchObject({ state, mercury_request_id: 'req-found' });
-        expect(await openKeys()).toEqual(events.map((event) => `payroll-pay:${ctx.id}:${event}`));
+        expect(await openBellKeys()).toEqual(events.map((event) => `payroll-pay:${ctx.id}:${event}`));
       });
     });
 
@@ -979,15 +993,12 @@ postgres('payroll Mercury paychecks', () => {
     it.each(['rejected', 'cancelled'])('a request %s after the noon reminder closes the reminder; only its own bell stays open', async (status) => {
       const ctx = await sent();
       const row = await ctx.row();
-      const openKeys = async () => (await trx('notifications').where({ recipient_type: 'admin', category: 'payroll' })
-        .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
-        .select(trx.raw("metadata->>'dedupeKey' as key"))).map((r) => r.key).sort();
       await poll(ctx.client, new Date('2026-09-24T16:01:00Z'));
-      expect(await openKeys()).toEqual([`payroll-pay:${row.id}:pending_noon`]);
+      expect(await openBellKeys()).toEqual([`payroll-pay:${row.id}:pending_noon`]);
       ctx.client.getRequest.mockResolvedValue({ status });
       await poll(ctx.client, new Date('2026-09-24T16:16:00Z'));
       expect((await ctx.row()).state).toBe(status);
-      expect(await openKeys()).toEqual([`payroll-pay:${row.id}:${status}`]);
+      expect(await openBellKeys()).toEqual([`payroll-pay:${row.id}:${status}`]);
     });
 
     it('a refused key (401) rings the key bell once and ends the run', async () => {

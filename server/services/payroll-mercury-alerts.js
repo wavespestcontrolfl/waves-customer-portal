@@ -2,7 +2,8 @@
  * Admin bells for Mercury paychecks (owner plan A, 2026-10-30), raised through raiseAdminAlert
  * (docs/admin-notifications.md) in category `payroll` with `bellDefault: true`: they ring unless the owner turned the
  * category off in Settings. One bell per payment and event (dedupeKey payroll-pay:<payment id>:<event>), who: person.
- * A payment bell closes when the payment is settled or a new attempt starts (closePaymentBells). Sends nothing to a
+ * A payment bell closes when the payment is settled or a new attempt starts (closePaymentBells), except a month-mismatch
+ * bell: it is about the tax figures, so a person closes it once they are fixed. Sends nothing to a
  * customer or staff member. A bell never blocks payroll: every function here swallows its own error.
  */
 const { dateOnlyString } = require('../utils/date-only');
@@ -64,7 +65,7 @@ const EVENTS = {
   month_mismatch: {
     action: [(n) => `tell Claude ${n}'s pay posted in a new month`, (n) => `tell Claude ${n}'s pay month is off`],
     why: (p, ctx) => `It posted ${shortDateET(`${p.postedOn}T12:00:00Z`)} but the pay date was ${shortDateET(`${ctx.payDate}T12:00:00Z`)}; the tax figures need a fix.`,
-    doneWhen: 'payment_settled',
+    doneWhen: 'tax_figures_fixed',
     who: 'either',
   },
 };
@@ -135,10 +136,14 @@ async function raiseKeyAlert({ kind = 'read', raise = require('./admin-alert-com
   }
 }
 
+// Never closed with the payment: a new attempt, a paper check or a return leaves the tax figures as wrong as they were.
+const PERSON_CLOSES = new Set(['month_mismatch']);
+
 // Closes the bells of one payment (or the key bell) once what they were about is settled. Never throws.
 async function closeBells({ paymentId = null, key = null, resolution, conn = db, episodes = require('./admin-alert-episodes') }) {
   try {
-    const keys = key ? [key] : await episodes.openAdminAlertKeys(conn, `${KEY_PREFIX}${paymentId}:`);
+    const keys = key ? [key] : (await episodes.openAdminAlertKeys(conn, `${KEY_PREFIX}${paymentId}:`))
+      .filter((open) => !PERSON_CLOSES.has(open.slice(open.lastIndexOf(':') + 1)));
     if (!keys.length) return 0;
     return Number(await episodes.closeAdminAlertKeys(conn, keys, 'payroll_payment_settled', { resolution })) || 0;
   } catch (err) {

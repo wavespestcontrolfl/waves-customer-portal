@@ -138,6 +138,19 @@ describe('bells follow the admin notification rules', () => {
     await alerts.closeKeyBell({ kind: 'send', conn: {}, episodes });
     expect(episodes.closeAdminAlertKeys.mock.calls[1][1]).toEqual(['payroll-mercury-key-send']);
   });
+
+  test('closing a payment\'s bells leaves its month-mismatch bell open: a person closes it once the tax figures are fixed', async () => {
+    const episodes = {
+      openAdminAlertKeys: jest.fn(async () => ['payroll-pay:p1:returned', 'payroll-pay:p1:month_mismatch']),
+      closeAdminAlertKeys: jest.fn(async () => 1),
+    };
+    await alerts.closePaymentBells('p1', 'A new attempt was started', { conn: {}, episodes });
+    expect(episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['payroll-pay:p1:returned']);
+    episodes.openAdminAlertKeys.mockResolvedValue(['payroll-pay:p1:month_mismatch']);
+    expect(await alerts.closePaymentBells('p1', 'Paid by paper check instead', { conn: {}, episodes })).toBe(0);
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
+    expect(alerts.EVENTS.month_mismatch.doneWhen).toBe('tax_figures_fixed');
+  });
 });
 
 describe('poller decisions', () => {
