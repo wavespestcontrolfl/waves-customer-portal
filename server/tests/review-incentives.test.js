@@ -444,6 +444,65 @@ describe('review incentives', () => {
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
 
+  test('lists the review matcher\'s open decisions with the customer they name, outside the period and the program window (owner 2026-10-31)', async () => {
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-dana', first_name: 'Dana', last_name: 'Fenwick', active: true },
+        { id: 'customer-gwen', first_name: 'Gwen', last_name: 'Harlowe', active: true },
+      ],
+      google_reviews: [
+        {
+          // A year-old unlinked review the matcher pauses: listed though it predates the program.
+          id: 'review-pause', customer_id: null, reviewer_name: 'Dana Fenwikc', star_rating: 5,
+          review_created_at: '2025-12-13T16:00:00.000Z', location_id: 'bradenton',
+          name_match_result: 'pause', name_match_customer_id: 'customer-dana', name_match_reason: 'near',
+        },
+        {
+          // A disputed link stays visible even after its bonus was paid.
+          id: 'review-disputed', customer_id: 'customer-gwen', reviewer_name: 'Gwen Harlowe', star_rating: 5,
+          review_created_at: '2025-01-01T16:00:00.000Z', location_id: 'parrish',
+          name_match_result: 'disputed', name_match_customer_id: 'customer-gwen', name_match_reason: 'clash_early',
+        },
+        {
+          // Matched by a person since the pass ran: the suggestion is closed.
+          id: 'review-closed', customer_id: 'customer-gwen', reviewer_name: 'Gwen Harlowe', star_rating: 5,
+          review_created_at: '2025-02-01T16:00:00.000Z', location_id: 'sarasota',
+          name_match_result: 'pause', name_match_customer_id: 'customer-dana', name_match_reason: 'near',
+        },
+      ],
+      review_incentive_payouts: [{ id: 'payout-1', google_review_id: 'review-disputed' }],
+    });
+
+    const queue = await ReviewIncentives.getAttributionQueue({
+      conn,
+      policy: { ...policy, programStartsAt: '2026-06-01T00:00:00.000Z' },
+      days: 30,
+    });
+
+    expect(queue.items.map((item) => [item.id, item.reason, item.suggestedCustomerId, item.suggestedCustomerName, item.customerName])).toEqual([
+      ['review-pause', 'name_match_pause', 'customer-dana', 'Dana Fenwick', null],
+      ['review-disputed', 'name_match_disputed', 'customer-gwen', 'Gwen Harlowe', 'Gwen Harlowe'],
+    ]);
+  });
+
+  test('candidate search puts the matcher\'s suggestion first even when the name search misses it', async () => {
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-dana', first_name: 'Dana', last_name: 'Fenwick', active: true },
+        // Sorts first by surname, so only the pin can put the suggestion ahead of it.
+        { id: 'customer-other', first_name: 'Dana', last_name: 'Aaronson', active: true },
+      ],
+      google_reviews: [{
+        id: 'review-pause', customer_id: null, reviewer_name: 'Dana Fenwikc', star_rating: 5,
+        review_created_at: '2026-09-01T16:00:00.000Z', location_id: 'bradenton',
+        google_review_id: 'accounts/1/locations/2/reviews/pause',
+        name_match_result: 'pause', name_match_customer_id: 'customer-dana', name_match_reason: 'near',
+      }],
+    });
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'review-pause', conn });
+    expect(result.candidates[0].id).toBe('customer-dana');
+  });
+
   test('excludes historical reviews from the attribution queue after program start', async () => {
     const conn = createDbMock({
       google_reviews: [

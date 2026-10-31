@@ -630,6 +630,35 @@ function serializeAttributionQueueItem(review, customer, reason) {
   };
 }
 
+// The review matcher's decisions this queue lists (services/review-name-match.js,
+// GATE_REVIEW_NAME_MATCH_V2): each names one customer for a person to confirm with Match or rule out
+// with Dismiss. 'disputed' is a link whose customer's first contact came after the review.
+const NAME_MATCH_REASONS = Object.freeze({
+  link: 'name_match_link',
+  link_confirm: 'name_match_confirm',
+  pause: 'name_match_pause',
+  household: 'name_match_household',
+  disputed: 'name_match_disputed',
+});
+
+// A decision row still open: unlinked for a suggestion, still on the disputed customer for a dispute.
+function openNameMatch(review) {
+  if (!NAME_MATCH_REASONS[review.name_match_result] || !review.name_match_customer_id) return false;
+  if (review.name_match_result === 'disputed') return String(review.customer_id || '') === String(review.name_match_customer_id);
+  return !review.customer_id;
+}
+
+// One open decision as a queue item. customerName stays the LINKED customer (set for a dispute
+// only); suggestedCustomerName names the customer the matcher points at.
+async function nameMatchQueueItem(review, conn) {
+  const suggested = await conn('customers').where({ id: review.name_match_customer_id }).first();
+  return {
+    ...serializeAttributionQueueItem(review, review.customer_id ? suggested : null, NAME_MATCH_REASONS[review.name_match_result]),
+    suggestedCustomerId: review.name_match_customer_id,
+    suggestedCustomerName: customerName(suggested),
+  };
+}
+
 async function getAttributionQueue(options = {}) {
   const conn = options.conn || db;
   const policy = options.policy || await getPolicy(conn);
@@ -671,7 +700,16 @@ async function getAttributionQueue(options = {}) {
     .whereNull('missing_since')
     .orderBy('review_created_at', 'desc');
   const clickAutoIds = new Set(clickAutoRows.map(r => r.id));
-  const reviews = [...clickAutoRows, ...scanned.filter(r => !clickAutoIds.has(r.id))];
+  // The matcher's open decisions, uncapped and outside the period for the same reason: this queue is
+  // where a person settles them (a pause can sit on a review from last year).
+  const nameMatchRows = (await conn('google_reviews')
+    .whereIn('name_match_result', Object.keys(NAME_MATCH_REASONS))
+    .whereNotNull('name_match_customer_id')
+    .whereNull('missing_since')
+    .orderBy('review_created_at', 'desc'))
+    .filter((r) => openNameMatch(r) && !clickAutoIds.has(r.id));
+  const nameMatchIds = new Set(nameMatchRows.map(r => r.id));
+  const reviews = [...clickAutoRows, ...nameMatchRows, ...scanned.filter(r => !clickAutoIds.has(r.id) && !nameMatchIds.has(r.id))];
 
   const reviewIds = reviews.map(row => row.id).filter(Boolean);
   const paidRows = reviewIds.length
@@ -681,6 +719,11 @@ async function getAttributionQueue(options = {}) {
 
   const items = [];
   for (const review of reviews) {
+    // Before the payout check: a disputed link stays visible even after its bonus was paid.
+    if (nameMatchIds.has(review.id)) {
+      items.push(await nameMatchQueueItem(review, conn));
+      continue;
+    }
     if (paidReviewIds.has(review.id)) continue;
 
     // A click auto-link is excluded from payouts until a human confirms
@@ -868,6 +911,7 @@ async function searchAttributionCandidates(options = {}) {
       if (current) customers.unshift(current);
     }
   }
+  await pinSuggestedCustomer(review, customers, conn);
   const candidates = [];
   for (const customer of customers) {
     const services = await recentServiceCandidatesForCustomer(customer.id, review, conn);
@@ -916,6 +960,24 @@ async function searchAttributionCandidates(options = {}) {
     candidates,
     likelyReviewers,
   };
+}
+
+// The matcher's suggestion for an unlinked review leads the candidate list, so its one tap is there
+// even when the name search missed it ("Rebecca Shively" does not find "Shivley").
+async function pinSuggestedCustomer(review, customers, conn) {
+  if (review.customer_id || !openNameMatch(review)) return;
+  const id = String(review.name_match_customer_id);
+  const at = customers.findIndex((c) => String(c.id) === id);
+  if (at === 0) return;
+  if (at > 0) {
+    customers.unshift(...customers.splice(at, 1));
+    return;
+  }
+  const suggested = await conn('customers')
+    .where({ id: review.name_match_customer_id, active: true })
+    .whereNull('deleted_at')
+    .first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  if (suggested) customers.unshift(suggested);
 }
 
 // Why each candidate fits this review or not (owner 2026-10-31): the name evidence, the first known
