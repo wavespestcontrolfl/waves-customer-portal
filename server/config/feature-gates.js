@@ -7028,6 +7028,16 @@ function reviewNameMatchMode() {
   return value === 'true' ? 'on' : 'off';
 }
 
+// GATE_REVIEW_PROBABLE_REVIEWER_GUARD read at CALL time (owner 2026-10-31, review matching plan
+// PR 4): 'true' = every review ask, at the moment it would leave and inside the per-customer
+// review-send lock, also stops when the customer probably already left a Google review: an open
+// review-matcher decision names them (services/review-name-match.js; a person's Dismiss closes it)
+// or they texted that they left one (services/review-click-guard.js). Covers the first-ask lock.
+// Unset = today's guard, no redeploy.
+function reviewProbableReviewerGuardLive() {
+  return String(process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD || '').trim().toLowerCase() === 'true';
+}
+
 // GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
 // builds", Route Check Everywhere build 3c). The portal assistant's
 // check_availability and the text drafter's city-based OPEN TIMES fallback
@@ -8743,6 +8753,7 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 module.exports.reviewNameMatchMode = reviewNameMatchMode;
+module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;
 module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;

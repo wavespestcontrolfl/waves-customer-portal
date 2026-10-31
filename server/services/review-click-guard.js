@@ -26,9 +26,16 @@
  *   - routes/admin-communications.js      — the composer's SMS send seam (a draft minted
  *                                            before the click is refused, not sent)
  * An untracked click (the bare office URL) is invisible here by nature.
+ *
+ * Probable reviewer (GATE_REVIEW_PROBABLE_REVIEWER_GUARD, owner 2026-10-31): the same checks also stop
+ * an ask, whatever its visit, when the customer probably already left a Google review: an open
+ * review-matcher decision names them (services/review-name-match.js), or they texted that they left
+ * one. A customer who reviewed under another spelling of their name is not asked again.
  */
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
+const { reviewProbableReviewerGuardLive } = require('../config/feature-gates');
+const { saysReviewed } = require('./review-link-evidence');
 
 // A date-only visit column is that ET calendar day, so the fallback anchor is
 // ET midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
@@ -96,6 +103,26 @@ async function reviewLinkClickedSince(customerId, since, database = db) {
   return Boolean(row);
 }
 
+// Review-matcher decisions that say this customer probably wrote an unlinked live review.
+const PROBABLE_REVIEWER_RESULTS = ['link', 'link_confirm', 'pause', 'household'];
+
+// Has this customer probably already left a Google review? Only with the gate on.
+async function probableReviewer(customerId, database = db) {
+  if (!customerId || !reviewProbableReviewerGuardLive()) return false;
+  const named = await database('google_reviews')
+    .where({ name_match_customer_id: customerId })
+    .whereIn('name_match_result', PROBABLE_REVIEWER_RESULTS)
+    .whereNull('customer_id')
+    .whereNull('missing_since')
+    .first('id');
+  if (named) return true;
+  const texts = await database('sms_log')
+    .where({ customer_id: customerId, direction: 'inbound' })
+    .whereILike('message_body', '%review%')
+    .select('message_body');
+  return texts.some((t) => saysReviewed(t.message_body));
+}
+
 // Operator-initiated asks with no visit and no cadence (Quick Links, admin,
 // tech-trigger, Intelligence Bar one-offs): the customer's newest completed
 // visit is the one the ask is about.
@@ -138,7 +165,8 @@ async function askSuppressedByClick(request, database = db) {
     ].filter((d) => d && !Number.isNaN(d.getTime()));
     anchor = candidates.length ? new Date(Math.min(...candidates.map((d) => d.getTime()))) : null;
   }
-  return reviewLinkClickedSince(request.customer_id, anchor, database);
+  return (await reviewLinkClickedSince(request.customer_id, anchor, database))
+    || probableReviewer(request.customer_id, database);
 }
 
 // The same guard for an ask known only by its id (a bundled completion ask):
@@ -159,9 +187,10 @@ async function touchSuppressedByClick(customerId, { serviceRecordId = null, sche
   const anchor = (await visitAnchor({ serviceRecordId, scheduledServiceId }, database))
     || (fallbackAnchor ? new Date(fallbackAnchor) : null)
     || (newestVisitFallback ? await newestCompletedVisitAnchor(customerId, database) : null);
-  return reviewLinkClickedSince(customerId, anchor, database);
+  return (await reviewLinkClickedSince(customerId, anchor, database))
+    || probableReviewer(customerId, database);
 }
 
-const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, so no further review request is sent.';
+const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, or probably already left a review, so no further review request is sent.';
 
-module.exports = { reviewLinkClickedSince, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };
+module.exports = { reviewLinkClickedSince, probableReviewer, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };

@@ -89,3 +89,82 @@ describe('newestCompletedVisitAnchor ordering matches the anchor instant', () =>
     expect(anchor.toISOString()).toBe('2026-09-25T20:00:00.000Z');
   });
 });
+
+// GATE_REVIEW_PROBABLE_REVIEWER_GUARD (owner 2026-10-31, review matching plan PR 4): an ask also
+// stops, whatever its visit, when an open review-matcher decision names the customer or they texted
+// that they left a review. Synthetic names only.
+describe('probable reviewer', () => {
+  const OLD = process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD;
+    else process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = OLD;
+  });
+
+  function fakeReviewDb({ reviews = [], texts = [] } = {}) {
+    return (table) => {
+      if (table === 'google_reviews') {
+        const filters = [];
+        const q = {
+          where: (obj) => { filters.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return q; },
+          whereIn: (col, values) => { filters.push((r) => values.includes(r[col])); return q; },
+          whereNull: (col) => { filters.push((r) => r[col] == null); return q; },
+          first: async () => reviews.find((r) => filters.every((f) => f(r))) || undefined,
+        };
+        return q;
+      }
+      if (table === 'sms_log') {
+        const filters = [];
+        const q = {
+          where: (obj) => { filters.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return q; },
+          whereILike: (_col, pattern) => { const needle = pattern.replace(/%/g, '').toLowerCase(); filters.push((r) => r.message_body.toLowerCase().includes(needle)); return q; },
+          select: async () => texts.filter((r) => filters.every((f) => f(r))),
+        };
+        return q;
+      }
+      // No visit and no click rows: only the probable-reviewer arm can stop the ask.
+      if (table === 'review_requests') return { where: () => ({ whereNotNull: () => ({ where: () => ({ first: async () => null }) }) }) };
+      if (table === 'service_records' || table === 'scheduled_services') {
+        const none = { where: () => none, orderBy: () => none, orderByRaw: () => none, first: async () => null };
+        return none;
+      }
+      throw new Error(`unexpected table ${table}`);
+    };
+  }
+
+  const openPause = { name_match_customer_id: 'cust-1', name_match_result: 'pause', customer_id: null, missing_since: null };
+
+  test('gate off: an open matcher decision changes nothing', async () => {
+    delete process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD;
+    expect(await guard.touchSuppressedByClick('cust-1', { fallbackAnchor: '2026-10-20T15:00:00Z' }, fakeReviewDb({ reviews: [openPause] }))).toBe(false);
+  });
+
+  test('gate on: an open matcher decision naming the customer stops every ask, with or without a visit anchor', async () => {
+    process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = 'true';
+    const db = fakeReviewDb({ reviews: [openPause] });
+    expect(await guard.touchSuppressedByClick('cust-1', {}, db)).toBe(true);
+    expect(await guard.askSuppressedByClick({ customer_id: 'cust-1', created_at: '2026-10-20T15:00:00Z' }, db)).toBe(true);
+    expect(await guard.touchSuppressedByClick('cust-2', {}, db)).toBe(false);
+  });
+
+  test('gate on: a decision that is linked, removed, or only a queue entry does not stop the ask', async () => {
+    process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = 'true';
+    const db = fakeReviewDb({
+      reviews: [
+        { ...openPause, customer_id: 'cust-9' },
+        { ...openPause, missing_since: '2026-10-01T00:00:00Z' },
+        { ...openPause, name_match_result: 'queue' },
+      ],
+    });
+    expect(await guard.probableReviewer('cust-1', db)).toBe(false);
+  });
+
+  test('gate on: a text saying they left a review stops the ask; a negated one does not', async () => {
+    process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = 'true';
+    const said = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'inbound', message_body: 'Just left you a 5 star review!' }] });
+    expect(await guard.probableReviewer('cust-1', said)).toBe(true);
+    const notYet = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'inbound', message_body: 'I have not left a review yet' }] });
+    expect(await guard.probableReviewer('cust-1', notYet)).toBe(false);
+    const ours = fakeReviewDb({ texts: [{ customer_id: 'cust-1', direction: 'outbound', message_body: 'Thanks, we saw you left a review!' }] });
+    expect(await guard.probableReviewer('cust-1', ours)).toBe(false);
+  });
+});
