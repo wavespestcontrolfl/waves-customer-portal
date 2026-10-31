@@ -271,10 +271,19 @@ function roundsMoveIsOneOff(pattern, fromDateStr, toDateStr, opts) {
   return !!window && isValidDateStr(to) && to >= window.start && to <= window.end;
 }
 
-// The same verdict for a scheduled_services row (needs recurring_pattern, scheduled_date, and when present date_exception +
-// date_exception_cadence_date).
+// The same verdict for MOVING a scheduled_services row (needs recurring_pattern, scheduled_date, and when present
+// date_exception + date_exception_cadence_date). Keeping the row on its own date is no move, so never a one-off.
 function roundsRowMoveIsOneOff(row, toDateStr, opts) {
-  return roundsMoveIsOneOff(row?.recurring_pattern, roundsRegularDate(row), toDateStr, opts);
+  return dateOnly(toDateStr) !== dateOnly(row?.scheduled_date)
+    && roundsMoveIsOneOff(row?.recurring_pattern, roundsRegularDate(row), toDateStr, opts);
+}
+
+// True when moving `row` from `fromDateStr` to `toDateStr` changes its date AND shifts its series: the date changes and
+// the move is not a lawn rounds one-off (size rule). Shared by the rebooker's series preview, rain-out's series shift
+// and the call reschedule plan, so they decide alike.
+function datesMoveSeries(row, fromDateStr, toDateStr) {
+  const to = dateOnly(toDateStr);
+  return !!to && to !== dateOnly(fromDateStr) && !roundsRowMoveIsOneOff(row, to);
 }
 
 module.exports = {
@@ -284,6 +293,7 @@ module.exports = {
   roundsOneOffWindow,
   roundsMoveIsOneOff,
   roundsRowMoveIsOneOff,
+  datesMoveSeries,
   ROUND_STEPS,
   roundStepForVisit,
   roundSpotMonth,

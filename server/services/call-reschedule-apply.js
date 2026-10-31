@@ -93,7 +93,7 @@ const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 const { stripServiceSuffixes } = require('../utils/service-normalizer');
 const { serviceNameCandidates } = require('./service-completion-profiles');
 const { assertAdminAppointmentWindow } = require('./scheduling/window-rules');
-const { roundsRowMoveIsOneOff } = require('./lawn-rounds');
+const { datesMoveSeries } = require('./lawn-rounds');
 const { isEnabled } = require('../config/feature-gates');
 const { createHash } = require('crypto');
 const logger = require('./logger');
@@ -384,9 +384,9 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     propertyKey: targetKey,
     visitId: visit.id,
     dateMove: currentDate !== newDate,
-    // Size rule (owner 2026-10-31, lawn_rounds_9 only): a short move inside the round moves only
-    // this visit, so it is a date move that is NOT a series move.
-    roundsOneOff: currentDate !== newDate && roundsRowMoveIsOneOff(visit, newDate),
+    // A date move that shifts the series: every date move except a lawn rounds one-off (size rule,
+    // owner 2026-10-31: 7 days or fewer inside the round moves only this visit).
+    seriesMove: datesMoveSeries(visit, currentDate, newDate),
     from: { date: currentDate, start: currentStart, end: hhmm(visit.window_end) },
     newDate,
     newWindow: { start: newStart, end: newEnd },
@@ -432,8 +432,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
   const plan = planRescheduleFromCall({ call, v2, customer, candidates, now, humanOverride: { visitId } });
   if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason };
   const visit = candidates.find((row) => String(row.id) === String(plan.visitId));
-  const seriesMove = plan.dateMove && !plan.roundsOneOff;
-  const seriesIds = seriesMove ? occurrenceIds : [];
+  const seriesIds = plan.seriesMove ? occurrenceIds : [];
   const affectedVisitIds = [...new Set([visit.id, ...seriesIds].map(String))].sort();
   const beforeMove = async (trx) => {
     // The call-booking creator takes this canonical fence before reading the
@@ -504,7 +503,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
         }
       },
       beforeMove,
-      ...(seriesMove ? { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences } : { seriesPolicy: 'single' }),
+      ...(plan.seriesMove ? { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences } : { seriesPolicy: 'single' }),
       expect: {
         scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
@@ -806,7 +805,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
       return { outcome: 'noop', reason: 'already_at_requested_time', visitId: visit.id, cardsResolved };
     }
     const result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, INITIATED_BY, {
-      keepStatus: true, beforeMove, ...(plan.dateMove && !plan.roundsOneOff ? {} : { seriesPolicy: 'single' }), moveGuard: writeDecision,
+      keepStatus: true, beforeMove, ...(plan.seriesMove ? {} : { seriesPolicy: 'single' }), moveGuard: writeDecision,
       sourceSurface: 'call_reschedule', notifyRequested: false,
       expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,

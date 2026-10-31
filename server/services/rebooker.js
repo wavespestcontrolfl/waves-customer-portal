@@ -237,7 +237,7 @@ function assertConflictSnapshot(actual, options) {
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
 // Lawn 9x rounds (owner 2026-10-28): one visit in each of nine fixed rounds a
 // year. A rescheduled round visit stays inside its own round.
-const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOf, roundOrdinal, roundsRowMoveIsOneOff } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOf, roundOrdinal, roundsRowMoveIsOneOff, datesMoveSeries } = require('./lawn-rounds');
 const { clearOfBlackout } = require('./scheduling/blackout-nudge');
 
 // Series sibling-projection clash horizon (rescheduleSeries): a shifted
@@ -351,9 +351,7 @@ function collectiveMoveGateOn() {
 // own date-change test, and the choke point must still reach a series retry's
 // replay.
 function movesAsSeries(row, newDate) {
-  const to = dateOnly(newDate);
-  const oneOff = !!to && to !== dateOnly(row?.scheduled_date) && roundsRowMoveIsOneOff(row, to);
-  return collectiveMoveGateOn() && row?.is_recurring === true && !oneOff;
+  return collectiveMoveGateOn() && row?.is_recurring === true && !roundsRowMoveIsOneOff(row, newDate);
 }
 
 // GATE_SERIES_MOVE_CARRIES_VISIT (owner ruling 2026-10-01: a pest visit riding
@@ -4824,12 +4822,12 @@ class SmartRebooker {
       collective: false, deltaDays: 0, movableCount: 0, skippedCount: 0,
       exceptionCount: 0, conflictCount: 0, conflicts: [], conflictSnapshot: [],
       firstAffectedDate: null, lastAffectedDate: null,
+      // Size rule: a lawn rounds one-off moves this visit alone, so there is no series to preview.
+      oneOff: roundsRowMoveIsOneOff(service, seriesDateStr),
     };
-    if (service.is_recurring !== true || !seriesDateStr || seriesDateStr === dateOnly(service.scheduled_date)) {
+    if (service.is_recurring !== true || !datesMoveSeries(service, service.scheduled_date, seriesDateStr)) {
       return empty;
     }
-    // Size rule: a lawn rounds one-off moves this visit alone, so there is no series to preview.
-    if (roundsRowMoveIsOneOff(service, seriesDateStr)) return { ...empty, oneOff: true };
     const parentId = service.recurring_parent_id || service.id;
     const parent = await conn('scheduled_services').where({ id: parentId }).first();
     if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) return empty;

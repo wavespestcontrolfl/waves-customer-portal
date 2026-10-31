@@ -734,6 +734,8 @@ async function loadAppointmentPin(appointmentId) {
       // (see normalizeAppointmentPin) — the executor asserts the same
       // fingerprint on its own full-row read.
       'ss.track_state', 'ss.en_route_at', 'ss.arrived_at', 'ss.actual_start_time', 'ss.check_in_time', 'ss.track_sms_sent_at', 'ss.arrival_sms_sent_at',
+      // The lawn rounds size rule (movesAsSeries) reads the pattern and the regular (cadence) date.
+      'ss.recurring_pattern', 'ss.date_exception', 'ss.date_exception_cadence_date',
       'c.first_name', 'c.last_name');
   if (!a) return null;
   return {
@@ -1849,13 +1851,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // a DATE move of a recurring row outright when the gate is on — a
       // card promising that move would be consumed just to report the
       // refusal. Same message, surfaced before the card exists.
-      // Size rule: a lawn rounds one-off is a single move, so the executor takes it (movesAsSeries).
-      const seriesRow = pin.is_recurring && params.new_date && String(params.new_date) !== String(pin.scheduled_date)
-        && require('../services/rebooker').collectiveMoveGateOn()
-        ? await db('scheduled_services').where({ id: pin.id })
-          .first('is_recurring', 'scheduled_date', 'recurring_pattern', 'date_exception', 'date_exception_cadence_date')
-        : null;
-      if (seriesRow && require('../services/rebooker').movesAsSeries(seriesRow, params.new_date)) {
+      // movesAsSeries carries the recurring + gate checks and the lawn rounds size rule: a one-off
+      // is a single move, so the executor takes it.
+      if (params.new_date && String(params.new_date) !== String(pin.scheduled_date)
+        && require('../services/rebooker').movesAsSeries(pin, params.new_date)) {
         return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. The bar can\'t move a series from here yet. Nothing was proposed.', code: 'collective_move_unsupported' } };
       }
       if (pin.visit_id) {

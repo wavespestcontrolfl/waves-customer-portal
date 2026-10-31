@@ -56,8 +56,9 @@ describe('proposal preview identity', () => {
     }
   });
 
-  // Size rule (owner 2026-10-31, lawn_rounds_9 only): a short move inside the round is a single move, so
-  // the reviewed preview reads no series and previews the single move; a bigger one reads the series.
+  // Size rule (owner 2026-10-31, lawn_rounds_9 only): the plan marks a short move inside the round as no series move,
+  // and the reviewed preview asks previewSeriesMove, which previews such a one-off as a single move (rebooker tests
+  // cover that verdict); a non-collective preview takes the single-move conflict check.
   test.each([
     ['2099-09-12', 'lawn_rounds_9', false],  // 2 days inside round 7: single
     ['2099-09-18', 'lawn_rounds_9', true],   // 8 days: the series preview
@@ -88,12 +89,14 @@ describe('proposal preview identity', () => {
     };
     conn.transaction = async (fn) => fn(conn);
     const rebooker = { collectiveMoveGateOn: () => true, reschedule: jest.fn(), previewMoveConflicts: jest.fn().mockResolvedValue([]),
-      previewSeriesMove: jest.fn().mockResolvedValue({ collective: true, conflictSnapshot: [], occurrenceIds: ['visit'], occurrences: [] }) };
+      previewSeriesMove: jest.fn().mockResolvedValue(readsSeries
+        ? { collective: true, conflictSnapshot: [], occurrenceIds: ['visit'], occurrences: [] }
+        : { collective: false, oneOff: true, conflictSnapshot: [] }) };
     try {
       const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
-      expect(rebooker.previewSeriesMove).toHaveBeenCalledTimes(readsSeries ? 1 : 0);
+      expect(rebooker.previewSeriesMove).toHaveBeenCalledTimes(1);
       expect(rebooker.previewMoveConflicts).toHaveBeenCalledTimes(readsSeries ? 0 : 1);
-      expect(preview.plan.roundsOneOff).toBe(!readsSeries);
+      expect(preview.plan.seriesMove).toBe(readsSeries);
       expect(preview.series.collective).toBe(readsSeries);
     } finally {
       if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;

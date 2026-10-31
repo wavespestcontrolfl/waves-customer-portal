@@ -781,7 +781,7 @@ describe('applyCallReschedule', () => {
   ])('a date move to %s of a %s visit: one-off %s', async (startAt, pattern, oneOff) => {
     const row = visit({ recurring_pattern: pattern });
     const plan = planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: startAt } }), call: callFor(startAt), customer: customer(), candidates: [row], now: NOW });
-    expect(plan).toMatchObject({ action: 'apply', dateMove: true, roundsOneOff: oneOff });
+    expect(plan).toMatchObject({ action: 'apply', dateMove: true, seriesMove: !oneOff });
     // The automatic move pins single exactly for the one-off; otherwise the choke point decides (owner cadence ruling).
     const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: startAt } }) });
     conn.visits[0].recurring_pattern = pattern;
@@ -797,7 +797,7 @@ describe('applyCallReschedule', () => {
   test('a same-day time change is never a rounds one-off (no date move)', () => {
     const row = visit({ recurring_pattern: 'lawn_rounds_9' });
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [row], now: NOW }))
-      .toMatchObject({ action: 'apply', dateMove: false, roundsOneOff: false });
+      .toMatchObject({ action: 'apply', dateMove: false, seriesMove: false });
   });
 
   test('review_status stays open when other cards remain', async () => {

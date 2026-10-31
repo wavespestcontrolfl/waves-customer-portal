@@ -23,7 +23,7 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
 const SmartRebooker = require('./rebooker');
-const { roundsRowMoveIsOneOff } = require('./lawn-rounds');
+const { datesMoveSeries } = require('./lawn-rounds');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
@@ -852,7 +852,7 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       // stop, not just the anchor — omitting it silently routed recurring
       // siblings down the single-visit path (codex P1).
       'is_recurring',
-      // The size rule for lawn rounds (roundsRowMoveIsOneOff) reads the pattern
+      // The size rule for lawn rounds (datesMoveSeries) reads the pattern
       // and the regular (cadence) date of every stop it moves.
       'recurring_pattern', 'date_exception', 'date_exception_cadence_date',
       // Visit group: a route batch moves a grouped stop ONCE, through its
@@ -2529,10 +2529,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // locked read), so no series write happens without the ownership check.
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
-      && String(target.date) !== jobDateStr
-      // Size rule (owner 2026-10-31, lawn_rounds_9 only): a move of 7 days or fewer inside the
-      // round moves only this visit, so it takes the single path below.
-      && !roundsRowMoveIsOneOff(job, String(target.date).split('T')[0])
+      // A date change, except a lawn rounds one-off (size rule, owner 2026-10-31: 7 days or fewer
+      // inside the round moves only this visit, so it takes the single path below).
+      && datesMoveSeries(job, jobDateStr, String(target.date).split('T')[0])
       && (!requireAssignedTechnicianId || allowSeriesForAssignedTechnician === true);
     // The anchor's on-the-hour normalization for this path lives at the
     // TOP of commit() (before the custom move's SMS pre-render) — by here
