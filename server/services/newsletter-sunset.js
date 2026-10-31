@@ -7,7 +7,8 @@
  * (default off; unset the var to kill). The job never sends email itself.
  * With GATE_NEWSLETTER_AUTO_SEND on (owner 2026-10-30, option A) the
  * win-back it stages is queued for the next scheduler tick, which sends it;
- * off, it is parked as a draft for the owner. Four phases, in order:
+ * off, it is parked as a draft, which cannot go out by hand since the manual
+ * newsletter tools were removed. Four phases, in order:
  *
  *   A. RECOVER — flagged subscribers who CONFIRMED (stay-subscribed quiz
  *      submit) since flagging lose the 'reengagement_due' tag, and sunset
@@ -418,6 +419,14 @@ async function applySunset(ids, now) {
 // the owner has something to do (valve tripped, or a win-back draft is
 // waiting to be sent); resolved and silent otherwise. Mirrors the
 // lawn-pricing-invariant-sweep upsert shape.
+// The owner's one step for a parked win-back. Only a win-back this job stages
+// under the auto-send switch sends itself; a parked one never does.
+function winbackNextStep(autoSend) {
+  return autoSend
+    ? 'An older re-engagement draft is parked in Newsletter → History. Delete it there, and the next Monday run stages one that sends itself.'
+    : 'A re-engagement draft is parked in Newsletter → History. It cannot go out while GATE_NEWSLETTER_AUTO_SEND is off. With the switch on, delete it there, and the next Monday run stages one that sends itself.';
+}
+
 async function syncAlert(summary, now) {
   if (!(await db.schema.hasTable('admin_alerts'))) return null;
 
@@ -451,12 +460,10 @@ async function syncAlert(summary, now) {
       : `Newsletter win-back waiting: ${summary.cohortAwaiting} inactive subscriber${summary.cohortAwaiting === 1 ? '' : 's'} flagged`,
     description: summary.valveTripped
       ? `Safety valve: ${summary.candidates} flag + ${summary.sunsetCandidates} sunset candidates out of ${summary.activeCount} sendable active subscribers matched the ${INACTIVITY_DAYS}-day inactivity criteria (> ${Math.round(MAX_FLAG_FRACTION * 100)}%). That usually means an open/click tracking outage or a criteria bug, not a real mass lapse — nothing was flagged or suppressed. Review before re-running.`
-    : `${summary.cohortAwaiting} subscriber(s) have ${INACTIVITY_DAYS}+ days of zero opens/clicks across ${MIN_DELIVERED_SENDS}+ delivered campaigns. A re-engagement draft is parked in /admin/newsletter — review, edit, and send it; non-responders auto-suppress ${GRACE_DAYS} days after delivery.`,
-    // Deep-link straight into the parked draft: tab=compose mounts
-    // ComposeView (the page defaults to the dashboard tab otherwise), and
-    // ?autopilotType= names the lane it hydrates (same mechanism as the
-    // Pest Insider bell).
-    href: '/admin/newsletter?tab=compose&autopilotType=reengagement',
+    : `${summary.cohortAwaiting} subscriber(s) have ${INACTIVITY_DAYS}+ days of zero opens/clicks across ${MIN_DELIVERED_SENDS}+ delivered campaigns. ${winbackNextStep(summary.autoSend)} Non-responders auto-suppress ${GRACE_DAYS} days after delivery.`,
+    // History lists the parked draft with its Delete button (there is no
+    // manual send any more).
+    href: '/admin/newsletter?tab=history',
     detected_at: now,
     last_seen_at: now,
     created_by_rule: 'newsletter_sunset_weekly',
