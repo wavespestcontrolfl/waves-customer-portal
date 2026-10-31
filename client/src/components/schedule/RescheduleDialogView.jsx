@@ -108,8 +108,12 @@ export default function RescheduleDialogView({
                   <div className="min-w-0">
                     <div className="text-ui-body font-medium">{option.displayDate}</div>
                     <div className="text-ui-body text-ink-secondary">
-                      {windowFor(option.suggestedWindow?.start)?.display || option.suggestedWindow?.display}{" "}
-                      · {option.currentLoad} jobs · {option.sameAreaServices} same area
+                      {windowFor(option.suggestedWindow?.start)?.display || option.suggestedWindow?.display}
+                      {/* A route-checked day says what it adds to the drive (route-dispatcher audit D); the
+                          other days keep the load and same-area counts. */}
+                      {option.driveMinutes != null
+                        ? ` · +${option.driveMinutes} min drive`
+                        : ` · ${option.currentLoad} jobs · ${option.sameAreaServices} same area`}
                       {option.dayAlreadyLate ? " · already late" : ""}
                     </div>
                   </div>
