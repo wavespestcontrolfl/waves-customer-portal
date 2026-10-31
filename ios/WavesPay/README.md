@@ -218,6 +218,10 @@ link directly. Only the main view registers; a portal popup shares its sign-in.
   the entitlement isn't applied to this build, or the app is running in
   the simulator. Confirm on a real device; in Signing & Capabilities
   verify the proximity-reader entitlement is listed.
+- **"Tap to Pay did not start on this iPhone"** — discovery ended with no
+  reader and no error, or gave no answer in 30 seconds
+  (`TerminalManager.discoverFirstReader`). Tap Try again. If it repeats,
+  run the reader-found checks in the line above.
 - **"This payment timed out"** — the 15-minute terminal token expired
   (the amount screen sat open). Close it and tap Tap to Pay again.
 - **410 `replay` on `/validate-handoff`** — the token was already used.
