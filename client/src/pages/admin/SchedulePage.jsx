@@ -6976,6 +6976,10 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
         ) : (
           <div style={{ color: D.muted }}>{sprayCheck.window === "not_today" ? "Judged on the visit day — open the card that morning." : sprayCheck.coordsSource === "none" ? "No property pin on file — no forecast, every product unknown." : "No forecast right now."}</div>
         )}
+        {sprayCheck?.heatSafety?.text && (
+          // Tech safety line (owner 2026-10-31): a warning beside the weather, never a verdict, hold or chip.
+          <div data-testid="job-card-heat-safety" style={{ marginTop: 6, color: "#B45309", fontWeight: sprayCheck.heatSafety.level === "extreme" ? 600 : 500 }}>{sprayCheck.heatSafety.text}</div>
+        )}
         {products.length > 0 && (
           <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
             {products.map((p) => (
