@@ -187,13 +187,10 @@ function TechDayRows({ date, closed, row, isPast, showTechName }) {
 }
 
 // GATE_ROUTE_ENGINE_SUMMARY: the server adds an `engine` block to the payload.
-// One plain sentence group above the table; a sentence whose number is 0 or
-// null is left out. Alert color only when a night failed.
+// One plain sentence group above the table, counts only (no drive-time figure:
+// see route-engine-summary.js); a sentence whose number is 0 or null is left
+// out. Alert color only when a night failed.
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
-
-function savedNote(minutes) {
-  return Number.isFinite(minutes) && minutes > 0 ? ` (about ${fmtMinutes(minutes)} less driving, estimated)` : '';
-}
 
 function heldSentence({ heldVisits, heldThenMoved }, cap) {
   if (!(heldVisits > 0)) return null;
@@ -206,7 +203,7 @@ function nightsSentence(n, what) {
 }
 
 function engineSentences({ totals, cap, windowNights }) {
-  const moves = totals.movesMade > 0 ? `${plural(totals.movesMade, 'move', 'moves')}${savedNote(totals.estDriveMinutesSaved)}.` : null;
+  const moves = totals.movesMade > 0 ? `${plural(totals.movesMade, 'move', 'moves')}.` : null;
   const parts = [moves, heldSentence(totals, cap), nightsSentence(totals.withErrorsNights, 'finished with errors')].filter(Boolean);
   const failed = nightsSentence(totals.failedNights, 'failed');
   if (!parts.length && !failed) parts.push('No moves made.');

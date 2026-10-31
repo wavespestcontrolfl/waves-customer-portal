@@ -487,19 +487,19 @@ const engine = (over = {}) => ({
   nights: [],
   cap: 10,
   windowNights: 7,
-  totals: { finishedNights: 5, withErrorsNights: 0, failedNights: 0, noRunNights: 2, movesMade: 18, heldVisits: 9, heldThenMoved: 6, estDriveMinutesSaved: 130, ...over },
+  totals: { finishedNights: 5, withErrorsNights: 0, failedNights: 0, noRunNights: 2, movesMade: 18, heldVisits: 9, heldThenMoved: 6, ...over },
 });
 
 it('shows the route engine line above the table', async () => {
   mockAdminFetch.mockResolvedValue(ok({ driveModel: 'legacy', days: [], engine: engine({ failedNights: 1 }) }));
   render(<DayScorecardPanel />);
   const line = await screen.findByTestId('route-engine-summary');
-  expect(line).toHaveTextContent('Route engine, last 7 nights: 18 moves (about 2h 10m less driving, estimated). The 10-move cap held 9 visits; 6 moved on a later night. 1 night failed.');
+  expect(line).toHaveTextContent('Route engine, last 7 nights: 18 moves. The 10-move cap held 9 visits; 6 moved on a later night. 1 night failed.');
   expect(within(line).getByText('1 night failed.')).toHaveClass('text-alert-fg');
 });
 
 it('leaves out an engine sentence whose number is zero or missing', async () => {
-  mockAdminFetch.mockResolvedValue(ok({ driveModel: 'legacy', days: [], engine: engine({ heldVisits: 0, heldThenMoved: 0, estDriveMinutesSaved: null }) }));
+  mockAdminFetch.mockResolvedValue(ok({ driveModel: 'legacy', days: [], engine: engine({ heldVisits: 0, heldThenMoved: 0 }) }));
   render(<DayScorecardPanel />);
   const line = await screen.findByTestId('route-engine-summary');
   expect(line).toHaveTextContent(/^Route engine, last 7 nights: 18 moves\.$/);
@@ -507,9 +507,16 @@ it('leaves out an engine sentence whose number is zero or missing', async () => 
 });
 
 it('says so when the engine made no moves and nothing else happened', async () => {
-  mockAdminFetch.mockResolvedValue(ok({ driveModel: 'legacy', days: [], engine: engine({ movesMade: 0, heldVisits: 0, heldThenMoved: 0, estDriveMinutesSaved: null }) }));
+  mockAdminFetch.mockResolvedValue(ok({ driveModel: 'legacy', days: [], engine: engine({ movesMade: 0, heldVisits: 0, heldThenMoved: 0 }) }));
   render(<DayScorecardPanel />);
   expect(await screen.findByTestId('route-engine-summary')).toHaveTextContent('Route engine, last 7 nights: No moves made.');
+});
+
+it('never shows a drive-time figure, even if an older payload carries one', async () => {
+  mockAdminFetch.mockResolvedValue(ok({ driveModel: 'legacy', days: [], engine: engine({ estDriveMinutesSaved: 949 }) }));
+  render(<DayScorecardPanel />);
+  const line = await screen.findByTestId('route-engine-summary');
+  expect(line).not.toHaveTextContent(/driving|estimated/);
 });
 
 it('shows one muted line when the engine summary is unavailable', async () => {
