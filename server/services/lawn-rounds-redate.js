@@ -233,9 +233,17 @@ async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new 
 // ---- writes (--apply only) ---------------------------------------------------------------------------------------
 
 // Move ONE visit, the way move-visit.js does. Throws with a reason when it refuses; nothing is written then.
+// The stay rules are judged on a plain read, then again inside the move transaction (beforeMove: after the
+// rebooker's date and technician-day locks, before its row write), where a reminder sent meanwhile shows. The
+// `expect` pin covers what the rules read on the row itself (confirmation, staff lock, grouping, date, time,
+// technician, status): a change that commits after the recheck makes the row write miss, and nothing moves.
 async function moveVisitToRound(conn, deps, row) {
-  const v = await readVisit(conn, row.id);
-  if (!v || v.d !== row.from || stayReason(v, deps.nowMs)) throw new Error(`visit ${row.id} changed since the plan`);
+  const unchanged = async (dbh) => {
+    const v = await readVisit(dbh, row.id);
+    if (!v || v.d !== row.from || stayReason(v, deps.nowMs)) throw new Error(`visit ${row.id} changed since the plan`);
+    return v;
+  };
+  const v = await unchanged(conn);
   const end = windowEnd(v);
   const clash = await readOverlaps(conn, { id: row.id, tech: v.tech, date: row.to, start: v.ws, end });
   if (clash.length) throw new Error(`visit ${row.id}: ${row.to} ${v.ws}-${end} is taken`);
@@ -244,7 +252,14 @@ async function moveVisitToRound(conn, deps, row) {
     visitPolicy: 'single',
     suppressTechNotice: true,
     placeInRoute: true,
-    expect: { scheduled_date: v.d, window_start: v.window_start, window_end: v.window_end, technician_id: v.technician_id, status: v.status },
+    beforeMove: unchanged,
+    expect: {
+      scheduled_date: v.d, window_start: v.window_start, window_end: v.window_end, technician_id: v.technician_id, status: v.status,
+      customer_confirmed: v.customer_confirmed ?? null,
+      auto_dispatch_locked: v.auto_dispatch_locked ?? null,
+      auto_dispatch_excluded: v.auto_dispatch_excluded ?? null,
+      visit_id: v.visit_id ?? null,
+    },
   });
   if (result && result.smsSent === true) throw new Error(`visit ${row.id}: the rebooker reported a customer text; stopping`);
   await deps.reminders.handleReschedule(row.id, `${row.to}T${v.ws}`, { sendNotification: false, keepPendingConfirmation: true });

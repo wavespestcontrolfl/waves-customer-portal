@@ -196,6 +196,7 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
   const rows = new Map(visits.map((v) => [v.id, {
     id: v.id, d: v.date, ws: v.ws, we: v.we, dur: v.dur, tech: v.tech, term_id: v.termId || null,
     window_start: `${v.ws}:00`, window_end: `${v.we}:00`, technician_id: v.tech, status: 'pending', customer_confirmed: false,
+    auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null,
   }]));
   const state = { parent: { id: PARENT, recurring_pattern: parentPattern }, terms };
   const live = () => [...rows.values()].sort((a, b) => a.d.localeCompare(b.d));
@@ -211,6 +212,8 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
     reschedule: jest.fn(async (id, date, window, reason, by, options) => {
       log.push(`move:${id}`);
       if (fail.id === id) throw new Error('refused');
+      // The real rebooker runs beforeMove inside its transaction, before the row write.
+      await options.beforeMove(conn);
       rows.get(id).d = date;
       return { ok: true, smsSent };
     }),
@@ -256,8 +259,12 @@ describe('applySeries', () => {
     const [id, date, window, reason, initiatedBy, options] = w.rebooker.reschedule.mock.calls[0];
     expect([id, date, window, reason, initiatedBy]).toEqual(['v2', '2027-01-12', { start: '09:00', end: '10:00' }, 'admin', 'admin']);
     expect(options).toEqual({
-      seriesPolicy: 'single', visitPolicy: 'single', suppressTechNotice: true, placeInRoute: true,
-      expect: { scheduled_date: '2026-12-29', window_start: '09:00:00', window_end: '10:00:00', technician_id: TECH, status: 'pending' },
+      seriesPolicy: 'single', visitPolicy: 'single', suppressTechNotice: true, placeInRoute: true, beforeMove: expect.any(Function),
+      // The row write misses when a confirmation, staff lock or grouping lands after the read.
+      expect: {
+        scheduled_date: '2026-12-29', window_start: '09:00:00', window_end: '10:00:00', technician_id: TECH, status: 'pending',
+        customer_confirmed: false, auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null,
+      },
     });
     // The reminder is re-timed with no notification; no other message path exists on these fakes.
     expect(w.reminders.handleReschedule.mock.calls.map((c) => [c[0], c[1], c[2]])).toEqual([
@@ -309,6 +316,22 @@ describe('applySeries', () => {
     const out = await applySeries(w.conn, w.deps, plan, w.replan);
     expect(out).toMatchObject({ status: 'skipped', why: 'series changed since the plan' });
     expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('a reminder sent after the read is caught inside the move transaction: nothing moves, nothing converts', async () => {
+    const w = world();
+    const plan = await w.replan();
+    const send = w.rebooker.reschedule.getMockImplementation();
+    // The 72-hour reminder for v2 goes out between the applier's read and the rebooker's transaction.
+    w.rebooker.reschedule.mockImplementationOnce(async (id, ...rest) => {
+      w.rows.get(id).r72 = true;
+      return send(id, ...rest);
+    });
+    const out = await applySeries(w.conn, w.deps, plan, w.replan);
+    expect(out).toMatchObject({ status: 'error', why: 'visit v2 changed since the plan' });
+    expect(w.rows.get('v2').d).toBe('2026-12-29');
+    expect(w.reminders.handleReschedule).not.toHaveBeenCalled();
+    expect(updates(w.log)).toEqual([]);
   });
 
   test('a refused move stops the series before the conversion; a re-run finishes it', async () => {
