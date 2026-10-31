@@ -180,6 +180,8 @@ describe('saidLeftReview: a done-fact statement, strict enough to stop review as
     'I already left a review, can you see it?',
     'I left a review yesterday and will recommend you',
     'I’ve left a review and I’ll tell my neighbors',
+    'I already left a review but you keep texting me',
+    'No worries, I left a review',
   ])('counts %s', (text) => expect(saidLeftReview(text)).toBe(true));
 
   test.each([
@@ -209,6 +211,11 @@ describe('saidLeftReview: a done-fact statement, strict enough to stop review as
     'Already left a review?',
     'I left a review?',
     'My review is done but not posted yet',
+    // A negation or an unfinished or removed review anywhere in the sentence.
+    'I wrote a review but did not submit it',
+    'I wrote a review but never published it',
+    'I wrote a review but forgot to post it',
+    'I left a review but deleted it',
   ])('never counts %s', (text) => expect(saidLeftReview(text)).toBe(false));
 });
 
