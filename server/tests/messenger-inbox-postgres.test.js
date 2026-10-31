@@ -555,6 +555,51 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect((await bellsOf('a'))[0]).toMatchObject({ done_by: 'messenger-inbox' });
     });
 
+    test('a reply and a poll reconciling the same thread at once end in stored order: answered stays closed', async () => {
+      const compose = require('../services/admin-alert-compose');
+      const original = compose.raiseAdminAlert;
+      const conv = conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'message A', at: ago(4) }] });
+      await messenger.pollMessenger();
+      expect((await bellsOf('a'))[0].metadata.dedupeVersion).toBe(messenger.messageKey(mid('a', 0)));
+
+      // Customer message B is stored by the poll, whose ring is held up just before the bell is written.
+      conv.messages.push({ id: mid('a', 1), fromPage: false, text: 'message B', at: ago(2) });
+      conv.updated = ago(2);
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let ringing;
+      const reached = new Promise((resolve) => { ringing = resolve; });
+      const spy = jest.spyOn(compose, 'raiseAdminAlert').mockImplementationOnce(async (...args) => {
+        ringing();
+        await gate;
+        return original(...args);
+      });
+      try {
+        const poll = messenger.pollMessenger();
+        await reached;
+
+        // Meanwhile staff answer B from the portal. Its reconcile must wait for the ring in flight.
+        const { threads } = await (await realFetch(`${base}/threads`, { headers: { Authorization: 'Bearer admin' } })).json();
+        const id = threads.find((t) => t.name === 'Pat Synthetic').id;
+        const reply = realFetch(`${base}/threads/${id}/reply`, {
+          method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Answering B' }),
+        });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect((await bellsOf('a'))[0].done_at).toBeNull();
+
+        release();
+        await poll;
+        expect((await reply).status).toBe(200);
+      } finally {
+        release();
+        spy.mockRestore();
+      }
+      const [bell] = await bellsOf('a');
+      expect(bell.metadata.dedupeVersion).toBe(messenger.messageKey(mid('a', 1)));
+      expect(bell).toMatchObject({ done_by: 'messenger-inbox', resolution: 'Answered in Messenger' });
+      expect(bell.done_at).not.toBeNull();
+    });
+
     test('a linked customer thread keeps its customer and takes new messages', async () => {
       const conv = conversation('a', { name: 'Pat Synthetic', unread: 0, messages: [{ fromPage: false, text: 'hi', at: ago(50) }] });
       await messenger.pollMessenger();

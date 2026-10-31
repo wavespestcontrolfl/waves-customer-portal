@@ -299,14 +299,21 @@ async function ensureThread(contact, pageId) {
 // import is stored read unless Facebook showed the conversation unread, so only
 // those ring.
 async function reconcileBell(thread) {
-  const latestIn = await db('messages').where({ conversation_id: thread.id, direction: 'inbound' })
-    .orderBy('created_at', 'desc').first('body', 'twilio_sid', 'created_at', 'is_read');
-  const latestOut = await db('messages').where({ conversation_id: thread.id, direction: 'outbound' })
-    .max({ at: 'created_at' }).first();
-  const answered = latestOut?.at && (!latestIn || new Date(latestOut.at) >= new Date(latestIn.created_at));
-  if (answered) return closeBell(thread.id, { through: latestIn || null });
-  if (latestIn && latestIn.is_read !== true) return ringBell(thread, { body: latestIn.body, key: latestIn.twilio_sid });
-  return null;
+  // One reconcile per thread at a time, reads included: the poll's and a reply's decisions are made
+  // and carried out in turn, so a ring decided from an older state cannot land after a close decided
+  // from a newer one. Advisory lock only (no row locks). ringBell and closeBell take their own,
+  // different, lock keys (admin:<bell key>) on their own connections, so nothing nests on this key.
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`messenger-reconcile:${thread.id}`]);
+    const latestIn = await trx('messages').where({ conversation_id: thread.id, direction: 'inbound' })
+      .orderBy('created_at', 'desc').first('body', 'twilio_sid', 'created_at', 'is_read');
+    const latestOut = await trx('messages').where({ conversation_id: thread.id, direction: 'outbound' })
+      .max({ at: 'created_at' }).first();
+    const answered = latestOut?.at && (!latestIn || new Date(latestOut.at) >= new Date(latestIn.created_at));
+    if (answered) return closeBell(thread.id, { through: latestIn || null });
+    if (latestIn && latestIn.is_read !== true) return ringBell(thread, { body: latestIn.body, key: latestIn.twilio_sid });
+    return null;
+  });
 }
 
 // One conversation: read it, store what is new, then settle its bell.
