@@ -2,12 +2,16 @@
 
 // GATE_SPRAY_RAIN_RULES=shadow (owner 2026-10-26, plan page "Visit-Day Rain Rule"): records, per visit and
 // visit day, the WORST verdict the rain rules would have shown (spray_rain_rule_shadow), next to the chip
-// the board shows today. Written from a visit-day job card or readiness build (job-card.js); nothing reads
+// the board shows today. At `true` (owner 2026-10-29) the live check is the rain rules, so both sides
+// match and the row keeps counting the real rain odds behind each caution; nothing is held then. Written from a visit-day job card or readiness build (job-card.js); nothing reads
 // it to decide anything. A row is refreshed at most every 10 minutes unless the verdict got worse or a live
 // hold appeared, so the board's 60-second readiness poll does not write every minute.
 const db = require('../models/db');
 
-const RANK_SQL = (table) => `CASE ${table}.shadow_status WHEN 'hold' THEN 3 WHEN 'caution' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END`;
+// A Warning (rain past the hold tier, owner 2026-10-29 step 2) is a caution with level 'warning'; it ranks above a
+// plain caution, so a later Warning read replaces an earlier caution peak (the status CHECK stays as it is).
+const WARNING_IN = (table) => `EXISTS (SELECT 1 FROM jsonb_array_elements(${table}.products) AS e WHERE e->>'level' = 'warning')`;
+const RANK_SQL = (table) => `CASE ${table}.shadow_status WHEN 'hold' THEN 4 WHEN 'caution' THEN CASE WHEN ${WARNING_IN(table)} THEN 3 ELSE 2 END WHEN 'unknown' THEN 1 ELSE 0 END`;
 const RANK = { ok: 0, unknown: 1, caution: 2, hold: 3 };
 // Columns that describe the worst read, its start time and service included (the start moves with the clock once
 // the window opens); they move only when a read is worse than the stored one.
@@ -40,6 +44,8 @@ function shadowRow({ facts, products = [], hourly = null, serviceInstant, live, 
     dose_hidden: shadow.verdicts.some((v) => v.verdict === 'hold'),
     products: JSON.stringify(shadow.verdicts.map((v) => ({
       name: names.get(v.productId) || null, verdict: v.verdict, reason: v.reason || null, source: v.source || null,
+      // The Warning level (rain past the hold tier, owner 2026-10-29 step 2), so warnings stay countable.
+      ...(v.level ? { level: v.level } : {}),
     }))),
   };
 }

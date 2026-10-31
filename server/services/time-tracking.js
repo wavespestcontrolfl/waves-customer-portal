@@ -15,6 +15,7 @@ const {
 } = require('../constants/staff-time');
 const { PAYROLL_SCALE, payrollUnits } = require('../utils/payroll-units');
 const { lockPayrollMutationsShared } = require('./payroll-lock');
+const { paidLineCoveringWeeks } = require('./payroll-paid-line-weeks');
 const { unpaidMealUnits } = require('../utils/unpaid-meal');
 const { autoLunchLive, shiftCloseReviewLive } = require('../config/feature-gates');
 
@@ -834,6 +835,11 @@ async function assertEntryMutable(trx, entry, action, affectedWorkDates) {
     .first('id');
   if (paid) {
     throw staffTimeHttpError(409, 'This week is already paid. Void its pay run before changing its entries.');
+  }
+  // A paid pay line took its overtime from these hours (GATE_PAYROLL_PAY_LINES), even
+  // when the week had no check of its own. Not behind the gate, like the check above.
+  if (await paidLineCoveringWeeks(trx, entry.technician_id, weekStarts)) {
+    throw staffTimeHttpError(409, 'A paid pay line took its overtime from this week. Void the pay run that paid it before changing its entries.');
   }
   for (const weekStart of weekStarts) {
     const weekly = await trx('time_weekly_summary')

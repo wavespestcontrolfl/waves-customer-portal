@@ -169,7 +169,13 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
       // The session / supplied customer rides along so the travel-gap mirror
       // (GATE_SLOT_TRAVEL_GAP) measures offers with the same pin
       // book_appointment → confirmBooking measures with.
-      const result = await Availability.getAvailableSlots(input.city, input.estimate_id, { customerId });
+      // GATE_ASSISTANT_ROUTE_TIMES: off = this finder, nothing else runs; shadow =
+      // this finder's answer, the customer pages' list compared after the reply;
+      // true = the customer pages' list in this finder's shape (own pin only).
+      const { result } = await require('../scheduling/assistant-route-times').serveAssistantTimes({
+        surface: 'assistant', customerId, estimateId: input.estimate_id,
+        loadOld: () => Availability.getAvailableSlots(input.city, input.estimate_id, { customerId }),
+      });
 
       // Simplify for the agent — just dates and slots
       return {

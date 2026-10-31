@@ -118,12 +118,18 @@ function buildRows() {
     ? lawnCadenceParts.join(' or ')
     : lawnCadenceParts.join(', ').replace(/, ([^,]*)$/, ', or $1');
   const b = constants.RODENT.bundles || {};
-  // NOTE: only trapping+sanitation is advertised — the live bundle selector
-  // matches service === 'exclusion', which the active V2 exclusion pricer
-  // ('rodent_exclusion') never emits, so exclusion-inclusive bundle
-  // discounts do not currently apply on exact quotes (engine defect flagged
-  // to the owner; widen this note only after the selector is fixed).
-  const rodentBundleTerms = `Package discount (live terms): trapping+sanitation ${Math.round(((b.trapSanitation || {}).discount || 0) * 100)}% (floor $${Math.round((b.trapSanitation || {}).floor || 0)}); other combinations are quoted at booking.`;
+  // One sentence per package: the website drops every sentence containing
+  // "sanitation" on rodent pages that do not sell sanitation, so the
+  // trapping+exclusion sentence must not contain that word.
+  const bundlePct = (cfg) => Math.round(((cfg || {}).discount || 0) * 100);
+  const bundleFloor = (n) => `$${Math.round(n || 0).toLocaleString('en-US')}`;
+  const fullFloors = Object.values(((b.fullRemediation || {}).floors) || {});
+  const fullFloorText = fullFloors.length
+    ? `${bundleFloor(Math.min(...fullFloors))}-${bundleFloor(Math.max(...fullFloors))}`
+    : bundleFloor(0);
+  const rodentBundleTerms = `Package discounts (live terms): trapping+exclusion ${bundlePct(b.trapExclusion)}% (floor ${bundleFloor((b.trapExclusion || {}).floor)}). `
+    + `Trapping+sanitation ${bundlePct(b.trapSanitation)}% (floor ${bundleFloor((b.trapSanitation || {}).floor)}). `
+    + `Trapping+exclusion+sanitation ${bundlePct(b.fullRemediation)}% (floor ${fullFloorText} by sanitation tier).`;
   const maxWaveGuardPct = Math.round(
     Math.max(...Object.values(constants.WAVEGUARD.tiers).map((t) => t.discount || 0)) * 100);
 
@@ -582,21 +588,29 @@ function buildRows() {
     { property: { footprint: MEDIAN_FOOTPRINT }, options: {} },
     { property: { footprint: MEDIAN_FOOTPRINT, bedArea: 4000 }, options: { treeCount: 6, access: 'moderate' } },
   ];
-  add('tree_shrub_care', () => rangeRow({
-    key: 'tree_shrub_care',
-    name: 'Tree & Shrub Care Program',
-    unit: 'per month',
+  add('tree_shrub_care', () => {
+    // New residential plans bill after each application (owner ruling
+    // 2026-07-09), so the PRICE published is the per-application amount
+    // (owner approved 2026-10-30; the 2026-10-20 ruling keeps "$X a month"
+    // to an averaged note, never the price). One sweep feeds both: perApp is
+    // the row, monthly only the averaged note.
     // 'light' (4x/quarterly) is hidden:true — retired for new sales (owner
     // directive 2026-09-24: stop offering quarterly tree & shrub care) — so
     // it is never swept here.
-    values: sweepValues(
-      TYPICAL_LOTS.flatMap((lot) =>
-        ['standard', 'enhanced'].flatMap((tier) =>
-          TREE_SHRUB_PROFILES.map((p) => ({ lot, tier, p })))),
-      ({ lot, tier, p }) => sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }),
-      (r) => r.monthly),
-    notes: `Monthly-billed program; 6 or 9 applications per year by tier; priced by planting beds and tree count — larger counts price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
-  }));
+    const results = TYPICAL_LOTS.flatMap((lot) =>
+      ['standard', 'enhanced'].flatMap((tier) =>
+        TREE_SHRUB_PROFILES.map((p) =>
+          sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }))));
+    const pick = (field) => results.map((r) => r[field]).filter((v) => Number.isFinite(v) && v > 0);
+    const average = rangeRow({ key: 'tree_shrub_care', name: 'Tree & Shrub Care Program', unit: 'per month', values: pick('monthly') });
+    return rangeRow({
+      key: 'tree_shrub_care',
+      name: 'Tree & Shrub Care Program',
+      unit: 'per application',
+      values: pick('perApp'),
+      notes: `Billed after each application; 6 or 9 applications per year by tier ($${average.low}-$${average.high} a month, averaged over the year); priced by planting beds and tree count — larger counts price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+    });
+  });
 
   // rodent_plugging (calculatePluggingPrice) is deliberately NOT published:
   // no live route or client populates services.rodentPlugging — same

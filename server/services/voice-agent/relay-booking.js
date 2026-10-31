@@ -155,8 +155,16 @@ function slotStartMinutes(slot) {
  * here would only be safe once the OFFER step can also resolve and thread
  * the same identity — until then, matching the offer's inputs exactly (this
  * function's own contract, above) beats a one-sided credit.
+ *
+ * `serviceLines` (GATE_SERVICE_LINE_MAP=live, the caller's catalog service's
+ * line) is NOT an identity and is safe to thread for the same reason it is
+ * safe to omit one above: the line rule changes no geometry (no credit, no
+ * packing, no grace). It only drops the slots of technicians that are not the
+ * line's home or gap technician and lets the home technician claim a start both
+ * have, so the saved slot.technician_id is the line's technician. A start only
+ * another line's technician had comes back slot_gone. Unset = today's recheck.
  */
-async function revalidateSlot({ offer, durationMinutes = null }) {
+async function revalidateSlot({ offer, durationMinutes = null, serviceLines }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'engine_unavailable' };
   if (!offer || !offer.lat || !offer.lng || !offer.date) return { status: 'need_location' };
@@ -194,10 +202,23 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     expandOpenDays: offer.expandOpenDays === true,
     // No serviceIdentity — see this function's doc comment (Codex r6 P2):
     // the offer never had one, so the recheck must not manufacture one.
+    serviceLines,
   });
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);
   return slot ? { status: 'ok', slot } : { status: 'slot_gone' };
+}
+
+// The booked service's line as `serviceLines` for the recheck: [line] while the
+// service-line map is LIVE and the catalog row has a line, else undefined (no read at
+// all with the gate off). A Waves Assessment has no line (liveServiceLine): today's recheck.
+async function bookingServiceLines(db, catalogRow) {
+  const { lineMapLive, liveServiceLine } = require('../scheduling/line-technician');
+  if (!lineMapLive() || !catalogRow) return undefined;
+  const line = await liveServiceLine(db, {
+    serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null,
+  });
+  return line ? [line] : undefined;
 }
 
 // The window the booked row will OCCUPY, resolved from the admin-portal
@@ -383,7 +404,7 @@ async function commitVoiceBooking({
       // a clash here is somebody ELSE's committed visit or live hold. The
       // offer came from the per-technician /book engine, so the probe is
       // scoped to the technician the row is written with (technicianId below):
-      // with GATE_MULTI_TECH_CONFIRM + capacity mode on, another technician's
+      // with GATE_MULTI_TECH_CONFIRM on (hour or capacity mode), another technician's
       // overlapping stop is not a clash, while an UNASSIGNED row still is;
       // gate off or no technician on the offer → tech-blind, as before.
       const clash = await findConflictingVisits({
@@ -468,6 +489,14 @@ async function commitVoiceBooking({
           `[voice-relay-booking] pending booking ${created.id} for customer ${customerId} created with NO `
           + 'outbound_booking_review card (no call_log row for this call) — it is invisible to the office confirm queue'
         );
+      }
+      // GATE_ROUTE_CHECK_BOOKING_SAVES: number the pending visit on its technician's
+      // day (stop numbers only: no message, no notification, no Google call), in
+      // this transaction, after the review card (the card can still roll the
+      // insert back). The row is never street-level held: this writer has no
+      // such state. Gate off: touches nothing. Never throws.
+      if (created) {
+        await require('../scheduling/staff-save-route-check').placeBookingSavedVisit(trx, { visit: created, source: 'voice_relay' });
       }
       return { status: 'ok', scheduledServiceId: created && created.id, callLogId };
     });
@@ -702,6 +731,7 @@ async function requestBookingText(input = {}, ctx = {}) {
   const recheck = await revalidateSlot({
     offer: { ...offer, lat: bookingCoords.lat, lng: bookingCoords.lng },
     durationMinutes: bookingDurationMinutes,
+    serviceLines: await bookingServiceLines(db, catalogRow),
   });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '

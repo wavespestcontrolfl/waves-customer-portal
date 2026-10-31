@@ -46,6 +46,7 @@ const MODELS = require('../../../config/models');
 const db = require('../../../models/db');
 const logger = require('../../logger');
 const script = require('./script');
+const { agentName } = require('../../voice-agent/relay-protocol');
 const { isVoiceLatePaymentEnabled, isPayLinkEnabled } = require('./gates');
 const { isStaffedHours } = require('./staffed-hours');
 const { callSupervision } = require('./supervision');
@@ -310,7 +311,7 @@ const REGISTER_RULES = {
 function buildSystemPrompt({ firstName, today, register = 'friendly' }) {
   const who = firstName || 'the customer';
   return [
-    'You are Sandy, the automated billing assistant for Waves Pest Control, on a RECORDED outbound phone call about an open balance. Keep every reply to one or two short spoken sentences. Never use emojis or read out symbols.',
+    `You are ${agentName()}, the automated billing assistant for Waves Pest Control, on a RECORDED outbound phone call about an open balance. Keep every reply to one or two short spoken sentences. Never use emojis or read out symbols.`,
     // The current ET calendar date rides the prompt (gh prb-r11): without
     // it, "this Friday" becomes a guessed YYYY-MM-DD that passes the 90-day
     // validator and lands next_eligible_at on the wrong day.
@@ -1191,7 +1192,7 @@ class CollectionsConversation {
         .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid'])
         .whereNull('payer_id')
         .whereNull('payer_statement_id')
-        .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+        .whereRaw('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0')
         .first('id');
       return rawOpen ? 'open' : 'settled';
     } catch (err) {

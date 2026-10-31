@@ -354,7 +354,7 @@ export function SandyTransferCard({ handoff }) {
   return (
     <div className="mt-1.5 ml-8 p-2 bg-zinc-50 border-hairline rounded-md" data-testid="sandy-transfer-card">
       <div className="flex items-center justify-between gap-2 mb-1">
-        <span className="text-13 md:text-11 text-ink-tertiary font-medium">Sandy transfer</span>
+        <span className="text-13 md:text-11 text-ink-tertiary font-medium">Jennifer transfer</span>
         <Badge tone="neutral">{tierLabel(handoff)}</Badge>
       </div>
       {noContext ? (

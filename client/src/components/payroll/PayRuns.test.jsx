@@ -123,11 +123,11 @@ describe('Pay runs section', () => {
   it('shows who is blocked or waiting with the reason, and keeps Finalize off', async () => {
     const detail = await startRun({
       waiting: [{ technicianId: 't2', name: 'Sample Waiting', reason: 'Timesheet for this week is not approved yet' }],
-      blocked: [{ technicianId: 't3', name: 'Sample NoW4', reason: 'No Form W-4 on file' }],
+      blocked: [{ technicianId: 't3', name: 'Sample NoRate', reason: 'No pay rate set' }],
     });
     const view = within(detail);
     expect(view.getByRole('list', { name: 'Waiting for approval' })).toHaveTextContent('Sample WaitingTimesheet for this week is not approved yet');
-    expect(view.getByRole('list', { name: 'Blocked' })).toHaveTextContent('Sample NoW4No Form W-4 on file');
+    expect(view.getByRole('list', { name: 'Blocked' })).toHaveTextContent('Sample NoRateNo pay rate set');
     expect(view.getByRole('button', { name: 'Finalize' })).toBeDisabled();
   });
 
@@ -261,6 +261,28 @@ describe('Finalized run', () => {
     await screen.findByText('Check number saved for Sample Alpha.');
   });
 
+  it('shows each final check its bank status only when the server sends one', async () => {
+    let detail = await openFinal();
+    expect(within(detail).queryByRole('columnheader', { name: 'Bank' })).toBeNull();
+    cleanup();
+    current = finalRun({
+      checks: [
+        check({ status: 'finalized', bank: { state: 'matched', date: '2026-10-28' } }),
+        check({ id: 'check-b', technicianId: 'tech-b', name: 'Sample Beta', payMethod: 'bank_transfer', status: 'finalized', bank: { state: 'needs_pick' } }),
+        check({ id: 'check-c', technicianId: 'tech-c', name: 'Sample Gamma', status: 'finalized', bank: { state: 'not_seen' } }),
+      ],
+    });
+    render(<PayrollSettings />);
+    const section = await screen.findByRole('region', { name: 'Pay runs' });
+    fireEvent.click(await within(section).findByRole('button', { name: /Open pay run for/ }));
+    detail = await screen.findByLabelText(/Pay run for/);
+    const view = within(detail);
+    expect(view.getByRole('columnheader', { name: 'Bank' })).toBeInTheDocument();
+    expect(view.getByText('Bank: matched Oct 28, 2026')).toBeInTheDocument();
+    expect(view.getByText('Bank: needs your pick (Tax page, Bank Import)')).toBeInTheDocument();
+    expect(view.getByText('Bank: not seen yet')).toBeInTheDocument();
+  });
+
   it('opens a printable stub with the year-to-date column and no employer taxes', async () => {
     const print = vi.spyOn(window, 'print').mockImplementation(() => {});
     const detail = await openFinal();
@@ -289,6 +311,31 @@ describe('Finalized run', () => {
     fireEvent.click(printButton);
     expect(print).toHaveBeenCalledTimes(1);
     print.mockRestore();
+  });
+
+  it('says so on a check drafted with no W-4 on file (the IRS default)', async () => {
+    const detail = await startRun({ checks: [check({ w4Default: true }), check({ id: 'check-b', name: 'Sample Beta' })] });
+    const rows = within(detail).getByRole('table', { name: 'Paychecks' }).querySelectorAll('tbody tr');
+    expect(rows[0]).toHaveTextContent('No W-4 on file: withheld as single, no adjustments (IRS default)');
+    expect(rows[1]).not.toHaveTextContent('No W-4 on file');
+  });
+
+  it('says so on the stub only when the check had no W-4 election', async () => {
+    const detail = await openFinal();
+    fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+    expect(await within(await screen.findByRole('dialog')).findByLabelText('Pay stub')).not.toHaveTextContent('No W-4 on file');
+  });
+
+  it('shows the no-W-4 note on the stub when the stub says so', async () => {
+    STUB.w4Default = true;
+    try {
+      const detail = await openFinal();
+      fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+      const stub = await within(await screen.findByRole('dialog')).findByLabelText('Pay stub');
+      expect(stub).toHaveTextContent('No W-4 on file: withheld as single, no adjustments (IRS default)');
+    } finally {
+      delete STUB.w4Default;
+    }
   });
 
   it('downloads the CSV from the export route', async () => {

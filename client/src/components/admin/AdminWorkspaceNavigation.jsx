@@ -1,6 +1,6 @@
 import { useId } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ChevronDown, LogOut, Pin, Search, Sparkles, X } from 'lucide-react';
+import { ChevronDown, LogOut, Pin, Search, Sparkles } from 'lucide-react';
 import { Button, UiSurface } from '../ui';
 import { cn } from '../ui/cn';
 import useAdminNavigation from '../../hooks/useAdminNavigation';
@@ -23,7 +23,10 @@ export function WorkspaceLink({ item, children, active, onNavigate, source = 'si
 export function WorkspaceGroup({ group, onNavigate, unreadCount, source = 'sidebar' }) {
   const panelId = useId();
   const { expanded, toggleGroup, selection } = useAdminNavigation();
-  const hasChildren = !group.target || group.items.length > 1;
+  // The row itself opens the group's main page, so that page is not listed
+  // again under it: every page appears in the menu once.
+  const children = group.items.filter((item) => item.id !== group.target?.id);
+  const hasChildren = children.length > 0;
   const isExpanded = hasChildren && Boolean(expanded[group.id]);
   const isActive = selection.groupId === group.id;
   const Icon = group.icon;
@@ -35,7 +38,7 @@ export function WorkspaceGroup({ group, onNavigate, unreadCount, source = 'sideb
   const expansion = <ChevronDown size={16} aria-hidden className={cn('shrink-0 transition-transform', isExpanded && 'rotate-180')} />;
   return <div>
     <div className={cn('flex items-stretch rounded', isActive && 'bg-zinc-100')}>
-      {group.target ? <WorkspaceLink item={group.target} active={isActive && !isExpanded && selection.itemId === group.target.id} onNavigate={onNavigate} source={source}>
+      {group.target ? <WorkspaceLink item={group.target} active={isActive && selection.itemId === group.target.id} onNavigate={onNavigate} source={source}>
         {label}
       </WorkspaceLink> : <Button variant="ghost" className={rowClass} aria-expanded={isExpanded} aria-controls={panelId} onClick={() => toggleGroup(group.id)}>
         {label}{expansion}
@@ -44,7 +47,7 @@ export function WorkspaceGroup({ group, onNavigate, unreadCount, source = 'sideb
         onClick={() => toggleGroup(group.id)} className="shrink-0 !px-2 min-w-[36px] max-lg:min-w-11 [@media(any-pointer:coarse)]:min-w-11">{expansion}</Button>}
     </div>
     {hasChildren && <div id={panelId} hidden={!isExpanded} className="ml-6 border-l border-zinc-200 pl-2">
-      {group.items.map((item) => <WorkspaceLink key={item.id} item={item} active={selection.itemId === item.id} onNavigate={onNavigate} source={source} className="!px-2" />)}
+      {children.map((item) => <WorkspaceLink key={item.id} item={item} active={selection.itemId === item.id} onNavigate={onNavigate} source={source} className="!px-2" />)}
     </div>}
   </div>;
 }
@@ -60,7 +63,7 @@ export function PinnedWorkspaceLinks({ onNavigate, source = 'sidebar' }) {
   </div>;
 }
 
-export default function AdminWorkspaceNavigation({ user, isMobile, onClose, onAsk, onSearch, onLogout, unreadCount }) {
+export default function AdminWorkspaceNavigation({ user, onClose, onAsk, onSearch, onLogout, unreadCount }) {
   const navigation = useAdminNavigation();
   if (!navigation) return null;
   const { groups } = navigation;
@@ -69,7 +72,7 @@ export default function AdminWorkspaceNavigation({ user, isMobile, onClose, onAs
       <img src="/waves-logo.png" alt="Waves" className="h-7" />
       <span className="text-16 font-medium" aria-hidden>Waves</span>
       <span className="flex-1" />
-      {isMobile ? <Button variant="ghost" onClick={onClose} aria-label="Close menu" className="!px-3"><X size={18} aria-hidden /></Button> : <NotificationBell type="admin" />}
+      <NotificationBell type="admin" />
     </div>
     <div className="shrink-0 space-y-1 px-3 py-2">
       <Button variant="secondary" onClick={onSearch} className="w-full !justify-start" aria-label="Search pages"><Search size={18} aria-hidden /><span className="flex-1 text-left">Search</span><kbd className="text-14 font-normal">⌘K</kbd></Button>

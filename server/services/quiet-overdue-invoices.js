@@ -35,12 +35,6 @@
 // Not quiet: an active sequence with a next touch, or a pause whose end date
 // is still ahead (staff chose that wait).
 //
-// Only while both legacy senders are retired (late-payment-checker.js, and
-// balance-reminder.js's account late check, by its own full rule): either one
-// can still contact an invoice with no sequence, a finished one or a stopped
-// one, so "no overdue reminder is scheduled" would not hold. Otherwise the run
-// is skipped and the standing row is left as it is.
-//
 // GATE_QUIET_OVERDUE_LIST (strict 'true', read at call time). Off = the
 // weekday cron returns before any read.
 
@@ -55,8 +49,8 @@ const CATEGORY = 'billing';
 const QUIET_AFTER_DAYS = 14;
 const AUTOPAY_HOLD_DAYS = 7;
 const ET = 'America/New_York';
-// The delivered statuses orphan adoption (invoice-followups.js) and the
-// legacy checker select from: an invoice the customer has.
+// The delivered statuses orphan adoption (invoice-followups.js) selects
+// from: an invoice the customer has.
 const PUBLISHED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 // The bell's "Show full text" lists at most this many invoices (oldest first).
 const DETAIL_MAX_LINES = 25;
@@ -120,7 +114,7 @@ function candidatesQuery(now = new Date(), database = db) {
     })
     .whereNull('i.archived_at')
     .whereNull('c.deleted_at')
-    .whereRaw('COALESCE(i.total, 0) - COALESCE(i.credit_applied, 0) > 0')
+    .whereRaw('COALESCE(i.total, 0) - COALESCE(i.credit_applied, 0) - COALESCE(i.amount_paid, 0) > 0')
     .whereRaw(`${dueDay} <= ? - ?::int`, [today, AUTOPAY_HOLD_DAYS])
     .whereNotExists(function noActivePlan() {
       this.select(1).from('payment_plans')
@@ -133,7 +127,7 @@ function candidatesQuery(now = new Date(), database = db) {
         .whereIn('d.status', OPEN_CUSTOMER_SCHEDULE_STATUSES);
     })
     .select(
-      'i.id', 'i.invoice_number', 'i.customer_id', 'i.total', 'i.credit_applied',
+      'i.id', 'i.invoice_number', 'i.customer_id', 'i.total', 'i.credit_applied', 'i.amount_paid',
       'c.first_name', 'c.last_name',
       's.status as seq_status', 's.next_touch_at', 's.paused_until', 's.stopped_by_admin_id', 's.stopped_reason',
       's.autopay_failures_observed',
@@ -270,25 +264,15 @@ async function closeList(database, dedupeKey) {
   });
 }
 
-// Both legacy senders retired, each by its own rule: the late-payment checker
-// and the balance reminder's account late check (its full retirement test:
-// gate, ladder, orphan adoption, no legacy `unpaid` invoice, an unreadable
-// count reads as running).
-async function legacySendersRetired() {
-  if (!require('./invoice-followups').latePaymentCheckerRetiredLive()) return false;
-  return require('./workflows/balance-reminder').latePaymentCheckRetired({ log: false });
-}
-
 /**
- * Weekday cron entry point. Returns { skipped } when the gate is off or a
- * legacy sender still runs, otherwise { count, outcome }: raised | refreshed |
+ * Weekday cron entry point. Returns { skipped } when the gate is off,
+ * otherwise { count, outcome }: raised | refreshed |
  * unchanged | suppressed | closed | clear. A read failure throws
  * (runExclusive records it in job_health) and never closes the row.
  * `loadRows` is the row source and `dedupeKey` the row's key (tests set both).
  */
 async function runQuietOverdueList({ now = new Date(), database = db, gateEnabled, loadRows = candidatesQuery, dedupeKey = DEDUPE_KEY } = {}) {
   if (!(gateEnabled ?? quietOverdueListLive())) return { skipped: 'disabled' };
-  if (!(await legacySendersRetired())) return { skipped: 'legacy_sender_live' };
   const items = listItems(await loadRows(now, database), now);
   if (!items.length) {
     const closed = Number(await closeList(database, dedupeKey)) || 0;

@@ -29,7 +29,7 @@ knex.client.runner = builder => ({ run: async () => {
 async function request(method, path, body = {}, query = {}) {
   const handler = router.stack.find(l => l.route?.path === path && l.route.methods[method]).route.stack.at(-1).handle;
   const res = { json: jest.fn(), status: jest.fn().mockReturnThis() }, next = jest.fn();
-  await handler({ body, query, params: { id: 'lead-1' }, technician: { first_name: 'Test', last_name: 'Admin' } }, res, next);
+  await handler({ body, query, params: { id: 'lead-1' }, technician: { name: 'Test Admin' } }, res, next);
   return { res, error: next.mock.calls[0]?.[0], data: res.json.mock.calls[0]?.[0] };
 }
 beforeEach(() => {

@@ -36,8 +36,30 @@ const defaults = {
         amount: 120,
         expected_amount: 120,
         reconciled: false,
+        // the route returns stripe_payouts.*: a midnight-UTC arrival marker
+        arrival_date: "2026-07-21T00:00:00.000Z",
+        created_at_stripe: "2026-07-19T14:05:00.000Z",
       },
     ],
+  },
+  "/api/admin/banking/cash-flow": {
+    period: { start: "2026-07-01", end: "2026-07-31" },
+    summary: {
+      total_revenue: 0,
+      total_expenses: 0,
+      stripe_fees: 0,
+      total_payouts: 0,
+      operating_cash_flow: 0,
+      bank_balance_delta: 0,
+      net_cash_flow: 0,
+      payment_count: 0,
+      payout_count: 0,
+      total_in: 0,
+      total_out: 0,
+      net: 0,
+    },
+    daily: [],
+    periods: [],
   },
   "/api/admin/tax/dashboard": {
     ytdTaxCollected: 0,
@@ -287,6 +309,34 @@ describe("Finance workflow preservation", () => {
       actual_amount: 119.5,
       notes: "Keep this note",
     });
+  });
+  it("shows each reconciliation payout's arrival day", async () => {
+    open(BankingPage);
+    fireEvent.click(
+      within(
+        screen.getByRole("navigation", { name: "Banking section" }),
+      ).getByRole("button", { name: "Reconciliation" }),
+    );
+    await screen.findByLabelText("Actual Amount");
+    expect(screen.getByText("7/21/2026")).toBeInTheDocument();
+  });
+  it("shows a failed cash-flow read as unavailable, and a real empty period as $0.00", async () => {
+    const key = "GET /api/admin/banking/cash-flow";
+    overrides.set(key, () =>
+      response({ error: "the cash-flow read failed" }, 500),
+    );
+    open(BankingPage);
+    fireEvent.click(
+      within(
+        screen.getByRole("navigation", { name: "Banking section" }),
+      ).getByRole("button", { name: "Cashflow" }),
+    );
+    await screen.findByText(/Couldn't load cash flow \(the cash-flow read failed\)/);
+    expect(screen.queryByText("Revenue In")).toBeNull();
+    overrides.delete(key);
+    fireEvent.click(screen.getByRole("button", { name: "Retry", exact: true }));
+    const label = await screen.findByText("Revenue In");
+    expect(label.parentElement).toHaveTextContent("$0.00");
   });
   it("keeps taxability confirmation and restores the enabled control after failure", async () => {
     open(TaxPage);

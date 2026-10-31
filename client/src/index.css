@@ -328,6 +328,12 @@ html.admin-app .admin-auth-page {
     max(20px, env(safe-area-inset-left, 0px));
   box-sizing: border-box;
 }
+/* The auth pages style controls inline (adminAuthStyles.js), and inline
+   styles cannot express focus. Keyboard focus gets the admin ring here. */
+.admin-auth-page :is(input, button, a):focus-visible {
+  outline: 2px solid #18181B;
+  outline-offset: 2px;
+}
 @media (max-width: 767px) {
   .admin-shell-v2 .admin-main {
     scroll-padding-top: calc(52px + env(safe-area-inset-top) + 12px);

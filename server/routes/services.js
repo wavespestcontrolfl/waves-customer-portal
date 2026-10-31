@@ -12,7 +12,7 @@ const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts } = require('../services/portal-service-history');
 const { etDateString } = require('../utils/datetime-et');
 
-// service_products columns the customer service-detail route returns (the table's columns before 20261009110000 added treated_place).
+// service_products columns the customer service-detail route returns (the table's columns before 20261009110000 added treated_place and 20261030120000 treated_places).
 const CUSTOMER_PRODUCT_COLUMNS = [
   'id', 'service_record_id', 'product_name', 'product_category', 'active_ingredient', 'moa_group', 'application_rate', 'rate_unit',
   'total_amount', 'amount_unit', 'notes', 'created_at', 'updated_at', 'application_method', 'application_area', 'epa_reg_number',
@@ -55,7 +55,12 @@ router.get('/', async (req, res, next) => {
     // the holder's stays customer-wide unless asked.
     const scope = req.contactSession ? await contactRecordScope(req) : (propertyScoped ? await resolveSessionScope(req) : null);
 
-    const { services: listed, total } = await listPortalServiceHistory(req.customerId, { limit, offset, type, scope });
+    // Completed visits only, one record per appointment: the Completed tab
+    // and Home's Last Visit card showed incomplete records as completed
+    // visits and a visit's sibling records as extra visits.
+    const { services: listed, total } = await listPortalServiceHistory(req.customerId, {
+      limit, offset, type, scope, completedOnly: true,
+    });
     // A contact the rule withholds from gets no artifact; an allowed contact
     // gets the visit without the public report bearers (the authenticated
     // contact-safe PDF route carries the report).
@@ -194,9 +199,14 @@ router.get('/stats/summary', async (req, res, next) => {
         ? scopeContactRecords(q.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'), scope)
         : q;
     };
+    // Visits, not records: one completed service day is one visit. A stop
+    // with several appointments, sibling records from two completion rails,
+    // and scheduled / in_progress / incomplete / cancelled rows each counted
+    // before.
     const servicesYTD = await records()
       .where('service_records.service_date', '>=', etYearStart)
-      .count('service_records.id as count')
+      .whereRaw("COALESCE(service_records.status, 'completed') = 'completed'") // NULL = legacy completed
+      .countDistinct('service_records.service_date as count')
       .first();
 
     const latestThatch = await records()

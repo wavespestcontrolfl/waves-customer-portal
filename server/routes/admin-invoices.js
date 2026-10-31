@@ -9,6 +9,8 @@ const InvoiceAttachments = require('../services/invoice-attachments');
 const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
 const db = require('../models/db');
 const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
+const { undoManualPayment, describeManualPaymentUndo } = require('../services/invoice-manual-payment-undo');
+const { undoManualPaymentLive, partialPaymentsLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -586,7 +588,9 @@ router.get('/', async (req, res, next) => {
       to,
       sort,
     });
-    res.json({ invoices, total, page: pageNum });
+    // The Invoices page shows "Undo payment" only while GATE_UNDO_MANUAL_PAYMENT is on, and lets the amount be typed (a part payment) only
+    // while GATE_PARTIAL_PAYMENTS is on.
+    res.json({ invoices, total, page: pageNum, undoPaymentEnabled: undoManualPaymentLive(), partialPaymentsEnabled: partialPaymentsLive() });
   } catch (err) { next(err); }
 });
 
@@ -1620,13 +1624,14 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
       // the closeout so a queued receipt cannot deliver during it.
       let claim;
       try {
-        claim = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: !invoice.receipt_sent_at });
+        // requirePaid: the status read above can be overtaken by an Undo of the payment; the claim re-reads it under the claim lock.
+        claim = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: !invoice.receipt_sent_at, requirePaid: true });
       } catch (err) {
         failed.push({ invoiceId, error: `receipt claim failed: ${err.message}` });
         continue;
       }
-      if (claim.inFlight || claim.alreadySent) {
-        skipped.push({ invoiceId, reason: claim.inFlight ? 'receipt_delivery_in_flight' : 'receipt_already_sent' });
+      if (claim.inFlight || claim.alreadySent || claim.notPaid) {
+        skipped.push({ invoiceId, reason: claim.notPaid ? 'invoice_not_paid' : claim.inFlight ? 'receipt_delivery_in_flight' : 'receipt_already_sent' });
         continue;
       }
 
@@ -1743,7 +1748,7 @@ const invoiceUpdateHandler = async (req, res, next) => {
     // so the UI can toast the reason. "could not verify the" covers every
     // fail-closed verify fence ("Could not verify the X — refusing to
     // edit"): a transient read failure is a retry, not a server fault.
-    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied|payment already applied|payment dispute|sending right now|just went out|saved-card charge|could not verify the/i.test(err.message)) {
+    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied|payment already applied|part payment on it|payment dispute|sending right now|just went out|saved-card charge|could not verify the/i.test(err.message)) {
       return res.status(409).json({ error: err.message });
     }
     if (/Invalid line-item discount/i.test(err.message)) {
@@ -2336,6 +2341,26 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         }
         const termCustomerId = lockedInvoiceRow.customer_id;
 
+        // Lawn rounds is the lawn plan's own calendar (Codex #7008 r6; the same
+        // check as Customer 360). Judge the EFFECTIVE pair, the submitted fields
+        // over this invoice's stored term, so a partial edit cannot pair rounds
+        // with another service.
+        if (resolvedCadence !== undefined || resolvedServiceType !== undefined) {
+          const storedTerm = await trx('annual_prepay_terms')
+            .where({ prepay_invoice_id: invoice.id })
+            .first('coverage_cadence', 'coverage_service_type');
+          const refusal = require('../services/prepay-cadence').lawnRoundsCoverageErrorForEdit({
+            submittedCadence: resolvedCadence, submittedServiceType: resolvedServiceType, storedTerm,
+          });
+          if (refusal) {
+            const refused = new Error(refusal.error);
+            refused.statusCode = 400;
+            refused.isOperational = true;
+            refused.code = refusal.code;
+            throw refused;
+          }
+        }
+
         if (coverageEnabled) {
           const ownTerm = await trx('annual_prepay_terms')
             .where({ prepay_invoice_id: invoice.id })
@@ -2758,8 +2783,10 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
   try {
     const { memo, via = 'both' } = req.body || {};
     // The one writer, shared with the Intelligence Bar resend_receipt tool.
-    const { status, body } = await sendInvoiceReceipt(req.params.id, { memo, via, actorTechnicianId: req.technicianId || null });
-    res.status(status).json(body);
+    const { status, body, delivery } = await sendInvoiceReceipt(req.params.id, { memo, via, actorTechnicianId: req.technicianId || null });
+    // Per-leg certainty ('sent' | 'not_sent' | 'unknown' | 'not_requested') rides along so the dialog
+    // never offers to resend a text or email that may already have reached the customer.
+    res.status(status).json(body && delivery ? { ...body, delivery } : body);
   } catch (err) { next(err); }
 });
 
@@ -2774,6 +2801,9 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 //   note?:        string  — operator note appended to invoice notes  (≤400 chars)
 //   sendReceipt?: boolean — fire receipt SMS/email after marking paid (default true)
 //   via?:         'email' | 'sms' | 'both'  — receipt channels (default 'both')
+//   amount?:      number  — dollars received (owner 2026-10-29). Absent = the whole balance owed, as before. Equal to the balance owed =
+//                 the same. Less = a PART payment, only behind GATE_PARTIAL_PAYMENTS (no receipt, the invoice stays open). More = 400.
+//                 Ignored for the Intelligence Bar card, which records the whole balance only.
 // }
 //
 // Settlement semantics (refusals, tenders, ledger, receipt) are documented on
@@ -2812,11 +2842,14 @@ function parseDateOnly(value, field) {
 // card's settlementFence (its invoice pin, held-report and annual-plan checks, run before the Stripe retirement and again under
 // the invoice row lock), and that the invoice is still
 // the customer's own (re-proved under the row lock, like the Zelle paths). The Invoices page never sets it, so its call is unchanged.
+// A part payment (GATE_IB_RECORD_PAYMENT_PARTIAL, owner 2026-10-29) adds `part: { amountCents, owedCentsSeen }` to the approval, built from the
+// card's own pin and never from the request body; the writer then gets the internal barApprovedPart marker (and re-checks both gates).
 const cardPinsOf = (req) => (req.ibApprovedPayment
   ? {
     expectedAmountCents: req.ibApprovedPayment.expectedAmountCents,
     settlementFence: req.ibApprovedPayment.settlementFence,
     requireSelfPay: true,
+    ...(req.ibApprovedPayment.part ? { barApprovedPart: true } : {}),
   }
   : {});
 
@@ -2833,12 +2866,37 @@ const recordPaymentHandler = async (req, res, next) => {
       note,
       sendReceipt = true,
       via = 'both',
+      amount,
+      owedSeen,
     } = req.body || {};
 
     if (!method || !VALID_PAYMENT_METHODS.includes(method)) {
       return res.status(400).json({
         error: `method must be one of: ${VALID_PAYMENT_METHODS.join(', ')}`,
       });
+    }
+    // The amount the office typed, in whole cents. Only the Invoices page sends one: the Intelligence Bar card records the whole balance,
+    // fenced by its own expectedAmountCents, so a stray amount in its body is dropped here. The one exception is a part payment the card
+    // priced (req.ibApprovedPayment.part, internal, built by the bar's tool only for a part card): its figures come from that approval, never
+    // from the body, and the writer refuses it (400, nothing recorded, never a whole-balance fallback) unless both part gates are on.
+    let amountCents = null;
+    let barOwedCentsSeen = null;
+    const barPart = req.ibApprovedPayment?.part || null;
+    if (barPart) {
+      amountCents = barPart.amountCents;
+      barOwedCentsSeen = barPart.owedCentsSeen;
+    } else if (amount != null && amount !== '' && !req.ibApprovedPayment) {
+      const dollars = Number(amount);
+      amountCents = Math.round(dollars * 100);
+      if (!Number.isFinite(dollars) || !(amountCents > 0) || Math.abs(dollars * 100 - amountCents) > 1e-6) {
+        return res.status(400).json({ error: 'amount must be a dollar amount above $0.00, with at most two decimals' });
+      }
+    }
+    // The amount owed the page showed beside that amount: the writer refuses when it is no longer what is owed (a repeat submit).
+    let owedCentsSeen = barOwedCentsSeen;
+    if (!barPart && amountCents != null && owedSeen != null && owedSeen !== '') {
+      const dollars = Number(owedSeen);
+      owedCentsSeen = Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
     }
     if (sendReceipt && !['email', 'sms', 'both'].includes(via)) {
       return res.status(400).json({ error: "via must be 'email', 'sms', or 'both'" });
@@ -2849,11 +2907,12 @@ const recordPaymentHandler = async (req, res, next) => {
     // effects and the receipt all live in services/invoice-manual-payment.js
     // — the one manual-settlement path (shared with the Zelle notice
     // reconciler). Refusals arrive as statusCode-shaped errors.
-    const { invoice, receipt, closeout } = await recordManualPayment(id, {
+    const { invoice, receipt, closeout, partial } = await recordManualPayment(id, {
       method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
+      ...(amountCents != null ? { amountCents, owedCentsSeen } : {}),
       ...cardPinsOf(req),
     });
-    res.json({ ok: true, invoice, receipt, ...cardResultOf(req, closeout) });
+    res.json({ ok: true, invoice, receipt, ...(partial ? { partial } : {}), ...cardResultOf(req, closeout) });
   } catch (err) {
     // 400 / 404 refusals and the 409-shaped conflicts (combined-session
     // reservation, PI in flight, lost race — the latter carries the
@@ -2862,7 +2921,7 @@ const recordPaymentHandler = async (req, res, next) => {
       return res.status(err.statusCode).json({
         error: err.message,
         ...(err.currentStatus !== undefined ? { current_status: err.currentStatus } : {}),
-        // Only a card's pin (amount due / invoice version) can produce these; the page never sets one.
+        // A card's pin (amount due / invoice version), or the amount the page typed no longer matching what is owed.
         ...(err.drift || err.amountMismatch ? { code: 'PREVIEW_CHANGED' } : {}),
       });
     }
@@ -2872,16 +2931,48 @@ const recordPaymentHandler = async (req, res, next) => {
 };
 router.post('/:id/record-payment', requireAdmin, recordPaymentHandler);
 
+// GET /:id/undo-payment — can the manual payment on this invoice be undone? The Invoices page asks before it opens the confirm, so the
+// rules live in one place (services/invoice-manual-payment-undo.js). 404 while GATE_UNDO_MANUAL_PAYMENT is off.
+router.get('/:id/undo-payment', requireAdmin, async (req, res, next) => {
+  try {
+    if (!undoManualPaymentLive()) return res.status(404).json({ error: 'Not found' });
+    res.json(await describeManualPaymentUndo(req.params.id));
+  } catch (err) {
+    if (err.statusCode === 404) return res.status(404).json({ error: err.message });
+    next(err);
+  }
+});
+
+// POST /:id/undo-payment — reverse a manual payment recorded today, before any receipt or reminder went out.
+// Body: { reason: string (required, <=400 chars), paymentId: the payment id GET returned (required; a different payment now → 409) }. The writer is undoManualPayment (also the future Intelligence Bar tool's); refusals
+// arrive as statusCode-shaped errors (400 no reason, 404, 409 not eligible with a plain `error` and a `code`). 404 while the gate is off.
+router.post('/:id/undo-payment', requireAdmin, async (req, res, next) => {
+  try {
+    if (!undoManualPaymentLive()) return res.status(404).json({ error: 'Not found' });
+    const undoneBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    const result = await undoManualPayment(req.params.id, {
+      reason: req.body?.reason, paymentId: req.body?.paymentId, undoneBy, undoneByTechnicianId: req.technicianId || null,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    if ([400, 404, 409].includes(err.statusCode)) {
+      return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    }
+    logger.error(`[admin-invoices] undo-payment failed: ${err.message}`);
+    next(err);
+  }
+});
+
 
 // GET /:id/credit-context — available account credit + this invoice's
 // amount due, for the Apply-credit / Mark-prepaid modal.
 router.get('/:id/credit-context', async (req, res, next) => {
   try {
     const invoice = await db('invoices').where({ id: req.params.id })
-      .first('id', 'customer_id', 'total', 'credit_applied', 'status', 'invoice_number');
+      .first('id', 'customer_id', 'total', 'credit_applied', 'amount_paid', 'status', 'invoice_number');
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     const total = CustomerCredit.round2(invoice.total || 0);
-    const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
+    const amountDue = invoiceAmountDue(invoice);
     const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
     res.json({
       customer_id: invoice.customer_id,
@@ -2948,7 +3039,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     if (total <= 0) {
       return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
     }
-    const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
+    const amountDue = invoiceAmountDue(invoice);
     if (amountDue <= 0) {
       return res.status(400).json({ error: 'Invoice is already fully covered by credit' });
     }
@@ -3040,8 +3131,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           const err = new Error('A new payment session started for this invoice — retry applying credit');
           err.statusCode = 409; err.isOperational = true; throw err;
         }
-        const lockedTotal = CustomerCredit.round2(locked.total || 0);
-        const lockedDue = CustomerCredit.round2(lockedTotal - CustomerCredit.round2(locked.credit_applied || 0));
+        const lockedDue = invoiceAmountDue(locked);
         if (lockedDue <= 0) {
           const err = new Error('Invoice is already fully covered by credit'); err.statusCode = 400; err.isOperational = true; throw err;
         }
@@ -4013,7 +4103,9 @@ function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
 // The Intelligence Bar's record_payment runs the SAME handler as POST /:id/record-payment. `body` is exactly what the
 // Invoices page sends with its Send receipt switch off: the shim forces sendReceipt=false and drops via, so the bar never sends a
 // receipt from here (a receipt is a separate act: resend_receipt, or the Invoices page). The recorder is the staff member's name as
-// the page path would read it from the login; approvedPayment: { expectedAmountCents, settlementFence }.
+// the page path would read it from the login; approvedPayment: { expectedAmountCents, settlementFence, part? } (part: the card's
+// { amountCents, owedCentsSeen } for a part payment; the tool builds it only while GATE_IB_RECORD_PAYMENT_PARTIAL and GATE_PARTIAL_PAYMENTS are on,
+// and the writer re-checks both).
 function recordPaymentFromBar({ invoiceId, body, actor, approvedPayment }) {
   const { via: _via, ...withoutVia } = body || {};
   return runInvoiceHandler(recordPaymentHandler, barRequest(invoiceId, { ...withoutVia, sendReceipt: false }, actor, {

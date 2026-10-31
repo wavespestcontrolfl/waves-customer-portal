@@ -11,6 +11,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice-manual-payment', () => ({
   VALID_PAYMENT_METHODS: ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'],
+  partPaymentRefusal: jest.fn(),
 }));
 jest.mock('../routes/admin-invoices', () => ({ recordPaymentFromBar: jest.fn(), getInvoiceDeliveryRecipients: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn() }));
@@ -19,6 +20,7 @@ jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: 
 
 const db = require('../models/db');
 const Invoices = require('../routes/admin-invoices');
+const { partPaymentRefusal } = require('../services/invoice-manual-payment');
 const { rowIsSelfPayDue } = require('../services/open-balance');
 const { resolveInvoiceTermId } = require('../services/invoice-prepay');
 const { issuedCloseoutTarget, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
@@ -77,6 +79,13 @@ function envGate(on) {
   else { delete process.env.GATE_IB_RECORD_PAYMENT; delete process.env.GATE_IB_PLATFORM; }
 }
 
+// The two part gates: the bar's own (GATE_IB_RECORD_PAYMENT_PARTIAL) and the Invoices page's (GATE_PARTIAL_PAYMENTS).
+function partGates(on) {
+  for (const name of ['GATE_IB_RECORD_PAYMENT_PARTIAL', 'GATE_PARTIAL_PAYMENTS']) {
+    if (on) process.env[name] = 'true'; else delete process.env[name];
+  }
+}
+
 const BASE = { invoice_id: INV, amount: 117, method: 'check', reference: '1042' };
 const preview = (input = {}, ctx = ADMIN) => executeRecordPaymentTool('record_payment', { ...BASE, ...input }, ctx);
 const confirm = (card, input = {}, ctx = ADMIN) => executeRecordPaymentTool('record_payment',
@@ -90,9 +99,10 @@ beforeEach(() => {
   rowIsSelfPayDue.mockResolvedValue(true);
   resolveInvoiceTermId.mockResolvedValue(null);
   issuedCloseoutTarget.mockResolvedValue(null);
+  partPaymentRefusal.mockResolvedValue(null);
   Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { id: INV, status: 'paid' }, receipt: null } });
 });
-afterEach(() => envGate(false));
+afterEach(() => { envGate(false); partGates(false); });
 
 describe('registration', () => {
   test('a two-step external action: admin only, never owner-direct, customers domain, record scope', () => {
@@ -550,6 +560,237 @@ describe('confirm', () => {
     state.invoices[0].status = 'paid';
     expect(await confirm(card)).toMatchObject({ preview_changed: true });
     expect(Invoices.recordPaymentFromBar).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a part payment (GATE_IB_RECORD_PAYMENT_PARTIAL + GATE_PARTIAL_PAYMENTS)', () => {
+  const PART = { amount: 40 };
+  const partPreview = (input = {}, ctx = ADMIN) => preview({ ...PART, ...input }, ctx);
+
+  test.each([
+    ['both part gates off', () => partGates(false)],
+    ['only the bar part gate on', () => { partGates(false); process.env.GATE_IB_RECORD_PAYMENT_PARTIAL = 'true'; }],
+    ['only the Invoices page part gate on', () => { partGates(false); process.env.GATE_PARTIAL_PAYMENTS = 'true'; }],
+    ['the bar part gate set to something other than true', () => { partGates(true); process.env.GATE_IB_RECORD_PAYMENT_PARTIAL = '1'; }],
+  ])('%s: a smaller amount is refused as before, nothing priced', async (_name, arrange) => {
+    arrange();
+    const res = await partPreview();
+    expect(res).toMatchObject({ code: 'partial_not_supported', balance_due: 117 });
+    expect(res.error).toMatch(/takes no partial payment/);
+    expect(partPaymentRefusal).not.toHaveBeenCalled();
+  });
+
+  test('the card for a part: invoice, customer, method, reference, the part, what is still owed, reminders, no receipt and the amount owed it priced from', async () => {
+    partGates(true);
+    const card = await partPreview({ note: 'half now' });
+    expect(card).toMatchObject({
+      preview: true, tool: 'record_payment', invoice_number: 'WPC-2099-0001', customer_name: 'Robin Sample', method: 'check', reference: '1042',
+      balance_due: 117, amount: 40, part_payment: true, still_owed_after: 77, sends_to_customer: false, receipt: 'No receipt is sent',
+    });
+    const text = card.effects.map((e) => e.text).join('\n');
+    expect(text).toMatch(/Part payment of \$40\.00 by check, reference 1042, as of today, on invoice WPC-2099-0001; \$77\.00 will still be owed\. The invoice stays open \(sent\)/);
+    expect(text).toMatch(/amount owed this card priced from is \$117\.00/);
+    expect(text).toMatch(/reminders continue for the rest: the reminder sequence is not stopped/);
+    expect(text).toMatch(/No receipt is sent for a part payment, and none can be sent yet/);
+    expect(text).toMatch(/No card is charged/);
+    expect(text).toMatch(/half now/);
+    expect(text).not.toMatch(/→ paid/);
+    expect(card.effects.filter((e) => e.kind === 'comms')).toHaveLength(1);
+    // A receipt needs the bill paid in full: the card must not offer one now (Codex #7017 r1).
+    expect(card.effects.find((e) => e.kind === 'comms').text).toBe('No receipt is sent for a part payment, and none can be sent yet: a receipt becomes available once the rest is paid and the invoice is paid in full.');
+    // The card lines the operator sees.
+    const lines = cardLines('record_payment', card).map((l) => l.text).join('\n');
+    expect(lines).toMatch(/Record a PART payment on invoice WPC-2099-0001 for Robin Sample: \$40\.00 by check \(reference 1042\)/);
+    expect(lines).toMatch(/Part payment of \$40\.00; \$77\.00 will still be owed \(owed now: \$117\.00\)/);
+    expect(lines).not.toMatch(/marked paid in full/);
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+  });
+
+  test('the part pins the amount owed it priced from and hands it over as an internal approval, with no amount in the body', async () => {
+    partGates(true);
+    const card = await partPreview();
+    expect(card._version).toMatchObject({ due: 11700, part: 4000 });
+    expect(card._body).toEqual({ method: 'check', reference: '1042', sendReceipt: false });
+    expect(card._approved).toEqual({ expectedAmountCents: 11700, part: { amountCents: 4000, owedCentsSeen: 11700 }, settlementFence: expect.any(Function) });
+    // A part completes no visit: no closeout is probed, named or pinned.
+    expect(issuedCloseoutTarget).not.toHaveBeenCalled();
+    expect(card._approved.settlementFence.closeoutTarget).toBe('none');
+    expect(card._version.closeout_visit).toBeNull();
+    // The whole balance is unchanged: no part in the approval, a null part in the pin.
+    const whole = await preview();
+    expect(whole._approved).toEqual({ expectedAmountCents: 11700, settlementFence: expect.any(Function) });
+    expect(whole._version.part).toBeNull();
+    expect(whole).not.toHaveProperty('part_payment');
+  });
+
+  test('a balance net of credit and a part already received is what the card prices from', async () => {
+    partGates(true);
+    state.invoices[0].credit_applied = '17.00';
+    state.invoices[0].amount_paid = '30.00';
+    const card = await partPreview({ amount: 20 });
+    expect(card).toMatchObject({ balance_due: 70, amount: 20, still_owed_after: 50 });
+    expect(card._approved.part).toEqual({ amountCents: 2000, owedCentsSeen: 7000 });
+  });
+
+  test('an amount over the balance is still refused, and the whole balance is a full payment (not a part)', async () => {
+    partGates(true);
+    expect(await partPreview({ amount: 150 })).toMatchObject({ code: 'amount_exceeds_balance' });
+    const full = await partPreview({ amount: 117 });
+    expect(full).toMatchObject({ preview: true, amount: 117 });
+    expect(full).not.toHaveProperty('part_payment');
+    expect(full.effects.map((e) => e.text).join('\n')).toMatch(/→ paid, \$117\.00/);
+  });
+
+  test('the page\'s part refusals surface on the card, in the writer\'s words, with nothing recorded', async () => {
+    partGates(true);
+    partPaymentRefusal.mockResolvedValue('This customer is on Auto Pay, so a part payment cannot be recorded on this invoice yet.');
+    const res = await partPreview();
+    expect(res).toMatchObject({ code: 'part_not_allowed', invoice_id: INV });
+    expect(res.error).toMatch(/on Auto Pay.*Nothing was recorded\./);
+    expect(partPaymentRefusal).toHaveBeenCalledWith(db, expect.objectContaining({ id: INV }));
+    // A check that cannot be read refuses too (fail closed).
+    partPaymentRefusal.mockRejectedValue(new Error('db'));
+    expect(await partPreview()).toMatchObject({ code: 'part_not_allowed' });
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['an invoice billed to a payer', () => rowIsSelfPayDue.mockResolvedValue(false), 'payer_owned'],
+    ['an annual-plan invoice', () => resolveInvoiceTermId.mockResolvedValue('term-1'), 'annual_plan_invoice'],
+    ['a paid invoice', () => { state.invoices[0].status = 'paid'; }, 'already_paid'],
+    ['a cancelled visit', () => { state.invoices[0].scheduled_service_id = 'sv-1'; state.scheduled_services.push({ id: 'sv-1', status: 'cancelled' }); }, 'visit_terminal'],
+  ])('the whole-balance refusals still apply to a part: %s', async (_name, arrange, code) => {
+    partGates(true);
+    arrange();
+    expect(await partPreview()).toMatchObject({ code });
+  });
+
+  test('a part is not a receipt, a card charge or a date change: those refusals are unchanged', async () => {
+    partGates(true);
+    expect(await partPreview({ send_receipt: true })).toMatchObject({ code: 'capability_unimplemented' });
+    expect(await partPreview({ method: 'credit card' })).toMatchObject({ code: 'card_not_supported' });
+    expect(await partPreview({ payment_date: '2020-01-02' })).toMatchObject({ code: 'date_not_supported' });
+    expect(await partPreview({ amount: 0.001 })).toMatchObject({ code: 'invalid_amount' });
+  });
+
+  test('Confirm runs the page handler once with the card\'s body and the part approval, and reports the part and what is still owed', async () => {
+    partGates(true);
+    const card = await partPreview({ note: 'n' });
+    Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { id: INV, status: 'sent' }, receipt: null, partial: { amount: 40, remaining: 77 }, closeout: null } });
+    const res = await confirm(card, { ...PART, note: 'n' });
+    expect(res).toMatchObject({ success: true, partial: true, status: 'sent', method: 'check', amount: 40, still_owed: 77, sent_to_customer: false });
+    expect(res.note).toMatch(/Part payment of \$40\.00 by check recorded on WPC-2099-0001; \$77\.00 is still owed and the invoice stays open, with its reminders running\. No receipt was sent/);
+    expect(res.note).toMatch(/No receipt was sent: a receipt becomes available once the rest is paid\.$/);
+    expect(res.note).not.toMatch(/resend the receipt/);
+    expect(Invoices.recordPaymentFromBar).toHaveBeenCalledTimes(1);
+    expect(Invoices.recordPaymentFromBar).toHaveBeenCalledWith({
+      invoiceId: INV,
+      body: { method: 'check', reference: '1042', note: 'n', sendReceipt: false },
+      actor: { technicianId: 'staff-1', name: 'Ava Admin', email: 'ava@example.test' },
+      approvedPayment: { expectedAmountCents: 11700, part: { amountCents: 4000, owedCentsSeen: 11700 }, settlementFence: expect.any(Function) },
+    });
+  });
+
+  test('the settlement fence of a part keeps every invoice check: customer, links, amounts, edit time, and the day', async () => {
+    partGates(true);
+    db.schema = { hasTable: jest.fn(async () => false) };
+    const card = await partPreview();
+    await confirm(card, PART);
+    const { settlementFence } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
+    await expect(settlementFence(db)).resolves.toBe(true);
+    await expect(settlementFence(db, { ...state.invoices[0] })).resolves.toBe(true);
+    for (const patch of [{ customer_id: '00000000-0000-4000-8000-0000000000c9' }, { total: '99.00' }, { credit_applied: '5.00' }, { amount_paid: '10.00' }, { payer_id: 'p1' }, { service_record_id: 'sr-1' }, { status: 'paid' }]) {
+      await expect(settlementFence(db, { ...state.invoices[0], ...patch })).rejects.toMatchObject({ statusCode: 409, drift: true });
+    }
+    state.invoices[0].updated_at = new Date('2099-01-02T00:00:00Z');
+    await expect(settlementFence(db)).rejects.toMatchObject({ drift: true });
+    delete db.schema;
+  });
+
+  test.each([
+    ['the amount owed moved (another part recorded on the page)', (s) => { s.invoices[0].amount_paid = '20.00'; }],
+    ['the amount owed moved (account credit applied)', (s) => { s.invoices[0].credit_applied = '10.00'; }],
+    ['the total was edited', (s) => { s.invoices[0].total = '120.00'; }],
+    ['the invoice was edited', (s) => { s.invoices[0].updated_at = new Date('2099-01-01T12:05:00Z'); }],
+    ['the invoice was paid', (s) => { s.invoices[0].status = 'paid'; }],
+    ['a payer was assigned', (s) => { s.invoices[0].payer_id = 'payer-1'; }],
+  ])('drift after the card (%s) refuses with preview_changed and runs nothing', async (_name, mutate) => {
+    partGates(true);
+    const card = await partPreview();
+    mutate(state);
+    expect(await confirm(card, PART)).toMatchObject({ preview_changed: true });
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a different part than the card showed is drift', async () => {
+    partGates(true);
+    const card = await partPreview();
+    expect(await confirm(card, { amount: 50 })).toMatchObject({ preview_changed: true });
+    expect(await confirm(card, { amount: 117 })).toMatchObject({ preview_changed: true });
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a part gate flipped off between the card and Confirm refuses, and the whole balance is never recorded instead', async () => {
+    partGates(true);
+    const card = await partPreview();
+    delete process.env.GATE_IB_RECORD_PAYMENT_PARTIAL;
+    expect(await confirm(card, PART)).toMatchObject({ preview_changed: true, code: 'partial_not_supported' });
+    partGates(true);
+    delete process.env.GATE_PARTIAL_PAYMENTS;
+    expect(await confirm(card, PART)).toMatchObject({ preview_changed: true, code: 'partial_not_supported' });
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a part refusal that appears between the card and Confirm (Auto Pay joined, a dispute) refuses with nothing recorded', async () => {
+    partGates(true);
+    const card = await partPreview();
+    partPaymentRefusal.mockResolvedValue('This invoice has a card dispute that is not settled yet, so a part payment cannot be recorded until it is.');
+    expect(await confirm(card, PART)).toMatchObject({ preview_changed: true, code: 'part_not_allowed' });
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+  });
+
+  test('the writer\'s refusals and an amount-owed 409 under the lock are reported, never as a success', async () => {
+    partGates(true);
+    const card = await partPreview();
+    Invoices.recordPaymentFromBar.mockResolvedValue({ status: 409, json: { error: 'The amount owed on this invoice changed to $77.00 since the page loaded', code: 'PREVIEW_CHANGED' } });
+    expect(await confirm(card, PART)).toMatchObject({ failed: true, code: 'preview_changed', preview_changed: true });
+    Invoices.recordPaymentFromBar.mockResolvedValue({ status: 400, json: { error: 'Part payments from the Intelligence Bar are not turned on.' } });
+    const res = await confirm(card, PART);
+    expect(res).toMatchObject({ failed: true, code: 'record_refused' });
+    expect(res.success).toBeUndefined();
+  });
+
+  test('an answer that does not carry the part the card showed (or reads as paid) is an unknown outcome', async () => {
+    partGates(true);
+    const card = await partPreview();
+    for (const json of [
+      { ok: true, invoice: { status: 'sent' } },
+      { ok: true, invoice: { status: 'sent' }, partial: { amount: 50, remaining: 67 } },
+      { ok: true, invoice: { status: 'paid' }, partial: { amount: 40, remaining: 0 } },
+    ]) {
+      Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json });
+      expect(await confirm(card, PART)).toMatchObject({ outcome_unknown: true, code: 'record_unverified' });
+    }
+  });
+
+  test('a second Confirm of the same card after the part landed meets a new amount owed: refused, never booked twice', async () => {
+    partGates(true);
+    const card = await partPreview();
+    Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'sent' }, partial: { amount: 40, remaining: 77 } } });
+    expect(await confirm(card, PART)).toMatchObject({ success: true });
+    state.invoices[0].amount_paid = '40.00';
+    expect(await confirm(card, PART)).toMatchObject({ preview_changed: true });
+    expect(Invoices.recordPaymentFromBar).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate off, login and approval rules are the tool\'s own for a part too', async () => {
+    partGates(true);
+    expect(await partPreview({}, { isAdmin: false })).toMatchObject({ code: 'permission_denied' });
+    envGate(false);
+    expect(await partPreview()).toMatchObject({ code: 'gate_off' });
+    envGate(true);
+    expect(await executeRecordPaymentTool('record_payment', { ...BASE, ...PART, confirmed: true }, ADMIN)).toMatchObject({ code: 'approval_required' });
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
   });
 });
 

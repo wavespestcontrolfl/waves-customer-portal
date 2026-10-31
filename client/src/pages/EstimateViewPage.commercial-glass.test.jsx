@@ -170,6 +170,11 @@ describe('commercial first visit on the proposal page', () => {
     expect(screen.getByTestId('proposal-next-steps')).toHaveTextContent('Pick the day and time of your first visit below');
   });
 
+  // The refetch and re-render after a pageshow ran past the default 1 s wait on loaded CI runners (main 10-27,
+  // #6912 10-28, #7136 10-30); local runs take ~15 ms. A longer wait, and a test timeout that leaves room for it.
+  const AFTER_REFETCH = { timeout: 4000 };
+  const AFTER_REFETCH_TEST_MS = 10000;
+
   // Codex #6869 r2 P2: the signing page's "Back to your estimate" is a history step, so a bfcache restore must refetch
   // /data, or the page keeps its unsigned card and never shows the picker.
   it('back from signing (a bfcache restore): /data is read again and the picker shows', async () => {
@@ -186,17 +191,34 @@ describe('commercial first visit on the proposal page', () => {
     render(<EstimateViewPage />);
     await screen.findByRole('button', { name: 'Accept & sign agreement' });
     await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
-    expect(await screen.findByTestId('commercial-first-visit-picker')).toBeInTheDocument();
+    expect(await screen.findByTestId('commercial-first-visit-picker', {}, AFTER_REFETCH)).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(2);
-  });
+  }, AFTER_REFETCH_TEST_MS);
 
-  it('a commercial proposal with nothing waiting on a signature never refetches on return', async () => {
-    const fetchMock = vi.fn(async () => json(proposalPayload({ canSign: true, state: 'none' })));
+  // Pipeline audit 10-30, item 4: an agreement with no first-visit picker (invoice mode, or the gate off) waits on a
+  // signature too. Without the refetch the page kept the sign button, and a tap answered the already-signed 409.
+  it('back from signing an agreement with no picker: /data is read again and the signed card shows', async () => {
+    const queue = [proposalPayload({ canSign: true, state: 'none' }), proposalPayload({ canSign: false, state: 'signed' })];
+    const fetchMock = vi.fn(async () => json(queue.length > 1 ? queue.shift() : queue[0]));
     vi.stubGlobal('fetch', fetchMock);
     render(<EstimateViewPage />);
     await screen.findByRole('button', { name: 'Accept & sign agreement' });
     await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(1);
+    expect(await screen.findByTestId('commercial-agreement-signed', {}, AFTER_REFETCH)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Accept & sign agreement' })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(2);
+  }, AFTER_REFETCH_TEST_MS);
+
+  it('a commercial proposal with nothing waiting on a signature never refetches on return', async () => {
+    for (const agreement of [{ canSign: false, state: 'signed' }, { canSign: false, state: 'none' }]) {
+      const fetchMock = vi.fn(async () => json(proposalPayload(agreement)));
+      vi.stubGlobal('fetch', fetchMock);
+      render(<EstimateViewPage />);
+      await screen.findByText('Commercial Service Proposal');
+      await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(1);
+      cleanup();
+    }
   });
 
   it('accepted with a booked first visit: the accepted card shows the visit date', async () => {

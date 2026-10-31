@@ -1178,6 +1178,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   customerRequestedReview: 'Review-ask scheduling bookkeeping (who asked, when, where) — carried through paid-invoice deferral, never itself a report claim.',
   reviewFirstAskLock: 'Review-ask audit marker (GATE_REVIEW_FIRST_ASK_LOCK): a never-asked customer\'s "no ask" kept on, or turned off with the "Complaint on site" reason; read back by a committed retry and the visit-closeout packet, never a report claim.',
   incompleteReason: 'Internal completion-state bookkeeping (why a visit is marked incomplete), not a customer-facing fact.',
+  payLinkOmitted: 'Office bookkeeping: the operator chose "report only, no pay link"; read by the next-day office alert (report-only-payment-alert.js), never rendered on the report.',
   servicePhotoVisit: 'Frozen visit identity for binding recovered photo uploads and report reconciliation to their original completion record; internal ownership/revision bookkeeping, not a customer report fact.',
   propertyServiceArea: 'Frozen job-coverage bookkeeping (area treated vs the reviewed property area at completion) for job quantities and product-area math; not rendered on the customer report.',
   visitDriveCostAllocation: 'Drive-cost costing bookkeeping, not a customer report fact.',
@@ -1670,7 +1671,7 @@ const VISIT_FACTS_CONTRACT = {
   rodent_sanitation: {
     label: 'Rodent sanitation (typed rodent_sanitation form)',
     typedForm: 'rodent_sanitation',
-    catalogKeys: ['rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy'],
+    catalogKeys: ['rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy', 'rodent_dead_animal_removal'],
     voiceFill: true,
     facts: [
       ...typedFormFacts('rodent_sanitation'),

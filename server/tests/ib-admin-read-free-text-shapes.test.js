@@ -626,7 +626,7 @@ const INVOICE_MORE = ['service_date', 'due_date', 'subtotal', 'discount_amount',
   'service_type', 'tech_name', 'sms_sent_at', 'sms_reminder_count', 'last_reminder_at', 'receipt_sent_at', 'prepaid_at', 'archived_at', 'payer_id', 'scheduled_service_id', 'created_at', 'updated_at', 'po_number', 'discount_label'];
 const PLAN_MORE = ['id', 'payment_amount', 'payment_frequency', 'next_payment_date', 'total_balance', 'status'];
 MORE['/admin/invoices'] = [
-  ...under('invoices.0', [...INVOICE_MORE, 'last_name', 'phone', 'email', 'waveguard_tier', 'property_type', 'annual_prepay_id', 'annual_prepay_status', 'annual_prepay_plan_label', 'annual_prepay_term_start', 'annual_prepay_term_end', 'annual_prepay_amount']),
+  ...under('invoices.0', [...INVOICE_MORE, 'amount_paid', 'last_name', 'phone', 'email', 'waveguard_tier', 'property_type', 'annual_prepay_id', 'annual_prepay_status', 'annual_prepay_plan_label', 'annual_prepay_term_start', 'annual_prepay_term_end', 'annual_prepay_amount']),
   ...under('invoices.0.active_payment_plan', PLAN_MORE)];
 MORE['/admin/invoices/:id'] = [
   ...INVOICE_MORE, 'review_hold', ...under('line_items.0', ['quantity', 'unit_price', 'category']), ...under('customer', ['phone', 'email', 'waveguard_tier', 'address_line1', 'city', 'state', 'zip']),

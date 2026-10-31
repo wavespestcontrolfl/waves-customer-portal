@@ -72,7 +72,7 @@ const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('.
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
-const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
+const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -2088,10 +2088,21 @@ async function hardLimitedProductNames(database, ids) {
 // so a backdated closeout is judged against the applications recorded after it too.
 async function productLimitFindings({ svc, productId, productName, serviceDate, database, place = null, addOnRows }) {
   try {
-    // GATE_LAWN_TROUBLE_AREAS: a spot application that carries a place is audited at that place (the yearly limits are per place).
-    const violations = await savepointRead(database, async (k) => require('../services/application-limits')
-      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (place && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, addOnRows, ...(place ? { place } : {}) }));
-    return violations.map((violation) => overLimitFinding(productId, productName, violation));
+    // GATE_LAWN_TROUBLE_AREAS: a spot application that carries places (`place`: one id, or the list of its places) is audited at EACH place
+    // (the yearly limits are per place, and one application on two places is one application at each). A limit it breaks at several places
+    // is one finding: the office hears of it once per product and limit type.
+    const placeList = [].concat(place || []);
+    const found = new Map();
+    for (const at of placeList.length ? placeList : [null]) {
+      const violations = await savepointRead(database, async (k) => require('../services/application-limits')
+        .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (at && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, addOnRows, ...(at ? { place: at } : {}) }));
+      for (const violation of violations) {
+        const finding = overLimitFinding(productId, productName, violation);
+        const key = `${finding.code}:${finding.limitType || ''}`;
+        if (!found.has(key)) found.set(key, finding);
+      }
+    }
+    return [...found.values()];
   } catch (err) {
     logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
     return [limitCheckUnavailableFinding(productId)];
@@ -2125,6 +2136,16 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
 // The hard-limit audit has always covered lawn visits under GATE_LAWN_V13.
 const lawnHostAudited = (svc) => require('../config/feature-gates').lawnV13Live?.() === true && detectServiceLine(svc.service_type) === 'lawn';
 
+// Product id -> every place its recorded rows name (a row names a list of places; a row with none is left out: it is judged lawn-wide).
+function placesByProduct(rows) {
+  const out = new Map();
+  for (const row of rows) {
+    const places = require('../services/lawn-trouble-areas').placesOfRecord(row);
+    if (places.length) out.set(String(row.product_id), [...new Set([...(out.get(String(row.product_id)) || []), ...places])]);
+  }
+  return out;
+}
+
 // The findings for the products a committed closeout recorded, read from its ledger rows (so a
 // resume re-derives them). Lawn visits under GATE_LAWN_V13, and, whatever the host's line or the gate, the products of the rows
 // tagged to an area add-on (`addOnRows: true`). Never throws: ANY failure on the
@@ -2138,7 +2159,7 @@ async function recordedProductLimitFindings({ svc, record, database = db, addOnR
     // GATE_LAWN_TROUBLE_AREAS: the place each spot application was recorded at, so the audit judges it there.
     const placed = require('../config/feature-gates').lawnTroubleAreasLive();
     const recorded = await savepointRead(database, (k) => k('property_application_history')
-      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place'] : ['product_id'])));
+      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place', 'treated_places'] : ['product_id'])));
     // Not a lawn host under the gate: only the add-on rows' products.
     const tagged = lawnHost ? null : await savepointRead(database, (k) => areaAddOnGovernedRate.taggedProductIds(k, record.id));
     const rows = (recorded || []).filter((row) => !tagged || tagged.has(String(row.product_id)));
@@ -2148,7 +2169,7 @@ async function recordedProductLimitFindings({ svc, record, database = db, addOnR
       serviceDate: serviceDateOnly(record.service_date),
       database,
       addOnRows,
-      ...(placed ? { places: new Map(rows.filter((row) => row.treated_place).map((row) => [String(row.product_id), row.treated_place])) } : {}),
+      ...(placed ? { places: placesByProduct(rows) } : {}),
     });
   } catch (err) {
     logger.warn('completion application limits: ledger lookup failed, flagging for the office', { serviceId: svc.id, error: err?.message });
@@ -5060,8 +5081,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           lawnFast,
           products,
           technicianNotes,
-          propertyServiceArea,
-          actor: completionInput.actor,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(
@@ -7095,6 +7114,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // (treatment-zone-maps.js traceJudgedAllows).
             ...(traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {}),
             visitOutcome,
+            // The operator's "report only, no pay link" choice on a real
+            // completion. A tech cannot record cash or a check, so the next-day
+            // office check (report-only-payment-alert.js) reads this marker to
+            // find a bill that stayed open.
+            ...(includePayLink === false && visitOutcome === 'completed' && !isBackfillCompletion
+              && !systemQuietCloseout && !issuedInvoiceCloseout && !invoiceAlreadySent
+              ? { payLinkOmitted: true } : {}),
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
             // (stripe-webhook.js) also suppresses it for a billed assessment.
@@ -7228,8 +7254,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
             // is not an area), so the card never states a whole-lawn fallback as the spot.
             ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
-            // GATE_LAWN_MIX_HELP: the rows whose spot area the server derived from gallons sprayed (the record says so).
-            ...require('./lawn-mix-help').sprayedGallonsFreeze(products),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -12015,6 +12039,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) return lockedInvoice;
+        // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
+        // amount_paid. The office settles it from the Invoices page.
+        if (toCents(lockedInvoice.amount_paid) > 0) {
+          logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: a part payment is on it — the office records the rest`);
+          return lockedInvoice;
+        }
         const existingCredit = await trx('payments')
           .where({ customer_id: svc.customer_id, status: 'paid' })
           .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
@@ -12270,6 +12300,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // visit row lock (see refuseCoveredMemberMintInTrx).
         // Same shape gate as every other sibling-coverage check (pre-push P1
         // on 645ccccaee): a callback or always-free visit is never refused.
+        // A visit from an invoice-mode commercial proposal is due on the agreement's Net term (owner 2026-10-30): the
+        // win makes no invoice, so this one carries the terms. Counted from the visit date (today for a backfill, so a
+        // backlog closeout is never minted overdue). A failed read mints nothing: the catch below releases the
+        // closeout for resume, so no invoice is ever created due on the wrong date.
+        let proposalTermsDue = null;
+        try {
+          proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(
+            db, svc.source_estimate_id, isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          );
+        } catch (termsErr) {
+          throw Object.assign(new Error(`The proposal payment terms could not be read: ${termsErr.message}`), { code: 'PROPOSAL_TERMS_UNREAD' });
+        }
         const coveredMemberMintGuard = isSiblingCoverageEligibleVisit({
           sourceEstimateId: svc.source_estimate_id, hasOwnPrice: false, isCallback: svc.is_callback, serviceType: svc.service_type,
         })
@@ -12366,7 +12408,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
           // instead: the exact net terms a normal same-day completion gets.
-          dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),
           // Claimed plan-choice setup fee rides the SAME mint (one invoice,
           // one auto-charge) — the claim above is the idempotency authority.
           extraLineItems: secureSetupFee
@@ -12482,7 +12524,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               taxRate: mintInvoiceTaxRate,
               frozenTaxAuthority: true,
               frozenPayerId: mintInvoicePayerId,
-              dueDate: serviceDateOnly(record.service_date),
+              dueDate: proposalTermsDue || serviceDateOnly(record.service_date),
               trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
             }),
           });
@@ -12624,7 +12666,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const { isEnabled } = require('../config/feature-gates');
             if (isEnabled('payerStatements')) {
               const payerRow = await db('payers').where({ id: invoice.payer_id }).first('payment_terms');
-              if (['net15', 'net30'].includes(payerRow?.payment_terms)) {
+              if (require('./payer').isNetPaymentTerm(payerRow?.payment_terms)) {
                 logger.info(`[dispatch] backfill completion: payer-statement accrual SKIPPED for visit ${svc.id} — ${payerRow.payment_terms} invoice ${invoice.invoice_number || invoice.id} minted OFF the payer's open statement for review; to bill it on the monthly statement, void + re-create it (attach happens only at create), or send it individually to the AP`);
               }
             }
@@ -12867,6 +12909,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'setup_fee_claim_in_flight',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        // The proposal's Net term could not be read before the mint (proposalTermsDueDate): nothing was minted.
+        // Release for resume on EVERY lane (a required lane already took the release above), so the retry bills with the
+        // agreement's due date (pre-push Codex P1).
+        if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {
+          logger.warn(`[dispatch] visit ${svc.id}: the proposal payment terms could not be read — releasing for resume instead of minting: ${invErr.message}`);
+          const termsReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 503, body: {
+            error: termsReleased
+              ? 'The proposal payment terms for this visit could not be read — the closeout is saved but NOT finalized. Retry the closeout.'
+              : `The proposal payment terms for this visit could not be read — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'proposal_terms_unread',
+            ...(termsReleased ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
         }
@@ -13173,6 +13230,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     } = await resolveExtendedLane({
       svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, apptCardOneTimeCharge, apptCardLaneUnresolved, customerAutopayActive,
     });
+    // The per-application Auto Pay lane skips a visit from a won
+    // Bill-by-invoice proposal (owner 2026-10-30, bill-by-invoice.js): its
+    // bill stays open on its Net term. An unreadable agreement charges
+    // nothing (the pay-link fallback below).
+    const perApplicationCharge = await resolvePerApplicationCharge({ svc, perApplicationBilling });
     if (!isBackfillCompletion
       && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
@@ -13234,7 +13296,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })
-            .first('status', 'credit_applied', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
+            .first('status', 'credit_applied', 'amount_paid', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
           if (fresh) invoice = { ...invoice, ...fresh };
           if (invoice.status === 'prepaid') { alreadyPaid = true; invoiceCreated = false; }
         }
@@ -13279,7 +13341,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // whole rail leaves the exact no-chargeable-method posture — invoice
     // open and collectible, autoChargedReceiptPending/paymentFailedSmsContext
     // untouched — for explicit operator collection.
-    if (isBackfillCompletion && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid
+    if (isBackfillCompletion && (perApplicationCharge || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid
       && customerAutopayActive) {
       logger.info(`[dispatch] backfill completion: completion auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
     }
@@ -13287,7 +13349,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? 'per_application_completion'
       : (apptCardOneTimeCharge ? 'appointment_card_completion' : 'autopay_completion');
     if (!isBackfillCompletion
-      && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && (perApplicationCharge || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && !annualPrepayOfficeReview
       && customerAutopayActive) {
@@ -13429,7 +13491,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // without moving the subtotal the cap compares — the
               // due-cents ceiling refuses instead of charging the larger
               // amount.
-              maxAuthorizedChargeCents: Math.max(0, Math.round((Number(invoice.total || 0) - Number(invoice.credit_applied || 0)) * 100)),
+              maxAuthorizedChargeCents: Math.round(require('../services/invoice-helpers').invoiceAmountDue(invoice) * 100),
             } : {}),
             deferReceiptDelivery: combinedReceiptArmed,
           });

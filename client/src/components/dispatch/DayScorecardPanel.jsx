@@ -186,6 +186,43 @@ function TechDayRows({ date, closed, row, isPast, showTechName }) {
   );
 }
 
+// GATE_ROUTE_ENGINE_SUMMARY: the server adds an `engine` block to the payload.
+// One plain sentence group above the table, counts only (no drive-time figure:
+// see route-engine-summary.js); a sentence whose number is 0 or null is left
+// out. Alert color only when a night failed.
+function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
+
+function heldSentence({ heldVisits, heldThenMoved }, cap) {
+  if (!(heldVisits > 0)) return null;
+  const later = heldThenMoved > 0 ? `; ${heldThenMoved} moved on a later night` : '';
+  return `The ${cap ? `${cap}-move ` : 'move '}cap held ${plural(heldVisits, 'visit', 'visits')}${later}.`;
+}
+
+function nightsSentence(n, what) {
+  return n > 0 ? `${plural(n, 'night', 'nights')} ${what}.` : null;
+}
+
+function engineSentences({ totals, cap, windowNights }) {
+  const moves = totals.movesMade > 0 ? `${plural(totals.movesMade, 'move', 'moves')}.` : null;
+  const parts = [moves, heldSentence(totals, cap), nightsSentence(totals.withErrorsNights, 'finished with errors')].filter(Boolean);
+  const failed = nightsSentence(totals.failedNights, 'failed');
+  if (!parts.length && !failed) parts.push('No moves made.');
+  return { head: `Route engine, last ${windowNights} nights:`, parts, failed };
+}
+
+function EngineSummary({ engine }) {
+  if (!engine) return null;
+  if (engine.unavailable) return <div className="text-14 text-ink-tertiary mb-3">Route engine summary unavailable.</div>;
+  if (!engine.totals) return null;
+  const { head, parts, failed } = engineSentences(engine);
+  return (
+    <div className="text-14 text-ink-secondary mb-3" data-testid="route-engine-summary">
+      {[head, ...parts].filter(Boolean).join(' ')}
+      {failed && <span className="text-alert-fg">{' '}{failed}</span>}
+    </div>
+  );
+}
+
 export default function DayScorecardPanel() {
   const [range] = useState({ from: DEFAULT_FROM(), to: DEFAULT_TO() });
   const [request, setRequest] = useState({ loading: true, data: null, error: false });
@@ -239,6 +276,7 @@ export default function DayScorecardPanel() {
         exists, else the remaining route. Past rows compare the saved
         pre-service plan with recorded work — a null shows as "unknown", never 0.
       </div>
+      <EngineSummary engine={request.data?.engine} />
       <Card>
         <CardBody className="p-0">
           <Table>

@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
 const { bidDeskLive, bidKitLive } = require('../config/feature-gates');
+const { soldByLive: commissionSoldByLive } = require('../services/estimate-sold-by');
 const {
   VISUAL_SERVICE_NOTES_FLAG,
   getVisualServiceNotesSettings,
@@ -30,6 +31,9 @@ router.get('/', async (req, res, next) => {
     // Bid kit nav entry (GATE_BID_KIT), the same way.
     if (bidKitLive()) flags.bid_kit = true;
     else delete flags.bid_kit;
+    // Neighbor flag in the tech app (GATE_COMMISSION_SOLD_BY), the same way.
+    if (commissionSoldByLive()) flags.commission_sold_by = true;
+    else delete flags.commission_sold_by;
     res.json({ flags });
   } catch (err) {
     next(err);

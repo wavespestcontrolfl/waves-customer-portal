@@ -302,6 +302,7 @@ describe('Google Business review sync', () => {
     service._clients = {};
     service._getClient = jest.fn(async () => ({}));
     service._getHeaders = jest.fn(async () => ({ Authorization: 'Bearer test' }));
+    service._reviewRetryDelaysMs = [0, 0]; // keep the reviews.list backoff instant
   });
 
   afterEach(() => {
@@ -326,6 +327,49 @@ describe('Google Business review sync', () => {
     const err = await service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota').catch((e) => e);
     expect(err.message).toMatch(/429/);
     expect(err.transport).toBeUndefined();
+  });
+
+  describe('getReviews transient retry', () => {
+    const failRes = (status) => ({ ok: false, status, headers: { get: () => 'application/json' }, text: async () => `{"error":{"status":"E${status}"}}` });
+    const loc = 'accounts/1/locations/2';
+
+    test('503 then 200 returns the data after two fetches without throwing', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(failRes(503))
+        .mockResolvedValueOnce(jsonResponse({ reviews: [{ name: 'r1' }] }));
+      await expect(service.getReviews(loc, 'bradenton')).resolves.toEqual({ reviews: [{ name: 'r1' }] });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    test('503 on every attempt throws the unchanged message after three fetches', async () => {
+      global.fetch = jest.fn(async () => failRes(503));
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 503: /);
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+    });
+
+    test('403 throws immediately after one fetch', async () => {
+      global.fetch = jest.fn(async () => failRes(403));
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 403: /);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('a signal that aborts during the backoff throws and starts no further fetch', async () => {
+      service._reviewRetryDelaysMs = [60000, 60000];
+      const ac = new AbortController();
+      global.fetch = jest.fn(async () => failRes(503));
+      const p = service.getReviews(loc, 'bradenton', 50, null, { signal: ac.signal });
+      await new Promise(r => setImmediate(r));
+      ac.abort();
+      await expect(p).rejects.toThrow(/aborted/);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('a signal already aborted when the retry wait starts does not fetch again', async () => {
+      const ac = new AbortController();
+      global.fetch = jest.fn(async () => { ac.abort(); return failRes(503); });
+      await expect(service.getReviews(loc, 'bradenton', 50, null, { signal: ac.signal })).rejects.toThrow(/aborted/);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
   });
 
   test('paginates GBP reviews and upserts each page by GBP resource name', async () => {

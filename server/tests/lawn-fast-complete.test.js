@@ -786,7 +786,6 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const ctx = await context(tablesFor());
       expect('treatmentGuide' in ctx).toBe(false);
       expect('spotTargets' in ctx).toBe(false);
-      expect('mixHelp' in ctx.plannedProducts).toBe(false);
       expect('chinch' in ctx.plannedProducts).toBe(false);
       expect(v13VisitLimits).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.arrayContaining([expect.objectContaining({ product: expect.objectContaining({ id: P_ARENA }) })]), expect.anything(), expect.anything());
     });
@@ -944,7 +943,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
     test('both at their cap: a line and no product', async () => {
       live();
       capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: YEARLY });
-      expect((await context(tablesFor())).plannedProducts.chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK], unreadableIds: [], limitedIds: [P_ARENA, P_TALAK] });
+      expect((await context(tablesFor())).plannedProducts.chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK], unreadableIds: [], limitedIds: [P_ARENA, P_TALAK], limitMessages: { [P_ARENA]: 'limit', [P_TALAK]: 'limit' } });
     });
 
     test('a product the month\'s plan holds is the plan\'s own add-on', async () => {
@@ -1047,6 +1046,8 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         chinch: expect.objectContaining({ item: expect.objectContaining({ productId: P_ARENA }) }),
         // A clean read blocks nothing: a pick without a finding is not blocked.
         blockedProductIds: [],
+        // A clean read warns of nothing: a limit that was read is a warning, never a block (owner 2026-10-30).
+        limitWarned: {},
         unreadableProductIds: [],
         unreadableNote: 'The limits could not be checked. Use Search products for what you applied; the office will review it.',
         // No take-all row in this month's plan.
@@ -1062,12 +1063,13 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const fungusTables = () => tablesFor({ lawn_assessment_runs: run({ fungal_activity: { level: 'severe' } }) });
       afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
 
-      test('gate off: a fungicide capped at the front is blocked lawn-wide, as before', async () => {
+      test('gate off: a fungicide capped at the front is a lawn-wide warning (offered, not blocked; owner 2026-10-30)', async () => {
         live();
         cappedAt(P_ART, 'front');
         const result = await guide(fungusTables());
-        expect(result.blockedProductIds).toContain(P_ART);
-        expect(result.cards.map((card) => card.kind)).not.toContain('fungus');
+        expect(result.blockedProductIds).not.toContain(P_ART);
+        expect(result.limitWarned).toEqual({ [P_ART]: 'limit' });
+        expect(result.cards.find((card) => card.kind === 'fungus')).toMatchObject({ productIds: [P_ART], note: 'limit You can still complete. The office gets an alert.' });
       });
 
       test('gate off: the guide answer has no placeBlocked key', async () => {
@@ -1100,13 +1102,14 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         expect(result.cards.find((card) => card.kind === 'fungus')).toMatchObject({ productIds: [P_ART] });
       });
 
-      test('gate on: capped at every place, it is blocked and has no card', async () => {
+      test('gate on: capped at every place, it is a warning: still offered, with the limit\'s words, not blocked', async () => {
         live();
         process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
         cappedAt(P_ART, 'front', 'back', 'left_side', 'right_side');
         const result = await guide(fungusTables());
-        expect(result.blockedProductIds).toContain(P_ART);
-        expect(result.cards.map((card) => card.kind)).not.toContain('fungus');
+        expect(result.blockedProductIds).not.toContain(P_ART);
+        expect(result.limitWarned).toEqual({ [P_ART]: 'limit' });
+        expect(result.cards.find((card) => card.kind === 'fungus')).toMatchObject({ productIds: [P_ART] });
       });
 
       test('gate on: the lead capped at the front only gives the weeds card a set per place (the front takes the replacement)', async () => {
@@ -1158,7 +1161,9 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: YEARLY });
       const both = await guide(tables);
       expect(both.chinch).toMatchObject({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
-      expect(both.blockedProductIds).toEqual(expect.arrayContaining([P_ARENA, P_TALAK]));
+      // Both rungs are at a limit that was read: warnings, not blocks, and the search keeps them.
+      expect(both.blockedProductIds).toEqual([]);
+      expect(both.limitWarned).toEqual({ [P_ARENA]: 'limit', [P_TALAK]: 'limit' });
       // A fresh limit read that fails offers nothing, never Arena.
       v13VisitLimits.mockRejectedValue(new Error('db down'));
       expect((await guide(tables)).chinch).toMatchObject({ item: null, note: expect.stringMatching(/could not be checked/) });
@@ -1183,15 +1188,28 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const clean = await guide(tables);
       expect(clean.blockedProductIds).toEqual([]);
       expect(clean.unreadableProductIds).toEqual([]);
-      // The fungicide and the wetting agent at a cap, the lead at its cap (July: no replacement row).
+      // The fungicide and the wetting agent at a cap, the lead at its cap (July: no replacement row): warnings, never blocks.
       capsFor({ [P_ART]: YEARLY, [P_DISP]: YEARLY, [P_LEAD]: YEARLY });
       const capped = await guide(tables);
-      expect(capped.blockedProductIds).toEqual(expect.arrayContaining([P_ART, P_DISP, P_LEAD, P_CERT]));
-      expect(capped.blockedProductIds).not.toContain(P_ACE);
+      expect(Object.keys(capped.limitWarned)).toEqual(expect.arrayContaining([P_ART, P_DISP, P_LEAD]));
+      expect(capped.limitWarned).not.toHaveProperty(P_ACE);
+      expect(capped.blockedProductIds).not.toEqual(expect.arrayContaining([P_ART]));
+      expect(capped.blockedProductIds).not.toContain(P_DISP);
+      expect(capped.blockedProductIds).not.toContain(P_LEAD);
       expect(capped.unreadableProductIds).toEqual([]);
-      // Arena alone at its cap: the first rung is blocked, the second is the offer.
+      // Arena alone at its cap: the first rung is warned, the second is the offer.
       capsFor({ [P_ARENA]: YEARLY });
-      expect((await guide(tables)).blockedProductIds).toEqual([P_ARENA]);
+      const arena = await guide(tables);
+      expect(arena.blockedProductIds).toEqual([]);
+      expect(arena.limitWarned).toEqual({ [P_ARENA]: 'limit' });
+      // A city hold is no limit: it stays blocked and is never warned.
+      const held = plan(addOns());
+      held.completionDefaults.addOns[3].unavailable = { kind: 'city_hold' };
+      buildPlanForService.mockResolvedValue(held);
+      capsFor({});
+      const city = await guide(tables);
+      expect(city.blockedProductIds).toEqual([P_ACE]);
+      expect(city.limitWarned).toEqual({});
     });
 
     test('unreadableProductIds, per governed kind: a limit read that FAILED forbids nothing', async () => {
@@ -1218,23 +1236,25 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect(one.cards.find((c) => c.kind === 'fungus')).toBeUndefined();
     });
 
-    test('per product: one chinch rung blocked, the other unreadable (Arena stays blocked; only Talak is released)', async () => {
+    test('per product: one chinch rung at a limit, the other unreadable (Arena is warned, never blocked; only Talak is released)', async () => {
       live();
       capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: [{ message: 'read failed' }] });
       const result = await guide(tablesFor());
       expect(result.chinch).toMatchObject({ item: null, rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA], unreadableIds: [P_TALAK] });
-      expect(result.blockedProductIds).toContain(P_ARENA);
+      expect(result.blockedProductIds).not.toContain(P_ARENA);
+      expect(result.limitWarned).toEqual({ [P_ARENA]: 'limit' });
       expect(result.blockedProductIds).not.toContain(P_TALAK);
       expect(result.unreadableProductIds).toContain(P_TALAK);
       expect(result.unreadableProductIds).not.toContain(P_ARENA);
     });
 
-    test('per product: a weed member read as capped stays blocked when its sibling\'s read fails; the sibling is released', async () => {
+    test('per product: a weed member read as capped is warned (not blocked) when its sibling\'s read fails; the sibling is released', async () => {
       live();
       capsFor({ [P_LEAD]: YEARLY, [P_CERT]: [{ message: 'read failed' }] });
       const result = await guide(tablesFor());
       expect(result.weedMix).toMatchObject({ mode: 'unavailable', blockedIds: [P_LEAD] });
-      expect(result.blockedProductIds).toContain(P_LEAD);
+      expect(result.blockedProductIds).not.toContain(P_LEAD);
+      expect(result.limitWarned).toEqual({ [P_LEAD]: 'limit' });
       expect(result.blockedProductIds).not.toContain(P_CERT);
       expect(result.unreadableProductIds).toContain(P_CERT);
       expect(result.unreadableProductIds).not.toContain(P_LEAD);
@@ -1244,17 +1264,19 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       live();
       capsFor({ [P_ART]: YEARLY, [P_ACE]: [{ message: 'read failed' }] });
       const result = await guide(tablesFor());
-      expect(result.blockedProductIds).toContain(P_ART);
+      expect(result.limitWarned).toEqual({ [P_ART]: 'limit' });
+      expect(result.blockedProductIds).not.toContain(P_ART);
       expect(result.unreadableProductIds).toContain(P_ACE);
       expect(result.unreadableProductIds).not.toContain(P_ART);
       expect(result.blockedProductIds).not.toContain(P_ACE);
     });
 
-    test('a pick with both a named limit and an unreadable one is blocked (the read forbids it)', async () => {
+    test('a pick with both a named limit and an unreadable one is warned with the limit that was read, never blocked', async () => {
       live();
       capsFor({ [P_ART]: [{ message: 'read failed' }, { type: 'annual_max_apps', message: 'limit' }] });
       const result = await guide(tablesFor());
-      expect(result.blockedProductIds).toContain(P_ART);
+      expect(result.blockedProductIds).not.toContain(P_ART);
+      expect(result.limitWarned).toEqual({ [P_ART]: 'limit' });
       expect(result.unreadableProductIds).not.toContain(P_ART);
     });
 
@@ -1388,16 +1410,20 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         expect((await read([{ ...AREA, type: 'fungus' }])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
       });
 
-      test('gate on: the stored place where the product is capped is not offered; with no other stored place the card is the check only', async () => {
+      // Owner 2026-10-30: a yearly limit warns, never blocks. A mapped place at its limit stays on the card, with the limit's words.
+      test('gate on: a stored place where the product is capped is still offered, with the limit warning', async () => {
         live();
         process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
         takeAllMonth();
         v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
           capped: new Map(items.filter((i) => i.product.id === P_ART && (!options?.place || options.place === 'back')).map((i) => [P_ART, YEARLY])), warnings: [], blocks: [],
         }));
-        expect((await read([AREA])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
-        // The same product capped at the back but a second stored area at the front: the card stands, naming the front only.
-        expect((await read([AREA, { ...AREA, id: uuid(71), place: 'front' }])).cards[0]).toMatchObject({ productIds: [P_ART], note: 'Take-all area on file: Front.', allowedPlaces: ['front'] });
+        const answer = await read([AREA]);
+        expect(answer.cards[0]).toMatchObject({ productIds: [P_ART], actionLabel: 'I checked. Add it', note: 'Take-all area on file: Back.', allowedPlaces: ['back'] });
+        // The limit at the back rides the per-place answer: the sheet shows it as the footer warning once the row is on the back.
+        expect(answer.placeBlocked[P_ART].back).toBeTruthy();
+        // A second stored area at the front: both mapped places stay on the card.
+        expect((await read([AREA, { ...AREA, id: uuid(71), place: 'front' }])).cards[0]).toMatchObject({ productIds: [P_ART], allowedPlaces: ['back', 'front'] });
       });
 
       test('gate on: a failed read of the store is the check only, never a guess', async () => {
@@ -1739,6 +1765,22 @@ describe('preflightLawnFastCompletion', () => {
     test('a spot row with no place: 400 lawn_place_required, naming the product; a bad place: 400 lawn_place_invalid', async () => {
       expect(await run(CONFIRMED, { products: [spotRow()] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required', error: 'Pick where on the lawn Test Weed Spray went.' } });
       expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'roof' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
+    });
+
+    test('areaPlaces (a list): every id must be on the list and at least one is required; an older client\'s single areaPlace still passes', async () => {
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: ['front', 'back'] })] })).toBeNull();
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: ['front', 'front', 'left_side', 'right_side', 'back'] })] })).toBeNull();
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: ['front', 'roof'] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: [] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required', error: 'Pick where on the lawn Test Weed Spray went.' } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: [''] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'back' })] })).toBeNull();
+    });
+
+    // The mix help is gone (2026-10-30): a sheet opened before that still sending gallons sprayed is refused, correctable, not recorded.
+    test('a row still carrying sprayedGallons: 400 lawn_gallons_unavailable naming the product; an empty value passes', async () => {
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front', sprayedGallons: '2', areaValue: 1900 })] }))
+        .toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable', productId: P_HERB } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front', sprayedGallons: '' })] })).toBeNull();
     });
 
     test('a row with a place, and a whole-lawn row without one, pass the preflight', async () => {

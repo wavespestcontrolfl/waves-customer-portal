@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { etDateString } from "../../lib/timezone";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { ActionFeedback, Badge, Button, Card, Checkbox, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle, Field, Input, Select, UiSurface } from "../../components/ui";
@@ -10,13 +10,34 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+  }).then(async r => {
+    if (r.ok) return r.json();
+    const body = await Promise.resolve().then(() => r.json()).catch(() => ({}));
+    throw new Error(body?.error || `HTTP ${r.status}`);
   });
 }
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const TYPE_LABELS = { blog: "Blog", social: "Social", rss: "RSS Auto" };
+// A scheduled blog opens its preview PR at the set time and goes live after
+// an admin approves it, so its publish_status reads as these steps (BLOG-02).
+const BLOG_STATUS_LABELS = {
+  pending: "Scheduled",
+  publishing: "Opening preview",
+  pending_review: "Awaiting approval",
+  published: "Published",
+  failed: "Failed",
+};
+// pending_review on a live post means its scheduled social share is next.
+const statusLabel = item => {
+  if (item.type !== "blog") return item.status;
+  if (item.status === "pending_review" && item.astroStatus === "live") return "Live, sharing to social";
+  return BLOG_STATUS_LABELS[item.status] || item.status;
+};
+// A schedule the run has not started, or one it parked as failed, can be withdrawn.
+const UNSCHEDULABLE = new Set(["pending", "failed"]);
+// The scheduled run skips drafts with a PR, a failed publish or no body, so
+// the picker offers only drafts it can publish (BLOG-03).
+const schedulableDraft = post => Boolean(post.content) && !post.astro_pr_number && !post.astro_branch_name && (!post.astro_status || post.astro_status === "draft") && post.publish_status !== "publishing";
 // Compact form for the month cells, where a full "RSS Auto" would eat the row.
 const TYPE_SHORT = { blog: "Blog", social: "Social", rss: "RSS" };
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -50,18 +71,30 @@ export default function ContentCalendar() {
     autoShare: true
   });
   const [draftPosts, setDraftPosts] = useState([]);
+  const [hiddenDrafts, setHiddenDrafts] = useState(0);
+  const [draftError, setDraftError] = useState("");
   const [loadingDrafts, setLoadingDrafts] = useState(false);
+  const [unscheduling, setUnscheduling] = useState(null);
   const [toast, setToast] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const loadGen = useRef(0);
   const loadCalendar = useCallback(async () => {
+    // Only the newest month request may commit: a slow earlier month must not
+    // replace the events of the month now on screen.
+    const gen = ++loadGen.current;
+    setLoadError("");
     const start = etDateString(new Date(month.year, month.month, 1, 12));
     const end = etDateString(new Date(month.year, month.month + 1, 0, 12));
     try {
       const data = await adminFetch(
         `/admin/content/calendar?start=${start}&end=${end}`,
       );
+      if (gen !== loadGen.current) return;
       setItems(data.calendar || data.items || []);
-    } catch {
+    } catch (e) {
+      if (gen !== loadGen.current) return;
       setItems([]);
+      setLoadError(e.message);
     }
   }, [month]);
   useEffect(() => {
@@ -74,11 +107,24 @@ export default function ContentCalendar() {
   useEffect(() => {
     if (!showSchedule || scheduleForm.type !== "blog") return;
     setLoadingDrafts(true);
+    setDraftError("");
     adminFetch(
       "/admin/content/blog?status=draft&limit=100&sort=updated_at&order=desc",
-    ).then(data => setDraftPosts(data.posts || [])).catch(() => setDraftPosts([])).finally(() => setLoadingDrafts(false));
+    ).then(data => {
+      const drafts = data.posts || [];
+      const eligible = drafts.filter(schedulableDraft);
+      setDraftPosts(eligible);
+      setHiddenDrafts(drafts.length - eligible.length);
+    }).catch(e => {
+      setDraftPosts([]);
+      setHiddenDrafts(0);
+      setDraftError(e.message);
+    }).finally(() => setLoadingDrafts(false));
   }, [showSchedule, scheduleForm.type]);
   const shiftMonth = dir => {
+    // A selected day belongs to the month it was picked in (Oct 31 does not
+    // exist in November), so a month change clears it.
+    setSelectedDay(null);
     setMonth(prev => {
       let m = prev.month + dir;
       let y = prev.year;
@@ -181,13 +227,28 @@ export default function ContentCalendar() {
           }),
         });
       }
-      showToast("Scheduled!");
+      showToast(scheduleForm.type === "blog" ? "Scheduled. The preview PR opens at that time." : "Scheduled!");
       setShowSchedule(false);
       loadCalendar();
     } catch (e) {
       showToast(`Failed: ${e.message}`);
     } finally {
       setScheduling(false);
+    }
+  };
+  // Withdraws a blog schedule the run has not started (BLOG-05). The server
+  // refuses once publishing has begun and names a preview PR left open.
+  const handleUnschedule = async item => {
+    if (unscheduling) return;
+    setUnscheduling(item.id);
+    try {
+      const result = await adminFetch(`/admin/content/schedule/${item.id}`, { method: "DELETE" });
+      showToast(result.pr_number ? `Unscheduled. Preview PR #${result.pr_number} stays open in the post editor.` : "Unscheduled");
+    } catch (e) {
+      showToast(`Couldn't unschedule: ${e.message}`);
+    } finally {
+      setUnscheduling(null);
+      loadCalendar();
     }
   };
   return (
@@ -200,10 +261,11 @@ export default function ContentCalendar() {
         </div>
         <div className="flex flex-wrap items-center gap-3 text-ui-body text-ink-secondary">
           {Object.values(TYPE_LABELS).map(label => <Badge key={label} tone="neutral">{label}</Badge>)}
-          <span>{items.length} posts this month</span>
+          {!loadError && <span>{items.length} posts this month</span>}
           <Button onClick={() => openSchedule("blog")}>Schedule</Button>
         </div>
       </div>
+      {loadError && <ActionFeedback error onRetry={loadCalendar}>Calendar unavailable: {loadError}</ActionFeedback>}
       <Card className="overflow-hidden">
         <div className="grid grid-cols-7 border-b border-hairline border-zinc-200">
           {DAYS.map(day => <div key={day} className="py-2 text-center text-ui-body font-medium text-ink-secondary">{day}</div>)}
@@ -246,9 +308,12 @@ export default function ContentCalendar() {
             <div key={i} className="flex flex-wrap items-center gap-3 border-b border-hairline border-zinc-200 py-2 last:border-b-0 text-ui-body">
               <div className="min-w-0 flex-1">
                 <div className="break-words font-medium text-zinc-900">{item.title}</div>
-                <div className="text-ink-secondary">{item.status} · {item.platforms?.join(", ") || item.type}</div>
+                <div className="text-ink-secondary">{statusLabel(item)} · {item.platforms?.join(", ") || item.type}</div>
               </div>
-              <Badge tone="neutral">{item.status}</Badge>
+              <Badge tone="neutral">{statusLabel(item)}</Badge>
+              {item.type === "blog" && UNSCHEDULABLE.has(item.status) && (
+                <Button variant="secondary" onClick={() => handleUnschedule(item)} loading={unscheduling === item.id} disabled={Boolean(unscheduling)}>Unschedule</Button>
+              )}
             </div>
           ))}
         </Card>
@@ -265,7 +330,11 @@ export default function ContentCalendar() {
             </Select>
           </Field>
           {scheduleForm.type === "blog" ? (
-            <Field label="Draft">
+            <Field
+              label="Draft"
+              help={`A preview PR opens at this time. The post goes live after you approve it in the post editor.${hiddenDrafts ? ` ${hiddenDrafts} draft${hiddenDrafts === 1 ? "" : "s"} with a PR, a failed publish or no body ${hiddenDrafts === 1 ? "is" : "are"} not listed.` : ""}`}
+              error={draftError ? `Couldn't load drafts: ${draftError}` : undefined}
+            >
               <Select value={scheduleForm.blogPostId} onChange={e => setScheduleForm(prev => ({ ...prev, blogPostId: e.target.value }))}>
                 <option value="">{loadingDrafts ? "Loading drafts..." : "Select draft..."}</option>
                 {draftPosts.map(post => <option key={post.id} value={post.id}>{post.title}</option>)}

@@ -1261,6 +1261,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
   "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
+  "proposal_terms_unread",               // an invoice-mode commercial proposal's Net terms could not be read; the resume re-reads them and mints
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -1514,6 +1515,15 @@ const EDIT_FREQUENCIES = [
   { value: "seasonal_feb_oct", label: "Seasonal (Feb–Oct, monthly)" },
   { value: "custom", label: "Custom (every N days)" },
 ];
+// A lawn 9x rounds series (lawn_rounds_9) shows and keeps its own pattern in the
+// select, so a save does not overwrite it with the first option. It is offered
+// only to a series already on it, never as a choice for other series.
+const LAWN_ROUNDS_FREQUENCY = { value: "lawn_rounds_9", label: "Lawn rounds (9 a year)" };
+function editFrequenciesFor(storedPattern) {
+  if (storedPattern !== LAWN_ROUNDS_FREQUENCY.value) return EDIT_FREQUENCIES;
+  const customAt = EDIT_FREQUENCIES.findIndex((f) => f.value === "custom");
+  return [...EDIT_FREQUENCIES.slice(0, customAt), LAWN_ROUNDS_FREQUENCY, ...EDIT_FREQUENCIES.slice(customAt)];
+}
 const EDIT_NTH_OPTIONS = [
   { value: 1, label: "1st" },
   { value: 2, label: "2nd" },
@@ -6175,7 +6185,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         className="font-medium"
                         style={inputStyle}
                       >
-                        {EDIT_FREQUENCIES.map((f) => (
+                        {editFrequenciesFor(
+                          service.recurringPattern || service.recurring_pattern,
+                        ).map((f) => (
                           <option key={f.value} value={f.value}>
                             {f.label}
                           </option>
@@ -6815,6 +6827,8 @@ const JOB_CARD_CHIP = {
   ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
   // GATE_SPRAY_RAIN_RULES: rain likely but the dose stays on the card; neutral, as red is for a hold.
   caution: { label: "Caution", bg: "#F4F4F5", fg: "#3F3F46" },
+  // Rain very likely (owner 2026-10-29, step 2): the dose still shows. Dark, not red: the admin stays monochrome.
+  warning: { label: "Warning", bg: "#18181B", fg: "#FFFFFF" },
   hold: { label: "Hold", bg: "#C8312F", fg: "#FFFFFF" },
   unknown: { label: "Unknown", bg: "#F4F4F5", fg: "#71717A" },
 };
@@ -6951,7 +6965,7 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
       title="Spray check"
       defaultOpen
       D={D}
-      right={sprayCheck?.hold ? <JobCardChip tone="hold" D={D} /> : null}
+      right={sprayCheck?.hold ? <JobCardChip tone="hold" D={D} /> : products.some((p) => p.verdictLevel === "warning") ? <JobCardChip tone="warning" D={D} /> : null}
     >
       <div style={{ fontSize: 13, color: D.text, marginTop: 10 }}>
         {f ? (
@@ -6971,7 +6985,7 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
                   {p.verdict !== "ok" && p.verdictReason && (
                     <span style={{ fontSize: 12, color: p.verdict === "hold" ? "#C8312F" : D.muted }}>{p.verdictReason}</span>
                   )}
-                  <JobCardChip tone={p.verdict} D={D} />
+                  <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
                 </span>
               </div>
             ))}
@@ -7068,7 +7082,7 @@ function JobCardProduct({ p, serviceId, D }) {
     <>
       {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
       {p.short && <JobCardChip tone="hold" label="Short" D={D} />}
-      <JobCardChip tone={p.verdict} D={D} />
+      <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
     </>
   );
@@ -7080,6 +7094,7 @@ function JobCardProduct({ p, serviceId, D }) {
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
+        {p.verdictAction && <div style={{ fontSize: 14, color: D.text }}>{p.verdictAction}</div>}
         {p.precautions && <div>{p.precautions}</div>}
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
         {p.short && (
@@ -7259,11 +7274,12 @@ function JobCardTank({ tank, serviceId, D }) {
           <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: 12, display: "grid", gap: 8 }}>
             <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
               <span>{picked.name}</span>
-              {mix?.sprayCheck && <JobCardChip tone={mix.sprayCheck.verdict} D={D} />}
+              {mix?.sprayCheck && <JobCardChip tone={mix.sprayCheck.level === "warning" ? "warning" : mix.sprayCheck.verdict} D={D} />}
             </div>
             {mix?.sprayCheck && mix.sprayCheck.verdict !== "ok" && mix.sprayCheck.reason && (
               <div style={{ fontSize: 12, color: mix.sprayCheck.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {mix.sprayCheck.reason}</div>
             )}
+            {mix?.sprayCheck?.action && <div style={{ fontSize: 14, color: D.text }}>{mix.sprayCheck.action}</div>}
             {mix?.context?.line && <div style={{ fontSize: 12, color: D.muted }}>Under add-on: {mix.context.line}{mix.context.conditional ? " · if needed" : ""}</div>}
             {busy ? (
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
@@ -25422,6 +25438,8 @@ const PRODUCT_DESCRIPTIONS_V13 = {
     "slow-release nitrogen fertilizer that feeds the lawn for 3 to 4 months",
   "lesco black out 0-0-24":
     "potassium fertilizer with no nitrogen for winter hardiness",
+  "k-acetate":
+    "potassium that helps the lawn handle summer heat and stress",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

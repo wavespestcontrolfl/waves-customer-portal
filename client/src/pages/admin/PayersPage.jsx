@@ -44,6 +44,7 @@ const TERMS = [
   { value: "due_on_receipt", label: "Due on receipt" },
   { value: "net15", label: "Net 15" },
   { value: "net30", label: "Net 30" },
+  { value: "net60", label: "Net 60" },
 ];
 
 const EMPTY = {

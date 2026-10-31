@@ -31,4 +31,27 @@ describe('MobileCustomerDetailSheet', () => {
     render(<MobileCustomerDetailSheet customerId="c1" onClose={() => {}} />);
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/customers/c1'));
   });
+
+  it('shows the server visit count, not one per service record row', async () => {
+    // One stop today with two appointments (one with a sibling record) plus a
+    // record that never completed: four rows, one visit.
+    adminFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        customer: { firstName: 'Test', lastName: 'Customer' },
+        services: [
+          { id: 'r1', service_date: '2026-10-29', status: 'completed' },
+          { id: 'r2', service_date: '2026-10-29', status: 'completed' },
+          { id: 'r3', service_date: '2026-10-29', status: 'completed' },
+          { id: 'r4', service_date: '2026-10-15', status: 'in_progress' },
+        ],
+        visitStats: { count: 1, firstDate: '2026-10-29', lastDate: '2026-10-29' },
+        payments: [], cards: [], scheduled: [], upcomingScheduled: [],
+      }),
+    });
+    render(<MobileCustomerDetailSheet customerId="c1" onClose={() => {}} />);
+    const label = await screen.findByText('Visits');
+    expect(label.parentElement.textContent).toContain('1');
+    expect(label.parentElement.textContent).not.toContain('4');
+  });
 });

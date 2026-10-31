@@ -12,6 +12,18 @@ function clearStoredSession() {
   clearStaffDeviceData();
 }
 import { refetchFlags } from '../hooks/useFeatureFlag';
+import {
+  ADMIN_FONT,
+  AUTH,
+  authCardStyle,
+  authErrorStyle,
+  authInputStyle,
+  authLabelStyle,
+  authLinkStyle,
+  authPageStyle,
+  authPrimaryButton,
+  authSecondaryButton,
+} from '../components/admin/adminAuthStyles';
 
 // Staff two-step sign-in (GATE_ADMIN_MFA): set up an authenticator app, make
 // new recovery codes, replace the authenticator, or turn it off. Standalone
@@ -19,54 +31,18 @@ import { refetchFlags } from '../hooks/useFeatureFlag';
 // admin here (every other staff route answers 403) until setup is finished.
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-  teal: '#0ea5e9',
-  white: '#fff',
-};
-const ADMIN_FONT = "'Roboto', Arial, sans-serif";
-
-const inputStyle = {
-  width: '100%',
-  padding: '14px 16px',
-  borderRadius: 10,
-  border: `2px solid ${D.border}`,
-  fontSize: 16,
-  fontFamily: ADMIN_FONT,
-  color: D.white,
-  background: D.bg,
-  outline: 'none',
-  boxSizing: 'border-box',
-};
-const labelStyle = { display: 'block', color: D.text, fontSize: 14, marginBottom: 6 };
-const cardStyle = { background: D.card, borderRadius: 16, padding: 24, border: `1px solid ${D.border}`, marginBottom: 16 };
-const primaryButton = (busy) => ({
-  width: '100%',
-  minHeight: 48,
-  marginTop: 16,
-  border: 0,
-  borderRadius: 10,
-  background: '#f4f4f5',
-  color: '#18181B',
-  fontSize: 15,
-  fontWeight: 700,
-  fontFamily: ADMIN_FONT,
-  cursor: busy ? 'wait' : 'pointer',
-  opacity: busy ? 0.7 : 1,
-});
+const inputStyle = authInputStyle;
+const labelStyle = authLabelStyle;
+const cardStyle = { ...authCardStyle, padding: 24, marginBottom: 16 };
+const primaryButton = (busy) => ({ ...authPrimaryButton(busy), marginTop: 16 });
 const linkButton = {
+  ...authLinkStyle,
   display: 'block',
   width: '100%',
   minHeight: 44,
   marginTop: 8,
   background: 'none',
   border: 'none',
-  color: D.teal,
-  fontSize: 14,
   fontFamily: ADMIN_FONT,
   cursor: 'pointer',
 };
@@ -74,7 +50,7 @@ const linkButton = {
 function ErrorBox({ message }) {
   if (!message) return null;
   return (
-    <div role="alert" style={{ marginTop: 14, padding: '10px 14px', borderRadius: 8, background: '#7f1d1d', color: '#fca5a5', fontSize: 14 }}>
+    <div role="alert" style={authErrorStyle}>
       {message}
     </div>
   );
@@ -127,10 +103,10 @@ function PasswordField({ id, value, onChange }) {
   );
 }
 
-const headingStyle = { fontSize: 18, margin: '0 0 6px', color: D.white };
-const introStyle = { fontSize: 14, lineHeight: 1.5, color: D.muted, margin: '0 0 16px' };
-const monoBox = { background: D.bg, borderRadius: 10, border: `1px solid ${D.border}`, color: D.white, fontFamily: "'Roboto Mono', ui-monospace, monospace", fontSize: 16 };
-const outlineButton = { ...linkButton, marginTop: 0, flex: 1, border: `1px solid ${D.border}`, borderRadius: 10 };
+const headingStyle = { fontSize: 18, fontWeight: 500, margin: '0 0 6px', color: AUTH.text };
+const introStyle = { fontSize: 14, lineHeight: 1.5, color: AUTH.muted, margin: '0 0 16px' };
+const monoBox = { background: AUTH.sunken, borderRadius: 6, border: `1px solid ${AUTH.border}`, color: AUTH.text, fontFamily: "'Roboto Mono', ui-monospace, monospace", fontSize: 16 };
+const outlineButton = { ...authSecondaryButton, flex: 1 };
 
 // Shown once after setup or regeneration; the codes live only in this state.
 function RecoveryCodesCard({ codes, onDone }) {
@@ -167,8 +143,8 @@ function RecoveryCodesCard({ codes, onDone }) {
         <button type="button" onClick={copy} style={outlineButton}>Copy</button>
         <button type="button" onClick={download} style={outlineButton}>Download</button>
       </div>
-      {notice && <p role="status" style={{ color: D.muted, fontSize: 14, margin: '10px 0 0' }}>{notice}</p>}
-      <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16, color: D.text, fontSize: 14, minHeight: 44 }}>
+      {notice && <p role="status" style={{ color: AUTH.muted, fontSize: 14, margin: '10px 0 0' }}>{notice}</p>}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16, color: AUTH.text, fontSize: 14, minHeight: 44 }}>
         <input type="checkbox" checked={saved} onChange={(event) => setSaved(event.target.checked)} style={{ width: 20, height: 20 }} />
         I saved these codes
       </label>
@@ -197,16 +173,16 @@ function ScanCard({ setup, code, setCode, error, busy, onSubmit, onCancel }) {
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16 }}>
         {qr
           ? <img src={qr} alt="QR code for your authenticator app" width={220} height={220} style={{ borderRadius: 8, background: '#fff' }} />
-          : <div style={{ width: 220, height: 220, borderRadius: 8, background: D.bg }} />}
+          : <div style={{ width: 220, height: 220, borderRadius: 8, background: AUTH.sunken }} />}
       </div>
-      <p style={{ fontSize: 14, color: D.muted, margin: '0 0 6px' }}>Can't scan? Enter this key in the app instead:</p>
+      <p style={{ fontSize: 14, color: AUTH.muted, margin: '0 0 6px' }}>Can't scan? Enter this key in the app instead:</p>
       <div style={{ ...monoBox, padding: '12px 14px', letterSpacing: 1, wordBreak: 'normal', overflowWrap: 'anywhere', marginBottom: 16, userSelect: 'all' }}>
         {groupKey(setup.secret)}
       </div>
       <CodeField id="two-step-confirm-code" label="Code from the app" value={code} onChange={setCode} />
       <ErrorBox message={error} />
       <button type="submit" disabled={busy} style={primaryButton(busy)}>{busy ? 'Checking…' : 'Turn on two-step sign-in'}</button>
-      <button type="button" onClick={onCancel} style={{ ...linkButton, color: D.muted }}>Cancel</button>
+      <button type="button" onClick={onCancel} style={{ ...linkButton, color: AUTH.muted }}>Cancel</button>
     </form>
   );
 }
@@ -232,7 +208,7 @@ function SetupCard({ replacing, needsCode, form, setField, error, busy, onSubmit
       {needsCode && <CodeField id="two-step-setup-code" label="Code from your current authenticator" allowRecovery value={form.code} onChange={setField('code')} />}
       <ErrorBox message={error} />
       <button type="submit" disabled={busy} style={primaryButton(busy)}>{busy ? 'Starting…' : 'Continue'}</button>
-      {replacing && <button type="button" onClick={onCancel} style={{ ...linkButton, color: D.muted }}>Cancel</button>}
+      {replacing && <button type="button" onClick={onCancel} style={{ ...linkButton, color: AUTH.muted }}>Cancel</button>}
     </form>
   );
 }
@@ -246,7 +222,7 @@ function OverviewCards({ status, notice, form, setField, errorFor, busy, onRepla
         <p style={{ ...introStyle, margin: 0 }}>
           Signing in asks for a code from your authenticator app. {remaining} unused recovery {remaining === 1 ? 'code' : 'codes'} left.
         </p>
-        {notice && <p role="status" style={{ color: D.text, fontSize: 14, margin: '10px 0 0' }}>{notice}</p>}
+        {notice && <p role="status" style={{ color: AUTH.text, fontSize: 14, margin: '10px 0 0' }}>{notice}</p>}
         <button type="button" onClick={onReplace} style={{ ...linkButton, textAlign: 'left', paddingLeft: 0 }}>Replace authenticator (new phone)</button>
       </div>
       <form onSubmit={onRegenerate} style={cardStyle}>
@@ -262,7 +238,7 @@ function OverviewCards({ status, notice, form, setField, errorFor, busy, onRepla
           <PasswordField id="two-step-off-password" value={form.offPassword} onChange={setField('offPassword')} />
           <CodeField id="two-step-off-code" label="Code from your authenticator" allowRecovery value={form.offCode} onChange={setField('offCode')} />
           <ErrorBox message={errorFor('off')} />
-          <button type="submit" disabled={busy} style={{ ...primaryButton(busy), background: 'transparent', color: D.text, border: `1px solid ${D.border}` }}>Turn off two-step sign-in</button>
+          <button type="submit" disabled={busy} style={{ ...primaryButton(busy), background: AUTH.card, color: AUTH.text, border: `1px solid ${AUTH.control}` }}>Turn off two-step sign-in</button>
         </form>
       )}
     </>
@@ -506,12 +482,12 @@ export default function AdminTwoStepPage() {
     if (loadError) {
       return (
         <div style={cardStyle}>
-          <p style={{ margin: 0, color: D.text, fontSize: 14, lineHeight: 1.5 }}>{loadError}</p>
-          <Link to="/admin" style={{ ...linkButton, textAlign: 'center', lineHeight: '44px', textDecoration: 'none' }}>Back to Waves Admin</Link>
+          <p style={{ margin: 0, color: AUTH.text, fontSize: 14, lineHeight: 1.5 }}>{loadError}</p>
+          <Link to="/admin" style={{ ...linkButton, textAlign: 'center', lineHeight: '44px' }}>Back to Waves Admin</Link>
         </div>
       );
     }
-    if (!status) return <div style={{ ...cardStyle, color: D.muted, fontSize: 14 }}>Loading…</div>;
+    if (!status) return <div style={{ ...cardStyle, color: AUTH.muted, fontSize: 14 }}>Loading…</div>;
     if (view === 'codes') return <RecoveryCodesCard codes={recoveryCodes} onDone={finishCodes} />;
     if (view === 'scan' && setup) {
       return (
@@ -557,21 +533,21 @@ export default function AdminTwoStepPage() {
 
   const held = status?.enrollmentRequired && view !== 'codes';
   return (
-    <main className="admin-auth-page" style={{ background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT }}>
+    <main className="admin-auth-page" style={authPageStyle}>
       <div style={{ maxWidth: 440, width: '100%' }}>
         <div style={{ textAlign: 'center', marginBottom: 24 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 48, marginBottom: 12 }} />
-          <h1 style={{ fontSize: 22, margin: 0, color: D.white }}>Two-step sign-in</h1>
+          <h1 style={{ fontSize: 22, fontWeight: 500, margin: 0, color: AUTH.text }}>Two-step sign-in</h1>
           {held && (
-            <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: '8px 0 0' }}>
+            <p style={{ fontSize: 14, lineHeight: 1.5, color: AUTH.text, margin: '8px 0 0' }}>
               Your account needs two-step sign-in before Waves Admin opens.
             </p>
           )}
         </div>
         {renderBody()}
         <div style={{ textAlign: 'center' }}>
-          {held && <button type="button" onClick={signOut} style={{ ...linkButton, color: D.muted }}>Sign out</button>}
-          {!held && view !== 'codes' && <Link to="/admin/settings" style={{ display: 'inline-block', minHeight: 44, lineHeight: '44px', fontSize: 14, color: D.teal, textDecoration: 'none' }}>Back to Settings</Link>}
+          {held && <button type="button" onClick={signOut} style={{ ...linkButton, color: AUTH.muted }}>Sign out</button>}
+          {!held && view !== 'codes' && <Link to="/admin/settings" style={{ ...authLinkStyle, display: 'inline-block', minHeight: 44, lineHeight: '44px' }}>Back to Settings</Link>}
         </div>
       </div>
     </main>

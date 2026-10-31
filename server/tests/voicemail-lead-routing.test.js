@@ -569,7 +569,7 @@ describe('dropFilledLeadColumns — fill-only re-decision under the row lock', (
     // Guards against drift: a new fill-if-empty assignment that is not in
     // this list silently keeps the stale pre-lock decision.
     expect(FILL_ONLY_LEAD_FIELDS).toEqual(
-      ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip'],
+      ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip', 'heard_about'],
     );
   });
 });

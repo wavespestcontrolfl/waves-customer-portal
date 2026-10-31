@@ -40,6 +40,12 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
+function categoryLabel(key) {
+  return key
+    .split("_")
+    .map((w) => (w === "and" ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ");
+}
 function isAdminUser() {
   try {
     return (
@@ -322,15 +328,6 @@ export default function WavesSEODashboard() {
     "Parrish",
     "North Port",
   ];
-  const categories = [
-    "All",
-    "Pest Control",
-    "Lawn Care",
-    "Mosquito",
-    "Termite",
-    "Tree & Shrub",
-  ];
-
   // Transform rankings API data into the shape we need
   const keywords = useMemo(() => {
     if (!rankData?.rankings) return [];
@@ -339,16 +336,23 @@ export default function WavesSEODashboard() {
       organic: r.currentPosition,
       prev:
         r.currentPosition != null && r.delta != null
-          ? r.currentPosition - r.delta
+          ? r.currentPosition + r.delta
           : null,
       mapPack: r.mapPackPosition || null,
       mapPrev: null,
       // API doesn't track map pack history separately
       trend: (r.history || []).map((h) => h.position).filter((p) => p != null),
-      category: r.service_category || "Pest Control",
+      category: r.service_category || null,
       city: r.primary_city || "All",
     }));
   }, [rankData]);
+  // Pills come from the stored service_category keys; the label is only display text.
+  const categories = useMemo(
+    () => [
+      ...new Set(keywords.map((k) => k.category).filter(Boolean)),
+    ].sort((a, b) => categoryLabel(a).localeCompare(categoryLabel(b))),
+    [keywords],
+  );
   const filteredKeywords = useMemo(() => {
     return keywords.filter((k) => {
       if (cityFilter !== "All" && k.city !== cityFilter) return false;
@@ -869,10 +873,15 @@ export default function WavesSEODashboard() {
               </div>{" "}
             </div>{" "}
             <div className="flex [gap:6px] [margin-top:10px] flex-wrap">
+              <FilterPill
+                label="All"
+                active={catFilter === "All"}
+                onClick={() => setCatFilter("All")}
+              />
               {categories.map((c) => (
                 <FilterPill
                   key={c}
-                  label={c}
+                  label={categoryLabel(c)}
                   active={catFilter === c}
                   onClick={() => setCatFilter(c)}
                 />
@@ -941,7 +950,7 @@ export default function WavesSEODashboard() {
                       </TD>
                       <TD className="[padding:10px_12px]">
                         <span className="[padding:2px_8px] rounded-sm text-ui-body font-medium bg-zinc-100 text-ink-secondary">
-                          {kw.category}
+                          {kw.category ? categoryLabel(kw.category) : "—"}
                         </span>
                       </TD>
                       <TD className="[padding:10px_12px] text-ink-secondary text-ui-body">

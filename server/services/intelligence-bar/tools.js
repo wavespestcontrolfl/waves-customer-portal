@@ -1314,7 +1314,7 @@ async function queryRevenue(input) {
       // total would overstate revenue by the consumed credit.
       db.raw('SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as total_revenue'),
       db.raw('COUNT(*) as total_invoices'),
-      db.raw("SUM(CASE WHEN status = 'overdue' THEN GREATEST(total - COALESCE(credit_applied, 0), 0) ELSE 0 END) as overdue_amount"),
+      db.raw("SUM(CASE WHEN status = 'overdue' THEN GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) ELSE 0 END) as overdue_amount"),
     ).first();
 
   return {
@@ -3915,7 +3915,25 @@ async function createAppointment(input, actionContext = {}) {
   // still never blocks the booking.
   let appointment;
   let overlapAdvisory = null;
+  let routeAdvisories = [];
   try {
+  // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
+  // runs): an ADMIN's booking buys them BEFORE the transaction, so the
+  // route number and route check below read the same Google road times the
+  // Edit dialog's check does. A technician's Intelligence Bar never buys.
+  // A named property books at the card's property stamp (lockedBookingProperty
+  // re-reads the same one), so its pin is the one priced; else the customer's.
+  const namedProperty = input.property_id !== undefined && input.property_id !== null && input.property_id !== '';
+  const bookingPin = namedProperty ? input._booking_property : { lat: customer?.latitude, lng: customer?.longitude };
+  if (actionContext.isAdmin === true && actionContext.technicianId && technician_id && win.start
+    && bookingPin?.lat != null && bookingPin?.lng != null) {
+    await require('../scheduling/save-road-buy').buyRoadsBeforeSave({
+      spender: actionContext.technicianId, date: dateStr, technicianId: technician_id,
+      windowStart: win.start, windowEnd,
+      prospective: { lat: bookingPin.lat, lng: bookingPin.lng,
+        estimated_duration_minutes: 60, service_type },
+    });
+  }
   await db.transaction(async (trx) => {
     // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
     // occupancy lock + tech-blind probe FIRST, before the comms key (rung
@@ -4049,6 +4067,24 @@ async function createAppointment(input, actionContext = {}) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
+    // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
+    // when off): the booked visit's technician day is numbered first in the
+    // order the arrival-window check certifies (inside this transaction; needs
+    // GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check Edit's
+    // save runs, on the road times the pickers already bought. Placement
+    // first: the check reads the visit where it is saved, so an unplaced visit
+    // can read late in a stale order. ADVISORY ONLY: its result is a warning in
+    // the tool result and is kept out of the pinned "no overlap" comparison
+    // above, so it can never refuse or roll back the booking; only a real
+    // overlap refuses, as before.
+    {
+      const routeCheck = require('../scheduling/staff-save-route-check');
+      await routeCheck.placeStaffSavedVisit(trx, { serviceId: created.id, source: 'intelligence_bar' });
+      routeAdvisories = await routeCheck.staffSaveRouteWarnings(trx, {
+        serviceId: created.id, date: dateStr, windowStart: created.window_start, windowEnd: created.window_end,
+        technicianId: created.technician_id,
+      });
+    }
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the
@@ -4268,7 +4304,7 @@ async function createAppointment(input, actionContext = {}) {
 
   // One `warning` key — both the reminder failure and the occupancy advisory
   // must survive when they coincide (the card renders result.warning).
-  const warnings = [reminderWarning, overlapAdvisory].filter(Boolean);
+  const warnings = [reminderWarning, overlapAdvisory, ...routeAdvisories].filter(Boolean);
   return {
     success: true,
     ...(warnings.length ? { warning: warnings.join(' ') } : {}),
@@ -4447,6 +4483,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
   let overlapAdvisory = null;
+  let routeAdvisories = [];
   // A package visit 1 with a live visit 2: the card shows one visit, so the
   // bar does not move it (ib-write-tools: the card shows everything the
   // commit does). The Schedule screen moves both.
@@ -4454,6 +4491,16 @@ async function rescheduleAppointment(input, actionContext = {}) {
     return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   }
   let thrownRefusal = null;
+  // Road times for the landing hour (GATE_SAVE_ROAD_BUY; unset = nothing
+  // runs): an ADMIN's move buys them BEFORE the transaction, so the route
+  // number and route check below read the same Google road times the Edit
+  // dialog's check does. A technician's Intelligence Bar never buys.
+  if (actionContext.isAdmin === true && actionContext.technicianId && probeWindowStart && probeWindowEnd) {
+    await require('../scheduling/save-road-buy').buyRoadsForVisitSave({
+      spender: actionContext.technicianId, serviceId: appointment_id,
+      changes: { scheduled_date: dateStr, window_start: probeWindowStart, window_end: probeWindowEnd },
+    });
+  }
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -4562,6 +4609,23 @@ async function rescheduleAppointment(input, actionContext = {}) {
         });
         overlapAdvisory = again.length ? slotOverlapWarning(dateStr) : null;
       }
+      // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
+      // when off): the moved visit's technician day is numbered first in the
+      // order the arrival-window check certifies (inside this transaction;
+      // needs GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check
+      // Edit's save runs, on the road times the pickers already bought.
+      // Placement first: the check reads the visit where it is saved, so a
+      // moved visit not yet placed can read late in a stale order. ADVISORY
+      // ONLY: a route result is a warning in the tool result and never
+      // refuses the move.
+      if (updatedRows && probeWindowStart && probeWindowEnd) {
+        const routeCheck = require('../scheduling/staff-save-route-check');
+        await routeCheck.placeStaffSavedVisit(trx, { serviceId: appointment_id, source: 'intelligence_bar' });
+        routeAdvisories = await routeCheck.staffSaveRouteWarnings(trx, {
+          serviceId: appointment_id, date: dateStr, windowStart: probeWindowStart, windowEnd: probeWindowEnd,
+          technicianId: committedTechId,
+        });
+      }
   }).catch((err) => {
     // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
     thrownRefusal = require('./outcomes').moveRefusalFromThrown(err);
@@ -4663,8 +4727,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
     // ONE warning key (card renders result.warning only): advisory overlap
     // note + lifecycle-cleanup + group-repair + audit-append failures
     // COMBINE, never overwrite.
-    ...(overlapAdvisory || lifecycleWarning || groupWarning || auditWarning
-      ? { warning: [overlapAdvisory, lifecycleWarning, groupWarning, auditWarning].filter(Boolean).join(' ') }
+    ...(overlapAdvisory || routeAdvisories.length || lifecycleWarning || groupWarning || auditWarning
+      ? { warning: [overlapAdvisory, ...routeAdvisories, lifecycleWarning, groupWarning, auditWarning].filter(Boolean).join(' ') }
       : {}),
   };
 }

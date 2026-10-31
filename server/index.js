@@ -2,6 +2,8 @@
 require('./config/load-env')();
 // Sentry must be initialized before all other imports
 require("./instrument.js");
+// AI credit key pool (GATE_AI_CREDIT_KEYS, dark): wraps globalThis.fetch once, before any module builds an Anthropic client.
+require('./services/llm/credit-key-pool').installCreditKeyPool();
 const Sentry = require("@sentry/node");
 
 // Prevent unhandled promise rejections from crashing the process
@@ -76,6 +78,7 @@ const bouncieRoutes = require('./routes/bouncie');
 const lawnHealthRoutes = require('./routes/lawn-health');
 const feedRoutes = require('./routes/feed');
 const satisfactionRoutes = require('./routes/satisfaction');
+const mistingSystemRoutes = require('./routes/misting-system');
 const propertyRoutes = require('./routes/property');
 const customerPricingAiRoutes = require('./routes/customer-pricing-ai');
 const referralRoutes = require('./routes/referrals-v2');
@@ -629,6 +632,9 @@ app.use('/api/ops/digest', ...require('./routes/ops-digest-ingest').ingestPrePar
 // body parsing, then parse with its own 256kb cap — same reason as staff
 // auth above; unauthenticated callers must not force big JSON parse work.
 app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
+// Owner MCP admin reads (routes/mcp-admin.js): gate + key check + per-login
+// rate limit BEFORE any body parsing, then a 64kb capped parse.
+app.use('/api/mcp-admin', ...require('./routes/mcp-admin').mcpAdminPreParsers);
 
 // Public MCP endpoint (anonymous agents): gate + rate limit BEFORE any body
 // parsing, then a 64kb capped parse — dark (404) until GATE_MCP_PUBLIC flips.
@@ -727,6 +733,8 @@ app.use('/api/bouncie', bouncieRoutes);
 app.use('/api/lawn-health', lawnHealthRoutes);
 app.use('/api/feed', feedRoutes);
 app.use('/api/satisfaction', satisfactionRoutes);
+// Misting system card on Home — dark behind GATE_MOSQUITO_MISTING (request-time read).
+app.use('/api/misting-system', mistingSystemRoutes);
 app.use('/api/property', propertyRoutes);
 // Unified Property Score — dark behind GATE_PROPERTY_SCORE (request-time read).
 app.use('/api/property-score', require('./routes/property-score'));
@@ -788,6 +796,7 @@ app.use('/api/admin/estimates', adminEstimateRoutes);
 app.use('/api/admin/service-outlines', adminServiceOutlineRoutes);
 app.use('/api/admin/estimates', require('./routes/admin-estimate-slots'));
 app.use('/api/admin/estimates', require('./routes/admin-estimate-misting-layout'));
+app.use('/api/admin/misting-records', require('./routes/admin-misting-records'));
 app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
@@ -996,6 +1005,8 @@ app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watc
 app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker'));
 // MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
 app.use('/api/mcp', require('./routes/mcp'));
+// Owner MCP admin reads — Intelligence Bar read tools under an mcp_read key, gated.
+app.use('/api/mcp-admin', require('./routes/mcp-admin'));
 // External ops-cron findings → ops_digest bell rows — machine auth
 // (OPS_DIGEST_INGEST_TOKEN); 404 until the token is set.
 app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));
@@ -1010,12 +1021,14 @@ app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
 app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
 app.use('/api/admin/requests', require('./routes/admin-requests'));
+app.use('/api/admin/portal-inbox', require('./routes/admin-portal-inbox'));
 app.use('/api/admin/wiki', require('./routes/admin-wiki'));
 app.use('/api/admin/health', require('./routes/admin-health'));
 app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
 app.use('/api/admin/timesheets', require('./routes/admin-timesheet-approval'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/tech/pay-growth', require('./routes/tech-pay-growth'));
+app.use('/api/tech/payroll', require('./routes/tech-payroll'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/consultations', require('./routes/admin-consultations'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));
@@ -1105,7 +1118,7 @@ if (config.nodeEnv === 'production') {
       manifest: '/tech-manifest.json',
       title: 'Waves Tech',
       appleTitle: 'Waves Tech',
-      themeColor: '#111111',
+      themeColor: '#18181B',
       htmlClass: 'admin-app',
     },
     {
@@ -1126,7 +1139,7 @@ if (config.nodeEnv === 'production') {
       manifest: '/tech-manifest.json',
       title: 'Waves Tech',
       appleTitle: 'Waves Tech',
-      themeColor: '#111111',
+      themeColor: '#18181B',
     },
   ];
   function pickSection(reqPath) {

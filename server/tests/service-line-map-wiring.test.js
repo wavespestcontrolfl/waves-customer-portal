@@ -3,7 +3,8 @@
  * six choice points call the recorder. /book confirm and the after-call booking cannot
  * be driven to a committed booking without a live database, so their position is pinned
  * from the source: the call sits AFTER the commit, is never awaited, and the resolver is
- * required lazily (gate off = no resolver module load, no query, byte-identical).
+ * required lazily, inside a function (gate off = no resolver module load at import time,
+ * no query, byte-identical).
  */
 const fs = require('fs');
 const path = require('path');
@@ -24,9 +25,10 @@ describe('service-line map shadow wiring', () => {
     // The recorder's own source tag: `source: 'x'` followed by the recorder's other fields.
     expect(text.match(new RegExp(`source: '${source}',? (?:trx|scheduledServiceId|runId)`, 'g'))).toHaveLength(1);
     expect(text.match(/recordLinePickShadow\(/g).length).toBeGreaterThanOrEqual(1);
-    // Lazy: every load of the module sits inside a call expression, never in the import block.
+    // Lazy: every load of the module sits inside a function body, never in the import block
+    // (the recorder call, and with GATE_SERVICE_LINE_MAP=live the live readers, build 4).
     for (const line of text.split('\n').filter((l) => /line-technician/.test(l) && /require\(/.test(l))) {
-      expect(line).toMatch(/require\('[./]+\/(?:services\/)?scheduling\/line-technician'\)\.recordLinePickShadow/);
+      expect(line).toMatch(/^\s+.*require\('[./]+\/(?:services\/)?scheduling\/line-technician'\)/);
     }
   });
 

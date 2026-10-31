@@ -400,6 +400,61 @@ async function projectNitrogenCut(dbh, svc, entries, summary) {
   }
 }
 
+// Round 3 of a 9x rounds visit takes February's step at its rounds-only rate (1.0 lb N, not the 12x plan's 0.75): the row's stored target
+// says 0.75, so the brief states the rounds target the row also carries (gates.roundsTargetN, migration 20261029180000) or, on a
+// database that does not have it, the recipe's own rounds variant. Every other visit: the entries are left as they are.
+function statedRoundsNitrogen(entries, rounds, trackKey) {
+  if (rounds?.variant !== 'rounds') return;
+  const { lawnProtocols } = require('./lawn-program');
+  const { parseVisitNutrientTargets } = require('./waveguard-plan-engine');
+  const variant = lawnProtocols()?.[trackKey]?.visits?.find((visit) => visit.roundVariants)?.roundVariants?.lawn_rounds_9;
+  const fromRecipe = parseVisitNutrientTargets(variant?.notes).targetNPer1000;
+  for (const entry of entries) {
+    if (!entry.gates.targetN) continue;
+    const rounded = entry.gates.roundsTargetN || (fromRecipe ? `${Number.isInteger(fromRecipe) ? fromRecipe.toFixed(1) : fromRecipe} lb N/1000` : null);
+    if (rounded) entry.gates = { ...entry.gates, targetN: rounded };
+  }
+}
+
+// The spring pre-emergent catch-up (lawn-rounds-catchup.js): the March Dimension 2EW row the window read for this visit is shown only when the
+// PLAN would keep the line. The same settlement the plan runs (waveguard-plan-engine settleCatchUpForVisit: product active, a linked row that
+// calculates, the yearly limits; STRICT like every read here) decides it. A kept line is named as a gated line with the catch-up as its trigger
+// (it is not a fixed product of the round); a rejected line leaves the entries and joins `held` with the plan's unavailable text and no dose.
+// No catch-up for this visit: nothing is read and the entries are as they are.
+async function settleRoundsCatchUp(dbh, svc, entries, held, summary, catchUp) {
+  if (!catchUp) return;
+  const { isCatchUpRow, CATCH_UP_LABEL } = require('./lawn-rounds-catchup');
+  const engine = require('./waveguard-plan-engine');
+  const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
+  const rows = entries.filter((entry) => isCatchUpRow({ role: entry.shapedEntry.role, product_name: entry.shapedEntry.name }));
+  for (const entry of rows) {
+    const product = entry.productId ? await dbh('products_catalog').where({ id: entry.productId }).first('id', 'name', 'active') : null;
+    const items = [{ roundsCatchUp: true, selected: true, product: product || null }];
+    const settled = v13Active ? await engine.settleCatchUpForVisit(dbh, svc, items, engine.v13ProtocolRows(summary), {}, { strict: true }) : { items: [], warnings: [] };
+    if (settled.items.length) {
+      entry.fixed = false;
+      entry.gates = { ...entry.gates, roundsCatchUp: CATCH_UP_LABEL, trigger: CATCH_UP_LABEL };
+      continue;
+    }
+    entries.splice(entries.indexOf(entry), 1);
+    // v13 not resolved: the plan drops the line without a word; so does the brief.
+    if (settled.warnings.length) held.push({ name: cleanText(entry.shapedEntry.name, 120), role: cleanText(entry.shapedEntry.role, 60), hold: true, message: cleanText(settled.warnings[0].message, 300) });
+  }
+}
+
+// The stored gate northPortBlocked ("not allowed in North Port this month") was written for the step's own month (the ban runs Apr 1 to
+// Sep 30). A rounds visit can read a step of another season (round 2 reads April's Dimension row in Feb and Mar), so the brief leaves
+// the key off while the REAL date is outside the ban, as the plan's note does (v13GateNotes). Every other visit: the entries as they are.
+function withoutOffSeasonNorthPortBlock(entries, rounds) {
+  if (!rounds || require('./waveguard-plan-engine').northPortNpBanMonth(rounds.realMonth)) return;
+  for (const entry of entries) {
+    if (!('northPortBlocked' in entry.gates)) continue;
+    const rest = { ...entry.gates };
+    delete rest.northPortBlocked;
+    entry.gates = rest;
+  }
+}
+
 // GATE_LAWN_DEC_LARGE_PATCH_K: for a visit where the plan swaps the whole-lawn bag (waveguard-plan-engine troubleProductSwap, the plan's
 // own decision) the brief says the swapped product replaces the normal bag, so the pocket reference agrees with the plan. Gate off, not
 // v13 or no swap: the entries are left as they are (no read). Strict, like projectFungusNitrogenCut.
@@ -453,6 +508,8 @@ async function loadLawnWindowGuidance(dbh, svc) {
   try {
     const { loadCustomerGrassContext } = require('./lawn-grass-context');
     const { getProtocolWindowContext, summarizeProtocolContext } = require('./lawn-protocol-operating-layer');
+    const { roundRouting, roundsNitrogenHold } = require('./waveguard-plan-engine');
+    const roundsCatchUp = require('./lawn-rounds-catchup');
     // strict — an outage here read as unknown_grass_track would hash
     // empty lawn guidance over a valid cached brief.
     const grass = await loadCustomerGrassContext(svc.customer_id, dbh, { strict: true });
@@ -468,6 +525,13 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // hash and would overwrite a valid cached brief (runSweep counts the
     // visit failed and the prior brief survives).
     const query = { serviceDate, strict: true, planning: true };
+    // A visit on a 9x rounds series: the brief states the step of its ROUND (a pinned window still wins), with the weed and spot rows of
+    // the real date. null for every other visit, which reads the month of its date as before.
+    const rounds = roundRouting(svc, grass.trackKey);
+    // A new customer's first rounds visit in round 3 with no pre-emergent this year also carries the spring pre-emergent catch-up (the plan's own
+    // decision, lawn-rounds-catchup.js; STRICT like every read here): its March Dimension 2EW row joins the window and is labelled below.
+    const catchUp = await roundsCatchUp.catchUpWanted(dbh, svc, { strict: true });
+    if (rounds) query.roundStep = roundsCatchUp.roundStepFields({ round: rounds.round, month: rounds.month }, catchUp);
     if (assignedWindowKey) {
       query.windowKey = assignedWindowKey;
       // Resolve the assigned protocol row (key + version, newest match —
@@ -531,12 +595,18 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // profile municipality, customer city); strict, like every read here.
     const { v13NorthPortHold, loadVisitCity, v13HoldWarnings } = require('./waveguard-plan-engine');
     const municipality = await loadVisitCity(dbh, svc);
-    const heldRows = (summary.products || []).filter((p) => v13NorthPortHold(p, municipality));
+    // Round 3 of a 9x rounds visit dated Apr 1 or later in North Port holds the nitrogen bag (the plan's own rule, roundsNitrogenHold).
+    const holdRoundsNitrogen = roundsNitrogenHold(rounds, municipality);
+    const roundsNitrogenRow = (p) => holdRoundsNitrogen && p.defaultInPlan === true && Number(p.analysis?.n) > 0;
+    const heldRows = (summary.products || []).filter((p) => v13NorthPortHold(p, municipality) || roundsNitrogenRow(p));
     const held = heldRows.map((p) => ({
       name: cleanText(p.productName || p.protocolProductName, 120),
       role: cleanText(p.role, 60),
       hold: true,
-      message: cleanText(v13HoldWarnings([{ selectionReason: 'north_port_product_window', product: { id: p.productId, name: p.productName || p.protocolProductName } }])[0].message, 300),
+      message: cleanText(v13HoldWarnings([{
+        selectionReason: roundsNitrogenRow(p) && !v13NorthPortHold(p, municipality) ? 'north_port_rounds_nitrogen' : 'north_port_product_window',
+        product: { id: p.productId, name: p.productName || p.protocolProductName },
+      }])[0].message, 300),
     }));
     // A staged row that only a swap rule brings in (GATE_LAWN_DEC_LARGE_PATCH_K: the December 0-0-24, a non-default row) is not guidance
     // until that rule's gate is live: with it off the brief lists exactly the products it listed before the row existed.
@@ -556,6 +626,9 @@ async function loadLawnWindowGuidance(dbh, svc) {
         gates: (p.gates && typeof p.gates === 'object') ? p.gates : {},
       }))
       .filter((p) => p.shapedEntry.name);
+    statedRoundsNitrogen(shaped, rounds, grass.trackKey);
+    await settleRoundsCatchUp(dbh, svc, shaped, held, summary, catchUp);
+    withoutOffSeasonNorthPortBlock(shaped, rounds);
     await projectNitrogenCut(dbh, svc, shaped, summary);
     await projectProductSwap(dbh, svc, shaped, summary);
     await projectChinchTetrinoRate(dbh, svc, shaped, summary);

@@ -37,7 +37,10 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { leadAddressUnverifiedNotice } from "../../lib/leadAddressUnverified";
+import { etDateString } from "../../lib/timezone";
+import { isConsultationVisit } from "../../lib/consultationVisit";
 import ConsultationStatsPanel from "./ConsultationStatsPanel";
+import { leadServiceAddress } from "../../utils/format-address";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const CONTACT_EVIDENCE_LABELS = new Map([
@@ -382,7 +385,8 @@ function leadEstimateParams(lead) {
   if (customerName) params.set("customerName", customerName);
   if (lead.phone) params.set("customerPhone", lead.phone);
   if (lead.email) params.set("customerEmail", lead.email);
-  if (lead.address) params.set("address", lead.address);
+  const address = leadServiceAddress(lead);
+  if (address) params.set("address", address);
   if (lead.service_interest)
     params.set("serviceInterest", lead.service_interest);
   return params;
@@ -2878,6 +2882,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         onClick={() => {
                                           setFormData({
                                             leadId: lead.id,
+                                            // Opens on the current assignee; "-- Select --" ('')
+                                            // sends an explicit unassign, never a missing key.
+                                            technician_id: lead.assigned_to || "",
                                           });
                                           setShowModal("assign");
                                         }}
@@ -2994,6 +3001,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     <div className="flex gap-[8px] mb-[8px]">
                                       <Input
                                         type="date"
+                                        // The server refuses a day that has passed (ET).
+                                        min={etDateString()}
                                         value={apptForm.date}
                                         onChange={(e) =>
                                           setApptForm((prev) => ({
@@ -3079,7 +3088,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         <option value="">— Unassigned —</option>
                                         {techs.map((t) => (
                                           <option key={t.id} value={t.id}>
-                                            {t.first_name} {t.last_name || ""}
+                                            {t.name}
                                           </option>
                                         ))}
                                       </Select>
@@ -3096,9 +3105,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       className="w-full min-h-[40px] resize-y box-border mb-[8px]"
                                     />
                                     <div className="text-ui-body text-ink-secondary mb-[8px]">
-                                      Saving creates a customer from this lead
-                                      (if not already linked) and marks the lead
-                                      won.
+                                      {/* The server books a Waves Assessment without
+                                          winning the lead (owner ruling 2026-09-08). */}
+                                      {isConsultationVisit({
+                                        serviceType: apptForm.serviceType,
+                                      })
+                                        ? "Saving creates a customer from this lead (if not already linked) and books the assessment. It does not mark the lead won; the lead converts when a quote is accepted or a paid service books."
+                                        : "Saving creates a customer from this lead (if not already linked) and marks the lead won."}
                                     </div>
                                     <div className="flex gap-[8px]">
                                       <Button
@@ -4732,7 +4745,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             }
             options={techs.map((t) => ({
               value: t.id,
-              label: `${t.first_name} ${t.last_name || ""}`,
+              label: t.name,
             }))}
           />{" "}
           <Button onClick={submitForm} disabled={loading} variant={"primary"}>

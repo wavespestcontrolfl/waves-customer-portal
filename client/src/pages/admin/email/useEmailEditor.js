@@ -360,6 +360,9 @@ export default function useEmailEditor(userId) {
         subject: `Re: ${email.subject || ""}`,
         body: text,
         threadId: email.gmail_thread_id,
+        // The server adds the source Message-ID (In-Reply-To / References)
+        // from this row, as it does for a scheduled reply.
+        replyEmailId: email.id,
       },
       text,
       email.id,

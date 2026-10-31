@@ -478,6 +478,14 @@ function lastCompletedWeekEndingET(now = new Date()) {
  * are the two halves of one invariant and must never disagree — Codex r6
  * P1 on #4678).
  */
+// Whole ET calendar days from `now`'s Eastern date to a DATE-ONLY value (a pg
+// date column: 'YYYY-MM-DD' or a UTC-midnight Date): 0 on that day, negative
+// after it. Never a fraction: subtracting the current instant from UTC
+// midnight flips the day early, from 8 PM ET the evening before.
+function etCalendarDaysUntil(value, now = new Date()) {
+  return Math.round((Date.parse(etCalendarDayOf(value)) - Date.parse(etDateString(now))) / 86400000);
+}
+
 function dateOnlyString(value) {
   if (!value) return value;
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -487,7 +495,7 @@ function dateOnlyString(value) {
 module.exports = {
   dateOnlyString,
   lastCompletedWeekEndingET,
-  TZ, parseETDateTime, parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etWallClockOccurrences, formatETDay, formatETDate, formatETDayDate, formatETTime, etCalendarDayOf,
+  TZ, parseETDateTime, parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etWallClockOccurrences, formatETDay, formatETDate, formatETDayDate, formatETTime, etCalendarDayOf, etCalendarDaysUntil,
   etParts, etDateString, etOffsetIso, addETDays, addETBusinessDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,

@@ -9,6 +9,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/seo/seo-action-generator', () => ({
   getSummary: jest.fn(),
   autoApprove: jest.fn(),
+  createExperiment: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -168,6 +169,160 @@ describe('admin seo actions routes — owner-only approve guard', () => {
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body).toEqual({ pending_by_tier: { auto: 3 }, done: 5 });
+    });
+  });
+});
+
+describe('admin seo actions routes — execute commits done + experiment together', () => {
+  const approvedRow = {
+    id: 'action-1',
+    url: 'https://wavespestcontrol.com/bradenton-pest-control',
+    action_type: 'rewrite_title_meta',
+    status: 'open',
+    approval_status: 'approved',
+    execution_status: 'queued',
+    started_at: null,
+  };
+
+  // A transactional fake: an update made through `trx` reaches `committed`
+  // only when the callback resolves (knex commits then). A rejected callback
+  // discards it, like a rollback.
+  function mockStagedTransaction(row) {
+    const committed = [];
+    const trxs = [];
+    db.transaction = jest.fn(async (cb) => {
+      const staged = [];
+      const trx = jest.fn((table) => {
+        if (table !== 'seo_actions') throw new Error(`Unexpected table ${table}`);
+        const q = {
+          where: jest.fn(() => q),
+          whereNot: jest.fn(() => q),
+          first: jest.fn(async () => row),
+          update: jest.fn((patch) => ({
+            returning: jest.fn(async () => {
+              const executable = row && row.status === 'open'
+                && row.approval_status === 'approved' && row.execution_status !== 'done';
+              if (!executable) return [];
+              staged.push(patch);
+              return [{ ...row, ...patch }];
+            }),
+          })),
+        };
+        return q;
+      });
+      trx.fn = { now: () => 'now()' };
+      trxs.push(trx);
+      const result = await cb(trx);
+      committed.push(...staged);
+      return result;
+    });
+    return { committed, trxs };
+  }
+
+  function postExecute(baseUrl) {
+    return fetch(`${baseUrl}/admin/seo/actions/action-1/execute`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer admin2', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes: 'title updated in the CMS' }),
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('Mark done commits the done row and creates the experiment in the same transaction', async () => {
+    const { committed, trxs } = mockStagedTransaction(approvedRow);
+    SeoActionGenerator.createExperiment.mockResolvedValue({ id: 'exp-1' });
+
+    await withServer(async (baseUrl) => {
+      const res = await postExecute(baseUrl);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ executed: true, id: 'action-1', experiment_id: 'exp-1' });
+    });
+
+    expect(committed).toEqual([expect.objectContaining({
+      execution_status: 'done',
+      executor: 'manual',
+      execution_notes: 'title updated in the CMS',
+    })]);
+    expect(SeoActionGenerator.createExperiment).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'action-1', execution_status: 'done' }),
+      trxs[0],
+    );
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a failed experiment insert rolls the done write back and returns 500', async () => {
+    const { committed, trxs } = mockStagedTransaction(approvedRow);
+    SeoActionGenerator.createExperiment.mockRejectedValue(new Error('insert into seo_url_experiments failed'));
+
+    await withServer(async (baseUrl) => {
+      const res = await postExecute(baseUrl);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: 'Execution failed' });
+    });
+
+    expect(committed).toEqual([]);
+    expect(SeoActionGenerator.createExperiment).toHaveBeenCalledWith(expect.anything(), trxs[0]);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an action that is not approved gets 409 and no experiment', async () => {
+    const { committed } = mockStagedTransaction({ ...approvedRow, approval_status: 'pending' });
+
+    await withServer(async (baseUrl) => {
+      const res = await postExecute(baseUrl);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'Action must be open, approved, and not already executed' });
+    });
+
+    expect(committed).toEqual([]);
+    expect(SeoActionGenerator.createExperiment).not.toHaveBeenCalled();
+  });
+
+  test('a missing action gets 404', async () => {
+    mockStagedTransaction(undefined);
+
+    await withServer(async (baseUrl) => {
+      const res = await postExecute(baseUrl);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Action not found' });
+    });
+
+    expect(SeoActionGenerator.createExperiment).not.toHaveBeenCalled();
+  });
+});
+
+describe('admin seo actions routes — list filters', () => {
+  test('a comma-separated execution_status lists every named state; a single value still works', async () => {
+    const calls = [];
+    const query = {
+      orderBy: jest.fn(() => query),
+      limit: jest.fn(() => query),
+      offset: jest.fn(() => query),
+      where: jest.fn((...args) => { calls.push(['where', ...args]); return query; }),
+      whereIn: jest.fn((...args) => { calls.push(['whereIn', ...args]); return query; }),
+      then: (resolve) => resolve([{ id: 'action-1', execution_status: 'queued' }]),
+    };
+    db.mockImplementation(() => query);
+
+    await withServer(async (baseUrl) => {
+      const progress = await fetch(
+        `${baseUrl}/admin/seo/actions?domain=example.test&approval_status=approved&execution_status=queued,manual_required,failed`,
+        { headers: { Authorization: 'Bearer admin' } },
+      );
+      expect(progress.status).toBe(200);
+      expect(await progress.json()).toEqual([{ id: 'action-1', execution_status: 'queued' }]);
+      expect(calls).toContainEqual(['where', 'approval_status', 'approved']);
+      expect(calls).toContainEqual(['whereIn', 'execution_status', ['queued', 'manual_required', 'failed']]);
+
+      calls.length = 0;
+      const done = await fetch(`${baseUrl}/admin/seo/actions?execution_status=done`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(done.status).toBe(200);
+      expect(calls).toContainEqual(['whereIn', 'execution_status', ['done']]);
     });
   });
 });

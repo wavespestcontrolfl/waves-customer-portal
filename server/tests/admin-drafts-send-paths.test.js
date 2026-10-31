@@ -71,6 +71,7 @@ function makeBuilder(table, cfg = {}) {
   b.returning = jest.fn(() => Promise.resolve(cfg.returning ?? []));
   b.catch = jest.fn(() => Promise.resolve());
   b.then = (resolve, reject) => {
+    if (cfg.error) return Promise.reject(cfg.error).then(resolve, reject);
     const value = b._mode === 'update' ? (cfg.update ?? 1)
       : b._mode === 'first' ? cfg.first
         : (cfg.rows ?? []);
@@ -478,6 +479,201 @@ describe('PUT /admin/drafts/:id/revise', () => {
     expect(release.payload).toMatchObject({ revised_response: null, final_response: null });
   });
 
+});
+
+describe('SMS-anchored drafts — the reply must still belong to the draft\'s customer (audit AG-01)', () => {
+  const SENDER = '+19415550142';
+  const smsRow = (overrides = {}) => ({ id: 'sms-1', from_phone: SENDER, to_phone: '+19412972817', customer_id: 'cust-A', ...overrides });
+  const smsDraft = (overrides = {}) => draftRow({ sms_log_id: 'sms-1', customer_id: 'cust-A', purpose: null, ...overrides });
+  const approve = (baseUrl) => fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const released = () => updates.some((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+
+  test('the SMS row re-linked to another customer: 409, claim released, nothing sent', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow({ customer_id: 'cust-B' }) });
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await approve(baseUrl);
+      expect(res.status).toBe(409);
+      body = await res.json();
+    });
+    expect(body.code).toBe('DRAFT_CUSTOMER_CHANGED');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(released()).toBe(true);
+  });
+
+  test('a reply number no longer on the customer\'s record: 409, nothing sent', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { first: { id: 'cust-A', phone: '+19415550199' } });
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await approve(baseUrl);
+      expect(res.status).toBe(409);
+      body = await res.json();
+    });
+    expect(body.code).toBe('DRAFT_PHONE_NOT_ON_RECORD');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(released()).toBe(true);
+  });
+
+  test('a gone customer row is refused like a re-link', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { first: undefined });
+    await withServer(async (baseUrl) => {
+      const res = await approve(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('DRAFT_CUSTOMER_CHANGED');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the customer still owns the number: sends as phone_matches_customer with a handoff recheck that passes', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { first: { id: 'cust-A', phone: SENDER } });
+    enqueue('sms_log', { first: { customer_id: 'cust-A' } });             // handoff re-read
+    enqueue('customers', { first: { id: 'cust-A', phone: SENDER } });
+    let atHandoff;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      atHandoff = await input.preProviderCheck({ channel: 'sms' });
+      return { sent: true, providerMessageId: 'SM_real_sid' };
+    });
+    await withServer(async (baseUrl) => {
+      expect((await approve(baseUrl)).status).toBe(200);
+    });
+    const input = sendCustomerMessage.mock.calls[0][0];
+    expect(input.to).toBe(SENDER);
+    expect(input.customerId).toBe('cust-A');
+    expect(input.identityTrustLevel).toBe('phone_matches_customer');
+    expect(atHandoff).toEqual({ ok: true });
+  });
+
+  test('a service-contact slot number sends as service_contact_authorized', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { first: { id: 'cust-A', phone: '+19415550199', service_contact_phone: SENDER } });
+    await withServer(async (baseUrl) => {
+      expect((await approve(baseUrl)).status).toBe(200);
+    });
+    const input = sendCustomerMessage.mock.calls[0][0];
+    expect(input.customerId).toBe('cust-A');
+    expect(input.identityTrustLevel).toBe('service_contact_authorized');
+  });
+
+  test('a property row without a phone matches its account primary\'s number', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { first: { id: 'cust-A', phone: null, account_id: 'acct-1', is_primary_profile: false } });
+    enqueue('customers', { first: { id: 'cust-primary', phone: SENDER } }); // account primary profile
+    await withServer(async (baseUrl) => {
+      expect((await approve(baseUrl)).status).toBe(200);
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].identityTrustLevel).toBe('phone_matches_customer');
+  });
+
+  test('a draft with no customer of its own takes the SMS row\'s link (not a change)', async () => {
+    enqueue('message_drafts', { returning: [smsDraft({ customer_id: null })] });
+    enqueue('sms_log', { first: smsRow({ customer_id: 'cust-B' }) });
+    enqueue('customers', { first: { id: 'cust-B', phone: SENDER } });
+    await withServer(async (baseUrl) => {
+      expect((await approve(baseUrl)).status).toBe(200);
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].customerId).toBe('cust-B');
+  });
+
+  test('a re-link during the send pipeline is refused at the provider handoff', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { first: { id: 'cust-A', phone: SENDER } });
+    enqueue('sms_log', { first: { customer_id: 'cust-B' } });             // re-linked meanwhile
+    let atHandoff;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      atHandoff = await input.preProviderCheck({ channel: 'sms' });
+      return { sent: false, blocked: true, code: atHandoff.code, reason: atHandoff.reason };
+    });
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await approve(baseUrl);
+      expect(res.status).toBe(422);
+      body = await res.json();
+    });
+    expect(atHandoff).toMatchObject({ ok: false, code: 'DRAFT_CUSTOMER_CHANGED' });
+    expect(body.code).toBe('DRAFT_CUSTOMER_CHANGED');
+    expect(released()).toBe(true);
+    expect(updates.some((u) => u.table === 'message_drafts' && u.payload.sent_at)).toBe(false);
+  });
+
+  test('a customer-less draft whose SMS row moves from B to C mid-send is refused at the handoff', async () => {
+    enqueue('message_drafts', { returning: [smsDraft({ customer_id: null })] });
+    enqueue('sms_log', { first: smsRow({ customer_id: 'cust-B' }) });
+    enqueue('customers', { first: { id: 'cust-B', phone: SENDER } });
+    enqueue('sms_log', { first: { customer_id: 'cust-C' } });             // re-linked meanwhile
+    enqueue('customers', { first: { id: 'cust-C', phone: SENDER } });     // C owns the number too
+    let atHandoff;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      atHandoff = await input.preProviderCheck({ channel: 'sms' });
+      return { sent: false, blocked: true, code: atHandoff.code, reason: atHandoff.reason };
+    });
+    await withServer(async (baseUrl) => {
+      expect((await approve(baseUrl)).status).toBe(422);
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].customerId).toBe('cust-B');
+    expect(atHandoff).toMatchObject({ ok: false, code: 'DRAFT_RECIPIENT_CHANGED' });
+    expect(released()).toBe(true);
+  });
+
+  test('a number that moves from the customer\'s own phone to a slot mid-send is refused at the handoff', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { first: { id: 'cust-A', phone: SENDER } });
+    enqueue('sms_log', { first: { customer_id: 'cust-A' } });
+    enqueue('customers', { first: { id: 'cust-A', phone: '+19415550199', service_contact_phone: SENDER } });
+    let atHandoff;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      atHandoff = await input.preProviderCheck({ channel: 'sms' });
+      return { sent: false, blocked: true, code: atHandoff.code, reason: atHandoff.reason };
+    });
+    await withServer(async (baseUrl) => {
+      expect((await approve(baseUrl)).status).toBe(422);
+    });
+    expect(atHandoff).toMatchObject({ ok: false, code: 'DRAFT_RECIPIENT_CHANGED' });
+  });
+
+  test('a lookup failure fails closed: 503, claim released, nothing sent', async () => {
+    enqueue('message_drafts', { returning: [smsDraft()] });
+    enqueue('sms_log', { first: smsRow() });
+    enqueue('customers', { error: new Error('db down: secret detail') });
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await approve(baseUrl);
+      expect(res.status).toBe(503);
+      body = await res.json();
+    });
+    expect(body.code).toBe('DRAFT_RECIPIENT_CHECK_UNAVAILABLE');
+    expect(JSON.stringify(body)).not.toMatch(/secret detail/);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(released()).toBe(true);
+  });
+
+  test('revise of a re-linked draft: 409, the edit cleared on release, nothing sent', async () => {
+    enqueue('message_drafts', { returning: [smsDraft({ status: 'revised' })] });
+    enqueue('sms_log', { first: smsRow({ customer_id: 'cust-B' }) });
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Thanks, we will be out Tuesday.' }),
+      });
+      expect(res.status).toBe(409);
+      body = await res.json();
+    });
+    expect(body.code).toBe('DRAFT_CUSTOMER_CHANGED');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release.payload).toMatchObject({ revised_response: null, final_response: null });
+  });
 });
 
 describe('GET /admin/drafts', () => {

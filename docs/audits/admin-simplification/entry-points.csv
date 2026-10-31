@@ -358,7 +358,6 @@ client/src/components/schedule/TimeGridDays.jsx,935,/admin/schedule/${…}/assig
 client/src/components/schedule/TimeGridDays.jsx,941,/admin/dispatch/${…}/reschedule
 client/src/components/schedule/TimeGridDays.jsx,964,/admin/schedule/week?start=${…}
 client/src/components/schedule/TreatmentPlanPanel.jsx,149,/admin/treatment-plans/${…}${…}
-client/src/components/schedule/WeatherBar.jsx,12,${…}/admin/dashboard-ops/weather?date=${…}
 client/src/components/schedule/seriesMove.js,117,${…}/admin/dispatch/${…}/series-move-preview?newDate=${…}
 client/src/components/schedule/useBestTimes.js,36,${…}/admin/schedule/find-time
 client/src/components/schedule/useSlotConflicts.js,31,${…}/admin/dispatch/slot-check

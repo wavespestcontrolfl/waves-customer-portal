@@ -131,7 +131,7 @@ const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
 const { activeTools, speakSlot } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
-const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
+const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES, agentName } = require('./relay-protocol');
 const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
 const { anthropicMaxTokens } = require('../llm/anthropic-wire');
 const { recordStreamedMessage } = require('../llm-dispatch-metrics');
@@ -758,7 +758,7 @@ const PRICE_LINE_CONTEXT = [
 ].join('\n');
 
 function agentDisplayName() {
-  return String(process.env.VOICE_AGENT_NAME || '').trim() || 'Sandy';
+  return agentName();
 }
 
 function contextPromptAddendum() {
@@ -2920,7 +2920,7 @@ class RelayConversation {
     if (!superseded && isTransferAvailable(toolCtx?.officeOpenNow())) {
       try {
         const { executeTool } = require('./relay-tools');
-        const out = await executeTool('transfer_to_office', { intent: require('./relay-transfer').RECOVERY_INTENT, summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
+        const out = await executeTool('transfer_to_office', { intent: require('./relay-transfer').RECOVERY_INTENT, summary: `${agentName()} had repeated system trouble on this call` }, toolCtx);
         this._recordTurn('tool', 'transfer_to_office');
         if (/Transferring the caller/.test(String(out))) return true;
       } catch (err) {

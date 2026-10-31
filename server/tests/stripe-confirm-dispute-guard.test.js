@@ -203,6 +203,21 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(Math.round(total * 100) - payment.surcharge_amount_cents).toBe(10700);
   });
 
+  test('a part payment already on the invoice stays in the bill: total = cash + credit + amount_paid, and amount_paid resets with the paid flip', async () => {
+    // $137 bill, $30 received by hand earlier: the card is asked for the $107 still owed (+ surcharge).
+    for (const row of [invoiceRow, lockedInvoiceRow]) { row.total = '137.00'; row.amount_paid = '30.00'; }
+    const StripeService = require('../services/stripe');
+    await StripeService.confirmInvoicePayment('inv_123', PI_ID);
+
+    const update = invoiceUpdate.mock.calls[0][0];
+    const payment = paymentsInsert.mock.calls[0][0];
+    expect(payment.amount).toBe(110.11);
+    expect(update).toMatchObject({ status: 'paid', amount_paid: 0 });
+    expect(update.total).toBe(140.11);
+    // The paid invoice reads as the whole bill plus the card fee, not just the last charge.
+    expect(Math.round(update.total * 100) - payment.surcharge_amount_cents).toBe(13700);
+  });
+
   test('an existing non-terminal row is updated through the terminal-status filter', async () => {
     existingPaymentRow = { id: 'pay_existing', status: 'processing' };
     const StripeService = require('../services/stripe');

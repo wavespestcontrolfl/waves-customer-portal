@@ -15,7 +15,6 @@
 
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const db = require('../../models/db');
-const logger = require('../logger');
 const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { techColumns, techStartPoint } = require('./tech-start-point');
 const { etParts, etDateString } = require('../../utils/datetime-et');
@@ -29,11 +28,10 @@ const { serviceFamilyPreference } = require('../auto-dispatch/service-category')
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
 const { bookGapAdmits, delayWithinGrace } = require('./book-arrival-grace');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
-const { occupiedRows, allocationKey } = require('./visit-capacity');
+const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
-const { customerWindowAdmits, pastCustomerLastStart } = require('./customer-windows');
-const { findSlideOffers } = require('./slide-offer');
+const { customerWindowAdmits } = require('./customer-windows');
 
 // customerWindowAdmits (scheduling/customer-windows.js) is the ONE grid /
 // day-end admission rule for customer-facing callers — the
@@ -122,6 +120,48 @@ async function preloadRouteLegs(travel, items, collect) {
   }
 }
 
+// GATE_PICKER_ROAD_BAND (owner 2026-10-28 cost plan, step 2: "Google only
+// for near-best hours"): each road day's route buys Google road times only for
+// its hours near its best. The hours are ranked first on what is already known
+// (the road times cached for them, else the model); those within BAND_MINUTES
+// of the route's least added drive, and always its BAND_MIN_HOURS best, are
+// driven on Google (three passes, as above). When Google then leaves an hour
+// outside the band ahead of every hour in it, that hour joins the band and is
+// driven too (at most BAND_ROUNDS purchases), so a day's best hour is never one
+// the band skipped. Every other hour keeps the model ("~"); an hour the model
+// refuses is not driven.
+const BAND_MINUTES = 5;
+const BAND_MIN_HOURS = 3;
+const BAND_ROUNDS = 3;
+
+const detourOf = (placement) => (Number.isFinite(placement.fit.detourMinutes) ? placement.fit.detourMinutes : Infinity);
+
+function nearBestStarts(placements) {
+  const ranked = [...placements].sort((a, b) => detourOf(a) - detourOf(b) || a.windowStart.localeCompare(b.windowStart));
+  const best = ranked.length ? detourOf(ranked[0]) : Infinity;
+  return new Set(ranked.filter((p, i) => i < BAND_MIN_HOURS || detourOf(p) <= best + BAND_MINUTES).map((p) => p.windowStart));
+}
+
+// Adds to `band` every hour outside it that now leads every hour in it; true
+// when one did.
+function widenBand(band, placements) {
+  const inside = Math.min(Infinity, ...placements.filter((p) => band.has(p.windowStart)).map(detourOf));
+  const ahead = placements.filter((p) => !band.has(p.windowStart) && detourOf(p) < inside);
+  ahead.forEach((p) => band.add(p.windowStart));
+  return ahead.length > 0;
+}
+
+async function preloadBandLegs(travel, routes) {
+  const bands = new Map(routes.map((route) => [route, nearBestStarts(enumerateArrivalPlacements(route.context, route.limits).placements)]));
+  let pending = routes;
+  for (let round = 1; pending.length; round++) {
+    await preloadRouteLegs(travel, pending,
+      (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs, startsOnly: bands.get(route) }));
+    if (round >= BAND_ROUNDS) return;
+    pending = pending.filter((route) => widenBand(bands.get(route), enumerateArrivalPlacements(route.context, route.limits).placements));
+  }
+}
+
 // A fit whose every leg came back from Google (with or without traffic).
 const GOOGLE_SOURCES = new Set(['google_traffic', 'google_road']);
 
@@ -137,8 +177,13 @@ function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
     route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
     latest_start_min: timeToMinutes(windowStart),
     ...(fit.travelSource ? { drive_source: GOOGLE_SOURCES.has(fit.travelSource) ? 'google' : 'estimate' } : {}),
+    // GATE_ROUTE_CHECK_LATE_DAYS: this day's existing stops already arrive late; the hour adds no new late stop.
+    ...(fit.dayAlreadyLate ? { day_already_late: true } : {}),
   };
 }
+
+// GATE_ROUTE_CHECK_LATE_DAYS, read at call time: the enumerator's `lateDays` option, or nothing (byte-identical).
+const lateDayLimits = () => (gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {});
 
 async function findArrivalWindowSlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
@@ -157,6 +202,10 @@ async function findArrivalWindowSlots(opts) {
   // driven on Google or re-checked (the source itself asks Google for
   // nothing until a route preloads through it).
   const roadCheck = opts.pickerRoadCheck === true;
+  // GATE_ROUTE_CHECK_LATE_DAYS (owner 2026-10-29): a day whose existing stops already break an arrival
+  // promise still lists the hours that add no new late stop, flagged day_already_late. Read at call time;
+  // every caller of this finder is a staff or technician list. Off: no limit added, byte-identical.
+  const lateLimits = lateDayLimits();
   const roads = require('./hint-road-times');
   const windows = roads.roadWindows();
   const roadTravel = roads.createPickerTravel({ spender: opts.roadSpender, budget: opts.pickerBudget });
@@ -199,14 +248,18 @@ async function findArrivalWindowSlots(opts) {
       if (context.target.memberServices && (await require('../technician-capabilities')
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES } });
+      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES, ...lateLimits } });
     }
   }
-  // The road days' routes are driven on Google (GATE_PICKER_ROAD_CHECK).
+  // The road days' routes are driven on Google (GATE_PICKER_ROAD_CHECK):
+  // every hour, or only each route's hours near its best (GATE_PICKER_ROAD_BAND).
   const onRoads = routes.filter((route) => roadCheck && roads.onRoads(route.date, today, windows));
   onRoads.forEach((route) => { route.context.travel = roadTravel; });
-  await preloadRouteLegs(roadTravel, onRoads,
-    (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs }));
+  if (onRoads.length && gateEnvValue('GATE_PICKER_ROAD_BAND')) await preloadBandLegs(roadTravel, onRoads);
+  else {
+    await preloadRouteLegs(roadTravel, onRoads,
+      (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs }));
+  }
   for (const route of routes) {
     const { date, tech, context, limits } = route;
     const candidates = enumerateArrivalPlacements(context, limits);
@@ -304,7 +357,9 @@ async function findCapacitySlots(opts) {
           // Same as the non-capacity path above.
           unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
-          service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' ') } }),
+          service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' '),
+          // Several services under one joined label name no single planning-minutes row (placedVisitMinutes).
+          ...(requestedServices.length > 1 ? { combined_services: true } : {}) } }),
       });
       if (!context) continue;
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
@@ -793,7 +848,7 @@ async function resolveCandidateExpectedMinutes({
 // findAvailableSlots' own branching stays in the loop that drives it, not
 // the row-shaping itself.
 function buildDayStops(services, {
-  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideMeta = null,
+  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
 }) {
   const filtered = services.filter((s) => {
     if (excludeSet.has(String(s.id))) return false;
@@ -819,16 +874,6 @@ function buildDayStops(services, {
   // are computed from each member's own raw span, same as the resolver's
   // own commit-side callers.
   const creditResolver = wantsExpectedMinutesCredit ? stopCreditResolver(filtered) : null;
-  // Grouped visits (several rows sharing visit_id) move as one unit on the
-  // canonical move paths — a slide must never split one, so every member of
-  // a multi-row visit is unslidable.
-  const visitMembers = new Map();
-  if (slideMeta) {
-    for (const s of filtered) {
-      const visitId = slideMeta.rows.get(String(s.id))?.visit_id;
-      if (visitId != null) visitMembers.set(visitId, (visitMembers.get(visitId) || 0) + 1);
-    }
-  }
   return occupiedRows(filtered)
     .map((s) => {
       // s.startMin/s.endMin are occupiedRows' own (allocation-expanded for
@@ -851,172 +896,9 @@ function buildDayStops(services, {
         ...(creditResolver ? {
           expectedMinutes: creditResolver(s, endMin - startMin),
         } : {}),
-        ...(slideMeta ? { movable: slidableStop(s, slideMeta, visitMembers) } : {}),
       };
     })
     .sort((a, b) => a.startMin - b.startMin);
-}
-
-// Whether a committed stop may be slid to another time the same day to make
-// room for a better-routed booking (GATE_SLOT_SLIDE_OFFER, owner rulings
-// 2026-10-22: any appointment type may slide). Never an estimate hold
-// (customer_id NULL — travel-gap.js isHoldStop's definition; a committed row
-// with a stray reservation_expires_at is committed), a completed visit, a
-// visit with ANY tracker evidence of being under way (rebooker's own
-// needsLifecycleRewind: status, track_state, or a lifecycle stamp — manual
-// En Route taps advance track_state without syncing status), a staff-locked
-// or excluded visit, or one member of a version-2 combined allocation
-// (visit-capacity.js allocationKey — its span is shared with its siblings).
-// A plain single-service reservation_service_mix (every estimate-booked
-// visit) is fine.
-const SLIDE_LIFECYCLE_COLUMNS = [
-  'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
-  'track_sms_sent_at', 'arrival_sms_sent_at',
-];
-// Movability facts for the slide shadow, read in their OWN query so the main
-// find-time read stays byte-identical at every gate setting and a missing
-// column or a failed read only switches the shadow off — never the
-// customer's real slots (pre-push audit P1). Also resolves rebooker's
-// predicate (lazy: rebooker.js pulls in the scheduling modules this file
-// sits beside) before any shadow time is counted. null = no shadow.
-async function loadSlideMeta(services) {
-  try {
-    const { needsLifecycleRewind } = require('../rebooker');
-    const ids = services.map((row) => row.id);
-    const rows = ids.length ? await db('scheduled_services').whereIn('id', ids).select(
-      'id', 'status', 'customer_id', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id',
-      ...SLIDE_LIFECYCLE_COLUMNS,
-    ) : [];
-    return { needsLifecycleRewind, rows: new Map(rows.map((row) => [String(row.id), row])) };
-  } catch (err) {
-    logger.warn(`[slot-slide] shadow off for this request: ${err.message}`);
-    return null;
-  }
-}
-
-// One stop's movability; any surprise reads as "not movable".
-function slidableStop(stop, slideMeta, visitMembers) {
-  try {
-    const meta = slideMeta.rows.get(String(stop.id));
-    if (!meta) return false;
-    return isSlidable({ ...stop, ...meta }, slideMeta.needsLifecycleRewind)
-      && !(visitMembers.get(meta.visit_id) > 1);
-  } catch {
-    return false;
-  }
-}
-
-function isSlidable(row, needsLifecycleRewind) {
-  return row.customer_id != null
-    && row.status !== 'completed'
-    && !needsLifecycleRewind(row)
-    && row.auto_dispatch_locked !== true
-    && row.auto_dispatch_excluded !== true
-    && allocationKey(row) == null;
-}
-
-// Shadow pass for slide offers (GATE_SLOT_SLIDE_OFFER phase 1): computes
-// what a slide could offer on this tech-day and LOGS it — ids and minutes
-// only, never names. Nothing it finds reaches the offer list. Fail-soft: a
-// throw here must never cost the customer their real slots. Bounded to the
-// next SLIDE_SHADOW_MAX_DAYS_OUT days and one SLIDE_SHADOW_REQUEST_EVALUATIONS
-// budget shared by every tech-day of the request (this runs synchronously on
-// the booking path; the estimate picker searches up to 90 days).
-const SLIDE_SHADOW_MAX_DAYS_OUT = 14;
-const SLIDE_SHADOW_REQUEST_EVALUATIONS = 60000;
-// It also sits behind the public, unauthenticated booking-availability route
-// (Codex security r2), so it is sampled: at most one request per
-// SLIDE_SHADOW_MIN_INTERVAL_MS process-wide, and a SLIDE_SHADOW_MAX_MS
-// wall-clock ceiling on that request's whole pass.
-const SLIDE_SHADOW_MIN_INTERVAL_MS = 10000;
-const SLIDE_SHADOW_MAX_MS = 50;
-let nextSlideShadowAt = 0;
-function claimSlideShadowSample(now = Date.now()) {
-  if (now < nextSlideShadowAt) return false;
-  nextSlideShadowAt = now + SLIDE_SHADOW_MIN_INTERVAL_MS;
-  return true;
-}
-const overlapsOnly = (a, b) => a.startMin < b.endMin && b.startMin < a.endMin;
-
-// Resolves this request's slide-shadow context, or null for no shadow. A
-// caller OPTS IN by passing `slideNewStartAllowed(date, startMin)` — its own
-// "would I show this start?" rule (daypart, notice window, lead time, zone
-// funnel). Only the estimate picker and /book self-serve do; the voice agent,
-// staff tools and the admin slot-debug view never claim the process-wide
-// sample. Also requires customerFacing packed-ends, the gate, and a free
-// sample. One helper so findAvailableSlots carries no shadow branching.
-async function resolveSlideShadow(opts, wantsPackedEnds, services) {
-  if (!(typeof opts.slideNewStartAllowed === 'function' && opts.customerFacing === true && wantsPackedEnds
-    && gateEnvValue('GATE_SLOT_SLIDE_OFFER') && claimSlideShadowSample())) return null;
-  return loadSlideMeta(services);
-}
-// True when another technician has committed work on `date`. The shadow
-// scores one-technician days only: the callers' collision checks are
-// tech-blind, so on a shared day a slide's fit depends on the other route
-// too, which this phase does not model (one active technician today).
-function otherTechWorksOn(date, tech, params) {
-  return params.services.some((s) => toDateStr(s.scheduled_date) === date
-    && s.technician_id != null && s.technician_id !== tech.id && !params.excludeSet.has(String(s.id)));
-}
-
-function logSlideShadow(date, tech, dayStops, params) {
-  const daysOut = (new Date(`${date}T12:00:00Z`) - new Date(`${params.geo.todayEt}T12:00:00Z`)) / 86400000;
-  const { slideBudget } = params;
-  if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT || slideBudget.remaining <= 0 || slideBudget.spentMs >= SLIDE_SHADOW_MAX_MS) return;
-  if (otherTechWorksOn(date, tech, params)) return;
-  const { geo } = params;
-  const t0 = Date.now();
-  // The 50 ms counts only time spent HERE, not the request's normal slot
-  // work between tech-days.
-  slideBudget.deadline = t0 + (SLIDE_SHADOW_MAX_MS - slideBudget.spentMs);
-  try {
-    const home = params.techStartPoints ? techStartPoint(tech) : HQ;
-    const result = findSlideOffers({
-      stops: dayStops,
-      newStop: { ...params.geo.newStop, expectedMinutes: params.geo.candidateExpectedMinutes },
-      durationMinutes: params.durationMinutes,
-      home,
-      dayOpen: params.dayOpen,
-      dayClose: params.dayClose,
-      // The same floors the plain candidates honour: nothing changed may
-      // start before "now + lead" today; the new stop also keeps the
-      // caller's earliest-start preference.
-      startFloorMin: date === geo.todayEt ? geo.todayFloorMin : 0,
-      newStartFloorMin: startFloorFor(date, geo.earliestStartMin, geo.startFloorByDate),
-      budget: slideBudget,
-      // Same pair rule the customer offers use: travel gap when its gate is
-      // on, plain overlap when off.
-      pairViolates: travelGapEnabled() ? undefined : overlapsOnly,
-      // Off-hour stops (assessments, re-services) skip only the hour-grid
-      // test — the last-start rule still applies.
-      admits: ({ startMin, endMin, isNew, offHour }) => {
-        // The caller's own "would I show this start?" rule (daypart, notice
-        // window, zone-day funnel) — callers own those filters, find-time
-        // doesn't copy them.
-        if (isNew && !params.slideNewStartAllowed(date, startMin)) return false;
-        return isNew || !offHour
-          ? customerWindowAdmits({ startMin, endMin })
-          : !pastCustomerLastStart(startMin);
-      },
-    });
-    if (!result.offers.length) return;
-    const best = result.offers[0];
-    logger.info(`[slot-slide] shadow ${JSON.stringify({
-      date,
-      techId: tech.id,
-      plainStart: minutesToTime(result.baseline.startMin),
-      slideStart: minutesToTime(best.startMin),
-      savedMinutes: best.savedMinutes,
-      savedMiles: Math.round(best.savedMiles * 10) / 10,
-      slides: best.slides.map((x) => ({ id: x.id, from: minutesToTime(x.fromStartMin), to: minutesToTime(x.toStartMin) })),
-      offers: result.offers.length,
-      ...(result.truncated ? { truncated: true } : {}),
-    })}`);
-  } catch (err) {
-    logger.warn(`[slot-slide] shadow failed: ${err.message}`);
-  } finally {
-    slideBudget.spentMs += Date.now() - t0;
-  }
 }
 
 // Adapts a dayStops row ({startMin, endMin, expectedMinutes?}) to the
@@ -1224,9 +1106,8 @@ function candidatesForDay(date, tech, params) {
     durationMinutes, dayOpen, dayClose,
   } = params;
   const dayStops = buildDayStops(services, {
-    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideMeta: params.slideMeta,
+    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
   });
-  if (params.slideShadow && dayStops.length) logSlideShadow(date, tech, dayStops, params);
   // Build virtual stop list: HQ ... stops ... HQ
   // "Stops" include timing. For gaps we evaluate between consecutive anchors.
   // HQ is this tech's start point for an opted-in staff caller: home under
@@ -1531,10 +1412,6 @@ async function findAvailableSlots(opts) {
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
     techStartPoints: opts.techStartPoints === true,
   });
-  // Slide offers (owner request 2026-10-22), THIS legacy path only (capacity
-  // mode returned above), shadow-logged and sampled in phase 1. Kill
-  // switch: unset GATE_SLOT_SLIDE_OFFER.
-  const slideMeta = await resolveSlideShadow(opts, wantsPackedEnds, services);
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
   const candidates = [];
@@ -1566,10 +1443,6 @@ async function findAvailableSlots(opts) {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
-    slideShadow: slideMeta != null,
-    slideMeta,
-    slideNewStartAllowed: opts.slideNewStartAllowed,
-    slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS, spentMs: 0, deadline: null },
   };
   // The days actually searched: open (no owner blackout) with at least one
   // technician working. Auto-dispatch's audit lists these, so a closed day or
@@ -1600,8 +1473,6 @@ async function findAvailableSlots(opts) {
 
 module.exports = {
   findAvailableSlots,
-  // Test seam: reset the process-wide slide-shadow sampling clock.
-  _resetSlideShadowSample: () => { nextSlideShadowAt = 0; },
   GAP_LEGS,
   // Service-day bounds (ET hours) — the one place they are defined; other
   // offer surfaces (rain-out same-day presets) clamp to these.
@@ -1621,5 +1492,7 @@ module.exports = {
     // EXACT same entity shape the offer side does, never a hand-rolled one.
     expandRowsWithCredit,
     capacityNeighbourEntity,
+    // GATE_PICKER_ROAD_BAND: the road days' Google purchase, near each route's best.
+    preloadBandLegs,
   },
 };

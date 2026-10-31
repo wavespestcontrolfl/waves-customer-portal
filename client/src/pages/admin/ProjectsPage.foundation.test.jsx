@@ -5,7 +5,8 @@ import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../hooks/useIsMobile", () => ({ default: () => false }));
+const viewport = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../hooks/useIsMobile", () => ({ default: () => viewport.mobile }));
 vi.mock("../../components/tech/CreateProjectModal", () => ({ default: ({ onClose }) => <div role="dialog" aria-label="Create report"><button onClick={onClose}>Cancel creation</button></div> }));
 vi.mock("../../components/tech/WdoIntelligenceBar", () => ({ default: () => <div>WDO intelligence fixture</div> }));
 vi.mock("../../components/tech/WdoSignaturePad", () => ({ default: () => <div>WDO signature fixture</div> }));
@@ -372,5 +373,50 @@ describe("Project photo caption dirty signal", () => {
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith("photo-1", true));
     view.unmount();
     expect(onDirtyChange).toHaveBeenLastCalledWith("photo-1", false);
+  });
+});
+
+// Operations audit OP-05: a deep link opens its report by id even when the
+// capped directory lists do not hold it, and a missing one says so.
+describe("Reports deep link outside the loaded lists", () => {
+  function listWithout(detailFixture) {
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const path = String(url).replace(/^\/api/, "");
+      if (path.startsWith("/admin/projects?")) return response({ projects: [] });
+      return detailFixture(path, url, options);
+    }));
+  }
+
+  it("opens a report the lists did not return", async () => {
+    listWithout((_path, url, options) => response(fixtureFor(url, options)));
+    mount();
+    expect(await screen.findByText("Customer report preview")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith("/api/admin/projects/project-1", expect.anything());
+    expect(screen.getByText("No reports match these filters.")).toBeInTheDocument();
+  });
+
+  it("says the report is not found instead of showing only the list", async () => {
+    listWithout((path, url, options) => (path.startsWith("/admin/projects/missing-1")
+      ? response({ error: "Project not found" }, 404)
+      : response(fixtureFor(url, options))));
+    mount("/admin/projects?projectId=missing-1");
+    expect(await screen.findByText("Project not found")).toBeInTheDocument();
+  });
+
+  it("keeps a way back to the list on a phone when the deep-linked report is missing", async () => {
+    viewport.mobile = true;
+    try {
+      listWithout((path, url, options) => (path.startsWith("/admin/projects/missing-1")
+        ? response({ error: "Project not found" }, 404)
+        : response(fixtureFor(url, options))));
+      mount("/admin/projects?projectId=missing-1");
+      expect(await screen.findByText("Project not found")).toBeInTheDocument();
+      expect(screen.queryByText("No reports match these filters.")).not.toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      expect(await screen.findByText("No reports match these filters.")).toBeVisible();
+      expect(screen.queryByText("Project not found")).not.toBeInTheDocument();
+    } finally {
+      viewport.mobile = false;
+    }
   });
 });

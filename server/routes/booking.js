@@ -205,6 +205,14 @@ function bookInsertionOffersLive() {
   return bookCapacityCommitLive() && capacityEnabled();
 }
 
+// Whether /book's offer-side occupancy mirror keeps only rows that are unassigned or on the
+// slot's own technician: capacity mode always (the gate off or on), hour mode when
+// GATE_MULTI_TECH_CONFIRM is on (occupancy.js techScopedConfirmActive, owner 2026-10-30).
+// Named rather than inline so the offer builder's own branching count stays flat.
+function offerScopedByTechnician() {
+  return capacityEnabled() || multiTechConfirmLive();
+}
+
 // Canonical reader for whether /book offers (and their commit) run under the
 // online-booking arrival grace (owner-approved 2026-09-29,
 // GATE_BOOK_ARRIVAL_GRACE): the gate AND mid-route insertion live — grace is
@@ -416,6 +424,45 @@ function reserviceCandidateOutranks(candidate, existing) {
   const existingEmpty = (existing.stops_that_day || 0) === 0;
   if (candidateEmpty !== existingEmpty) return existingEmpty;
   return reserviceAdjustedScore(candidate) < reserviceAdjustedScore(existing);
+}
+
+// Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): the offer ranking for
+// `serviceLines` (capability categories), or null (today's offers). A plain
+// function so the gate/empty/failure branches stay out of buildBookingAvailability.
+// Fail-open: an unreadable map is logged and offers what today's code offers.
+// `place` ({ lat, lng }: the address being booked) lets GATE_TERRITORY_ROUTING pick the territory's technician.
+async function loadLineOfferRanking(serviceLines, place = null) {
+  if (!Array.isArray(serviceLines) || !serviceLines.length) return null;
+  try {
+    return await require('../services/scheduling/line-technician').lineOfferRanking(db, { lines: serviceLines, place });
+  } catch (err) {
+    logger.warn(`[booking] line map offer ranking unavailable: ${err.message}`);
+    return null;
+  }
+}
+
+// The find-time slots a line ranking keeps, lower rank first. Array#sort is stable,
+// so find-time's score order holds inside one rank. Without a ranking: `slots` itself.
+function orderByLineRank(slots, ranking) {
+  if (!ranking) return slots;
+  return slots
+    .map((slot) => ({ slot, rank: ranking.rankOf(slot.technician && slot.technician.id) }))
+    .filter((entry) => entry.rank !== null)
+    .sort((a, b) => a.rank - b.rank)
+    .map((entry) => entry.slot);
+}
+
+// A slot's line rank: 0 when no ranking is in play (every claim then ties, as today).
+function lineRankOf(ranking, slot) {
+  return ranking ? ranking.rankOf(slot.technician.id) : 0;
+}
+
+// Whether `candidate` (line rank `rank`) takes a date+start `existing` (rank
+// `heldRank`) already holds: a lower line rank always, a higher one never, a
+// tie by the re-service profile's own rule (first claim keeps it otherwise).
+function claimDisplaces(candidate, existing, rank, heldRank) {
+  if (rank !== heldRank) return rank < heldRank;
+  return reserviceCandidateOutranks(candidate, existing);
 }
 
 // Whether the re-service rank profile actually applies (the gate AND the
@@ -1571,6 +1618,48 @@ function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, 
   });
 }
 
+// Route check for the customer lists (GATE_CUSTOMER_ROUTE_CHECK, owner
+// 2026-10-29; services/scheduling/customer-route-check.js). A `surface`
+// ('book' | 'reschedule' | 'reservice' | 'inspection' | 'commercial_first_visit'
+// | 'voice') opts the caller in; with the gate off or no surface this returns
+// null and the module is never loaded. The target is the customer's pin as a
+// new stop, with the visit being moved (excludeServiceIds) left out of the
+// day. The voice agent is never filtered: its check runs detached, in shadow
+// only, after the answer is built (its tool call times out at 3 seconds).
+function routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today }) {
+  if (!surface) return null;
+  try {
+    const routeCheck = require('../services/scheduling/customer-route-check');
+    const mode = routeCheck.customerRouteCheckMode();
+    if (mode === 'off') return null;
+    return {
+      routeCheck, surface, voice: surface === 'voice', today,
+      mode: surface === 'voice' ? 'shadow' : mode,
+      durationMinutes: duration,
+      target: { prospective: { lat, lng, estimated_duration_minutes: duration }, excludeServiceIds },
+    };
+  } catch (err) {
+    logger.warn(`[customer-route-check] unavailable: ${err.message}`);
+    return null;
+  }
+}
+
+async function applyRouteCheck(plan, candidates) {
+  if (!plan || plan.voice) return candidates;
+  try {
+    return (await plan.routeCheck.filterOfferedSlots({ ...plan, slots: candidates })).slots || candidates;
+  } catch (err) {
+    logger.warn(`[customer-route-check] check failed, serving the unfiltered list: ${err.message}`);
+    return candidates;
+  }
+}
+
+function detachVoiceRouteCheck(plan, candidates) {
+  if (!plan || !plan.voice) return;
+  Promise.resolve().then(() => plan.routeCheck.filterOfferedSlots({ ...plan, slots: candidates }))
+    .catch((err) => logger.warn(`[customer-route-check] voice shadow check failed: ${err.message}`));
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the whole-hour rules, then returns the
 // curated best-4 (best-3 under the re-service profile — see rankProfile
@@ -1591,8 +1680,15 @@ function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, 
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace }) {
+// `serviceLines`: opt-in capability categories of the service being booked
+// (GATE_SERVICE_LINE_MAP=live only; see loadLineOfferRanking). A mapped line
+// keeps only its home and gap technician's slots, home first at a start both
+// have. No geometry changes: grace, packing and signatures are untouched.
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel, serviceLines }) {
   config = applySchedulingPolicy(config);
+  // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
+  // caller names `serviceLines`, the gate is live and a line has a technician set.
+  const lineRanking = await loadLineOfferRanking(serviceLines, { lat, lng });
   // The signed-offer policy tag for this build (minted inside addCandidate
   // below; createSelfBooking verifies with the same mapping). An offer built
   // with mid-route insertion carries it, so a GATE_BOOK_CAPACITY_COMMIT /
@@ -1700,6 +1796,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     bookArrivalGrace: graceBuild,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
+    // `false` = the model-only road clock, no paid road times (GATE_ASSISTANT_ROUTE_TIMES alone
+    // passes it, through availabilityForPin); undefined = today's allowance for every other caller.
+    providerTravel,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
     // against neighbouring stops; 0 when the gate is off.
     bufferMinutes: customerFacingBufferMinutes(),
@@ -1719,14 +1818,6 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // phone bookings follow the full 8am-6pm business-hours shift, matching
     // call-recording-processor.js's own sanity bound (Codex r3 P0 on #4663).
     customerFacing: selfServeNotice,
-    // Slide shadow (GATE_SLOT_SLIDE_OFFER): the same daypart + self-serve
-    // notice filters this function applies to find-time's results below,
-    // so a logged slide is one this request could actually show. The
-    slideNewStartAllowed: (date, startMin) => {
-      const startTime = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
-      return inTimeOfDay(startTime, timeOfDay)
-        && !(selfServeNotice && violatesSelfServeNotice({ date, startTime }, today));
-    },
     // Waves works weekends (Sat AND Sun) — the estimate slot flow already
     // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
     // find-time's legacy default drops Sundays, which silently hid every Sunday
@@ -1809,9 +1900,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // (e.g. a packed day beating an empty one at the same start) displaces it,
   // so the empty-day penalty applies before this dedupe, not after.
   const keepsFirstClaim = (existing) => Boolean(existing) && !reserviceRankActive;
-  const claimSlot = (key, candidate) => {
+  // Line map LIVE: a gap technician's slot never displaces the home technician's
+  // at a date+start both have (rank 0 everywhere when the map is not in play).
+  const claimedLineRank = new Map();
+  const claimSlot = (key, candidate, lineRank = 0) => {
     const existing = candidateMap.get(key);
-    if (existing && !reserviceCandidateOutranks(candidate, existing)) return;
+    if (existing && !claimDisplaces(candidate, existing, lineRank, claimedLineRank.get(key))) return;
+    claimedLineRank.set(key, lineRank);
     candidateMap.set(key, candidate);
   };
 
@@ -1846,7 +1941,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // offered (offer/commit parity).
     const slotGrace = bookSlotGrace(graceBuild, slot);
     if (occupiedByDate) {
-      const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !capacityEnabled()
+      // Technician scope of the mirror: capacity mode always scopes the offer (today's
+      // behavior, gate off or on); GATE_MULTI_TECH_CONFIRM alone (techScopedConfirmActive,
+      // occupancy.js) now scopes it in hour mode too, so two technicians can hold the same
+      // hour. The confirm probes below scope on the gate alone, so an offered slot commits.
+      const scopeByTech = offerScopedByTechnician();
+      const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !scopeByTech
         || row.technician_id == null || row.technician_id === slot.technician.id);
       if (dayOccupied && dayOccupied.some((b) => startMin < b.endMin && endMin > b.startMin)) return;
       // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): the commit gate's
@@ -1918,13 +2018,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       endTime24: fmt(endMin),
       start: minToTime12(startMin),
       end: minToTime12(endMin),
-    });
+    }, lineRankOf(lineRanking, slot));
   };
 
   // A graced build never offers a slot whose simulated arrival delay is past
   // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
   // confirm. Ungraced builds pass every slot through untouched.
-  const offerSlots = graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []);
+  const offerSlots = orderByLineRank(graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []), lineRanking);
   for (const slot of offerSlots) {
     if (capacityEnabled()) {
       // Capacity evaluates each start against the whole route and live blocks.
@@ -1983,7 +2083,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       }
     }
   }
-  const candidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
+  const stampedCandidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
+  // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
+  // off or no surface named, and nothing below runs.
+  const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today });
+  const candidates = await applyRouteCheck(routeCheck, stampedCandidates);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible,
@@ -2054,7 +2158,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     for (const s of curatedSlots) stampRain(s, s.date);
   }
 
-  return {
+  const response = {
     // stops_that_day is internal ranking state (reserviceAdjustedScore) —
     // strip it here so every caller's payload shape stays byte-for-byte
     // identical to before this field existed.
@@ -2067,6 +2171,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     total_feasible: totalFeasible,
     ...rankProfileFields,
   };
+  detachVoiceRouteCheck(routeCheck, stampedCandidates);
+  return response;
 }
 
 // The /book funnel's default offer window — anchored to ET calendar days so it
@@ -2080,6 +2186,19 @@ function bookingOfferWindow(config, today) {
   };
 }
 
+// The capability categories ('general', 'lawn', ...) a /book funnel serviceKey
+// ('pest_control', 'pest_control+lawn_care') covers, unique; null unless the line
+// map is LIVE and the key names a line.
+function funnelServiceLines(serviceKey) {
+  const { lineMapLive } = require('../services/scheduling/line-technician');
+  if (!lineMapLive()) return null;
+  const { categoryForCatalogCategory } = require('../services/auto-dispatch/service-category');
+  const lines = normalizeBookingServiceKeys(serviceKey)
+    .map((key) => categoryForCatalogCategory(BOOKING_FUNNEL_SERVICE_CATEGORIES[key]))
+    .filter(Boolean);
+  return lines.length ? [...new Set(lines)].sort() : null;
+}
+
 // The /book funnel's offer builder — GET /availability, POST /find-slots and
 // the texting AI's OPEN TIMES (availabilityForExistingCustomer) all offer
 // through it, so an offer and its later createSelfBooking commit come from
@@ -2091,7 +2210,14 @@ function bookingOfferWindow(config, today) {
 // tag either way, so a gate flip between this mint and /confirm can't be
 // redeemed under the wrong policy.
 function buildFunnelAvailability(args) {
-  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
+  // Service-line map LIVE: the funnel service's lines, so /availability, /find-slots, the
+  // capture-intent revalidation and both pin readers offer (and re-check) one technician set.
+  // Gate off or shadow: nothing named, no query.
+  const serviceLines = funnelServiceLines(args.serviceKey);
+  // `appendOnly` (the portal assistant's availabilityForPin call alone): its commit, confirmBooking, stores an
+  // unassigned visit with no certified route order, so a mid-route insertion offer could not be honored.
+  // Undefined for every other caller: the gate's value, as before.
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() && !args.appendOnly, ...(serviceLines ? { serviceLines } : {}) });
 }
 
 // The customer a /book offer may be made to, or null. The ONE eligibility
@@ -2142,7 +2268,7 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 // (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
 // so a text-offered time and the website's come from one finder. Null when
 // /book is off, the service is no funnel service or the pin is missing.
-async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
+async function availabilityForPin({ lat, lng, serviceKey, internal = false, providerTravel, appendOnly }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
   const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
@@ -2154,6 +2280,8 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
   const today = new Date();
   const { minDate, defaultTo } = bookingOfferWindow(config, today);
   return buildFunnelAvailability({
+    // Customer-facing text offers only; a staff-side pick (`internal`) is never filtered.
+    ...(internal ? {} : { surface: 'book' }),
     lat: pin[0], lng: pin[1], duration: resolveBookingDuration(null, config, funnelKey),
     rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
     // The /book page's own first request always sends expand=open
@@ -2164,6 +2292,8 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
     // no-op while GATE_BOOK_ARRIVAL_GRACE is off): the texting AI offers
     // exactly what /book would show this customer, graced slots included.
     bookArrivalGrace: true,
+    providerTravel,
+    appendOnly,
   });
 }
 
@@ -2226,6 +2356,9 @@ router.get('/availability', async (req, res, next) => {
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     const availability = await buildFunnelAvailability({
+      // Offer list: the route check applies (GATE_CUSTOMER_ROUTE_CHECK). /confirm and the
+      // capture-intent revalidation rebuild without a surface and see the unfiltered list.
+      surface: 'book',
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
       // "expand=open" widens otherwise-empty days into full hourly windows — used
       // when the customer browses a specific date / "Find more dates".
@@ -2334,6 +2467,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     const availability = await buildFunnelAvailability({
+      surface: 'book',
       lat: resolvedLat, lng: resolvedLng, duration,
       rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
       timeOfDay: when.timeOfDay,
@@ -2416,6 +2550,17 @@ async function preloadBookingLocation(customer) {
 async function customerBookingLocation(customer) {
   const location = storedBookingPin(customer) || await preloadBookingLocation(customer);
   return storedBookingPin({ latitude: location?.lat, longitude: location?.lng });
+}
+
+// The placement source for a self-booked visit (GATE_ROUTE_CHECK_BOOKING_SAVES):
+// /book itself is 'self_booking'; the internal callers pass callbackVisit: the
+// re-service page ('reservice'), the commercial first-visit page
+// ('commercial_first_visit', isCallback false with an estimateGuard) and the
+// inspection page ('inspection', isCallback false).
+function bookingPlacementSource(callbackVisit) {
+  if (!callbackVisit) return 'self_booking';
+  if (callbackVisit.isCallback !== false) return 'reservice';
+  return callbackVisit.estimateGuard ? 'commercial_first_visit' : 'inspection';
 }
 
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
@@ -4202,16 +4347,16 @@ async function createSelfBooking(payload = {}) {
             .whereRaw('scheduled_services.reservation_expires_at > NOW()');
         });
       });
-      // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark):
-      // the legs above are OR'd and tech-blind past the tech's own route — a
+      // Second technician (GATE_MULTI_TECH_CONFIRM, dark; hour mode or capacity
+      // mode alike): the legs above are OR'd and tech-blind past the tech's own route — a
       // zone/city leg matches ANOTHER technician's overlapping row, and a
       // hold leg matches a hold stamped for another technician — even though
       // the offer (buildBookingAvailability's occupancy mirror) only counts
       // rows that are unassigned or on the slot's own technician. AND the
       // same predicate onto the whole probe so a slot offered on technician
       // B's day is not refused for technician A's stop. Unassigned rows still
-      // block everyone. Off (or no technician, or capacity off): untouched.
-      if (technician_id && multiTechConfirmLive() && capacityEnabled()) {
+      // block everyone. Off (or no technician): untouched.
+      if (technician_id && multiTechConfirmLive()) {
         conflictQuery.where((q) => {
           q.whereNull('scheduled_services.technician_id')
             .orWhere('scheduled_services.technician_id', technician_id);
@@ -4445,6 +4590,15 @@ async function createSelfBooking(payload = {}) {
       if (capacityCommitFit) {
         const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
         await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
+      } else {
+        // GATE_ROUTE_CHECK_BOOKING_SAVES: capacity did not number this visit
+        // (capacity mode is off), so the dispatcher's placement does, in this
+        // same transaction. The primary visit only: package visit 2 is placed
+        // by package-followup-booking. Nothing below changes this row's date,
+        // window or technician. Gate off: touches nothing. Never throws.
+        await require('../services/scheduling/staff-save-route-check').placeBookingSavedVisit(trx, {
+          serviceId: scheduledRow.id, source: bookingPlacementSource(callbackVisit),
+        });
       }
       // Two-treatment package (cockroach / flea / bed bug): visit 2 books with
       // visit 1 when the row carries the catalog identity (internal callers'
@@ -5514,6 +5668,9 @@ async function createSelfBooking(payload = {}) {
                 lat: bookingLat,
                 lng: bookingLng,
               },
+              // The parent's own technician (GATE_MULTI_TECH_CONFIRM scopes the probe to that
+              // route plus unassigned rows; gate off or unassigned = tech-blind, as before).
+              technicianId: seriesParentRow.technician_id || null,
             });
             if (extensionClashes.length === 0) {
               await trx('scheduled_services')
@@ -7131,6 +7288,7 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 module.exports = router;
 module.exports.preferredTimePreParserGuard = preferredTimePreParserGuard;
 module.exports._internals = {
+  bookingPlacementSource,
   assertContactLinkedHandoffProvisional,
   suppressRecoveryIntents,
   captureIpKey,
@@ -7158,9 +7316,12 @@ module.exports._internals = {
   resolveOfferCoords,
   customerBookingLocation,
   buildBookingAvailability,
+  buildFunnelAvailability,
+  funnelServiceLines,
   availabilityForExistingCustomer,
   availabilityForPin,
   bookableOfferCustomer,
+  storedBookingPin,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,

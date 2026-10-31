@@ -11,6 +11,15 @@ export function isNativeApp() {
   try { return Capacitor.isNativePlatform(); } catch { return false; }
 }
 
+/**
+ * True inside the Waves Admin iPhone app (ios/WavesPay), which shows the staff
+ * pages in a web view and takes Tap to Pay itself. It is not a Capacitor
+ * shell, so isNativeApp() stays false there.
+ */
+export function isWavesAdminApp() {
+  try { return Boolean(window.webkit?.messageHandlers?.wavesAdmin); } catch { return false; }
+}
+
 /** The Capacitor platform: 'ios' | 'android' | 'web'. */
 export function nativePlatform() {
   try { return Capacitor.getPlatform(); } catch { return 'web'; }

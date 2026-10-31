@@ -16,7 +16,7 @@
 // never saves. No onPick = display only (the drag-and-drop confirm).
 
 import { useEffect, useRef, useState } from 'react';
-import { fmtDay, fmtHour } from './AvailabilityStrip';
+import { fmtDay, fmtHour, EstimateLegend } from './AvailabilityStrip';
 
 const LIST_SIZE = 15;
 // A day nobody could check: a far day whose lookup failed ('unchecked'), or
@@ -105,6 +105,13 @@ const rowStyle = ({ withDate, far, current, takeable }) => ({
   background: current ? '#18181B' : (far ? '#FFFBEB' : '#FFFFFF'),
   color: current ? '#FFFFFF' : '#18181B', cursor: takeable ? 'pointer' : 'default',
 });
+// The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small status
+// tag like "unverified", never a sentence about the hour.
+export const ALREADY_LATE_TAG = 'already late';
+const tagStyle = (current) => ({
+  display: 'inline-block', marginLeft: 6, padding: '0 6px', borderRadius: 999, fontSize: 12, fontWeight: 500, lineHeight: '18px',
+  border: `0.5px solid ${current ? '#FFFFFF' : '#D4D4D8'}`, color: current ? '#FFFFFF' : '#854D0E', background: current ? 'transparent' : '#FEFCE8',
+});
 const subInk = (current) => ({ display: 'block', fontSize: 14, fontWeight: 400, color: current ? '#FFFFFF' : '#52525B' });
 
 export default function OpenTimesBox({
@@ -178,7 +185,10 @@ export default function OpenTimesBox({
       )}
       {focusDate && (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-          <b style={{ fontSize: 15 }}>{fmtDay(focusDate)}</b>
+          <b style={{ fontSize: 15 }}>
+            {fmtDay(focusDate)}
+            {days.find((d) => d.date === focusDate)?.alreadyLate ? <span data-testid="already-late-tag" style={tagStyle(false)}>{ALREADY_LATE_TAG}</span> : null}
+          </b>
           <button type="button" style={chipBtn(false)} onClick={() => setFocusDate(null)}>All dates</button>
         </div>
       )}
@@ -200,6 +210,7 @@ export default function OpenTimesBox({
               >
                 <span style={{ fontSize: 16, fontWeight: 600 }}>
                   {focusDate ? fmtHour(hour.start) : fmtDay(hour.date)}
+                  {hour.dayAlreadyLate && !focusDate ? <span data-testid="already-late-tag" style={tagStyle(current)}>{ALREADY_LATE_TAG}</span> : null}
                   {hour.technicianName ? <span style={subInk(current)}>{hour.technicianName}</span> : null}
                 </span>
                 {!focusDate && <span style={{ fontSize: 17, fontWeight: 600 }}>{fmtHour(hour.start)}</span>}
@@ -215,7 +226,7 @@ export default function OpenTimesBox({
           </div>
         )}
       </div>
-      {rows.some(isEstimate) ? <div style={{ color: '#52525B' }}>~ = straight-line estimate, not a road time.</div> : null}
+      {rows.some(isEstimate) ? <EstimateLegend roadLimit={availability.roadLimit} /> : null}
     </div>
   );
 }

@@ -8,7 +8,7 @@ import {
   ShieldCheck,
   Trees,
 } from "lucide-react";
-import { classifyEstimate } from "./EstimatePage";
+import { classifyEstimateForPipeline } from "./EstimatePage";
 import { Button, Card } from "../../components/ui";
 import { etParts } from "../../lib/timezone";
 
@@ -484,7 +484,8 @@ export default function PipelineAnalytics({
     );
     const classified = estimates.map((e) => ({
       ...e,
-      _class: e._class || classifyEstimate(e),
+      // The list's own classifier, so "ready to send" here matches the rows below.
+      _class: e._class || classifyEstimateForPipeline(e),
     }));
 
     const total = inRange.length;

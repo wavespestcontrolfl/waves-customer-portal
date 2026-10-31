@@ -163,7 +163,7 @@ describe('not "not my number": every caller_id_disclaimed consumer ignores the n
 
 describe('schema 1.28.0, normalizer, flat view, prompt, replay watch list', () => {
   test('version, enum and both property definitions, additive and never required', () => {
-    expect(SCHEMA_VERSION).toBe('1.28.0');
+    expect(SCHEMA_VERSION).toBe('1.29.0');
     expect(persistedSchema.properties.meta.properties.schema_version.enum).toContain('1.28.0');
     for (const schema of [modelOutputSchema, persistedSchema]) {
       const caller = schema.properties.caller;
@@ -192,7 +192,7 @@ describe('schema 1.28.0, normalizer, flat view, prompt, replay watch list', () =
   });
 
   test('prompt v30 carries the rule and allows both flags on a shared line that cannot get texts (codex r10 P1)', () => {
-    expect(PROMPT_VERSION).toBe('v31');
+    expect(PROMPT_VERSION).toBe('v33');
     const prompt = buildExtractionPrompt('', '', '');
     expect(prompt).toMatch(/- ani_cannot_text: set true whenever the caller says the line they are calling from cannot receive text messages/);
     expect(prompt).toMatch(/WITH or WITHOUT naming another number to text/);

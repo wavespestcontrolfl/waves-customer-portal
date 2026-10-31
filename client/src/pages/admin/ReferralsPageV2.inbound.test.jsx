@@ -3,6 +3,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
+import { MemoryRouter } from "react-router-dom";
 import ReferralsPageV2 from "./ReferralsPageV2";
 
 const FRIEND = "00000000-0000-4000-8000-000000000021";
@@ -47,8 +48,11 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const confirms = () => fetch.mock.calls.filter(([url]) => url.endsWith("/confirm"));
 
+const renderPage = (entry = "/admin/referrals") =>
+  render(<MemoryRouter initialEntries={[entry]}><ReferralsPageV2 /></MemoryRouter>);
+
 async function openQueue(label) {
-  render(<ReferralsPageV2 />);
+  renderPage();
   fireEvent.click(await screen.findByRole("button", { name: label }));
 }
 
@@ -61,7 +65,7 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
 
     fireEvent.click(screen.getByRole("button", { name: "Choose" }));
     expect(confirms()).toHaveLength(0);
-    expect(screen.getByText(/Confirm Fixture Referrer as the referrer\. Both accounts get the \$25 credit now\. No reward text or email goes out\. A referrer's 3rd, 5th or 10th referral also sends the usual milestone text\./)).toBeInTheDocument();
+    expect(screen.getByText(/Confirm Fixture Referrer as the referrer\. Both accounts get the \$25 credit now\. The referrer gets one thank-you email at the next 9:00 AM ET, and no text\. A referrer's 3rd, 5th or 10th referral also sends the usual milestone text\./)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(await screen.findByText("Referral confirmed. $25 credited to both accounts.")).toBeInTheDocument();
@@ -76,7 +80,7 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
     await openQueue(/Queue \(1\)/);
     expect(screen.getByText(/no completed plan visit yet/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Choose" }));
-    expect(screen.getByText(/Both accounts get the \$25 credit at Fixture's next completed plan visit, with the usual reward text\./)).toBeInTheDocument();
+    expect(screen.getByText(/Both accounts get the \$25 credit at Fixture's next completed plan visit\. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text\./)).toBeInTheDocument();
   });
 
   it("a referrer found by search is named in the confirm line and posted by id", async () => {
@@ -97,6 +101,17 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
     fireEvent.click(screen.getByRole("button", { name: "Choose" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(await screen.findByText("Error: A referral already names this customer")).toBeInTheDocument();
+  });
+
+  it("opens the Queue tab straight from ?tab=queue", async () => {
+    renderPage("/admin/referrals?tab=queue");
+    expect(await screen.findByText("Needs confirmation (1)")).toBeInTheDocument();
+  });
+
+  it("ignores an unknown ?tab= value and opens the Dashboard", async () => {
+    renderPage("/admin/referrals?tab=constructor");
+    await screen.findByRole("button", { name: /Queue \(1\)/ });
+    expect(screen.queryByText("Needs confirmation (1)")).not.toBeInTheDocument();
   });
 
   it("gate off: no section and no count", async () => {

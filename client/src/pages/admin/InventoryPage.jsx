@@ -65,6 +65,18 @@ function safeExternalHref(value) {
     return null;
   }
 }
+// A tab whose read failed: the error and Retry, never "Loading..." forever.
+// Each caller's Retry clears its error and sets loading before reloading.
+function LoadRetry({ what, error, onRetry }) {
+  return (
+    <ActionFeedback error>
+      Failed to load {what}: {error}{" "}
+      <Button type="button" onClick={onRetry} variant="primary" className="ml-[8px]">
+        Retry
+      </Button>
+    </ActionFeedback>
+  );
+}
 function formatMoney(value, decimals = 2) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "—";
@@ -2376,23 +2388,17 @@ export function ProductsTab({
   };
   if (loadError)
     return (
-      <ActionFeedback error>
-        Failed to load products: {loadError}{" "}
-        <Button
-          type="button"
-          onClick={() => {
-            // Clear the error first so the loading branch renders during the
-            // retry; leaving it up allowed repeated clicks and overlapping loads.
-            setLoadError(null);
-            setLoading(true);
-            load();
-          }}
-          variant="primary"
-          className="ml-[8px]"
-        >
-          Retry
-        </Button>
-      </ActionFeedback>
+      <LoadRetry
+        what="products"
+        error={loadError}
+        onRetry={() => {
+          // Clear the error first so the loading branch renders during the
+          // retry; leaving it up allowed repeated clicks and overlapping loads.
+          setLoadError(null);
+          setLoading(true);
+          load();
+        }}
+      />
     );
   if (loading) return <ActionFeedback>Loading products...</ActionFeedback>;
   return (
@@ -4320,6 +4326,7 @@ const STATUS_OPTIONS = [
 function RegistryTab({ showToast }) {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
   const [filter, setFilter] = useState("all");
@@ -4328,8 +4335,10 @@ function RegistryTab({ showToast }) {
     try {
       const data = await adminFetch("/admin/inventory?limit=500");
       setProducts(data.products || []);
-    } catch {
-      setProducts([]);
+      setLoadError(null);
+    } catch (e) {
+      // A failed read is a failure, not an empty registry.
+      setLoadError(e?.message || "Request failed");
     } finally {
       setLoading(false);
     }
@@ -4388,6 +4397,7 @@ function RegistryTab({ showToast }) {
       return p.customerVisibility !== "internal_only" && !p.publicSummary;
     return true;
   });
+  if (loadError) return <LoadRetry what="the registry" error={loadError} onRetry={() => { setLoadError(null); load(); }} />;
   if (loading)
     return <ActionFeedback>Loading...</ActionFeedback>;
   return (
@@ -4633,10 +4643,19 @@ function VendorsTab({ showToast }) {
   const [vendors, setVendors] = useState([]);
   const [editing, setEditing] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const load = async () => {
-    const d = await adminFetch("/admin/inventory/vendors");
-    setVendors(d.vendors || []);
-    setLoading(false);
+    // The read had no catch, so a non-2xx left "Loading vendors..." up
+    // forever (operations audit OP-10).
+    try {
+      const d = await adminFetch("/admin/inventory/vendors");
+      setVendors(d.vendors || []);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e?.message || "Request failed");
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => {
     load();
@@ -4654,6 +4673,7 @@ function VendorsTab({ showToast }) {
       showToast("Failed: " + e.message);
     }
   };
+  if (loadError) return <LoadRetry what="vendors" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); load(); }} />;
   if (loading) return <ActionFeedback>Loading vendors...</ActionFeedback>;
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-[12px]">
@@ -4775,13 +4795,19 @@ function ApprovalsTab({ showToast, onUpdate }) {
   const [approvals, setApprovals] = useState([]);
   const [selected, setSelected] = useState(new Set());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const load = () =>
     adminFetch("/admin/inventory/approvals?status=pending&limit=100")
       .then((d) => {
         setApprovals(d.approvals || []);
+        setLoadError(null);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      // A failed read is a failure, not "No pending approvals".
+      .catch((e) => {
+        setLoadError(e?.message || "Request failed");
+        setLoading(false);
+      });
   useEffect(() => {
     load();
   }, []);
@@ -4834,6 +4860,7 @@ function ApprovalsTab({ showToast, onUpdate }) {
       else n.add(id);
       return n;
     });
+  if (loadError) return <LoadRetry what="approvals" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); load(); }} />;
   if (loading) return <ActionFeedback>Loading approvals...</ActionFeedback>;
   return (
     <div>
@@ -5002,6 +5029,7 @@ function ProtocolsTab({
   const [products, setProducts] = useState([]);
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const normalizedInitialLine = PROTOCOL_FILTERS.some(
     (f) => f.key === initialServiceLine,
   )
@@ -5026,21 +5054,28 @@ function ProtocolsTab({
   const [showNewService, setShowNewService] = useState(false);
   const [appliedDeepLink, setAppliedDeepLink] = useState(false);
   const load = async () => {
-    const [sData, pData, hData] = await Promise.all([
-      adminFetch("/admin/inventory/service-usage"),
-      adminFetch("/admin/inventory?limit=200"),
-      adminFetch("/admin/inventory/protocol-health").catch(() => null),
-    ]);
-    setServices(sData.services || []);
-    setProducts(pData.products || []);
-    setHealth(hData);
-    setLoading(false);
+    try {
+      const [sData, pData, hData] = await Promise.all([
+        adminFetch("/admin/inventory/service-usage"),
+        adminFetch("/admin/inventory?limit=200"),
+        adminFetch("/admin/inventory/protocol-health").catch(() => null),
+      ]);
+      setServices(sData.services || []);
+      setProducts(pData.products || []);
+      setHealth(hData);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e?.message || "Request failed");
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => {
     load();
   }, []);
   useEffect(() => {
-    if (loading || appliedDeepLink || normalizedInitialLine === "all") return;
+    // A failed read must not open the deep-linked "add" form over an empty list.
+    if (loading || loadError || appliedDeepLink || normalizedInitialLine === "all") return;
     setAppliedDeepLink(true);
     if (initialAction === "add") {
       const existingService = services.find(
@@ -5063,6 +5098,7 @@ function ProtocolsTab({
     }
   }, [
     loading,
+    loadError,
     appliedDeepLink,
     normalizedInitialLine,
     initialAction,
@@ -5136,6 +5172,7 @@ function ProtocolsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
+  if (loadError) return <LoadRetry what="protocols" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); load(); }} />;
   if (loading) return <ActionFeedback>Loading protocols...</ActionFeedback>;
   const unitOpts = [
     "oz",
@@ -5743,14 +5780,22 @@ function AddProtocolRow({
 function MarginsTab({ showToast }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     adminFetch("/admin/inventory/service-usage")
       .then((d) => {
         setServices(d.services || []);
+        setLoadError(null);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      // A failed read is a failure, not "No service product mappings yet".
+      .catch((e) => {
+        setLoadError(e?.message || "Request failed");
+        setLoading(false);
+      });
+  }, [attempt]);
+  if (loadError) return <LoadRetry what="service margins" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); setAttempt((n) => n + 1); }} />;
   if (loading) return <ActionFeedback>Loading service margins...</ActionFeedback>;
   return (
     <div>
@@ -5832,14 +5877,21 @@ function ScrapeTab({ showToast }) {
   const [vendors, setVendors] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const load = async () => {
-    const [vData, jData] = await Promise.all([
-      adminFetch("/admin/inventory/vendors"),
-      adminFetch("/admin/inventory/scrape-jobs"),
-    ]);
-    setVendors((vData.vendors || []).filter((v) => v.scrapingEnabled));
-    setJobs(jData.jobs || []);
-    setLoading(false);
+    try {
+      const [vData, jData] = await Promise.all([
+        adminFetch("/admin/inventory/vendors"),
+        adminFetch("/admin/inventory/scrape-jobs"),
+      ]);
+      setVendors((vData.vendors || []).filter((v) => v.scrapingEnabled));
+      setJobs(jData.jobs || []);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e?.message || "Request failed");
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => {
     load();
@@ -5856,6 +5908,7 @@ function ScrapeTab({ showToast }) {
       showToast(`Failed: ${e.message}`);
     }
   };
+  if (loadError) return <LoadRetry what="scrape data" error={loadError} onRetry={() => { setLoadError(null); setLoading(true); load(); }} />;
   if (loading) return <ActionFeedback>Loading scrape data...</ActionFeedback>;
   return (
     <div>

@@ -656,10 +656,10 @@ async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch, tim
     // sending it to the legacy text-model slug would 400 the whole attempt.
     if (aspectRatio) generationConfig.imageConfig = { aspectRatio };
     const res = await fetchFn(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig,

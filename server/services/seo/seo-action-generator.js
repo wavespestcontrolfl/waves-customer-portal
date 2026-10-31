@@ -206,14 +206,17 @@ class SeoActionGenerator {
           continue;
         }
 
-        await db('seo_actions').where('id', action.id).update({
-          execution_status: 'done',
-          started_at: db.fn.now(),
-          completed_at: db.fn.now(),
-          execution_notes: notes,
+        // "done" commits only with its experiment; on a failed insert the
+        // catch below marks the action failed instead.
+        await db.transaction(async (trx) => {
+          await trx('seo_actions').where('id', action.id).update({
+            execution_status: 'done',
+            started_at: trx.fn.now(),
+            completed_at: trx.fn.now(),
+            execution_notes: notes,
+          });
+          await this.createExperiment(action, trx);
         });
-
-        await this.createExperiment(action);
         executed++;
       } catch (err) {
         await db('seo_actions').where('id', action.id).update({
@@ -313,21 +316,23 @@ ${queryList || 'No query data available'}`,
     return { drafts_generated: generated };
   }
 
-  async createExperiment(action) {
+  // `conn` is the caller's transaction when the action's "done" write must
+  // commit or roll back together with this experiment.
+  async createExperiment(action, conn = db) {
     const d28ago = etDateString(addETDays(new Date(), -28));
 
-    const gsc = await db('gsc_pages')
+    const gsc = await conn('gsc_pages')
       .whereIn('page_url', urlLookupVariants(action.url))
       .where('date', '>=', d28ago)
       .select(
-        db.raw('SUM(clicks) as clicks'),
-        db.raw('SUM(impressions) as impressions'),
-        db.raw('AVG(ctr) as ctr'),
-        db.raw('AVG(position) as position'),
+        conn.raw('SUM(clicks) as clicks'),
+        conn.raw('SUM(impressions) as impressions'),
+        conn.raw('AVG(ctr) as ctr'),
+        conn.raw('AVG(position) as position'),
       )
       .first();
 
-    const [experiment] = await db('seo_url_experiments').insert({
+    const [experiment] = await conn('seo_url_experiments').insert({
       url: action.url,
       action_type: action.action_type,
       publish_date: etDateString(),
@@ -342,7 +347,7 @@ ${queryList || 'No query data available'}`,
     }).returning('id');
 
     if (experiment?.id) {
-      await db('seo_actions').where('id', action.id).update({ experiment_id: experiment.id });
+      await conn('seo_actions').where('id', action.id).update({ experiment_id: experiment.id });
     }
 
     return experiment;

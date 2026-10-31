@@ -11,9 +11,9 @@ const fixture = {
   estimate: { id: 'synthetic-proposal', status: 'draft', editVersion: 'loaded-version', customerName: 'Synthetic Office', customerEmail: 'office@example.invalid', customerPhone: '+19415550100' },
   proposal: { enabled: true, buildingUse: 'nonresidential', title: 'Synthetic proposal', buildings: [{ name: 'Office', lineItems: [{ description: 'Quarterly service', quantity: 1, unitPrice: 100, frequency: 'quarterly', taxable: false }] }] },
 };
-let saved; let previewVersion; let failSave; let calls; let interloperAfterSave; let duringSave; let duringBidBlob;
+let saved; let previewVersion; let failSave; let calls; let interloperAfterSave; let duringSave; let duringBidBlob; let holdNextGet;
 beforeEach(() => {
-  saved = structuredClone(fixture); previewVersion = 'loaded-version'; failSave = false; calls = []; interloperAfterSave = false; duringSave = null; duringBidBlob = null;
+  saved = structuredClone(fixture); previewVersion = 'loaded-version'; failSave = false; calls = []; interloperAfterSave = false; duringSave = null; duringBidBlob = null; holdNextGet = null;
   localStorage.setItem('waves_admin_token', 'synthetic-token');
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     calls.push({ url: String(url), ...options });
@@ -33,7 +33,11 @@ beforeEach(() => {
         data = { editVersion: 'saved-version' };
         if (interloperAfterSave) { saved.proposal = { ...saved.proposal, title: 'Interloper edit' }; saved.estimate.editVersion = 'interloper-version'; previewVersion = 'interloper-version'; }
       }
-    } else data = saved;
+    } else {
+      // A test can hold one proposal read open (the post-send reload) until it releases it.
+      if (holdNextGet && String(url).endsWith('/proposal')) { const hold = holdNextGet; holdNextGet = null; await hold(); }
+      data = saved;
+    }
     return { ok: status < 400, status, json: async () => structuredClone(data), blob: async () => { if (String(url).endsWith('/bid-form.pdf')) duringBidBlob?.(); return new Blob(['%PDF-']); }, clone() { return this; } };
   }));
 });
@@ -191,6 +195,26 @@ it('saves edits before review and sends only the explicitly reviewed channel/ver
   expect(JSON.parse(sends[0].body)).toMatchObject({ sendMethod: 'email', expectedEditVersion: 'saved-version', messageVersion: 'message-version' });
 });
 
+// Pipeline audit 10-30, item 3: the reload after a send replaces the whole form and clears Unsaved changes, so the
+// fields stay read-only until it lands; nothing typed meanwhile can be wiped without a trace.
+it('keeps the form read-only while the reload after a send runs, then opens it again', async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.click(screen.getByRole('button', { name: 'Review and send' }));
+  fireEvent.click(await screen.findByLabelText('Email'));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
+  await screen.findByText(/provider accepted; delivery not confirmed/);
+  let release; let reloading = false;
+  holdNextGet = () => new Promise((resolve) => { reloading = true; release = resolve; });
+  fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  await waitFor(() => expect(reloading).toBe(true));
+  expect(screen.getByDisplayValue('Synthetic proposal')).toBeDisabled();
+  expect(screen.getByLabelText('Additional terms')).toBeDisabled();
+  release();
+  await waitFor(() => expect(screen.getByDisplayValue('Synthetic proposal')).toBeEnabled());
+  expect(screen.getByLabelText('Additional terms')).toBeEnabled();
+});
+
 it('keeps a changed saved offer blocked and cancel sends nothing', async () => {
   // Authored terms: a proposal with none opens prefilled and unsaved, and review would save it first.
   saved.proposal.commercialTerms = { initialTermMonths: 12 };
@@ -253,6 +277,7 @@ it('withholds the costing margin while any program row is incomplete, exactly as
   fireEvent.change(screen.getByLabelText('Cost per unit'), { target: { value: '1' } });
   expect(screen.getByText('$399.00')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Add program' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Blank program' }));
   expect(screen.queryByText('$399.00')).not.toBeInTheDocument();
   expect(screen.getByText(/Fix the quoted itemization before comparing costs: Every program row needs a name/)).toBeInTheDocument();
 });

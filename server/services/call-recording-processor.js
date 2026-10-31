@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { heardAboutFromCallReferral } = require('./heard-about');
 const { applyAssignable, isAssignable, assertAssignableTechnician } = require('./technician-eligibility');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
@@ -118,7 +119,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -139,9 +140,10 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
+const { callEmailChecksLive, screenCallEmail, deadDomainQuestion } = require('./call-email-checks');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, callApplicantHandlingLive } = require('../config/feature-gates');
 
 // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT is only EFFECTIVE together with its
 // prerequisite GATE_CALL_FAIL_OPEN_BOOKING (the Assessment fallback and the
@@ -1832,6 +1834,27 @@ async function spelledEmailTrusted({ extracted, dictationEmailPayload, corrected
     .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), null)
     .catch(() => true);
   return !ownedByAnyone;
+}
+
+// GATE_CALL_EMAIL_CHECKS: an address whose domain has no mail server was set
+// aside before the upserts (email_raw). Its read-back reason becomes
+// email_invalid, and the card carries the domain and the question to ask, so
+// the office sees why instead of a plain "check this email". Mutates `reasons`.
+function applyDeadDomainReason(reasons, callEmailCheck) {
+  if (!callEmailCheck?.dead_domain) return reasons;
+  const at = reasons.indexOf('email_unverified');
+  if (at !== -1) reasons.splice(at, 1);
+  if (!reasons.includes('email_invalid')) reasons.push('email_invalid');
+  return reasons;
+}
+
+function callEmailCheckCardPayload(callEmailCheck) {
+  const dead = callEmailCheck?.dead_domain;
+  if (!dead?.domain) return {};
+  return {
+    email_domain_check: { domain: dead.domain, deliverable: false, dns_error: dead.dns_error || null },
+    confirmation_question: deadDomainQuestion(dead.domain),
+  };
 }
 
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
@@ -5677,7 +5700,7 @@ function deriveStampLinkAuthority({ phone, existingLeadVia, priorStampedLeadVia,
 // later attempt rejects the call. One list so the stamp and the restore can
 // never drift.
 const STAMPED_LEAD_RESTORE_FIELDS = [
-  'first_name', 'last_name', 'email', 'phone', 'address', 'city', 'zip',
+  'first_name', 'last_name', 'email', 'phone', 'address', 'city', 'zip', 'heard_about',
   'service_interest', 'urgency', 'transcript_summary', 'extracted_data',
   'is_qualified', 'status', 'next_follow_up_at', 'customer_id',
 ];
@@ -5735,7 +5758,7 @@ function snapshotStampedLeadStates(leadRow, leadUpdates) {
 // fill-only behavior (codex P2 r17). Re-decided against the LOCKED row
 // inside the transaction; keep this list in step with the fill-if-empty
 // assignments in Step 4b.
-const FILL_ONLY_LEAD_FIELDS = ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip'];
+const FILL_ONLY_LEAD_FIELDS = ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip', 'heard_about'];
 
 function dropFilledLeadColumns(leadUpdates, lockedLead) {
   if (!lockedLead || !leadUpdates) return leadUpdates;
@@ -6532,11 +6555,18 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // it was. The writer is a no-op unless GATE_STAFF_ROUTE_INSERTION is on, runs
 // under a savepoint and never fails the booking. Read at call time; a partial
 // test mock of the gates module reads as off.
+// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b) is
+// the umbrella for the automatic writers: with the gate above off it places the
+// same booking through the shared auto-save helper (source 'call_booking'). With
+// the gate above on, THIS call is the only placement, so the umbrella never adds
+// a second one.
 async function placeCallBookingInRoute(trx, created, { streetLevelPending = false } = {}) {
   if (streetLevelPending || !created?.id) return null;
   const gates = require('../config/feature-gates');
-  if (typeof gates.gateEnvValue !== 'function' || !gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) return null;
-  return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
+  if (typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) {
+    return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
+  }
+  return require('./scheduling/staff-save-route-check').placeAutoSavedVisit(trx, { visit: created, source: 'call_booking' });
 }
 
 // Convert the call's lead to won when the pipeline books an appointment,
@@ -8313,6 +8343,29 @@ async function resolveDefaultCallBookingTechnician(conn = db) {
   return null;
 }
 
+// Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): the technician the map picks for
+// ONE call-booked visit's own service and day, replacing the default technician:
+// { id, name } (id null = nobody fits: the visit is saved unassigned), or null when
+// the gate is not live, the visit's line is unmapped or the read failed (the old
+// default stands). Own savepoint, so a failed read cannot abort `trx`. No free-time
+// check: the tech-blind overlap probe below still flags a clash for the office.
+async function lineDefaultCallBookingTechnician(trx, visit) {
+  const lineTech = require('./scheduling/line-technician');
+  if (!lineTech.lineMapLive()) return null;
+  try {
+    return await trx.transaction(async (sp) => {
+      const pick = await lineTech.pickLineTechnician(sp, { ...visit, checkFree: false });
+      if (!pick.mapped) return null;
+      if (!pick.technicianId) return { id: null, name: null };
+      const tech = await sp('technicians').where({ id: pick.technicianId }).first('name');
+      return { id: pick.technicianId, name: tech?.name || null };
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] line-map technician read failed (default technician kept): ${err.message}`);
+    return null;
+  }
+}
+
 async function resolveDefaultCallBookingTechnicianId(conn = db) {
   const tech = await resolveDefaultCallBookingTechnician(conn);
   return tech?.id || null;
@@ -9035,11 +9088,11 @@ async function transcribeWithGemini(audioBuffer, opts = {}) {
     const direction = isOutboundCall(opts.call) ? 'outbound' : 'inbound';
     const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent`,
       {
         method: 'POST',
         signal: providerTimeoutSignal('transcription'),
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
           contents: [{
             parts: [
@@ -10042,11 +10095,11 @@ Return ONLY valid JSON.`;
   // sweep + triage machinery owns those); only the parse verdict is retried.
   const generateOnce = async () => {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent`,
       {
         method: 'POST',
         signal: providerTimeoutSignal('extraction'),
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
@@ -10385,6 +10438,25 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
 // processRecording's outer guard — every path that stamps extraction_failed
 // counts against the same budget and surfaces the same card at the cap. The
 // partial unique index dedupes re-files while a card is already open.
+// A recording too short to hold words (a pick-up, or a hang-up at the beep)
+// gives a person nothing to review, so its spent transcription retries file
+// no blocking card. When a person took the call, the connected leg must be
+// short too: a long conversation with a near-empty recording may have lost
+// its audio, and that call keeps its card. Without a person on the line,
+// only a voicemail's recording is the whole message (call audit 2026-10-29).
+const WORDLESS_RECORDING_MAX_SECONDS = 3;
+const WORDLESS_LEG_MAX_SECONDS = 10;
+function recordingTooShortForWords(call) {
+  const recorded = Number(call?.recording_duration_seconds);
+  if (!(recorded > 0 && recorded <= WORDLESS_RECORDING_MAX_SECONDS)) return false;
+  const meta = callMetadataObject(call);
+  if (meta.forward_acceptance?.accepted === true) {
+    const leg = (Date.parse(meta.ended_at) - Date.parse(meta.forward_acceptance.accepted_at)) / 1000;
+    return Number.isFinite(leg) && leg <= WORDLESS_LEG_MAX_SECONDS;
+  }
+  return call.answered_by === 'voicemail' && !meta.customer_leg;
+}
+
 async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) {
   if (attempts < CALL_EXTRACTION_MAX_ATTEMPTS) return;
   try {
@@ -10472,6 +10544,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
           customerId: customerId || null,
           isKnownCustomer: !!call.customer_id || !!customerId,
         },
+        thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
       await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
       // ...and once more after the write: a confirm that landed between the read
@@ -10529,6 +10602,10 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
         v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
         procGeneration,
         historicalReplay,
+        // GATE_CALL_APPLICANT_HANDLING: office promises on an applicant / vendor call are not customer promises
+        // when the call asks no service of its own; a mixed-purpose call keeps its real service promises.
+        thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result)
+          && v2Result?.status === 'valid' && thirdPartyCallMakesNoServiceAsk(v2Result.extraction),
       });
       logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
       // The pipeline ignores the summary; the commitments backfill reads it to
@@ -10540,6 +10617,29 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
     return { error: err.message };
   }
   return null;
+}
+
+// Careers row for a job applicant's call (GATE_CALL_APPLICANT_HANDLING, dark).
+// Files ONE job_applications row (services/job-applications.js
+// createJobApplicationFromCall): status new, role technician, source phone_call,
+// idempotent by call and deduped by phone. It sends nothing to the applicant: no
+// text, no email, no invite, no AI screen. Needs a VALID V2 extraction whose
+// call_nature is job_applicant; a spam call files nothing. Never blocks the call.
+async function fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration = null }) {
+  if (!callApplicantHandlingLive() || extracted?.is_spam) return null;
+  const extraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
+  if (extraction?.call_nature !== 'job_applicant') return null;
+  try {
+    const outcome = await require('./job-applications').createJobApplicationFromCall({ call, extraction, database: db, procGeneration });
+    logger.info(`[call-proc] Careers row for ${maskSid(callSid)}: ${outcome.reason}`);
+    return outcome;
+  } catch (err) {
+    // Code/name only: a knex message embeds the bound row (the applicant's name,
+    // phone, email and call summary), so the raw message is never logged.
+    const code = err?.code || err?.name || 'error';
+    logger.warn(`[call-proc] Careers row failed (non-blocking) for ${maskSid(callSid)}: ${code}`);
+    return { created: false, id: null, reason: 'error', error: code };
+  }
 }
 
 // Reschedule apply — when a matched existing customer's call moved a visit
@@ -11939,7 +12039,10 @@ const CallRecordingProcessor = {
       // routing decision and no pass will try again, so the same permanent
       // processing-failure card the extraction lane files is owed here
       // (codex #6271 r43 P1). fileExtractionExhaustedTriage is a no-op under the cap.
-      await fileExtractionExhaustedTriage(call.id, Number(releasedRows?.[0]?.extraction_attempts) || 0, new Error('No transcription available'), callSid);
+      // A recording too short to hold words is the exception: nothing to review.
+      if (!recordingTooShortForWords(call)) {
+        await fileExtractionExhaustedTriage(call.id, Number(releasedRows?.[0]?.extraction_attempts) || 0, new Error('No transcription available'), callSid);
+      }
       return { success: false, error: 'No transcription available' };
     }
 
@@ -12690,6 +12793,11 @@ const CallRecordingProcessor = {
       // path; enrichment keys on the webhook's pre-linked customer if any.
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
 
+      // GATE_CALL_APPLICANT_HANDLING: an applicant's voicemail (name + callback
+      // number, no service ask) ends on this path too; the step skips spam and
+      // every non-applicant call itself, and is fenced like the main path.
+      await fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration });
+
       // Service-request voicemail that the workable-lead gate declined
       // (existing customer, or non-lead call_type veto): surface a callback
       // bell instead of ending silent. Bell only — never customer comms.
@@ -12966,6 +13074,7 @@ const CallRecordingProcessor = {
     // address-recovery lookup below. Fail-open.
     let contactDictation = null;
     let dictationEmailPayload = null;
+    let callEmailCheck = null;
     // The late contact pass (paid) is persisted OUTSIDE the fail-open try below: a lost claim abandons
     // the pass like the transcript write above, and a THROWN fence write escapes to the outer
     // processing-failure path instead of marking the call processed with the late transcript
@@ -13095,6 +13204,18 @@ const CallRecordingProcessor = {
       extracted = held.extracted;
       dictationEmailPayload = held.dictationEmailPayload;
       logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+    }
+
+    // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a DNS check on the address this
+    // pass is about to save, after every adopt and hold above. A domain with no
+    // mail server is set aside exactly like an unconfirmed dictation
+    // (email_raw), so no write or send path can use it, and the card says why.
+    // A DNS hiccup is unknown, never a block.
+    if (extracted.email && callEmailChecksLive()) {
+      callEmailCheck = await screenCallEmail(extracted);
+      if (callEmailCheck?.dead_domain) {
+        logger.info(`[call-proc] Set aside a call email whose domain has no mail server for ${maskSid(callSid)}`);
+      }
     }
 
     // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
@@ -13473,6 +13594,8 @@ const CallRecordingProcessor = {
           // (2026-10-10 audit). Codes, not flags: not_confirmed is the
           // routing reason, so it is never in finalFlags.
           for (const code of noActionCallCards(v2Extraction, { canonicalStreet: extracted?.address_line1 })) unneededCards.add(code);
+          // GATE_CALL_APPLICANT_HANDLING: an applicant / vendor call files no customer-only card.
+          for (const code of thirdPartyCustomerOnlyCards(v2Extraction, { gateOn: callApplicantHandlingLive() })) unneededCards.add(code);
           // A voicemail whose office callback reached a solicitor (the standing
           // callback_verdict, written under the parent lock, so it is current
           // for this pass): the asks a return call would have answered are
@@ -13956,6 +14079,21 @@ const CallRecordingProcessor = {
           const at = needsConfirmation.indexOf('email_unverified');
           if (at !== -1) needsConfirmation.splice(at, 1);
         }
+        applyDeadDomainReason(needsConfirmation, callEmailCheck);
+        // GATE_CALL_APPLICANT_HANDLING: an applicant / vendor call files no customer-only
+        // review card (address, name, email read-back, consent). Removed in place, like
+        // the settled-email reasons above, so every later reader of needsConfirmation
+        // (cards, review_status, the email hold) sees the same list.
+        {
+          const applicantDropped = new Set(thirdPartyCustomerOnlyCards(
+            v2Result?.status === 'valid' ? v2Ext : null, { gateOn: callApplicantHandlingLive() },
+          ));
+          if (applicantDropped.size) {
+            for (let i = needsConfirmation.length - 1; i >= 0; i -= 1) {
+              if (applicantDropped.has(needsConfirmation[i])) needsConfirmation.splice(i, 1);
+            }
+          }
+        }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
           // reads extracted.* below, so both records get the corrected address.
@@ -14120,7 +14258,7 @@ const CallRecordingProcessor = {
               // + the address the run adopted at filing time (the release
               // target the evidence sweep may verify); null when the
               // dictation demoted it — then only a human can settle it.
-              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+              extraPayload: { ...(dictationEmailPayload || {}), ...callEmailCheckCardPayload(callEmailCheck), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
             })),
           // Codex P1 (round 3): this cycle's single agreed address (or
           // null) — lets the mint reconcile a STALE open disagreement card
@@ -14171,6 +14309,18 @@ const CallRecordingProcessor = {
           const at = emailReasons.indexOf('email_unverified');
           if (at !== -1) emailReasons.splice(at, 1);
         }
+        applyDeadDomainReason(emailReasons, callEmailCheck);
+        // GATE_CALL_APPLICANT_HANDLING: no email read-back card for an applicant / vendor call.
+        {
+          const applicantDropped = new Set(thirdPartyCustomerOnlyCards(
+            v2Result?.status === 'valid' ? v2Result.extraction : null, { gateOn: callApplicantHandlingLive() },
+          ));
+          if (applicantDropped.size) {
+            for (let i = emailReasons.length - 1; i >= 0; i -= 1) {
+              if (applicantDropped.has(emailReasons[i])) emailReasons.splice(i, 1);
+            }
+          }
+        }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),
           // with the same phone/name fallback for a not-yet-linked known caller.
@@ -14220,7 +14370,7 @@ const CallRecordingProcessor = {
             extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
             severity: 'advisory',
             // Same filing-time release-target snapshot as the shadow branch.
-            extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+            extraPayload: { ...(dictationEmailPayload || {}), ...callEmailCheckCardPayload(callEmailCheck), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
           })),
           resolvedEmail: String(extracted.email || '').trim().toLowerCase() || null,
         });
@@ -14508,7 +14658,17 @@ const CallRecordingProcessor = {
         // shared) in between, so the callback card no longer applies. Retire it (Codex #6419 r9).
         await require('./call-family-name-link').retireCallbackSpokenNumberCard({ callLogId: call.id, procToken });
       }
-      if (existing) {
+      // GATE_CALL_APPLICANT_HANDLING: where the gate drops this call's customer
+      // review cards (an applicant / vendor call that asks no service), a phone
+      // match is NOT linked. The number may be one the caller named, and with the
+      // cards gone nothing would review what a link feeds: the email / address
+      // backfill below and the profile enrichment (access codes, pets, notes).
+      const thirdPartyMatchUnlinked = !!existing && thirdPartyCustomerOnlyCards(
+        v2Result?.status === 'valid' ? v2Result.extraction : null, { gateOn: callApplicantHandlingLive() },
+      ).length > 0;
+      if (thirdPartyMatchUnlinked) {
+        logger.info(`[call-proc] ${maskSid(callSid)}: applicant/vendor call matched a customer by phone; not linked (GATE_CALL_APPLICANT_HANDLING)`);
+      } else if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
         // Update with any new info (email + address; shared with the
@@ -17101,6 +17261,17 @@ const CallRecordingProcessor = {
           // kill-switch mode.
           const leadAddressShape = analyzeLeadAddress(extracted.address_line1, extracted.address_line2);
           const composedLeadAddress = leadAddressShape.address;
+          // "How did you hear about us?" from the call itself: the V2
+          // reader's customer_history.referral_source, mapped onto the
+          // quote-form allowlist (null when the caller named no clear
+          // channel). Read from V2 directly in every mode, like the quote
+          // signals: it is a standalone attribute with no V1 counterpart,
+          // so there is no V1 field it could be glued onto.
+          const callHeardAbout = heardAboutFromCallReferral(
+            v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
+              ? v2Result.extraction?.customer_history?.referral_source
+              : null,
+          );
           if (leadAddressShape.unitConflict && !bridgeNeedsConfirmation.includes('address_unit_conflict')) {
             bridgeNeedsConfirmation.push('address_unit_conflict');
           }
@@ -17135,6 +17306,7 @@ const CallRecordingProcessor = {
             if (composedLeadAddress && isEmpty(current?.address)) leadUpdates.address = composedLeadAddress;
             if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
             if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
+            if (callHeardAbout && isEmpty(current?.heard_about)) leadUpdates.heard_about = callHeardAbout;
             // Multi-service calls: matched_service is single-slot, so append the
             // requested families it doesn't cover ("pest and lawn" must not
             // price as pest-only). Fill-if-empty semantics unchanged.
@@ -17652,6 +17824,7 @@ const CallRecordingProcessor = {
                     resupply('address', composedLeadAddress);
                     resupply('city', extracted.city);
                     resupply('zip', extracted.zip);
+                    resupply('heard_about', callHeardAbout);
                     if (serviceInterestLabel && !Object.prototype.hasOwnProperty.call(leadUpdates, 'service_interest')) {
                       leadUpdates.service_interest = serviceInterestLabel;
                       persistedServiceInterestLabel = serviceInterestLabel;
@@ -17722,6 +17895,7 @@ const CallRecordingProcessor = {
                   address: composedLeadAddress,
                   city: extracted.city,
                   zip: extracted.zip,
+                  heard_about: callHeardAbout,
                 };
                 for (const [f, v] of Object.entries(reaffirmedFilledLeadFields(suppliedIdentity, lockedLead))) {
                   const sv = serializeStampedLeadValue(f, v);
@@ -18334,7 +18508,8 @@ const CallRecordingProcessor = {
                 `${callerName}: the agent promised to send a quote (${servicesText}${propertyCount > 1 ? `, ${propertyCount} properties` : ''}). Send it before end of day — the lead stays open in the pipeline until it goes out.`,
                 {
                   link: `/admin/leads?lead=${leadId}`,
-                  metadata: { leadId, callSid: call.twilio_call_sid, quote_promised: true, property_count: propertyCount },
+                  // promise: a quote we owe the caller (GATE_CUSTOMER_ALERTS_RING rings it; the bell policy mutes 'lead').
+                  metadata: { leadId, callSid: call.twilio_call_sid, quote_promised: true, promise: true, property_count: propertyCount },
                 },
               );
             } catch (notifyErr) {
@@ -18672,6 +18847,8 @@ const CallRecordingProcessor = {
               customerId: customerId || null,
               callSid: call.twilio_call_sid,
               quote_promised: true,
+              // promise: a quote we owe the caller (GATE_CUSTOMER_ALERTS_RING rings it; the bell policy mutes 'lead').
+              promise: true,
               property_count: propertyCount,
               no_lead: true,
             },
@@ -19973,6 +20150,9 @@ const CallRecordingProcessor = {
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;
+                // Visit 2 copies visit 1's technician; when visit 1 has none, the default.
+                // Under the live line map the line's pick (even "nobody") is visit 1's default.
+                let followUpDefaultTechId = defaultTechnicianId;
                 // Linked follow-up visit (visit 2). PENDING, not customer-
                 // confirmed: the exact time gets confirmed by a human at
                 // dispatch. No confirmation SMS and no reminder registration
@@ -20109,7 +20289,7 @@ const CallRecordingProcessor = {
                       // The follow-up inherits the primary's tech; if that tech
                       // is no longer assignable (offboarded since the primary
                       // was booked) seed it unassigned rather than onto them.
-                      let followUpTechId = primaryRow.technician_id || defaultTechnicianId || null;
+                      let followUpTechId = primaryRow.technician_id || followUpDefaultTechId || null;
                       if (followUpTechId) {
                         const fuTech = await sp('technicians').where({ id: followUpTechId }).forShare()
                           .first('id', 'employment_status', 'field_dispatchable');
@@ -20371,7 +20551,26 @@ const CallRecordingProcessor = {
                   // read as a clash for every technician.
                   let reuseCandidateTechId = defaultTechnicianId;
                   let reuseTechPicked = false;
+                  let reuseLineMapped = false;
                   if (!isAttachedManualBooking && !existing.technician_id && !reuseHeldForAddress) {
+                    // Live service-line map: the line's technician for THIS row's own service and day
+                    // is the default. Unmapped (or gate not live): the default above, byte for byte.
+                    const reuseLineTech = await lineDefaultCallBookingTechnician(trx, {
+                      serviceId: existing.service_id || null,
+                      serviceKey: existing.service_key_snapshot || null,
+                      serviceType: existing.service_type || serviceType,
+                      date: callBookingDateOnly(existing.scheduled_date),
+                      // The reused visit's own property first (GATE_TERRITORY_ROUTING), the customer last.
+                      zip: existing.service_address_zip || null,
+                      lat: existing.lat ?? null,
+                      lng: existing.lng ?? null,
+                      customerId: existing.customer_id || null,
+                    });
+                    if (reuseLineTech) {
+                      reuseCandidateTechId = reuseLineTech.id;
+                      followUpDefaultTechId = reuseLineTech.id;
+                      reuseLineMapped = true;
+                    }
                     try {
                       const reusePick = await trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
                         conn: pickSp,
@@ -20387,6 +20586,7 @@ const CallRecordingProcessor = {
                         durationMinutes: existing.estimated_duration_minutes || callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                         lat: existing.lat ?? null,
                         lng: existing.lng ?? null,
+                        zip: existing.service_address_zip || null,
                         // The row's own service: a replay can extract a
                         // different one while the appointment stays as booked.
                         serviceType: existing.service_type || serviceType,
@@ -20429,8 +20629,9 @@ const CallRecordingProcessor = {
                       await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true });
                       // A PICKED technician passed the capability filter on a
                       // plain read; re-read it under the technician share lock
-                      // so an Off saved since cannot receive this visit.
-                      if (reuseTechPicked) {
+                      // so an Off saved since cannot receive this visit. The line map's
+                      // pick passed the same test: it gets the same re-read.
+                      if (reuseTechPicked || reuseLineMapped) {
                         await require('./technician-capabilities').assertCapabilitiesActive(trx, reuseTechId,
                           [{ id: existing.id, service_type: existing.service_type || serviceType, service_id: existing.service_id || null, service_key: existing.service_key_snapshot || null }],
                           (rowId, why) => Object.assign(new Error(`technician ${reuseTechId} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
@@ -20882,8 +21083,8 @@ const CallRecordingProcessor = {
                 // resolved before the txn; if the FOR SHARE recheck below
                 // books unassigned instead, it re-fences the unassigned-day
                 // rung there (codex r1 P2).
-                // Two technicians (GATE_MULTI_TECH_CONFIRM + capacity mode,
-                // owner 2026-10-03): a FRESH call booking goes to the
+                // Two technicians (GATE_MULTI_TECH_CONFIRM, hour or capacity mode,
+                // owner 2026-10-03; hour mode owner 2026-10-30): a FRESH call booking goes to the
                 // technician who is free at this time and whose route that day
                 // is closest (scheduling/pick-technician.js), not to the one
                 // default technician. Nobody free → unassigned, and the
@@ -20894,6 +21095,28 @@ const CallRecordingProcessor = {
                 let bookingTechnicianId = defaultTechnicianId;
                 let bookingTechnicianName = defaultTechnicianName;
                 let bookingTechnicianPicked = false;
+                // Live service-line map: the line's technician for this visit's own service and day
+                // is the default. It is NOT "picked" (no free-time check, no re-pick off the line):
+                // bookingLineMapped only keeps the capability re-read below. Unmapped / gate not live:
+                // the default above, byte for byte.
+                let bookingLineMapped = false;
+                const bookingLineTech = await lineDefaultCallBookingTechnician(trx, {
+                  serviceId: callBookingCatalogRow?.id || null,
+                  serviceKey: callBookingCatalogRow?.service_key || null,
+                  serviceType,
+                  date: scheduledDate,
+                  // The booked property first (GATE_TERRITORY_ROUTING), the customer last.
+                  zip: propertyLinkage.address?.zip || null,
+                  lat: propertyLinkage.lat ?? null,
+                  lng: propertyLinkage.lng ?? null,
+                  customerId,
+                });
+                if (bookingLineTech) {
+                  bookingTechnicianId = bookingLineTech.id;
+                  bookingTechnicianName = bookingLineTech.name;
+                  followUpDefaultTechId = bookingLineTech.id;
+                  bookingLineMapped = true;
+                }
                 const pickBookingTechnician = () => trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
                   conn: pickSp,
                   date: scheduledDate,
@@ -20902,6 +21125,7 @@ const CallRecordingProcessor = {
                   durationMinutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                   lat: propertyLinkage.lat ?? null,
                   lng: propertyLinkage.lng ?? null,
+                  zip: propertyLinkage.address?.zip || null,
                   serviceType,
                   serviceId: callBookingCatalogRow?.id || null,
                   customerId,
@@ -21244,8 +21468,9 @@ const CallRecordingProcessor = {
                     await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10), workDays: true });
                     // A PICKED technician passed the capability filter on a
                     // plain read; re-read it under the technician share lock
-                    // so an Off saved since cannot receive this visit.
-                    if (bookingTechnicianPicked) {
+                    // so an Off saved since cannot receive this visit. The line map's
+                    // pick passed the same test: it gets the same re-read.
+                    if (bookingTechnicianPicked || bookingLineMapped) {
                       await require('./technician-capabilities').assertCapabilitiesActive(trx, insertData.technician_id,
                         [{ id: null, service_type: serviceType, service_id: callBookingCatalogRow?.id || null }],
                         (rowId, why) => Object.assign(new Error(`technician ${insertData.technician_id} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
@@ -24593,6 +24818,9 @@ const CallRecordingProcessor = {
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
 
+      // GATE_CALL_APPLICANT_HANDLING: a job applicant's call files one Careers row, comms-free.
+      await fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration });
+
       // A callback once classified spam that this pass settled on any other
       // verdict gives the parent voicemail back what the spam verdict closed
       // (settleParentForCallbackVerdict, dark GATE_CALLBACK_SPAM_CLOSES_PARENT).
@@ -25633,6 +25861,7 @@ CallRecordingProcessor._test = {
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
+  fileApplicantCareersRowStep,
   applyCallRescheduleStep,
   applyRescheduleFollowUps,
   reviseDispositionAfterAppliedMove,
@@ -25658,6 +25887,7 @@ CallRecordingProcessor._test = {
   referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
+  lineDefaultCallBookingTechnician,
   resolveCallContactPhone,
   startPrecedesCall,
   clarifyAskTargetPhone,
@@ -25879,6 +26109,9 @@ CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCust
 // same reason as the two promotions above — promoted rather than
 // reimplemented (CLAUDE.md rule 15).
 CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
+CallRecordingProcessor.recordingTooShortForWords = recordingTooShortForWords;
+CallRecordingProcessor.applyDeadDomainReason = applyDeadDomainReason;
+CallRecordingProcessor.callEmailCheckCardPayload = callEmailCheckCardPayload;
 
 // Callback-spam parent settlement: on the module surface for its live-PG
 // suite (callback-spam-closes-parent.test.js), which drives it directly.

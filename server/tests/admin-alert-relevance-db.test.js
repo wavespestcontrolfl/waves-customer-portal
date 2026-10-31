@@ -7,7 +7,9 @@
  * witnesses as SQL: the Messages reader, a person's text and call, a visit, a
  * quote, a person's email reply), and the two rules with their own gates
  * (GATE_VOICEMAIL_VISIT_UNDERWAY: a visit that ran after a voicemail;
- * GATE_LEAD_CONTACTED_CLOSE: the lead_contacted Leads bells). The rules
+ * GATE_LEAD_CONTACTED_CLOSE: the lead_contacted Leads bells), and
+ * GATE_SMS_STAFF_ACTION_ANSWERS (a visit a person booked, or a payment a person
+ * recorded, answers a text: the alert witness and the Messages reader). The rules
  * themselves are covered by admin-alert-relevance.test.js.
  */
 const SKIP = !process.env.DATABASE_URL;
@@ -20,7 +22,7 @@ const DAY = 24 * 60 * 60 * 1000;
 maybeDescribe('alert relevance re-arm (live Postgres)', () => {
   let db;
   let relevance;
-  const made = { notifications: [], sms_log: [], call_log: [], emails: [], scheduled_services: [], estimates: [], leads: [], customers: [] };
+  const made = { notifications: [], sms_log: [], call_log: [], emails: [], scheduled_services: [], invoices: [], estimates: [], leads: [], customers: [] };
 
   beforeAll(() => {
     db = require('../models/db');
@@ -30,10 +32,11 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     delete process.env.GATE_ALERT_CONTACT_CLOSE;
     delete process.env.GATE_VOICEMAIL_VISIT_UNDERWAY;
     delete process.env.GATE_LEAD_CONTACTED_CLOSE;
+    delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS;
   });
   afterAll(async () => {
     if (made.notifications.length) await db('audit_log').where({ resource_type: 'notification' }).whereIn('resource_id', made.notifications).del();
-    for (const table of ['notifications', 'sms_log', 'call_log', 'emails', 'scheduled_services', 'leads', 'estimates', 'customers']) {
+    for (const table of ['notifications', 'sms_log', 'call_log', 'emails', 'scheduled_services', 'invoices', 'leads', 'estimates', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
     }
     await db.destroy();
@@ -873,6 +876,119 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       }
       expect(await state(never)).toEqual(['relevance', 'Lead was contacted']);
     }, 30000);
+
+    describe('a staff action answers a text (GATE_SMS_STAFF_ACTION_ANSWERS)', () => {
+      const f1 = (mode) => { if (mode === undefined) delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS; else process.env.GATE_SMS_STAFF_ACTION_ANSWERS = mode; };
+      let phoneN = 8301;
+      let invoiceN = 0;
+      const BOOKED = 'A visit was booked';
+      const PAID = 'A payment was recorded';
+      const visitRow = (customer, over = {}) => insert('scheduled_services', { customer_id: customer.id, scheduled_date: etDateString(new Date()),
+        service_type: 'Lawn Care Re-Service', status: 'pending', source_action: 'admin_manual', is_callback: true, ...over });
+      const invoiceRow = (customer, over = {}) => insert('invoices', { token: `f1-${Date.now()}-${invoiceN}`, invoice_number: `F1-${Date.now()}-${invoiceN += 1}`, customer_id: customer.id,
+        status: 'paid', total: 108, payment_method: 'zelle', ...over });
+      // One customer with a text 6 hours ago; `act(customer, t0)` adds the staff action under test.
+      const scenario = async (act) => {
+        const t0 = mins(new Date(), -360);
+        const customer = await customerWith(`+1555555${phoneN += 1}`);
+        const { row } = await text({ customer, phone: customer.phone, at: t0 });
+        if (act) await act(customer, t0);
+        return { customer, row, t0 };
+      };
+      const build = async () => ({
+        booked: await scenario((c, t0) => visitRow(c, { created_at: mins(t0, 10) })),
+        ibBooked: await scenario((c, t0) => visitRow(c, { created_at: mins(t0, 10), source_action: 'admin_ib' })),
+        paid: await scenario((c, t0) => invoiceRow(c, { payment_recorded_by: 'Office Person', payment_recorded_at: mins(t0, 4) })),
+        child: await scenario(async (c, t0) => {
+          const parent = await visitRow(c, { created_at: mins(t0, -60 * 24 * 30) });
+          await visitRow(c, { created_at: mins(t0, 10), recurring_parent_id: parent.id });
+        }),
+        before: await scenario((c, t0) => visitRow(c, { created_at: mins(t0, -5) })),
+        late: await scenario((c, t0) => visitRow(c, { created_at: mins(t0, 25 * 60) })),
+        cancelled: await scenario((c, t0) => visitRow(c, { created_at: mins(t0, 10), status: 'cancelled' })),
+        automatic: await scenario((c, t0) => visitRow(c, { created_at: mins(t0, 10), source_action: 'voice_agent' })),
+        otherCustomer: await scenario(async (c, t0) => {
+          // Another customer's visit and payment, even on the very same phone, are never this customer's.
+          const other = await customerWith('+15555558399');
+          await visitRow(other, { created_at: mins(t0, 10) });
+          await invoiceRow(other, { payment_recorded_by: 'Office Person', payment_recorded_at: mins(t0, 4) });
+        }),
+        cardPaid: await scenario((c, t0) => invoiceRow(c, { payment_method: 'card', paid_at: mins(t0, 4) })),
+        reconciler: await scenario((c, t0) => invoiceRow(c, { payment_recorded_by: 'zelle-notice-reconciler', payment_recorded_at: mins(t0, 4) })),
+        paidBefore: await scenario((c, t0) => invoiceRow(c, { payment_recorded_by: 'Office Person', payment_recorded_at: mins(t0, -4) })),
+        paidLate: await scenario((c, t0) => invoiceRow(c, { payment_recorded_by: 'Office Person', payment_recorded_at: mins(t0, 25 * 60) })),
+        none: await scenario(null),
+      });
+      const stays = ['child', 'before', 'late', 'cancelled', 'automatic', 'otherCustomer', 'cardPaid', 'reconciler', 'paidBefore', 'paidLate', 'none'];
+      const closes = { booked: BOOKED, ibBooked: BOOKED, paid: PAID };
+
+      test('the zelle reconciler constant is the one the module excludes', () => {
+        expect(require('../services/sms-staff-action-answers').SYSTEM_PAYMENT_RECORDERS).toContain(require('../services/zelle-notice-reconciler').RECORDED_BY);
+      });
+
+      test('alert witness: off changes nothing; shadow records the would-close only; true closes by the action named (a series child, an action before the text or after 24 h, a cancelled, automatic or another customer\'s visit or payment, a card or Auto Pay payment and the reconciler do not)', async () => {
+        gate('true');
+        const cases = await build();
+        const all = Object.values(cases);
+        await sweep();
+        for (const c of all) expect((await get(c.row.id)).done_at).toBeNull();
+
+        f1('shadow');
+        await sweep();
+        for (const c of all) expect((await get(c.row.id)).done_at).toBeNull();
+        for (const [name, reason] of Object.entries(closes)) {
+          const rows = await wouldClose(cases[name].row.id);
+          expect(rows).toHaveLength(1);
+          expect(rows[0].metadata).toMatchObject({ class: 'inbound_sms', reason });
+        }
+        for (const name of stays) expect(await wouldClose(cases[name].row.id)).toHaveLength(0);
+
+        f1('true');
+        await sweep();
+        for (const [name, reason] of Object.entries(closes)) expect(await get(cases[name].row.id)).toMatchObject({ done_by: 'relevance', resolution: reason });
+        for (const name of stays) expect((await get(cases[name].row.id)).done_at).toBeNull();
+
+        // The gate switched off: the re-arm pass puts the closed alerts back.
+        f1(undefined);
+        const back = await sweep();
+        expect(back.rearmed).toBeGreaterThanOrEqual(Object.keys(closes).length);
+        for (const name of Object.keys(closes)) expect((await get(cases[name].row.id)).done_at).toBeNull();
+      }, 60000);
+
+      test('the Messages reader: true drops a text a staff action answered; off and shadow list it as before; the others stay listed in every mode', async () => {
+        const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
+        const cases = await build();
+        const pendingFor = async (name) => (await loadPendingSmsConversations({ includeLegacyOnly: true, customerId: cases[name].customer.id }))
+          .map((r) => r.customer_id || r.peer);
+        for (const mode of [undefined, 'shadow']) {
+          f1(mode);
+          for (const name of Object.keys(cases)) expect(await pendingFor(name)).toHaveLength(1);
+        }
+        f1('true');
+        for (const name of Object.keys(closes)) expect(await pendingFor(name)).toHaveLength(0);
+        for (const name of stays) expect(await pendingFor(name)).toHaveLength(1);
+        // The Messages reader and the alert agree: with the reader dropping it, the sweep closes by the named action.
+        gate('true');
+        await sweep();
+        for (const [name, reason] of Object.entries(closes)) expect(await get(cases[name].row.id)).toMatchObject({ done_by: 'relevance', resolution: reason });
+      }, 60000);
+
+      test('a shared phone is judged by customer id: the action for this customer closes the text, one for the other customer on the number does not', async () => {
+        gate('true');
+        f1('true');
+        const phone = `+1555555${phoneN += 1}`;
+        const t0 = mins(new Date(), -360);
+        const mine = await customerWith(phone);
+        const theirs = await customerWith(phone);
+        const a = await text({ customer: mine, phone, at: t0 });
+        await visitRow(theirs, { created_at: mins(t0, 10) });
+        await sweep();
+        expect((await get(a.row.id)).done_at).toBeNull();
+        await visitRow(mine, { created_at: mins(t0, 12) });
+        await sweep();
+        expect(await get(a.row.id)).toMatchObject({ done_by: 'relevance', resolution: BOOKED });
+      }, 60000);
+    });
 
     test('rollback: gate off puts back, unread, what the contact classes closed in the window', async () => {
       const t0 = mins(new Date(), -120);

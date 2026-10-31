@@ -729,9 +729,9 @@ router.get('/balance', async (req, res, next) => {
       .where(function withdrawnExcluded() {
         this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
       })
-      // Outstanding balance = amount DUE (total − applied account credit), not the
+      // Outstanding balance = amount DUE (total − applied account credit − part payments), not the
       // raw total, so the portal balance matches what Stripe/Terminal actually charge.
-      .select(db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) AS total'))
+      .select(db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) AS total'))
       .first();
 
     // The portal's billing banner flips to "failed" when the most recent
@@ -804,10 +804,10 @@ router.get('/balance', async (req, res, next) => {
         // fully-credited invoices would crowd a payable sixth out of the
         // list entirely (Codex P2). Same GREATEST expression as the
         // balance SUM above.
-        .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+        .whereRaw('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0')
         .orderBy('created_at', 'asc')
         .limit(5)
-        .select('token', 'invoice_number', 'due_date', 'total', 'credit_applied');
+        .select('token', 'invoice_number', 'due_date', 'total', 'credit_applied', 'amount_paid');
       openInvoices = openRows
         .map((row) => ({
           payUrl: `/pay/${row.token}`,

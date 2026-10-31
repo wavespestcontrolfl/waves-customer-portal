@@ -3,11 +3,10 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SocialMediaService = require('../services/social-media');
-const { SOCIAL_FLAGS, isPausedByAdmin, normalizeUrl } = require('../services/social-media');
+const { SOCIAL_FLAGS, RSS_FEED_URL, isPausedByAdmin, normalizeUrl, platformEntryOutcome } = require('../services/social-media');
 const linkedin = require('../services/linkedin');
 const SocialContentStudio = require('../services/social-content-studio');
 const logger = require('../services/logger');
-const { runExclusive } = require('../utils/cron-lock');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -48,7 +47,7 @@ router.get('/status', async (req, res, next) => {
         scheduledPosts: SOCIAL_FLAGS.scheduledPosts,
         newsletterAutoshare: SOCIAL_FLAGS.newsletterAutoshare,
       },
-      rssFeed: 'https://www.wavespestcontrol.com/feed.xml',
+      rssFeed: RSS_FEED_URL,
     });
   } catch (err) { next(err); }
 });
@@ -72,15 +71,16 @@ router.post('/pause', async (req, res, next) => {
 // GET /rss — fetch latest RSS items
 router.get('/rss', async (req, res, next) => {
   try {
-    const url = req.query.url || 'https://www.wavespestcontrol.com/feed.xml';
-    const items = await SocialMediaService.getRSSItems(url);
+    // Always the fixed blog feed: a caller-supplied ?url= is ignored so this
+    // endpoint can never fetch an arbitrary destination.
+    const items = await SocialMediaService.getRSSItems(RSS_FEED_URL);
     // Mark which have been posted
     for (const item of items) {
       const posted = await db('social_media_posts').where({ source_url: normalizeUrl(item.link) || item.link }).first();
       item.posted = !!posted;
       item.postId = posted?.id;
     }
-    res.json({ items, feedUrl: url });
+    res.json({ items, feedUrl: RSS_FEED_URL });
   } catch (err) { next(err); }
 });
 
@@ -193,61 +193,13 @@ router.post('/review-graphics', requireStudioEnabled, async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// POST /review-graphics/:id/approve — mark a review graphic approved
+// POST /review-graphics/:id/approve — post the graphic through the testimonial
+// publish path; it is marked approved only after a real post
 router.post('/review-graphics/:id/approve', requireStudioEnabled, async (req, res, next) => {
   try {
-    const existing = await db('review_graphics').where({ id: req.params.id }).first();
-    if (!existing) return res.status(404).json({ error: 'review graphic not found' });
-    // Never approve a graphic with no rendered image — approving publishes it as
-    // a "5-star review" card, and a blank card is worse than none.
-    if (!existing.image_url) {
-      return res.status(400).json({ error: 'review graphic has no rendered image; regenerate it before approving' });
-    }
-    // Liveness gate, mirroring the autonomous-run approval: the source review
-    // can be stamped removed between draft creation and this approval, and
-    // approving would publish a removed review as a current testimonial.
-    // Check and approval run in ONE transaction with the source row locked,
-    // UNDER the per-location sync advisory lock (same shape as
-    // createReviewGraphic / publishWithReviewLivenessLock): the row lock
-    // alone only serializes against the stamping UPDATE — a sync cycle that
-    // already fetched a snapshot without this review could stamp it right
-    // after a row-lock-only approval committed.
-    const approve = async () => {
-      let outcome = null;
-      await db.transaction(async (trx) => {
-        if (existing.google_review_id) {
-          const src = await trx('google_reviews')
-            .where({ id: existing.google_review_id })
-            .forUpdate()
-            .first();
-          if (!src || src.missing_since) {
-            outcome = { status: 409, error: 'source Google review has been removed from Google — the graphic cannot be approved' };
-            return;
-          }
-        }
-        const [graphic] = await trx('review_graphics')
-          .where({ id: req.params.id })
-          .update({
-            status: 'approved',
-            approved_at: new Date(),
-            updated_at: new Date(),
-          })
-          .returning('*');
-        outcome = { status: 200, graphic };
-      });
-      return outcome;
-    };
-    let outcome;
-    if (existing.google_review_id && existing.location_id) {
-      outcome = await runExclusive(`gbp-review-sync:${existing.location_id}`, approve, { recordHealth: false });
-      if (outcome?.skipped) {
-        outcome = { status: 409, error: 'review sync is in progress for this location — approve again in a moment' };
-      }
-    } else {
-      outcome = await approve();
-    }
-    if (outcome.status !== 200) return res.status(outcome.status).json({ error: outcome.error });
-    res.json({ success: true, graphic: outcome.graphic });
+    const result = await SocialContentStudio.approveReviewGraphic(req.params.id);
+    if (!result.ok) return res.status(result.status || 500).json({ error: result.error });
+    res.json({ success: true, published: result.published, dryRun: result.dryRun, publishResult: result.publishResult, graphic: result.graphic });
   } catch (err) { next(err); }
 });
 
@@ -294,8 +246,8 @@ router.post('/publish-single', async (req, res, next) => {
 // POST /check-rss — check RSS feed and auto-publish new items
 router.post('/check-rss', async (req, res, next) => {
   try {
-    const url = req.body.feedUrl || 'https://www.wavespestcontrol.com/feed.xml';
-    const result = await SocialMediaService.checkAndPublish(url, { manual: true });
+    // Fixed blog feed only; a body feedUrl is ignored (see GET /rss).
+    const result = await SocialMediaService.checkAndPublish(RSS_FEED_URL, { manual: true });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -376,6 +328,27 @@ router.post('/engagement/sync', async (req, res, next) => {
   }
 });
 
+// Per-platform tally for one post. Each entry is classified from its own
+// outcome when it is a result object ({platform, success|error|skipped}); a
+// plain channel string (draft/scheduled rows) or an outcome-less marker falls
+// back to the parent post status. No platform info uses a generic bucket.
+function tallyPlatforms(byPlatform, post, platformList) {
+  const entries = platformList.length > 0
+    ? platformList.map(p => (typeof p === 'string'
+      ? { name: p, outcome: null }
+      : { name: p?.platform || 'unknown', outcome: platformEntryOutcome(p) }))
+    : [{ name: 'unknown', outcome: null }];
+  for (const { name, outcome } of entries) {
+    if (!byPlatform[name]) {
+      byPlatform[name] = { total: 0, success: 0, failed: 0, skipped: 0, draft: 0, scheduled: 0 };
+    }
+    const bucket = byPlatform[name];
+    bucket.total++;
+    const key = outcome || { published: 'success', failed: 'failed', draft: 'draft', scheduled: 'scheduled' }[post.status];
+    if (key) bucket[key]++;
+  }
+}
+
 router.get('/analytics', async (req, res, next) => {
   try {
     // Posts grouped by platform (cap at 2000 most-recent to avoid unbounded scans)
@@ -388,21 +361,7 @@ router.get('/analytics', async (req, res, next) => {
       const platforms = post.platforms_posted || [];
       const platformList = Array.isArray(platforms) ? platforms : (typeof platforms === 'string' ? JSON.parse(platforms) : []);
 
-      // If no platform info, use a generic bucket
-      const effectivePlatforms = platformList.length > 0
-        ? platformList.map(p => typeof p === 'string' ? p : (p.platform || 'unknown'))
-        : ['unknown'];
-
-      for (const platform of effectivePlatforms) {
-        if (!byPlatform[platform]) {
-          byPlatform[platform] = { total: 0, success: 0, failed: 0, draft: 0, scheduled: 0 };
-        }
-        byPlatform[platform].total++;
-        if (post.status === 'published') byPlatform[platform].success++;
-        else if (post.status === 'failed') byPlatform[platform].failed++;
-        else if (post.status === 'draft') byPlatform[platform].draft++;
-        else if (post.status === 'scheduled') byPlatform[platform].scheduled++;
-      }
+      tallyPlatforms(byPlatform, post, platformList);
 
       // Weekly trend — bucket by ISO week
       const created = new Date(post.created_at);

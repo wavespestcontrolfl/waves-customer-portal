@@ -29,6 +29,24 @@
  *   at the rate Florida assigns the employer (Florida DOR: "The initial tax
  *   rate for new employers is .0270 (2.7%)").
  *
+ * Pay lines (GATE_PAYROLL_PAY_LINES, owner 2026-10-29, D5 part 1): a caller may
+ * pass `payLines` (review bonus, commission, health allowance, employer HSA and
+ * the extra overtime those cause, from payroll-regular-rate.js) and
+ * `flsaCovered`. The bonus, commission, allowance and line overtime are taxable
+ * wages: they add to gross and so to every tax base. The employer HSA money is
+ * Section 125 cafeteria-plan pay: not gross, not net pay and in no tax base, but
+ * it is reported (W-2 box 12 code W) and it counts in the regular rate. Code TT
+ * (qualified overtime) is filled only when the technician is covered by federal
+ * overtime law. Without `payLines` the output is exactly what it was before.
+ *
+ * Family employee (GATE_PAYROLL_FAMILY_EMPLOYEE, owner 2026-10-29, D5 part 2): a caller
+ * may pass `unemploymentExempt` (the employee is the owner's parent or spouse, 26 U.S.C.
+ * 3306(c)(5) and F.S. 443.1216(13)(d)) and `ytdUnemploymentWages` (the employee's year-to-date
+ * wages that already counted toward the $7,000 base; omitted = ytdGrossWages, same unit).
+ * Exempt pay is no FUTA or RT-6 wage: both taxes and both taxable wage lines are zero and
+ * it never uses up the base. Social Security, Medicare, Additional Medicare and income tax
+ * withholding never change. Without `unemploymentExempt` the output is exactly what it was.
+ *
  * The tax year is the pay date's calendar year, because wages are taxed when
  * paid. A pay date in a year without tables throws: the calculator never
  * falls back to an older year's tables. Money is integer cents; each tax line
@@ -97,6 +115,23 @@ const ADDITIONAL_MEDICARE_THRESHOLD_CENTS = 20000000n;
 const FUTA_BP = 60n;
 const STATE_AND_FUTA_WAGE_BASE_CENTS = 700000n;
 const FLORIDA_NEW_EMPLOYER_RATE_BP = 270;
+
+// Florida minimum wage, effective-dated (Fla. Const. art. X, s. 24(c), as amended 2020: $15.00 on
+// 30 Sep 2026; the 2027 rate is computed 30 Sep 2027 and takes effect 1 Jan 2028, so the table ends
+// 31 Dec 2027 until that rate is known). Kept apart from TAX_YEARS: the form figures read TAX_YEARS.
+const FLORIDA_MINIMUM_WAGE = [
+  { from: '2025-09-30', through: '2026-09-29', cents: 1400n },
+  { from: '2026-09-30', through: '2027-12-31', cents: 1500n },
+];
+
+// The floor in force on a YYYY-MM-DD date, in cents.
+function floridaMinimumWageCentsFor(day) {
+  const row = FLORIDA_MINIMUM_WAGE.find((r) => day >= r.from && day <= r.through);
+  if (!row) throw new Error(`No Florida minimum wage on file for ${day} yet`);
+  return row.cents;
+}
+
+const dollarsText = (cents) => `$${(Number(cents) / 100).toFixed(2)}`;
 
 const max0 = (n) => (n > 0n ? n : 0n);
 const min = (a, b) => (a < b ? a : b);
@@ -179,6 +214,13 @@ function taxYearOf(payDate) {
   return Number(date.slice(0, 4));
 }
 
+// A pay line figure: omitted is zero; a supplied one must be a whole number of cents.
+function wholeCents(value, label) {
+  if (value == null) return 0n;
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a non-negative whole number of cents`);
+  return BigInt(value);
+}
+
 const toNumbers = (obj) => Object.fromEntries(
   Object.entries(obj).map(([k, v]) => [k, typeof v === 'bigint' ? Number(v) : v]),
 );
@@ -201,6 +243,10 @@ function computePaycheck({
   ytdGrossWages = 0,
   w4,
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
+  payLines,
+  flsaCovered,
+  unemploymentExempt,
+  ytdUnemploymentWages,
 }) {
   const taxYear = taxYearOf(payDate);
   const tables = schedulesForYear(taxYear);
@@ -209,6 +255,13 @@ function computePaycheck({
   validateW4(w4);
   const rateCents = nonNegativeCents(hourlyRate, 'Hourly rate');
   if (rateCents === 0n) throw new Error('No pay rate set');
+  // The floor on the PAY DATE. It only rises, so a rate that clears it on the pay date also
+  // cleared it on every day of the work week before.
+  const day = validCalendarDate(payDate);
+  const floor = floridaMinimumWageCentsFor(day);
+  if (rateCents < floor) {
+    throw new Error(`Hourly rate ${dollarsText(rateCents)} is below the Florida minimum wage of ${dollarsText(floor)} on ${day}`);
+  }
   if (!Number.isInteger(reemploymentRateBp) || reemploymentRateBp < 0) {
     throw new Error('reemploymentRateBp must be a whole number of basis points');
   }
@@ -225,7 +278,17 @@ function computePaycheck({
   const withTimeOff = ptoMinutes !== undefined || holidayMinutes !== undefined;
   const ptoPay = roundDiv(rateCents * nonNegativeCents(ptoMinutes, 'Paid time off minutes'), 6000n);
   const holidayPay = roundDiv(rateCents * nonNegativeCents(holidayMinutes, 'Holiday minutes'), 6000n);
-  const gross = regularPay + overtimePay + ptoPay + holidayPay;
+  // Pay lines ride on the check only when the caller passes them.
+  // (wholeCents reads an omitted figure as zero.)
+  const withPayLines = payLines != null;
+  const lineFigures = payLines || {};
+  const reviewBonus = wholeCents(lineFigures.reviewBonusCents, 'Review bonus');
+  const commission = wholeCents(lineFigures.commissionCents, 'Commission');
+  const healthAllowance = wholeCents(lineFigures.healthAllowanceCents, 'Health allowance');
+  const hsaEmployer = wholeCents(lineFigures.hsaEmployerCents, 'Employer HSA');
+  const lineOvertimePremium = wholeCents(lineFigures.lineOvertimePremiumCents, 'Overtime on pay lines');
+  const gross = regularPay + overtimePay + ptoPay + holidayPay
+    + reviewBonus + commission + healthAllowance + lineOvertimePremium;
 
   const ytd = nonNegativeCents(ytdGrossWages, 'Year-to-date wages');
   const socialSecurityWages = min(gross, max0(tables.socialSecurityWageBase - ytd));
@@ -234,7 +297,9 @@ function computePaycheck({
   const additionalMedicareWages = max0(ytd + gross - ADDITIONAL_MEDICARE_THRESHOLD_CENTS)
     - max0(ytd - ADDITIONAL_MEDICARE_THRESHOLD_CENTS);
   const additionalMedicare = roundDiv(additionalMedicareWages * ADDITIONAL_MEDICARE_BP, 10000n);
-  const capWages = min(gross, max0(STATE_AND_FUTA_WAGE_BASE_CENTS - ytd));
+  // The $7,000 base is used up by the year's non-exempt wages only (family pay is never FUTA wages).
+  const ytdBase = ytdUnemploymentWages == null ? ytd : nonNegativeCents(ytdUnemploymentWages, 'Year-to-date unemployment wages');
+  const capWages = unemploymentExempt === true ? 0n : min(gross, max0(STATE_AND_FUTA_WAGE_BASE_CENTS - ytdBase));
   const futa = roundDiv(capWages * FUTA_BP, 10000n);
   const floridaReemployment = roundDiv(capWages * BigInt(reemploymentRateBp), 10000n);
 
@@ -256,6 +321,12 @@ function computePaycheck({
       overtimePayCents: overtimePay,
       overtimePremiumCents: overtimePremium,
       ...(withTimeOff ? { ptoPayCents: ptoPay, holidayPayCents: holidayPay } : {}),
+      ...(withPayLines ? {
+        reviewBonusCents: reviewBonus,
+        commissionCents: commission,
+        healthAllowanceCents: healthAllowance,
+        lineOvertimePremiumCents: lineOvertimePremium,
+      } : {}),
       grossPayCents: gross,
       federalIncomeTaxCents: federalIncomeTax,
       federalIncomeTaxShortfallCents: withheld - federalIncomeTax,
@@ -268,6 +339,17 @@ function computePaycheck({
       futaCents: futa,
       floridaReemploymentCents: floridaReemployment,
     }),
+    // Separate bases for the tax forms. Federal income tax wages and SIMPLE IRA
+    // compensation equal gross (Section 125 HSA money is in neither); Social
+    // Security, Medicare, FUTA and RT-6 wages are the taxableWages block below.
+    // Qualified overtime (W-2 box 12 code TT) counts only for a technician the
+    // federal overtime law covers. The employer HSA money is box 12 code W.
+    ...(withPayLines ? toNumbers({
+      incomeTaxWagesCents: gross,
+      simpleCompensationCents: gross,
+      qualifiedOvertimeCents: flsaCovered === true ? overtimePremium + lineOvertimePremium : 0n,
+      hsaEmployerCents: hsaEmployer,
+    }) : {}),
     taxableWages: toNumbers({
       socialSecurityCents: socialSecurityWages,
       medicareCents: gross,
@@ -276,6 +358,7 @@ function computePaycheck({
       floridaReemploymentCents: capWages,
     }),
     withholdingWorksheet: toNumbers(lines),
+    ...(unemploymentExempt == null ? {} : { unemploymentExempt: unemploymentExempt === true }),
   };
 }
 
@@ -292,4 +375,4 @@ const RATES = {
   floridaNewEmployerBp: FLORIDA_NEW_EMPLOYER_RATE_BP,
 };
 
-module.exports = { computePaycheck, TAX_YEARS, PAY_PERIODS_PER_YEAR, RATES };
+module.exports = { computePaycheck, floridaMinimumWageCentsFor, roundDiv, TAX_YEARS, PAY_PERIODS_PER_YEAR, RATES };

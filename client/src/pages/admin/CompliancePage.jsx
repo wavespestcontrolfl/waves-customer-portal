@@ -71,10 +71,14 @@ function StatCard({ label, value, sub, tone = "neutral" }) {
 
 function DashboardTab({ token }) {
   const { data, loading, error, reload } = useFetch(`${API}/dashboard`, token);
-  const { data: nitrogenData } = useFetch(`${API}/nitrogen-status`, token);
+  const { data: nitrogenData, loading: nitrogenLoading, error: nitrogenError, reload: reloadNitrogen } = useFetch(`${API}/nitrogen-status`, token);
   if (error) return <ErrorState onRetry={reload} className="min-h-20">Couldn't load the dashboard — {error}</ErrorState>;
   if (loading || !data) return <ActionFeedback className="min-h-20">Loading dashboard…</ActionFeedback>;
   const blackoutActive = nitrogenData?.activeBlackoutCount > 0;
+  // A failed or pending read is unknown, never "no blackout".
+  const nitrogenTitle = nitrogenError ? "Nitrogen Blackout Status Unknown"
+    : nitrogenLoading || !nitrogenData ? "Checking Nitrogen Blackout…"
+      : blackoutActive ? "Nitrogen Blackout Active" : "No Active Nitrogen Blackout";
   return <div className="space-y-5">
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
       <StatCard label="YTD Applications" value={data.ytdApplications} />
@@ -87,9 +91,10 @@ function DashboardTab({ token }) {
     </div>
     <Card className={blackoutActive ? "border-alert-fg" : undefined}>
       <CardHeader><CardTitle className={blackoutActive ? "text-alert-fg" : undefined}>
-        {blackoutActive ? "Nitrogen Blackout Active" : "No Active Nitrogen Blackout"}
+        {nitrogenTitle}
       </CardTitle></CardHeader>
       <CardBody className="space-y-1 text-ui-body text-ink-secondary">
+        {nitrogenError && <ErrorState onRetry={reloadNitrogen}>Couldn't load nitrogen status — {nitrogenError}</ErrorState>}
         {nitrogenData?.blackoutPeriods?.map((blackout, index) => <div key={index} className="u-nums">
           {titleCaseCounty(blackout.jurisdiction)}: {fmtDay(blackout.start)} to {fmtDay(blackout.end)}
         </div>)}
@@ -209,17 +214,29 @@ function ProductLimitsTab({ token }) {
   const [customerId, setCustomerId] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
-  const { data: nitrogenData } = useFetch(`${API}/nitrogen-status`, token);
+  const [lookupError, setLookupError] = useState(null);
+  // Only the latest Check Limits may land: an older, slower lookup must not
+  // show another customer's limits as current.
+  const lookupSeq = useRef(0);
+  const { data: nitrogenData, loading: nitrogenLoading, error: nitrogenError, reload: reloadNitrogen } = useFetch(`${API}/nitrogen-status`, token);
   const lookup = async () => {
     if (!customerId) return;
+    const seq = ++lookupSeq.current;
     setLoading(true);
+    setResult(null);
+    setLookupError(null);
     try {
       const response = await fetch(`${API}/product-limits?customer_id=${customerId}`, {
         headers: headers(token),
       });
-      setResult(await response.json());
-    } catch (requestError) { console.error(requestError); }
-    setLoading(false);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      if (seq === lookupSeq.current) setResult(body);
+    } catch (requestError) {
+      console.error(requestError);
+      if (seq === lookupSeq.current) setLookupError(`Couldn't check limits for customer ${customerId} — ${requestError.message || "request failed"}`);
+    }
+    if (seq === lookupSeq.current) setLoading(false);
   };
   return <div className="space-y-6">
     <Card><CardBody className="flex flex-col gap-3 sm:flex-row sm:items-end">
@@ -227,6 +244,7 @@ function ProductLimitsTab({ token }) {
       <Button onClick={lookup}>Check Limits</Button>
     </CardBody></Card>
     {loading && <ActionFeedback>Checking…</ActionFeedback>}
+    {lookupError && <ErrorState onRetry={lookup}>{lookupError}</ErrorState>}
     {result?.limits && <Card>
       <CardHeader><CardTitle>{result.customerName}</CardTitle></CardHeader>
       <CardBody className="p-0"><Table layout="records">
@@ -246,7 +264,9 @@ function ProductLimitsTab({ token }) {
     <Card>
       <CardHeader><CardTitle>Nitrogen Status — All Lawn Customers</CardTitle></CardHeader>
       <CardBody className={nitrogenData?.customers?.length ? "p-0" : undefined}>
-        {nitrogenData?.customers?.length ? <Table layout="records">
+        {nitrogenError ? <ErrorState onRetry={reloadNitrogen}>Couldn't load nitrogen status — {nitrogenError}</ErrorState>
+          : nitrogenLoading && !nitrogenData ? <ActionFeedback>Loading lawn customers…</ActionFeedback>
+            : nitrogenData?.customers?.length ? <Table layout="records">
           <THead><TR>{["Customer", "City", "County", "Lawn Type", "N Apps YTD", "Blackout"].map((heading) => <TH key={heading} scope="col">{heading}</TH>)}</TR></THead>
           <TBody>{nitrogenData.customers.map((customer) => <TR key={customer.customerId}>
             <TD className="font-medium text-zinc-900">{customer.customerName}</TD>
@@ -473,7 +493,7 @@ function LicensesTab({ token }) {
       <TBody>{data?.technicians?.map((technician) => <TR key={technician.id}>
         <TD className="font-medium text-zinc-900">{technician.name}</TD>
         <TD data-label="License #" className="u-nums">{technician.license || "—"}</TD>
-        <TD data-label="Expiry" className="u-nums">{technician.licenseExpiry || "—"}</TD>
+        <TD data-label="Expiry" className="u-nums">{fmtDay(technician.licenseExpiry) || "—"}</TD>
         <TD data-label="Categories" className="text-ink-secondary">{Array.isArray(technician.licenseCategories) ? technician.licenseCategories.join(", ") : "—"}</TD>
         <TD data-label="Status"><StatusBadge status={technician.licenseStatus} /></TD>
         {trainingOn && <TD data-label="ID card and training"><TrainingCell technician={technician} /></TD>}

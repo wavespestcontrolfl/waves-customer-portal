@@ -91,7 +91,7 @@ describe('POST /:id/send-receipt', () => {
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ ok: true, email: { ok: true }, sms: { ok: true } });
     // The route read an unstamped invoice: the claim refuses if another path stamps it first.
-    expect(claimReceiptJobForOperatorSend).toHaveBeenCalledWith(INVOICE_ID, { sawUnsent: true });
+    expect(claimReceiptJobForOperatorSend).toHaveBeenCalledWith(INVOICE_ID, { sawUnsent: true, requirePaid: true });
     const claimAt = claimReceiptJobForOperatorSend.mock.invocationCallOrder[0];
     // Claimed before the closeout too: a queued receipt cannot deliver during it.
     expect(claimAt).toBeLessThan(closeOutVisitForIssuedInvoice.mock.invocationCallOrder[0]);
@@ -166,15 +166,17 @@ test('POST /:id/send-receipt: a stale claim the claim step found already deliver
 
 describe('POST /batch/send-receipts', () => {
   test('each invoice is claimed and released around its legs; an in-flight one is skipped and a claim failure fails only that one', async () => {
-    const ids = ['a1111111-1111-4111-8111-111111111111', 'a2222222-2222-4222-8222-222222222222', 'a3333333-3333-4333-8333-333333333333'];
+    const ids = ['a1111111-1111-4111-8111-111111111111', 'a2222222-2222-4222-8222-222222222222', 'a3333333-3333-4333-8333-333333333333', 'a4444444-4444-4444-8444-444444444444'];
     claimReceiptJobForOperatorSend
       .mockResolvedValueOnce({ id: 'job-1', token: 't1', prior: null })
       .mockResolvedValueOnce({ inFlight: true })
-      .mockRejectedValueOnce(new Error('db blip'));
+      .mockRejectedValueOnce(new Error('db blip'))
+      // An Undo reopened this one after the route read it paid: the claim finds it unpaid and takes nothing.
+      .mockResolvedValueOnce({ notPaid: true });
     const r = await withServer((base) => post(base, '/batch/send-receipts', { invoiceIds: ids }));
     expect(r.status).toBe(200);
     expect(r.body.sent).toEqual([{ invoiceId: ids[0], channels: { email: true, sms: true } }]);
-    expect(r.body.skipped).toEqual([{ invoiceId: ids[1], reason: 'receipt_delivery_in_flight' }]);
+    expect(r.body.skipped).toEqual([{ invoiceId: ids[1], reason: 'receipt_delivery_in_flight' }, { invoiceId: ids[3], reason: 'invoice_not_paid' }]);
     expect(r.body.failed).toEqual([{ invoiceId: ids[2], error: 'receipt claim failed: db blip' }]);
     expect(sendReceiptEmail).toHaveBeenCalledTimes(1);
     expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(1);

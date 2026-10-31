@@ -7,7 +7,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
-    req.technician = { first_name: 'Ava', last_name: 'Admin' };
+    req.technician = { name: 'Ava Admin' };
     req.technicianId = 'admin-1';
     // Role comes from the (mocked) auth layer exactly as admin-auth.js sets
     // req.techRole; tests pick a technician via the x-test-role header.
@@ -183,7 +183,7 @@ function post(baseUrl, extra = {}, { role = 'admin' } = {}) {
   return fetch(`${baseUrl}/admin/leads/${LEAD_ID}/schedule-appointment`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-test-role': role },
-    body: JSON.stringify({ date: '2027-01-15', time: '10:00', serviceType: 'Pest Control', ...extra }),
+    body: JSON.stringify({ date: '2094-01-15', time: '10:00', serviceType: 'Pest Control', ...extra }),
   });
 }
 
@@ -218,6 +218,20 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
       // The lead update is gated on converted_at being NULL (first conversion).
       const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
       expect(leadUpdate.ops.filter((o) => o.op === 'whereNull').map((o) => o.args[0])).toEqual(['deleted_at', 'converted_at']);
+    });
+  });
+
+  it("a form lead's one-line address is saved split into street, city, state and ZIP", async () => {
+    const calls = [];
+    const preLead = baseLead({ address: '12 Sample Ct East, Parrish, FL 34219', city: 'Parrish', zip: null });
+    const knex = makeKnex(makeResolver({ preLead, lockedLead: { customer_id: null, converted_at: null } }), calls);
+    db.mockImplementation(knex);
+    Object.assign(db, { raw: knex.raw, transaction: knex.transaction });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(200);
+      const custInsert = calls.find((c) => c.table === 'customers' && c.op === 'insert');
+      expect(custInsert.args[0]).toMatchObject({ address_line1: '12 Sample Ct East', city: 'Parrish', state: 'FL', zip: '34219' });
     });
   });
 
@@ -779,7 +793,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       const first = calls[calls.findIndex((c) => c.op === 'trx-begin') + 1];
       expect(first.op).toBe('raw');
       expect(first.args[0]).toMatch(/pg_advisory_xact_lock\(hashtext/);
-      expect(first.args[1][1]).toBe('occupancy:2027-01-15');
+      expect(first.args[1][1]).toBe('occupancy:2094-01-15');
       const commsIdx = calls.findIndex((c) => c.op === 'raw' && /customer-comms/.test(String(c.args[1]?.[0])));
       const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
       expect(commsIdx).toBeGreaterThan(0);
@@ -787,8 +801,8 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     });
   });
 
-  const ownBooking = { id: 'appt-existing', customer_id: 'cust-linked', technician_id: 'tech-1', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Pest Control' };
-  const otherBooking = { id: 'appt-other', customer_id: 'cust-other', technician_id: null, scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Lawn' };
+  const ownBooking = { id: 'appt-existing', customer_id: 'cust-linked', technician_id: 'tech-1', scheduled_date: '2094-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Pest Control' };
+  const otherBooking = { id: 'appt-other', customer_id: 'cust-other', technician_id: null, scheduled_date: '2094-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Lawn' };
 
   it('ordering: retry after commit with its OWN booking on the schedule → LEAD_ALREADY_CONVERTED, not SLOT_CONFLICT', async () => {
     const calls = [];
@@ -838,7 +852,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       const json = await res.json();
       // The overlap no longer refuses the booking — it commits and the
       // response carries the advisory warning naming the date.
-      expect(json.warnings).toEqual([expect.stringContaining('2027-01-15')]);
+      expect(json.warnings).toEqual([expect.stringContaining('2094-01-15')]);
       expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
       // Probe still runs, tech-blind with the shared admin exclusion set
       // (freed terminal rows never draw a false overlap note).
@@ -891,7 +905,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     install(makeKnex(makeResolver({
       preLead: linkedLead(),
       lockedLead: lockedLinked,
-      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', status: 'pending' }],
+      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2094-01-15', window_start: '10:00', status: 'pending' }],
     }), calls));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { rebook: true });
@@ -903,7 +917,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       // The dedupe lookup excludes inactive visits and ran under the locks.
       const lookup = calls.find((c) => c.table === 'scheduled_services' && c.op === 'first');
       expect(lookup.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]);
-      expect(lookup.ops[0].args[0]).toMatchObject({ customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', service_type: 'Pest Control' });
+      expect(lookup.ops[0].args[0]).toMatchObject({ customer_id: 'cust-linked', scheduled_date: '2094-01-15', window_start: '10:00', service_type: 'Pest Control' });
       const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
       expect(calls.indexOf(lookup)).toBeGreaterThan(forUpdateIdx);
     });
@@ -914,10 +928,10 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     install(makeKnex(makeResolver({
       preLead: linkedLead(),
       lockedLead: lockedLinked,
-      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', status: 'pending' }],
+      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2094-01-15', window_start: '10:00', status: 'pending' }],
     }), calls));
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, { rebook: true, date: '2027-01-22' });
+      const res = await post(baseUrl, { rebook: true, date: '2094-01-22' });
       expect(res.status).toBe(200);
       expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
     });
@@ -1356,7 +1370,7 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
     install(makeKnex(makeResolver({
       preLead: baseLead({ customer_id: 'cust-linked', converted_at: null }),
       lockedLead: { customer_id: 'cust-linked', converted_at: null, status: 'new' },
-      existingVisits: [{ id: 'appt-first', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending' }],
+      existingVisits: [{ id: 'appt-first', customer_id: 'cust-linked', scheduled_date: '2094-01-15', window_start: '10:00', window_end: '11:00', status: 'pending' }],
     }), calls));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { serviceType: 'Waves Assessment' });
@@ -1397,5 +1411,123 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
       expect(leadUpdate.args[0].converted_at).toBeInstanceOf(Date);
       expect(bridgeLeadFunnelStage).toHaveBeenCalledWith(LEAD_ID, 'won');
     });
+  });
+});
+
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): the
+// booked visit also gets the arrival-window route check (a SECOND, advisory
+// probe after the insert), its warning joins the response's warnings, and its
+// technician's day is numbered inside the booking transaction. Warn only.
+describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_SAVES', () => {
+  const routeCheck = require('../services/scheduling/staff-save-route-check');
+  const arrivalRoute = require('../services/scheduling/arrival-route');
+  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2094-01-15. Review the route before driving it.';
+  let warningsSpy;
+  let placeSpy;
+  let realPlaceSpy;
+  beforeEach(() => {
+    db.mockReset();
+    warningsSpy = jest.spyOn(routeCheck, 'staffSaveRouteWarnings').mockResolvedValue([ROUTE_WARNING]);
+    placeSpy = jest.spyOn(routeCheck, 'placeStaffSavedVisit').mockResolvedValue(null);
+    realPlaceSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(null);
+  });
+  afterEach(() => {
+    warningsSpy.mockRestore();
+    placeSpy.mockRestore();
+    realPlaceSpy.mockRestore();
+    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  });
+
+  it('the booked visit is route-checked inside the transaction, the warning is returned, and the booking commits', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      // The route-check helper is spied (it skips an unassigned visit on its own, pinned in
+      // staff-save-route-check.test.js); only the wiring is under test here.
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.warnings).toEqual([ROUTE_WARNING]);
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
+      expect(warningsSpy).toHaveBeenCalledTimes(1);
+      const [conn, args] = warningsSpy.mock.calls[0];
+      expect(conn.isTransaction).toBe(true);
+      expect(args).toMatchObject({ serviceId: 'appt-1', date: '2094-01-15', windowStart: '10:00', technicianId: null });
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy.mock.calls[0][0].isTransaction).toBe(true);
+      expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'appt-1', source: 'lead_appointment' });
+      // Placement first, then the route warning (Codex P1 on 9837f0c3d4): the check reads the visit where it is saved.
+      expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(warningsSpy.mock.invocationCallOrder[0]);
+    });
+  });
+
+  it('gate off (the real helper): no route probe and no route number, the response is as before', async () => {
+    warningsSpy.mockRestore();
+    placeSpy.mockRestore();
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).warnings).toBeUndefined();
+      expect(realPlaceSpy).not.toHaveBeenCalled();
+      // Only the one overlap probe ran on scheduled_services.
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c))).toHaveLength(1);
+    });
+  });
+
+  it('gate on (the real helper): an unassigned booking is not route-checked or numbered', async () => {
+    warningsSpy.mockRestore();
+    placeSpy.mockRestore();
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).warnings).toBeUndefined();
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c))).toHaveLength(1);
+    });
+  });
+});
+
+// GATE_SAVE_ROAD_BUY (owner 2026-10-29): the booking buys the placement's Google
+// road times BEFORE its transaction opens (the router is requireAdmin: the staff
+// user pays). The helper is spied: it reads its own gate; only the wiring is
+// under test here (the purchase itself is proven in save-road-buy.test.js).
+describe('POST /admin/leads/:id/schedule-appointment — GATE_SAVE_ROAD_BUY', () => {
+  const roadBuy = require('../services/scheduling/save-road-buy');
+  const located = { ...existingLinked, latitude: '27.5', longitude: '-82.4' };
+  let buySpy;
+  beforeEach(() => {
+    db.mockReset();
+    buySpy = jest.spyOn(roadBuy, 'buyRoadsBeforeSave').mockResolvedValue({ lookups: 0 });
+  });
+  afterEach(() => buySpy.mockRestore());
+
+  const run = async (extra, resolverOptions = {}) => {
+    const knex = makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked, ...resolverOptions }), []);
+    install(knex);
+    await withServer(async (baseUrl) => { await post(baseUrl, { rebook: true, ...extra }); });
+    return knex;
+  };
+
+  it('a timed booking for a located customer with a technician buys first, as the staff user, before any transaction', async () => {
+    const knex = await run({ technicianId: 'tech-1' }, { linkedCustomer: located });
+    expect(buySpy).toHaveBeenCalledTimes(1);
+    expect(buySpy.mock.calls[0][0]).toMatchObject({
+      spender: 'admin-1', date: '2094-01-15', technicianId: 'tech-1', windowStart: '10:00',
+      prospective: { lat: '27.5', lng: '-82.4' },
+    });
+    expect(buySpy.mock.invocationCallOrder[0]).toBeLessThan(knex.transaction.mock.invocationCallOrder[0]);
+  });
+
+  it('no saved location, or no technician: nothing is bought', async () => {
+    await run({ technicianId: 'tech-1' });
+    await run({}, { linkedCustomer: located });
+    expect(buySpy).not.toHaveBeenCalled();
   });
 });

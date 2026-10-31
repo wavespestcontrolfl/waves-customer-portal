@@ -140,19 +140,44 @@ describe('public pricing ranges', () => {
     expect(ts.notes).not.toMatch(/\b4,?\s*6,?\s*or\s*9\b/);
   });
 
-  test('tree & shrub published LOW never reflects the retired Light tier (codex pre-push P1)', () => {
-    // Light's own (pre-retirement) discounted floor was ~$18/mo — well below
-    // Standard's. The bundle sweep's "cheapest combo" input used to pin T&S
-    // to tier:'light' (waveGuardBundleValues), which alone could pull the
-    // published low that far down even though the direct per-tier sweep
-    // above it was already standard/enhanced-only. Both paths must now
-    // agree: the published low reflects Standard's discounted floor, not
-    // Light's.
+  test('tree & shrub range never reflects the retired Light tier (codex pre-push P1)', () => {
+    // Light (4x/quarterly) is retired and must not be swept, directly or via
+    // the bundle sweep's "cheapest combo" input. On the row's own profiles
+    // Light prices ABOVE the sold tiers per application (4 visits a year, up to
+    // ~$156) and BELOW them per month (as low as ~$24), so a swept Light would
+    // lift the published high or drop the averaged monthly low.
     const ts = payload.services.find((s) => s.key === 'tree_shrub_care');
-    const constants = require('../services/pricing-engine/constants');
-    const lightDiscountedFloor = constants.TREE_SHRUB.tiers.light.monthlyFloor * 0.8;
-    expect(ts.low).toBeGreaterThan(lightDiscountedFloor);
-    expect(ts.low).toBeGreaterThanOrEqual(constants.TREE_SHRUB.tiers.standard.monthlyFloor * 0.8);
+    const sp = require('../services/pricing-engine/service-pricing');
+    const light = [5400, 7000, 8900, 12700, 22500].flatMap((lotSqFt) => [
+      sp.priceTreeShrub({ footprint: 1865, lotSqFt }, { tier: 'light' }),
+      sp.priceTreeShrub({ footprint: 1865, lotSqFt, bedArea: 4000 }, { tier: 'light', treeCount: 6, access: 'moderate' }),
+    ]);
+    expect(ts.high).toBeLessThan(Math.max(...light.map((r) => r.perApp)));
+    const monthlyLow = Number(ts.notes.match(/\$(\d+)-\$\d+ a month/)[1]);
+    expect(monthlyLow).toBeGreaterThan(Math.min(...light.map((r) => r.monthly)));
+  });
+
+  test('tree & shrub row is priced per application, with the monthly figure only as an average', () => {
+    const ts = payload.services.find((s) => s.key === 'tree_shrub_care');
+    const sp = require('../services/pricing-engine/service-pricing');
+    expect(ts.unit).toBe('per application');
+    // Recompute the row's own sweep (standard + enhanced only; light stays retired).
+    const results = [5400, 7000, 8900, 12700, 22500].flatMap((lotSqFt) =>
+      ['standard', 'enhanced'].flatMap((tier) => [
+        sp.priceTreeShrub({ footprint: 1865, lotSqFt }, { tier }),
+        sp.priceTreeShrub({ footprint: 1865, lotSqFt, bedArea: 4000 }, { tier, treeCount: 6, access: 'moderate' }),
+      ]));
+    const perApp = results.map((r) => r.perApp);
+    const monthly = results.map((r) => r.monthly);
+    expect(ts.low).toBe(Math.floor(Math.min(...perApp)));
+    expect(ts.high).toBe(Math.ceil(Math.max(...perApp)));
+    const avg = `$${Math.floor(Math.min(...monthly))}-$${Math.ceil(Math.max(...monthly))} a month, averaged over the year`;
+    expect(ts.notes).toContain(avg);
+    expect(ts.notes).toMatch(/^Billed after each application; 6 or 9 applications per year by tier/);
+    expect(ts.notes).not.toMatch(/Monthly-billed/i);
+    expect(ts.notes).not.toMatch(/\/\s*mo\b/i);
+    // The per-application price is the price: it sits above the monthly average.
+    expect(ts.low).toBeGreaterThan(Math.floor(Math.min(...monthly)));
   });
 
   test('no lawn or pest combined monthly totals are published', () => {
@@ -269,5 +294,38 @@ describe('public pricing ranges', () => {
     expect(Array.isArray(rows)).toBe(true);
     expect(Array.isArray(errors)).toBe(true);
     expect(errors).toEqual([]);
+  });
+});
+
+describe('rodent package discount note lists all three live packages (owner 2026-10-30)', () => {
+  const { RODENT } = require('../services/pricing-engine/constants');
+  const rows = () => computePublicPricingRanges({ refresh: true }).services;
+
+  test.each(['rodent_trapping', 'rodent_sanitation', 'rodent_exclusion'])('%s note carries one sentence per package', (key) => {
+    const note = rows().find((svc) => svc.key === key).notes;
+    expect(note).toContain('Package discounts (live terms): trapping+exclusion 7% (floor $895).');
+    expect(note).toContain('Trapping+sanitation 5% (floor $895).');
+    expect(note).toContain('Trapping+exclusion+sanitation 10% (floor $1,195-$1,995 by sanitation tier).');
+    expect(note).not.toMatch(/other combinations/);
+  });
+
+  test('the website splits notes on sentence ends: only the sanitation packages mention sanitation', () => {
+    const note = rows().find((svc) => svc.key === 'rodent_exclusion').notes;
+    const sentences = note.split(/(?<=\.)\s+/);
+    const exclusionSentence = sentences.find((s) => s.startsWith('Package discounts'));
+    expect(exclusionSentence).not.toMatch(/sanitation/i);
+    expect(sentences.filter((s) => /sanitation/i.test(s))).toHaveLength(2);
+  });
+
+  test('the note tracks constants', () => {
+    const original = RODENT.bundles.trapExclusion.discount;
+    try {
+      RODENT.bundles.trapExclusion.discount = 0.08;
+      const note = rows().find((svc) => svc.key === 'rodent_trapping').notes;
+      expect(note).toContain('trapping+exclusion 8% (floor $895).');
+    } finally {
+      RODENT.bundles.trapExclusion.discount = original;
+      computePublicPricingRanges({ refresh: true });
+    }
   });
 });

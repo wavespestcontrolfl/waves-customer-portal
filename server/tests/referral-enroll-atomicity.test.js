@@ -19,6 +19,10 @@ const engine = require('../services/referral-engine');
 
 // Minimal knex-transaction fake: trx('table') returns a chain; every chain
 // records itself so assertions can prove which connection ran the query.
+const digitsOf = (phone) => String(phone || '').replace(/\D/g, '');
+const samePhone = (stored, exact, digitVariants) => (exact != null && stored === exact)
+  || (Array.isArray(digitVariants) && digitVariants.includes(digitsOf(stored)));
+
 function makeTrx(state) {
   const trx = jest.fn((table) => {
     const chain = {
@@ -29,7 +33,20 @@ function makeTrx(state) {
       _accountScope: null,
       join: jest.fn().mockReturnThis(),
       _where: null,
+      _digitScope: null,
+      orderBy: jest.fn().mockReturnThis(),
+      // Digit-match predicates (F7): the enroll same-number probe and the
+      // household lookup's other-spelling arm both bind the phone's digits.
+      whereRaw: jest.fn(function whereRaw(sql, bindings) {
+        if (/regexp_replace/.test(sql)) chain._digitScope = bindings;
+        return chain;
+      }),
+      orWhereRaw: jest.fn(function orWhereRaw(sql, bindings) {
+        if (/regexp_replace/.test(sql)) chain._digitScope = bindings;
+        return chain;
+      }),
       where: jest.fn(function where(...args) {
+        if (typeof args[0] === 'function') { args[0].call(chain); return chain; }
         // The already-enrolled conflict probe excludes the promoter's own
         // id — the fake must honor that or it reports the row as its own
         // "conflict" and the engine regenerates a code that isn't there.
@@ -58,8 +75,14 @@ function makeTrx(state) {
           if (chain._phoneScope) {
             state.phoneFallbacks.push({ phone: chain._phoneScope, account: chain._accountScope, locked: chain._forUpdate });
             const p = state.promoter;
-            if (!p || p.customer_phone !== chain._phoneScope) return null;
+            if (!p || !samePhone(p.customer_phone, chain._phoneScope, chain._digitScope)) return null;
             return (state.promoterAccountId && state.promoterAccountId === chain._accountScope) ? p : null;
+          }
+          // enrollPromoter's same-number probe: any spelling of the number.
+          if (chain._digitScope) {
+            state.sameNumberProbes.push(chain._digitScope);
+            const p = state.promoter;
+            return p && samePhone(p.customer_phone, null, chain._digitScope) ? { id: p.id } : null;
           }
           const wanted = chain._where || {};
           // generateUniqueCode collision probe: only an EXACT code match is a collision.
@@ -101,6 +124,8 @@ function makeTrx(state) {
     state.trxTables.push(table);
     return chain;
   });
+  // The enroll's per-number advisory lock (F7).
+  trx.raw = jest.fn(async (sql, bindings) => { state.advisoryLocks.push(bindings); return { rows: [] }; });
   return trx;
 }
 
@@ -129,6 +154,8 @@ function freshState(overrides = {}) {
     customerReadLocked: false,
     ownLookupLocked: false,
     phoneFallbacks: [],
+    sameNumberProbes: [],
+    advisoryLocks: [],
     promoterAccountId: null,
     ...overrides,
   };

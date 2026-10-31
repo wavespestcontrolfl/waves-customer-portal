@@ -270,6 +270,76 @@ describe('buildEstimatePaymentContext', () => {
     expect(ctx.annualPrepay.prepayAmount).toBe(600);
   });
 
+  // GATE_PAF_PREPAY: the year waits unpaid until a visit is performed.
+  // Completion counts a visit the year holds as annual-prepay covered and
+  // raises no setup-fee alert for it (the prepay waives the fee), so the card
+  // must not switch it to per-application billing or warn about a $99 fee.
+  describe('a pay-after-first-visit year (term payment_pending, invoice a draft)', () => {
+    const awaitingJob = { deferred_to_first_visit: true, status: 'awaiting_first_visit', invoice_id: 'inv-p' };
+    const pafEstimate = (job = awaitingJob) => ({ ...estimate, estimate_data: JSON.stringify({ prepayAutoChargeJob: job }) });
+    const configurePafYear = () => configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: 'prepay_annual' },
+      annual_prepay_terms: {
+        id: 'term-p',
+        status: 'payment_pending',
+        prepay_amount: '368.00',
+        prepay_invoice_id: 'inv-p',
+        term_start: '2026-12-01',
+        term_end: '2027-12-01',
+        coverage_visit_count: 4,
+      },
+      invoices: { id: 'inv-p', status: 'draft', paid_at: null, total: '368.00' },
+    });
+
+    it('keeps prepay billing and runs no setup-fee check for a visit the hold covers', async () => {
+      configurePafYear();
+      mockCoversVisit = true;
+      mockSetupFeeObligation = { owed: true, setupFee: 99, firstVisitAlreadyCompleted: false };
+
+      const ctx = await buildEstimatePaymentContext(pafEstimate(), { scheduledServiceId: 'ss-p' });
+      expect(ctx.billingTerm).toBe('prepay_annual');
+      expect(ctx.setupFeeMissing).toBe(null);
+      expect(ctx.acceptanceInvoice).toBe(null);
+      expect(require('../services/setup-fee-obligation').findUnmintedSetupFeeObligation).not.toHaveBeenCalled();
+      expect(ctx.annualPrepay).toMatchObject({ paid: false, coversThisVisit: true, chargeAfterFirstVisit: true });
+    });
+
+    it('still warns for a visit the hold does not cover', async () => {
+      configurePafYear();
+      mockCoversVisit = false;
+      mockSetupFeeObligation = { owed: true, setupFee: 99, firstVisitAlreadyCompleted: false };
+
+      const ctx = await buildEstimatePaymentContext(pafEstimate(), { scheduledServiceId: 'ss-x' });
+      expect(ctx.billingTerm).toBe('standard');
+      expect(ctx.setupFeeMissing).toMatchObject({ setupFee: 99 });
+    });
+
+    it.each([
+      ['the charge already left the wait', { ...awaitingJob, status: 'pending' }],
+      ['a job bound to another invoice', { ...awaitingJob, invoice_id: 'inv-other' }],
+      ['a job that was never deferred', { ...awaitingJob, deferred_to_first_visit: false }],
+    ])('reports no charge-after-first-visit for %s', async (_case, job) => {
+      configurePafYear();
+      mockCoversVisit = true;
+
+      const ctx = await buildEstimatePaymentContext(pafEstimate(job), { scheduledServiceId: 'ss-p' });
+      expect(ctx.annualPrepay.chargeAfterFirstVisit).toBe(false);
+    });
+
+    it('reads the job from the estimate row when the caller passed no estimate_data', async () => {
+      configureDb({
+        scheduled_services: { annual_prepay_term_id: null, payment_method_preference: 'prepay_annual' },
+        annual_prepay_terms: { id: 'term-p', status: 'payment_pending', prepay_amount: '368.00', prepay_invoice_id: 'inv-p' },
+        invoices: { id: 'inv-p', status: 'draft', paid_at: null, total: '368.00' },
+        estimates: { estimate_data: { prepayAutoChargeJob: awaitingJob } },
+      });
+      mockCoversVisit = true;
+
+      const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-p' });
+      expect(ctx.annualPrepay.chargeAfterFirstVisit).toBe(true);
+    });
+  });
+
   it('treats a lagging payment_pending term as paid when the coverage predicate says so', async () => {
     configureDb({
       scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },

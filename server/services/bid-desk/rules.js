@@ -7,6 +7,7 @@
  *   reminderDue(bid, now)           which due-date reminder (if any) is owed right now
  *   datesDue(bid, now)              the questions and job-walk reminders owed right now (GATE_BID_CHECKLIST)
  *   daysLeft(dueAt, now)            whole ET calendar days until the due date
+ *   lapsedBid(bid, now)             a bid that closes itself (GATE_BID_DESK_AUTO_DATES; the caller checks the gate)
  *
  * The date rule: an email never overwrites a due date. A date the operator confirmed is final; a date that was read
  * from an earlier email stays as it was and the bid is flagged `needs_date_confirmation` so a person looks.
@@ -92,6 +93,25 @@ function datesDue(bid, now = new Date()) {
   return due;
 }
 
+// The note a bid carries after it closed itself. A bid with this note never closes itself again, so one the owner
+// sets back to 'new' stays open.
+const AUTO_CLOSE_NOTE = 'Closed by itself';
+const LAPSED_AFTER_MS = DAY_MS;
+// A date still waiting on an addendum check (needs_date_confirmation) is given this long before the bid closes.
+const LAPSED_FLAGGED_AFTER_MS = 30 * DAY_MS;
+
+/**
+ * True when an open bid should close itself as 'no_bid': still 'new' (never marked 'bid'), a due date more than 1 day
+ * past (more than 30 days past when the date is flagged for confirmation), no submission recorded, and not closed by
+ * itself before. A bid with no date never closes. Pure; the caller checks GATE_BID_DESK_AUTO_DATES.
+ */
+function lapsedBid(bid, now = new Date()) {
+  if (!bid || bid.status !== 'new' || !bid.due_at || bid.submitted_at) return false;
+  if (String(bid.decision_note || '').startsWith(AUTO_CLOSE_NOTE)) return false;
+  const past = new Date(now).getTime() - new Date(bid.due_at).getTime();
+  return past > (bid.needs_date_confirmation ? LAPSED_FLAGGED_AFTER_MS : LAPSED_AFTER_MS);
+}
+
 // ET calendar days from today to the due date (0 = due today, negative = past). null without a date.
 function daysLeft(dueAt, now = new Date()) {
   if (!dueAt) return null;
@@ -102,4 +122,37 @@ function daysLeft(dueAt, now = new Date()) {
   return Math.round((toUtcDay(dueAt) - toUtcDay(now)) / DAY_MS);
 }
 
-module.exports = { attachPatch, reminderDue, datesDue, daysLeft, OPEN_STATUSES, FILL_FIELDS };
+// ---------- work we do not do ----------
+
+// GATE_BID_DESK_NOT_OUR_WORK (owner 2026-10-29): "we are a lawn care, as in herbicide, micronutrients, fertilizer, lawn pest
+// control, we dont mow". Waves never bids grounds upkeep. A title that names upkeep and none of our work is not our work;
+// a title that names neither is filed as always.
+const UPKEEP_WORDS = new RegExp(`\\b(?:${[
+  'mow(?:s|ing|ed|ers?)?', 'edg(?:e|es|ing)', 'trim(?:s|ming|med|mers?)?', 'weed[\\s-]*eat(?:ing|er|ers)?', 'blow(?:ing)?',
+  'litter(?:\\s+(?:pick[\\s-]*up|removal))?', 'debris\\s+removal', 'pressure[\\s-]*wash(?:ing)?', 'prun(?:e|es|ing)', 'mulch(?:ing)?',
+  'sod', 'planting', 'hedges?', 'tree\\s+(?:trim\\w*|removal|work|services?)', 'grounds[\\s-]*maintenance', 'grounds[\\s-]*keeping',
+  'groundskeeping', 'landscap(?:e|ing)\\s+maintenance', 'lawn\\s+maintenance', 'lot\\s+(?:maintenance|clearing)',
+  'right[\\s-]*of[\\s-]*way\\s+maintenance', 'row\\s+maintenance', 'janitorial', 'irrigation\\s+(?:repair|maintenance)',
+].join('|')})\\b`, 'i');
+// Two-word names allow a space or a hyphen ("Weed-Control", "Fire-Ant"): a hyphenated name of our work must keep the bid.
+const OUR_WORK_WORDS = new RegExp(`\\b(?:${[
+  'herbicides?', 'pesticides?', 'insecticides?', 'fungicides?', 'weed[\\s-]+control', 'weed[\\s-]+spraying', 'spray(?:ing)?', 'chemical',
+  'fertiliz\\w*', 'micro[\\s-]*nutrients?', 'nutrients?', 'pests?', 'pest[\\s-]+control', 'termites?', 'mosquito(?:es)?', 'rodents?', 'rats?',
+  'exterminat\\w*', 'fumigat\\w*', 'insects?', 'fire[\\s-]+ants?', 'chinch', 'grubs?', 'mole[\\s-]+crickets?', 'ipm', 'integrated[\\s-]+pest',
+  'vegetation[\\s-]+control', 'aquatic[\\s-]+weed', 'turf[\\s-]+treatment', 'lawn[\\s-]+treatment',
+].join('|')})\\b`, 'i');
+const NOT_OUR_WORK_NOTE = 'Not our work: mowing, edging or trimming (owner 2026-10-29).';
+
+/**
+ * True when the title names grounds-upkeep work and none of our work. Pure; empty or non-string input is false.
+ * The caller checks GATE_BID_DESK_NOT_OUR_WORK and never applies it to a bid a person marked by hand.
+ */
+function notOurWork(title) {
+  const t = typeof title === 'string' ? title : '';
+  return UPKEEP_WORDS.test(t) && !OUR_WORK_WORDS.test(t);
+}
+
+module.exports = {
+  attachPatch, reminderDue, datesDue, daysLeft, lapsedBid, OPEN_STATUSES, FILL_FIELDS, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS,
+  notOurWork, NOT_OUR_WORK_NOTE,
+};

@@ -18,10 +18,10 @@
  * agency, a contractor or a customer. The API key is never logged (errors carry the HTTP status only).
  */
 const db = require('../../models/db');
-const { bidDeskSamLive } = require('../../config/feature-gates');
+const { bidDeskSamLive, bidDeskAutoDatesLive, bidDeskNotOurWorkLive } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
 const { deliverOwedAlerts } = require('./index');
-const { OPEN_STATUSES } = require('./rules');
+const { OPEN_STATUSES, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
 
 const LOG = '[bid-desk-sam]';
 const API_URL = 'https://api.sam.gov/opportunities/v2/search';
@@ -279,11 +279,19 @@ async function upsertNotice(row, { block = null } = {}) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (!block) {
-      const { sql, bindings } = trx('bid_opportunities').insert({ ...row, owed_alert_kind: 'new' }).toSQL();
+      // GATE_BID_DESK_AUTO_DATES: the notice's own response deadline counts as confirmed when the bid is first filed. A
+      // later move of the deadline still flags the bid (refreshPatch), and a confirmed date is never overwritten.
+      const due_confirmed = Boolean(row.due_at) && bidDeskAutoDatesLive();
+      // GATE_BID_DESK_NOT_OUR_WORK: a notice for grounds upkeep is filed as no bid, with no bell owed.
+      const declined = bidDeskNotOurWorkLive() && notOurWork(row.project_title);
+      const filing = declined
+        ? { ...row, due_confirmed, status: 'no_bid', decision_note: NOT_OUR_WORK_NOTE }
+        : { ...row, due_confirmed, owed_alert_kind: 'new' };
+      const { sql, bindings } = trx('bid_opportunities').insert(filing).toSQL();
       const inserted = await trx.raw(`${sql} ON CONFLICT (source, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING id`, bindings);
       const id = inserted.rows?.[0]?.id;
       if (id) {
-        await trx('bid_opportunities').where({ id }).update({ owed_alert_key: `bid-desk:new:${id}` });
+        if (!declined) await trx('bid_opportunities').where({ id }).update({ owed_alert_key: `bid-desk:new:${id}` });
         return { outcome: 'filed' };
       }
     }

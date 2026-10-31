@@ -20,6 +20,7 @@ jest.mock('../services/logger', () => ({
 const express = require('express');
 const db = require('../models/db');
 const leadsRouter = require('../routes/admin-leads');
+const { etDateString } = require('../utils/datetime-et');
 
 function appServer() {
   const app = express();
@@ -45,7 +46,7 @@ function postAppointment(baseUrl, body) {
   return fetch(`${baseUrl}/admin/leads/lead-1/schedule-appointment`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ date: '2027-01-15', serviceType: 'Pest Control', ...body }),
+    body: JSON.stringify({ date: '2094-01-15', serviceType: 'Pest Control', ...body }),
   });
 }
 
@@ -79,6 +80,45 @@ describe('POST /admin/leads/:id/schedule-appointment on-the-hour clamp', () => {
       };
       db.mockImplementation(() => q);
       const res = await postAppointment(baseUrl, { time: '10:00' });
+      expect(res.status).toBe(404);
+      expect(db).toHaveBeenCalledWith('leads');
+    });
+  });
+});
+
+describe('POST /admin/leads/:id/schedule-appointment date check', () => {
+  beforeEach(() => db.mockReset());
+
+  it.each(['2027-02-31', 'not-a-date', '2027-1-5', '2094-01-15T10:00:00'])(
+    'rejects %s with 400 before touching the database',
+    async (date) => {
+      await withServer(async (baseUrl) => {
+        const res = await postAppointment(baseUrl, { date, time: '10:00' });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/real calendar date/i);
+        expect(db).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it('rejects a day that has passed (ET) with 400 before touching the database', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postAppointment(baseUrl, { date: '2020-01-01', time: '10:00' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/has passed/i);
+      expect(db).not.toHaveBeenCalled();
+    });
+  });
+
+  it('lets today (ET) through validation (proceeds to the lead lookup)', async () => {
+    await withServer(async (baseUrl) => {
+      const q = {
+        where: jest.fn(() => q),
+        whereNull: jest.fn(() => q),
+        first: jest.fn(async () => undefined),
+      };
+      db.mockImplementation(() => q);
+      const res = await postAppointment(baseUrl, { date: etDateString(), time: '10:00' });
       expect(res.status).toBe(404);
       expect(db).toHaveBeenCalledWith('leads');
     });

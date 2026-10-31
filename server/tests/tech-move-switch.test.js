@@ -211,3 +211,35 @@ describe('the same technician moves as before when allowed', () => {
     expect(mockGetOptions).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('the route check is told who is asking (GATE_ROUTE_CHECK_STAFF_LISTS: Google is staff-only)', () => {
+  beforeEach(() => {
+    db.__state.technicians.find((t) => t.id === 'tech-1').can_move_visits = true;
+  });
+
+  test('the tech app\'s Quick Move options go in as a non-admin caller', async () => {
+    const r = await call('GET', '/api/tech/services/svc-1/rain-out-options');
+    expect(r.status).toBe(200);
+    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: false, technicianId: 'tech-1' } });
+  });
+
+  test('Dispatch\'s Quick Move options go in with the admin and his technician id', async () => {
+    mockCaller.id = 'admin-1';
+    mockCaller.role = 'admin';
+    const r = await call('GET', '/api/admin/dispatch/svc-1/rain-out-options');
+    expect(r.status).toBe(200);
+    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: true, technicianId: 'admin-1' } });
+  });
+
+  test.each([
+    ['admin', 'admin-1', true],
+    ['technician', 'tech-1', false],
+  ])('the Reschedule window\'s suggested days (%s) go in with the caller', async (role, id, isAdmin) => {
+    mockCaller.id = id;
+    mockCaller.role = role;
+    const r = await call('GET', '/api/admin/dispatch/svc-1/reschedule-options');
+    expect(r.status).toBe(200);
+    expect(mockFindRescheduleOptions).toHaveBeenCalledTimes(1);
+    expect(mockFindRescheduleOptions.mock.calls[0][2]).toEqual({ caller: { isAdmin, technicianId: id } });
+  });
+});

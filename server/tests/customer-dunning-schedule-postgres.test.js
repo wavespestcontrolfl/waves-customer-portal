@@ -86,6 +86,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       t.string('status');
       t.decimal('total', 10, 2);
       t.decimal('credit_applied', 10, 2).defaultTo(0);
+      t.decimal('amount_paid', 10, 2).notNullable().defaultTo(0);
       t.timestamp('created_at');
       t.timestamp('sent_at');
       t.timestamp('sms_sent_at');

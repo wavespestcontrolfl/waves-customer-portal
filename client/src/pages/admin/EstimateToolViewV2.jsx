@@ -67,6 +67,7 @@ import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/Scop
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
+import { leadServiceAddress } from "../../utils/format-address";
 
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -795,7 +796,31 @@ export function nextFormForOfferTiers(form, estimate) {
   }
   return form;
 }
+// The linked member's current services this quote moves up a tier (owner
+// 2026-10-30 option B). The pick keeps the
+// latest list (`offered`) and every service staff unticked for this customer
+// (`unticked`); a service is ticked when it is offered and not unticked. An
+// untick holds until staff tick it again — through a regenerate, a result
+// without the list (nothing to offer, or the lookup failed) and a list that
+// briefly leaves the service out — so a save can never reprice a service staff
+// declined. Another customer's pick never carries. The pick lives in the form
+// so a reopened draft saves the same choice.
+export function nextFormForTierExtension(form, estimate, customerId) {
+  const offered = (estimate?.currentServiceTierOffer?.services || []).map((svc) => svc.key);
+  const prior = customerId && form.tierExtensionPick?.customerId === customerId ? form.tierExtensionPick : null;
+  if (!offered.length) return (form.tierExtensionPick || null) === prior ? form : { ...form, tierExtensionPick: prior };
+  return { ...form, tierExtensionPick: { customerId, offered, unticked: prior ? prior.unticked : [] } };
+}
 const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
+// Dead Rodent Removal & Odor Treatment access choices. The values are the engine's tiers
+// (reachable | attic | in_wall); the empty value is the placeholder, never a default tier.
+const DEAD_ANIMAL_ACCESS_OPTIONS = [
+  { value: "", label: "Choose access" },
+  { value: "reachable", label: "Easy reach (garage, crawl-space opening, under a cabinet, attic floor near the hatch)" },
+  { value: "attic", label: "Attic search (found by smell, insulation moved as needed)" },
+  { value: "in_wall", label: "Inside a wall or ceiling (needs an opening) - custom quote" },
+];
+const DEAD_ANIMAL_ACCESS_VALUES = DEAD_ANIMAL_ACCESS_OPTIONS.map((o) => o.value).filter(Boolean);
 // The four rodent-guarantee eligibility confirmations. They are per-job
 // affirmations (work actually completed for THIS property), so they must reset
 // on a fresh estimate / customer-or-address change / when the guarantee toggle
@@ -1699,6 +1724,9 @@ export default function EstimateToolViewV2({
     sanitationArea: "",
     sanitationDebris: "0",
     sanitationAccess: "normal",
+    // Dead Rodent Removal & Odor Treatment: no default access tier. An unchosen
+    // tier goes to the server as a custom-quote line.
+    deadAnimalAccess: "",
     bedbugRooms: "1",
     bedbugMethod: "CHEMICAL",
     bedbugSeverity: "light",
@@ -1777,6 +1805,7 @@ export default function EstimateToolViewV2({
     birdBoxType: "standard_bird_box",
     birdBoxQuantity: "1",
     svcRodentSanitation: false,
+    svcRodentDeadAnimal: false,
     svcFlea: false,
     fleaOfferKey: "flea_elimination_two_visit",
     fleaComplexity: "light",
@@ -1804,6 +1833,7 @@ export default function EstimateToolViewV2({
     billByInvoice: false,
     offerTiers: false,
     _offerTiersDeclined: false,
+    tierExtensionPick: null,
   });
 
   function clearedPropertyFields() {
@@ -2009,6 +2039,7 @@ export default function EstimateToolViewV2({
       "svcFoam",
       "svcRodentTrap",
       "svcRodentSanitation",
+      "svcRodentDeadAnimal",
       "svcFlea",
       "svcWasp",
       "svcRoach",
@@ -2636,6 +2667,24 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }, []);
 
+  // A tick on the current-services list (owner 2026-10-30 option B) changes
+  // what an accept reprices, never this quote's price: the generated estimate
+  // stays, and the saved state is invalidated like the other delivery options
+  // so Review and send cannot go out with the previously saved choice.
+  const toggleTierExtension = useCallback((key) => {
+    setForm((f) => (f.tierExtensionPick ? {
+      ...f,
+      tierExtensionPick: {
+        ...f.tierExtensionPick,
+        unticked: f.tierExtensionPick.unticked.includes(key)
+          ? f.tierExtensionPick.unticked.filter((k) => k !== key)
+          : [...f.tierExtensionPick.unticked, key],
+      },
+    } : f));
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, []);
+
   const mosquitoRecommendations = useMemo(
     () => buildMosquitoRecommendations(form),
     [form],
@@ -2849,13 +2898,14 @@ export default function EstimateToolViewV2({
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim();
     const hadSelection = !!(form.customerId || form.leadId || linkedLead || existingCustomerMatch);
     const previousPick = pickedContactRef.current;
+    const leadAddress = leadServiceAddress(lead);
     setForm((f) => ({
       ...f,
       leadId: lead.id,
       customerId: "",
       propertyId: "",
-      ...(lead.address && lead.address !== f.address ? clearedPropertyFields() : {}),
-      address: lead.address || f.address,
+      ...(leadAddress && leadAddress !== f.address ? clearedPropertyFields() : {}),
+      address: leadAddress || f.address,
       customerName: name || f.customerName || "",
       // A value the lead does not have keeps what the operator TYPED, and
       // nothing else: not while another person is selected (hadSelection),
@@ -3385,6 +3435,10 @@ export default function EstimateToolViewV2({
   // Area add-on catalog + availability, read from the same lawn_pricing_v2 row.
   // Fail closed: enabled false (or a missing field) hides the whole group.
   const [areaAddOnCatalog, setAreaAddOnCatalog] = useState({ enabled: false, items: [] });
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL, new quotes only).
+  // Explicit true only: a 404, a transport failure or an older server keeps the choice
+  // hidden rather than offering a service the engine would refuse with a 400.
+  const [deadAnimalAvailable, setDeadAnimalAvailable] = useState(false);
   // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
   // Only an explicit false hides the option; an older server or a failed read keeps it, and a
   // reopened estimate that already carries bahia still shows it.
@@ -3511,6 +3565,23 @@ export default function EstimateToolViewV2({
         // rental choice hidden rather than offering an option the engine
         // would silently discard.
         if (active) setTermiteRentalAvailable(row?.featureAvailable === true);
+      } catch {
+        /* ignore — stays unavailable */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/rodent_dead_animal_removal");
+        if (!r.ok) return;
+        const row = await r.json();
+        if (active) setDeadAnimalAvailable(row?.featureAvailable === true);
       } catch {
         /* ignore — stays unavailable */
       }
@@ -4096,6 +4167,7 @@ export default function EstimateToolViewV2({
       if (form.svcTrapOnlyRetainer) selectedServices.push("TRAP_ONLY_RETAINER");
       // Legacy RODENT_WIRE_MESH / RODENT_BIRD_BOX — folded into EXCLUSION V2
       if (form.svcRodentSanitation) selectedServices.push("RODENT_SANITATION");
+      if (form.svcRodentDeadAnimal) selectedServices.push("RODENT_DEAD_ANIMAL");
       if (form.svcFlea || form.svcFleaExterior) selectedServices.push("FLEA");
       if (form.svcWasp) selectedServices.push("STING");
       if (form.svcRoach) selectedServices.push("ROACH");
@@ -4401,6 +4473,10 @@ export default function EstimateToolViewV2({
         sanitationArea: parseInt(form.sanitationArea, 10) || 0,
         sanitationDebris: parseInt(form.sanitationDebris, 10) || 0,
         sanitationAccess: form.sanitationAccess || "normal",
+        // Only when the service is ticked: with it off the request is byte-for-byte what it was before.
+        ...(form.svcRodentDeadAnimal
+          ? { deadAnimalAccess: DEAD_ANIMAL_ACCESS_VALUES.includes(form.deadAnimalAccess) ? form.deadAnimalAccess : "" }
+          : {}),
         roachType: form.roachType || "REGULAR",
         standaloneRoachTreatment: !!form.svcRoach && form.roachType === "REGULAR",
         germanRoachCleanoutSelected: !!form.svcRoach && form.roachType === "GERMAN",
@@ -4709,7 +4785,7 @@ export default function EstimateToolViewV2({
         );
       }
       setEstimate(result);
-      setForm((f) => nextFormForOfferTiers(f, result));
+      setForm((f) => nextFormForTierExtension(nextFormForOfferTiers(f, result), result, options.existingCustomerId));
       setSavedId(null);
       setSavedViewUrl(null);
       setPriceRecomputeNotice(null);
@@ -4786,6 +4862,17 @@ export default function EstimateToolViewV2({
         // parked row's mark unless this is true.
         offerTiersDeclined: !!form._offerTiersDeclined,
         billByInvoice: !!form.billByInvoice,
+        // The current services staff ticked for the new tier, and the ones
+        // they saw and unticked. Absent = the server's automatic plan.
+        ...(savingInputs.tierExtensionPick
+          && savingInputs.tierExtensionPick.customerId === (form.customerId || existingCustomerMatch?.id)
+          ? {
+            tierExtensionKeys: savingInputs.tierExtensionPick.offered
+              .filter((key) => !savingInputs.tierExtensionPick.unticked.includes(key)),
+            tierExtensionKeptKeys: savingInputs.tierExtensionPick.offered
+              .filter((key) => savingInputs.tierExtensionPick.unticked.includes(key)),
+          }
+          : {}),
         // Explicit staff confirmation of a county-roll-flagged address
         // (never inferred from copied data — the server reads only this
         // request field).
@@ -5034,6 +5121,7 @@ export default function EstimateToolViewV2({
       // Good / Better / Best is decided per estimate, never carried.
       offerTiers: false,
       _offerTiersDeclined: false,
+      tierExtensionPick: null,
     }));
     // Starting the next customer's quote ends any in-place edit — otherwise
     // Save changes would still PUT the new quote over the estimate that was
@@ -8018,6 +8106,27 @@ export default function EstimateToolViewV2({
                   </div>{" "}
                 </div>
               )}
+              {/* New quotes only: hidden while the gate is off, unless this estimate already carries it
+                  (a reopened draft keeps the box so the rep sees it and the server's refusal, never a silent drop). */}
+              {(deadAnimalAvailable || form.svcRodentDeadAnimal) && (
+                <>
+                  <CheckboxV2 k="svcRodentDeadAnimal" label="Dead Rodent Removal & Odor Treatment" />
+                  {form.svcRodentDeadAnimal && (
+                    <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                      <Field label="Access (required)" id="estimate-deadAnimalAccess" className="mb-4">
+                        <SelectV2 k="deadAnimalAccess" options={DEAD_ANIMAL_ACCESS_OPTIONS} />
+                      </Field>
+                      <div className="text-14 text-zinc-600" data-testid="dead-animal-note">
+                        {form.deadAnimalAccess === "in_wall"
+                          ? "Custom quote: the price is set after we look at the opening."
+                          : form.deadAnimalAccess
+                            ? "Fixed price. It drops when this estimate has other rodent work."
+                            : "Pick the access. With no access chosen this line is a custom quote."}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion Service" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
@@ -8415,6 +8524,32 @@ export default function EstimateToolViewV2({
                       <div><dt className="text-zinc-600">Recurring monthly equivalent</dt><dd className="text-22 font-medium u-nums">{fmt(E.recurring?.grandTotal || 0)}</dd></div>
                       <div><dt className="text-zinc-600">One-time and setup charges</dt><dd className="text-22 font-medium u-nums">{fmt(E.oneTime?.total || 0)}</dd></div>
                     </dl>
+                  )}
+                  {!presentQuoteRequired && Number(E.recurring?.discount) > 0 && Number(E.recurring?.savings) > 0 && (
+                    <p className="text-14 text-zinc-900 mb-4">
+                      WaveGuard {E.recurring.waveGuardTier || E.recurring.tier} discount: {Math.round(E.recurring.discount * 100)}% off, saving{" "}
+                      <span className="u-nums">{fmt(Math.round((E.recurring.savings / 12) * 100) / 100)}</span>/mo
+                    </p>
+                  )}
+                  {E.currentServiceTierOffer?.services?.length > 0 && form.tierExtensionPick && (
+                    <fieldset className="mb-4 border-hairline border-zinc-300 rounded-sm p-3">
+                      <legend className="px-1 text-14 font-medium text-zinc-900">
+                        Also give {E.currentServiceTierOffer.tierLabel} to current services
+                      </legend>
+                      <p className="text-14 text-zinc-600 mb-2">
+                        Ticked services show on the estimate at the {E.currentServiceTierOffer.tierLabel} price and change when the customer accepts.
+                      </p>
+                      {E.currentServiceTierOffer.services.map((svc) => (
+                        <div key={svc.key} className="mb-1">
+                          <Checkbox
+                            id={`estimate-tier-extension-${svc.key}`}
+                            checked={!form.tierExtensionPick.unticked.includes(svc.key)}
+                            onChange={() => toggleTierExtension(svc.key)}
+                            label={`${svc.label}: ${fmt(svc.currentPerVisit)} → ${fmt(svc.newPerVisit)} / application${svc.marginPct != null ? ` · est. margin ${svc.marginPct}%` : ""}`}
+                          />
+                        </div>
+                      ))}
+                    </fieldset>
                   )}
                   <p className="text-14 text-zinc-600 mb-4">Service cadence, per-application amounts and payment choices appear in the saved customer preview.</p>
                   <div>

@@ -295,3 +295,75 @@ test('rejecting a conversion past the milestone threshold keeps the level and bo
     expect(upd.vals.available_balance_cents).toBeUndefined();
   });
 });
+
+test('the milestone rule names each level once, at 3, 5 and 10 conversions', () => {
+  const { milestoneLevelEarned } = require('../services/referral-engine');
+  expect([
+    [2, 'none'], [3, 'none'], [3, 'advocate'], [4, 'advocate'], [5, 'advocate'], [6, 'ambassador'], [10, 'ambassador'], [12, 'champion'], [5, null],
+  ].map(([converted, level]) => milestoneLevelEarned(converted, level))).toEqual([
+    null, 'advocate', null, null, 'ambassador', null, 'champion', null, 'ambassador',
+  ]);
+});
+
+test('a conversion that brings a promoter to 3 awards the advocate bonus once', async () => {
+  const state = freshState();
+  state.promoter = { id: 'promo-1', total_referrals_converted: 3, milestone_level: 'none' };
+  primeDb(state);
+  await withServer(async (base) => {
+    expect((await convert(base)).status).toBe(200);
+  });
+  const awards = state.updates.filter((u) => u.table === 'referral_promoters' && u.vals.milestone_level);
+  expect(awards).toHaveLength(1);
+  expect(awards[0].vals.milestone_level).toBe('advocate');
+  expect(awards[0].vals.available_balance_cents.bindings).toEqual([2500]);
+});
+
+test('a conversion past a level already held awards nothing', async () => {
+  const state = freshState();
+  state.promoter = { id: 'promo-1', total_referrals_converted: 4, milestone_level: 'advocate' };
+  primeDb(state);
+  await withServer(async (base) => {
+    expect((await convert(base)).status).toBe(200);
+  });
+  expect(state.updates.filter((u) => u.table === 'referral_promoters' && u.vals.milestone_level)).toHaveLength(0);
+});
+
+describe('convertReferral deferredOnly (the new-referral bell: nothing sent or paid now)', () => {
+  const engine = () => require('../services/referral-engine');
+  const written = (state) => state.updates.length + state.increments.length;
+
+  test('refused, with nothing written, while the program pays rewards at once', async () => {
+    const state = freshState();
+    const trx = primeDb(state);
+    await expect(engine().convertReferral('ref-1', { trx, deferredOnly: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'REWARD_NOT_DEFERRED' });
+    expect(written(state)).toBe(0);
+  });
+
+  test('refused, with nothing written, when this conversion earns a milestone', async () => {
+    const state = freshState();
+    state.settings.require_service_completion = true;
+    state.promoter = { id: 'promo-1', total_referrals_converted: 2, milestone_level: 'none' };
+    const trx = primeDb(state);
+    await expect(engine().convertReferral('ref-1', { trx, deferredOnly: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'MILESTONE_DUE' });
+    expect(written(state)).toBe(0);
+  });
+
+  test('a deferred conversion runs on the caller\'s transaction and stages the reward as pending', async () => {
+    const state = freshState();
+    state.settings.require_service_completion = true;
+    const trx = primeDb(state);
+    await expect(engine().convertReferral('ref-1', { trx, deferredOnly: true })).resolves.toMatchObject({ referralId: 'ref-1', requiresServiceCompletion: true });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(state.referral).toMatchObject({ status: 'signed_up', referrer_reward_status: 'pending_service' });
+    expect(state.increments.find((i) => i.table === 'referral_promoters').vals).toMatchObject({ pending_earnings_cents: 2500 });
+  });
+
+  test('a caller transaction without deferredOnly is refused before anything runs', async () => {
+    const state = freshState();
+    const trx = primeDb(state);
+    await expect(engine().convertReferral('ref-1', { trx })).rejects.toThrow(/only when deferredOnly/);
+    expect(written(state)).toBe(0);
+  });
+});

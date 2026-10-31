@@ -13,6 +13,7 @@ import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
 import { MISTING_LEGEND_KEYS, mistingLayoutCountsLine } from '../lib/mistingLayoutCounts';
 import { pumpLoad, pumpNotice } from '../lib/mistingLayoutLimits';
+import { mistingRefillLine } from '../lib/mistingPlanText';
 import { MISTING_SWATCH } from '../components/estimate/MistingLegend';
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
@@ -235,6 +236,18 @@ export default function EstimateProposalDocument({ data, token }) {
   // for authored proposals (codex #3281 r4). Synthesized/engine-priced
   // documents keep it: there the claim is true.
   const intelligence = authoredProposal ? null : (estimate.intelligence || null);
+
+  // The misting system plan's own facts, from the page's pricing section (/data pricing.services, key mosquito_misting): the
+  // refill line prints under the plan's line and the install's "21 nozzles · 2 risers" under the install's line (owner
+  // 2026-10-30, items D and the install detail). Empty for every estimate without the plan, so nothing else changes.
+  const mistingSection = (Array.isArray(data?.pricing?.services) ? data.pricing.services : []).find((section) => section?.key === 'mosquito_misting') || null;
+  const mistingRefillText = mistingRefillLine(mistingSection?.refill);
+  const mistingInstallDetails = new Map(
+    (mistingSection?.oneTimeContribution?.items || [])
+      .filter((row) => row?.label && row?.detail)
+      .map((row) => [row.label, row.detail]),
+  );
+  const isMistingPlanLine = (item) => !!mistingSection && item?.frequency !== 'one_time' && /^Mosquito Misting Service Plan\b/.test(String(item?.description || ''));
 
   // Failed-image accounting for the render pipeline (parity with
   // ServiceReportDocument): the satellite snapshot is the one remote image;
@@ -623,6 +636,12 @@ export default function EstimateProposalDocument({ data, token }) {
                     <span style={{ minWidth: 0, color: INK }}>
                       {item.description || 'Service'}
                       {showsLineBasis(item) ? <span style={{ display: 'block', color: MUTED }}>{formatLineBasis(item)}</span> : ''}
+                      {isMistingPlanLine(item) && mistingRefillText ? (
+                        <span data-testid="doc-misting-refill" style={{ display: 'block', color: MUTED }}>{mistingRefillText}</span>
+                      ) : ''}
+                      {item.frequency === 'one_time' && mistingInstallDetails.get(item.description) ? (
+                        <span data-testid="doc-misting-install-detail" style={{ display: 'block', color: MUTED }}>{mistingInstallDetails.get(item.description)}</span>
+                      ) : ''}
                       {monthlyAverage?.byLine.get(item) && !applicationMonths ? (
                         <span data-monthly-average-line="" style={{ display: 'block', color: MUTED, fontVariantNumeric: 'tabular-nums' }}>
                           {monthlyText(monthlyAverage.byLine.get(item).monthly)}

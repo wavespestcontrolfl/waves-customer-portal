@@ -6484,7 +6484,7 @@ const InvoiceService = {
     if (!skipAccrual && database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
       const PayerSvc = require("./payer");
       const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: linkedScheduledServiceId, throwOnError: true });
-      if (pre.payerId && ["net15", "net30"].includes(pre.paymentTerms)) {
+      if (pre.payerId && PayerSvc.isNetPaymentTerm(pre.paymentTerms)) {
         return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
     }
@@ -6686,7 +6686,7 @@ const InvoiceService = {
     let accruedStatementId = null;
     if (!skipAccrual
       && resolvedPayerId
-      && ['net15', 'net30'].includes(resolvedPaymentTerms)
+      && PayerService.isNetPaymentTerm(resolvedPaymentTerms)
       && isEnabled('payerStatements')) {
       // TOCTOU guard: the transaction wrap at the top was decided from a preflight
       // resolve. If the payer/terms flipped to NET between that preflight and this
@@ -10052,6 +10052,7 @@ const InvoiceService = {
         "status",
         "total",
         "credit_applied",
+        "amount_paid",
       );
 
     let sent = 0;
@@ -10921,8 +10922,11 @@ const InvoiceService = {
     const today = etDateString();
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
     const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
+    // An invoice with no service date falls back to the Eastern day it was
+    // created (the date presets send Eastern from/to bounds); a bare
+    // created_at::date is the UTC day, so a 9 PM ET invoice read as tomorrow.
     const dateColumn =
-      "COALESCE(invoices.service_date, invoices.created_at::date)";
+      "COALESCE(invoices.service_date, (invoices.created_at AT TIME ZONE 'America/New_York')::date)";
     const invoiceDate = database.raw(dateColumn);
     const validDate = (value) =>
       typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -10963,6 +10967,11 @@ const InvoiceService = {
             today,
           );
         });
+        // An annual prepay charged after the first visit is not due before
+        // that visit, whatever date its draft carries.
+        if (hasAnnualPrepayTerms) {
+          q.whereRaw(`invoices.id NOT IN (${require("./paf-prepay-release").AWAITING_FIRST_VISIT_INVOICE_IDS_SQL})`);
+        }
       } else if (normalizedStatus === "unpaid") {
         q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
@@ -11201,6 +11210,12 @@ const InvoiceService = {
     // that claimed, delivered, and released entirely before the row lock.
     let preSendState = null;
     if (isRetotal) {
+      // Plain words first for the common case of a part payment (amount_paid, payment_recorded_at both set by the Invoices page).
+      if (Math.round(Number(existing.amount_paid || 0) * 100) > 0) {
+        throw new Error(
+          "This invoice has a part payment on it, so its amounts cannot be edited. Undo the part payment first (the same day only), or issue a new invoice instead",
+        );
+      }
       if (existing.payment_recorded_at) {
         throw new Error(
           "Cannot edit amounts on an invoice with payment already applied — refund it or issue a new invoice instead",
@@ -11773,6 +11788,13 @@ const InvoiceService = {
     // refunding) would hide collected money. Account-CREDIT prepayment sets neither
     // signal (it only moves the credit ledger), so this still lets credit-covered
     // invoices void. Mirrors the cancelled-service auto-void money guard.
+    // A part payment (invoices.amount_paid, owner 2026-10-29) is money received on this invoice: plain words for the office. Its payments row and
+    // payment_recorded_at below would refuse it too; this is the readable reason.
+    if (Math.round(Number(current.amount_paid || 0) * 100) > 0) {
+      throw new Error(
+        "Cannot void an invoice with a part payment on it. Undo the part payment first (the same day only), or ask for help",
+      );
+    }
     const voidAppliedPayment = await db("payments")
       .whereIn("status", ["paid", "processing"])
       .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [current.id])
@@ -14054,6 +14076,11 @@ const InvoiceService = {
 
   async getStats() {
     const today = etDateString();
+    // The list's overdue filter: an annual prepay charged after the first
+    // visit is not overdue before that visit.
+    const notAwaitingFirstVisit = (await annualPrepayInvoiceTableExists())
+      ? ` AND invoices.id NOT IN (${require("./paf-prepay-release").AWAITING_FIRST_VISIT_INVOICE_IDS_SQL})`
+      : "";
     const [totals] = await db("invoices")
       .select(
         db.raw("COUNT(*) as total"),
@@ -14062,7 +14089,7 @@ const InvoiceService = {
           "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
         ),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
+          `COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)${notAwaitingFirstVisit}) as overdue`,
           [today],
         ),
         db.raw(
@@ -14072,7 +14099,7 @@ const InvoiceService = {
           "COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) FILTER (WHERE status = 'paid'), 0) as total_collected",
         ),
         db.raw(
-          "COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
+          "COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
         ),
       )
       .whereNull("archived_at");

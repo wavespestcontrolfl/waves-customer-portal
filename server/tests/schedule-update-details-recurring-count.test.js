@@ -122,6 +122,7 @@ function scenario({
   prepaidVisitIds = [],
   paidInvoiceVisitIds = [],
   cardRequestVisitIds = [],
+  cardRequestFeeStatus = null,
   invoiceRows = null,
   zeroPrepaidAll = false,
   hasCardHoldTable = true,
@@ -197,7 +198,7 @@ function scenario({
       return [];
     }
     if (table === 'appointment_card_requests') {
-      if (op === 'await') return cardRequestVisitIds.map((id) => ({ scheduled_service_id: id }));
+      if (op === 'await') return cardRequestVisitIds.map((id) => ({ scheduled_service_id: id, fee_status: cardRequestFeeStatus }));
       return [];
     }
     if (table === 'invoices') {
@@ -425,17 +426,23 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
     expect(result.cancelledIds).toEqual([live[2].id]);
   });
 
-  test('refuses a /secure visit whose late-cancel fee is unsettled — that path CHARGES (Codex #3337 r5 P1)', async () => {
-    // handleAppointmentCardCancellation does not merely close the request: at
-    // appointment-card-request.js:1996 it calls chargeAppointmentNoShowFee
-    // inside the cancel window. The trim has no fee preview and no waiver, so
-    // such a visit must never reach the follow-through.
-    const { conn, parent } = scenario({ upcoming: 4, cardRequestVisitIds: [103] });
+  test('refuses a /secure visit whose late-cancel fee event is in flight — that path CHARGES (Codex #3337 r5 P1)', async () => {
+    // handleAppointmentCardCancellation does not merely close the request: it
+    // calls chargeAppointmentNoShowFee inside the cancel window. The trim has
+    // no fee preview and no waiver, so a visit whose fee event is already
+    // charging must never reach the follow-through.
+    const { conn, parent } = scenario({ upcoming: 4, cardRequestVisitIds: [103], cardRequestFeeStatus: 'charging' });
     await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
       status: 409,
       message: expect.stringContaining('late-cancel fee has not been settled'),
     });
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('an undecided fee on a recurring series visit does not block the trim — the fee rail never charges recurring visits (owner ruling 2026-10-29)', async () => {
+    const { conn, parent, live } = scenario({ upcoming: 3, cardRequestVisitIds: [102] });
+    const result = await reconcile(conn, parent, 2);
+    expect(result.cancelledIds).toEqual([live[2].id]);
   });
 
   test('a settled card-request fee does not block the trim', async () => {
@@ -1165,9 +1172,16 @@ describe('update-details wiring (source guards)', () => {
     const branch = dispatchSrc.slice(start, dispatchSrc.indexOf('return moveReply(200, {', start));
     expect(branch).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: actor.technicianId, qualityDates })');
     expect(branch).toContain('await flushDispatchQualityDates(qualityDates);');
+    // The tech Quick Move seeds ONE Set from commit()'s dates, its per-stop board
+    // updates add to that Set, and it is flushed once after them (dispatch
+    // audit 2026-10-29: tech moves now update other operators' boards).
     const techSrc = fs.readFileSync(path.join(__dirname, '../routes/tech-track.js'), 'utf8');
-    expect(techSrc).toContain("flushDispatchQualityDates(new Set(result.qualityDates))");
-    expect(techSrc.indexOf('flushDispatchQualityDates(new Set(result.qualityDates))')).toBeGreaterThan(techSrc.indexOf('RainOut.commit({'));
+    const seed = techSrc.indexOf('const qualityDates = new Set(Array.isArray(result.qualityDates) ? result.qualityDates : []);');
+    const emit = techSrc.indexOf('emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId, qualityDates })');
+    const flush = techSrc.indexOf('await dispatchAssignment.flushDispatchQualityDates(qualityDates);');
+    expect(seed).toBeGreaterThan(techSrc.indexOf('RainOut.commit({'));
+    expect(emit).toBeGreaterThan(seed);
+    expect(flush).toBeGreaterThan(emit);
   });
 
   test('the edit broadcast waits for every board update before the shared Set is flushed (codex #4295 r5 P2)', () => {

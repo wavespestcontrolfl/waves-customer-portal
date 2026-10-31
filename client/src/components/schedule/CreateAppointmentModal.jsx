@@ -37,6 +37,7 @@ import useModalFocus from '../../hooks/useModalFocus';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
+import CancelCallNotice from './CancelCallNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import HourTechCompare from './HourTechCompare';
 import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
@@ -241,6 +242,10 @@ const CADENCE_OPTIONS = [
   { value: 'custom', label: 'Custom (every N days)' },
 ];
 
+// Lawn 9x rounds (lawn_rounds_9) is never a choice in the cadence select; a line
+// can still carry it (an existing 9x lawn plan), so it needs a staff label here.
+const LAWN_ROUNDS_LABEL = 'Lawn rounds (9 a year)';
+
 const NTH_OPTIONS = [
   { value: 1, label: '1st' }, { value: 2, label: '2nd' },
   { value: 3, label: '3rd' }, { value: 4, label: '4th' },
@@ -437,6 +442,8 @@ function visitsPerYearForCadence(cadence) {
     // fall to the null default and the prepay choice stays disabled.
     case 'monthly': return 12;
     case 'every_6_weeks': return 9;
+    // Lawn 9x rounds: prepay coverage follows the round calendar server-side.
+    case 'lawn_rounds_9': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
     case 'quarterly': return 4;
     case 'triannual': case 'every_4_months': return 3;
@@ -1242,6 +1249,13 @@ export function decideAnnualPrepayAttachment({
   return { attach, billingTerm: attach ? 'prepay_annual' : undefined };
 }
 
+// GATE_CALL_PREPAY_CHOICE: Book it on a held call where the caller chose annual prepay opens the form with "Annual prepay"
+// preselected, but only when the linked quote is open and the SERVER says it is prepay-eligible. Everything else stays Standard.
+// The save still goes through decideAnnualPrepayAttachment and the server's own eligibility and pricing checks.
+export function preselectAnnualPrepay({ preferAnnualPrepay, linkedEstimate }) {
+  return !!preferAnnualPrepay && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
+}
+
 // The series a manual prepay preview priced, matched by GROUP IDENTITY —
 // NOT "the first result" (a booking can post a one-time group first).
 export function matchesPrepayTarget({ targetKey, key, result }) {
@@ -1420,6 +1434,7 @@ const AUTO_UNASSIGNED_REASONS = {
   none_assignable: 'No technician is available that day.',
   several_assignable: 'More than one technician could take it.',
   none_free: 'No technician is free at that time.',
+  line_none: 'The technicians for this service are not free that day.',
   absent_on_series_date: 'The technician is out on a later date of the series.',
 };
 export function autoAssignWarning(results) {
@@ -1553,7 +1568,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -2059,7 +2074,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // quote — the option is quote-specific (eligibility + invoice amount).
   const linkedEstimateIdForPrepay = linkedEstimate?.id ?? null;
   useEffect(() => {
-    setBillAsAnnualPrepay(false);
+    const preselect = preselectAnnualPrepay({ preferAnnualPrepay: defaultAnnualPrepay, linkedEstimate });
+    setBillAsAnnualPrepay(preselect);
+    // Annual prepay and "collect prepayment in person" are mutually exclusive.
+    if (preselect) setCollectPrepay(false);
   }, [linkedEstimateIdForPrepay]);
   // Annual prepay on a MANUAL booking — the phone-"yes" case with no quote
   // behind it, where billAsAnnualPrepay above has nothing to price. Every
@@ -2247,6 +2265,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   }, [reserviceProbeCustomerId]);
   // A different customer's suggestion or words never carry over.
   useEffect(() => { setCustomerWords(''); setUsedSuggestion(null); }, [reserviceProbeCustomerId]);
+  // "Canceled on a call" (GATE_CALL_CANCEL_GUARD): the chosen customer's latest call, when it was a cancellation.
+  // A warning only. The probe doubles as the gate read: the route answers {enabled:false} while the lane is dark,
+  // and a failed fetch shows nothing, so a dark lane renders as before. It runs for every chosen customer, so a fetch
+  // that throws synchronously is turned into that same quiet failure.
+  const cancelProbeCustomerId = selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
+  const [cancelCallProbe, setCancelCallProbe] = useState({ customerId: '', call: null });
+  useEffect(() => {
+    if (!cancelProbeCustomerId) return undefined;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => adminFetch(`/admin/schedule/cancel-call-notice?customerId=${encodeURIComponent(cancelProbeCustomerId)}`))
+      .then((r) => {
+        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: r?.enabled ? (r.call || null) : null });
+      })
+      .catch(() => {
+        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: null });
+      });
+    return () => { cancelled = true; };
+  }, [cancelProbeCustomerId]);
+  const cancelCallNotice = cancelCallProbe.customerId === cancelProbeCustomerId ? cancelCallProbe.call : null;
   const reserviceRequestActive = !!reserviceProbeCustomerId
     && reserviceRequestProbe.customerId === reserviceProbeCustomerId
     && reserviceRequestProbe.enabled;
@@ -3142,6 +3180,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const wOpt = WEEKDAY_OPTIONS.find((o) => o.value === parseInt(group.weekday));
       return `${nthOpt?.label || group.nth} ${wOpt?.label || ''}`.trim();
     }
+    if (group.cadence === 'lawn_rounds_9') return LAWN_ROUNDS_LABEL;
     const found = CADENCE_OPTIONS.find((o) => o.value === group.cadence);
     return found ? found.label : group.cadence;
   };
@@ -3157,6 +3196,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (cadence === 'daily') return 1;
     if (cadence === 'weekly') return 7;
     if (cadence === 'biweekly') return 14;
+    if (cadence === 'lawn_rounds_9') return 42; // ranks like the 42-day 9x cadence
     const months = {
       monthly: 30,
       monthly_nth_weekday: 30,
@@ -5559,6 +5599,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               >✕</button>
             </div>
           )}
+          {selectedCustomer && cancelCallNotice && <CancelCallNotice call={cancelCallNotice} />}
           {selectedCustomer && quickAddSaveNotice && (
             <div role="status" style={{ fontSize: 14, color: '#18181B', marginTop: 10 }}>{quickAddSaveNotice}</div>
           )}

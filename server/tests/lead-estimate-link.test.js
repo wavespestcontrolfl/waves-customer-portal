@@ -96,7 +96,7 @@ describe('lead-estimate link service', () => {
       leadId: lead.id,
       estimateId: 'estimate-1',
       estimate: { id: 'estimate-1', customer_phone: '+1 (941) 555-0101' },
-      technician: { first_name: 'Ava', last_name: 'Tech' },
+      technician: { name: 'Ava Tech' },
     });
 
     expect(updates).toEqual(expect.arrayContaining([
@@ -110,6 +110,27 @@ describe('lead-estimate link service', () => {
     expect(updates[0].patch).not.toHaveProperty('status');
     expect(updates[0].patch).not.toHaveProperty('response_time_minutes');
     expect(activities.map((a) => a.row.activity_type)).toEqual(['estimate_created']);
+    expect(activities[0].row.performed_by).toBe('Ava Tech');
+  });
+
+  test('records system when no staff member is passed', async () => {
+    const lead = {
+      id: 'lead-1',
+      status: 'new',
+      phone: '9415550101',
+      first_contact_at: new Date(Date.now() - 12 * 60000).toISOString(),
+      response_time_minutes: null,
+    };
+    const { database, activities } = makeDb(lead);
+
+    await attachLeadToEstimate({
+      database,
+      leadId: lead.id,
+      estimateId: 'estimate-1',
+      estimate: { id: 'estimate-1', customer_phone: '+1 (941) 555-0101' },
+    });
+
+    expect(activities[0].row.performed_by).toBe('system');
   });
 
   test('rejects stale lead ids that do not match the estimate contact', async () => {
@@ -148,7 +169,7 @@ describe('lead-estimate link service', () => {
       leadId: lead.id,
       estimateId: 'estimate-1',
       estimate: { id: 'estimate-1', customer_phone: '+1 (941) 555-0101' },
-      technician: { first_name: 'Ava', last_name: 'Tech' },
+      technician: { name: 'Ava Tech' },
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(updates).toHaveLength(0);
     expect(activities).toHaveLength(0);
@@ -168,7 +189,7 @@ describe('lead-estimate link service', () => {
       leadId: lead.id,
       estimateId: 'estimate-new',
       estimate: { id: 'estimate-new', customer_phone: '+1 (941) 555-0101' },
-      technician: { first_name: 'Ava', last_name: 'Tech' },
+      technician: { name: 'Ava Tech' },
       allowReplacingEstimateId: true,
     });
 

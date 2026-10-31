@@ -145,6 +145,22 @@ describe('pipeline opportunities read model', () => {
     expect(response.data[0]).not.toHaveProperty('rawEstimate');
   });
 
+  test('a lead street line carries the lead city and ZIP for Create Estimate; an estimate address does not', () => {
+    const response = buildPipelineResponse({
+      leads: [
+        lead({ address: '100 Test Palm Way', city: 'Parrish', zip: '34219' }),
+        lead({ id: 'lead-2', first_name: 'Ana', phone: '(555) 987-6543', email: 'ana@example.com', address: null, city: 'Parrish', zip: '34219', estimate_id: 'est-2' }),
+      ],
+      estimates: [estimate({ id: 'est-2', customer_name: 'Ana Smith', customer_phone: '555-987-6543', customer_email: 'ana@example.com', address: '200 Test Palm Way, Parrish, FL 34219' })],
+      query: { stage: 'all', page: 1, pageSize: 50 },
+      now: NOW,
+    });
+
+    const byLead = Object.fromEntries(response.data.map((opportunity) => [opportunity.leadId, opportunity]));
+    expect(byLead['lead-1']).toMatchObject({ address: '100 Test Palm Way', addressCity: 'Parrish', addressZip: '34219' });
+    expect(byLead['lead-2']).toMatchObject({ address: '200 Test Palm Way, Parrish, FL 34219', addressCity: null, addressZip: null });
+  });
+
   test('surfaces server candidate-cap metadata when response is truncated', () => {
     const response = buildPipelineResponse({
       leads: [lead({ estimate_id: 'est-1' })],

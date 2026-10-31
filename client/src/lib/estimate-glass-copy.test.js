@@ -708,3 +708,51 @@ describe('the retired fixed-window refund promise never appears in glass copy (o
     expect(glassPestInclusions(4, true).join(' ')).not.toMatch(NO_90_DAY);
   });
 });
+
+describe('the mosquito misting system plan is its own service (owner wording 2026-10-30)', () => {
+  it('resolves to its own slug for the plan key and label, and bare barrier names keep theirs', () => {
+    for (const raw of ['mosquito_misting', 'Mosquito Misting Service Plan', 'Mosquito Misting Service Plan — 12 applications/yr', 'mosquito_misting_installation']) {
+      expect(glassServiceSlug(raw)).toBe('mosquito_misting');
+    }
+    // Bare "mosquito misting" is the barrier program's own wording (the server's isMistingSystemIdentity rule).
+    for (const raw of ['mosquito', 'Mosquito', 'Monthly Mosquito Program (12 visits)', 'Seasonal Mosquito, 21-day misting cycle', 'Mosquito Misting', '21-day mosquito misting']) {
+      expect(glassServiceSlug(raw)).toBe('mosquito');
+    }
+    expect(glassServiceSlug('commercial_mosquito')).toBe('mosquito');
+  });
+
+  it('has the misting hero and Waves AI card, keeps the CTA line the plan showed before, and the barrier pack is untouched', () => {
+    setGlassDefault(true);
+    const pack = glassEstimateCopyFor('mosquito_misting');
+    expect(pack).toMatchObject({
+      eyebrow: 'Your misting system plan',
+      heroH1: 'Hello {first}, your misting system estimate is ready!',
+      heroSub: 'We install your misting system, then service it every month.',
+      aiTitle: 'Priced from your system layout',
+      aiBody: 'Your price is set by your system size and your nozzle and riser count.',
+    });
+    expect(glassEstimateCopyFor('mosquito').heroH1).toBe('Hello {first}, your mosquito-free backyard plan is ready!');
+    expect(glassEstimateCopyFor('mosquito').aiTitle).toBe('Priced from your actual lot — not a guess');
+    // The approved wording (A-F) did not change the approve-button line: the plan keeps the shared default it showed before.
+    expect(glassCtaMicroFor('mosquito_misting')).toBe(GLASS_COPY.ctaMicro);
+    expect(glassCtaMicroForKeys(['pest_control', 'mosquito_misting'])).toBe(GLASS_COPY.ctaMicro);
+  });
+
+  it('lists the three approved bullets, then the generic guarantee and cancel lines, never the barrier bullets', () => {
+    const stack = glassRowInclusions('mosquito_misting', 12);
+    expect(stack).toEqual([
+      'Every month, we check the tank, the timer, the tubing and the spray from each nozzle.',
+      'Every third visit, we clean every nozzle and replace the filter.',
+      'Only Waves technicians refill the tank, and the cabinet stays locked.',
+      'Money-back guarantee — if we can’t solve a covered problem, we refund your last service payment',
+      'No contract, no cancellation fee — cancel online anytime',
+    ]);
+    expect(glassRowInclusions('mosquito', 12).join(' ')).toContain('Barrier treatment');
+    expect(stack.join(' ')).not.toMatch(/barrier|fog-and-go/i);
+  });
+
+  it('has no per-day comparison line (the barrier "can of repellent" line does not describe a system)', () => {
+    expect(glassDayLinesFor('mosquito_misting')).toBeNull();
+    expect(glassDayLinesFor('mosquito')).not.toBeNull();
+  });
+});

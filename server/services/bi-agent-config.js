@@ -8,11 +8,7 @@
 
 const MODELS = require('../config/models');
 
-const BI_AGENT_CONFIG = {
-  name: 'waves-weekly-briefing',
-  description: 'Monday morning business intelligence briefing — revenue, customers, ads, content, SEO, reviews in one SMS',
-  model: MODELS.FLAGSHIP,
-  system: `You are the Waves Pest Control business intelligence analyst. Pull every metric, identify what changed, and send Adam one SMS briefing.
+const SYSTEM_PROMPT = `You are the Waves Pest Control business intelligence analyst. Pull every metric, identify what changed, and send Adam one SMS briefing.
 
 SMS FORMAT (under 480 chars — 3 SMS segments max):
 "Mon briefing 📊
@@ -49,9 +45,9 @@ ANALYSIS RULES:
 
 SAVED REPORT — operations_section (save_weekly_report): list EVERY kpi from get_operations_snapshot's kpis array, one per line — label, last7 value, the last30 baseline (for a 'current'-window kpi like AR days, write "as of today — no 30-day baseline" instead of a baseline number; never present it as a 7-day-vs-30-day comparison), the target (or "no target set"), and the tone (write "unavailable" instead of a tone when last7 or tone is null — never "on target"; EXCEPTION: collection_rate with lowSample true — write "too few invoices to grade" instead, never "unavailable" or "on target") — plus the rest of the operations narrative (completion rate, unassigned, weather). This is the durable record; the SMS only surfaces the outliers.
 
-Save a detailed report to the dashboard after sending the SMS.`,
+Save a detailed report to the dashboard after sending the SMS.`;
 
-  tools: [
+const TOOLS = [
     {
       type: 'agent_toolset_20260401',
       default_config: { enabled: false },
@@ -163,7 +159,37 @@ Save a detailed report to the dashboard after sending the SMS.`,
         required: ['summary', 'operations_section', 'action_items'],
       },
     },
-  ],
+];
+
+// GATE_BI_TECH_SCORECARD: the scorecard rules for the prompt and the tool description.
+// Off, neither is touched (BI_AGENT_CONFIG.system and .tools are the constants above).
+const TECH_SCORECARD_PROMPT = `
+
+TECHNICIAN SCORECARD (only when get_operations_snapshot returns "techScorecard"):
+- techScorecard covers the last full week (Monday to Sunday ET): one row per technician with a completed visit — completedStops, daysWorked, stopsPerDay, onSiteMinutesPerStop (against onSiteTargetMinutes), driveMinutesPerStop, callbacks, reviewAsks, revenuePerDay and costPerDay. A null value is UNKNOWN, not zero: its reason is in the row's "reasons". Never write 0 or "none" for a null; write "n/a". lowSample true means too few stops to judge — say so.
+- The owner SMS gets one short line per technician, ONLY when techScorecard.rows has 2 or more technicians (name, stops/day, on-site min vs target, drive min, callbacks, review asks, revenue/day vs cost/day; leave out any n/a figure). With 0 or 1 row, put nothing about technicians in the SMS. Keep the SMS under 480 chars: trim the content/SEO line, then the ads line, before these lines — never the Ops 7d line.
+- The saved report's operations_section ALWAYS carries the full table when techScorecard is present: every row, every field, each null with its reason. If techScorecard has "unavailable", write that it is unavailable and why. Never compute these figures yourself.`;
+
+const TECH_SCORECARD_TOOL_NOTE = ` When GATE_BI_TECH_SCORECARD is on it also returns "techScorecard": { week, onSiteTargetMinutes, rows, note, unavailable? } for the last full week (Monday to Sunday ET) — one row per technician with a completed visit: completedStops, daysWorked, stopsPerDay, onSiteMinutesPerStop, driveMinutesPerStop, callbacks (credited to the technician whose visit they correct), reviewAsks, revenuePerDay, costPerDay, lowSample and "reasons" (why each null value is unknown). Null means unknown, never zero.`;
+
+function techScorecardOn() {
+  return require('../config/feature-gates').biTechScorecardLive();
+}
+
+// system and tools are read when a session is created (bi-agent.js), so the gate is read
+// at call time. Off returns the very same constants as before the gate existed.
+const BI_AGENT_CONFIG = {
+  name: 'waves-weekly-briefing',
+  description: 'Monday morning business intelligence briefing — revenue, customers, ads, content, SEO, reviews in one SMS',
+  model: MODELS.FLAGSHIP,
+  get system() {
+    return techScorecardOn() ? SYSTEM_PROMPT + TECH_SCORECARD_PROMPT : SYSTEM_PROMPT;
+  },
+  get tools() {
+    if (!techScorecardOn()) return TOOLS;
+    return TOOLS.map((tool) => (tool.name === 'get_operations_snapshot'
+      ? { ...tool, description: tool.description + TECH_SCORECARD_TOOL_NOTE } : tool));
+  },
 };
 
 module.exports = { BI_AGENT_CONFIG };

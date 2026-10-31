@@ -58,6 +58,7 @@ const leadAttribution = require('../services/lead-attribution');
 // keeps using — and re-exporting via `_test` — the shared implementation.
 const { determineLeadSource } = require('../services/lead-source-classify');
 const { GOOGLE_ADS_WEB_FORM_NAME } = require('../services/lead-source-resolver');
+const { sanitizeHeardAbout, sanitizeHeardAboutPrompt } = require('../services/heard-about');
 
 // Adam's personal cell for new-lead alerts — must be a real cell, never one
 // of our own Twilio numbers (same-from/to sends fail with Twilio error 21266).
@@ -600,6 +601,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       phone: phoneFormatted, email: email || null,
       address: fullAddress || '',
       city: resolvedCity,
+      // Only a typed ZIP: a blank one must not erase a ZIP the call lead already holds.
+      ...(normalizedAddress.zip ? { zip: normalizedAddress.zip } : {}),
       service_interest: serviceInterest || null,
       service_key: leadServiceKey,
       customer_id: customer.id,
@@ -891,6 +894,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           phone: phoneFormatted, email: email || null,
           address: fullAddress || '',
           city: resolvedCity,
+          // The territory read-outs and ads count leads by ZIP (territory build 2).
+          zip: normalizedAddress.zip || null,
           lead_source_id: leadSourceId,
           lead_type: 'form_submission',
           service_interest: serviceInterest || null,
@@ -1537,7 +1542,10 @@ function getLeadWebhookAttribution(body = {}) {
     utmCampaign: body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '',
     utmContent: body.utm_content || body['Utm Content'] || attrUtm.content || '',
     utmTerm: body.utm_term || body['Utm Term'] || attrUtm.term || '',
-    gclid: truncateClickId(body.gclid || body['Gclid'] || body.GCLID || attr.gclid || ''),
+    // leads.gclid is varchar(200) (migration 20260401000110); the other click-id
+    // columns are 255. Same caps as LEAD_CLICK_ID_MAX in lead-estimate-link.js: a
+    // longer gclid made the leads insert throw after the customer row was saved.
+    gclid: truncateClickId(body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '', 200),
     wbraid: truncateClickId(body.wbraid || body['Wbraid'] || body.WBRAID || attr.wbraid || ''),
     gbraid: truncateClickId(body.gbraid || body['Gbraid'] || body.GBRAID || attr.gbraid || ''),
     // Meta click id + first-party cookies (the gclid analog), for Meta web-lead
@@ -1553,8 +1561,8 @@ function getLeadWebhookAttribution(body = {}) {
   };
 }
 
-function truncateClickId(value) {
-  return value ? String(value).slice(0, 255) : '';
+function truncateClickId(value, max = 255) {
+  return value ? String(value).slice(0, max) : '';
 }
 
 // The neighbor page's optional "Which home had the sign?" answer: printable
@@ -1571,38 +1579,6 @@ function normalizeSignHost(value) {
     .replace(/\s+/g, ' ')
     .trim();
   return Array.from(cleaned).slice(0, SIGN_HOST_MAX_LENGTH).join('').trim();
-}
-
-// "How did you hear about us?" — self-reported discovery channel from the
-// optional quote-form question (owner-approved 2026-09-27). Validated against
-// a FIXED allowlist shared with the Astro quote form's select options — any
-// other value (including free text) is silently dropped, never stored. Kept
-// SEPARATE from leadSource: leadSource is technically-observed attribution
-// (UTM/referrer/click-id); this is what the visitor typed themselves, and
-// unknown stays unknown (null) rather than being guessed at.
-const HEARD_ABOUT_OPTIONS = new Set([
-  'google_search', 'google_maps', 'chatgpt', 'other_ai',
-  'facebook_instagram', 'nextdoor', 'yelp', 'friend_neighbor',
-  'truck_yard_sign', 'other',
-]);
-
-function sanitizeHeardAbout(value) {
-  const key = String(value || '').trim().toLowerCase();
-  return HEARD_ABOUT_OPTIONS.has(key) ? key : null;
-}
-
-// Optional follow-up to the AI choices above ("What did you ask it?"). Stored
-// as typed — no redaction — but only for chatgpt / other_ai, and normalized to
-// one printable line (whitespace collapsed) capped at 500 chars. Anything else
-// (non-string, empty, or a non-AI heard_about) resolves to null.
-const HEARD_ABOUT_PROMPT_MAX = 500;
-const HEARD_ABOUT_PROMPT_KEYS = new Set(['chatgpt', 'other_ai']);
-
-function sanitizeHeardAboutPrompt(value, heardAbout) {
-  if (!HEARD_ABOUT_PROMPT_KEYS.has(heardAbout)) return null;
-  if (typeof value !== 'string') return null;
-  const text = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return text ? text.slice(0, HEARD_ABOUT_PROMPT_MAX).trim() : null;
 }
 
 // The AI triage's extracted_data REPLACES the intake snapshot on a fresh form
@@ -1651,7 +1627,9 @@ function buildLeadWebhookIntake(body = {}) {
   const normalizedName = normalizeLeadName(body);
   const firstName = capitalizeName(normalizedName.first_name || 'Unknown');
   const lastName = capitalizeName(normalizedName.last_name || '');
-  const serviceInterest = normalizeLeadServiceInterest(body);
+  // leads.service_interest is varchar(255), and a free-text answer is not a known label,
+  // so it would pass through uncapped and fail the leads insert after the customer saved.
+  const serviceInterest = normalizeLeadServiceInterest(body).slice(0, 255);
   const serviceKey = normalizeLeadServiceKey(body);
   // Declared "when do you want this handled?" — exact key only (a substring
   // sweep would catch address/attribution fields, same trap as `message`).

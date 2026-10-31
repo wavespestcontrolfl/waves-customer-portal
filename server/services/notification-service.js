@@ -525,6 +525,8 @@ const NotificationService = {
               category,
               triggerKey: metadata?.triggerKey || null,
               options: { bell, bellDefault },
+              // A composed alert's declared customer contact / promise (GATE_CUSTOMER_ALERTS_RING reads it).
+              declared: { contact: metadata?.contact === true, promise: metadata?.promise === true },
             });
             if (!allowed) {
               // Category + triggerKey only — titles/bodies carry customer
@@ -533,6 +535,14 @@ const NotificationService = {
                 category,
                 triggerKey: metadata?.triggerKey || null,
               });
+              // GATE_ALERT_CATALOG=watch (the helper reads it): leave one audit_log row per Eastern day per distinct
+              // muted alert, so a muted alert can be counted. The module's own db, never `connection` (it may roll
+              // back); a failure costs the record, never the return below, and the log line carries no title text.
+              try {
+                await require('./audit-log').auditBellPolicyMuted({ category, triggerKey: metadata?.triggerKey || null, title, metadata });
+              } catch (auditErr) {
+                logger.warn(`[notifications] muted-alert audit failed: ${safeErrorSummary(auditErr)}`);
+              }
               return { id: null, suppressed: true, reason: 'bell_policy' };
             }
           }

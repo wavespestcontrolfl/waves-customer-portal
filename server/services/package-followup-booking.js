@@ -86,6 +86,7 @@
 const logger = require('./logger');
 const { packageFollowupAutobookLive } = require('../config/feature-gates');
 const { createScheduledService } = require('./booking/create-scheduled-service');
+const { placeAutoSavedVisit } = require('./scheduling/staff-save-route-check');
 const { FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
@@ -352,6 +353,10 @@ async function bookInSavepoint(sp, outerTrx, primary, cols) {
     });
   }
   await warnOnOverlap(sp, { child: { ...child, scheduled_date: date }, customerId: primary.customer_id, outerTrx, fenceMissed });
+  // GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29): number visit 2's technician
+  // day in the dispatcher's order, on the child's savepoint. Silent, never fails
+  // the booking, a no-op while the gate is off.
+  await placeAutoSavedVisit(sp, { visit: child, source: 'package_followup' });
   logger.info(`[package-followup] visit 2 ${child.id} booked for ${date} from ${catalogRow.service_key} visit ${primary.id}`);
   return child;
 }

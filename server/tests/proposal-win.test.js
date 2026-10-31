@@ -1,5 +1,4 @@
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
-jest.mock('../services/invoice', () => ({ create: jest.fn() }));
 jest.mock('../utils/datetime-et', () => ({
   // No-arg calls resolve the mocked "today"; date-arg calls format the date,
   // so Net-N due-date tests can assert actual offsets from mocked today.
@@ -7,8 +6,8 @@ jest.mock('../utils/datetime-et', () => ({
   addETDays: (_date, days) => new Date(Date.UTC(2026, 5, 20 + (days || 0))),
 }));
 jest.mock('../services/payer', () => ({
-  PAYMENT_TERMS: ['due_on_receipt', 'net15', 'net30'],
-  PAYMENT_TERM_NET_DAYS: { net15: 15, net30: 30 },
+  PAYMENT_TERMS: ['due_on_receipt', 'net15', 'net30', 'net60'],
+  PAYMENT_TERM_NET_DAYS: { net15: 15, net30: 30, net60: 60 },
   resolveForInvoice: jest.fn().mockResolvedValue({ payerId: null, paymentTerms: null }),
 }));
 jest.mock('../routes/admin-customers', () => ({
@@ -18,13 +17,13 @@ jest.mock('../services/customer-default-rows', () => ({
   createDefaultCustomerRows: jest.fn().mockResolvedValue(),
 }));
 
-const InvoiceService = require('../services/invoice');
 const adminCustomers = require('../routes/admin-customers');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const {
   buildProposalFirstInvoice,
-  proposalNetTermDays,
-  createProposalAcceptanceInvoice,
+  assertProposalTermsMatchPayer,
+  flagProposalCustomerCommercialIfTaxable,
+  proposalTermsDueDate,
   ensureCustomerForProposalWin,
   promoteLinkedCustomerForProposalWin,
   resolveProposalWinContact,
@@ -52,21 +51,6 @@ const SIESTA_PROPOSAL = {
     },
   ],
 };
-
-describe('proposalNetTermDays', () => {
-  test('maps only the canonical payer tokens — lookup, never a parse (codex #3297 r2)', () => {
-    const withTerms = (paymentTerms) => ({ commercialTerms: { paymentTerms } });
-    expect(proposalNetTermDays(withTerms('net30'))).toBe(30);
-    expect(proposalNetTermDays(withTerms('net15'))).toBe(15);
-    expect(proposalNetTermDays(withTerms('due_on_receipt'))).toBe(0);
-    // Non-canonical strings never reach here (the normalizer nulls them and
-    // the PUT route 400s them) — and this lookup ignores them regardless.
-    expect(proposalNetTermDays(withTerms('Net-30 to the management company'))).toBe(0);
-    expect(proposalNetTermDays(withTerms(''))).toBe(0);
-    expect(proposalNetTermDays({})).toBe(0);
-    expect(proposalNetTermDays(null)).toBe(0);
-  });
-});
 
 describe('buildProposalFirstInvoice', () => {
   test('bills every line once with building prefix + first-period labels and mixed tax', () => {
@@ -232,125 +216,103 @@ function makeInvoiceTrx({ propertyType } = {}) {
   return { trx, ops };
 }
 
-describe('createProposalAcceptanceInvoice', () => {
-  beforeEach(() => InvoiceService.create.mockReset());
+// Owner 2026-10-30 (pipeline audit item 1, option A): an invoice-mode win makes no invoice; every visit bills when it
+// is completed. The win keeps the agreement-vs-payer term check, and it still flags a taxable customer commercial.
+describe('assertProposalTermsMatchPayer', () => {
+  const { resolveForInvoice } = require('../services/payer');
+  const withTerm = (paymentTerms) => ({ ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms } });
+  // Payer resolution runs TWICE when a payer exists (lock-then-re-resolve, codex #3297 r4b).
+  const queuePayer = (value) => { resolveForInvoice.mockResolvedValueOnce(value).mockResolvedValueOnce(value); };
+  beforeEach(() => resolveForInvoice.mockReset().mockResolvedValue({ payerId: null, paymentTerms: null }));
 
-  test('creates the invoice from proposal lines with the blended rate', async () => {
-    InvoiceService.create.mockResolvedValue({ id: 7, invoice_number: 'WPC-2026-0007', token: 'tok', total: 2259.7 });
-    const { trx, ops } = makeInvoiceTrx({ propertyType: 'commercial' });
-    const invoice = await createProposalAcceptanceInvoice({
-      trx, estimate: { id: 42 }, proposal: SIESTA_PROPOSAL, customerId: 'cust-1',
-    });
-
-    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
-    const args = InvoiceService.create.mock.calls[0][0];
-    expect(args.customerId).toBe('cust-1');
-    expect(args.database).toBe(trx);
-    expect(args.title).toBe('Siesta Key Proposal');
-    expect(args.lineItems).toHaveLength(3);
-    expect(Math.round(2210 * args.taxRate * 100) / 100).toBe(49.7);
-    expect(invoice.invoice_number).toBe('WPC-2026-0007');
-    // No authored payment terms → due on receipt (mocked today).
-    expect(args.dueDate).toBe('2026-06-20');
-    expect(ops.updates).toHaveLength(0); // already commercial → no re-flag
-  });
-
-  test('authored Net-15 terms push the invoice due date 15 ET days out (codex 1A-i r4 P0)', async () => {
-    InvoiceService.create.mockResolvedValue({ id: 8, invoice_number: 'WPC-2026-0008', total: 1 });
+  test('no authored term: nothing to check, the payer is never read', async () => {
     const { trx } = makeInvoiceTrx({ propertyType: 'commercial' });
-    await createProposalAcceptanceInvoice({
-      trx,
-      estimate: { id: 42 },
-      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
-      customerId: 'cust-1',
-    });
-    expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-05');
+    await expect(assertProposalTermsMatchPayer({ trx, customerId: 'cust-1', proposal: SIESTA_PROPOSAL })).resolves.toBeUndefined();
+    expect(resolveForInvoice).not.toHaveBeenCalled();
   });
 
-  test('payer-term resolution: match proceeds on payer terms, mismatch REJECTS acceptance, self-pay uses the proposal term (codex #3297 r2d)', async () => {
-    const { resolveForInvoice } = require('../services/payer');
-    // Payer resolution runs TWICE per win (lock-then-re-resolve, codex
-    // #3297 r4b) — queue each payer scenario's value for both reads.
-    const queuePayer = (value) => {
-      resolveForInvoice.mockResolvedValueOnce(value).mockResolvedValueOnce(value);
-    };
-    // Active payer whose terms MATCH the authored term → invoices on it.
-    InvoiceService.create.mockResolvedValue({ id: 10, invoice_number: 'WPC-2026-0010', total: 1 });
+  test('a payer on the same terms, or self-pay, passes', async () => {
     queuePayer({ payerId: 77, paymentTerms: 'net30' });
-    await createProposalAcceptanceInvoice({
-      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
-      estimate: { id: 42 },
-      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net30' } },
-      customerId: 'cust-1',
-    });
-    expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-20');
-
-    // Active payer CONTRADICTING the rendered agreement → 409, no invoice —
-    // acceptance must never silently bill a term the customer didn't see.
-    queuePayer({ payerId: 77, paymentTerms: 'net30' });
-    await expect(createProposalAcceptanceInvoice({
-      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
-      estimate: { id: 43 },
-      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
-      customerId: 'cust-1',
-    })).rejects.toMatchObject({ statusCode: 409 });
-    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
-
-    // Payer with terms but NO authored term → payer terms, no conflict.
-    queuePayer({ payerId: 77, paymentTerms: 'net15' });
-    await createProposalAcceptanceInvoice({
-      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
-      estimate: { id: 44 },
-      proposal: SIESTA_PROPOSAL,
-      customerId: 'cust-1',
-    });
-    expect(InvoiceService.create.mock.calls[1][0].dueDate).toBe('2026-07-05');
-
-    // Self-pay resolution falls back to the authored proposal term.
-    resolveForInvoice.mockResolvedValueOnce({ payerId: null, paymentTerms: null });
-    await createProposalAcceptanceInvoice({
-      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
-      estimate: { id: 45 },
-      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
-      customerId: 'cust-1',
-    });
-    expect(InvoiceService.create.mock.calls[2][0].dueDate).toBe('2026-07-05');
+    await expect(assertProposalTermsMatchPayer({ trx: makeInvoiceTrx({}).trx, customerId: 'cust-1', proposal: withTerm('net30') })).resolves.toBeUndefined();
+    expect(resolveForInvoice).toHaveBeenCalledTimes(2);
+    await expect(assertProposalTermsMatchPayer({ trx: makeInvoiceTrx({}).trx, customerId: 'cust-1', proposal: withTerm('net15') })).resolves.toBeUndefined();
   });
 
+  test('a payer contradicting the signed agreement REJECTS the win (codex #3297 r2d)', async () => {
+    queuePayer({ payerId: 77, paymentTerms: 'net30' });
+    await expect(assertProposalTermsMatchPayer({ trx: makeInvoiceTrx({}).trx, customerId: 'cust-1', proposal: withTerm('net15') }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('net15 payment terms but the customer bills through a payer on net30') });
+  });
+
+  test('a failed payer lookup aborts the win instead of passing as self-pay (codex 1A-i r3 P0)', async () => {
+    resolveForInvoice.mockRejectedValueOnce(new Error('payer lookup down'));
+    await expect(assertProposalTermsMatchPayer({ trx: makeInvoiceTrx({}).trx, customerId: 'cust-1', proposal: withTerm('net30') }))
+      .rejects.toThrow('payer lookup down');
+  });
+});
+
+// The win makes no invoice (option A), so each visit invoice of an invoice-mode proposal carries the agreement's Net
+// term (pre-push Codex P1: without it a self-pay customer's first invoice was due on the visit date).
+describe('proposalTermsDueDate', () => {
+  const estimateConn = (row) => jest.fn(() => ({ where() { return this; }, first: async () => row }));
+  const invoiceModeRow = (paymentTerms, extra = {}) => ({
+    status: 'accepted', bill_by_invoice: true,
+    estimate_data: { proposal: { ...SIESTA_PROPOSAL, enabled: true, commercialTerms: { paymentTerms } } },
+    ...extra,
+  });
+
+  test('an accepted invoice-mode proposal on Net 15 / 30 / 60 is due that many calendar days after the base date', async () => {
+    expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net30')), 'est-1', '2026-11-03')).toBe('2026-12-03');
+    expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net60')), 'est-1', '2026-11-03')).toBe('2027-01-02');
+    expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net15')), 'est-1', new Date('2026-12-20T15:00:00Z'))).toBe('2027-01-04');
+  });
+
+  test('anything else keeps the caller\'s own due date (null)', async () => {
+    for (const row of [
+      invoiceModeRow('due_on_receipt'), invoiceModeRow(undefined), invoiceModeRow('net30', { bill_by_invoice: false }),
+      invoiceModeRow('net30', { status: 'sent' }), undefined,
+      { status: 'accepted', bill_by_invoice: true, estimate_data: { recurring: { services: [] } } },
+    ]) {
+      expect(await proposalTermsDueDate(estimateConn(row), 'est-1', '2026-11-03')).toBeNull();
+    }
+    expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net30')), null, '2026-11-03')).toBeNull();
+  });
+
+  test('both completion lanes use it for the visit invoice due date (source pins)', () => {
+    const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
+    const legacy = read('../services/complete-scheduled-service.js');
+    expect(legacy).toContain("proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(");
+    expect(legacy).toContain('dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),');
+    expect(legacy).toContain('dueDate: proposalTermsDue || serviceDateOnly(record.service_date),');
+    // A failed read mints nothing: the mint's catch releases the closeout for resume on every lane (pre-push Codex P1).
+    expect(legacy).toContain("{ code: 'PROPOSAL_TERMS_UNREAD' }");
+    const handler = legacy.slice(legacy.indexOf("if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {"));
+    expect(handler.length).toBeGreaterThan(0);
+    expect(handler.slice(0, 900)).toContain('const termsReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
+    expect(handler.slice(0, 900)).toContain("code: 'proposal_terms_unread'");
+    // A required lane takes the release in the required-mint branch; every other lane reaches this one.
+    expect(legacy.indexOf("if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {"))
+      .toBeLessThan(legacy.indexOf("if (invErr?.code === 'BILLING_LANE_CHANGED' && !invoice?.id) {"));
+    const sheet = read('../services/visit-completion-invoice.js');
+    expect(sheet).toContain("require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, visit.scheduled_date)");
+    expect(sheet).toContain('dueDate: proposalTermsDue || dateOnly(visit.scheduled_date)');
+  });
+});
+
+describe('flagProposalCustomerCommercialIfTaxable', () => {
   test('flags a non-commercial customer commercial when the proposal is taxable', async () => {
-    InvoiceService.create.mockResolvedValue({ id: 9, invoice_number: 'WPC-2026-0009', total: 1 });
     const { trx, ops } = makeInvoiceTrx({ propertyType: 'single_family' });
-    await createProposalAcceptanceInvoice({
-      trx, estimate: { id: 42 }, proposal: SIESTA_PROPOSAL, customerId: 'cust-1',
-    });
+    await flagProposalCustomerCommercialIfTaxable({ trx, customerId: 'cust-1', proposal: SIESTA_PROPOSAL });
     expect(ops.updates).toEqual([{ property_type: 'commercial' }]);
   });
 
-  test('does NOT touch property_type when the proposal has no taxable lines', async () => {
-    InvoiceService.create.mockResolvedValue({ id: 9, invoice_number: 'WPC-2026-0009', total: 200 });
-    const { trx, ops } = makeInvoiceTrx({ propertyType: 'single_family' });
-    await createProposalAcceptanceInvoice({
-      trx, estimate: { id: 42 }, proposal: NONTAXABLE_PROPOSAL, customerId: 'cust-1',
-    });
-    expect(ops.updates).toHaveLength(0);
-    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
-  });
-
-  test('returns null and skips InvoiceService when there are no billable lines', async () => {
-    const { trx } = makeInvoiceTrx({ propertyType: 'commercial' });
-    const invoice = await createProposalAcceptanceInvoice({
-      trx, estimate: { id: 42 }, customerId: 'cust-1',
-      proposal: { taxRate: 0, buildings: [{ name: 'A', lineItems: [] }] },
-    });
-    expect(invoice).toBeNull();
-    expect(InvoiceService.create).not.toHaveBeenCalled();
-  });
-
-  test('throws without a customer', async () => {
-    const { trx } = makeInvoiceTrx({ propertyType: 'commercial' });
-    await expect(createProposalAcceptanceInvoice({
-      trx, estimate: { id: 42 }, proposal: SIESTA_PROPOSAL, customerId: null,
-    })).rejects.toThrow(/customer is required/i);
+  test('does NOT touch property_type when the proposal has no taxable lines, or the customer is already commercial', async () => {
+    const plain = makeInvoiceTrx({ propertyType: 'single_family' });
+    await flagProposalCustomerCommercialIfTaxable({ trx: plain.trx, customerId: 'cust-1', proposal: NONTAXABLE_PROPOSAL });
+    expect(plain.ops.updates).toHaveLength(0);
+    const commercial = makeInvoiceTrx({ propertyType: 'commercial' });
+    await flagProposalCustomerCommercialIfTaxable({ trx: commercial.trx, customerId: 'cust-1', proposal: SIESTA_PROPOSAL });
+    expect(commercial.ops.updates).toHaveLength(0);
   });
 });
 

@@ -3,7 +3,9 @@
  * charge attempt and no Auto Pay payment since the hold began; a cash/check/Zelle tender a person recorded does
  * not count), the skips (open customer-level schedule, terminal invoice, active payment plan, payer-billed,
  * other statuses), the release (first touch no earlier than the next send-window run, one office alert per
- * released invoice), and the shadow audit rows with their once-per-ET-day dedupe. Disposable schema on a private QA / isolated CI database; skipped without
+ * released invoice), the shadow audit rows with their once-per-ET-day dedupe, and the 'charge' mode (a stale hold
+ * charges the saved Auto Pay method first; a decline releases it, an unclear outcome keeps it, a dispute hold defers it;
+ * the Stripe, method and bell calls are spies). Disposable schema on a private QA / isolated CI database; skipped without
  * APP_TEST_DATABASE_URL, run for real in CI.
  */
 jest.mock('../models/db', () => {
@@ -19,6 +21,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mo
 
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
+const { etDateString, addETDaysAtWallClock } = require('../utils/datetime-et');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -43,25 +46,45 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
     await mockPg.raw(`CREATE TABLE invoices (
       id uuid PRIMARY KEY, status text, payer_id uuid, scheduled_send_error text, scheduled_service_id uuid,
-      invoice_number text, total numeric, credit_applied numeric DEFAULT 0, sent_at timestamptz, sms_sent_at timestamptz, created_at timestamptz DEFAULT now())`);
+      invoice_number text, total numeric, subtotal numeric, discount_amount numeric, notes text, line_items jsonb, customer_id uuid,
+      credit_applied numeric DEFAULT 0, amount_paid numeric NOT NULL DEFAULT 0, sent_at timestamptz, sms_sent_at timestamptz, due_date date, created_at timestamptz DEFAULT now())`);
+    // The dedicated annual-prepay rails charge through annual_prepay_terms.prepay_invoice_id (unique per invoice).
+    await mockPg.raw('CREATE TABLE annual_prepay_terms (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), prepay_invoice_id uuid UNIQUE)');
     await mockPg.raw(`CREATE TABLE invoice_followup_sequences (
       id uuid PRIMARY KEY, invoice_id uuid NOT NULL, customer_id uuid NOT NULL, status text,
       step_index integer DEFAULT 0, next_touch_at timestamptz, anchor_at timestamptz,
       is_autopay_held boolean DEFAULT false, autopay_failures_observed integer DEFAULT 0,
       updated_at timestamptz DEFAULT now())`);
     await mockPg.raw(`CREATE TABLE stripe_invoice_charge_attempts (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, created_at timestamptz DEFAULT now())`);
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, status text, decline_code text, error_message text, created_at timestamptz DEFAULT now())`);
     await mockPg.raw(`CREATE TABLE payments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text, next_retry_at timestamptz,
-      description text, processor text, stripe_charge_id text, stripe_payment_intent_id text, created_at timestamptz DEFAULT now())`);
-    await mockPg.raw('CREATE TABLE customers (id uuid PRIMARY KEY, first_name text, last_name text)');
-    await mockPg.raw('CREATE TABLE scheduled_services (id uuid PRIMARY KEY, status text)');
+      description text, metadata jsonb, processor text, stripe_charge_id text, stripe_payment_intent_id text, created_at timestamptz DEFAULT now())`);
+    // The columns the visit-bill verdict (completion-charge-verdict.js) and the facts fingerprint read.
+    await mockPg.raw(`CREATE TABLE customers (id uuid PRIMARY KEY, first_name text, last_name text, billing_mode text, monthly_rate numeric,
+      per_application_fee numeric, payer_id uuid, autopay_enabled boolean, autopay_paused_until date, autopay_payment_method_id uuid, ach_status text)`);
+    await mockPg.raw(`CREATE TABLE scheduled_services (id uuid PRIMARY KEY, status text, customer_id uuid, estimated_price numeric, primary_line_price numeric,
+      payer_id uuid, is_callback boolean DEFAULT false, service_type text, is_recurring boolean DEFAULT false, recurring_parent_id uuid, recurring_pattern text,
+      source_estimate_id uuid, prepaid_amount numeric, prepaid_method text)`);
+    await mockPg.raw('CREATE TABLE service_records (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scheduled_service_id uuid, status text, structured_notes jsonb, created_at timestamptz NOT NULL DEFAULT now())');
+    await mockPg.raw('CREATE TABLE estimate_card_holds (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scheduled_service_id uuid, status text)');
+    await mockPg.raw('CREATE TABLE appointment_card_requests (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scheduled_service_id uuid, customer_id uuid, status text, accepted_amount numeric, selected_plan text)');
+    await mockPg.raw('CREATE TABLE setup_fee_claims (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid, amount numeric)');
     await mockPg.raw('CREATE TABLE customer_dunning_schedules (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text)');
     await mockPg.raw('CREATE TABLE payment_plans (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, status text)');
     await mockPg.raw(`CREATE TABLE audit_log (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_type text NOT NULL, actor_id uuid, action text NOT NULL,
       resource_type text, resource_id uuid, metadata jsonb, ip_address text, user_agent text,
       created_at timestamptz NOT NULL DEFAULT now())`);
+    // Lets a test make the release UPDATE fail while a row sits in fail_release: insert the row, run, delete it.
+    await mockPg.raw('CREATE TABLE collections_flags (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, flag text, reason text, released_at timestamptz)');
+    await mockPg.raw('CREATE TABLE fail_release (id int)');
+    await mockPg.raw(`CREATE FUNCTION fail_release_fn() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.status = 'active' AND EXISTS (SELECT 1 FROM fail_release) THEN RAISE EXCEPTION 'release failed (test)'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await mockPg.raw('CREATE TRIGGER fail_release_trg BEFORE UPDATE ON invoice_followup_sequences FOR EACH ROW EXECUTE FUNCTION fail_release_fn()');
     ({ releaseStaleAutopayHolds: sweep, AUTOPAY_HOLD_TIMEOUT_DAYS: TIMEOUT_DAYS } = require('../services/invoice-followups'));
   });
 
@@ -74,7 +97,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
   });
 
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE customers, invoices, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, customer_dunning_schedules, audit_log');
+    await mockPg.raw('TRUNCATE customers, invoices, annual_prepay_terms, setup_fee_claims, service_records, estimate_card_holds, appointment_card_requests, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, customer_dunning_schedules, audit_log, fail_release, collections_flags');
     delete process.env.GATE_AUTOPAY_HOLD_TIMEOUT;
     mockNotify.mockClear();
   });
@@ -84,19 +107,21 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
   // same customer passes its customerId.
   async function held({
     heldDaysAgo = 4, anchorDaysAgo = 20, at = new Date(), invoiceStatus = 'sent', status = 'autopay_hold', payerId = null,
-    visitStatus = null, sequenceId = randomUUID(), customerId = randomUUID(), total = 120,
+    visitStatus = null, sequenceId = randomUUID(), customerId = randomUUID(), total = 120, dueDate = null,
+    visitFields = {}, invoiceFields = {}, customerFields = {},
   } = {}) {
     const invoiceId = randomUUID();
     const heldAt = new Date(at.getTime() - heldDaysAgo * DAY);
     const sentAt = new Date(at.getTime() - anchorDaysAgo * DAY);
-    await mockPg('customers').insert({ id: customerId, first_name: 'Casey', last_name: 'Testwell' }).onConflict('id').ignore();
+    await mockPg('customers').insert({ id: customerId, first_name: 'Casey', last_name: 'Testwell', ...customerFields }).onConflict('id').merge();
     let visitId = null;
     if (visitStatus) {
       visitId = randomUUID();
-      await mockPg('scheduled_services').insert({ id: visitId, status: visitStatus });
+      await mockPg('scheduled_services').insert({ id: visitId, status: visitStatus, customer_id: customerId, ...visitFields });
     }
     await mockPg('invoices').insert({
-      id: invoiceId, status: invoiceStatus, payer_id: payerId, scheduled_service_id: visitId, sent_at: sentAt, invoice_number: `WPC-${invoiceId.slice(0, 4)}`, total,
+      id: invoiceId, status: invoiceStatus, payer_id: payerId, scheduled_service_id: visitId, sent_at: sentAt, invoice_number: `WPC-${invoiceId.slice(0, 4)}`, total, due_date: dueDate,
+      customer_id: customerId, ...invoiceFields,
     });
     await mockPg('invoice_followup_sequences').insert({
       id: sequenceId,
@@ -108,7 +133,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       anchor_at: sentAt,
       updated_at: heldAt,
     });
-    return { invoiceId, customerId, sequenceId, heldAt };
+    return { invoiceId, customerId, sequenceId, heldAt, visitId, invoiceNumber: `WPC-${invoiceId.slice(0, 4)}` };
   }
   const seqOf = (invoiceId) => mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   const shadowRows = () => mockPg('audit_log').where({ action: 'invoice_followup.autopay_hold_timeout_shadow' });
@@ -511,8 +536,1203 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       await held();
       const now = new Date();
       await sweep({ now });
-      await sweep({ now: new Date(now.getTime() + 24 * 3600000) });
+      // Not now + 24 h: on the day the clocks go back (25 hours) that still falls on the same ET date.
+      await sweep({ now: addETDaysAtWallClock(now, 1) });
       expect(await shadowRows()).toHaveLength(2);
+    });
+  });
+
+  describe('gate charge', () => {
+    const StripeService = require('../services/stripe');
+    const Eligibility = require('../services/autopay-eligibility');
+    const NotificationService = require('../services/notification-service');
+    const chargeAuditRows = () => mockPg('audit_log').where({ action: 'invoice_followup.autopay_hold_timeout_charge' });
+    const Payer = require('../services/payer');
+    const FeatureGates = require('../config/feature-gates');
+    const METHOD = { id: 'pm-1', method_type: 'card' };
+    let quote;
+    let chargeCall;
+    let notify;
+    let payerLookup;
+    let autopayActive;
+
+    // A hold on a visit's own bill, the only kind charge mode charges: a completed visit with a performed closeout
+    // on the per-application lane, a $100 agreed price and a $100 bill. Override any fact to leave the cap, the
+    // closeout or the payer.
+    async function heldBound({
+      price = 100, subtotal = 100, discount = null, customerFields = {}, visitFields = {}, invoiceFields = {}, record = { visitOutcome: 'completed' }, recordStatus = 'completed', ...rest
+    } = {}) {
+      const h = await held({
+        visitStatus: 'completed',
+        customerFields: { billing_mode: 'per_application', per_application_fee: price, ...customerFields },
+        visitFields: { estimated_price: price, ...visitFields },
+        invoiceFields: { subtotal, discount_amount: discount, ...invoiceFields },
+        ...rest,
+      });
+      if (record) await mockPg('service_records').insert({ scheduled_service_id: h.visitId, status: recordStatus, structured_notes: JSON.stringify(record) });
+      return h;
+    }
+    const reviewRows = () => mockPg('audit_log').where({ action: 'invoice_followup.autopay_hold_timeout_charge' }).whereRaw("metadata->>'outcome' = 'review'");
+    // The office changes the bill: the verdict's facts (and so the fingerprint) change.
+    const changeBill = (h, fields) => mockPg('invoices').where({ id: h.invoiceId }).update(fields);
+
+    beforeEach(() => {
+      process.env.GATE_AUTOPAY_HOLD_TIMEOUT = 'charge';
+      payerLookup = jest.spyOn(Payer, 'resolveForInvoice').mockResolvedValue({ payerId: null });
+      autopayActive = jest.spyOn(Eligibility, 'customerOnAutopay').mockResolvedValue(true);
+      jest.spyOn(Eligibility, 'getChargeableAutopayMethod').mockResolvedValue(METHOD);
+      quote = jest.spyOn(StripeService, 'quoteInvoiceSavedCardCharge').mockResolvedValue({ base: 100, surcharge: 3.09, total: 103.09 });
+      chargeCall = jest.spyOn(StripeService, 'chargeInvoiceWithSavedCard').mockResolvedValue({ status: 'paid', amount: 103.09 });
+      notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'bell-1' });
+    });
+    afterEach(() => {
+      // Restore each spy by hand: restoreAllMocks would also reset the jest.fn() mocks above.
+      for (const spy of [Eligibility.getChargeableAutopayMethod, quote, chargeCall, notify, payerLookup, autopayActive]) spy.mockRestore();
+    });
+
+    // What the real charge path leaves behind on a decline: its attempt claim (failed) and a failed payments row.
+    // The charge path stores decline_code only for a customer decline; a refusal before Stripe leaves it null.
+    const leaveDeclineRows = async (h, declineCode = 'insufficient_funds') => {
+      await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', decline_code: declineCode });
+      await mockPg('payments').insert({ customer_id: h.customerId, status: 'failed', next_retry_at: null });
+    };
+    const decline = (declineCode = 'insufficient_funds') => Object.assign(new Error('Your card was declined.'), {
+      wavesCardDecline: { attemptedAmount: 103.09, declineCode },
+    });
+
+    test('charge success: the hold is kept, the sequence is closed, one audit row, no alert, and the sweep does not pick it again', async () => {
+      const h = await heldBound();
+      chargeCall.mockImplementation(async () => {
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'succeeded' });
+        await mockPg('invoices').where({ id: h.invoiceId }).update({ status: 'paid' });
+        return { status: 'paid', amount: 103.09 };
+      });
+      const result = await sweep();
+      expect(result).toMatchObject({ mode: 'charge', candidates: 1, charged: 1, declined_released: 0, ambiguous: 0, released: 0 });
+      const seq = await seqOf(h.invoiceId);
+      expect(seq.status).toBe('completed');
+      expect(seq.next_touch_at).toBeNull();
+      const rows = await chargeAuditRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ actor_type: 'system', resource_type: 'invoice', resource_id: h.invoiceId });
+      expect(rows[0].metadata).toEqual({
+        sequence_id: h.sequenceId, customer_id: h.customerId, outcome: 'paid', reason: null, error_code: null,
+        amount_cents: 10309, method_type: 'card', released: false,
+      });
+      expect(notify).not.toHaveBeenCalled();
+      expect(await sweep()).toMatchObject({ candidates: 0, charged: 0 });
+      expect(chargeCall).toHaveBeenCalledTimes(1);
+    });
+
+    test('quotes the method, then charges a visit bill with the completion rail\'s option set, the quote total as the ceiling and no expectedTotal', async () => {
+      const h = await heldBound();
+      await sweep();
+      expect(Eligibility.getChargeableAutopayMethod).toHaveBeenCalledWith({ id: h.customerId }, expect.anything(), { rethrow: true });
+      expect(quote).toHaveBeenCalledWith(h.invoiceId, 'pm-1');
+      expect(chargeCall).toHaveBeenCalledTimes(1);
+      // toEqual on the whole options object: no operatorOverride, no expectedTotal, no other guard slips in.
+      expect(chargeCall.mock.calls[0]).toEqual([h.invoiceId, 'pm-1', {
+        maxAuthorizedSubtotal: 100,
+        requireAutopayForCustomerId: h.customerId,
+        requireSelfPayScheduledServiceId: h.visitId,
+        requireOneTimeLane: false,
+        requireNoAppointmentCardLane: false,
+        requireExtendedCompletionAnchor: false,
+        requireInvoiceScheduledServiceBinding: true,
+        refuseWhenDunningStopped: true,
+        requireCompletedVisit: true,
+        requirePerformedVisit: true,
+        allowIssuedInvoiceCloseoutFor: h.invoiceId,
+        requireNoUnappliedVisitPrepayment: true,
+        requireBankDebitDue: true,
+        maxAuthorizedTotalCents: 10309,
+      }]);
+    });
+
+    test('F: an invoice bound to no visit is released as true releases it and never quoted, marked or charged', async () => {
+      const h = await held();
+      expect(await sweep()).toMatchObject({ candidates: 1, true_released: 1, charged: 0, declined_released: 0 });
+      expect((await seqOf(h.invoiceId)).status).toBe('active');
+      expect(Eligibility.getChargeableAutopayMethod).not.toHaveBeenCalled();
+      expect(quote).not.toHaveBeenCalled();
+      expect(chargeCall).not.toHaveBeenCalled();
+      expect(await chargeAuditRows()).toHaveLength(0);
+      expect(notify.mock.calls.map((c) => c[3].dedupeKey)).toEqual([expect.stringMatching(new RegExp(`^autopay-hold-timeout:${h.invoiceId}:`))]);
+    });
+
+    describe('the verdict: the completion rail\'s own cap, lanes and performed-visit rule', () => {
+      afterEach(() => {
+        FeatureGates.gates.completionAutopayCharge = false;
+        FeatureGates.gates.apptCardCompletionCharge = false;
+      });
+      const reviewed = async (h, reason) => {
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+        await untouched(h);
+        expect(await mockPg('audit_log').where({ action: 'invoice_followup.autopay_hold_timeout_charge_started' })).toHaveLength(0);
+        expect(await mockPg('stripe_invoice_charge_attempts')).toHaveLength(0);
+        expect(notify).toHaveBeenCalledTimes(1);
+        const [category, headline, why, opts] = notify.mock.calls[0];
+        expect(category).toBe('billing');
+        expect(headline).toBe("Billing — review Casey Testwell's held Auto Pay charge");
+        expect(opts).toMatchObject({ bell: true, dedupeKey: `autopay_hold_charge:review:${h.invoiceId}`, link: `/admin/invoices?invoice=${h.invoiceId}`, metadata: { reason } });
+        const rows = await reviewRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].metadata).toMatchObject({ outcome: 'review', reason, released: false, error_code: null, fingerprint: expect.stringMatching(/^[a-f0-9]{32}$/) });
+        return why;
+      };
+
+      test('extended lane inside the cap: charged with the extended option set, no expectedTotal', async () => {
+        FeatureGates.gates.completionAutopayCharge = true;
+        const h = await heldBound({ customerFields: { billing_mode: null, per_application_fee: null } });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, review: 0 });
+        expect(chargeCall.mock.calls[0][2]).toEqual({
+          maxAuthorizedSubtotal: 100,
+          requireAutopayForCustomerId: h.customerId,
+          requireSelfPayScheduledServiceId: h.visitId,
+          requireOneTimeLane: false,
+          requireNoAppointmentCardLane: true,
+          requireExtendedCompletionAnchor: true,
+          requireInvoiceScheduledServiceBinding: true,
+          refuseWhenDunningStopped: true,
+          requireCompletedVisit: true,
+          requirePerformedVisit: true,
+          allowIssuedInvoiceCloseoutFor: h.invoiceId,
+          requireNoUnappliedVisitPrepayment: true,
+          requireBankDebitDue: true,
+          maxAuthorizedChargeCents: 12000,
+          maxAuthorizedTotalCents: 10309,
+        });
+      });
+
+      test('above the cap: office review (one alert, hold kept, no marker or attempt); a second run is silent; charged after the office lowers the bill', async () => {
+        FeatureGates.gates.completionAutopayCharge = true;
+        const h = await heldBound({ customerFields: { billing_mode: null, per_application_fee: null }, subtotal: 140 });
+        expect(await sweep()).toMatchObject({ candidates: 1, review: 1, charged: 0, declined_released: 0 });
+        expect(await reviewed(h, 'over_cap')).toBe('$120.00 on invoice ' + h.invoiceNumber + ' was not charged: the bill is above the visit price the customer agreed to.');
+        // Same facts: not a candidate again, no second alert, no second final row.
+        expect(await sweep()).toMatchObject({ candidates: 0, review: 0 });
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(await reviewRows()).toHaveLength(1);
+        // The office lowers the bill: a new fingerprint is evaluated once and charged.
+        await changeBill(h, { subtotal: 100 });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, review: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+
+      test('a changed bill that is still over the cap is evaluated once more with the open alert kept (at most one new alert)', async () => {
+        FeatureGates.gates.completionAutopayCharge = true;
+        const h = await heldBound({ customerFields: { billing_mode: null, per_application_fee: null }, subtotal: 140 });
+        await sweep();
+        await changeBill(h, { subtotal: 130 });
+        expect(await sweep()).toMatchObject({ candidates: 1, review: 1 });
+        expect(await reviewRows()).toHaveLength(2);
+        expect(chargeCall).not.toHaveBeenCalled();
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+      });
+
+      test('no visit price and no dues rate: office review no_cap, never an uncapped charge', async () => {
+        FeatureGates.gates.completionAutopayCharge = true;
+        const h = await heldBound({ price: null, customerFields: { billing_mode: null, per_application_fee: null }, visitFields: { estimated_price: null } });
+        expect(await sweep()).toMatchObject({ review: 1, charged: 0 });
+        expect(await reviewed(h, 'no_cap')).toContain('no agreed visit price or dues rate is on file');
+      });
+
+      test('a net-of-discount bill inside the cap is charged (the cap compares the subtotal net of the discount)', async () => {
+        const h = await heldBound({ subtotal: 130, discount: 30 });
+        expect(await sweep()).toMatchObject({ charged: 1 });
+        expect(chargeCall.mock.calls[0][2]).toMatchObject({ maxAuthorizedSubtotal: 100 });
+        expect(h.invoiceId).toBe(chargeCall.mock.calls[0][0]);
+      });
+
+      test('appointment-card lane: the cap is the amount frozen at consent, not the live visit price', async () => {
+        FeatureGates.gates.apptCardCompletionCharge = true;
+        const h = await heldBound({ price: 100, customerFields: { billing_mode: null, per_application_fee: null }, subtotal: 100 });
+        await mockPg('appointment_card_requests').insert({ scheduled_service_id: h.visitId, customer_id: h.customerId, status: 'completed', accepted_amount: 80 });
+        expect(await sweep()).toMatchObject({ review: 1, charged: 0 });
+        await reviewed(h, 'over_cap');
+        await changeBill(h, { subtotal: 80 });
+        expect(await sweep()).toMatchObject({ charged: 1 });
+        expect(chargeCall.mock.calls[0][2]).toMatchObject({ maxAuthorizedSubtotal: 80, requireOneTimeLane: true, requireNoAppointmentCardLane: false, requireExtendedCompletionAnchor: false });
+      });
+
+      test('per-application lane: the cap is the visit price, else the customer fee', async () => {
+        const h = await heldBound({ price: null, visitFields: { estimated_price: null }, customerFields: { per_application_fee: 90 }, subtotal: 100 });
+        expect(await sweep()).toMatchObject({ review: 1, charged: 0 });
+        await reviewed(h, 'over_cap');
+      });
+
+      test('no completion lane admits the bill (both completion gates off, not per-application): released as true releases it, never charged', async () => {
+        const h = await heldBound({ customerFields: { billing_mode: null, per_application_fee: null } });
+        expect(await sweep()).toMatchObject({ candidates: 1, true_released: 1, charged: 0, review: 0 });
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('Auto Pay not active for the customer: released as true releases it, never charged', async () => {
+        autopayActive.mockResolvedValue(false);
+        const h = await heldBound();
+        expect(await sweep()).toMatchObject({ true_released: 1, charged: 0 });
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('the issued-invoice closeout of THIS invoice counts as performed: charged inside the cap', async () => {
+        const h = await heldBound({ record: null });
+        await mockPg('service_records').insert({
+          scheduled_service_id: h.visitId, status: 'completed',
+          structured_notes: JSON.stringify({ visitOutcome: 'completed', backfill: true, invoiceAlreadySent: true, issuedInvoiceCloseout: { invoiceId: h.invoiceId, trigger: 'sent', completedAt: new Date().toISOString() } }),
+        });
+        expect(await sweep()).toMatchObject({ charged: 1, review: 0 });
+        expect(chargeCall.mock.calls[0][2]).toMatchObject({ requirePerformedVisit: true, allowIssuedInvoiceCloseoutFor: h.invoiceId });
+      });
+
+      test('a manual backfill (no closeout marker) is not performed: office review, hold kept', async () => {
+        const h = await heldBound({ record: { visitOutcome: 'completed', backfill: true } });
+        expect(await sweep()).toMatchObject({ review: 1, charged: 0 });
+        expect(await reviewed(h, 'not_performed')).toContain('the visit is not a finished, performed visit');
+      });
+
+      test('a closeout marker that names ANOTHER invoice is not performed: office review', async () => {
+        const h = await heldBound({ record: { visitOutcome: 'completed', backfill: true, issuedInvoiceCloseout: { invoiceId: randomUUID() } } });
+        expect(await sweep()).toMatchObject({ review: 1, charged: 0 });
+        await reviewed(h, 'not_performed');
+      });
+
+      test.each(['inspection_only', 'customer_declined', 'incomplete'])('a %s closeout is not performed: office review, hold kept', async (visitOutcome) => {
+        const h = await heldBound({ record: { visitOutcome } });
+        expect(await sweep()).toMatchObject({ review: 1, charged: 0 });
+        await reviewed(h, 'not_performed');
+      });
+
+      test('a visit with no closeout record at all is not performed: office review', async () => {
+        const h = await heldBound({ record: null });
+        expect(await sweep()).toMatchObject({ review: 1, charged: 0 });
+        await reviewed(h, 'not_performed');
+      });
+
+      test('a payer resolved for the visit: office review, never released, no reminder, nothing charged', async () => {
+        payerLookup.mockResolvedValue({ payerId: randomUUID() });
+        const h = await heldBound();
+        expect(await sweep()).toMatchObject({ review: 1, charged: 0, declined_released: 0, true_released: 0 });
+        expect(await reviewed(h, 'payer')).toContain('the bill goes to a third-party payer');
+        expect(payerLookup).toHaveBeenCalledWith(expect.objectContaining({ customerId: h.customerId, scheduledServiceId: h.visitId, throwOnError: true }));
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+        await untouched(h);
+      });
+
+      // P0: a backfill closeout skips applying the visit's cash/Zelle prepayment, so the visit keeps the stamp while the
+      // invoice shows nothing. Every admitted lane refuses to charge over it.
+      const issuedCloseout = (h) => ({ visitOutcome: 'completed', backfill: true, invoiceAlreadySent: true, issuedInvoiceCloseout: { invoiceId: h.invoiceId, trigger: 'sent', completedAt: new Date().toISOString() } });
+      const closeoutOf = async (h) => mockPg('service_records').insert({ scheduled_service_id: h.visitId, status: 'completed', structured_notes: JSON.stringify(issuedCloseout(h)) });
+      const prepaid = { prepaid_amount: 40, prepaid_method: 'cash' };
+      const lanes = {
+        'per-application': async () => heldBound({ record: null, visitFields: prepaid }),
+        extended: async () => {
+          FeatureGates.gates.completionAutopayCharge = true;
+          return heldBound({ record: null, customerFields: { billing_mode: null, per_application_fee: null }, visitFields: prepaid });
+        },
+        'appointment-card': async () => {
+          FeatureGates.gates.apptCardCompletionCharge = true;
+          const h = await heldBound({ record: null, customerFields: { billing_mode: null, per_application_fee: null }, visitFields: prepaid });
+          await mockPg('appointment_card_requests').insert({ scheduled_service_id: h.visitId, customer_id: h.customerId, status: 'completed', accepted_amount: 100 });
+          return h;
+        },
+      };
+
+      test.each(Object.keys(lanes))('P0: an issued-invoice closeout whose visit has an unapplied prepayment is an office review on the %s lane: no quote, no charge', async (lane) => {
+        const h = await lanes[lane]();
+        await closeoutOf(h);
+        expect(await sweep()).toMatchObject({ candidates: 1, review: 1, charged: 0 });
+        expect(await reviewed(h, 'prepaid')).toContain('the visit carries a prepayment the bill does not show');
+      });
+
+      test('P0: a prepayment the completion route applied to THIS invoice (paid scheduled_service_prepaid marker) is not unapplied: charged', async () => {
+        const h = await heldBound({ visitFields: prepaid });
+        await mockPg('payments').insert({
+          customer_id: h.customerId, status: 'paid', created_at: new Date(Date.now() - 30 * DAY),
+          metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: h.invoiceId, scheduled_service_id: h.visitId }),
+        });
+        expect(await sweep()).toMatchObject({ charged: 1, review: 0 });
+        expect(chargeCall.mock.calls[0][2]).toMatchObject({ requireNoUnappliedVisitPrepayment: true });
+      });
+
+      test('P0 race: the prepayment appears after the unlocked read, the charge refuses under the visit lock: review (hold kept, not released); re-evaluated once after the prepayment is applied', async () => {
+        const h = await heldBound();
+        quote.mockImplementation(async () => {
+          await mockPg('scheduled_services').where({ id: h.visitId }).update(prepaid);
+          return { base: 100, surcharge: 3.09, total: 103.09 };
+        });
+        chargeCall.mockImplementationOnce(async () => {
+          await leaveDeclineRows(h, null);
+          throw Object.assign(new Error('The visit carries a prepayment this invoice does not show. Review before charging.'), { code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+        });
+        expect(await sweep()).toMatchObject({ candidates: 1, review: 1, declined_released: 0, true_released: 0, charged: 0 });
+        await untouched(h);
+        const [row] = await reviewRows();
+        expect(row.metadata).toMatchObject({ outcome: 'review', reason: 'prepaid', error_code: 'UNAPPLIED_VISIT_PREPAYMENT', released: false });
+        // Unchanged facts (the stamp was read into the fingerprint only at the next evaluation): the failed attempt holds it out.
+        // The office applies the prepayment: the invoice total drops and the marker payment exists.
+        await mockPg('payments').insert({
+          customer_id: h.customerId, status: 'paid', created_at: new Date(Date.now() + 1000),
+          metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: h.invoiceId, scheduled_service_id: h.visitId }),
+        });
+        await changeBill(h, { total: 80 });
+        quote.mockResolvedValue({ base: 80, surcharge: 2.47, total: 82.47 });
+        // The applied-marker payment since the hold is this customer's, for THIS invoice: it blocks the candidate rule
+        // (a settled payment for the invoice), so the hold waits for the payment sweep to close it. Keep it older.
+        await mockPg('payments').update({ created_at: new Date(Date.now() - 30 * DAY) });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+      });
+
+      test('P1: no method + a visit/customer payer is an office review, never a release', async () => {
+        payerLookup.mockResolvedValue({ payerId: randomUUID() });
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+        const h = await heldBound();
+        expect(await sweep()).toMatchObject({ review: 1, declined_released: 0, true_released: 0 });
+        await reviewed(h, 'payer');
+      });
+
+      test('P1: no method + a visit that was not performed is an office review', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+        const h = await heldBound({ record: { visitOutcome: 'inspection_only' } });
+        expect(await sweep()).toMatchObject({ review: 1, declined_released: 0 });
+        await reviewed(h, 'not_performed');
+      });
+
+      test('P1: no method + a bill over its cap is an office review (the cap does not depend on Auto Pay being active)', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+        autopayActive.mockResolvedValue(false);
+        const h = await heldBound({ subtotal: 140 });
+        expect(await sweep()).toMatchObject({ review: 1, declined_released: 0, true_released: 0 });
+        await reviewed(h, 'over_cap');
+      });
+
+      test('P1: no method + an unapplied prepayment is an office review', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+        const h = await heldBound({ visitFields: prepaid });
+        expect(await sweep()).toMatchObject({ review: 1, declined_released: 0 });
+        await reviewed(h, 'prepaid');
+      });
+
+      test('P1: a bank method on an invoice with no due date + a payer is an office review, not a release', async () => {
+        payerLookup.mockResolvedValue({ payerId: randomUUID() });
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue({ id: 'pm-bank', method_type: 'us_bank_account' });
+        const h = await heldBound({ dueDate: null });
+        expect(await sweep()).toMatchObject({ review: 1, true_released: 0 });
+        await reviewed(h, 'payer');
+      });
+
+      test('P1: a bank method with no due date, performed and inside the cap, is still released as true releases it', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue({ id: 'pm-bank', method_type: 'us_bank_account' });
+        const h = await heldBound({ dueDate: null });
+        expect(await sweep()).toMatchObject({ true_released: 1, review: 0, charged: 0 });
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+        expect(quote).not.toHaveBeenCalled();
+      });
+
+      test('a strict lookup error in the verdict keeps the hold, writes nothing and retries the next run', async () => {
+        payerLookup.mockRejectedValueOnce(new Error('connection reset'));
+        const h = await heldBound();
+        expect(await sweep()).toMatchObject({ candidates: 1, skipped: 1, charged: 0, review: 0 });
+        await untouched(h);
+        expect(quote).not.toHaveBeenCalled();
+        expect(notify).not.toHaveBeenCalled();
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(await sweep()).toMatchObject({ charged: 1 });
+      });
+    });
+
+    test('D: a guard refusal under the lock (VISIT_NOT_COMPLETED) is an office review, never a release: hold kept, one alert, failed attempt, retried once after the bill changes', async () => {
+      const h = await heldBound();
+      quote.mockImplementation(async () => {
+        await mockPg('scheduled_services').where({ id: h.visitId }).update({ status: 'confirmed' });
+        return { base: 100, surcharge: 3.09, total: 103.09 };
+      });
+      chargeCall.mockImplementation(async () => {
+        await leaveDeclineRows(h, null);
+        throw Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
+      });
+      expect(await sweep()).toMatchObject({ candidates: 1, review: 1, release_failed: 0, declined_released: 0, ambiguous: 0, charged: 0 });
+      await untouched(h);
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:review:${h.invoiceId}`);
+      expect(notify.mock.calls[0][2]).toContain('the visit is not a finished, performed visit');
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'review', reason: 'not_performed', error_code: 'VISIT_NOT_COMPLETED', released: false, fingerprint: expect.any(String) });
+      // Same bill: the failed attempt row still keeps the invoice out of the sweep.
+      expect(await sweep()).toMatchObject({ candidates: 0 });
+      // The office changes the bill: the failed attempt is covered by a review of other facts, so it is tried once more.
+      await mockPg('scheduled_services').where({ id: h.visitId }).update({ status: 'completed' });
+      await changeBill(h, { subtotal: 90 });
+      chargeCall.mockResolvedValue({ status: 'paid', amount: 103.09 });
+      expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+      expect(chargeCall).toHaveBeenCalledTimes(2);
+    });
+
+    test.each([
+      ['PAYER_BILLED_GUARD', 'payer', 'This appointment is payer-billed. The saved card must not be charged.'],
+      ['COMPETING_CARD_CONSENT', 'refused', 'The visit carries a /secure appointment-card consent.'],
+      ['INVOICE_COLLECTION_STOPPED', 'refused', 'Dunning is stopped for this invoice.'],
+      [undefined, 'refused', 'The invoice total is above the authorized ceiling.'],
+    ])('D: %s thrown under the lock is an office review (%s), never a release and never a reminder to the homeowner', async (code, reason, message) => {
+      const h = await heldBound();
+      chargeCall.mockImplementation(async () => { await leaveDeclineRows(h, null); throw Object.assign(new Error(message), code ? { code } : {}); });
+      expect(await sweep()).toMatchObject({ candidates: 1, review: 1, declined_released: 0, true_released: 0, release_failed: 0 });
+      await untouched(h);
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:review:${h.invoiceId}`);
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'review', reason, error_code: code || null, released: false });
+      expect(await sweep()).toMatchObject({ candidates: 0 });
+    });
+
+    test('a bank charge that is processing keeps the hold open for the webhook and writes one audit row', async () => {
+      const h = await heldBound({ dueDate: etDateString(new Date(Date.now() - 2 * DAY)) });
+      Eligibility.getChargeableAutopayMethod.mockResolvedValue({ id: 'pm-bank', method_type: 'us_bank_account' });
+      quote.mockResolvedValue({ base: 100, surcharge: 0, total: 100 });
+      chargeCall.mockImplementation(async () => {
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'claimed' });
+        return { status: 'processing', amount: 100 };
+      });
+      expect(await sweep()).toMatchObject({ charged: 1, declined_released: 0 });
+      expect((await seqOf(h.invoiceId)).status).toBe('autopay_hold');
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'processing', amount_cents: 10000, method_type: 'us_bank_account', released: false });
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    test('an invoice the account credit covered closes the sequence and records a zero charge', async () => {
+      const h = await heldBound();
+      quote.mockResolvedValue({ base: 0, surcharge: 0, total: 0, coveredByCredit: true });
+      chargeCall.mockResolvedValue({ covered_by_credit: true, status: 'prepaid', paymentId: null, paymentIntentId: null });
+      expect(await sweep()).toMatchObject({ charged: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('completed');
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'covered_by_credit', amount_cents: 0 });
+      expect(chargeCall.mock.calls[0][2]).toMatchObject({ maxAuthorizedTotalCents: 0 });
+      expect(chargeCall.mock.calls[0][2]).not.toHaveProperty('expectedTotal');
+    });
+
+    test('a decline releases the hold even though the charge left an attempt and a failed payment, and posts one alert', async () => {
+      const h = await heldBound();
+      chargeCall.mockImplementation(async () => { await leaveDeclineRows(h); throw decline(); });
+      const result = await sweep();
+      expect(result).toMatchObject({ mode: 'charge', candidates: 1, charged: 0, declined_released: 1, released: 1, ambiguous: 0 });
+      const seq = await seqOf(h.invoiceId);
+      expect(seq.status).toBe('active');
+      expect(seq.is_autopay_held).toBe(false);
+      expect(seq.next_touch_at).not.toBeNull();
+
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [category, headline, why, opts] = notify.mock.calls[0];
+      expect(category).toBe('billing');
+      expect(headline).toBe("Billing — check Casey Testwell's failed Auto Pay charge");
+      expect(why).toBe(`$103.09 on invoice ${h.invoiceNumber} was not charged (the card was declined); reminders start.`);
+      expect(opts).toMatchObject({
+        bell: true, dedupeKey: `autopay_hold_charge:declined:${h.invoiceId}`, link: `/admin/invoices?invoice=${h.invoiceId}`,
+        metadata: { subject: { type: 'invoice', id: h.invoiceId }, severity: 'needs-you', reason: 'declined' },
+      });
+
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toEqual({
+        sequence_id: h.sequenceId, customer_id: h.customerId, outcome: 'declined_released', reason: 'declined', error_code: null,
+        amount_cents: 10309, method_type: 'card', released: true,
+      });
+      expect(await chargeAuditRows()).toHaveLength(1);
+    });
+
+    test('no chargeable method releases the hold and posts one alert, with no quote and no charge', async () => {
+      const h = await heldBound();
+      Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+      expect(await sweep()).toMatchObject({ candidates: 1, declined_released: 1, released: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('active');
+      expect(quote).not.toHaveBeenCalled();
+      expect(chargeCall).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][2]).toContain('no Auto Pay card or bank is on file');
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'declined_released', reason: 'no_method', method_type: null, released: true });
+    });
+
+    test('a guard refusal before any charge (plain error, no attempt row) is an office review: hold kept, one alert, never released', async () => {
+      const h = await heldBound();
+      chargeCall.mockRejectedValue(new Error('Auto Pay is no longer active for this customer.'));
+      expect(await sweep()).toMatchObject({ review: 1, declined_released: 0, ambiguous: 0 });
+      await untouched(h);
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][2]).toContain('Auto Pay refused the charge');
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'review', reason: 'refused', released: false });
+    });
+
+    test('a method lookup that throws is not "no method": hold kept, skipped, no quote, charge, alert or audit row', async () => {
+      const h = await heldBound();
+      Eligibility.getChargeableAutopayMethod.mockRejectedValue(new Error('connection reset'));
+      expect(await sweep()).toMatchObject({ candidates: 1, skipped: 1, declined_released: 0, released: 0, charged: 0 });
+      await untouched(h);
+      expect(Eligibility.getChargeableAutopayMethod).toHaveBeenCalledWith({ id: h.customerId }, expect.anything(), { rethrow: true });
+      expect(quote).not.toHaveBeenCalled();
+      expect(chargeCall).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+      expect(await chargeAuditRows()).toHaveLength(0);
+      // The next run retries.
+      Eligibility.getChargeableAutopayMethod.mockResolvedValue(METHOD);
+      expect(await sweep()).toMatchObject({ charged: 1 });
+    });
+
+    test('no method found keeps the hold when the hold itself changed since the read (stamp equality still applies)', async () => {
+      const h = await heldBound();
+      Eligibility.getChargeableAutopayMethod.mockImplementation(async () => {
+        await mockPg('invoice_followup_sequences').where({ invoice_id: h.invoiceId }).update({ updated_at: new Date(Date.now() - 3.5 * DAY) });
+        return null;
+      });
+      expect(await sweep()).toMatchObject({ declined_released: 0, release_failed: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('autopay_hold');
+    });
+
+    test('a decline keeps the hold when a processing payment (not our failed row) exists since the hold began', async () => {
+      const h = await heldBound();
+      chargeCall.mockImplementation(async () => {
+        await leaveDeclineRows(h);
+        await mockPg('payments').insert({ customer_id: h.customerId, status: 'processing' });
+        throw decline();
+      });
+      expect(await sweep()).toMatchObject({ declined_released: 0, release_failed: 1, ambiguous: 0 });
+      await untouched(h);
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'declined_not_released', released: false });
+    });
+
+    test('a plain decline that leaves a non-failed attempt is read as unclear: kept, one check-Stripe alert', async () => {
+      const h = await heldBound();
+      chargeCall.mockImplementation(async () => {
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'succeeded' });
+        throw decline();
+      });
+      expect(await sweep()).toMatchObject({ ambiguous: 1, declined_released: 0 });
+      await untouched(h);
+    });
+
+    test('a quote that fails moves no money and is an office review, never a release (it can be a payer): no marker, no attempt, no charge', async () => {
+      const h = await heldBound();
+      quote.mockRejectedValue(new Error('Invoice is billed to a third-party payer'));
+      expect(await sweep()).toMatchObject({ review: 1, declined_released: 0 });
+      await untouched(h);
+      expect(chargeCall).not.toHaveBeenCalled();
+      expect(await mockPg('audit_log').where({ action: 'invoice_followup.autopay_hold_timeout_charge_started' })).toHaveLength(0);
+      expect(await mockPg('stripe_invoice_charge_attempts')).toHaveLength(0);
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'review', reason: 'refused', released: false, amount_cents: 12000 });
+      expect(await sweep()).toMatchObject({ candidates: 0 });
+    });
+
+    test.each(['STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED', 'STRIPE_CHARGE_IN_PROGRESS'])('%s keeps the hold, retries nothing and posts one check-Stripe alert', async (code) => {
+      const h = await heldBound();
+      chargeCall.mockImplementation(async () => {
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'ambiguous' });
+        throw Object.assign(new Error('unclear'), { code });
+      });
+      const result = await sweep();
+      expect(result).toMatchObject({ candidates: 1, ambiguous: 1, declined_released: 0, released: 0, charged: 0 });
+      await untouched(h);
+      expect(chargeCall).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [category, headline, why, opts] = notify.mock.calls[0];
+      expect(category).toBe('billing');
+      expect(headline).toContain('check Stripe first');
+      expect(why).toContain('check Stripe before anything else');
+      expect(opts.dedupeKey).toBe(`autopay_hold_charge:ambiguous:${h.invoiceId}`);
+      expect(opts.detail).toContain(code);
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'ambiguous', error_code: code, released: false });
+      // The next run does not touch it either: the attempt row fences it.
+      expect(await sweep()).toMatchObject({ candidates: 0 });
+      expect(chargeCall).toHaveBeenCalledTimes(1);
+    });
+
+    test('a plain error that leaves an open charge attempt is ambiguous, not a refusal', async () => {
+      const h = await heldBound();
+      chargeCall.mockImplementation(async () => {
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'claimed' });
+        throw new Error('socket hang up');
+      });
+      expect(await sweep()).toMatchObject({ ambiguous: 1, declined_released: 0 });
+      await untouched(h);
+      expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:ambiguous:${h.invoiceId}`);
+    });
+
+    test('a decline that asks the customer to authenticate is ambiguous: the live PaymentIntent may still be completed', async () => {
+      const h = await heldBound();
+      chargeCall.mockImplementation(async () => { await leaveDeclineRows(h); throw decline('authentication_required'); });
+      expect(await sweep()).toMatchObject({ ambiguous: 1, declined_released: 0 });
+      await untouched(h);
+    });
+
+    test('an alert that cannot be filed leaves the attempt unfinished (no release, no final row) and the sweep goes on to the next hold', async () => {
+      const first = await heldBound({ sequenceId: '00000000-0000-4000-8000-000000000001' });
+      const second = await heldBound({ sequenceId: '00000000-0000-4000-8000-000000000002' });
+      notify.mockRejectedValue(new Error('bell down'));
+      chargeCall.mockImplementation(async () => { throw decline(); });
+      expect(await sweep()).toMatchObject({ candidates: 2, errors: 2, declined_released: 0 });
+      expect(chargeCall).toHaveBeenCalledTimes(2);
+      await untouched(first);
+      await untouched(second);
+      expect(await chargeAuditRows()).toHaveLength(0);
+    });
+
+    test('a hold that changed after the read is skipped before any quote or charge', async () => {
+      const a = await heldBound({ sequenceId: '00000000-0000-4000-8000-000000000001' });
+      const b = await heldBound({ sequenceId: '00000000-0000-4000-8000-000000000002' });
+      chargeCall.mockImplementation(async () => {
+        // While A is charged, B's customer has a payment in flight: B's hold is no longer stale.
+        await mockPg('payments').insert({ customer_id: b.customerId, status: 'processing' });
+        return { status: 'paid', amount: 103.09 };
+      });
+      expect(await sweep()).toMatchObject({ candidates: 2, charged: 1, skipped: 1 });
+      expect(chargeCall).toHaveBeenCalledTimes(1);
+      expect(chargeCall.mock.calls[0][0]).toBe(a.invoiceId);
+      await untouched(b);
+      expect(await chargeAuditRows()).toHaveLength(1);
+    });
+
+    test('every skip the sweep has for true applies to charge: a held-over candidate is never charged', async () => {
+      const visit = await heldBound({ visitStatus: 'confirmed' });
+      const plan = await heldBound();
+      await mockPg('payment_plans').insert({ invoice_id: plan.invoiceId, status: 'active' });
+      const attempted = await heldBound();
+      await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: attempted.invoiceId, status: 'failed' });
+      const young = await heldBound({ heldDaysAgo: 2 });
+      const paid = await heldBound({ invoiceStatus: 'paid' });
+      const payer = await heldBound({ payerId: randomUUID() });
+      expect(await sweep()).toMatchObject({ candidates: 0, charged: 0 });
+      expect(chargeCall).not.toHaveBeenCalled();
+      for (const h of [visit, plan, attempted, young, paid, payer]) await untouched(h);
+    });
+
+    test.each(['true', 'shadow', 'off'])('GATE_AUTOPAY_HOLD_TIMEOUT=%s never asks for a method, a quote or a charge', async (value) => {
+      process.env.GATE_AUTOPAY_HOLD_TIMEOUT = value;
+      await heldBound();
+      const result = await sweep();
+      expect(result.mode).toBe(value);
+      expect(Eligibility.getChargeableAutopayMethod).not.toHaveBeenCalled();
+      expect(quote).not.toHaveBeenCalled();
+      expect(chargeCall).not.toHaveBeenCalled();
+      // 'true' raises the release alert of the timeout itself; none of the charge-mode alerts.
+      expect(notify.mock.calls.filter((c) => String(c[3]?.dedupeKey).startsWith('autopay_hold_charge'))).toHaveLength(0);
+      expect(await chargeAuditRows()).toHaveLength(0);
+    });
+
+    describe('charge-mode candidate rules: sibling payments and dispute holds', () => {
+      const FINAL = 'invoice_followup.autopay_hold_timeout_charge';
+      const disputeHold = (customerId, released = null) => mockPg('collections_flags').insert({
+        customer_id: customerId, flag: 'collection_hold', reason: 'dispute on call: says the bill is wrong', released_at: released,
+      });
+      const settle = (customerId) => async (invoiceId) => {
+        await mockPg('payments').insert({ customer_id: customerId, status: 'paid', metadata: JSON.stringify({ invoice_id: invoiceId }), description: 'card on file' });
+        await mockPg('invoices').where({ id: invoiceId }).update({ status: 'paid' });
+        return { status: 'paid', amount: 103.09 };
+      };
+
+      test('P1: charging the first of two held invoices does not disqualify the second, in the same run', async () => {
+        const a = await heldBound({ sequenceId: '00000000-0000-4000-8000-000000000001' });
+        const b = await heldBound({ customerId: a.customerId, sequenceId: '00000000-0000-4000-8000-000000000002' });
+        chargeCall.mockImplementation(settle(a.customerId));
+        expect(await sweep()).toMatchObject({ candidates: 2, charged: 2, skipped: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+        expect((await seqOf(a.invoiceId)).status).toBe('completed');
+        expect((await seqOf(b.invoiceId)).status).toBe('completed');
+        expect(await chargeAuditRows()).toHaveLength(2);
+      });
+
+      test('P1: a sibling whose first charge was a decline is still a candidate on the next run', async () => {
+        const a = await heldBound({ sequenceId: '00000000-0000-4000-8000-000000000001' });
+        const b = await heldBound({ customerId: a.customerId, sequenceId: '00000000-0000-4000-8000-000000000002' });
+        // A settles and B's turn is skipped by an in-flight payment; once that clears B is charged, never stuck.
+        chargeCall.mockImplementation(async (invoiceId) => {
+          await settle(a.customerId)(invoiceId);
+          await mockPg('payments').insert({ customer_id: a.customerId, status: 'processing' });
+          return { status: 'paid', amount: 103.09 };
+        });
+        expect(await sweep()).toMatchObject({ candidates: 2, charged: 1, skipped: 1 });
+        await untouched(b);
+        await mockPg('payments').where({ status: 'processing' }).update({ status: 'paid' });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+        expect((await seqOf(b.invoiceId)).status).toBe('completed');
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+      });
+
+      test.each(['processing', 'pending'])('P1: a %s payment for the customer since the hold still blocks (any invoice)', async (status) => {
+        const h = await heldBound();
+        await mockPg('payments').insert({ customer_id: h.customerId, status });
+        expect(await sweep()).toMatchObject({ candidates: 0, charged: 0 });
+        await untouched(h);
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('P1: a settled payment for THIS invoice blocks, matched by metadata or by the invoice number in the description', async () => {
+        const byMeta = await heldBound();
+        await mockPg('payments').insert({ customer_id: byMeta.customerId, status: 'paid', metadata: JSON.stringify({ invoice_id: byMeta.invoiceId }) });
+        const byNumber = await heldBound();
+        await mockPg('payments').insert({ customer_id: byNumber.customerId, status: 'paid', description: `Invoice ${byNumber.invoiceNumber} — card on file` });
+        expect(await sweep()).toMatchObject({ candidates: 0, charged: 0 });
+        await untouched(byMeta);
+        await untouched(byNumber);
+      });
+
+      test('P1: a settled payment that names another invoice or none does not block', async () => {
+        const h = await heldBound();
+        await mockPg('payments').insert({ customer_id: h.customerId, status: 'paid', metadata: JSON.stringify({ invoice_id: randomUUID() }), description: 'Invoice WPC-ZZZZ — card on file' });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+      });
+
+      test('P2: a customer with an active dispute hold is never attempted; a released hold and a non-dispute hold do not block', async () => {
+        const held1 = await heldBound();
+        await disputeHold(held1.customerId);
+        const released = await heldBound();
+        await disputeHold(released.customerId, new Date());
+        const fallback = await heldBound();
+        await mockPg('collections_flags').insert({ customer_id: fallback.customerId, flag: 'collection_hold', reason: 'wrong-number report on billing follow-up call' });
+        expect(await sweep()).toMatchObject({ candidates: 2, charged: 2 });
+        expect(chargeCall.mock.calls.map((c) => c[0]).sort()).toEqual([released.invoiceId, fallback.invoiceId].sort());
+        await untouched(held1);
+      });
+
+      test('P2: a dispute hold that appears before the quote defers quietly: no marker, no attempt, no release, no alert', async () => {
+        const h = await heldBound();
+        Eligibility.getChargeableAutopayMethod.mockImplementation(async () => { await disputeHold(h.customerId); return METHOD; });
+        expect(await sweep()).toMatchObject({ candidates: 1, deferred: 1, charged: 0, errors: 0 });
+        await untouched(h);
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+        expect(notify).not.toHaveBeenCalled();
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(await mockPg('audit_log').where({ action: `${FINAL}_started` })).toHaveLength(0);
+      });
+
+      test('P2: a hold check that cannot be read defers the same way (fail closed)', async () => {
+        const h = await heldBound();
+        const holdModule = require('../services/collections/collection-hold');
+        const check = jest.spyOn(holdModule, 'customerHasActiveCollectionHoldChecked')
+          .mockRejectedValue(Object.assign(new Error('flags unreadable'), { code: 'COLLECTION_HOLD_CHECK_FAILED' }));
+        try {
+          expect(await sweep()).toMatchObject({ candidates: 1, deferred: 1, charged: 0 });
+        } finally {
+          check.mockRestore();
+        }
+        expect(chargeCall).not.toHaveBeenCalled();
+        expect(notify).not.toHaveBeenCalled();
+        await untouched(h);
+      });
+
+      test('P2: a charge that still throws a collection-hold refusal is deferred: one alert, hold kept, final row deferred; after the hold clears it is charged once', async () => {
+        const h = await heldBound();
+        chargeCall.mockImplementationOnce(async () => {
+          await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', error_message: 'A billing dispute is on hold for this customer' });
+          throw Object.assign(new Error('A billing dispute is on hold for this customer'), { code: 'COLLECTION_HOLD_ACTIVE' });
+        });
+        expect(await sweep()).toMatchObject({ candidates: 1, deferred: 1, charged: 0, declined_released: 0, errors: 0 });
+        await untouched(h);
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:deferred:${h.invoiceId}`);
+        expect(notify.mock.calls[0][2]).toContain('a dispute hold stopped the Auto Pay charge');
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'deferred', reason: 'deferred', error_code: 'COLLECTION_HOLD_ACTIVE', released: false });
+
+        // Next run, hold still not in the table (it cleared): the failed attempt is covered by the deferred row.
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, recovered: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+        expect((await seqOf(h.invoiceId)).status).toBe('completed');
+        // And it is never charged a third time.
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+      });
+
+      test('P2: a hold-refusal attempt whose final row was never written is recovered as deferred, not released', async () => {
+        const h = await heldBound();
+        await mockPg('audit_log').insert({
+          actor_type: 'system', action: `${FINAL}_started`, resource_type: 'invoice', resource_id: h.invoiceId,
+          metadata: { sequence_id: h.sequenceId, customer_id: h.customerId, hold_stamp: h.heldAt.toISOString(), amount_cents: 10309 },
+        });
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', error_message: 'A billing dispute is on hold for this customer' });
+        expect(await sweep()).toMatchObject({ recovered: 1, declined_released: 0 });
+        await untouched(h);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:deferred:${h.invoiceId}`);
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'deferred', reason: 'collection_hold', released: false });
+      });
+    });
+
+    describe('recovery of an attempt that did not finish', () => {
+      const STARTED = 'invoice_followup.autopay_hold_timeout_charge_started';
+      const startedRows = () => mockPg('audit_log').where({ action: STARTED });
+      const markStarted = (h) => mockPg('audit_log').insert({
+        actor_type: 'system', action: STARTED, resource_type: 'invoice', resource_id: h.invoiceId,
+        metadata: { sequence_id: h.sequenceId, customer_id: h.customerId, hold_stamp: h.heldAt.toISOString(), amount_cents: 10309 },
+      });
+
+      test('the marker is written right before the charge, with the hold stamp and amount', async () => {
+        const h = await heldBound();
+        let markerAtChargeTime = null;
+        chargeCall.mockImplementation(async () => { markerAtChargeTime = await startedRows(); return { status: 'paid', amount: 103.09 }; });
+        await sweep();
+        expect(markerAtChargeTime).toHaveLength(1);
+        expect(markerAtChargeTime[0]).toMatchObject({ actor_type: 'system', resource_type: 'invoice', resource_id: h.invoiceId });
+        expect(markerAtChargeTime[0].metadata).toMatchObject({ sequence_id: h.sequenceId, customer_id: h.customerId, amount_cents: 10309 });
+        expect(typeof markerAtChargeTime[0].metadata.hold_stamp).toBe('string');
+        // The final row is written after the marker.
+        const [final] = await chargeAuditRows();
+        expect(new Date(final.created_at).getTime()).toBeGreaterThanOrEqual(new Date(markerAtChargeTime[0].created_at).getTime());
+      });
+
+      test('(a) a decline whose release throws once: no final row, the next run releases, alerts once, writes recovered, and never charges again', async () => {
+        const h = await heldBound();
+        chargeCall.mockImplementation(async () => { await leaveDeclineRows(h); throw decline(); });
+        await mockPg('fail_release').insert({ id: 1 });
+        const first = await sweep();
+        expect(first).toMatchObject({ candidates: 1, errors: 1, declined_released: 0 });
+        await untouched(h);
+        expect(await chargeAuditRows()).toHaveLength(0);
+        // The alert goes out before the release, so it was filed once already.
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(await startedRows()).toHaveLength(1);
+
+        await mockPg('fail_release').del();
+        const second = await sweep();
+        expect(second).toMatchObject({ recovered: 1, errors: 0, charged: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        const seq = await seqOf(h.invoiceId);
+        expect(seq.status).toBe('active');
+        expect(seq.next_touch_at).not.toBeNull();
+        // Recovery raises it again under the SAME dedupe key, so the office sees one open alert.
+        expect(notify).toHaveBeenCalledTimes(2);
+        expect(notify.mock.calls[1][3].dedupeKey).toBe(notify.mock.calls[0][3].dedupeKey);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:declined:${h.invoiceId}`);
+        const rows = await chargeAuditRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].metadata).toMatchObject({ outcome: 'declined_released', reason: 'recovered', amount_cents: 10309, released: true });
+
+        // Done: a third run finds nothing to recover and still does not charge.
+        expect(await sweep()).toMatchObject({ recovered: 0, candidates: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        expect(notify).toHaveBeenCalledTimes(2);
+      });
+
+      test('E: a failed attempt with no decline code (a refusal before Stripe) is recovered as an office review: hold kept, never released; a decline code releases (see (a))', async () => {
+        const h = await heldBound();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', decline_code: null, error_message: 'This appointment is payer-billed. The saved card must not be charged.' });
+        expect(await sweep()).toMatchObject({ recovered: 1, declined_released: 0, review: 0, charged: 0 });
+        await untouched(h);
+        expect(chargeCall).not.toHaveBeenCalled();
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:review:${h.invoiceId}`);
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'review', reason: 'refused', released: false, fingerprint: expect.stringMatching(/^[a-f0-9]{32}$/) });
+        // The bill is unchanged: nothing more happens. Changed: the failed attempt no longer keeps it out.
+        expect(await sweep()).toMatchObject({ recovered: 0, candidates: 0 });
+        await changeBill(h, { subtotal: 95 });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+      });
+
+      test('(b) a marker with a succeeded attempt on a paid invoice: sequence closed, final row charged, no alert, no charge', async () => {
+        const h = await heldBound();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'succeeded' });
+        await mockPg('invoices').where({ id: h.invoiceId }).update({ status: 'paid' });
+        expect(await sweep()).toMatchObject({ recovered: 1, charged: 0 });
+        expect((await seqOf(h.invoiceId)).status).toBe('completed');
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'charged', reason: null, released: false });
+        expect(notify).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('(c) a marker with a claimed (open) attempt: one ambiguous alert, hold kept, nothing charged, and the alert is not repeated', async () => {
+        const h = await heldBound();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'claimed' });
+        expect(await sweep()).toMatchObject({ recovered: 1 });
+        await untouched(h);
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:ambiguous:${h.invoiceId}`);
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'ambiguous', reason: 'ambiguous', released: false });
+        expect(await sweep()).toMatchObject({ recovered: 0 });
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('(d) a marker with no attempt after it: final row abandoned, no charge in that run, the next run charges normally', async () => {
+        const h = await heldBound();
+        await markStarted(h);
+        const first = await sweep();
+        expect(first).toMatchObject({ recovered: 1, charged: 0, candidates: 0 });
+        expect(chargeCall).not.toHaveBeenCalled();
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'abandoned', released: false });
+        await untouched(h);
+        expect(notify).not.toHaveBeenCalled();
+
+        const second = await sweep();
+        expect(second).toMatchObject({ recovered: 0, charged: 1 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        expect(await startedRows()).toHaveLength(2);
+      });
+
+      test('(1) a failed attempt with decline_code authentication_required after the marker is ambiguous: one alert, hold kept, no release', async () => {
+        const h = await heldBound();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', decline_code: 'authentication_required' });
+        expect(await sweep()).toMatchObject({ recovered: 1, declined_released: 0 });
+        await untouched(h);
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:ambiguous:${h.invoiceId}`);
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'ambiguous', released: false });
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('(2) the own-charge release never releases a hold whose attempt asks the customer to authenticate', async () => {
+        const { releaseStaleAutopayHold: releaseOne } = require('../services/invoice-followups')._test;
+        const observed = async (h) => mockPg('invoice_followup_sequences as s').where('s.id', h.sequenceId)
+          .first('s.id', 's.invoice_id', 's.customer_id', mockPg.raw('s.updated_at::text as hold_stamp'));
+        const cutoff = new Date(Date.now() - TIMEOUT_DAYS * DAY);
+        const auth = await heldBound();
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: auth.invoiceId, status: 'failed', decline_code: 'authentication_required' });
+        expect(await releaseOne(await observed(auth), cutoff, new Date(), { afterOwnCharge: true, chargeMode: true })).toBe(false);
+        await untouched(auth);
+        // The same failed attempt with a plain decline code is still released.
+        const plain = await heldBound();
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: plain.invoiceId, status: 'failed', decline_code: 'insufficient_funds' });
+        expect(await releaseOne(await observed(plain), cutoff, new Date(), { afterOwnCharge: true, chargeMode: true })).toBe(true);
+      });
+
+      test('(3) a live ambiguous outcome whose alert fails: no final row, hold kept; the next run raises the alert and finishes', async () => {
+        const h = await heldBound();
+        chargeCall.mockImplementation(async () => {
+          await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'ambiguous' });
+          throw Object.assign(new Error('unclear'), { code: 'STRIPE_AMBIGUOUS_OUTCOME' });
+        });
+        notify.mockResolvedValue(null);
+        expect(await sweep()).toMatchObject({ candidates: 1, errors: 1, ambiguous: 0 });
+        await untouched(h);
+        expect(await chargeAuditRows()).toHaveLength(0);
+
+        notify.mockResolvedValue({ id: 'bell-2' });
+        expect(await sweep()).toMatchObject({ recovered: 1, errors: 0 });
+        await untouched(h);
+        expect(notify).toHaveBeenCalledTimes(2);
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'ambiguous', released: false });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+
+      test('(4) a live decline whose alert fails: no release, no final row; the next run alerts, releases, finishes, and never charges again', async () => {
+        const h = await heldBound();
+        chargeCall.mockImplementation(async () => { await leaveDeclineRows(h); throw decline(); });
+        notify.mockRejectedValue(new Error('bell down'));
+        expect(await sweep()).toMatchObject({ candidates: 1, errors: 1, declined_released: 0 });
+        await untouched(h);
+        expect(await chargeAuditRows()).toHaveLength(0);
+
+        notify.mockResolvedValue({ id: 'bell-2' });
+        expect(await sweep()).toMatchObject({ recovered: 1, errors: 0 });
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+        const rows = await chargeAuditRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].metadata).toMatchObject({ outcome: 'declined_released', reason: 'recovered', released: true });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+
+      test('(e) a failed attempt without our marker (Auto Pay itself) is never touched by recovery', async () => {
+        const h = await heldBound();
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed' });
+        expect(await sweep()).toMatchObject({ recovered: 0, candidates: 0, errors: 0 });
+        await untouched(h);
+        expect(notify).not.toHaveBeenCalled();
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('true, shadow and off never run recovery', async () => {
+        const h = await heldBound();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed' });
+        for (const value of ['true', 'shadow', 'off']) {
+          process.env.GATE_AUTOPAY_HOLD_TIMEOUT = value;
+          await sweep();
+        }
+        await untouched(h);
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(notify).not.toHaveBeenCalled();
+      });
+
+      test('a marker that cannot be written means no charge', async () => {
+        const h = await heldBound();
+        await mockPg.raw('ALTER TABLE audit_log ADD CONSTRAINT no_marker CHECK (action <> \'invoice_followup.autopay_hold_timeout_charge_started\')');
+        try {
+          expect(await sweep()).toMatchObject({ candidates: 1, skipped: 1, charged: 0 });
+        } finally {
+          await mockPg.raw('ALTER TABLE audit_log DROP CONSTRAINT no_marker');
+        }
+        expect(chargeCall).not.toHaveBeenCalled();
+        await untouched(h);
+      });
+    });
+
+    describe('annual-prepay term rails and bank debit dates (hold-timeout charge fixes)', () => {
+      const FINAL = 'invoice_followup.autopay_hold_timeout_charge';
+      const BANK = { id: 'pm-bank', method_type: 'us_bank_account' };
+      const etDay = (offsetDays) => etDateString(new Date(Date.now() + offsetDays * DAY));
+      const trueAlerts = () => notify.mock.calls.filter((c) => /^autopay-hold-timeout:/.test(c[3]?.dedupeKey || ''));
+      const chargeAlerts = () => notify.mock.calls.filter((c) => /^autopay_hold_charge:/.test(c[3]?.dedupeKey || ''));
+      const markers = () => mockPg('audit_log').where({ action: `${FINAL}_started` });
+      const nothingWritten = async () => {
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+        expect(notify).not.toHaveBeenCalled();
+        expect(await markers()).toHaveLength(0);
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(await mockPg('stripe_invoice_charge_attempts')).toHaveLength(0);
+      };
+
+      test('finding 1: an invoice an annual-prepay term references is never quoted or charged; it is released as true releases it, with the true-mode alert once', async () => {
+        const rail = await heldBound();
+        await mockPg('annual_prepay_terms').insert({ prepay_invoice_id: rail.invoiceId });
+        const sibling = await heldBound({ customerId: rail.customerId });
+        const result = await sweep();
+        expect(result).toMatchObject({ mode: 'charge', candidates: 2, charged: 1, true_released: 1, declined_released: 0, released: 1, errors: 0 });
+        // The sibling of the same customer is charged as before; the rail invoice never reaches the quote or the charge.
+        expect(quote.mock.calls.map((c) => c[0])).toEqual([sibling.invoiceId]);
+        expect(chargeCall.mock.calls.map((c) => c[0])).toEqual([sibling.invoiceId]);
+        const seq = await seqOf(rail.invoiceId);
+        expect(seq.status).toBe('active');
+        expect(seq.is_autopay_held).toBe(false);
+        expect(seq.next_touch_at).not.toBeNull();
+        // The true-mode alert, once, and no charge-mode alert, marker or audit row for the rail invoice.
+        expect(trueAlerts()).toHaveLength(1);
+        expect(trueAlerts()[0][3].dedupeKey).toMatch(new RegExp(`^autopay-hold-timeout:${rail.invoiceId}:`));
+        expect(chargeAlerts()).toHaveLength(0);
+        expect((await markers()).map((r) => r.resource_id)).toEqual([sibling.invoiceId]);
+        expect((await chargeAuditRows()).map((r) => r.resource_id)).toEqual([sibling.invoiceId]);
+        // A re-run finds nothing: no second alert, no second release, no charge.
+        expect(await sweep()).toMatchObject({ candidates: 0, charged: 0, true_released: 0 });
+        expect(trueAlerts()).toHaveLength(1);
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+
+      test('finding 1: a rail invoice is released by the same rules as true (an attempt row keeps it held, and it is still not charged)', async () => {
+        const rail = await heldBound();
+        await mockPg('annual_prepay_terms').insert({ prepay_invoice_id: rail.invoiceId });
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: rail.invoiceId, status: 'succeeded' });
+        expect(await sweep()).toMatchObject({ candidates: 0, charged: 0, true_released: 0 });
+        await untouched(rail);
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('finding 2: a bank method before the due date: no quote, marker, attempt, charge, release or alert; charged once on the due date', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        quote.mockResolvedValue({ base: 100, surcharge: 0, total: 100 });
+        const h = await heldBound({ dueDate: etDay(5) });
+        expect(await sweep()).toMatchObject({ candidates: 1, not_due: 1, charged: 0, true_released: 0, declined_released: 0, deferred: 0, errors: 0 });
+        await untouched(h);
+        await nothingWritten();
+        // Still waiting on the next run, still silent.
+        expect(await sweep()).toMatchObject({ candidates: 1, not_due: 1, charged: 0 });
+        await nothingWritten();
+        // The due date arrives: charged exactly once.
+        await mockPg('invoices').where({ id: h.invoiceId }).update({ due_date: etDay(0) });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, not_due: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        expect(chargeCall.mock.calls[0][2]).toMatchObject({ requireBankDebitDue: true });
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+
+      test.each([['today', 0], ['in the past', -6]])('finding 2: a bank method on an invoice due %s is charged', async (_label, offset) => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        const h = await heldBound({ dueDate: etDay(offset) });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, not_due: 0 });
+        expect(chargeCall.mock.calls[0][0]).toBe(h.invoiceId);
+      });
+
+      test('finding 2: a bank method on an invoice with no due date has no authorized debit date: released as true releases it, never charged', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        const h = await heldBound({ dueDate: null });
+        expect(await sweep()).toMatchObject({ candidates: 1, true_released: 1, released: 1, charged: 0, declined_released: 0, errors: 0 });
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+        expect(trueAlerts()).toHaveLength(1);
+        expect(chargeAlerts()).toHaveLength(0);
+        expect(await markers()).toHaveLength(0);
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+        expect(trueAlerts()).toHaveLength(1);
+      });
+
+      test('finding 2: a card is unchanged by the due date, whether it is weeks away or missing', async () => {
+        const later = await heldBound({ dueDate: etDay(25) });
+        const none = await heldBound({ dueDate: null });
+        expect(await sweep()).toMatchObject({ candidates: 2, charged: 2, not_due: 0, true_released: 0 });
+        expect(chargeCall.mock.calls.map((c) => c[0]).sort()).toEqual([later.invoiceId, none.invoiceId].sort());
+      });
+
+      test('finding 2 (race): the charge refuses a bank debit before the due date under the lock: final row deferred, no alert, hold kept; charged once after the due date', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        const h = await heldBound({ dueDate: etDay(0) });
+        // The due date moves later after the sweep read it; the charge path then refuses under its lock.
+        chargeCall.mockImplementationOnce(async () => {
+          await mockPg('invoices').where({ id: h.invoiceId }).update({ due_date: etDay(7) });
+          await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', error_message: 'Bank debit date has not arrived. The invoice can be debited on or after its due date.' });
+          throw Object.assign(new Error('Bank debit date has not arrived. The invoice can be debited on or after its due date.'), { code: 'BANK_DEBIT_NOT_DUE' });
+        });
+        expect(await sweep()).toMatchObject({ candidates: 1, not_due: 1, charged: 0, declined_released: 0, deferred: 0, errors: 0 });
+        await untouched(h);
+        expect(notify).not.toHaveBeenCalled();
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'deferred', reason: 'not_due', error_code: 'BANK_DEBIT_NOT_DUE', released: false, method_type: 'us_bank_account' });
+        // Still before the due date: the failed attempt is covered by the deferred row, and the next run waits quietly.
+        expect(await sweep()).toMatchObject({ candidates: 1, not_due: 1, charged: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        // After the due date it is charged exactly once.
+        await mockPg('invoices').where({ id: h.invoiceId }).update({ due_date: etDay(0) });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, recovered: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+        expect((await seqOf(h.invoiceId)).status).toBe('completed');
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+        expect(notify).not.toHaveBeenCalled();
+      });
+
+      test('finding 2 (recovery): a marker whose attempt was refused for the bank debit date is deferred, not released; no alert; charged after the due date', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        const h = await heldBound({ dueDate: etDay(0) });
+        await mockPg('audit_log').insert({
+          actor_type: 'system', action: `${FINAL}_started`, resource_type: 'invoice', resource_id: h.invoiceId,
+          metadata: { sequence_id: h.sequenceId, customer_id: h.customerId, hold_stamp: h.heldAt.toISOString(), amount_cents: 10000 },
+        });
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', error_message: 'Bank debit date has not arrived. The invoice can be debited on or after its due date.' });
+        const first = await sweep();
+        expect(first).toMatchObject({ recovered: 1, declined_released: 0, true_released: 0, charged: 0 });
+        await untouched(h);
+        expect(notify).not.toHaveBeenCalled();
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'deferred', reason: 'bank_debit_not_due', released: false });
+        expect(chargeCall).not.toHaveBeenCalled();
+        // The next run (the invoice is due) charges it once; the failed attempt is covered by the deferred row.
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    test.each([['charge', 'charge'], [' Charge ', 'charge'], ['CHARGE', 'charge'], ['chargeit', 'off'], ['true ', 'true'], ['shadow', 'shadow'], ['yes', 'off']])('the gate reads %p as %s', (value, expected) => {
+      process.env.GATE_AUTOPAY_HOLD_TIMEOUT = value;
+      expect(require('../config/feature-gates').autopayHoldTimeoutMode()).toBe(expected);
     });
   });
 

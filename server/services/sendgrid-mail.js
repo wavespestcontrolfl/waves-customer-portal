@@ -31,11 +31,15 @@
  *   - 2× DKIM CNAMEs at s1._domainkey + s2._domainkey on the root
  *   - 1× return-path CNAME (provider-named, e.g. wavesnewsletter.*)
  *   - 1× link-tracking CNAME (e.g. click.*)
+ *   The newsletter (issues, signup confirms, win-backs) sends from the separately
+ *   authenticated subdomain news.wavespestcontrol.com (em2241.news + s1/s2._domainkey.news,
+ *   owner 2026-10-31); the click.* link branding is the account default, so it covers it.
  *   - SPF include is implicit via the Sender Authentication wizard
  */
 
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { untrackAppLinks } = require('./messaging/email-link-policy');
 
 const API_BASE = 'https://api.sendgrid.com/v3';
 
@@ -283,7 +287,9 @@ async function sendOne({
     subject,
     content: [
       ...(sendText ? [{ type: 'text/plain', value: sendText }] : []),
-      ...(sendHtml ? [{ type: 'text/html', value: sendHtml }] : []),
+      // Customer-page links skip the click rewrite so the app can open them
+      // (messaging/email-link-policy.js); every other link stays tracked.
+      ...(sendHtml ? [{ type: 'text/html', value: untrackAppLinks(sendHtml) }] : []),
     ],
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),

@@ -162,6 +162,7 @@ const {
 } = require('../services/estimate-lawn-limits');
 const { beforeYouBookBlock } = require('../services/estimate-before-you-book');
 const { mistingLayoutDocBlock } = require('../services/misting-layouts');
+const { isMistingSystemIdentity, isMistingSelection, mistingCustomerFacts } = require('../utils/mosquito-misting-system');
 
 function lawnCalendarBlock(services) {
   if (!featureGates.isEnabled('estimateLawnCalendar')) return {};
@@ -1400,6 +1401,11 @@ function classifyServiceFamilyText(text) {
   // sanitation from bait — sold exclusion or trapping work must never adopt
   // (and restamp) a bait-station monitoring visit. Same regexes as
   // slot-reservation.
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL) is its own
+  // identity: left to the seeder's generic rodent bucket it would read as
+  // rodent_bait, and a sold removal would adopt (and restamp) a bait-station
+  // monitoring visit. Same regex as slot-reservation.
+  if (/dead\s*(?:rodent|animal)|rodent\s*dead\s*animal/.test(raw)) return 'rodent_dead_animal_removal';
   if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
   // Wire-mesh/seal wording is exclusion work (codex r19: the supported
   // rodent_wire_mesh catalog key carries no "exclusion" token).
@@ -1525,7 +1531,8 @@ function oneTimeItemFamilyKeys(item = {}) {
   // and a bait-station monitoring visit stayed adoptable.
   const hasSpecificRodent = [...keys].some(
     (k) => k === 'rodent_trapping' || k === 'rodent_exclusion'
-      || k === 'rodent_sanitation' || k === 'rodent_inspection',
+      || k === 'rodent_sanitation' || k === 'rodent_inspection'
+      || k === 'rodent_dead_animal_removal',
   );
   if (hasSpecificRodent) {
     keys.delete('rodent_bait');
@@ -2755,6 +2762,21 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this plan.",
     },
   },
+  // The misting SYSTEM plan: only the owner-approved Waves AI card copy (owner 2026-10-30, item E). The chips and the per-day
+  // line reuse strings that hold for a misting system; the barrier-only ones ("When does the season start?") are left out.
+  mosquito_misting: {
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Priced from your system layout',
+    aiBody: 'Your price is set by your system size and your nozzle and riser count.',
+    askChips: [
+      'How long does each visit last?',
+      'What precautions should I follow for pets and children?',
+      'What about my pool area?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
   termite_bait: {
     headline: "Hey {first}, choose your termite protection option.",
     aiEyebrow: 'Waves AI',
@@ -3257,9 +3279,15 @@ function resolveRecurringMonthlyParts(estimate, parsedData) {
   const engineDerived = Number(estResult?.recurring?.annualBeforeDiscount || 0) / 12;
   const nonDiscountableMonthly = serviceParts.nonDiscountableMonthly;
   const discountableFromServices = serviceParts.discountableBaseMonthly;
-  const discountableFromFallback = engineDerived > 0
-    ? engineDerived
-    : resolveExplicitDiscountableMonthly(explicit, nonDiscountableMonthly, estimate);
+  // Misting plan rows alone leave no discountable base: the engine total IS that plan (already counted as non-discountable),
+  // so the engine-derived fallback would count the plan a second time and show savings that do not exist. An empty list never
+  // reaches the summed return below, so `every` alone decides it.
+  const mistingPlanOnly = recurringServices.every((svc) => recurringServiceKey(svc) === 'mosquito_misting');
+  const discountableFromFallback = mistingPlanOnly
+    ? 0
+    : (engineDerived > 0
+      ? engineDerived
+      : resolveExplicitDiscountableMonthly(explicit, nonDiscountableMonthly, estimate));
   const discountableBaseMonthly = discountableFromServices > 0
     ? discountableFromServices
     : discountableFromFallback;
@@ -4022,6 +4050,10 @@ function recurringServiceKey(svc = {}) {
     )
   ) return 'rodent_bait';
   if (!raw.includes('commercial') && /\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(words)) return 'rodent';
+  // The mosquito MISTING system plan (GATE_MOSQUITO_MISTING) is its own service, never the barrier mosquito program: the
+  // converter's key function (estimate-converter.js) resolves it the same way and with the same shared predicate, so what the
+  // customer sees here is what acceptance creates. It runs before the commercial and residential mosquito checks.
+  if (isMistingSystemIdentity(raw)) return 'mosquito_misting';
   // Commercial auto-priced lines must keep a DISTINCT key — otherwise the
   // residential lawn/tree special-cases below normalize them to lawn_care /
   // tree_shrub, which are WaveGuard-qualifying, and an existing commercial
@@ -4091,6 +4123,7 @@ function recurringServiceDisplayName(key) {
     case 'lawn_care': return 'Lawn Care';
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito';
+    case 'mosquito_misting': return 'Mosquito Misting Service Plan';
     case 'termite_bait': return 'Termite Bait';
     case 'foam_recurring': return 'Recurring Termite Foam Service';
     case 'palm_injection': return 'Palm Injection';
@@ -4198,6 +4231,8 @@ function isMosquitoOneTimeItem(item = {}) {
 function isActualMosquitoOneTimeItem(item = {}) {
   const category = serviceCategoryForOneTimeItem(item);
   if (category === 'mosquito') return true;
+  // The misting install is the misting plan's charge, not barrier mosquito work.
+  if (category === 'mosquito_misting') return false;
   const raw = [item.service, item.name, item.label]
     .filter(Boolean)
     .join(' ')
@@ -4506,7 +4541,7 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait', 'termite_bond', 'termite_station_rental']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'mosquito_misting', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait', 'termite_bond', 'termite_station_rental']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
       const rawKey = recurringServiceKey(item);
@@ -4527,6 +4562,9 @@ function recurringServicesWithSupplements(estResult = {}) {
       // discountable:false, so the generic !== false defaults below would
       // tier-count it.
       const isRentalLine = rawKey === 'termite_station_rental';
+      // The misting plan is a fixed monthly plan: never tier-counted, never percent-discounted (the raw engine line only carries
+      // the pricer's own flags, so the generic defaults below would count it).
+      const isMistingLine = rawKey === 'mosquito_misting';
       const annual = key === 'lawn_care'
         ? firstPositiveNumber(item.annualBeforeDiscount, item.annual, item.ann)
         : firstPositiveNumber(item.annualAfterDiscount, item.annualAfterCredits, item.annual, item.ann);
@@ -4575,11 +4613,12 @@ function recurringServicesWithSupplements(estResult = {}) {
         // Bond riders are hard-coded out of tier counting and the bundle %
         // discount — the raw engine line only carries discountable:false, so
         // the generic !== false defaults below would tier-count it.
-        waveGuardDiscountEligible: (isBondLine || isRentalLine) ? false : recurringServiceReceivesTierDiscount(item),
-        waveGuardTierEligible: (isBondLine || isRentalLine) ? false : (item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false),
-        countsTowardWaveGuardTier: (isBondLine || isRentalLine) ? false : (item.countsTowardWaveGuardTier !== false),
-        discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
-        discountEligible: key === 'lawn_care' ? true : item.discountEligible,
+        waveGuardDiscountEligible: (isBondLine || isRentalLine || isMistingLine) ? false : recurringServiceReceivesTierDiscount(item),
+        waveGuardTierEligible: (isBondLine || isRentalLine || isMistingLine) ? false : (item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false),
+        countsTowardWaveGuardTier: (isBondLine || isRentalLine || isMistingLine) ? false : (item.countsTowardWaveGuardTier !== false),
+        ...(isMistingLine ? { misting: mistingCustomerFacts(item) } : {}),
+        discountable: key === 'lawn_care' ? true : (isMistingLine ? false : (item.discountable ?? item.discount?.discountable)),
+        discountEligible: key === 'lawn_care' ? true : (isMistingLine ? false : item.discountEligible),
         excludeFromPctDiscount: item.excludeFromPctDiscount,
         // Billing-unit marker (2026-08-29): new rodent bait lines bill per
         // application; legacy lines never carry it and stay monthly-billed.
@@ -4982,6 +5021,11 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     || oneTimeCategories.has('mosquito');
   const isMosquitoOnly = hasMosquito
     && hasOnlyMosquitoServiceMix(recurringServices, intelligenceOneTimeItems);
+  // The misting SYSTEM plan alone (its install is the only one-time work): the card states the layout facts the price comes
+  // from, never the barrier program's lot and mosquito-pressure story (owner 2026-10-30, item E).
+  const isMistingOnly = serviceKeys.length > 0 && serviceKeys.every((key) => key === 'mosquito_misting')
+    && [...oneTimeCategories].every((category) => category === 'mosquito_misting');
+  const mistingFacts = isMistingOnly ? mistingFactsFromRows(recurringServices) : null;
   const hasTermiteBait = serviceNames.some((name) => isTermiteBaitServiceName(name))
     || !!inputServices.termiteBait
     || !!inputServices.termite;
@@ -5264,6 +5308,21 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
             : (satelliteUrl || metrics.length
               ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
               : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')))));
+  if (isMistingOnly) {
+    const mistingCopy = SERVICE_COPY.mosquito_misting;
+    return {
+      eyebrow: 'Waves AI',
+      title: mistingCopy.aiTitle,
+      body: mistingCopy.aiBody,
+      satelliteUrl,
+      metrics: [
+        mistingFacts?.tierLabel ? { label: 'System', value: mistingSystemTileValue(mistingFacts.tierLabel) } : null,
+        mistingFacts?.nozzles != null ? { label: 'Nozzles', value: String(mistingFacts.nozzles) } : null,
+        mistingFacts?.risers != null ? { label: 'Risers', value: String(mistingFacts.risers) } : null,
+      ].filter(Boolean),
+      signals: [],
+    };
+  }
   return {
     eyebrow: 'Waves AI',
     title: oneTimeOnlyCopy?.aiTitle || intelligenceTitle,
@@ -6153,7 +6212,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     if (key === 'pest_control') return 0;
     if (key === 'lawn_care') return 1;
     if (key === 'tree_shrub') return 2;
-    if (key === 'mosquito') return 3;
+    if (key === 'mosquito' || key === 'mosquito_misting') return 3;
     if (key === 'termite_bait') return 4;
     if (key === 'palm_injection') return 5;
     if (key === 'rodent_bait') return 6;
@@ -6963,7 +7022,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // validity date any renderer may print (see proposal-sections.js).
       // Payment tokens are the canonical payer vocabulary → labels, same
       // map as client proposal-sections.js PAYMENT_TERM_LABELS.
-      const proposalPaymentLabel = { autopay: 'Auto Pay', due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+      const proposalPaymentLabel = { autopay: 'Auto Pay', due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30', net60: 'Net-60' };
       const proposalTermRows = proposalForCard.commercialTerms ? [
         ['Payment', proposalPaymentLabel[proposalForCard.commercialTerms.paymentTerms] || null],
         ['Initial term', proposalForCard.commercialTerms.initialTermMonths != null
@@ -13823,7 +13882,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           //    invoice to 'prepaid' — the post-commit block must run the
           //    credit-coverage settlement instead of a charge call that
           //    would refuse the settled status as a decline.
-          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status', 'total', 'credit_applied');
+          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status', 'total', 'credit_applied', 'amount_paid');
           prepayCoveredInTrxResult = String(appliedInvoiceRow?.status || '').toLowerCase() === 'prepaid';
           // 4) Verify the applied result still matches the ACKNOWLEDGED
           //    quote BEFORE commit (hook P1 r20): applyAccountCreditToInvoice
@@ -16451,7 +16510,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         const { membershipTierKey, NON_MEMBERSHIP_TIER_KEYS } = require('../services/membership-state');
         const prepayTierKey = membershipTierKey(prepayTier);
-        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id');
+        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'amount_paid', 'payer_id');
         const finalDue = finalRow ? require('../services/invoice-helpers').invoiceAmountDue(finalRow) : null;
         if (!prepaySmsPhone || !prepayTierKey || NON_MEMBERSHIP_TIER_KEYS.has(prepayTierKey)) {
           logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!prepaySmsPhone ? 'no live phone' : 'no WaveGuard membership tier'}`);
@@ -20457,13 +20516,14 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   // (mosquito uses `visits`, T&S uses `frequency`; palm and rodent bait
   // are separate recurring lines that do not receive WaveGuard percentage
   // discounts).
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'mosquito_misting', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait']);
   const labelForRecurring = (svc) => {
     switch (svc) {
       case 'pest_control': return 'Pest Control';
       case 'lawn_care': return 'Lawn Care';
       case 'tree_shrub': return 'Tree & Shrub';
       case 'mosquito': return 'Mosquito';
+      case 'mosquito_misting': return 'Mosquito Misting Service Plan';
       case 'termite_bait': return 'Termite Bait';
       case 'palm_injection': return 'Palm Injection';
       case 'rodent_bait': return 'Rodent Bait Stations';
@@ -21058,6 +21118,16 @@ function findInitialRoachItem(_pestTiers, estData) {
   return null;
 }
 
+// Dead Rodent Removal & Odor Treatment rows carry the sold access tier and its on-site minutes (the booking's
+// duration floor) in two shapes: the legacy mapper's (deadAnimalTier, onSiteMinutes) and the raw engine line
+// item's (tier, durationMin), which is what an estimate whose only container is engineResult holds. Both are read.
+const DEAD_ANIMAL_TIERS = new Set(['reachable', 'attic', 'in_wall']);
+function deadAnimalBreakdownFields(item) {
+  const tier = [item.deadAnimalTier, item.tier].find((value) => DEAD_ANIMAL_TIERS.has(value)) || null;
+  const minutes = Number(item.onSiteMinutes ?? item.durationMin);
+  return { deadAnimalTier: tier, onSiteMinutes: minutes > 0 ? minutes : null };
+}
+
 function normalizeOneTimeBreakdown(estData) {
   // The authoritative container (estimate-result-container.js), the one the area add-on readers use.
   const result = storedEstimateContainer(estData);
@@ -21089,7 +21159,7 @@ function normalizeOneTimeBreakdown(estData) {
       const rawDetail = item.detail || item.det || item.note || item.frequency || null;
       const detail = isTermiteInstallItem({ ...item, label, service })
         ? formatTermiteBaitDetail(result.results?.tmBait, rawDetail)
-        : rawDetail;
+        : (isMistingSystemIdentity(service) ? customerSafeMistingDetail(rawDetail) : rawDetail);
       const key = [service || '', label, amount, detail || ''].join('|');
       if (seen.has(key)) continue;
       seen.add(key);
@@ -21159,6 +21229,7 @@ function normalizeOneTimeBreakdown(estData) {
           includedCallbacks: item.includedCallbacks ?? null,
           unlimitedCallbacks: typeof item.unlimitedCallbacks === 'boolean' ? item.unlimitedCallbacks : null,
         } : {}),
+        ...(service === 'rodent_dead_animal_removal' ? deadAnimalBreakdownFields(item) : {}),
         includedScope: item.includedScope || null,
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
@@ -23519,6 +23590,8 @@ function categoryForRecurringServiceKey(key) {
     case 'lawn_care': return 'lawn_care';
     case 'tree_shrub': return 'tree_shrub';
     case 'mosquito': return 'mosquito';
+    // The misting system plan is its own category: its copy never falls back to the barrier mosquito, pest or generic pack.
+    case 'mosquito_misting': return 'mosquito_misting';
     case 'termite_bait': return 'termite_bait';
     case 'foam_recurring': return 'foam_recurring';
     case 'pre_slab_termiticide': return 'pre_slab_termiticide';
@@ -23550,6 +23623,7 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'lawn_care': return 'Lawn Care';
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito Control';
+    case 'mosquito_misting': return 'Mosquito Misting Service Plan';
     case 'termite_bait': return 'Termite Bait Stations';
     case 'foam_recurring': return 'Recurring Termite Foam Service';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
@@ -23601,6 +23675,9 @@ function serviceCategoryForOneTimeItem(item = {}) {
   // Area add-ons take their family from the add-on key, before any name test; the other
   // exact service keys below map straight to theirs.
   if (service === 'area_addon') return areaAddOnCategoryForItem(item);
+  // The misting system's install belongs to the misting plan, never the barrier mosquito program ('mosquito_misting_installation'
+  // would otherwise reach the generic mosquito check below).
+  if (isMistingSystemIdentity(service)) return 'mosquito_misting';
   // `termite_inspection` is the standalone FS 482.226 inspection (project-types.js:
   // "not for real-estate transactions — use WDO for those") and stays OFF the
   // regulated certificate surface; only the WDO report itself maps here.
@@ -23813,7 +23890,7 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // mosquito or tree & shrub (palm included). Rodent, commercial, termite or
 // unclassifiable work anywhere, or an authored (commercial) proposal, means
 // no estimate-wide guarantee line (AGENTS.md estimate truth scope).
-const PLAN_TERMS_CATEGORIES = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub']);
+const PLAN_TERMS_CATEGORIES = new Set(['pest_control', 'lawn_care', 'mosquito', 'mosquito_misting', 'tree_shrub']);
 function serviceMixCarriesPlanTerms(recurringServices = [], oneTimeItems = []) {
   if (serviceMixMakesNoGuaranteeClaim(recurringServices, oneTimeItems)) return false;
   let services = 0;
@@ -23962,6 +24039,7 @@ function inferCategoriesFromEngineInputs(estData = {}) {
     services.lawn || services.lawnCare || inputs.svcLawn || engineCommercialServiceSelected(services.commercialLawn) ? 'lawn_care' : null,
     services.treeShrub || services.tree_shrub || inputs.svcTreeShrub ? 'tree_shrub' : null,
     services.mosquito || services.oneTimeMosquito || inputs.svcMosquito || inputs.svcOnetimeMosquito ? 'mosquito' : null,
+    isMistingSelection(services.mosquitoMisting) || isMistingSelection(services.mosquito_misting) ? 'mosquito_misting' : null,
     services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,
     services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab || inputs.svcPreslab ? 'pre_slab_termiticide' : null,
     services.boraCare || services.bora_care || inputs.svcBoracare ? 'bora_care' : null,
@@ -24006,7 +24084,7 @@ const SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS = [
   ['rodentGuaranteeCombo', 'rodent'], ['rodentInspection', 'rodent'],
   ['rodentWireMesh', 'rodent'], ['rodentBirdBoxes', 'rodent'], ['rodentPlugging', 'rodent'],
   ['trapOnlyRetainer', 'rodent'], ['exclusion', 'rodent'], ['exclusionV2', 'rodent'],
-  ['sanitation', 'rodent'],
+  ['sanitation', 'rodent'], ['deadAnimalRemoval', 'rodent'],
   ['foam', 'foam_recurring'], ['foam_recurring', 'foam_recurring'],
   ['termiteFoam', 'termite_foam'],
   ['termite_bait', 'termite_bait'],
@@ -24032,7 +24110,7 @@ const SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS = [
   ['svcWasp', 'stinging'],
   ['svcTs', 'tree_shrub'], ['svcInjection', 'tree_shrub'],
   ['svcRodentBait', 'rodent'], ['svcRodentTrap', 'rodent'],
-  ['svcRodentSanitation', 'rodent'], ['svcRodentGuarantee', 'rodent'],
+  ['svcRodentSanitation', 'rodent'], ['svcRodentDeadAnimal', 'rodent'], ['svcRodentGuarantee', 'rodent'],
   ['svcRodentWireMesh', 'rodent'], ['svcRodentBirdBox', 'rodent'],
   ['svcTrapOnlyRetainer', 'rodent'], ['svcExclusion', 'rodent'],
   ['svcFoam', 'termite_foam'],
@@ -24823,7 +24901,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
 // is NOT recurring (the recurring rodent service is rodent_bait; rodent_trapping
 // is a one-time specialty that fuzzily maps onto 'rodent').
 const RECURRING_SERVICE_KEYS = new Set([
-  'pest_control', 'lawn_care', 'tree_shrub', 'mosquito',
+  'pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'mosquito_misting',
   'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring',
 ]);
 
@@ -25171,6 +25249,71 @@ function commercialPestFrequenciesFromV1Services(services = []) {
     gradeUnmappedVisits: true,
     canonicalV1Keys: true,
   })];
+}
+
+// The misting system plan is ONE monthly cadence (12 applications a year at a fixed price per application), never the pest
+// ladder: its section and the top-level entry of a solo-misting estimate are both built from the sold plan row.
+//
+// The stored plan and install details end with the refill solution ("... Standard (permethrin, Sector or Mosquito Mist Ultra)
+// refill $129 per refill application"): product names and a second price that belong in the refill line, not in these. Drop
+// the refill segment; what is left ("21 nozzles · 12 applications/yr · $59 per application", "21 nozzles · 2 risers") is the
+// customer-safe detail.
+function customerSafeMistingDetail(detail) {
+  if (detail == null) return detail;
+  const kept = String(detail).split(/\s+\u00B7\s+/).filter((part) => !/refill/i.test(part));
+  return kept.length ? kept.join(' \u00B7 ') : null;
+}
+
+// The Waves AI card's System tile in the owner-approved wording (2026-10-30, item E): "Standard system (55-gallon)" reads
+// "Standard, 55-gallon". A tier label in any other shape (the labels are editable in the price row) prints as it is.
+function mistingSystemTileValue(tierLabel) {
+  const match = /^\s*(.+?)\s+system\s*\((\d+(?:\.\d+)?)[\s-]*gallon\)\s*$/i.exec(String(tierLabel || ''));
+  return match ? `${match[1]}, ${match[2]}-gallon` : tierLabel;
+}
+
+// The customer-safe misting facts of the plan row (see mistingCustomerFacts: layout counts, tier label, refill price and
+// expected count; no cost field), or null for an estimate with no misting plan row.
+function mistingFactsFromRows(recurringServices = []) {
+  const row = (Array.isArray(recurringServices) ? recurringServices : []).find((svc) => recurringServiceKey(svc) === 'mosquito_misting');
+  return row && row.misting && typeof row.misting === 'object' ? row.misting : null;
+}
+
+// The misting section's own facts: the system (tier label, nozzles, risers) and the refill line the card and the PDF print
+// ("Refills, Standard solution: $129.00 each ..."). Mutates in place, like attachMeasuredBasis.
+function attachMistingSystem(services = [], estData = {}) {
+  const sections = (Array.isArray(services) ? services : []).filter((section) => section && section.key === 'mosquito_misting');
+  if (!sections.length) return;
+  // An inputs-only save has no stored rows: its facts come from the (memoized) engine replay the guarantee rule already runs.
+  const facts = mistingFactsFromRows(recurringServicesWithSupplements(resolvePricingEstResult(estData)))
+    || mistingFactsFromRows(recurringServicesWithSupplements(guaranteeReplayForInputsOnly(estData).result || {}));
+  if (!facts) return;
+  for (const section of sections) {
+    section.system = { tierLabel: facts.tierLabel, nozzles: facts.nozzles, risers: facts.risers };
+    if (facts.refill) {
+      section.refill = { label: facts.refill.label, perFill: facts.refill.perFill, refillsPerYear: facts.refill.refillsPerYear };
+    }
+  }
+}
+
+function mistingFrequencyFromRow(row) {
+  if (!row) return null;
+  const freq = singleCadenceFrequencyFromRow(row, {
+    serviceKey: 'mosquito_misting',
+    serviceLabel: 'Mosquito Misting Service Plan',
+    includedProgramLabel: () => 'Mosquito Misting Service Plan',
+    defaultCadence: 'monthly',
+  });
+  const detail = customerSafeMistingDetail(row.detail);
+  return {
+    ...freq,
+    included: [{ key: 'mosquito_misting_service_plan', label: 'Mosquito Misting Service Plan', detail, includedAtThisFrequency: true }],
+  };
+}
+
+function mistingFrequenciesFromV1Services(services = []) {
+  const row = (Array.isArray(services) ? services : []).find((svc) => recurringServiceKey(svc) === 'mosquito_misting');
+  const freq = mistingFrequencyFromRow(row);
+  return freq ? [freq] : [];
 }
 
 // Engine-invocation path: build the foam frequency from the live engine result's
@@ -25739,6 +25882,7 @@ const RECURRING_SECTION_ORDER = [
   'lawn_care',
   'tree_shrub',
   'mosquito',
+  'mosquito_misting',
   'termite_bait',
   'palm_injection',
   'rodent_bait',
@@ -25862,7 +26006,7 @@ function includedRowsForServiceFrequency(frequency = {}, key, recurringService =
     || serviceLabelForCategory(categoryForRecurringServiceKey(key) || key);
   const detail = isTermiteBaitServiceName(label)
     ? formatTermiteBaitDetail(null, recurringService.detail)
-    : (recurringService.detail || recurringService.cadenceLabel || null);
+    : ((key === 'mosquito_misting' ? customerSafeMistingDetail(recurringService.detail) : recurringService.detail) || recurringService.cadenceLabel || null);
   return [{
     key,
     label,
@@ -25983,6 +26127,11 @@ function frequencyFromRecurringService(recurringService = {}, key, recurringDisc
 }
 
 function sectionFrequenciesForRecurringService(key, recurringService = {}, baseFrequencies = [], recurringDiscount = 0, { preserveSelectableKeys = false } = {}) {
+  // The misting plan has ONE cadence of its own (monthly, 12 applications): never the mirrored pest ladder.
+  if (key === 'mosquito_misting') {
+    const misting = mistingFrequencyFromRow(recurringService);
+    return misting ? [misting] : [];
+  }
   const allowAddOns = key === 'pest_control';
   if (key === 'pest_control') {
     const pestFrequencies = baseFrequencies
@@ -26696,8 +26845,10 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
     // entry — which would render the monthly plan as a "$X/quarter" price.
     // Shape the section entry through the same flat-monthly path the
     // split-bundle sections use: a single 'recurring' entry with per-check
-    // display pricing and the "Billed $X/mo" clarification.
-    const soloTermiteFrequencies = key === 'termite_bait'
+    // display pricing and the "Billed $X/mo" clarification. The misting plan
+    // is the other fixed-cadence service: its one monthly entry is built the
+    // same way, from its own row.
+    const soloTermiteFrequencies = (key === 'termite_bait' || key === 'mosquito_misting')
       ? sectionFrequenciesForRecurringService(
         key,
         (recurringRows.find(([rowKey]) => rowKey === key) || [])[1] || {},
@@ -27645,6 +27796,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   attachTermiteBondSelector(services, estData);
   attachTermiteStationRental(services, estData);
   attachCommercialInteriorSelector(services, estData);
+  attachMistingSystem(services, estData);
   // Same resolver as buildPricingServices — basis and price ladder must come
   // from ONE result object (ui-verify caught them diverging; see helper).
   // Engine-invocation bundles carry measuredBasisAnchor: the basis computed
@@ -28305,7 +28457,7 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     label: svc?.displayName || recurringServiceDisplayName(recurringServiceKey(svc)) || svc?.name || 'Service',
     detail: isTermiteBaitServiceName(svc?.name || svc?.label || svc?.service)
       ? formatTermiteBaitDetail(v1.tmBait, svc?.detail)
-      : (svc?.detail || null),
+      : (recurringServiceKey(svc) === 'mosquito_misting' ? customerSafeMistingDetail(svc?.detail) : (svc?.detail || null)),
     includedAtThisFrequency: true,
   }));
 
@@ -28866,11 +29018,12 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
 // boundary keeps the review lane server-side. Quote-required items keep the
 // full set: quoteRequiredReasonCandidates humanizes them into the customer's
 // reason note (client lib quoteDisplay.js).
-// onSiteMinutes (area add-on rows) is the engine's internal labor estimate: the
-// booking path reads it from the unsanitized breakdown, the customer never sees it.
+// onSiteMinutes (area add-on and Dead Rodent Removal rows) is the engine's internal labor estimate: the
+// booking path reads it from the unsanitized breakdown, the customer never sees it. deadAnimalTier (a Dead
+// Rodent Removal row's access tier) is internal the same way.
 // pricingKnobs (area add-on rows) holds the target margin and the cost knobs the row was priced with (the replay reads
 // them from the stored estimate); the customer never sees them either.
-const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'pricingKnobs'];
+const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'deadAnimalTier', 'pricingKnobs'];
 function sanitizePublicOneTimeBreakdown(breakdown) {
   if (!breakdown || typeof breakdown !== 'object' || !Array.isArray(breakdown.items)) return breakdown;
   return {
@@ -29303,6 +29456,10 @@ async function buildPricingBundleInner(estimate) {
     const foamFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'foam_recurring'
       ? foamFrequenciesFromV1Services(v1.services)
       : [];
+    // Solo misting plan: its own monthly entry, so the key the page sends on accept is the plan's, not the pest-shaped quarterly.
+    const mistingFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'mosquito_misting'
+      ? mistingFrequenciesFromV1Services(v1.services)
+      : [];
     // Solo commercial pest replaces the generic entry outright. A MIXED bundle
     // keeps the generic entry's bundle totals + per-service treatment rows but
     // re-keys it to the sold pest cadence: the accept handler exact-matches the
@@ -29331,7 +29488,8 @@ async function buildPricingBundleInner(estimate) {
         : (mosquitoFreqs.length ? mosquitoFreqs
           : (lawnFreqs.length ? lawnFreqs
             : (foamFreqs.length ? foamFreqs
-              : (commercialPestFreqs.length ? commercialPestFreqs : frequencies.slice(0, 1))))));
+              : (mistingFreqs.length ? mistingFreqs
+                : (commercialPestFreqs.length ? commercialPestFreqs : frequencies.slice(0, 1)))))));
     const annualPrepayEligible = annualPrepayEligibleForEstimateData(estData);
 
     // First-visit fees stack — non-recurring charges shown to the customer
@@ -29619,10 +29777,17 @@ async function buildPricingBundleInner(estimate) {
       const foamFreqs = (lawnFreqs.length || !foamOnlyRecurring)
         ? []
         : foamFrequenciesFromEngineResult(engineResult);
+      // The misting plan alone is its own monthly entry (see mistingFrequencyFromRow), never the generic quarterly one.
+      const mistingFreqs = (lawnFreqs.length || foamFreqs.length || !recurringKeys.length
+        || !recurringKeys.every((k) => k === 'mosquito_misting'))
+        ? []
+        : mistingFrequenciesFromV1Services(recurringServicesWithSupplements(engineResult));
       if (lawnFreqs.length) {
         frequencies.push(...lawnFreqs);
       } else if (foamFreqs.length) {
         frequencies.push(...foamFreqs);
+      } else if (mistingFreqs.length) {
+        frequencies.push(...mistingFreqs);
       } else {
         frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
       }

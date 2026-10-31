@@ -232,6 +232,8 @@ const LANE_RUNTIME = {
   // runNarrative (writer fallback) for lawn_diag_writer, via ledgerCall — while each lane's primary is a raw
   // Gemini / OpenAI fetch outside the adapters. Marking them 'call' would read the unrecorded primary traffic as a
   // silent lane.
+  // 2026-10-29: runPerception's OpenAI backup (on a Gemini miss) runs through dispatch() and records under this
+  // lane; the Gemini primary is still the raw fetch, so the lane stays unrecordable.
   lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   lawn_challenge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // M3 (Codex r19): the public lawn analyzer persists customer_summary and returns the teaser without staff review.
@@ -301,7 +303,7 @@ const LANE_RUNTIME = {
   invoice_pdf: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
 
   // ── Content & SEO ──
-  // M3 (Codex r19): a scheduled draft can ride the 'publishing' claim through pages-poll auto-merge after the preview + Codex gates.
+  // M3 (Codex r19): a scheduled draft whose 'publishing' claim a crash strands can still auto-merge through pages-poll after the preview + Codex gates (normally it waits for an admin's approval).
   blog_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
   // draft_for_human + M2 (Codex r21): optimizeExistingPost only stores optimization_suggestions; the operator applies them to the draft by hand.
   blog_optimize: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },

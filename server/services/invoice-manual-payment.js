@@ -13,6 +13,26 @@
  *                                    automated })
  *     → { invoice, receipt }   receipt = { email, sms } | null
  *
+ * amountCents (optional, the Invoices page, owner 2026-10-29): the cents the office received. Under the invoice row lock the amount is
+ * compared with what is still owed (invoiceAmountDue of the LOCKED row): equal = the whole balance, today's paid flip, unchanged;
+ * more = refused; less = a PART PAYMENT (only behind GATE_PARTIAL_PAYMENTS, and only for a person at the Invoices page). A part payment
+ * inserts the same off-gateway payments row, adds the amount to invoices.amount_paid, leaves the status alone, stamps
+ * payment_recorded_at (the "money is on this invoice" signal every void/edit/settle guard already reads), writes the recorded and the
+ * completion markers Undo works from, and retires an open Stripe session exactly as a full payment does. It skips the paid flip, the
+ * receipt, the reminder stop, the review ask, the closeout, the pause clear, the prepay activation and the plan completion: reminders
+ * continue for the remainder. The paid flip of a part-paid invoice resets amount_paid to 0 (the column holds money received on an
+ * invoice that is still open), books the REMAINDER as the payments row, and the receipt reads the whole bill.
+ * Refused for a part: gate off; Auto Pay customer (fail closed); an active payment plan; an annual prepay invoice; a payer-billed
+ * invoice; any caller carrying expectedAmountCents / settlementFence / requireSelfPay / automated (the Zelle paths).
+ * ONE exception, the Intelligence Bar's record_payment card (owner 2026-10-29): `barApprovedPart: true`, an internal argument only the bar
+ * shim sets (admin-invoices.js cardPinsOf, from the card's own approval; never read from a request body). It needs GATE_PARTIAL_PAYMENTS AND
+ * GATE_IB_RECORD_PAYMENT_PARTIAL, the card's settlementFence and requireSelfPay, never `automated`, and expectedAmountCents must equal
+ * owedCentsSeen (the amount owed the card showed): the under-lock amount fence then compares the live amount owed with the card's, not with
+ * the part. Every other part refusal above applies to it unchanged.
+ * owedCentsSeen (required with amountCents): the amount owed the page showed. It must still be what is owed, before the lock and on
+ * the locked row, so a double click, a retry after a lost response, or a payment someone else recorded meanwhile is refused (409)
+ * instead of booking the same part payment twice.
+ *
  * expectedAmountCents (optional, the Zelle notice reconciler): the amount the
  * caller is settling FOR. Checked under the invoice row lock right before the
  * paid flip — if the amount due moved since the caller looked (an edit, a
@@ -70,7 +90,10 @@ const InvoiceService = require('./invoice');
 const PaymentPlans = require('./payment-plans');
 const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
+const { recordAuditEvent } = require('./audit-log');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
+const { partialPaymentsLive, ibRecordPaymentPartialLive } = require('../config/feature-gates');
+const { customerOnAutopay } = require('./autopay-eligibility');
 
 // Append the operator note to the invoice notes (don't clobber existing notes). Built from the LOCKED row's notes inside the
 // settlement transaction, so a note saved between the unlocked read and the lock is kept, not overwritten.
@@ -82,6 +105,18 @@ function appendOperatorNote(existing, { method, reference, note }) {
 }
 
 const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
+// The audit_log action recordManualPayment writes with every settlement, and the invoice columns the paid flip overwrites (their
+// pre-payment values ride the marker so Undo can put them back exactly). Read by invoice-manual-payment-undo.js.
+const MANUAL_PAYMENT_RECORDED_ACTION = 'invoice.manual_payment_recorded';
+// Written when every post-commit effect below has finished (reminder stop, pause clear, review ask, closeout, receipt). Undo refuses until it
+// exists, so it can never reverse a payment while those effects are still running against the paid snapshot.
+const MANUAL_PAYMENT_EFFECTS_DONE_ACTION = 'invoice.manual_payment_effects_done';
+// amount_paid rides the list because the paid flip resets it to 0 (money received on a still-open invoice is the paid payment's now): Undo of
+// the final payment of a part-paid invoice puts the earlier parts back from the marker.
+const PAID_FIELDS = ['status', 'notes', 'paid_at', 'payment_method', 'payment_reference', 'payment_recorded_by', 'payment_recorded_at', 'amount_paid'];
+// A part payment changes only these invoice columns besides amount_paid (the status and the tender stay as they were); their prior values
+// ride its marker so Undo of the part can put them back.
+const PART_FIELDS = ['notes', 'payment_recorded_by', 'payment_recorded_at'];
 const VALID_RECEIPT_CHANNELS = ['email', 'sms', 'both'];
 
 function refusal(statusCode, message, extra = {}) {
@@ -113,6 +148,43 @@ async function retireOpenPaymentIntentBeforeSettlement(invoice, { action }) {
   return { status: 409, error: `Open payment session ${openPiId} could not be verified (${verdict.detail || 'payment service unavailable'}); resolve it before ${action}` };
 }
 
+// Why this invoice cannot take a part payment right now, or null. `conn` is the pool (before the lock) or the transaction holding the invoice
+// lock. Auto Pay reads fail closed: an unreadable answer refuses. The messages are for the office, in plain English.
+async function partPaymentRefusal(conn, invoice) {
+  if (invoice.payer_id || invoice.payer_statement_id) {
+    return 'This invoice is billed to a payer, so a part payment cannot be recorded on it.';
+  }
+  const plan = await conn('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id');
+  if (plan) return 'This invoice has a payment plan, so a part payment cannot be recorded on it.';
+  // A card dispute not settled for this invoice yet: a won dispute puts the invoice back to the paid state of the disputed payment and
+  // zeroes amount_paid, which would swallow a part received meanwhile. Undecided (no dispute_final), or won while this invoice is still
+  // open (the combined closure marks the payment won before it restores each invoice; a crash can stop in between). Lost lets parts in.
+  // The shapes the dispute handlers persist: markPaymentDisputed sets status 'disputed' (+ dispute_invoice_id), a closure adds dispute_final.
+  const openDispute = await conn('payments')
+    .whereRaw("(metadata->>'dispute_invoice_id' = CAST(? AS text) OR metadata->>'invoice_id' = CAST(? AS text))", [invoice.id, invoice.id])
+    .whereRaw("((status = 'disputed' AND metadata->>'dispute_final' IS NULL) OR metadata->>'dispute_final' IN ('won', 'warning_closed'))")
+    .first('id');
+  if (openDispute) return 'This invoice has a card dispute that is not settled yet, so a part payment cannot be recorded until it is.';
+  const { resolveInvoiceTermId } = require('./invoice-prepay');
+  const onTerm = await resolveInvoiceTermId(invoice, conn, { strict: true })
+    || ((await conn.schema.hasTable('annual_prepay_terms')) && await conn('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id'));
+  if (onTerm) return 'This is an annual prepay invoice, so a part payment cannot be recorded on it.';
+  try {
+    const customer = await conn('customers').where({ id: invoice.customer_id }).first();
+    if (!customer || await customerOnAutopay(customer, { db: conn, failClosed: true })) {
+      return 'This customer is on Auto Pay, so a part payment cannot be recorded on this invoice yet.';
+    }
+  } catch (err) {
+    logger.warn(`[invoice-manual-payment] Auto Pay check failed for invoice ${invoice.id}: ${err.message}`);
+    return 'Auto Pay could not be checked for this customer, so a part payment cannot be recorded right now.';
+  }
+  return null;
+}
+
+function owedChangedMessage(nowCents) {
+  return `The amount owed on this invoice changed to $${(nowCents / 100).toFixed(2)} since the page loaded (another payment or an edit). Reload the invoice and check it before you record a payment. Nothing was recorded.`;
+}
+
 async function recordManualPayment(id, {
   method,
   reference,
@@ -121,15 +193,27 @@ async function recordManualPayment(id, {
   sendReceipt = true,
   via = 'both',
   expectedAmountCents = null,
+  amountCents = null,
+  // The amount owed the Invoices page showed when the office typed amountCents (required with it).
+  owedCentsSeen = null,
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
+  // Set ONLY by the Intelligence Bar shim (admin-invoices.js cardPinsOf, from the card's internal approval, never from a request body):
+  // this call is a part payment the operator approved on the bar's card (see the rule at the part-payment check below).
+  barApprovedPart = false,
   // Staff user id behind an operator-recorded payment (audit attribution
   // for the invoice-issued closeout); null for automated settlements.
   recordedByTechnicianId = null,
 } = {}) {
   if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
     throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
+  }
+  if (amountCents != null && !(Number.isSafeInteger(amountCents) && amountCents > 0)) {
+    throw refusal(400, 'amount must be a positive amount of money');
+  }
+  if (amountCents != null && !(Number.isSafeInteger(owedCentsSeen) && owedCentsSeen > 0)) {
+    throw refusal(400, 'Reload the invoice and enter the payment again. Nothing was recorded.');
   }
   if (!method || !VALID_PAYMENT_METHODS.includes(method)) {
     throw refusal(400, `method must be one of: ${VALID_PAYMENT_METHODS.join(', ')}`);
@@ -164,6 +248,45 @@ async function recordManualPayment(id, {
     throw refusal(400, 'Invoice has no amount to collect (total is $0)');
   }
 
+  // The amount the office entered, against what is still owed (the pre-lock read; the locked row decides below). More than owed is
+  // refused; the whole balance is today's full path, fenced to that figure; less is a part payment.
+  let partCents = null;
+  if (amountCents != null) {
+    const owedCents = Math.round(invoiceAmountDue(invoice) * 100);
+    // A repeat of the same submit (a double click, a retry after a lost response) or a payment someone else recorded meanwhile meets
+    // a different amount owed than the page showed: refused, so one payment is never booked twice. Checked again on the locked row.
+    if (owedCentsSeen !== owedCents) throw refusal(409, owedChangedMessage(owedCents));
+    if (amountCents > owedCents) {
+      throw refusal(400, `That is more than the $${(owedCents / 100).toFixed(2)} still owed on this invoice. Nothing was recorded.`);
+    }
+    if (amountCents === owedCents) {
+      if (expectedAmountCents == null) expectedAmountCents = amountCents;
+    } else {
+      if (!partialPaymentsLive()) throw refusal(400, 'Part payments are not turned on. Record the whole amount owed, or ask for help.');
+      if (barApprovedPart) {
+        // The Intelligence Bar card (owner 2026-10-29), behind its own gate too. The card carries its fence and the self-pay re-proof, and the
+        // figure it priced from (expectedAmountCents) must be the amount owed it showed (owedCentsSeen, already matched above), so the
+        // under-lock re-checks compare against the card's amount owed, never the part. Nothing automated ever takes this door.
+        if (!ibRecordPaymentPartialLive()) throw refusal(400, 'Part payments from the Intelligence Bar are not turned on. Record the whole amount owed, or use the Invoices page.');
+        if (automated || !settlementFence || !requireSelfPay || expectedAmountCents !== owedCentsSeen) {
+          throw refusal(400, 'A part payment can only be entered by hand on the Invoices page, or approved on the Intelligence Bar card.');
+        }
+      } else if (automated || expectedAmountCents != null || settlementFence || requireSelfPay) {
+        // Person-entered only: the Zelle reconciler and notice Apply carry a figure or a fence of their own.
+        throw refusal(400, 'A part payment can only be entered by hand on the Invoices page.');
+      }
+      const refused = await partPaymentRefusal(db, invoice);
+      if (refused) throw refusal(409, `${refused} Nothing was recorded.`);
+      partCents = amountCents;
+      // The live payer re-resolution (rowIsSelfPayDue), run now and again on the locked row like the Zelle paths.
+      requireSelfPay = true;
+    }
+  }
+  // A part-paid invoice never settles from a Zelle notice by itself: the office records what is left by hand.
+  if (automated && Number(invoice.amount_paid) > 0) {
+    throw refusal(409, 'This invoice has a part payment, so a Zelle notice cannot settle it by itself. The office records the rest by hand. Nothing was recorded.');
+  }
+
   // Combined pay-page session release BEFORE accepting a manual payment
   // (codex #3427 r29 P0): this invoice may ride a combined PI a browser
   // can still confirm directly — recording cash/check now and letting
@@ -184,6 +307,7 @@ async function recordManualPayment(id, {
   // session is retired below — never cancel a valid checkout for a
   // settlement that then records nothing. The under-lock re-checks below
   // remain the race fences.
+  // Whole-balance match only: a partially paid invoice (amount_paid > 0) must not auto-match a notice (the partial-payment writer enforces it).
   if (expectedAmountCents != null) {
     const actualCents = Math.round(invoiceAmountDue(invoice) * 100);
     if (actualCents !== expectedAmountCents) {
@@ -215,6 +339,10 @@ async function recordManualPayment(id, {
   // missing on a transient DB failure — with no alert and no sweep (the
   // dashboard gap-fallback only rescues Stripe-PI invoices). Either both
   // commit or the operator gets a retryable error and nothing changed.
+  let settledPaymentId = null;
+  // The cash this call booked (the part, or the remainder of a part-paid invoice): the paid flip resets amount_paid, so the row read after it
+  // no longer says what was owed.
+  let settledAmount = null;
   const updatedInvoice = await db.transaction(async (trx) => {
     // Combined-session reservation INSIDE the collection transaction
     // (codex #3427 r30 P0, serialized r31 P0): the helper takes the
@@ -268,6 +396,7 @@ async function recordManualPayment(id, {
     // Amount fence under the same lock as the paid flip: the caller settles
     // a specific sum; the ledger row below records invoiceAmountDue(row), so
     // the two must agree NOW, not when the caller last looked.
+    // Whole-balance match only: a partially paid invoice (amount_paid > 0) must not auto-match a notice (the partial-payment writer enforces it).
     if (expectedAmountCents != null) {
       const actualCents = Math.round(invoiceAmountDue(locked) * 100);
       if (actualCents !== expectedAmountCents) return { amountMismatch: { expectedCents: expectedAmountCents, actualCents } };
@@ -297,6 +426,16 @@ async function recordManualPayment(id, {
       const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
       if (!selfPay) return { notSelfPay: true };
     }
+    // The reconciler never settles a part-paid invoice (re-read on the locked row, like the pre-lock check).
+    if (automated && Number(locked.amount_paid) > 0) return { partPaidNotice: true };
+    // A part payment, decided on the LOCKED row: still less than what is owed, and nothing that makes it unsafe appeared since the pre-lock read.
+    if (partCents != null) {
+      const lockedOwedCents = Math.round(invoiceAmountDue(locked) * 100);
+      if (lockedOwedCents !== owedCentsSeen) return { owedChanged: { nowCents: lockedOwedCents } };
+      if (partCents >= lockedOwedCents) return { amountMismatch: { expectedCents: partCents, actualCents: lockedOwedCents } };
+      const refused = await partPaymentRefusal(trx, locked);
+      if (refused) return { partRefused: refused };
+    }
     // Visit fence under the same lock (after the invoice → customer → visit
     // → payer order above; the visit row is re-locked, never taken earlier):
     // an invoice whose visit is cancelled / no-show / skipped takes no
@@ -307,11 +446,63 @@ async function recordManualPayment(id, {
       if (neverRan) return { visitNeverRan: neverRan };
     }
     if (settlementFence && !(await settlementFence(trx, locked))) return { fenceLost: true };
+    if (partCents != null) {
+      const partAmount = partCents / 100;
+      const [partRow] = await trx('invoices')
+        .where({ id })
+        .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+        .update({
+          amount_paid: trx.raw('ROUND(COALESCE(amount_paid, 0) + ?::numeric, 2)', [partAmount]),
+          // The status and the tender stay as they were. payment_recorded_at is the "money is on this invoice" signal the void, edit and
+          // settle guards read (and the instant Undo matches its marker against); the retired session leaves no stale stamp.
+          payment_recorded_by: recordedBy,
+          payment_recorded_at: trx.fn.now(),
+          stripe_payment_intent_id: null,
+          processor: null,
+          notes: appendOperatorNote(locked.notes, { method, reference: trimmedReference, note: trimmedNote }),
+          updated_at: trx.fn.now(),
+        })
+        .returning('*');
+      if (!partRow) return null;
+      const [{ id: partPaymentId }] = await trx('payments').insert({
+        customer_id: partRow.customer_id,
+        amount: partAmount,
+        status: 'paid',
+        description: `Invoice ${partRow.invoice_number} — ${method} (part payment)${trimmedReference ? ` (${trimmedReference})` : ''}`,
+        payment_date: etDateString(),
+        // Linked to the invoice so every "is there money on this invoice" read (void, edit, prepay and refund guards) sees it.
+        metadata: JSON.stringify({ invoice_id: partRow.id, partial_payment: true }),
+      }).returning('id');
+      settledPaymentId = partPaymentId;
+      settledAmount = partAmount;
+      await recordAuditEvent({
+        actor_type: recordedByTechnicianId ? 'admin' : 'system',
+        actor_id: recordedByTechnicianId,
+        action: MANUAL_PAYMENT_RECORDED_ACTION,
+        resource_type: 'invoices',
+        resource_id: id,
+        metadata: {
+          paymentId: partPaymentId,
+          method,
+          amount: partAmount,
+          partial: true,
+          automated: false,
+          recordedBy,
+          previous: Object.fromEntries(PART_FIELDS.map((field) => [field, locked[field] ?? null])),
+        },
+        critical: true,
+        trx,
+      });
+      return partRow;
+    }
     const [row] = await trx('invoices')
       .where({ id })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
       .update({
         status: 'paid',
+        // The money received so far is this payment's now: the column holds money received on a still-open invoice. The remainder is the
+        // ledger row below (read from the locked row); the receipt reads the whole bill off total and credit.
+        amount_paid: 0,
         paid_at: trx.fn.now(),
         payment_method: method,
         payment_reference: trimmedReference || null,
@@ -344,7 +535,7 @@ async function recordManualPayment(id, {
       // Record the CASH actually received — amount due (total − applied account
       // credit) — not the full total, or manual cash/check/Zelle over-states
       // revenue by the applied credit (which isn't cash).
-      amount: invoiceAmountDue(row),
+      amount: invoiceAmountDue(locked),
       status: 'paid',
       description: `Invoice ${row.invoice_number} — ${method}`
         + `${trimmedReference ? ` (${trimmedReference})` : ''}`,
@@ -356,9 +547,11 @@ async function recordManualPayment(id, {
     // account credit was applied the recorded cash (amount due) differs from
     // invoice.total, so they MUST be linked or the receipt falls back to the
     // pre-credit total instead of the amount actually received.
-    if (row.payer_id || Number(row.credit_applied) > 0) {
+    if (row.payer_id || Number(row.credit_applied) > 0 || Number(locked.amount_paid) > 0) {
       paymentRow.metadata = JSON.stringify({
         invoice_id: row.id,
+        // This payment is the last of a part-paid invoice; the earlier parts are their own ledger rows.
+        ...(Number(locked.amount_paid) > 0 ? { completes_part_payments: true, amount_paid_before: Number(locked.amount_paid) } : {}),
         // Payer ownership rides the ledger row itself: billing-cron's
         // pause veto and the webhook auto-clear both exclude payer-funded
         // money by metadata.payer_id — without this stamp a manually
@@ -367,7 +560,29 @@ async function recordManualPayment(id, {
         ...(row.payer_id ? { payer_id: row.payer_id } : {}),
       });
     }
-    await trx('payments').insert(paymentRow);
+    const [{ id: paymentId }] = await trx('payments').insert(paymentRow).returning('id');
+    settledPaymentId = paymentId;
+    settledAmount = paymentRow.amount;
+    // The marker Undo (invoice-manual-payment-undo.js) works from, in the SAME transaction: which ledger row backs this payment, how the
+    // invoice looked before it, and whether a person or the Zelle reconciler recorded it. The marker's created_at is this transaction's
+    // now(), the same instant payment_recorded_at carries, which is how Undo proves the marker belongs to the payment still on the invoice.
+    await recordAuditEvent({
+      actor_type: recordedByTechnicianId ? 'admin' : 'system',
+      actor_id: recordedByTechnicianId,
+      action: MANUAL_PAYMENT_RECORDED_ACTION,
+      resource_type: 'invoices',
+      resource_id: id,
+      metadata: {
+        paymentId,
+        method,
+        amount: paymentRow.amount,
+        automated: Boolean(automated),
+        recordedBy,
+        previous: Object.fromEntries(PAID_FIELDS.map((field) => [field, locked[field] ?? null])),
+      },
+      critical: true,
+      trx,
+    });
     // The invoice is settled — an active payment plan has nothing left to
     // collect. Complete it on the SAME trx so a paid invoice never keeps
     // an `active` plan that blocks edits / credit reversal.
@@ -389,6 +604,15 @@ async function recordManualPayment(id, {
     const { expectedCents, actualCents } = updatedInvoice.amountMismatch;
     throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: updatedInvoice.amountMismatch });
   }
+  if (updatedInvoice?.owedChanged) {
+    throw refusal(409, owedChangedMessage(updatedInvoice.owedChanged.nowCents));
+  }
+  if (updatedInvoice?.partRefused) {
+    throw refusal(409, `${updatedInvoice.partRefused} Nothing was recorded.`);
+  }
+  if (updatedInvoice?.partPaidNotice) {
+    throw refusal(409, 'This invoice has a part payment, so a Zelle notice cannot settle it by itself. The office records the rest by hand. Nothing was recorded.');
+  }
   if (updatedInvoice?.fenceLost) {
     throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed, or the bank changed or withdrew the payment) — nothing was recorded');
   }
@@ -409,6 +633,33 @@ async function recordManualPayment(id, {
     // paid in between). Re-fetch so the caller can return a useful 409 body.
     const current = await db('invoices').where({ id }).first();
     throw refusal(409, 'Invoice status changed before payment could be recorded', { currentStatus: current?.status });
+  }
+
+  if (partCents != null) {
+    // A part payment ends here: no receipt, no reminder stop (reminders continue for the remainder), no review ask, closeout, pause clear,
+    // prepay activation or plan completion. The completion marker tells Undo that nothing else is still running against this payment.
+    const remainingCents = Math.round(invoiceAmountDue(updatedInvoice) * 100);
+    await db('activity_log').insert({
+      customer_id: updatedInvoice.customer_id,
+      admin_user_id: recordedByTechnicianId,
+      action: 'invoice_part_payment_recorded',
+      description: `Part payment recorded for ${updatedInvoice.invoice_number} ($${settledAmount.toFixed(2)} via ${method}`
+        + `${trimmedReference ? ` · ref ${trimmedReference}` : ''}; $${(remainingCents / 100).toFixed(2)} still owed) — ${recordedBy}`,
+    }).catch((err) => logger.warn(`[admin-invoices:record-payment] activity_log insert failed: ${err.message}`));
+    await recordAuditEvent({
+      actor_type: recordedByTechnicianId ? 'admin' : 'system',
+      actor_id: recordedByTechnicianId,
+      action: MANUAL_PAYMENT_EFFECTS_DONE_ACTION,
+      resource_type: 'invoices',
+      resource_id: id,
+      metadata: { paymentId: settledPaymentId },
+    });
+    return {
+      invoice: await db('invoices').where({ id }).first(),
+      receipt: null,
+      closeout: null,
+      partial: { amount: settledAmount, remaining: remainingCents / 100 },
+    };
   }
 
   // Stop the follow-up sequence the same way the Stripe webhook does.
@@ -482,7 +733,7 @@ async function recordManualPayment(id, {
     customer_id: updatedInvoice.customer_id,
     action: 'invoice_payment_recorded',
     description: `Manual payment recorded for ${updatedInvoice.invoice_number}`
-      + ` ($${invoiceAmountDue(updatedInvoice).toFixed(2)} via ${method}`
+      + ` ($${settledAmount.toFixed(2)} via ${method}`
       + `${trimmedReference ? ` · ref ${trimmedReference}` : ''})`
       + ` — ${recordedBy}`,
   }).catch((err) => logger.warn(`[admin-invoices:record-payment] activity_log insert failed: ${err.message}`));
@@ -554,6 +805,17 @@ async function recordManualPayment(id, {
   const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
   const closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId, approvedTarget: approvedCloseoutTarget, approvedVisit: approvedCloseoutVisit });
 
+  // Every post-commit effect has finished: Undo may now consider this payment. Best-effort by design (recordAuditEvent logs and swallows):
+  // the payment is committed, so a lost marker only leaves it un-undoable, the safe direction. A crash before this line does the same.
+  await recordAuditEvent({
+    actor_type: recordedByTechnicianId ? 'admin' : 'system',
+    actor_id: recordedByTechnicianId,
+    action: MANUAL_PAYMENT_EFFECTS_DONE_ACTION,
+    resource_type: 'invoices',
+    resource_id: id,
+    metadata: { paymentId: settledPaymentId },
+  });
+
   const final = await db('invoices').where({ id }).first();
   return {
     invoice: final,
@@ -565,6 +827,12 @@ async function recordManualPayment(id, {
 
 module.exports = {
   VALID_PAYMENT_METHODS,
+  MANUAL_PAYMENT_RECORDED_ACTION,
+  MANUAL_PAYMENT_EFFECTS_DONE_ACTION,
+  PAID_FIELDS,
+  PART_FIELDS,
+  refusal,
   recordManualPayment,
+  partPaymentRefusal,
   retireOpenPaymentIntentBeforeSettlement,
 };

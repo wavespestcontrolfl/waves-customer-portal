@@ -1,7 +1,11 @@
 // Technician pick for a fixed-time visit (owner 2026-10-03: closest route that
 // day among the technicians who are free; no territories; no new-hire guard).
-const mockState = { active: true, techs: [], absent: new Set(), off: [], clashes: {}, slots: [], last: null, findTimeThrows: false, stops: {}, blocked: new Set() };
+const mockState = { lineLive: false, linePick: null, active: true, techs: [], absent: new Set(), off: [], clashes: {}, slots: [], last: null, findTimeThrows: false, stops: {}, blocked: new Set() };
 
+jest.mock('../services/scheduling/line-technician', () => ({
+  lineMapLive: () => mockState.lineLive,
+  pickLineTechnician: jest.fn(async () => mockState.linePick),
+}));
 jest.mock('../services/tech-out-auto-move', () => ({
   blockedBySchedule: jest.fn(async (techId) => mockState.blocked.has(techId)),
 }));
@@ -52,7 +56,7 @@ const slot = (tech, detour, start = '10:00') => ({
 });
 
 beforeEach(() => {
-  Object.assign(mockState, { active: true, techs: [A, B], absent: new Set(), off: [], clashes: {}, slots: [], last: null, findTimeThrows: false, stops: {}, blocked: new Set() });
+  Object.assign(mockState, { lineLive: false, linePick: null, active: true, techs: [A, B], absent: new Set(), off: [], clashes: {}, slots: [], last: null, findTimeThrows: false, stops: {}, blocked: new Set() });
   jest.clearAllMocks();
 });
 
@@ -166,5 +170,63 @@ describe('pickTechnicianForVisit', () => {
       { id: 'tech-b', name: 'Tech B', detourMinutes: 30, stopsThatDay: 5 },
     ], 'tech-a');
     expect(winner.id).toBe('tech-b');
+  });
+});
+
+// Build 4 (GATE_SERVICE_LINE_MAP=live): a mapped line decides among the callers' own eligible list.
+describe('pickTechnicianForVisit — service-line map live', () => {
+  const lineTech = require('../services/scheduling/line-technician');
+  beforeEach(() => { mockState.lineLive = true; });
+
+  test('a mapped line returns its technician, named from the eligible list, with the free-time probe asked for', async () => {
+    mockState.linePick = { mapped: true, line: 'general', technicianId: 'tech-b', reason: 'home' };
+    mockState.slots = [slot(A, 1), slot(B, 30)];
+    const pick = await pickTechnicianForVisit({ conn: makeConn(), ...base, serviceId: 'svc-1', serviceKey: 'k', excludeServiceIds: ['row-1'] });
+    expect(pick).toEqual({ active: true, technician: { id: 'tech-b', name: 'Tech B' }, reason: 'line_home' });
+    expect(lineTech.pickLineTechnician).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      serviceId: 'svc-1', serviceKey: 'k', serviceType: 'General Pest', date: base.date, windowStart: '10:00', windowEnd: '11:00',
+      excludeCustomerId: 'cust-1', excludeServiceIds: ['row-1'], candidateIds: ['tech-a', 'tech-b'], checkFree: true,
+    }));
+    expect(findTime.findAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('the visit\'s place (customer, map position) reaches the line picker for GATE_TERRITORY_ROUTING', async () => {
+    mockState.linePick = { mapped: true, line: 'general', technicianId: 'tech-b', reason: 'home' };
+    mockState.slots = [slot(A, 1), slot(B, 30)];
+    await pickTechnicianForVisit({ conn: makeConn(), ...base, lat: 27.05, lng: -82.4 });
+    expect(lineTech.pickLineTechnician).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      customerId: 'cust-1', lat: 27.05, lng: -82.4,
+    }));
+  });
+
+  test('the gap technician, and nobody, keep the line reason', async () => {
+    mockState.linePick = { mapped: true, line: 'general', technicianId: 'tech-a', reason: 'gap_absent' };
+    expect(await pickTechnicianForVisit({ conn: makeConn(), ...base })).toMatchObject({ technician: { id: 'tech-a' }, reason: 'line_gap_absent' });
+    mockState.linePick = { mapped: true, line: 'general', technicianId: null, reason: 'none' };
+    expect(await pickTechnicianForVisit({ conn: makeConn(), ...base })).toEqual({ active: true, technician: null, reason: 'line_none' });
+  });
+
+  test('an unmapped line keeps the closest-route pick', async () => {
+    mockState.linePick = { mapped: false, line: 'general', technicianId: null, reason: 'no_map' };
+    mockState.slots = [slot(A, 22), slot(B, 6)];
+    expect(await pickTechnicianForVisit({ conn: makeConn(), ...base })).toMatchObject({ technician: { id: 'tech-b' }, reason: 'closest_route' });
+  });
+
+  test('the picker inactive: no line read, the caller keeps its default', async () => {
+    mockState.active = false;
+    expect(await pickTechnicianForVisit({ conn: makeConn(), ...base })).toMatchObject({ active: false });
+    expect(lineTech.pickLineTechnician).not.toHaveBeenCalled();
+  });
+
+  test('nobody eligible: none_assignable, the line is not asked', async () => {
+    mockState.techs = [];
+    expect(await pickTechnicianForVisit({ conn: makeConn(), ...base })).toMatchObject({ technician: null, reason: 'none_assignable' });
+    expect(lineTech.pickLineTechnician).not.toHaveBeenCalled();
+  });
+
+  test('gate not live: the line is not asked', async () => {
+    mockState.lineLive = false;
+    await pickTechnicianForVisit({ conn: makeConn(), ...base });
+    expect(lineTech.pickLineTechnician).not.toHaveBeenCalled();
   });
 });

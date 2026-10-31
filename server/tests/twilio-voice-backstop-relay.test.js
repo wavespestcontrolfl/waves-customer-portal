@@ -190,7 +190,7 @@ describe('buildRelayTwiML — authenticates the upgrade + disclosure greeting', 
   });
 });
 
-describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
+describe('buildRelayTwiML — Jennifer persona parity (voice + greeting)', () => {
   const savedEnv = {};
   const KEYS = ['VOICE_RELAY_TTS_VOICE', 'VOICE_RELAY_GREETING', 'VOICE_AGENT_NAME', 'VOICE_RELAY_WS_SECRET'];
   beforeEach(() => { for (const k of KEYS) { savedEnv[k] = process.env[k]; delete process.env[k]; } });
@@ -201,21 +201,21 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
     }
   });
 
-  test('default voice id is the Sandy voice, env-overridable', () => {
-    expect(DEFAULT_TTS_VOICE_ID).toBe('21m00Tcm4TlvDq8ikWAM');
-    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('voice="21m00Tcm4TlvDq8ikWAM"');
+  test('default voice id is the Jennifer voice (Eleven v4 Turbo), env-overridable', () => {
+    expect(DEFAULT_TTS_VOICE_ID).toBe('g7LVvkPWALzPxOQbF6OE-v4_turbo-0.5_0.8');
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('voice="g7LVvkPWALzPxOQbF6OE-v4_turbo-0.5_0.8"');
     process.env.VOICE_RELAY_TTS_VOICE = 'custom-voice-id';
     expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('voice="custom-voice-id"');
   });
 
   test('default greeting is the bare owner-ruled opener — name + day-part, no notice', () => {
     const greeting = defaultWelcomeGreeting();
-    expect(greeting).toContain('Sandy');
+    expect(greeting).toContain('Jennifer');
     expect(greeting.toLowerCase()).not.toMatch(/recorded|automated|assistant/);
-    expect(greeting).toMatch(/^Waves, this is Sandy\. How can I help you this (morning|afternoon|evening)\?$/);
+    expect(greeting).toMatch(/^Waves, this is Jennifer\. How can I help you this (morning|afternoon|evening)\?$/);
     expect(greeting).toMatch(/How can I help you this (morning|afternoon|evening)\?$/);
     expect(greeting).not.toContain('{dayPart}');
-    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Sandy');
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Jennifer');
   });
 
   test('the greeting day-part follows the ET clock at render time (owner ruling 2026-08-28)', () => {
@@ -230,7 +230,7 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
   });
 
   test('VOICE_AGENT_NAME renames her; VOICE_RELAY_GREETING overrides the whole line', () => {
-    expect(agentName()).toBe('Sandy');
+    expect(agentName()).toBe('Jennifer');
     process.env.VOICE_AGENT_NAME = 'Marge';
     expect(agentName()).toBe('Marge');
     expect(defaultWelcomeGreeting()).toContain('Marge');
@@ -252,7 +252,7 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
     ]) {
       process.env.VOICE_RELAY_GREETING = bad;
       const spoken = defaultWelcomeGreeting();
-      expect(spoken).toMatch(/^Waves, this is Sandy\. How can I help you this (morning|afternoon|evening)\?$/);
+      expect(spoken).toMatch(/^Waves, this is Jennifer\. How can I help you this (morning|afternoon|evening)\?$/);
       expect(spoken).not.toMatch(/human|real person|live agent/);
     }
     // …while any honest override is used exactly as written.
@@ -355,7 +355,7 @@ describe('buildRelayTwiML — relay profile tuning attrs (relay-profiles is the 
     expect(xml).toContain('events="speaker-events tokens-played"');
     expect(xml.indexOf('language=')).toBeLessThan(xml.indexOf('speechModel='));
     expect(xml).toContain('<Parameter name="relay_profile" value="flux_balanced_v1" />');
-    expect(xml).toContain('<Parameter name="tts_voice" value="21m00Tcm4TlvDq8ikWAM" />');
+    expect(xml).toContain('<Parameter name="tts_voice" value="g7LVvkPWALzPxOQbF6OE-v4_turbo-0.5_0.8" />');
     expect(xml).toContain('</ConversationRelay>');
   });
 
@@ -366,7 +366,7 @@ describe('buildRelayTwiML — relay profile tuning attrs (relay-profiles is the 
     });
     expect(xml).toContain('<Parameter name="lang" value="es" />');
     expect(xml).toContain('<Parameter name="relay_profile" value="override" />');
-    expect(xml).toContain('<Parameter name="tts_voice" value="21m00Tcm4TlvDq8ikWAM" />');
+    expect(xml).toContain('<Parameter name="tts_voice" value="g7LVvkPWALzPxOQbF6OE-v4_turbo-0.5_0.8" />');
   });
 
   test('a profile can never re-point or re-voice the relay, and odd keys are dropped', () => {

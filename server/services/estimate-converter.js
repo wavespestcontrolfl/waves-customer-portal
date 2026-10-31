@@ -36,7 +36,7 @@ const {
   isNewRecurringSignupCandidate,
 } = require('./new-recurring-welcome-sms');
 const { etDateString } = require('../utils/datetime-et');
-const { visitsPerYearForCadence } = require('./prepay-cadence');
+const { visitsPerYearForCadence, prepayCoverageCadenceForPattern } = require('./prepay-cadence');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeGrassType, GRASS_SOURCE } = require('./lawn-grass-context');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
@@ -1176,14 +1176,23 @@ async function applyFrozenExistingServiceExtension({
     // another property (codex #3338 r8).
     appliedRowIds: [],
     monthlyRateReviewNeeded: false,
+    // Current services staff unticked in the estimate tool: kept at their
+    // contracted price by that choice, so never a family for office review.
+    keptFamilies: [],
   };
   const snapshot = estimateData?.membershipSnapshot;
+  const keptKeys = new Set(Array.isArray(snapshot?.extensionKeptKeys) ? snapshot.extensionKeptKeys : []);
+  summary.keptFamilies = (priorQualifyingKeys || []).filter((key) => keptKeys.has(key));
   const plan = (Array.isArray(snapshot?.existingServices) ? snapshot.existingServices : [])
     .filter((svc) => Number(svc?.currentPerVisit) > 0
       && Number(svc?.newPerVisit) > 0
       && Number(svc?.perVisitSavings) > 0
       && Array.isArray(svc?.keys) && svc.keys.length > 0);
-  if (!plan.length) return summary;
+  if (!plan.length) {
+    // Staff ticked nothing: the review names only what they did not keep.
+    if (keptKeys.size) summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !keptKeys.has(key));
+    return summary;
+  }
   // The frozen plan belongs to the tier the snapshot advertised — a stale
   // snapshot whose tier disagrees with the activated tier must not apply
   // its numbers.
@@ -1205,7 +1214,7 @@ async function applyFrozenExistingServiceExtension({
     return summary;
   }
   const plannedKeys = new Set(plan.flatMap((svc) => svc.keys));
-  summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !plannedKeys.has(key));
+  summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !plannedKeys.has(key) && !keptKeys.has(key));
 
   // Monthly-lane members bill customers.monthly_rate — row writes and
   // prepaid credits would not deliver the displayed reduction (codex #3338
@@ -4686,7 +4695,20 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
 // SEASONAL_FEB_OCT (annual-prepay renewal doesn't support the season walk yet)
 // so seasonal prepay fails closed on every acceptance path, matching the
 // prepay-on-book and /secure lanes (prepayCoverageCadenceForPattern → null).
+//
+// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the term must also record the pattern
+// the series is WRITTEN with. A residential lawn 9x series seeds as
+// lawn_rounds_9, so the cadence derived below comes back as lawn_rounds_9 (via
+// the seeder's lawnRoundsSeriesPattern, the same decision the seeder makes
+// for the series). Gate off, or any other line: the derived cadence is
+// returned unchanged.
 function annualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFrequency = null) {
+  const derived = derivedAnnualPrepayCoverageCadence(svc, fallbackFrequency, acceptedPlanFrequency);
+  if (derived !== 'every_6_weeks') return derived;
+  return RecurringAppointmentSeeder.lawnRoundsSeriesPattern({ ...svc, pattern: derived, intervalDays: null }).pattern;
+}
+
+function derivedAnnualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFrequency = null) {
   // Coverage and the recurring series must use the same accepted pest cadence.
   if (acceptedPestSelectionVisits(svc, acceptedPlanFrequency)
     && !svc.isCommercial && !isCommercialRecurringLine(svc)) {
@@ -4835,6 +4857,10 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
   const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
     pattern,
+    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the seeder writes a residential
+    // lawn 9x series as lawn_rounds_9 (parent mark and every child); an accept
+    // with annual prepay mints a lawn_rounds_9 term for it
+    // (annualPrepayCoverageCadence).
     visitsPerYear,
     skipWeekends: true,
     weekendShift: 'forward',
@@ -7152,6 +7178,24 @@ const EstimateConverter = {
             if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {
               throw palmCatalogMissingError();
             }
+            // LIVE line map: a same-trip program whose line has its own technician does
+            // not copy the reserved visit's hour or technician (a combined capacity
+            // member keeps today's copy: its offer already needed one technician on
+            // every line). Same day, no time: never one slot for two programs. The
+            // note is customer-visible, so it says it in plain words.
+            if (sameTrip && !combinedCapacity) {
+              const quotedZip = estimate?.address ? (require('../utils/address-normalizer').parseRawAddress(estimate.address).zip || null) : null;
+              const own = await require('./scheduling/promoted-unit-line').ownLineTechnicianForPromotedUnit(database, { row: standaloneRow, unit, unitDate, reservedStart, quotedZip });
+              if (own) {
+                delete standaloneRow.window_start;
+                delete standaloneRow.window_end;
+                delete standaloneRow.technician_id;
+                if (own.technicianId) standaloneRow.technician_id = own.technicianId;
+                standaloneRow.notes = `${standaloneRow.notes} ${own.technicianId
+                  ? 'This program has its own technician, so we will set its time separately.'
+                  : 'We will set the time for this program separately.'}`;
+              }
+            }
             // Promoted lawn/palm parents get the converter FAMILY duration
             // (codex r7 P2): the identity-only skip above correctly refuses
             // the lawn catalog's contradictory 45-minute default, but a
@@ -7211,6 +7255,11 @@ const EstimateConverter = {
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+              // GATE_ROUTE_CHECK_ACCEPT_SAVES: the same-trip parent copies the
+              // reserved start's technician and window and was never numbered;
+              // number it here, inside `trx` (always a transaction). Gate off:
+              // touches nothing. Never throws.
+              if (sameTrip) await require('./scheduling/staff-save-route-check').placeAcceptedVisit(trx, { visit: parentRow });
               // Tech-facing "new visit" card (tech-visit-notifications.js,
               // codex r9 P1): this promoted same-trip parent inherits the
               // reserved start's technician and is inserted directly — no
@@ -7245,6 +7294,7 @@ const EstimateConverter = {
                   // row's first-application invoice covers the shared trip);
                   // its follow-ups bill this line's own per-visit amount.
                   estimatedPrice: reservedPerVisitSplit?.byUnit.get(unit),
+                  annualPrepay: billingTerm === 'prepay_annual',
                 });
               } catch (seedErr) {
                 if (combinedCapacity) throw seedErr;
@@ -7600,6 +7650,7 @@ const EstimateConverter = {
                 // The reserved row keeps the same-day total it was accepted
                 // and invoiced at; its follow-ups bill only this line.
                 estimatedPrice: reservedPerVisitSplit?.reserved,
+                annualPrepay: billingTerm === 'prepay_annual',
               });
               return { seedResult };
             });
@@ -7903,6 +7954,7 @@ const EstimateConverter = {
                 // same split the reserved-slot path applies. undefined = the
                 // seeder's parent-copy price (single-program accepts).
                 estimatedPrice: unitPerVisit,
+                annualPrepay: billingTerm === 'prepay_annual',
               });
             } catch (seedErr) {
               logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
@@ -8418,6 +8470,15 @@ const EstimateConverter = {
               coverageServiceType = annualPrepayCoverageOverride.serviceType;
               coverageVisitCount = annualPrepayCoverageOverride.visitCount;
               coverageCadence = annualPrepayCoverageOverride.cadence;
+              // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): this accept writes the
+              // series as lawn_rounds_9, so a caller's 9-visit every-6-weeks
+              // (or unspecified, which infers every_6_weeks from 9 visits)
+              // coverage cadence is the same plan under the quote's name. The
+              // term records the pattern the series is written with.
+              if (overrideValidation === 'lawn_rounds_9'
+                && (!coverageCadence || prepayCoverageCadenceForPattern(coverageCadence) === 'every_6_weeks')) {
+                coverageCadence = 'lawn_rounds_9';
+              }
             }
           } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];
@@ -9028,10 +9089,14 @@ const EstimateConverter = {
     // review alert the moment an accept actually moves the stored tier up.
     // An APPLIED extension always notifies, upgrade or not — money moved;
     // so does a frozen plan that parked for review.
+    // Staff kept every current service at its price on the estimate: the
+    // upgrade itself leaves nothing to review.
+    const everyPriorKept = extension?.keptFamilies?.length === priorQualifyingKeys.length;
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0
       && tier && tier !== 'none'
-      && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(effectiveCustomer.waveguard_tier, tier))) {
+      && (extensionApplied || extensionNeedsReview
+        || (isMembershipTierUpgrade(effectiveCustomer.waveguard_tier, tier) && !everyPriorKept))) {
       const tierReviewPayload = buildTierReviewPayload({
         customer, customerId, estimateId, tier, discount, extension, extensionApplied, effectiveCustomer,
         estimateQualifyingKeys, priorQualifyingKeys, combinedServiceCount,
@@ -9260,6 +9325,8 @@ module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.seedingFamilyKey = seedingFamilyKey;
+module.exports.isCommercialRecurringLine = isCommercialRecurringLine;
+module.exports.seedRecurringFollowUpsForParent = seedRecurringFollowUpsForParent;
 module.exports.isPalmInjectionFamily = isPalmInjectionFamily;
 module.exports.guardServiceTypeFor = guardServiceTypeFor;
 module.exports.PREPAY_COVERAGE_INVALID = PREPAY_COVERAGE_INVALID;

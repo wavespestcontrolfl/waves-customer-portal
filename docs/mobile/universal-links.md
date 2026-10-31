@@ -27,7 +27,17 @@ links therefore stay portal URLs forever; the app claims them at the OS level.
      claimed, and a path not on the list keeps opening in the browser. `/r/`
      referral links are excluded on BOTH platforms: they 302 to the marketing
      site, which would strand the app's webview off-portal. New customer link
-     surface ⇒ add its prefix in bootstrap-android.sh AND rebuild.
+     surface ⇒ add its prefix in bootstrap-android.sh AND in
+     `server/services/messaging/email-link-policy.js` (the same list), then
+     rebuild. `server/tests/mobile-bootstrap-pinning.test.js` fails when the
+     lists differ or a customer route in `client/src/App.jsx` is on neither the
+     list nor its browser-only set (`/card`, `/careers`, `/newsletter`).
+   - Email: SendGrid click tracking rewrites links to `click.wavespestcontrol.com`,
+     which no app claims, so a tracked email link always opened the browser.
+     `sendOne` marks anchors to the listed portal paths (and the portal root,
+     for `/?tab=` links) `clicktracking=off`, so they go straight to the portal
+     and open the app. Other links stay tracked; newsletter broadcasts
+     (`sendBatch`) are unchanged.
 3. In the app, Capacitor fires `appUrlOpen` / `getLaunchUrl` with the tapped
    URL; `client/src/native/nativeLinks.js` navigates the webview to the same
    path (same-origin only). The shell loads the remote portal, so short-link
@@ -81,6 +91,8 @@ links in the browser. No client update needed.
   policy strips `https://`), Messages opens them as http, and iOS routes http
   universal links into the app too. Before 2026-10 the handler refused them,
   so every texted link opened the app on Home (Sentry `Native link: rejected`).
+  The Android filter declares `http` as well as `https` for the same reason:
+  until 2026-10-31 it was https-only, so every texted link opened Chrome.
 
 ## Diagnosing an app that opens on home
 

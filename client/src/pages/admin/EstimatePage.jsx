@@ -65,6 +65,8 @@ const STATUS_CONFIG = {
   accepted: { label: "Accepted", color: C.green, bg: `${C.green}22` },
   declined: { label: "Declined", color: C.red, bg: `${C.red}22` },
   expired: { label: "Expired", color: C.gray, bg: `${C.gray}15` },
+  // A delivery the server parked after a failed attempt; staff retry it with Send.
+  send_failed: { label: "Send failed", color: C.red, bg: `${C.red}22` },
 };
 
 /* ── Competitor detection for intel badge ──────────────────── */
@@ -526,6 +528,28 @@ function classifyEstimate(e) {
   return "all";
 }
 
+// Rows without a share token (quote-wizard mirrors, legacy imports) have no
+// customer link to send — the SMS/email would carry a literal /estimate/null.
+// The server refuses these too (assertEstimateSendable); hiding the
+// affordance keeps the operator from hitting that error blind.
+function canSendEstimate(estimate) {
+  if (!String(estimate?.token || "").trim()) return false;
+  return (
+    Number(estimate?.monthlyTotal || 0) > 0 ||
+    Number(estimate?.onetimeTotal || estimate?.oneTimeTotal || 0) > 0
+  );
+}
+// The Pipeline's one classifier, shared by the list, its filter counts and the
+// summary tiles. An unsent row (a draft, or a send that failed) is ready to send
+// only when canSendEstimate passes; every other status keeps classifyEstimate.
+function classifyEstimateForPipeline(estimate) {
+  if (estimate?.archivedAt) return classifyEstimate(estimate);
+  if (estimate?.status === "draft" || estimate?.status === "send_failed") {
+    return canSendEstimate(estimate) ? "ready_to_send" : "needs_estimate";
+  }
+  return classifyEstimate(estimate);
+}
+
 
 
 export {
@@ -534,6 +558,8 @@ export {
   DECLINE_REASONS,
   declinePayload,
   classifyEstimate,
+  canSendEstimate,
+  classifyEstimateForPipeline,
   getUrgencyIndicator,
   detectCompetitor,
   FollowUpModal,

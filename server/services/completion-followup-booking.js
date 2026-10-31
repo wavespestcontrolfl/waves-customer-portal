@@ -47,6 +47,7 @@ const { assertAssignableTechnician } = require('./technician-eligibility');
 const { techWorkDaysLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { completeScheduledServiceInsert } = require('./booking/create-scheduled-service');
+const { placeAutoSavedVisit } = require('./scheduling/staff-save-route-check');
 
 const reply = (status, payload) => ({ status, body: payload });
 
@@ -518,6 +519,10 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
       trx, cols, source: { sourceAction },
     });
     const inserted = await trx('scheduled_services').insert(followupInsert).returning('*');
+    // GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29): number the follow-up's
+    // technician day in the dispatcher's order, inside this transaction. Silent,
+    // never fails the booking, a no-op while the gate is off.
+    await placeAutoSavedVisit(trx, { visit: inserted[0], source: 'completion_followup' });
     return inserted;
   });
   return { appointment, overlapWarning };

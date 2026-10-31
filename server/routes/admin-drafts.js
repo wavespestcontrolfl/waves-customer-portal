@@ -81,6 +81,9 @@ async function resolveDraftRecipient(draft, preloaded = {}) {
         fromNumber: TWILIO_NUMBERS.findByNumber(smsLog.to_phone) ? smsLog.to_phone : undefined,
         customerId: draft.customer_id || smsLog.customer_id || null,
         identityTrustLevel: draft.customer_id || smsLog.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+        // Unverified pairing: approve / revise judge it in guardDraftRecipient.
+        viaSmsLog: true,
+        smsCustomerId: smsLog.customer_id,
       };
     }
   }
@@ -114,6 +117,116 @@ async function resolveDraftRecipient(draft, preloaded = {}) {
   }
 
   return { toPhone: null, customerId: draft.customer_id || null, identityTrustLevel: 'phone_provided_unverified' };
+}
+
+// Audit AG-01 (2026-10-30): an SMS-anchored draft goes out only while it
+// still belongs to the customer it was written for. The branch above pairs
+// the inbound sender's phone with the draft's own customer_id and asserts
+// phone_matches_customer without checking either link, and the send
+// validators accept that label. Judged at approve / revise, and again at the
+// provider handoff (the SMS row can be re-linked while the pipeline awaits):
+//  - the SMS row now linked to a different customer (a reassigned number or
+//    a merge), or the customer row gone: the copy and the stored preferences
+//    belong to the old customer, so the draft is refused, never relabeled;
+//  - a reply number no longer on the customer's record: its own phone (a
+//    property row without one uses the account primary's, the canonical
+//    fallback) or a service-contact slot.
+// A NULL link on either side is not a change: the drafter may have resolved
+// the customer itself. A slot number sends as service_contact_authorized, so
+// the provider boundary re-reads that contact's own choices.
+const DRAFT_RECIPIENT_HOLDS = {
+  customer_changed: {
+    error: 'This draft was written for a different customer than the one this conversation now belongs to — reject it and reply from the conversation.',
+    code: 'DRAFT_CUSTOMER_CHANGED',
+  },
+  phone_not_on_record: {
+    error: "The number this draft replies to is no longer on the customer's record — reject it and reply from the conversation.",
+    code: 'DRAFT_PHONE_NOT_ON_RECORD',
+  },
+  // Handoff only: the recheck passed for another customer or trust level
+  // than the send was prepared with (its identity and consent context).
+  changed_during_send: {
+    error: 'The recipient changed while this draft was being sent — it was left pending; open it again before sending.',
+    code: 'DRAFT_RECIPIENT_CHANGED',
+  },
+};
+const DRAFT_RECIPIENT_UNAVAILABLE = {
+  error: 'Recipient check unavailable — draft left pending, try again',
+  code: 'DRAFT_RECIPIENT_CHECK_UNAVAILABLE',
+};
+
+async function smsDraftRecipientVerdict(draft, toPhone, smsCustomerId) {
+  if (smsCustomerId && draft.customer_id && String(smsCustomerId) !== String(draft.customer_id)) {
+    return { ok: false, hold: 'customer_changed' };
+  }
+  const customerId = draft.customer_id || smsCustomerId;
+  if (!customerId) return { ok: true, customerId: null, identityTrustLevel: 'phone_provided_unverified' };
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  if (!customer) return { ok: false, hold: 'customer_changed' };
+  const { withAccountPrimaryContact, findServiceContactSlotByPhoneKey, phoneKeyOf } = require('../services/customer-contact');
+  const own = await withAccountPrimaryContact(customer, { rethrow: true }); // an outage is a 503, not "not on record"
+  if (samePhone(own.phone, toPhone)) {
+    return { ok: true, customerId: customer.id, identityTrustLevel: 'phone_matches_customer' };
+  }
+  if (findServiceContactSlotByPhoneKey(customer, phoneKeyOf(toPhone))) {
+    return { ok: true, customerId: customer.id, identityTrustLevel: 'service_contact_authorized' };
+  }
+  return { ok: false, hold: 'phone_not_on_record' };
+}
+
+// The provider-handoff form (preProviderCheck contract): the SMS row's link
+// and the customer's numbers are re-read at the last await before Twilio,
+// and the answer must name the same customer and trust level the send was
+// prepared with (`prepared`, the route-level verdict) — a customer-less
+// draft's SMS row re-linked from B to C mid-send must not pass as C while
+// the send carries B's identity and preferences. `next` (a later hook, e.g.
+// the photo-triage offer recheck) runs only on a pass. An outage answers a
+// retryable code, never a raw exception message.
+function draftRecipientLateCheck(draft, toPhone, prepared, next) {
+  return async (ctx) => {
+    let verdict;
+    try {
+      const smsRow = await db('sms_log').where({ id: draft.sms_log_id }).first('customer_id');
+      verdict = await smsDraftRecipientVerdict(draft, toPhone, smsRow?.customer_id || null);
+    } catch {
+      return { ok: false, code: DRAFT_RECIPIENT_UNAVAILABLE.code, reason: DRAFT_RECIPIENT_UNAVAILABLE.error, retryable: true };
+    }
+    const holdKey = !verdict.ok ? verdict.hold
+      : String(verdict.customerId || '') !== String(prepared.customerId || '')
+        || verdict.identityTrustLevel !== prepared.identityTrustLevel ? 'changed_during_send' : null;
+    if (holdKey) {
+      const hold = DRAFT_RECIPIENT_HOLDS[holdKey];
+      return { ok: false, code: hold.code, reason: hold.error };
+    }
+    return next ? next(ctx) : { ok: true };
+  };
+}
+
+// Route-level form, run right after the recipient resolves and before any
+// send work: a hold → 409 and an outage → 503, both with the claim released
+// (the draft stays pending). A pass returns the recipient with the verified
+// customer and trust level, and lateCheck(next) builds the handoff hook.
+async function guardDraftRecipient(draft, recipient, res, releaseFields = {}) {
+  if (!recipient.viaSmsLog) return { blocked: false, recipient, lateCheck: (next) => next };
+  let verdict;
+  try {
+    verdict = await smsDraftRecipientVerdict(draft, recipient.toPhone, recipient.smsCustomerId);
+  } catch (err) {
+    logger.warn(`[admin-drafts] recipient check failed for draft ${draft.id} (code=${err?.code || 'none'})`);
+    await releaseUndecidedClaim(draft, releaseFields);
+    res.status(503).json(DRAFT_RECIPIENT_UNAVAILABLE);
+    return { blocked: true };
+  }
+  if (!verdict.ok) {
+    await releaseUndecidedClaim(draft, releaseFields);
+    res.status(409).json(DRAFT_RECIPIENT_HOLDS[verdict.hold]);
+    return { blocked: true };
+  }
+  return {
+    blocked: false,
+    recipient: { ...recipient, customerId: verdict.customerId, identityTrustLevel: verdict.identityTrustLevel },
+    lateCheck: (next) => draftRecipientLateCheck(draft, recipient.toPhone, verdict, next),
+  };
 }
 
 // The From number the send path will END UP using for a draft with no
@@ -241,9 +354,10 @@ function draftSendPolicyFields(draft, recipient) {
  * later.
  */
 function blockedSendResponse(res, smsResult) {
-  // The photo-triage late recheck's outage is transient — same retryable
-  // 503 contract as its route-level check (codex #4810 r13).
-  const status = smsResult.code === 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE' ? 503 : 422;
+  // A late recheck's outage (photo-triage offer, draft recipient) is
+  // transient — same retryable 503 contract as its route-level check
+  // (codex #4810 r13).
+  const status = ['PHOTO_TRIAGE_RECHECK_UNAVAILABLE', DRAFT_RECIPIENT_UNAVAILABLE.code].includes(smsResult.code) ? 503 : 422;
   return res.status(status).json({
     error: smsResult.reason || smsResult.code || 'SMS send blocked/failed',
     code: smsResult.code,
@@ -302,6 +416,14 @@ async function releaseClarifyClaim(draftId, fields = {}) {
       approved_at: null,
       ...fields,
     }).catch(() => {});
+}
+
+// A claim taken before the clarify dispatch decision: a clarify draft's
+// release is status-guarded (reject-safe), every other draft's is plain.
+function releaseUndecidedClaim(draft, fields = {}) {
+  return draft.intent === 'estimate_clarify'
+    ? releaseClarifyClaim(draft.id, fields)
+    : releaseDraftClaim(draft.id, fields);
 }
 
 async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = false } = {}) {
@@ -693,13 +815,11 @@ router.put('/:id/approve', async (req, res, next) => {
       immediateOnlyRefusal = await draftImmediateOnlyLinkRefusal(draft.draft_response);
     } catch (checkErr) {
       logger.warn(`[drafts] Auto Pay link check failed for draft ${draft.id} — releasing claim: ${checkErr.message}`);
-      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
-      else await releaseDraftClaim(draft.id);
+      await releaseUndecidedClaim(draft);
       return res.status(503).json({ error: 'Pre-send check unavailable - draft left pending, try again' });
     }
     if (immediateOnlyRefusal) {
-      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
-      else await releaseDraftClaim(draft.id);
+      await releaseUndecidedClaim(draft);
       return res.status(409).json({ error: immediateOnlyRefusal });
     }
 
@@ -711,7 +831,9 @@ router.put('/:id/approve', async (req, res, next) => {
     // decision-invariant (toPhone, provenance, and estimate linkage never
     // change in the decision), and failures here happen pre-commitment — a
     // plain claim release suffices, nothing to reconcile.
-    const recipient = await resolveDraftRecipient(draft);
+    const recipientGuard = await guardDraftRecipient(draft, await resolveDraftRecipient(draft), res);
+    if (recipientGuard.blocked) return;
+    const { recipient } = recipientGuard;
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
@@ -719,8 +841,7 @@ router.put('/:id/approve', async (req, res, next) => {
       // Unreachable for clarify drafts by construction (park requires a
       // usable phone) — but if it ever fires, the release must still be
       // reject-safe.
-      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
-      else await releaseDraftClaim(draft.id);
+      await releaseUndecidedClaim(draft);
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
     const sendPolicy = sendPolicyForDraft(draft, recipient);
@@ -748,7 +869,8 @@ router.put('/:id/approve', async (req, res, next) => {
         ...sendPolicy,
         // At most one is set: clarify and photo-triage drafts are distinct intents.
         preDispatchCheck: clarifyGuard.preDispatchCheck || photoTriageGuard.preDispatchCheck,
-        preProviderCheck: photoTriageGuard.preProviderCheck,
+        // Recipient recheck first; the photo-triage offer recheck runs on a pass.
+        preProviderCheck: recipientGuard.lateCheck(photoTriageGuard.preProviderCheck),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
@@ -867,14 +989,15 @@ router.put('/:id/revise', async (req, res, next) => {
     // Same order contract as the approve route: recipient + policy are
     // decision-invariant and resolve pre-commitment; the clarify decision
     // runs LAST with no await between its commit and the provider call.
-    const recipient = await resolveDraftRecipient(draft);
+    const recipientGuard = await guardDraftRecipient(draft, await resolveDraftRecipient(draft), res, { revised_response: null, final_response: null });
+    if (recipientGuard.blocked) return;
+    const { recipient } = recipientGuard;
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
       // Same reject-safe release rule as the approve route.
-      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id, { revised_response: null, final_response: null });
-      else await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      await releaseUndecidedClaim(draft, { revised_response: null, final_response: null });
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
     const sendPolicy = sendPolicyForDraft(draft, recipient);
@@ -894,6 +1017,7 @@ router.put('/:id/revise', async (req, res, next) => {
         // shape exactly.
         ...sendPolicy,
         preDispatchCheck: clarifyGuard.preDispatchCheck,
+        preProviderCheck: recipientGuard.lateCheck(),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',

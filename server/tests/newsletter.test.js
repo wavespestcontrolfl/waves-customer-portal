@@ -3276,16 +3276,9 @@ describe('newsletter quiz — config, rendering, tag resolution', () => {
   });
 });
 
-describe('newsletter quiz — multi-quiz tokens + picker/results helpers (Phase 2b)', () => {
+describe('newsletter quiz — multi-quiz tokens + results helpers (Phase 2b)', () => {
   const quiz = require('../services/newsletter-quiz');
   const T = '11111111-2222-3333-4444-555555555555';
-
-  test('listQuizzes returns lawn/pest/mosquito with answers + tags', () => {
-    const ids = quiz.listQuizzes().map((q) => q.id);
-    expect(ids).toEqual(expect.arrayContaining(['lawn-headache-v1', 'pest-pressure-v1', 'mosquito-v1']));
-    const pest = quiz.listQuizzes().find((q) => q.id === 'pest-pressure-v1');
-    expect(pest.answers.find((a) => a.key === 'ants').tags).toContain('pest:ants');
-  });
 
   test('parseQuizTokens extracts default + id + text variants, deduped', () => {
     const parsed = quiz.parseQuizTokens('a {{quiz}} b {{quiz:pest-pressure-v1}} c {{quiz-text}} d {{quiz}}');

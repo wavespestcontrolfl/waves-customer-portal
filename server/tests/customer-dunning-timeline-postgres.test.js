@@ -123,12 +123,11 @@ postgres('customer-level overdue reminders: one customer through a whole episode
       doNotFake: ['setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'nextTick',
         'queueMicrotask', 'performance', 'hrtime', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback'],
     });
-    for (const key of ['GATE_DUNNING_LADDER_90', 'GATE_DUNNING_CUSTOMER_SCHEDULE', 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST', 'GATE_BALANCE_REMINDER_LEGACY_OFF']) saved[key] = process.env[key];
+    for (const key of ['GATE_DUNNING_LADDER_90', 'GATE_DUNNING_CUSTOMER_SCHEDULE', 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST']) saved[key] = process.env[key];
     saved.pay = FeatureGates.gates.payIncludeBalance;
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     process.env.GATE_DUNNING_CUSTOMER_SCHEDULE = 'true';
     delete process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST;
-    delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
     FeatureGates.gates.payIncludeBalance = true;
     expect(FeatureGates.dunningCustomerScheduleLive()).toBe(true);
 
@@ -148,7 +147,7 @@ postgres('customer-level overdue reminders: one customer through a whole episode
 
   afterAll(async () => {
     jest.useRealTimers();
-    for (const key of ['GATE_DUNNING_LADDER_90', 'GATE_DUNNING_CUSTOMER_SCHEDULE', 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST', 'GATE_BALANCE_REMINDER_LEGACY_OFF']) {
+    for (const key of ['GATE_DUNNING_LADDER_90', 'GATE_DUNNING_CUSTOMER_SCHEDULE', 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST']) {
       if (saved[key] === undefined) delete process.env[key];
       else process.env[key] = saved[key];
     }
@@ -182,7 +181,7 @@ postgres('customer-level overdue reminders: one customer through a whole episode
       t.uuid('payer_id');
       t.uuid('scheduled_service_id');
       t.string('scheduled_send_error');
-      t.string('token'); t.string('title'); t.decimal('total', 10, 2); t.decimal('credit_applied', 10, 2);
+      t.string('token'); t.string('title'); t.decimal('total', 10, 2); t.decimal('credit_applied', 10, 2); t.decimal('amount_paid', 10, 2).notNullable().defaultTo(0);
       t.string('stripe_payment_intent_id'); t.date('service_date'); t.date('due_date'); t.string('invoice_number');
     });
     await app.schema.createTable('invoice_followup_sequences', (t) => {

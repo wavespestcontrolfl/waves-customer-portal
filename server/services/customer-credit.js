@@ -192,16 +192,18 @@ function portalCreditsFromLedger(rows = []) {
 
 /**
  * Pure decision math for auto-applying account credit to an invoice. No DB —
- * unit-testable. Given the invoice total, credit already applied, and the
+ * unit-testable. Given the invoice total, credit already applied, part payments
+ * already received (amountPaid) and the
  * customer's available balance, returns how much to apply now and whether the
  * invoice ends fully covered. `fullCoverageOnly` suppresses partial application.
  */
-function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverageOnly = false }) {
+function computeApplication({ total, creditApplied = 0, amountPaid = 0, balance = 0, fullCoverageOnly = false }) {
   const t = round2(total);
   const applied = round2(creditApplied);
+  const paid = round2(amountPaid);
   const bal = round2(balance);
   if (!(t > 0)) return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'zero_total' };
-  const remainingDue = round2(t - applied);
+  const remainingDue = round2(t - applied - paid);
   if (remainingDue <= 0) return { applyAmt: 0, fullyCovered: true, newCreditApplied: applied, skipReason: 'already_covered' };
   if (bal <= 0) return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'no_balance' };
   let applyAmt = round2(Math.min(bal, remainingDue));
@@ -220,7 +222,7 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
     return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'residual_below_minimum' };
   }
   const newCreditApplied = round2(applied + applyAmt);
-  return { applyAmt, fullyCovered: round2(t - newCreditApplied) <= 0, newCreditApplied, skipReason: null };
+  return { applyAmt, fullyCovered: round2(t - newCreditApplied - paid) <= 0, newCreditApplied, skipReason: null };
 }
 
 /**
@@ -428,12 +430,13 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     }
     // Partial application is now safe: every charge path (Stripe PI / autopay /
     // Terminal) and the webhook amount-verification price from amount due
-    // (total − credit_applied) via invoiceAmountDue, so a collectible invoice
+    // (total − credit_applied − amount_paid) via invoiceAmountDue, so a collectible invoice
     // with credit_applied set is charged the reduced amount, not the full total.
     // Callers may still force full coverage via fullCoverageOnly.
     const { applyAmt, fullyCovered, newCreditApplied, skipReason } = computeApplication({
       total: invoice.total,
       creditApplied: invoice.credit_applied,
+      amountPaid: invoice.amount_paid,
       balance: customer?.account_credits || 0,
       fullCoverageOnly,
     });
@@ -723,7 +726,7 @@ async function autoApplyWouldApply(invoice, dbh = db) {
     if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
     if (!(await customerAutoApplyEnabled(invoice.customer_id, dbh))) return false;
     const balance = await getBalance(invoice.customer_id, dbh);
-    return computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).applyAmt > 0;
+    return computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, amountPaid: invoice.amount_paid, balance }).applyAmt > 0;
   } catch { return true; }
 }
 

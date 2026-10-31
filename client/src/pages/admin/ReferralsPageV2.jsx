@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useId, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { createPortal } from "react-dom";
 import {
   BarChart3,
@@ -12,6 +13,7 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { getAdminUser } from "../../lib/adminAuth";
 import useIsMobile from "../../hooks/useIsMobile";
+import useModalFocus from "../../hooks/useModalFocus";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: legacy color names remain to preserve the inline-style
@@ -42,10 +44,22 @@ function af(path, opts = {}) {
     },
     ...opts,
   }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      // Show the server's own reason (a 400 names the bad field) instead of "HTTP 400".
+      return r
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          throw new Error(body?.error || `HTTP ${r.status}`);
+        });
+    }
     return r.json();
   });
 }
+
+// Customer search rows are camelCase (mapCustomerListRow); a missing part must not print "undefined".
+const customerDisplayName = (c) =>
+  [c.firstName, c.lastName].filter(Boolean).join(" ");
 
 const fc = (c) => "$" + (c / 100).toFixed(2);
 const fd = (d) => "$" + parseFloat(d || 0).toFixed(2);
@@ -241,6 +255,72 @@ const btnSmall = (background, color = "#fff") => ({
   cursor: "pointer",
 });
 
+// 44px mobile touch target (CLAUDE.md). Spread into a button's style; desktop
+// density is unchanged because it returns nothing off mobile.
+const touch = (isMobile) =>
+  isMobile
+    ? {
+        minHeight: 44,
+        minWidth: 44,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }
+    : null;
+
+// Persistent failure text shown inside the control that failed (the page-level
+// flash banner clears in 3 s and sits behind the full-screen mobile dialogs).
+const errorSt = {
+  padding: "8px 12px",
+  borderRadius: 8,
+  background: `${D.red}22`,
+  border: `1px solid ${D.red}`,
+  color: D.red,
+  fontSize: 14,
+  marginTop: 10,
+};
+
+// Visible caption for a settings control. A text/number/textarea caption is a
+// real <label htmlFor>; a boolean toggle is named by its own aria-label, so its
+// caption stays plain text (a label there would toggle it on click).
+function SettingCaption({ htmlFor, children }) {
+  const Tag = htmlFor ? "label" : "div";
+  return (
+    <Tag
+      {...(htmlFor ? { htmlFor } : {})}
+      style={{
+        display: "block",
+        fontSize: 14,
+        color: D.muted,
+        marginBottom: 4,
+        textTransform: "uppercase",
+        letterSpacing: 0.5,
+      }}
+    >
+      {children}
+    </Tag>
+  );
+}
+
+// A customer search result: a native button so Tab reaches it and Enter or
+// Space picks it, drawn like the plain row it replaces.
+const resultBtnSt = (isMobile, padding) => ({
+  display: "block",
+  width: "100%",
+  boxSizing: "border-box",
+  padding,
+  background: "none",
+  border: "none",
+  borderBottom: `1px solid ${D.border}33`,
+  borderRadius: 0,
+  textAlign: "left",
+  font: "inherit",
+  fontSize: 14,
+  color: D.text,
+  cursor: "pointer",
+  ...(isMobile ? { minHeight: 44 } : {}),
+});
+
 // The flat 6-tab bar is grouped into parent sections, each revealing its leaf
 // tabs in a sub-row. `tab` still holds the LEAF key, so every {tab === "..."}
 // render block below is unchanged.
@@ -312,6 +392,7 @@ function inboundConfirmedMessage(result) {
 // referral link or named a referrer. The office picks the referrer (a
 // suggestion or a search result), then confirms; or marks "not a referral".
 function InboundReferralCard({ item, onDone, flash }) {
+  const isMobile = useIsMobile();
   const [chosen, setChosen] = useState(null);
   const [search, setSearch] = useState(item.evidence.spokenName || "");
   const [results, setResults] = useState([]);
@@ -392,7 +473,7 @@ function InboundReferralCard({ item, onDone, flash }) {
       <button
         onClick={() => setChosen(c)}
         disabled={busy}
-        style={btnSmall(D.card, D.heading)}
+        style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
       >
         Choose
       </button>
@@ -447,18 +528,28 @@ function InboundReferralCard({ item, onDone, flash }) {
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
             {item.creditsNow
-              ? "Both accounts get the $25 credit now. No reward text or email goes out."
-              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit, with the usual reward text.`}{" "}
+              ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
+              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}
             A referrer's 3rd, 5th or 10th referral also sends the usual milestone text.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={confirm} disabled={busy} style={btnPrimary}>
+            <button
+              onClick={confirm}
+              disabled={busy}
+              style={{ ...btnPrimary, ...touch(isMobile) }}
+            >
               {busy ? "..." : "Confirm"}
             </button>
             <button
               onClick={() => setChosen(null)}
               disabled={busy}
-              style={{ ...btnPrimary, background: D.card, color: D.heading, border: `1px solid ${D.border}` }}
+              style={{
+                ...btnPrimary,
+                background: D.card,
+                color: D.heading,
+                border: `1px solid ${D.border}`,
+                ...touch(isMobile),
+              }}
             >
               Cancel
             </button>
@@ -503,13 +594,17 @@ function InboundReferralCard({ item, onDone, flash }) {
           {dismissing ? (
             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, fontSize: 14, color: D.text }}>
               Remove {firstName} from this list for good?
-              <button onClick={dismiss} disabled={busy} style={btnSmall(D.teal)}>
+              <button
+                onClick={dismiss}
+                disabled={busy}
+                style={{ ...btnSmall(D.teal), ...touch(isMobile) }}
+              >
                 Yes, not a referral
               </button>
               <button
                 onClick={() => setDismissing(false)}
                 disabled={busy}
-                style={btnSmall(D.card, D.heading)}
+                style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
               >
                 Cancel
               </button>
@@ -519,7 +614,7 @@ function InboundReferralCard({ item, onDone, flash }) {
               <button
                 onClick={() => setDismissing(true)}
                 disabled={busy}
-                style={btnSmall(D.card, D.muted)}
+                style={{ ...btnSmall(D.card, D.muted), ...touch(isMobile) }}
               >
                 Not a referral
               </button>
@@ -531,9 +626,48 @@ function InboundReferralCard({ item, onDone, flash }) {
   );
 }
 
+// A failed read is not an empty result: say so, and offer a retry.
+function ErrorRow({ what, onRetry }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 12,
+        flexWrap: "wrap",
+        padding: "10px 14px",
+        borderRadius: 6,
+        background: `${D.red}22`,
+        border: `1px solid ${D.red}`,
+        color: D.red,
+        fontSize: 14,
+      }}
+    >
+      <span>Could not load {what}. This is not an empty list.</span>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          style={{ ...btnSmall(D.card, D.red), border: `1px solid ${D.red}` }}
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
+const PROMOTERS_PAGE_SIZE = 50;
+
 export default function ReferralsPageV2() {
   const isMobile = useIsMobile();
-  const [tab, setTab] = useState("dashboard");
+  // `?tab=queue` (the new-referral bell row's link) opens that tab on first render.
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState(() => {
+    const wanted = searchParams.get("tab");
+    return wanted && Object.hasOwn(REFERRALS_LEAF_BY_KEY, wanted) ? wanted : "dashboard";
+  });
   const [stats, setStats] = useState(null);
   const [promoters, setPromoters] = useState([]);
   const [queue, setQueue] = useState([]);
@@ -543,6 +677,19 @@ export default function ReferralsPageV2() {
   const [analytics, setAnalytics] = useState(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  // A failed read is tracked apart from an empty result, per section.
+  const [loadErrors, setLoadErrors] = useState({});
+  // Promoters tab rows. `promoters` stays the unsearched first page (the
+  // Dashboard's Top Promoters reads it); `promoterRows` follows the search box
+  // and "Load more".
+  const [promoterRows, setPromoterRows] = useState([]);
+  const [promoterPage, setPromoterPage] = useState(1);
+  const [promoterHasMore, setPromoterHasMore] = useState(false);
+  const [promoterBusy, setPromoterBusy] = useState(false);
+  const [promoterError, setPromoterError] = useState(false);
+  const promoterReq = useRef(0);
+  const promoterLast = useRef(["", 1]);
+  const searchSeen = useRef("");
   const [msg, setMsg] = useState(null);
 
   // Modals
@@ -550,26 +697,87 @@ export default function ReferralsPageV2() {
   const [enrollModal, setEnrollModal] = useState(false);
   const [settingsEditing, setSettingsEditing] = useState(null);
 
-  // Customer search for enroll/convert
+  // Customer search for enroll/convert. custReq numbers each lookup so a
+  // reply for an older query, or one landing after a pick, a clear or a
+  // close, is dropped.
   const [custSearch, setCustSearch] = useState("");
   const [custResults, setCustResults] = useState([]);
+  const custReq = useRef(0);
+
+  // Dialog + payout request state. A request in flight disables its control;
+  // a failure stays inside the dialog (or beside the payout) with the draft kept.
+  const inFlight = useRef(new Set());
+  const [convertPending, setConvertPending] = useState(false);
+  const [convertError, setConvertError] = useState("");
+  const [enrollPending, setEnrollPending] = useState(false);
+  const [enrollError, setEnrollError] = useState("");
+  const [approvingId, setApprovingId] = useState(null);
+  const [payoutError, setPayoutError] = useState(null); // { id, message }
+  const convertTitleId = useId();
+  const enrollTitleId = useId();
+  const tierSelectRef = useRef(null);
+
+  const closeConvert = () => {
+    if (inFlight.current.has("convert")) return;
+    custReq.current += 1;
+    setConvertModal(null);
+    setConvertError("");
+    setCustSearch("");
+    setCustResults([]);
+  };
+  const closeEnroll = () => {
+    if (inFlight.current.has("enroll")) return;
+    custReq.current += 1;
+    setEnrollModal(false);
+    setEnrollError("");
+    setCustSearch("");
+    setCustResults([]);
+  };
+  // Focus moves into the dialog on open, Tab stays inside, Escape closes, and
+  // focus returns to the control that opened it (shared hook, same as ui/Dialog).
+  const convertDialogRef = useModalFocus(Boolean(convertModal), closeConvert);
+  const enrollDialogRef = useModalFocus(enrollModal, closeEnroll);
 
   const load = useCallback(() => {
     setLoading(true);
+    const FAILED = Symbol("failed");
+    const read = (path) => af(path).catch(() => FAILED);
     Promise.all([
-      af("/admin/referrals/stats").catch(() => null),
-      af("/admin/referrals/promoters?status=all").catch(() => ({
-        promoters: [],
-      })),
-      af("/admin/referrals/queue").catch(() => ({ referrals: [] })),
-      af("/admin/referrals/payouts").catch(() => ({ payouts: [] })),
-      af("/admin/referrals/inbound").catch(() => ({ enabled: false, items: [] })),
+      read("/admin/referrals/stats"),
+      read("/admin/referrals/promoters?status=all"),
+      read("/admin/referrals/queue"),
+      read("/admin/referrals/payouts"),
+      read("/admin/referrals/inbound"),
     ]).then(([s, p, q, pay, inb]) => {
-      setStats(s);
-      setPromoters(p.promoters || []);
-      setQueue(q.referrals || []);
-      setPayouts(pay.payouts || []);
-      setInbound({ enabled: Boolean(inb.enabled), items: inb.items || [] });
+      setLoadErrors({
+        stats: s === FAILED,
+        promoters: p === FAILED,
+        // The Promoters tab's copy of the first-page failure; a later
+        // successful search or page clears it (the Dashboard keeps its own).
+        promotersTab: p === FAILED,
+        queue: q === FAILED,
+        payouts: pay === FAILED,
+        inbound: inb === FAILED,
+      });
+      setStats(s === FAILED ? null : s);
+      const firstPage = p === FAILED ? [] : p.promoters || [];
+      setPromoters(firstPage);
+      promoterReq.current += 1;
+      setPromoterRows(firstPage);
+      setPromoterPage(1);
+      setPromoterHasMore(p === FAILED ? false : Boolean(p.hasMore));
+      setPromoterError(false);
+      setPromoterBusy(false);
+      setSearch("");
+      searchSeen.current = "";
+      setQueue(q === FAILED ? [] : q.referrals || []);
+      setPayouts(pay === FAILED ? [] : pay.payouts || []);
+      // A failed inbound read says nothing about whether inbound is on.
+      setInbound(
+        inb === FAILED
+          ? { enabled: false, items: [] }
+          : { enabled: Boolean(inb.enabled), items: inb.items || [] },
+      );
       setLoading(false);
     });
   }, []);
@@ -578,19 +786,72 @@ export default function ReferralsPageV2() {
     load();
   }, [load]);
 
+  // Promoters tab: ask the server (search + paging) so rows past the first
+  // page can be found. page 1 replaces the rows, later pages append.
+  const fetchPromoters = useCallback((term, page) => {
+    const req = ++promoterReq.current;
+    promoterLast.current = [term, page];
+    const params = new URLSearchParams({ status: "all" });
+    if (term) params.set("search", term);
+    if (page > 1) {
+      params.set("page", String(page));
+      params.set("limit", String(PROMOTERS_PAGE_SIZE));
+    }
+    setPromoterBusy(true);
+    setPromoterError(false);
+    af(`/admin/referrals/promoters?${params}`)
+      .then((r) => {
+        if (req !== promoterReq.current) return;
+        const rows = r.promoters || [];
+        setPromoterRows((prev) => (page > 1 ? [...prev, ...rows] : rows));
+        setPromoterPage(page);
+        setPromoterHasMore(Boolean(r.hasMore));
+        setPromoterBusy(false);
+        setLoadErrors((e) => (e.promotersTab ? { ...e, promotersTab: false } : e));
+      })
+      .catch(() => {
+        if (req !== promoterReq.current) return;
+        setPromoterError(true);
+        setPromoterBusy(false);
+      });
+  }, []);
+
   useEffect(() => {
-    if (tab === "settings" && !settings)
-      af("/admin/referrals/settings")
-        .then((r) => setSettings(r.settings))
-        .catch(() => {});
-    if (tab === "analytics" && !analytics)
-      af("/admin/referrals/analytics")
-        .then((r) => setAnalytics(r))
-        .catch(() => {});
+    const term = search.trim();
+    if (term === searchSeen.current) return undefined;
+    const t = setTimeout(() => {
+      searchSeen.current = term;
+      fetchPromoters(term, 1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [search, fetchPromoters]);
+
+  const [settingsError, setSettingsError] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState(false);
+  const loadSettings = useCallback(() => {
+    setSettingsError(false);
+    af("/admin/referrals/settings")
+      .then((r) => setSettings(r.settings))
+      .catch(() => setSettingsError(true));
+  }, []);
+  const loadAnalytics = useCallback(() => {
+    setAnalyticsError(false);
+    af("/admin/referrals/analytics")
+      .then((r) => setAnalytics(r))
+      .catch(() => setAnalyticsError(true));
+  }, []);
+
+  useEffect(() => {
+    if (tab === "settings" && !settings) loadSettings();
+    if (tab === "analytics" && !analytics) loadAnalytics();
   }, [tab]);
 
+  // Editing the text also drops the convert dialog's picked customer, so the
+  // field can never show one name while Convert sends another customer's id.
   const searchCustomers = async (q) => {
+    const req = ++custReq.current;
     setCustSearch(q);
+    setConvertModal((m) => (m?.customerId ? { ...m, customerId: "" } : m));
     if (q.length < 2) {
       setCustResults([]);
       return;
@@ -599,8 +860,10 @@ export default function ReferralsPageV2() {
       const r = await af(
         `/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
       );
+      if (req !== custReq.current) return;
       setCustResults(r.customers || []);
     } catch {
+      if (req !== custReq.current) return;
       setCustResults([]);
     }
   };
@@ -611,18 +874,25 @@ export default function ReferralsPageV2() {
   };
 
   const handleEnroll = async (customerId) => {
+    if (inFlight.current.has("enroll")) return;
+    inFlight.current.add("enroll");
+    setEnrollPending(true);
+    setEnrollError("");
     try {
       await af("/admin/referrals/enroll", {
         method: "POST",
         body: JSON.stringify({ customerId }),
       });
+      inFlight.current.delete("enroll");
+      setEnrollPending(false);
       flash("Promoter enrolled");
-      setEnrollModal(false);
-      setCustSearch("");
-      setCustResults([]);
+      closeEnroll();
       load();
     } catch (e) {
-      flash("Error: " + e.message);
+      // Keep the dialog open; the page flash sits behind it on mobile.
+      inFlight.current.delete("enroll");
+      setEnrollPending(false);
+      setEnrollError(e.message || "Could not enroll this customer.");
     }
   };
 
@@ -644,7 +914,18 @@ export default function ReferralsPageV2() {
   };
 
   const handleConvert = async () => {
-    if (!convertModal) return;
+    if (!convertModal || inFlight.current.has("convert")) return;
+    // Text in the search field means a customer link was intended; it is
+    // linked only by picking a result.
+    if (custSearch.trim() && !convertModal.customerId) {
+      setConvertError(
+        "Pick the customer from the search results, or clear the search to convert without one.",
+      );
+      return;
+    }
+    inFlight.current.add("convert");
+    setConvertPending(true);
+    setConvertError("");
     try {
       await af(`/admin/referrals/${convertModal.id}/convert`, {
         method: "POST",
@@ -654,21 +935,38 @@ export default function ReferralsPageV2() {
           monthlyValue: convertModal.monthlyValue,
         }),
       });
+      inFlight.current.delete("convert");
+      setConvertPending(false);
       flash("Referral converted");
-      setConvertModal(null);
+      closeConvert();
       load();
     } catch (e) {
-      flash("Error: " + e.message);
+      // Keep the dialog and its draft open; show the reason inside it.
+      inFlight.current.delete("convert");
+      setConvertPending(false);
+      setConvertError(e.message || "Could not convert this referral.");
     }
   };
 
   const handleApprovePayout = async (id) => {
-    await af(`/admin/referrals/payouts/${id}/approve`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    flash("Payout approved");
-    load();
+    if (inFlight.current.has(`payout:${id}`)) return;
+    inFlight.current.add(`payout:${id}`);
+    setApprovingId(id);
+    setPayoutError(null);
+    try {
+      await af(`/admin/referrals/payouts/${id}/approve`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      flash("Payout approved");
+      load();
+    } catch (e) {
+      // e.g. 400 "Insufficient promoter balance for this payout"
+      setPayoutError({ id, message: e.message || "Could not approve this payout." });
+    } finally {
+      inFlight.current.delete(`payout:${id}`);
+      setApprovingId(null);
+    }
   };
 
   const handleSaveSettings = async () => {
@@ -741,14 +1039,6 @@ export default function ReferralsPageV2() {
     REFERRALS_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
     REFERRALS_TAB_GROUPS[0];
 
-  const filteredPromoters = search
-    ? promoters.filter((p) =>
-        `${p.first_name} ${p.last_name} ${p.customer_phone} ${p.referral_code}`
-          .toLowerCase()
-          .includes(search.toLowerCase()),
-      )
-    : promoters;
-
   return (
     <div>
       {" "}
@@ -757,7 +1047,14 @@ export default function ReferralsPageV2() {
         icon={Gift}
         sections={REFERRALS_TAB_GROUPS.map((g) =>
           g.key === "queue"
-            ? { key: g.key, label: `${g.label} (${queue.length + inbound.items.length})`, Icon: g.Icon }
+            ? {
+                key: g.key,
+                label:
+                  loadErrors.queue || loadErrors.inbound
+                    ? g.label
+                    : `${g.label} (${queue.length + inbound.items.length})`,
+                Icon: g.Icon,
+              }
             : { key: g.key, label: g.label, Icon: g.Icon },
         )}
         activeKey={activeGroup.key}
@@ -792,9 +1089,13 @@ export default function ReferralsPageV2() {
         </div>
       )}
       {/* DASHBOARD */}
-      {tab === "dashboard" && stats && (
+      {tab === "dashboard" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {" "}
+          {!stats && loadErrors.stats && (
+            <ErrorRow what="referral stats" onRetry={load} />
+          )}
+          {stats && (
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             {" "}
             <Stat
@@ -823,7 +1124,8 @@ export default function ReferralsPageV2() {
               label="Program ROI"
               value={`${stats.programROI}%`}
             />{" "}
-          </div>{" "}
+          </div>
+          )}{" "}
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
             {" "}
             <div
@@ -847,7 +1149,9 @@ export default function ReferralsPageV2() {
               >
                 Recent Activity
               </div>
-              {queue.length === 0 ? (
+              {loadErrors.queue ? (
+                <ErrorRow what="recent referrals" onRetry={load} />
+              ) : queue.length === 0 ? (
                 <div
                   style={{
                     color: D.muted,
@@ -917,7 +1221,11 @@ export default function ReferralsPageV2() {
               >
                 Top Promoters
               </div>
-              {promoters.filter((p) => p.total_referrals_converted > 0).length === 0 && (
+              {loadErrors.promoters && (
+                <ErrorRow what="top promoters" onRetry={load} />
+              )}
+              {!loadErrors.promoters &&
+                promoters.filter((p) => p.total_referrals_converted > 0).length === 0 && (
                 <div style={{ fontSize: 14, color: D.muted }}>
                   No converted referrals yet
                 </div>
@@ -980,6 +1288,9 @@ export default function ReferralsPageV2() {
       {/* QUEUE */}
       {tab === "queue" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {loadErrors.inbound && (
+            <ErrorRow what="inbound referrals needing confirmation" onRetry={load} />
+          )}
           {inbound.enabled && inbound.items.length > 0 && (
             <div
               style={{
@@ -1118,9 +1429,11 @@ export default function ReferralsPageV2() {
                 marginBottom: 14,
               }}
             >
-              Referral Queue ({queue.length})
+              Referral Queue ({loadErrors.queue ? "--" : queue.length})
             </div>
-            {queue.length === 0 ? (
+            {loadErrors.queue ? (
+              <ErrorRow what="the referral queue" onRetry={load} />
+            ) : queue.length === 0 ? (
               <div
                 style={{
                   color: D.muted,
@@ -1178,7 +1491,7 @@ export default function ReferralsPageV2() {
                           <div
                             style={{
                               display: "flex",
-                              gap: 4,
+                              gap: isMobile ? 8 : 4,
                               justifyContent: "flex-end",
                             }}
                           >
@@ -1187,7 +1500,7 @@ export default function ReferralsPageV2() {
                                 onClick={() =>
                                   handleStatusChange(r.id, "contacted")
                                 }
-                                style={btnSmall(D.teal)}
+                                style={{ ...btnSmall(D.teal), ...touch(isMobile) }}
                               >
                                 Contacted
                               </button>
@@ -1209,7 +1522,7 @@ export default function ReferralsPageV2() {
                                     monthlyValue: "",
                                   })
                                 }
-                                style={btnSmall(D.green)}
+                                style={{ ...btnSmall(D.green), ...touch(isMobile) }}
                               >
                                 Convert
                               </button>
@@ -1224,6 +1537,7 @@ export default function ReferralsPageV2() {
                                 style={{
                                   ...btnSmall(D.card, D.red),
                                   border: `1px solid ${D.red}`,
+                                  ...touch(isMobile),
                                 }}
                               >
                                 Reject
@@ -1256,6 +1570,16 @@ export default function ReferralsPageV2() {
               Enroll Customer
             </button>{" "}
           </div>{" "}
+          {loadErrors.promotersTab && (
+            <ErrorRow what="promoters" onRetry={load} />
+          )}
+          {!loadErrors.promotersTab && promoterError && (
+            <ErrorRow
+              what="promoters"
+              onRetry={() => fetchPromoters(...promoterLast.current)}
+            />
+          )}
+          {!loadErrors.promotersTab && (
           <div
             style={{
               background: D.card,
@@ -1281,7 +1605,7 @@ export default function ReferralsPageV2() {
                 </tr>
               </thead>{" "}
               <tbody>
-                {filteredPromoters.map((p) => (
+                {promoterRows.map((p) => (
                   <tr key={p.id}>
                     {" "}
                     <td style={tdSt}>
@@ -1311,6 +1635,7 @@ export default function ReferralsPageV2() {
                             cursor: "pointer",
                             textTransform: "uppercase",
                             letterSpacing: "0.06em",
+                            ...touch(isMobile),
                           }}
                         >
                           Copy Link
@@ -1336,7 +1661,42 @@ export default function ReferralsPageV2() {
                 ))}
               </tbody>{" "}
             </table>{" "}
-          </div>{" "}
+            {promoterRows.length === 0 && !promoterBusy && !promoterError && (
+              <div
+                style={{
+                  color: D.muted,
+                  padding: 20,
+                  textAlign: "center",
+                  fontSize: 14,
+                }}
+              >
+                {search.trim() ? "No promoters match this search" : "No promoters yet"}
+              </div>
+            )}
+            {promoterBusy && (
+              <div
+                style={{
+                  color: D.muted,
+                  padding: 12,
+                  textAlign: "center",
+                  fontSize: 14,
+                }}
+              >
+                Loading promoters...
+              </div>
+            )}
+            {!promoterBusy && !promoterError && promoterHasMore && (
+              <div style={{ padding: 12, textAlign: "center" }}>
+                <button
+                  onClick={() => fetchPromoters(search.trim(), promoterPage + 1)}
+                  style={btnSmall(D.teal)}
+                >
+                  Load more
+                </button>
+              </div>
+            )}
+          </div>
+          )}{" "}
         </div>
       )}
       {/* PAYOUTS */}
@@ -1360,7 +1720,9 @@ export default function ReferralsPageV2() {
           >
             Payouts
           </div>
-          {payouts.length === 0 ? (
+          {loadErrors.payouts ? (
+            <ErrorRow what="payouts" onRetry={load} />
+          ) : payouts.length === 0 ? (
             <div
               style={{
                 color: D.muted,
@@ -1415,10 +1777,31 @@ export default function ReferralsPageV2() {
                         {p.status === "pending" && (
                           <button
                             onClick={() => handleApprovePayout(p.id)}
-                            style={btnSmall(D.green)}
+                            disabled={approvingId === p.id}
+                            style={{
+                              ...btnSmall(D.green),
+                              ...touch(isMobile),
+                              ...(approvingId === p.id ? { opacity: 0.6 } : {}),
+                            }}
                           >
-                            Approve
+                            {approvingId === p.id ? "Approving..." : "Approve"}
                           </button>
+                        )}
+                        {payoutError?.id === p.id && (
+                          <div
+                            role="alert"
+                            style={{
+                              color: D.red,
+                              fontSize: 14,
+                              marginTop: 6,
+                              maxWidth: 260,
+                              marginLeft: "auto",
+                              fontFamily: "inherit",
+                              textAlign: "right",
+                            }}
+                          >
+                            {payoutError.message}
+                          </div>
                         )}
                       </td>{" "}
                     </tr>
@@ -1430,6 +1813,15 @@ export default function ReferralsPageV2() {
         </div>
       )}
       {/* SETTINGS */}
+      {tab === "settings" && !settings && (
+        settingsError ? (
+          <ErrorRow what="settings" onRetry={loadSettings} />
+        ) : (
+          <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+            Loading settings...
+          </div>
+        )
+      )}
       {tab === "settings" &&
         settings &&
         (() => {
@@ -1625,22 +2017,19 @@ export default function ReferralsPageV2() {
                     {section.items.map((f) => (
                       <div key={f.key}>
                         {" "}
-                        <div
-                          style={{
-                            fontSize: 14,
-                            color: D.muted,
-                            marginBottom: 4,
-                            textTransform: "uppercase",
-                            letterSpacing: 0.5,
-                          }}
+                        <SettingCaption
+                          htmlFor={f.type === "boolean" ? undefined : `ref-setting-${f.key}`}
                         >
                           {f.label}
-                        </div>
+                        </SettingCaption>
                         {f.type === "boolean" ? (
                           <button
+                            type="button"
+                            aria-label={`${f.label}: ${s[f.key] ? "Enabled" : "Disabled"}`}
                             onClick={() => isEditing && upd(f.key, !s[f.key])}
                             disabled={!isEditing}
                             style={{
+                              ...touch(isMobile),
                               display: "inline-flex",
                               alignItems: "center",
                               gap: 6,
@@ -1674,6 +2063,7 @@ export default function ReferralsPageV2() {
                           </button>
                         ) : f.type === "textarea" ? (
                           <textarea
+                            id={`ref-setting-${f.key}`}
                             value={s[f.key] || ""}
                             onChange={(e) => upd(f.key, e.target.value)}
                             disabled={!isEditing}
@@ -1686,17 +2076,19 @@ export default function ReferralsPageV2() {
                           />
                         ) : (
                           <input
+                            id={`ref-setting-${f.key}`}
                             type={f.type}
                             value={s[f.key] ?? ""}
                             onChange={(e) =>
                               upd(
                                 f.key,
                                 f.type === "number"
-                                  ? parseInt(e.target.value) || 0
+                                  ? Math.max(0, parseInt(e.target.value) || 0)
                                   : e.target.value,
                               )
                             }
                             disabled={!isEditing}
+                            {...(f.type === "number" ? { min: 0, step: 1 } : {})}
                             style={{ ...inputSt, opacity: isEditing ? 1 : 0.6 }}
                           />
                         )}
@@ -1712,9 +2104,13 @@ export default function ReferralsPageV2() {
       {tab === "analytics" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {!analytics ? (
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-              Loading analytics...
-            </div>
+            analyticsError ? (
+              <ErrorRow what="analytics" onRetry={loadAnalytics} />
+            ) : (
+              <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+                Loading analytics...
+              </div>
+            )
           ) : (
             <>
               {/* Funnel */}
@@ -1900,10 +2296,14 @@ export default function ReferralsPageV2() {
             justifyContent: "center",
             zIndex: 999,
               }}
-          onClick={() => setConvertModal(null)}
+          onClick={closeConvert}
         >
           {" "}
           <div
+            ref={convertDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={convertTitleId}
             style={{
               background: D.card,
               borderRadius: 16,
@@ -1930,6 +2330,7 @@ export default function ReferralsPageV2() {
           >
             {" "}
             <div
+              id={convertTitleId}
               style={{
                 fontSize: 18,
                 fontWeight: 500,
@@ -1946,10 +2347,15 @@ export default function ReferralsPageV2() {
               {" "}
               <div>
                 {" "}
-                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
+                <label
+                  htmlFor="ref-convert-customer"
+                  style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
+                >
                   Customer Search
-                </div>{" "}
+                </label>{" "}
                 <input
+                  id="ref-convert-customer"
+                  autoFocus
                   placeholder="Search customer name or phone..."
                   value={custSearch}
                   onChange={(e) => searchCustomers(e.target.value)}
@@ -1967,34 +2373,38 @@ export default function ReferralsPageV2() {
                     }}
                   >
                     {custResults.map((c) => (
-                      <div
+                      <button
+                        type="button"
                         key={c.id}
                         onClick={() => {
+                          custReq.current += 1;
                           setConvertModal((m) => ({ ...m, customerId: c.id }));
-                          setCustSearch(`${c.first_name} ${c.last_name}`);
+                          setCustSearch(customerDisplayName(c));
                           setCustResults([]);
+                          setConvertError("");
+                          // The pressed result unmounts; keep focus in the form.
+                          tierSelectRef.current?.focus();
                         }}
-                        style={{
-                          padding: "8px 12px",
-                          cursor: "pointer",
-                          borderBottom: `1px solid ${D.border}33`,
-                          fontSize: 14,
-                          color: D.text,
-                        }}
+                        style={resultBtnSt(isMobile, "8px 12px")}
                       >
-                        {c.first_name} {c.last_name}{" "}
+                        {customerDisplayName(c)}{" "}
                         <span style={{ color: D.muted }}>({c.phone})</span>{" "}
-                      </div>
+                      </button>
                     ))}
                   </div>
                 )}
               </div>{" "}
               <div>
                 {" "}
-                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
+                <label
+                  htmlFor="ref-convert-tier"
+                  style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
+                >
                   WaveGuard Tier
-                </div>{" "}
+                </label>{" "}
                 <select
+                  id="ref-convert-tier"
+                  ref={tierSelectRef}
                   value={convertModal.tier}
                   onChange={(e) =>
                     setConvertModal((m) => ({ ...m, tier: e.target.value }))
@@ -2012,10 +2422,14 @@ export default function ReferralsPageV2() {
               </div>{" "}
               <div>
                 {" "}
-                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
+                <label
+                  htmlFor="ref-convert-value"
+                  style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
+                >
                   Monthly Value ($)
-                </div>{" "}
+                </label>{" "}
                 <input
+                  id="ref-convert-value"
                   type="number"
                   placeholder="e.g. 79"
                   value={convertModal.monthlyValue}
@@ -2028,21 +2442,35 @@ export default function ReferralsPageV2() {
                   style={inputSt}
                 />{" "}
               </div>{" "}
+              {convertError && (
+                <div role="alert" style={errorSt}>
+                  {convertError}
+                </div>
+              )}
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 {" "}
                 <button
                   onClick={handleConvert}
-                  style={{ ...btnPrimary, background: D.green, flex: 1 }}
+                  disabled={convertPending}
+                  style={{
+                    ...btnPrimary,
+                    background: D.green,
+                    flex: 1,
+                    ...touch(isMobile),
+                    ...(convertPending ? { opacity: 0.6, cursor: "default" } : {}),
+                  }}
                 >
-                  Convert
+                  {convertPending ? "Converting..." : "Convert"}
                 </button>{" "}
                 <button
-                  onClick={() => setConvertModal(null)}
+                  onClick={closeConvert}
+                  disabled={convertPending}
                   style={{
                     ...btnPrimary,
                     background: "transparent",
                     border: `1px solid ${D.border}`,
                     color: D.muted,
+                    ...touch(isMobile),
                   }}
                 >
                   Cancel
@@ -2065,10 +2493,14 @@ export default function ReferralsPageV2() {
             justifyContent: "center",
             zIndex: 999,
               }}
-          onClick={() => setEnrollModal(false)}
+          onClick={closeEnroll}
         >
           {" "}
           <div
+            ref={enrollDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={enrollTitleId}
             style={{
               background: D.card,
               borderRadius: 16,
@@ -2095,6 +2527,7 @@ export default function ReferralsPageV2() {
           >
             {" "}
             <div
+              id={enrollTitleId}
               style={{
                 fontSize: 18,
                 fontWeight: 500,
@@ -2105,6 +2538,8 @@ export default function ReferralsPageV2() {
               Enroll Customer as Promoter
             </div>{" "}
             <input
+              aria-label="Search customers to enroll"
+              autoFocus
               placeholder="Search customer name or phone..."
               value={custSearch}
               onChange={(e) => searchCustomers(e.target.value)}
@@ -2121,29 +2556,35 @@ export default function ReferralsPageV2() {
                 }}
               >
                 {custResults.map((c) => (
-                  <div
+                  <button
+                    type="button"
                     key={c.id}
                     onClick={() => handleEnroll(c.id)}
+                    disabled={enrollPending}
                     style={{
-                      padding: "10px 14px",
-                      cursor: "pointer",
-                      borderBottom: `1px solid ${D.border}33`,
-                      fontSize: 14,
-                      color: D.text,
+                      ...resultBtnSt(isMobile, "10px 14px"),
+                      ...(enrollPending ? { opacity: 0.6, cursor: "default" } : {}),
                     }}
                   >
-                    {c.first_name} {c.last_name}{" "}
+                    {customerDisplayName(c)}{" "}
                     <span style={{ color: D.muted }}>({c.phone})</span>{" "}
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
+            {enrollPending && (
+              <div role="status" style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
+                Enrolling...
+              </div>
+            )}
+            {enrollError && (
+              <div role="alert" style={errorSt}>
+                {enrollError}
+              </div>
+            )}
             <button
-              onClick={() => {
-                setEnrollModal(false);
-                setCustSearch("");
-                setCustResults([]);
-              }}
+              onClick={closeEnroll}
+              disabled={enrollPending}
               style={{
                 ...btnPrimary,
                 background: "transparent",
@@ -2151,6 +2592,7 @@ export default function ReferralsPageV2() {
                 color: D.muted,
                 marginTop: 12,
                 width: "100%",
+                ...touch(isMobile),
               }}
             >
               Cancel

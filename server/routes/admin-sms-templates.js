@@ -147,6 +147,11 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // autopay-setup-link.js passes this same list to getTemplate at send time
   // and checks every active body in its read-only delivery preflight.
   autopay_setup_link: Object.freeze(['secure_link']),
+  // Cancellation confirmations with an open balance: the amount and the pay
+  // link ARE the reason this twin exists. cancellation-confirmations.js
+  // passes this same list at render time and falls back to the base copy.
+  service_cancellation_confirmation_balance: Object.freeze(['balance', 'pay_url']),
+  service_cancellation_end_of_term_confirmation_balance: Object.freeze(['balance', 'pay_url']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {

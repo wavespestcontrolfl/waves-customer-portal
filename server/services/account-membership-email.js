@@ -1115,9 +1115,16 @@ async function sendMembershipRenewalReminder({
   termId = null,
   lastServiceDate = null,
   idempotencyKey,
+  termitePlan = false,
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  // An annual prepay term notice (owner 2026-10-29): the customer pays 12
+  // months up front, so the email must not read "Billing cadence: monthly"
+  // or print the monthly rate. An empty monthlyRate drops the rate row (the
+  // renderer drops empty detail rows). The termite annual plan (15/7-day
+  // rungs share this sender) keeps its existing payload.
+  const prepaidYear = termitePlan ? {} : { billingCadence: '12 months prepaid', monthlyRate: '' };
   return sendTemplate({
     customerId,
     templateKey: 'membership.renewal_reminder',
@@ -1128,6 +1135,7 @@ async function sendMembershipRenewalReminder({
         membershipTier: customer.waveguard_tier,
         monthlyRate: customer.monthly_rate,
         membershipStatus: 'Active',
+        ...prepaidYear,
       }),
       renewal_days_out: clean(daysOut),
       renewal_notice_window: daysOut ? `${daysOut} days` : '',

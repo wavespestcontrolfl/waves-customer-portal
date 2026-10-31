@@ -120,6 +120,12 @@ describe('GATE_IB_READ_NOTES on, owner login', () => {
     expect(text).not.toContain('A1b2C3');
   });
 
+  test('a Google key in the newer AQ. format is removed; a short AQ. stays', () => {
+    const secret = 'A' + 'Q.' + 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3' + 'x_zzzzzzzz';
+    expect(scrubNote(`Use ${secret} for the photo tool`)).toEqual({ text: 'Use [removed] for the photo tool', removed: 1 });
+    expect(scrubNote('Grade AQ. ok, AQ.abc')).toEqual({ text: 'Grade AQ. ok, AQ.abc', removed: 0 });
+  });
+
   test('a rule line and ordinary punctuation are not mistaken for a secret', () => {
     const text = 'Phone 941-555-0100, call 5-6 pm.\n--------------------------------------------------\nGate: #4321 *';
     expect(scrubNote(text)).toEqual({ text, removed: 0 });

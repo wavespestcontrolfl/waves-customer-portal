@@ -2,6 +2,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockRouteScorecardEnabled = jest.fn();
 const mockGetDayScorecard = jest.fn();
+const mockEngineLive = jest.fn();
+const mockBuildEngine = jest.fn();
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
@@ -31,6 +33,14 @@ jest.mock('../services/scheduling/day-scorecard', () => {
   };
 });
 
+jest.mock('../config/feature-gates', () => ({
+  ...jest.requireActual('../config/feature-gates'),
+  routeEngineSummaryLive: (...args) => mockEngineLive(...args),
+}));
+jest.mock('../services/scheduling/route-engine-summary', () => ({
+  buildRouteEngineSummary: (...args) => mockBuildEngine(...args),
+}));
+
 const express = require('express');
 const scorecardRouter = require('../routes/admin-route-scorecard');
 
@@ -58,6 +68,7 @@ async function withServer(fn) {
 describe('admin route scorecard route', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockEngineLive.mockReturnValue(false);
   });
 
   test('requires admin authentication', async () => {
@@ -126,6 +137,56 @@ describe('admin route scorecard route', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/route-scorecard?from=2026-09-01&to=2026-09-08`, { headers: { Authorization: 'Bearer admin' } });
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe('GATE_ROUTE_ENGINE_SUMMARY', () => {
+    const url = (baseUrl) => `${baseUrl}/admin/route-scorecard?from=2026-09-01&to=2026-09-08`;
+    const admin = { headers: { Authorization: 'Bearer admin' } };
+
+    beforeEach(() => {
+      mockRouteScorecardEnabled.mockReturnValue(true);
+      mockGetDayScorecard.mockResolvedValue({ range: { from: '2026-09-01', to: '2026-09-08' }, driveModel: 'legacy', days: [] });
+    });
+
+    test('gate off: no engine key and the summary is never built', async () => {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(url(baseUrl), admin);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body).toEqual({ range: { from: '2026-09-01', to: '2026-09-08' }, driveModel: 'legacy', days: [] });
+        expect('engine' in body).toBe(false);
+        expect(mockBuildEngine).not.toHaveBeenCalled();
+      });
+    });
+
+    test('gate on: the payload carries the engine summary', async () => {
+      mockEngineLive.mockReturnValue(true);
+      mockBuildEngine.mockResolvedValue({ nights: [], totals: { movesMade: 3 }, cap: 10, windowNights: 7 });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(url(baseUrl), admin);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ driveModel: 'legacy', engine: { totals: { movesMade: 3 }, cap: 10 } });
+      });
+    });
+
+    test('gate on, summary throws: engine.unavailable and the scorecard still answers 200', async () => {
+      mockEngineLive.mockReturnValue(true);
+      mockBuildEngine.mockRejectedValue(new Error('db down'));
+      await withServer(async (baseUrl) => {
+        const res = await fetch(url(baseUrl), admin);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ driveModel: 'legacy', days: [], engine: { unavailable: 'summary failed' } });
+      });
+    });
+
+    test('a scorecard 404 or 400 never builds the summary', async () => {
+      mockEngineLive.mockReturnValue(true);
+      mockRouteScorecardEnabled.mockReturnValue(false);
+      await withServer(async (baseUrl) => {
+        expect((await fetch(url(baseUrl), admin)).status).toBe(404);
+        expect(mockBuildEngine).not.toHaveBeenCalled();
+      });
     });
   });
 });

@@ -282,10 +282,10 @@ describe('/call-complete AI backstop → Sandy → transfer (codex hook r21)', (
 describe('press-1 whisper', () => {
   test('a transferred row speaks the ≤20-word whisper; other rows keep today\'s lines', () => {
     const row = { metadata: JSON.stringify({ screen_caller_name: 'Pat Doe', relay_handoff: { context_available: true, caller_name: 'Pat Doe', intent: 'cancel service', unresolved_question: 'refund' } }) };
-    expect(connectingAnnouncement(row)).toBe('Sandy transfer from Pat Doe: cancel service; refund.');
-    expect(connectingAnnouncement({ metadata: { relay_handoff: { context_available: false } } })).toBe('Sandy transfer. The caller requested assistance; the summary was unavailable.');
+    expect(connectingAnnouncement(row)).toBe('Jennifer transfer from Pat Doe: cancel service; refund.');
+    expect(connectingAnnouncement({ metadata: { relay_handoff: { context_available: false } } })).toBe('Jennifer transfer. The caller requested assistance; the summary was unavailable.');
     // Both packet writes failed but the outcome stamp landed: still the generic Sandy whisper (P2).
-    expect(connectingAnnouncement({ metadata: { screen_caller_name: 'Pat Doe' }, call_outcome: 'ai_transferred' })).toBe('Sandy transfer. The caller requested assistance; the summary was unavailable.');
+    expect(connectingAnnouncement({ metadata: { screen_caller_name: 'Pat Doe' }, call_outcome: 'ai_transferred' })).toBe('Jennifer transfer. The caller requested assistance; the summary was unavailable.');
     expect(connectingAnnouncement({ metadata: { screen_caller_name: 'Pat Doe' } })).toBe('Connecting your call from Pat Doe.');
     expect(connectingAnnouncement(null)).toBe('Connecting your call from an unknown number.');
   });

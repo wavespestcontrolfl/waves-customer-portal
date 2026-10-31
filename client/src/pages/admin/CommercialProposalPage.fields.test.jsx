@@ -85,6 +85,7 @@ it('programs stay one Add program button until the first program', async () => {
   await mount({});
   expect(screen.queryByText('Service programs')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Add program' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Blank program' }));
   expect(screen.getByText('Service programs')).toBeInTheDocument();
   expect(screen.getByLabelText('Program frequency')).toHaveValue('4');
 });

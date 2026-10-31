@@ -405,7 +405,11 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
         </Table>
       </Card>
 
+      {/* Keyed by row so each open is a fresh sheet: a slow read for A that
+          lands after the operator closed A and opened B can never pair A's
+          contact, email or report link with B's send and link actions. */}
       <PhotoAssessmentDetailSheet
+        key={selected ? `${selected.type}:${selected.id}` : "closed"}
         open={!!selected}
         type={selected?.type}
         id={selected?.id}

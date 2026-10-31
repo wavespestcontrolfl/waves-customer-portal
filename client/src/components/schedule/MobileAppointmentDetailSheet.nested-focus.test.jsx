@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./MobileCustomerDetailSheet', () => ({ default: () => null }));
@@ -75,30 +75,41 @@ afterEach(() => {
 });
 
 describe('MobileAppointmentDetailSheet nested focus containment', () => {
-  it('does not pull Tab behind the real portaled Quick Move dialog and resumes its own focus contract afterward', async () => {
+  it('keeps Tab and Escape inside the portaled Quick Move dialog, returns focus to its opener, then resumes the Details focus contract', async () => {
     render(<Harness />);
     const opener = screen.getByRole('button', { name: 'Open appointment' });
     fireEvent.click(opener);
-    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Appointment details' })).toHaveFocus());
+    const details = await screen.findByRole('dialog', { name: 'Appointment details' });
+    await waitFor(() => expect(details).toHaveFocus());
 
     const quickMoveOpener = screen.getByRole('button', { name: 'Quick Move Appointment' });
     quickMoveOpener.focus();
     fireEvent.click(quickMoveOpener);
     const quickMove = screen.getByRole('dialog', { name: 'Quick Move Appointment' });
-    const quickMoveClose = within(quickMove).getByRole('button', { name: 'Close' });
-    quickMoveClose.focus();
+    // Focus moves into Quick Move, off the Details sheet underneath.
+    await waitFor(() => expect(quickMove.contains(document.activeElement)).toBe(true));
+    expect(details.contains(document.activeElement)).toBe(false);
 
-    const childTab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-    document.dispatchEvent(childTab);
-    expect(childTab.defaultPrevented).toBe(false);
-    expect(quickMoveClose).toHaveFocus();
+    // Tab (and Shift+Tab) cycle inside Quick Move and never reach Details.
+    for (let i = 0; i < 12; i += 1) {
+      const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: i % 2 === 1, bubbles: true, cancelable: true });
+      document.dispatchEvent(tab);
+      expect(tab.defaultPrevented).toBe(true);
+      expect(quickMove.contains(document.activeElement)).toBe(true);
+    }
+
+    // Escape closes Quick Move only; Details stays and focus returns to the
+    // control that opened Quick Move.
     fireEvent.keyDown(document, { key: 'Escape' });
-    expect(screen.getByRole('dialog', { name: 'Quick Move Appointment' })).toBeInTheDocument();
-
-    fireEvent.click(quickMoveClose);
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Quick Move Appointment' })).not.toBeInTheDocument());
-    fireEvent.keyDown(document, { key: 'Tab' });
-    expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus();
+    expect(screen.getByRole('dialog', { name: 'Appointment details' })).toBeInTheDocument();
+    expect(quickMoveOpener).toHaveFocus();
+
+    // Details owns Tab and Escape again.
+    const detailsTab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    document.dispatchEvent(detailsTab);
+    expect(detailsTab.defaultPrevented).toBe(true);
+    expect(details.contains(document.activeElement)).toBe(true);
 
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Appointment details' })).not.toBeInTheDocument());

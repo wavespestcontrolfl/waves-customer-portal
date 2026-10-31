@@ -1,7 +1,7 @@
 // Orphan-invoice adoption sweep (GATE_DUNNING_ADOPT_ORPHANS, dunning
 // unification PR 3): an invoice sent outside the direct-send path never got
-// an invoice_followup_sequences row and was left to the legacy
-// late-payment-checker.js alone.
+// an invoice_followup_sequences row and was left to the legacy late-payment
+// checker (deleted 2026-10-29) alone.
 //
 // Design (post Codex r1 rewrite): NO seeding pass and no post-insert release
 // — a candidate is either armed once, atomically, or left on the hand list.
@@ -29,9 +29,8 @@
 //
 // The live sweep runs candidate selection AND scheduling inside
 // runExclusive('late-payment-check', …) (server/utils/cron-lock.js, mocked
-// below) — the legacy checker's own lease — refusing outright
-// (refused: 'checker_lock_held') rather than racing an in-flight checker
-// run's history writes.
+// below) — refusing outright (refused: 'checker_lock_held') when another pod
+// holds the lease.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice-helpers', () => ({
@@ -78,13 +77,11 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
   delete process.env.GATE_DUNNING_LADDER_90;
-  delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
 });
 afterEach(() => {
   jest.useRealTimers();
   delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
   delete process.env.GATE_DUNNING_LADDER_90;
-  delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
 });
 
 // The `invoices as i` orphan-candidate query: records every filter clause so
@@ -265,7 +262,7 @@ describe('selectAdoptionCandidates (dry run)', () => {
     expect(orphanQuery.recorded.whereNulls).toEqual(expect.arrayContaining(['s.id', 'i.payer_id', 'c.deleted_at']));
     // Delivered statuses ONLY (never 'scheduled'/'sending' — not yet
     // actually delivered to the customer) — the same whitelist
-    // late-payment-checker.js's own candidate query uses.
+    // the retired late-payment checker's candidate query used.
     expect(orphanQuery.recorded.whereIn).toEqual(['i.status', ['sent', 'viewed', 'overdue']]);
     // "withdrawn to a payer" (payer_billed: stamp), same shape as runPending's own exclusion.
     expect(orphanQuery.recorded.withdrawnClause).toEqual([
@@ -529,24 +526,7 @@ describe('scheduleForInvoice(id, { adoption: true })', () => {
 });
 
 describe('adoptOrphanInvoices: live sweep locking', () => {
-  test('refused before the checker retires: no lock taken, nothing written', async () => {
-    const recentSent = tenAmET('2026-08-04');
-    setupFullDb({
-      orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: recentSent, sms_sent_at: null, created_at: recentSent,
-      }],
-    });
-
-    const result = await adoptOrphanInvoices({ dryRun: false });
-
-    expect(result).toEqual({ adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_running' });
-    expect(runExclusive).not.toHaveBeenCalled();
-    expect(db.transaction).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('adoption refused: GATE_LATE_PAYMENT_CHECKER_OFF is not live'));
-  });
-
   test('runs candidate selection and scheduling under runExclusive("late-payment-check", …, { recordHealth: false, waitForSlot: false })', async () => {
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     setupFullDb({ orphanRows: [] });
 
@@ -556,7 +536,6 @@ describe('adoptOrphanInvoices: live sweep locking', () => {
   });
 
   test('a lock refused as lease_held is reported refused: checker_lock_held, and candidate selection never runs', async () => {
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
     const recentSent = tenAmET('2026-08-04');
@@ -569,7 +548,7 @@ describe('adoptOrphanInvoices: live sweep locking', () => {
     const result = await adoptOrphanInvoices({ dryRun: false });
 
     expect(result).toEqual({ adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_lock_held' });
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("adoption refused this run: the late-payment checker's lock is held (lease_held)"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("adoption refused this run: the late-payment-check lock is held (lease_held)"));
     // Candidate selection (selectAdoptionCandidates -> `invoices as i`) runs
     // INSIDE the lock callback — a refused lock never reaches it.
     expect(db.mock.calls.some(([table]) => table === 'invoices as i')).toBe(false);
@@ -577,7 +556,6 @@ describe('adoptOrphanInvoices: live sweep locking', () => {
   });
 
   test('a genuinely eligible orphan is armed for real under an acquired lock', async () => {
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const oldSent = tenAmET('2026-06-21');
     const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent };
@@ -597,7 +575,6 @@ describe('adoptOrphanInvoices: live sweep locking', () => {
   });
 
   test('a candidate with legacy checker history is filtered inside the lock and never reaches scheduleForInvoice', async () => {
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const oldSent = tenAmET('2026-06-21');
     setupFullDb({
@@ -614,7 +591,6 @@ describe('adoptOrphanInvoices: live sweep locking', () => {
   // result carries a skipped ARRAY (truthy even when empty), so a success
   // must never be read as a refusal.
   test('a successful lock run reports the adopted row, never a refusal', async () => {
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const oldSent = tenAmET('2026-06-21');
     const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent };
@@ -639,7 +615,6 @@ describe('adoptOrphanInvoices: live sweep locking', () => {
 describe('runPending and the orphan sweep', () => {
   test('a failed adoption sweep never costs the day\'s due touches (Codex r2)', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     // Day 3 (step 0) is the same day on both cadences, so the ladder gate
     // does not re-time it: sent Sunday 08-02, due today.
@@ -662,27 +637,13 @@ describe('runPending and the orphan sweep', () => {
     const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
     // 'invoices as i' is deliberately NOT registered — a call to it throws,
     // proving adoption was never invoked when the gate is off.
-    setupFullDb({ batchReads: [[row]] });
+    setupFullDb({ batchReads: [[], [row]] }); // reopened revival read, then the batch
     const result = await runPending();
     expect(result).toEqual({ sent: 1, skipped: 0 });
-  });
-
-  test('adopt gate set while the legacy checker still runs: no sweep, one warning', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
-    // 'invoices as i' is NOT registered — a call to it throws, proving the
-    // sweep never ran with the checker gate unset.
-    setupFullDb({ batchReads: [[row]] });
-
-    const result = await runPending();
-
-    expect(result).toEqual({ sent: 1, skipped: 0 });
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('GATE_DUNNING_ADOPT_ORPHANS ignored: GATE_LATE_PAYMENT_CHECKER_OFF is not live'));
   });
 
   test('gate on: an adopted orphan sent 45 days ago lands on Day 60 with a future next_touch_at and is not sent this run', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const anchor = tenAmET('2026-06-21'); // 45 days before NOW (2026-08-05)
     const previewInvoice = {
@@ -698,7 +659,7 @@ describe('runPending and the orphan sweep', () => {
       insertedRow,
       // Landing computes a next_touch_at of 2026-08-20 directly at insert —
       // weeks past NOW — so this SAME run's revival reads (ladder on ⇒
-      // reviveLegacyFinishedSequences; checker retired ⇒
+      // reviveLegacyFinishedSequences; always ⇒
       // reviveReopenedLowStepSequences) and the main batch select (all
       // against `invoice_followup_sequences as s`) all find nothing due.
       batchReads: [[], [], []],
@@ -716,7 +677,6 @@ describe('runPending and the orphan sweep', () => {
 
   test('gate on: an orphan whose landing day is exactly today lands on tomorrow 10:00 NY instead — never sent this run', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const anchor = tenAmET('2026-07-06'); // Day 30 on both cadences — due today
     const previewInvoice = {

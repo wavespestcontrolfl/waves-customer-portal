@@ -6,8 +6,8 @@
   "start_url": "/admin/today",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#0f1923",
-  "theme_color": "#0ea5e9",
+  "background_color": "#FAFAFA",
+  "theme_color": "#18181B",
   "orientation": "portrait-primary",
   "icons": [
     {

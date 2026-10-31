@@ -35,6 +35,11 @@ jest.mock('../services/booking/create-scheduled-service', () => ({
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn() }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn() }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn() }));
+// GATE_ROUTE_CHECK_AUTO_SAVES reader stands in for arrival-route's (read at call time).
+jest.mock('../services/scheduling/arrival-route', () => ({
+  routeCheckAutoSavesLive: () => process.env.GATE_ROUTE_CHECK_AUTO_SAVES === 'true',
+  placeMovedVisit: jest.fn(async () => [1]),
+}));
 
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
@@ -44,6 +49,8 @@ const { assertAssignableTechnician } = require('../services/technician-eligibili
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { resolveAlert } = require('../services/dispatch-alerts');
 const { registerAppointment } = require('../services/appointment-reminders');
+const { placeMovedVisit } = require('../services/scheduling/arrival-route');
+const logger = require('../services/logger');
 const { bookCompletionFollowup } = require('../services/completion-followup-booking');
 
 const SOURCE = {
@@ -312,4 +319,48 @@ test('an inherited off-hour window (legacy :15 start) refuses before preview or 
   const commit = await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true });
   expect(commit.body.code).toBe('followup_window_invalid');
   expect(writes).toEqual([]);
+});
+
+// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b): the
+// follow-up is numbered in its technician's day, inside the write transaction.
+describe('GATE_ROUTE_CHECK_AUTO_SAVES', () => {
+  const book = () => bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, isAdmin: true, actorId: 'admin-1', sourceAction: 'admin_ib' });
+  afterEach(() => { delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES; });
+
+  test('gate off (unset): no placement, same booking', async () => {
+    const { writes } = install();
+    const out = await book();
+    expect(out.status).toBe(200);
+    expect(placeMovedVisit).not.toHaveBeenCalled();
+    expect(writes).toHaveLength(1);
+  });
+
+  test('gate on: placed once, on the write transaction after the insert, with its source and cache-only roads', async () => {
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    const { writes } = install();
+    const order = [];
+    const transaction = db.transaction;
+    const trxs = [];
+    db.transaction = jest.fn(async (fn) => {
+      const out = await transaction(async (trx) => { trxs.push(trx); return fn(trx); });
+      order.push('commit');
+      return out;
+    });
+    placeMovedVisit.mockImplementationOnce(async () => { order.push(`place:${writes.length}`); return [1]; });
+    const out = await book();
+    expect(out.status).toBe(200);
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    expect(placeMovedVisit).toHaveBeenCalledWith(trxs[0], { serviceId: 'fu-1', staffSave: true, source: 'completion_followup' });
+    expect(order).toEqual(['place:1', 'commit']);
+  });
+
+  test('gate on, a throwing placement: the booking still succeeds, one warning line', async () => {
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    install();
+    placeMovedVisit.mockRejectedValueOnce(new Error('route boom'));
+    const out = await book();
+    expect(out.status).toBe(200);
+    expect(out.body).toEqual(expect.objectContaining({ success: true, appointment: expect.objectContaining({ id: 'fu-1' }) }));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('route boom'));
+  });
 });

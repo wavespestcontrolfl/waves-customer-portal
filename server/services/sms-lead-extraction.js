@@ -293,6 +293,7 @@ async function ringLeadBell(leadId, extracted) {
     subject: { type: 'lead', id: String(leadId) },
     doneWhen: 'lead_contacted',
     who: 'person',
+    contact: true,
   }, {
     bell: true,
     dedupeKey: `sms-lead:${leadId}`,

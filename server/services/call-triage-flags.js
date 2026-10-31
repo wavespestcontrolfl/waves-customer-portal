@@ -932,6 +932,51 @@ function duplicateAddressCards(list, dropped) {
   return ADDRESS_UNVERIFIED_PEERS.filter((f) => list.includes(f));
 }
 
+// GATE_CALL_APPLICANT_HANDLING. A job applicant or a vendor/partner on the line
+// is not a customer: the cards that ask the office to finish a CUSTOMER record
+// (service address, name, email read-back, SMS consent capture, an unconfirmed
+// visit) have nothing to act on. Same shape as noActionCallCards: card codes
+// only. The route decision, the flags and the routing verdict keep everything.
+// Callers pass the gate value in, so this stays pure. `callback_number_needed`
+// and `caller_phone_missing` are NOT here: the office needs a number to reach
+// the applicant back.
+const THIRD_PARTY_CALL_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
+const THIRD_PARTY_CUSTOMER_ONLY_CARDS = Object.freeze([
+  'missing_service_address', 'low_confidence_address', 'missing_unit_number',
+  'address_unverified', 'address_unverifiable', 'address_validation_unavailable',
+  'address_not_validated', 'address_readback', 'address_recovered', 'out_of_service_area',
+  'second_service_address', 'multi_property_call',
+  'missing_first_name', 'missing_last_name', 'missing_required_customer_fields', 'name_email_mismatch',
+  'email_unverified', 'email_invalid',
+  'no_sms_consent_captured', 'sms_consent_missing',
+  'not_confirmed', 'ambiguous_scheduling',
+]);
+
+function isThirdPartyCallNature(extraction) {
+  return THIRD_PARTY_CALL_NATURES.has(extraction?.call_nature);
+}
+
+// A third-party call asks no service of its own only when it carries no
+// scheduling, no quote or price evidence and no service intent beyond the
+// 'quote_only' default the model files on applicant and vendor calls (AGENTS.md:
+// address cards drop on the service ask, never on a nature label alone). Unlike
+// callMakesNoServiceAsk, an existing-service intent (a callback, a complaint, a
+// cancellation) IS a service ask here: those promises keep their SLA tracking.
+// An applicant who asks for service at their own home keeps every card.
+function thirdPartyCallMakesNoServiceAsk(extraction) {
+  const status = String(extraction?.scheduling?.status || 'none');
+  if (!SCHEDULING_NO_ASK_STATUSES.has(status)) return false;
+  const sr = extraction?.service_request || {};
+  if (sr.quote_requested === true || sr.quote_promised === true || sr.price_discussed === true) return false;
+  return !sr.service_intent || sr.service_intent === 'quote_only';
+}
+
+function thirdPartyCustomerOnlyCards(extraction, { gateOn = false } = {}) {
+  if (gateOn !== true || !isThirdPartyCallNature(extraction)) return [];
+  if (!thirdPartyCallMakesNoServiceAsk(extraction)) return [];
+  return [...THIRD_PARTY_CUSTOMER_ONLY_CARDS];
+}
+
 function dropUnneededCallCards(flags, extraction, options) {
   const { canonicalStreet, preConstructionPretreat } = options || {};
   const list = Array.isArray(flags) ? flags : [];
@@ -3510,6 +3555,10 @@ module.exports = {
   dropUnneededCallCards,
   callEndedWithNothingToDo,
   noActionCallCards,
+  thirdPartyCustomerOnlyCards,
+  thirdPartyCallMakesNoServiceAsk,
+  isThirdPartyCallNature,
+  THIRD_PARTY_CUSTOMER_ONLY_CARDS,
   CALLBACK_SPAM_MOOT_CODES,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,

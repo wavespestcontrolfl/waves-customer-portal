@@ -4,7 +4,8 @@ const { etParts } = require('../utils/datetime-et');
 const { isDeepStrictEqual } = require('node:util');
 const featureGates = require('../config/feature-gates');
 const { activeProtocolProducts } = require('./lawn-protocol-retired');
-const { LAWN_V13_VERSION, BAHIA_TRACK, bahiaHasNoProgram } = require('./lawn-program');
+const { LAWN_V13_VERSION, BAHIA_TRACK, bahiaHasNoProgram, isAsNeededRow } = require('./lawn-program');
+const { roundSpotMonth } = require('./lawn-rounds');
 
 // The checked-in field reference and plan matcher are released with protocol
 // product/rate/gate changes. Portal publication may update DB-owned SOP and
@@ -233,20 +234,9 @@ async function withV13CapMetadata(knex, protocol, products) {
   return clamped;
 }
 
-async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false, includeBermudaRemoval = false } = {}) {
-  // An appointment's assigned version must not fall through to the currently
-  // active protocol when that assignment can no longer be resolved.
-  const assignedId = !protocolId && protocolKey ? await resolveAssignedProtocolId(knex, protocolKey, protocolVersion) : protocolId;
-  if (!assignedId && protocolKey) return null;
-  const protocol = assignedId
-    ? await getLawnProtocolById(knex, assignedId, { strict })
-    : await getActiveLawnProtocol(knex, { grassTrack, region, strict, planning });
-  // A visit pinned to the staged bahia version plans from nothing too (the rows stay for history).
-  if (!protocol || (planning && v13NoProgramRow(protocol))) return null;
-
-  const window = windowForVisit(protocol, windowKey, etParts(serviceDate).month);
-  if (!window) return { protocol, window: null, products: [], gates: protocol.gates };
-
+// The rows of one window, in sort order, with their catalog fields. Bermuda removal rows (migration 20261006190100) belong to the lawns
+// that asked for the step, never to the window as a whole: every reader leaves them out unless it names the account as a bermuda removal lawn.
+async function readWindowProducts(knex, window, { strict, includeBermudaRemoval }) {
   const productsQuery = activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
     .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
     .where('lpp.lawn_protocol_window_id', window.id)
@@ -264,18 +254,72 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
       'pc.moa_group',
     )
     .orderBy('lpp.sort_order', 'asc');
-  // The bermuda removal rows (migration 20261006190100) belong to the lawns that
-  // asked for the step, never to the window as a whole: every reader leaves them
-  // out unless it names the account as a bermuda removal lawn.
   if (!includeBermudaRemoval) require('./lawn-bermuda-removal').withoutBermudaRemovalRows(productsQuery, 'lpp');
   const productsRead = savepointRead(knex, () => productsQuery);
   const products = strict ? await productsRead : await productsRead.catch(() => []);
+  return products.map(normalizeProduct);
+}
+
+// The month whose window a visit reads when it is not pinned: the round's step month for a rounds visit, else the month of its date.
+const stepMonthOf = (roundStep, realMonth) => (roundStep ? roundStep.month : realMonth);
+const namedSpotWindow = (spotWindow) => (spotWindow ? { spotWindow } : {});
+
+// A 9x rounds visit (`roundStep`, lawn-rounds.js roundStepForVisit; a caller that already knows the spot month passes `spotMonth`): the
+// round window's own as-needed rows (the weed, disease and insect spots, the wetting agent, the curative granule, the fire ant add-on:
+// lawn-program.js isAsNeededRow) are replaced by those of the window of the REAL service date's month, with the St. Augustine green-up
+// exception (roundSpotMonth). `rows` are the round window's rows. Returns { rows, spotWindow }; the same rows and no spot window when the
+// real window is the round's window or does not exist.
+async function withRoundSpotRows(knex, protocol, window, rows, { roundStep, realMonth, strict, includeBermudaRemoval }) {
+  if (!roundStep) return { rows, spotWindow: null };
+  const spotMonth = roundStep.spotMonth ?? roundSpotMonth({ round: roundStep.round, realMonth, grassTrack: protocol.grass_track });
+  const spotWindow = windowForVisit(protocol, null, spotMonth);
+  const spot = !spotWindow || spotWindow.id === window.id
+    ? { rows, spotWindow: null }
+    : { rows: [...rows.filter((row) => !isAsNeededRow(row)), ...(await readWindowProducts(knex, spotWindow, { strict, includeBermudaRemoval })).filter(isAsNeededRow)], spotWindow };
+  return { ...spot, rows: await withCatchUpRows(knex, protocol, spot.rows, { roundStep, strict }) };
+}
+
+// The spring pre-emergent catch-up (lawn-rounds-catchup.js; `roundStep.catchUp`, set by the caller that decided the visit qualifies): the
+// MARCH window's Dimension 2EW row joins the round's rows, so the plan, the completion attribution and every reader resolve one list. Not
+// added twice, and the same rows back when the visit has no catch-up or the March window has no such row.
+async function withCatchUpRows(knex, protocol, rows, { roundStep, strict }) {
+  if (roundStep?.catchUp !== true) return rows;
+  const catchUp = require('./lawn-rounds-catchup');
+  if (rows.some(catchUp.isCatchUpRow)) return rows;
+  const marchWindow = windowForVisit(protocol, null, catchUp.CATCH_UP_MONTH);
+  if (!marchWindow) return rows;
+  const found = (await readWindowProducts(knex, marchWindow, { strict, includeBermudaRemoval: false })).filter(catchUp.isCatchUpRow);
+  return found.length ? [...rows, found[0]] : rows;
+}
+
+// `roundStep` ({ round, month }): a 9x rounds visit. Its program rows come from the window of the ROUND's step month (`roundStep.month`; a
+// pinned `windowKey` still wins, as it does for every visit) and its as-needed rows from the REAL date's window (withRoundSpotRows).
+// The result then also names that window (`spotWindow`). Without `roundStep` nothing here differs from the one-window read.
+async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false, includeBermudaRemoval = false, roundStep } = {}) {
+  // An appointment's assigned version must not fall through to the currently
+  // active protocol when that assignment can no longer be resolved.
+  const assignedId = !protocolId && protocolKey ? await resolveAssignedProtocolId(knex, protocolKey, protocolVersion) : protocolId;
+  if (!assignedId && protocolKey) return null;
+  const protocol = assignedId
+    ? await getLawnProtocolById(knex, assignedId, { strict })
+    : await getActiveLawnProtocol(knex, { grassTrack, region, strict, planning });
+  // A visit pinned to the staged bahia version plans from nothing too (the rows stay for history).
+  if (!protocol || (planning && v13NoProgramRow(protocol))) return null;
+
+  const realMonth = etParts(serviceDate).month;
+  const window = windowForVisit(protocol, windowKey, stepMonthOf(roundStep, realMonth));
+  if (!window) return { protocol, window: null, products: [], gates: protocol.gates };
+
+  const read = { strict, includeBermudaRemoval };
+  const windowRows = await readWindowProducts(knex, window, read);
+  const { rows, spotWindow } = await withRoundSpotRows(knex, protocol, window, windowRows, { roundStep, realMonth, ...read });
 
   return {
     protocol,
     window,
-    products: await withV13CapMetadata(knex, protocol, products.map(normalizeProduct)),
+    products: await withV13CapMetadata(knex, protocol, rows),
     gates: protocol.gates,
+    ...namedSpotWindow(spotWindow),
   };
 }
 
@@ -352,6 +396,7 @@ module.exports = {
   lockDraftProtocol,
   getActiveLawnProtocol,
   getLawnProtocolById,
+  withRoundSpotRows,
   getProtocolWindowContext,
   summarizeProtocolContext,
 };

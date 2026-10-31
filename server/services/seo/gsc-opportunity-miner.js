@@ -903,6 +903,9 @@ function citabilityBackfillLaneOpen() {
 }
 
 function filterActiveCitabilityReservations(query) {
+  // Also releases a gate-off same_question_refresh row's pending reservation
+  // (it cannot be claimed), in every caller that reads in-flight page edits.
+  require('../content/opportunity-queue')._internals.releaseDisabledSameQuestionReservations(query);
   if (!citabilityBackfillLaneOpen()) return query.whereNot('bucket', 'citability_backfill');
   const { _internals: { maxClaimAttempts } } = require('../content/opportunity-queue');
   // Pending rows that can no longer be claimed must release both their
@@ -3651,10 +3654,11 @@ class GscOpportunityMiner {
     const cutoff = new Date(Date.now() - cooldownDays * 86400_000);
     const recent = (b) => b.whereIn('status', ['pending', 'claimed', 'pending_review'])
       .orWhere((d) => d.where('status', 'done').where('updated_at', '>=', cutoff));
-    const edits = await db('opportunity_queue')
+    const editsQuery = db('opportunity_queue')
       .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
       .whereNotNull('page_url')
-      .where(recent)
+      .where(recent);
+    const edits = await require('../content/opportunity-queue')._internals.releaseDisabledSameQuestionReservations(editsQuery)
       .select('page_url', 'dedupe_key');
     const articles = await db('opportunity_queue')
       .whereNull('page_url')
@@ -4443,12 +4447,13 @@ class GscOpportunityMiner {
     // narrowing the race to truly-simultaneous uncommitted writes — full
     // serialization would need a shared advisory lock adopted by EVERY
     // producer, which is beyond this lane (pre-push audit r24).
-    const nonFamily = await trx('opportunity_queue')
+    const nonFamilyQuery = trx('opportunity_queue')
       .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
       .whereNot('bucket', 'listicle_family')
       .whereNot('bucket', 'citability_backfill')
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
-      .whereNotNull('page_url')
+      .whereNotNull('page_url');
+    const nonFamily = await require('../content/opportunity-queue')._internals.releaseDisabledSameQuestionReservations(nonFamilyQuery)
       .select('page_url', 'query', trx.raw("signal_metadata->'unanswered_queries' as unanswered_queries"));
     const conflictPages = new Set(nonFamily.map((r) => routeIdentity(r.page_url)));
     const conflictQueries = new Set();

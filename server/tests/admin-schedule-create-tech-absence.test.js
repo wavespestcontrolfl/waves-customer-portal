@@ -512,7 +512,7 @@ describe('POST / — admin create — New Appointment stop order', () => {
     const { status } = await post(body);
     expect(status).toBe(201);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
-    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'new-1', source: 'new_appointment', staffSave: true });
+    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'new-1', source: 'new_appointment', staffSave: true, lateDays: true });
   });
 
   test('gate on, a recurring create: the parent visit only (the night pass orders the children)', async () => {
@@ -520,7 +520,7 @@ describe('POST / — admin create — New Appointment stop order', () => {
     const { status } = await post({ ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, createInvoice: true });
     expect(status).toBe(201);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
-    expect(placeMovedVisit.mock.calls[0][1]).toEqual({ serviceId: 'new-1', source: 'new_appointment', staffSave: true });
+    expect(placeMovedVisit.mock.calls[0][1]).toEqual({ serviceId: 'new-1', source: 'new_appointment', staffSave: true, lateDays: true });
   });
 
   test('gate off (default): the save writes no stop order', async () => {
@@ -529,3 +529,166 @@ describe('POST / — admin create — New Appointment stop order', () => {
     expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 });
+
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): the
+// booked visit also gets the arrival-window route check Edit's save runs (a
+// SECOND, advisory probe after the insert; the overlap probe is unchanged), and
+// its warning joins `warnings`. The booking never fails on a route result.
+describe('POST / — admin create — GATE_ROUTE_CHECK_STAFF_SAVES route check', () => {
+  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2099-07-03. Review the route before driving it.';
+  const body = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    technicianId: 'tech-no-absence',
+    estimatedPrice: 89,
+  };
+  const arrivalCalls = () => findConflictingVisits.mock.calls.map(([a]) => a).filter((a) => a.arrivalWindow);
+  const overlapCalls = () => findConflictingVisits.mock.calls.map(([a]) => a).filter((a) => !a.arrivalWindow);
+  beforeEach(() => {
+    findConflictingVisits.mockImplementation(async (args) => (args.arrivalWindow
+      ? [{ id: args.arrivalWindow.serviceId, conflict_reason: 'arrival_window', warning: ROUTE_WARNING }] : []));
+  });
+  afterEach(() => {
+    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    delete process.env.GATE_NEW_APPT_STOP_ORDER;
+  });
+  const gateOn = () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  };
+
+  test('gate off: no route probe, no extra warning; the overlap probe carries no arrivalWindow', async () => {
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(res.warnings || []).not.toContain(ROUTE_WARNING);
+    expect(arrivalCalls()).toHaveLength(0);
+    expect(overlapCalls()).toHaveLength(1);
+    expect(overlapCalls()[0]).not.toHaveProperty('arrivalWindow');
+  });
+
+  test('gate on: the booked visit is checked on cached road times, the warning is returned, and the booking still commits', async () => {
+    gateOn();
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(res.warnings).toContain(ROUTE_WARNING);
+    expect(inserts).toHaveLength(1);
+    expect(arrivalCalls()).toHaveLength(1);
+    expect(arrivalCalls()[0]).toMatchObject({
+      db: trx, date: '2099-07-03', windowStart: '10:00', windowEnd: '11:00', excludeServiceIds: ['new-1'],
+      arrivalWindow: { serviceId: 'new-1', roads: 'cache' },
+    });
+    // The overlap probe is the same call it was.
+    expect(overlapCalls()).toHaveLength(1);
+    expect(overlapCalls()[0]).not.toHaveProperty('arrivalWindow');
+  });
+
+  test('gate on, a recurring create: the parent visit only', async () => {
+    gateOn();
+    const { status } = await post({ ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, createInvoice: true });
+    expect(status).toBe(201);
+    expect(arrivalCalls().map((a) => a.arrivalWindow.serviceId)).toEqual(['new-1']);
+  });
+
+  test('gate on: an unassigned booking is not route-checked', async () => {
+    gateOn();
+    const { status, body: res } = await post({ ...body, technicianId: undefined });
+    expect(status).toBe(201);
+    expect(res.warnings || []).not.toContain(ROUTE_WARNING);
+    expect(arrivalCalls()).toHaveLength(0);
+  });
+
+  test('gate on, GATE_NEW_APPT_STOP_ORDER on: the stop-order placement runs before the route check (Codex P1 on 9837f0c3d4)', async () => {
+    const { placeMovedVisit } = require('../services/scheduling/arrival-route');
+    gateOn();
+    process.env.GATE_NEW_APPT_STOP_ORDER = 'true';
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(res.warnings).toContain(ROUTE_WARNING);
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    const arrivalIdx = findConflictingVisits.mock.calls.findIndex(([a]) => a.arrivalWindow);
+    expect(placeMovedVisit.mock.invocationCallOrder[0]).toBeLessThan(findConflictingVisits.mock.invocationCallOrder[arrivalIdx]);
+  });
+
+  test('gate on, GATE_NEW_APPT_STOP_ORDER off: the stop-order writer is untouched (this gate numbers nothing here)', async () => {
+    const { placeMovedVisit } = require('../services/scheduling/arrival-route');
+    gateOn();
+    await post(body);
+    expect(placeMovedVisit).not.toHaveBeenCalled();
+  });
+});
+
+// GATE_SAVE_ROAD_BUY (owner 2026-10-29): the New Appointment save buys the
+// placement's Google road times BEFORE its transaction opens, as the staff
+// user. The helper reads its own gate and is spied: only the wiring is under
+// test here (the purchase itself is proven in save-road-buy.test.js).
+describe('POST / — admin create — GATE_SAVE_ROAD_BUY wiring', () => {
+  const roadBuy = require('../services/scheduling/save-road-buy');
+  let buySpy;
+  const located = (table) => chain(table === 'customers'
+    ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null, latitude: '27.5', longitude: '-82.4' }
+    : (table === 'scheduled_services' ? { ...SVC } : undefined));
+  const body = {
+    customerId: 'cust-1', scheduledDate: '2099-07-03', windowStart: '10:00', serviceType: 'General Pest Control',
+    sendConfirmationSms: false, technicianId: TECH_ID, estimatedPrice: 89, createInvoice: true,
+  };
+  beforeEach(() => {
+    buySpy = jest.spyOn(roadBuy, 'buyRoadsBeforeSave').mockResolvedValue({ lookups: 0 });
+    db.mockImplementation(located);
+  });
+  afterEach(() => buySpy.mockRestore());
+
+  test('a timed booking with a technician and a located customer buys first, as the staff user, outside any transaction', async () => {
+    const { status } = await post({ ...body, technicianId: 'tech-no-absence' });
+    expect(status).toBe(201);
+    expect(buySpy).toHaveBeenCalledTimes(1);
+    expect(buySpy.mock.calls[0][0]).toMatchObject({
+      spender: 'staff-1', date: '2099-07-03', technicianId: 'tech-no-absence', windowStart: '10:00',
+      prospective: { lat: '27.5', lng: '-82.4', service_type: 'General Pest Control' },
+    });
+    expect(buySpy.mock.invocationCallOrder[0]).toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
+  });
+
+  // A chosen property is stamped on the visit with its own pin (nulls too), and
+  // the route read excludes the primary address's pin for it: price that pin only.
+  describe('a chosen property', () => {
+    const customerProps = require('../services/customer-properties');
+    const converter = require('../services/estimate-converter');
+    const stamp = (pin) => ({ property_id: 'prop-2', service_address_line1: '2 Side St', service_address_city: 'Bradenton',
+      service_address_state: 'FL', service_address_zip: '34202', lat: pin.lat, lng: pin.lng });
+    const gates = require('../config/feature-gates').gates;
+    const savedAddressGate = gates.editApptAddress;
+    beforeEach(() => {
+      gates.editApptAddress = true;
+      jest.spyOn(converter, 'buildSeriesAddressScope').mockResolvedValue(null);
+    });
+    afterEach(() => { gates.editApptAddress = savedAddressGate; jest.restoreAllMocks(); });
+    const book = (pin) => {
+      jest.spyOn(customerProps, 'bookingPropertyStamp').mockResolvedValue(stamp(pin));
+      return post({ ...body, technicianId: 'tech-no-absence', propertyId: 'prop-2' });
+    };
+
+    test('with its own pin: that pin is priced, not the customer\'s', async () => {
+      await book({ lat: 27.9, lng: -82.1 });
+      expect(buySpy).toHaveBeenCalledTimes(1);
+      expect(buySpy.mock.calls[0][0].prospective).toMatchObject({ lat: 27.9, lng: -82.1 });
+    });
+
+    test('with no pin: nothing is bought, never the customer\'s primary pin', async () => {
+      await book({ lat: null, lng: null });
+      expect(buySpy).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an unassigned, untimed or unlocated booking buys nothing', async () => {
+    await post({ ...body, technicianId: undefined });
+    await post({ ...body, technicianId: 'tech-no-absence', windowStart: undefined });
+    db.mockImplementation((table) => chain(table === 'customers' ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null } : undefined));
+    await post({ ...body, technicianId: 'tech-no-absence' });
+    expect(buySpy).not.toHaveBeenCalled();
+  });
+});
+

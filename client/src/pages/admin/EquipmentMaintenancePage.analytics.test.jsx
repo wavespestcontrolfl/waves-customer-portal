@@ -44,3 +44,17 @@ it('exposes the monthly cost values to assistive technology', async () => {
  expect(region).toHaveTextContent('2026-09: $62.50');
  expect(region.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
 });
+it('puts an evening service on the last day of a month in that ET month', async () => {
+ const base = fetch.getMockImplementation();
+ fetch.mockImplementation(async url => (String(url).includes('/records/recent')
+  ? ok({ records: [
+   // 10 PM ET on Oct 31 is already Nov 1 in UTC.
+   { id: 'r3', performed_at: '2026-11-01T02:00:00Z', total_cost: 80 },
+   { id: 'r4', performed_at: '2026-11-02T15:00:00Z', total_cost: 20 },
+  ] })
+  : base(url)));
+ await openAnalytics();
+ const region = screen.getByRole('region', { name: 'Monthly maintenance costs chart' });
+ expect(region).toHaveTextContent('2026-10: $80.00');
+ expect(region).toHaveTextContent('2026-11: $20.00');
+});

@@ -76,6 +76,7 @@ const CADENCE_LABEL = {
   semiannual: 'Twice a year',
   annual: 'Annual',
   seasonal_feb_oct: 'Seasonal (Feb–Oct)',
+  lawn_rounds_9: 'Lawn rounds (9 a year)',
   one_time: 'One-time',
 };
 
@@ -194,10 +195,18 @@ function paymentRows(payment) {
         tone: 'muted',
       });
     } else {
+      // A pay-after-first-visit year (GATE_PAF_PREPAY) keeps its invoice a
+      // draft on purpose: the card on file is charged once a visit is
+      // performed, so "not sent to the customer yet" would read as a step
+      // someone owes. A visit the year holds is not collected at the door.
+      const pendingNote = ap.chargeAfterFirstVisit
+        ? 'Charged to the card on file after the first visit'
+        : invoicePendingNote(ap.invoiceStatus);
+      const collect = ap.coversThisVisit === true ? ' — do not collect at the visit' : '';
       rows.push({
         label: 'Annual prepay — pending',
         value: amount,
-        sub: `${invoicePendingNote(ap.invoiceStatus)}${usage}${left}${through}`,
+        sub: `${pendingNote}${usage}${left}${through}${collect}`,
         tone: 'muted',
       });
     }

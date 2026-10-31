@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { mistingInstallLinesTotal, isMistingInstallLine } = require('../utils/mosquito-misting-system');
 const { isAnnualPrepayCoverageLine, looksLikeLegacyCoverageDescription } = require('../utils/annual-prepay-line-kinds');
 const logger = require('./logger');
+const { placeAutoSavedVisit } = require('./scheduling/staff-save-route-check');
 const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
@@ -12,6 +13,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const AccountMembershipEmail = require('./account-membership-email');
 const CancellationResolution = require('./cancellation-resolution');
 const { portalUrl } = require('../utils/portal-url');
+const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOrdinal } = require('./lawn-rounds');
 
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // Decided coverage: the renewal decision is recorded but the paid window still
@@ -483,7 +485,9 @@ function normalizeCoverageCadence(value) {
   };
 
   const normalized = aliases[cleaned] || cleaned;
-  return ['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'annual', 'every_6_weeks'].includes(normalized)
+  // lawn_rounds_9 (lawn 9x rounds): the exact token only, no aliases. A term
+  // covering a rounds series stores it so its dates follow the round calendar.
+  return ['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'annual', 'every_6_weeks', LAWN_ROUNDS_9].includes(normalized)
     ? normalized
     : null;
 }
@@ -529,6 +533,9 @@ function cadenceFromIntervalDays(days) {
 
 function coverageCadenceSchedule(value) {
   const cadence = normalizeCoverageCadence(value);
+  // Lawn rounds: one visit per round, placed by the round calendar
+  // (lawn-rounds.js lawnRoundDate), not by a fixed step.
+  if (cadence === LAWN_ROUNDS_9) return { unit: 'rounds', value: 1, cadence };
   const months = coverageCadenceMonths(cadence);
   if (months) return { unit: 'months', value: months, cadence };
   const days = coverageCadenceDays(cadence);
@@ -625,6 +632,12 @@ function coverageSeriesAnchor(termStart, { firstVisitDate = null, notBefore = nu
   return anchor < normalizedStart ? normalizedStart : anchor;
 }
 
+// options.roundAnchor (lawn_rounds_9 only): the series parent's
+// recurring_round_anchor_date, when the term is tied to a series that has one.
+// Dates are then placed from that anchor's offset and weekday (the same call
+// the series' own extension makes), so the rows match the series; without it
+// they are lawnRoundDate(anchor, i) from the term's series anchor, the exact
+// dates the seeder writes for the same anchor.
 function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, options = {}) {
   const normalizedStart = dateOnly(termStart);
   const count = normalizeCoverageVisitCount(visitCount);
@@ -634,10 +647,16 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
   const anchor = coverageSeriesAnchor(normalizedStart, options) || normalizedStart;
   const normalizedEnd = termEnd ? dateOnly(termEnd) : null;
   const dates = [];
+  const roundAnchor = schedule.unit === 'rounds' ? dateOnly(options?.roundAnchor) : null;
   for (let index = 0; index < count; index++) {
-    const date = schedule.unit === 'days'
-      ? addDaysYmd(anchor, index * schedule.value)
-      : addMonthsSameDay(anchor, index * schedule.value);
+    let date;
+    if (schedule.unit === 'rounds') {
+      date = roundAnchor ? lawnRoundDateFrom(roundAnchor, anchor, index) : lawnRoundDate(anchor, index);
+    } else if (schedule.unit === 'days') {
+      date = addDaysYmd(anchor, index * schedule.value);
+    } else {
+      date = addMonthsSameDay(anchor, index * schedule.value);
+    }
     if (!date) return [];
     if (normalizedEnd && date > normalizedEnd) break;
     dates.push(date);
@@ -1218,6 +1237,38 @@ async function findWindowSlideMarker(term, conn) {
   };
 }
 
+// The round anchor a lawn_rounds_9 term's dates are placed from: the anchor
+// the covered series itself extends from (seriesRoundAnchor, the one rule shared
+// with admin-schedule's top-up/extension: the parent's stored
+// recurring_round_anchor_date, else its cadence position), or null when the
+// term covers no series yet (plain walk from the term anchor). Shared by the
+// payment-time seeder and the invoice/PDF schedule, so both list the same dates.
+// existingRows are the term's in-window eligible visits; the parent is the
+// first one's recurring_parent_id (or the visit itself). It is always read by
+// id, scoped to the term's customer: the in-window row may not be the parent,
+// and its select may lack the anchor fields. A failed read logs a warning and
+// returns null.
+async function seriesRoundAnchorForTerm({ term, coverageCadence, existingRows, conn = db, cols = null } = {}) {
+  if (coverageCadence !== LAWN_ROUNDS_9 || !Array.isArray(existingRows) || !existingRows.length) return null;
+  const parentId = existingRows[0].recurring_parent_id || existingRows[0].id;
+  try {
+    const scheduledCols = cols || await scheduledServiceColumns();
+    const wanted = [
+      'id', 'scheduled_date', 'recurring_round_anchor_date', 'date_exception',
+      'date_exception_cadence_date', 'recurring_dispatch_due_date',
+    ].filter((c) => c === 'id' || scheduledCols[c]);
+    const parentRow = await conn('scheduled_services')
+      .where({ id: parentId, customer_id: term?.customer_id })
+      .first(...wanted);
+    if (!parentRow) return null;
+    const { seriesRoundAnchor } = require('./recurring-appointment-seeder');
+    return seriesRoundAnchor(parentRow);
+  } catch (err) {
+    logger.warn(`[annual-prepay] term ${term?.id}: series round anchor lookup failed (${err.message}) — placing rounds from the term anchor`);
+    return null;
+  }
+}
+
 async function ensureCoverageRowsForTerm(term, conn = db, {
   today = etDateString(), nowHHMM = etNowHHMM(), seedNotBefore = null, gapFillOnly = false,
 } = {}) {
@@ -1356,7 +1407,20 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     // A retry never SHRINKS a window an earlier run already persisted.
     if (effectiveTermEnd < termEnd) effectiveTermEnd = termEnd;
   }
+  // A rounds term tied to an existing series places its dates from that
+  // series' stored round anchor, so a gap-fill lands on the dates the series
+  // itself would extend to.
+  const storedRoundAnchor = await seriesRoundAnchorForTerm({ term, coverageCadence, existingRows, conn, cols });
+  if (storedRoundAnchor) anchorOptions.roundAnchor = storedRoundAnchor;
   const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, effectiveTermEnd, anchorOptions);
+  // The anchor the rounds target dates were placed from (paidAnchor and
+  // coverageScheduleDates read the same anchorOptions). A NEW rounds series parent
+  // stores it, so the series' own extension, a later refresh and the invoice
+  // schedule keep the seeded dates (seriesRoundAnchor falls back to the parent's
+  // own date otherwise, which can be a later target than the anchor).
+  const newParentRoundAnchor = coverageCadence === LAWN_ROUNDS_9
+    ? (anchorOptions.roundAnchor || paidAnchor)
+    : null;
   if (!targetDates.length) {
     return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
   }
@@ -1377,8 +1441,21 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // customer already has at least the sold number of in-window matching visits.
   const availableExisting = existingRows.filter((row) => dateOnly(row.scheduled_date));
   const cadenceMonths = coverageCadenceMonths(coverageCadence);
+  // A rounds plan owes one visit a round: an existing visit fills a slot only
+  // when it sits in the SAME round (wherever in the round it was moved), and a
+  // visit in a neighbouring round never does, however close in days. Every
+  // other cadence matches within half a cadence.
+  const coverageIsRounds = coverageCadence === LAWN_ROUNDS_9;
   const cadenceIntervalDays = cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30);
   const slotToleranceDays = Math.max(7, Math.floor(cadenceIntervalDays / 2));
+  const slotMatchesVisit = (existingDate, slotDate) => {
+    if (coverageIsRounds) {
+      const want = roundOrdinal(slotDate);
+      return want != null && roundOrdinal(existingDate) === want;
+    }
+    const diff = daysUntil(existingDate, slotDate);
+    return diff != null && Math.abs(diff) <= slotToleranceDays;
+  };
   const remainingToSeed = Math.max(0, coverageVisitCount - existingRows.length);
   // The first target carries an operator PROMISE when first_visit_date made it
   // the anchor: only an existing visit on exactly that date may satisfy it (the
@@ -1403,8 +1480,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     const matchIndex = availableExisting.findIndex((row) => {
       const existingDate = dateOnly(row.scheduled_date);
       if (exactOnly) return existingDate === scheduledDate;
-      const diff = daysUntil(existingDate, scheduledDate);
-      return diff != null && Math.abs(diff) <= slotToleranceDays;
+      return slotMatchesVisit(existingDate, scheduledDate);
     });
     if (matchIndex !== -1) {
       const [matched] = availableExisting.splice(matchIndex, 1);
@@ -1696,6 +1772,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (cols.service_key_snapshot && coverageCatalogKey) insertData.service_key_snapshot = coverageCatalogKey;
     if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;
     if (cols.is_recurring) insertData.is_recurring = true;
+    // A rounds term (lawn_rounds_9) writes the rounds pattern with no
+    // interval, as the seeder does for a rounds series.
     if (cols.recurring_pattern) insertData.recurring_pattern = coverageCadence === 'every_6_weeks' ? 'custom' : coverageCadence;
     if (cols.recurring_interval_days) insertData.recurring_interval_days = coverageCadence === 'every_6_weeks' ? 42 : null;
     if (cols.recurring_ongoing) insertData.recurring_ongoing = false;
@@ -1703,6 +1781,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       if (createdParentId) {
         insertData.recurring_parent_id = createdParentId;
       }
+    }
+    // This row becomes the new rounds series parent: store the round anchor.
+    if (newParentRoundAnchor && !createdParentId && cols.recurring_round_anchor_date) {
+      insertData.recurring_round_anchor_date = newParentRoundAnchor;
     }
     if (cols.time_window) insertData.time_window = null;
     if (cols.window_start) insertData.window_start = windowStart;
@@ -1872,6 +1954,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     }
     if (await termOwnerMovedUnderFence(trx)) return null;
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
+    // GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29): number the timed first visit
+    // in its technician's day, inside this transaction (silent, never fails the
+    // seed, a no-op while the gate is off or the seed has no technician).
+    await placeAutoSavedVisit(trx, { visit: row, source: 'annual_prepay_renewal' });
     // Filed only once the visit actually exists: fileCoverageException writes
     // through the global connection and dedupes for 7 days, so a notice
     // emitted before a deferred/aborted insert would outlive the rollback
@@ -1964,6 +2050,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
     await trx('scheduled_services').where({ id: row.id }).update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
+    // GATE_ROUTE_CHECK_AUTO_SAVES: the retimed visit moved within its day.
+    await placeAutoSavedVisit(trx, { visit: row, source: 'annual_prepay_renewal' });
     // Filed only once the retime is written (same rule as the seed path):
     // the notice claims the visit WAS retimed, so it must never outlive a
     // failed update.
@@ -2021,8 +2109,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       if (consumedConcurrentIds.has(String(row.id))) return false;
       const existingDate = dateOnly(row.scheduled_date);
       if (scheduledDate === promisedTarget) return existingDate === scheduledDate;
-      const diff = daysUntil(existingDate, scheduledDate);
-      return diff != null && Math.abs(diff) <= slotToleranceDays;
+      return slotMatchesVisit(existingDate, scheduledDate);
     });
     if (!filler) return true;
     consumedConcurrentIds.add(String(filler.id));
@@ -7037,7 +7124,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
     const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
     const { splitTerminalCompletionInvoice, COMPLETION_TERMINAL_INVOICE_STATUSES } = require('./completion-invoice-candidate');
-    const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('./completion-charge-verdict');
+    const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('./completion-charge-verdict');
     const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
     // Real columns only: the payer is resolved by the payer authority
     // (scheduled_services.payer_id → self-pay override → customers.payer_id,
@@ -7303,7 +7390,10 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // charges a priced bill ('invoice' — gate off — or 'auto_charge') for
       // an Auto-Pay-active customer; the route gates every rail on
       // customerAutopayActive.
-      const perApplicationCharge = perApplicationBilling && autopayActive && prediction.kind === 'auto_charge';
+      // Like the route, the per-application rail skips a visit from a won
+      // Bill-by-invoice proposal (bill-by-invoice.js).
+      const perApplicationCharge = autopayActive && prediction.kind === 'auto_charge'
+        && await resolvePerApplicationCharge({ svc: svcLike, perApplicationBilling, conn, strict: true });
       const apptLaneCharge = appt.apptCardOneTimeCharge && autopayActive && ['invoice', 'auto_charge'].includes(prediction.kind);
       const extendedCharge = ext.extendedChargeCandidate && prediction.kind === 'auto_charge';
       let autopayLaneCharges = perApplicationCharge || apptLaneCharge || extendedCharge;
@@ -8295,6 +8385,9 @@ async function sendTermNoticeEmail({
         daysOut,
         termId: term.id,
         lastServiceDate: dateOnly(term.last_scheduled_service_date),
+        // 15/7-day rungs of a termite plan share this generic sender; flag
+        // them so the prepaid-year wording applies to prepay terms only.
+        ...(isTermiteAnnualPlanTerm(term) ? { termitePlan: true } : {}),
       });
     const confirmed = result?.sent === true || result?.ok === true;
     if (!confirmed) logger.warn(`[annual-prepay] renewal email not sent for term ${term.id}: ${result?.reason || 'not_sent'}`);
@@ -11585,6 +11678,8 @@ module.exports = {
     cadenceFromIntervalDays,
     coverageCadenceMonths,
     coverageCadenceDays,
+    coverageCadenceSchedule,
+    seriesRoundAnchorForTerm,
     inferCoverageCadence,
     normalizeCoverageServiceType,
     normalizeCoverageVisitCount,

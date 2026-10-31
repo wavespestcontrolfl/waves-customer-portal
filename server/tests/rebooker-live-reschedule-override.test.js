@@ -1389,3 +1389,66 @@ describe('seasonal winter single-visit guard (codex r10 P1)', () => {
     )).rejects.not.toMatchObject({ code: 'OFF_SEASON' });
   });
 });
+
+describe('lawn round guard: a round visit stays inside its round', () => {
+  // BASE is 10 days out, so its round has not ended and the round guard is live.
+  const { roundOf } = require('../services/lawn-rounds');
+  const round = roundOf(BASE);
+  const afterRound = etDateString(addETDays(parseETDateTime(`${round.end}T12:00`), 3));
+  const insideRound = round.end;
+  const roundVisit = {
+    id: 'svc-11', customer_id: 'cust-1', technician_id: 'tech-1',
+    status: 'confirmed', scheduled_date: BASE, recurring_parent_id: 'parent-11',
+    recurring_pattern: 'lawn_rounds_9', window_start: '09:00:00', window_end: '11:00:00',
+  };
+  const roundParent = {
+    id: 'parent-11', customer_id: 'cust-1', is_recurring: true,
+    recurring_pattern: 'lawn_rounds_9', scheduled_date: BASE,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = rawFactory('db.raw');
+    db.transaction = undefined;
+  });
+
+  test('a self-serve single-visit move into the next round is refused', async () => {
+    db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(roundVisit) }));
+    await expect(SmartRebooker.reschedule(
+      'svc-11', afterRound, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.toMatchObject({ statusCode: 409, code: 'OUT_OF_ROUND' });
+    expect(db.transaction).toBeUndefined();
+  });
+
+  test('a move inside the round, an admin move and a tech/auto-dispatch move inside it all get past the guard', async () => {
+    db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(roundVisit) }));
+    await expect(SmartRebooker.reschedule(
+      'svc-11', insideRound, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.not.toMatchObject({ code: 'OUT_OF_ROUND' });
+    await expect(SmartRebooker.reschedule(
+      'svc-11', afterRound, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+    )).rejects.not.toMatchObject({ code: 'OUT_OF_ROUND' });
+  });
+
+  test('a tech or auto-dispatch move out of the round is refused too', async () => {
+    db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(roundVisit) }));
+    for (const initiator of ['tech', 'auto_dispatch']) {
+      await expect(SmartRebooker.reschedule(
+        'svc-11', afterRound, { start: '09:00', end: '11:00' }, 'rain', initiator,
+      )).rejects.toMatchObject({ code: 'OUT_OF_ROUND' });
+    }
+  });
+
+  test('a self-serve series re-anchor into the next round is refused; an admin one is not', async () => {
+    const wire = () => db.mockImplementationOnce(() => chain({ first: jest.fn().mockResolvedValue(roundVisit) }))
+      .mockImplementationOnce(() => chain({ first: jest.fn().mockResolvedValue(roundParent) }));
+    wire();
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-11', afterRound, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.toMatchObject({ statusCode: 409, code: 'OUT_OF_ROUND' });
+    wire();
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-11', afterRound, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+    )).rejects.not.toMatchObject({ code: 'OUT_OF_ROUND' });
+  });
+});

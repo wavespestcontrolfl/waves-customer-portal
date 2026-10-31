@@ -280,64 +280,59 @@ async function getDailyTrafficSources(client, startDate, endDate) {
 }
 
 // ── 1. Traffic Overview ─────────────────────────────────────────────
+const OVERVIEW_METRICS = [
+  { name: 'sessions' },
+  { name: 'totalUsers' },
+  { name: 'newUsers' },
+  { name: 'screenPageViews' },
+  { name: 'bounceRate' },
+  { name: 'averageSessionDuration' },
+];
+
+// Metric values of one report row, in OVERVIEW_METRICS order.
+function parseOverviewMetrics(row) {
+  return {
+    sessions: parseInt(row.metricValues[0].value),
+    users: parseInt(row.metricValues[1].value),
+    newUsers: parseInt(row.metricValues[2].value),
+    pageviews: parseInt(row.metricValues[3].value),
+    bounceRate: parseFloat(parseFloat(row.metricValues[4].value).toFixed(4)),
+    avgSessionDuration: parseFloat(parseFloat(row.metricValues[5].value).toFixed(2)),
+  };
+}
+
+async function getDailyOverview(client, range) {
+  const response = await runGa4Report(client, {
+    dateRanges: [range],
+    dimensions: [{ name: 'date' }],
+    metrics: OVERVIEW_METRICS,
+    orderBys: [{ dimension: { dimensionName: 'date' } }],
+  });
+  return (response.data.rows || []).map(row => ({
+    date: row.dimensionValues[0].value,
+    ...parseOverviewMetrics(row),
+  }));
+}
+
 async function getTrafficOverview(startDate, endDate) {
   try {
     const client = await initialize();
     if (!client) return { configured: false, data: [] };
 
     const range = defaultDateRange(startDate, endDate);
-    const response = await client.properties.runReport({
-      property: `properties/${propertyId}`,
-      requestBody: {
-        dateRanges: [range],
-        dimensions: [{ name: 'date' }],
-        metrics: [
-          { name: 'sessions' },
-          { name: 'totalUsers' },
-          { name: 'newUsers' },
-          { name: 'screenPageViews' },
-          { name: 'bounceRate' },
-          { name: 'averageSessionDuration' },
-        ],
-        orderBys: [{ dimension: { dimensionName: 'date' } }],
-      },
-    });
+    // Period totals come from their own report with no dimensions: GA4 counts a
+    // user once across the whole window, and weights bounce rate and session
+    // duration by sessions. Summing or averaging the daily rows gets both wrong.
+    const [daily, periodResponse] = await Promise.all([
+      getDailyOverview(client, range),
+      runGa4Report(client, { dateRanges: [range], metrics: OVERVIEW_METRICS }),
+    ]);
+    const periodRow = (periodResponse.data.rows || [])[0];
+    const totals = periodRow
+      ? parseOverviewMetrics(periodRow)
+      : { sessions: 0, users: 0, newUsers: 0, pageviews: 0, bounceRate: 0, avgSessionDuration: 0 };
 
-    const rows = (response.data.rows || []).map(row => ({
-      date: row.dimensionValues[0].value,
-      sessions: parseInt(row.metricValues[0].value),
-      users: parseInt(row.metricValues[1].value),
-      newUsers: parseInt(row.metricValues[2].value),
-      pageviews: parseInt(row.metricValues[3].value),
-      bounceRate: parseFloat(parseFloat(row.metricValues[4].value).toFixed(4)),
-      avgSessionDuration: parseFloat(parseFloat(row.metricValues[5].value).toFixed(2)),
-    }));
-
-    // Compute totals
-    const totals = rows.reduce(
-      (acc, r) => {
-        acc.sessions += r.sessions;
-        acc.users += r.users;
-        acc.newUsers += r.newUsers;
-        acc.pageviews += r.pageviews;
-        return acc;
-      },
-      { sessions: 0, users: 0, newUsers: 0, pageviews: 0 }
-    );
-
-    const avgBounce = rows.length > 0
-      ? parseFloat((rows.reduce((s, r) => s + r.bounceRate, 0) / rows.length).toFixed(4))
-      : 0;
-    const avgDuration = rows.length > 0
-      ? parseFloat((rows.reduce((s, r) => s + r.avgSessionDuration, 0) / rows.length).toFixed(2))
-      : 0;
-
-    return {
-      configured: true,
-      totals: { ...totals, bounceRate: avgBounce, avgSessionDuration: avgDuration },
-      daily: rows,
-      period: range,
-    };
+    return { configured: true, totals, daily, period: range };
   } catch (err) {
     logger.error(`[GA4] getTrafficOverview failed: ${err.message}`);
     return { configured: true, totals: {}, daily: [], error: err.message };
@@ -652,7 +647,7 @@ async function syncDailyData(days = 3) {
     logger.info(`[GA4] Syncing daily data: ${startStr} to ${endStr}`);
 
     // 1. Get daily overview
-    const overview = await getTrafficOverview(startStr, endStr);
+    const dailyOverview = await getDailyOverview(client, { startDate: startStr, endDate: endStr });
 
     // 2. Get per-day source/device/landing/conversion dimensions for DB trends.
     const [
@@ -668,8 +663,8 @@ async function syncDailyData(days = 3) {
     ]);
 
     // 3. Upsert daily rows.
-    if (overview.daily && overview.daily.length > 0) {
-      for (const day of overview.daily) {
+    if (dailyOverview.length > 0) {
+      for (const day of dailyOverview) {
         const dateStr = normalizeGa4Date(day.date);
         const topSource = dailySources.topByDate.get(dateStr);
         const devicePct = dailyDevices.get(dateStr) || {};
@@ -704,11 +699,11 @@ async function syncDailyData(days = 3) {
       }
     }
 
-    logger.info(`[GA4] Sync complete: ${overview.daily ? overview.daily.length : 0} daily rows`);
+    logger.info(`[GA4] Sync complete: ${dailyOverview.length} daily rows`);
     return {
       synced: true,
       period: { start: startStr, end: endStr },
-      rows: overview.daily ? overview.daily.length : 0,
+      rows: dailyOverview.length,
       sourceRows: dailySources.rows.length,
     };
   } catch (err) {

@@ -161,14 +161,60 @@ postgres('closeout: the place of a spot treatment', () => {
     } finally { await cleanup(f); }
   });
 
-  test('a 3rd Celsius spot of the year at the SAME place is recorded and flagged for the office (the closeout never refuses)', async () => {
+  test('one spot on the front and the back is ONE product record and ONE ledger row naming both places; the store gets an area at each; an older client\'s single areaPlace still works', async () => {
+    const f = await seedLawnVisit();
+    try {
+      const out = await complete(f, { products: [spot(f, { areaPlaces: ['front', 'back', 'front'] })] });
+      expect(out.status).toBe(200);
+      const record = await recordOf(f);
+      const stored = await mockPg('service_products').where({ service_record_id: record.id });
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({ treated_place: 'front', treated_places: ['front', 'back'], application_method: 'spot_treatment' });
+      const ledger = await mockPg('property_application_history').where({ customer_id: f.customerId, service_record_id: record.id });
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0]).toMatchObject({ treated_place: 'front', treated_places: ['front', 'back'], property_id: f.propertyId });
+      expect((await areasOf(f)).map((area) => `${area.place}:${area.type}`).sort()).toEqual(['back:weeds', 'front:weeds']);
+    } finally { await cleanup(f); }
+    const g = await seedLawnVisit();
+    try {
+      expect((await complete(g, { products: [spot(g, { areaPlace: 'left_side' })] })).status).toBe(200);
+      const record = await recordOf(g);
+      expect(await mockPg('service_products').where({ service_record_id: record.id }).first()).toMatchObject({ treated_place: 'left_side', treated_places: ['left_side'] });
+      expect(await ledgerOf(g, record.id)).toMatchObject({ treated_place: 'left_side', treated_places: ['left_side'] });
+    } finally { await cleanup(g); }
+  });
+
+  test('a spot on two places where one place is at its limit is flagged once; a spot on two other places is not flagged', async () => {
     const f = await seedLawnVisit();
     try {
       await priorCelsius(f, 'front');
+      const out = await complete(f, { products: [spot(f, { areaPlaces: ['back', 'front'] })] });
+      expect(out.status).toBe(200);
+      expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: Celsius WG is over its yearly application limit\.$/)]);
+    } finally { await cleanup(f); }
+    const g = await seedLawnVisit();
+    try {
+      await priorCelsius(g, 'front');
+      const out = await complete(g, { products: [spot(g, { areaPlaces: ['back', 'left_side'] })] });
+      expect(out.status).toBe(200);
+      expect(out.body.completionAdvisories).toEqual([]);
+    } finally { await cleanup(g); }
+  });
+
+  test('a 3rd Celsius spot of the year at the SAME place is recorded and flagged for the office (the preflight and the closeout never refuse; the office gets one bell)', async () => {
+    const f = await seedLawnVisit();
+    try {
+      await priorCelsius(f, 'front');
+      // The /complete places check lets the row through (a yearly limit warns on the sheet, owner 2026-10-30).
+      const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+      expect(await require('../services/lawn-trouble-areas').preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'front' })] })).toBeNull();
       const out = await complete(f, { products: [spot(f, { areaPlace: 'front' })] });
       expect(out.status).toBe(200);
       expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: Celsius WG is over its yearly application limit\.$/)]);
       expect(await ledgerOf(f, (await recordOf(f)).id)).toMatchObject({ treated_place: 'front' });
+      // The office alert (complete-scheduled-service.js notifyOfficeOfLimitFindings), one per record, product and limit type.
+      const bells = await mockPg('notifications').whereRaw("metadata->>'customerId' = ?", [f.customerId]).whereRaw("metadata->>'code' = 'application_limit_exceeded'");
+      expect(bells.length).toBeGreaterThanOrEqual(1);
     } finally { await cleanup(f); }
   });
 
@@ -291,7 +337,8 @@ postgres('closeout: the place of a spot treatment', () => {
         // The context block exists, and the closed place is judged on the resolved property (the front is at its count, the back is not).
         const block = await areas.buildContextBlock({ knex: mockPg, svc, seed: { products: [{ id: f.celsius.id, name: 'Celsius WG' }], rows: new Map() }, readFailures: new Set() });
         expect(Object.keys(block.troubleAreas.blocked[f.celsius.id])).toEqual(['front']);
-        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'front' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+        // A limit never refuses (owner 2026-10-30); the closed place is still read as closed for the sheet's warning (blocked above).
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'front' })] })).toBeNull();
         expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'back' })] })).toBeNull();
         const out = await complete(f, { products: [spot(f, { areaPlace: 'back' }), { productId: granular.id, rate: 1, rateUnit: 'lb', totalAmount: 1, amountUnit: 'lb', applicationMethod: 'granular_broadcast', areaValue: 500, areaUnit: 'sqft' }] });
         expect(out.status).toBe(200);
@@ -513,7 +560,7 @@ postgres('closeout: the place of a spot treatment', () => {
       // Byte-identical to before the column: the table's other columns, no more and no fewer. area_addon_key
       // (20261009200000, the internal tag naming the area add-on a row belongs to) is staff-only too.
       expect(res.body.products[0]).not.toHaveProperty('area_addon_key');
-      const staffOnly = ['treated_place', 'area_addon_key'];
+      const staffOnly = ['treated_place', 'treated_places', 'area_addon_key'];
       const columns = Object.keys(await mockPg('service_products').columnInfo()).filter((c) => !staffOnly.includes(c)).sort();
       expect(Object.keys(res.body.products[0]).sort()).toEqual(columns);
     } finally { await cleanup(f); }

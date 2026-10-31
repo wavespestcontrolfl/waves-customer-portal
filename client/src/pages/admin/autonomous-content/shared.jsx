@@ -73,7 +73,7 @@ export function PillTab({ active, onClick, children }) {
       type="button"
       onClick={onClick}
       className={cn(
-        "h-9 shrink-0 rounded-full px-4 text-13 font-medium transition-colors u-focus-ring",
+        "h-9 shrink-0 rounded-full px-4 text-14 font-medium transition-colors u-focus-ring",
         active ? "bg-[#43B02A] text-white" : "bg-white/10 text-white/80 hover:bg-white/20",
       )}
     >
@@ -93,7 +93,7 @@ export function KpiRow({ children, cols = 4 }) {
 export function Kpi({ label, value, emphasize }) {
   return (
     <div className="rounded-2xl border border-zinc-200 bg-white p-3 sm:p-4">
-      <div className="text-11 uppercase tracking-label text-zinc-400 sm:text-12">{label}</div>
+      <div className="text-14 uppercase tracking-label text-zinc-400">{label}</div>
       <div
         className={cn(
           "mt-1 text-22 leading-none tabular-nums sm:text-28",
@@ -110,9 +110,9 @@ export function ListHeader({ icon: Icon, title, count }) {
   return (
     <div className="mb-2.5 flex items-center gap-2">
       <Icon size={15} strokeWidth={2} className="text-[#2E7D20]" />
-      <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
+      <span className="text-14 uppercase tracking-label text-zinc-500">{title}</span>
       {typeof count === "number" && (
-        <span className="rounded-full bg-zinc-100 px-2 text-11 tabular-nums text-zinc-500">{count}</span>
+        <span className="rounded-full bg-zinc-100 px-2 text-14 tabular-nums text-zinc-500">{count}</span>
       )}
     </div>
   );
@@ -143,12 +143,12 @@ export function PanelHeader({ icon: Icon, title, onBack }) {
       <button
         type="button"
         onClick={onBack}
-        className="-ml-1 inline-flex h-7 items-center gap-1 rounded-full px-1.5 text-12 text-zinc-600 hover:bg-zinc-100 lg:hidden u-focus-ring"
+        className="-ml-1 inline-flex h-7 items-center gap-1 rounded-full px-1.5 text-14 text-zinc-600 hover:bg-zinc-100 lg:hidden u-focus-ring"
       >
         <ArrowLeft size={15} strokeWidth={2} /> Back
       </button>
       <Icon size={15} strokeWidth={2} className="text-[#2E7D20]" />
-      <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
+      <span className="text-14 uppercase tracking-label text-zinc-500">{title}</span>
     </div>
   );
 }
@@ -159,7 +159,7 @@ export function Empty({ children }) {
   );
 }
 
-export function Tag({ tone = "neutral", lifecycle = false, className, children }) {
+export function Tag({ tone = "neutral", className, children }) {
   const cls = {
     neutral: "bg-zinc-100 text-zinc-600",
     green: "bg-[#EAF5E4] text-[#2E7D20]",
@@ -170,7 +170,7 @@ export function Tag({ tone = "neutral", lifecycle = false, className, children }
     <span
       className={cn(
         "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 font-medium",
-        lifecycle ? "text-14" : "text-11",
+        "text-14",
         cls,
         className,
       )}
@@ -186,7 +186,7 @@ export function ActionBtn({ variant = "green", size = "md", disabled, onClick, c
     secondary: "bg-white text-zinc-800 border-zinc-300 hover:bg-zinc-50",
     danger: "bg-white text-[#B42318] border-[#F1C7C2] hover:bg-[#FEF3F2]",
   }[variant];
-  const sizing = size === "sm" ? "h-9 px-3.5 text-12" : "h-11 px-4 text-13 sm:h-10";
+  const sizing = size === "sm" ? "h-9 px-3.5 text-14" : "h-11 px-4 text-14 sm:h-10";
   return (
     <button
       type="button"
@@ -223,7 +223,7 @@ export function Section({ icon: Icon, ok, title, children }) {
             className={ok === undefined ? "text-zinc-500" : ok ? "text-[#2E7D20]" : "text-[#B42318]"}
           />
         )}
-        <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
+        <span className="text-14 uppercase tracking-label text-zinc-500">{title}</span>
       </div>
       {children}
     </div>
@@ -237,7 +237,7 @@ export function ExternalAnchor({ href, label }) {
       target="_blank"
       rel="noreferrer"
       onClick={(event) => event.stopPropagation()}
-      className="inline-flex w-fit items-center gap-1.5 text-13 font-medium text-[#2E7D20] hover:underline"
+      className="inline-flex w-fit items-center gap-1.5 text-14 font-medium text-[#2E7D20] hover:underline"
     >
       <ExternalLink size={14} strokeWidth={2} />
       {label}
@@ -249,7 +249,7 @@ export function LinkContext({ title, value }) {
   if (!value) return null;
   return (
     <Section title={title}>
-      <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-md bg-[#FAF7EF] p-3 text-13 leading-relaxed text-zinc-600">
+      <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-md bg-[#FAF7EF] p-3 text-14 leading-relaxed text-zinc-600">
         {value}
       </div>
     </Section>

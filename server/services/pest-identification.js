@@ -444,10 +444,10 @@ async function callOpenAIVision(base64Image, mimeType) {
 }
 
 async function geminiVisionAttempt(model, base64Image, mimeType) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
     body: JSON.stringify({
       contents: [{
         parts: [

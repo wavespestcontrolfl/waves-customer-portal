@@ -116,12 +116,142 @@ function lawnRoundDate(anchorDateStr, i = 0) {
   return snapped;
 }
 
+// The i-th round date after `base` (a visit in the series), counted in rounds
+// and placed from the SERIES ANCHOR's offset and weekday. lawnRoundDate hops
+// from whatever date it is given, and each hop snaps to the weekday again
+// (a hop gains 2 days a round), so extending a series one visit at a time from
+// its latest visit drifts toward the end of every round (a Jan 12 anchor ends
+// a year later on Jan 25). Extension, top-up and reseed hop from the latest
+// visit, so they pass the anchor: the answer is then the same date the series
+// was seeded with. No anchor, or an unreadable one: hop from `base`, as
+// lawnRoundDate does. i = 0 is `base` itself.
+function lawnRoundDateFrom(anchorDateStr, baseDateStr, i = 0) {
+  const base = dateOnly(baseDateStr);
+  const steps = Math.trunc(Number(i) || 0);
+  const anchorRound = roundOf(anchorDateStr);
+  const baseRound = roundOf(base);
+  if (!anchorRound || !baseRound) return lawnRoundDate(base, steps);
+  if (steps === 0) return base;
+  return lawnRoundDate(dateOnly(anchorDateStr), roundOrdinal(base) - roundOrdinal(anchorDateStr) + steps);
+}
+
+// Position of a date on the continuous round timeline: round 1 of program
+// year Y is Y * 9. Null for an unreadable date.
+function roundOrdinal(dateStr) {
+  const home = roundOf(dateStr);
+  return home ? home.programYear * ROUNDS_PER_YEAR + (home.round - 1) : null;
+}
+
+// The dates a recurring series already occupies, for a walk that places new
+// visits. Every date blocks its own day (the Set itself). Only a CADENCE
+// visit owns a lawn round (`cadence`): a booster extra shares
+// recurring_parent_id but carries is_recurring = false and sits on top of the
+// plan, so it must never stand in for a round's regular visit. add() records
+// a cadence date (every date a walk places is one); addExtra() a booster's.
+// Copying another SeriesDates keeps which dates are extras.
+class SeriesDates extends Set {
+  constructor(dates = []) {
+    super();
+    this.cadence = new Set();
+    if (dates instanceof SeriesDates) {
+      for (const d of dates) super.add(d);
+      for (const d of dates.cadence) this.cadence.add(d);
+      return;
+    }
+    for (const d of dates || []) this.add(d);
+  }
+
+  add(date) {
+    super.add(date);
+    this.cadence.add(date);
+    return this;
+  }
+
+  addExtra(date) {
+    super.add(date);
+    return this;
+  }
+}
+
+// A SeriesDates from scheduled_services rows ({ scheduled_date, is_recurring }).
+// A row without is_recurring counts as a cadence visit (the reading before
+// boosters were told apart). `toDate` normalizes the stored date.
+function seriesDatesFromRows(rows, toDate = dateOnly) {
+  const out = new SeriesDates();
+  for (const row of rows || []) {
+    const d = toDate(row?.scheduled_date);
+    if (!d) continue;
+    if (row.is_recurring === false) out.addExtra(d);
+    else out.add(d);
+  }
+  return out;
+}
+
+// True when `dates` (any iterable of 'YYYY-MM-DD', or a SeriesDates) already
+// holds a visit in the same round as `dateStr`. A series owes one visit a
+// round: a candidate whose round is taken is not a missing visit, it is a
+// second one. A SeriesDates answers from its cadence visits only.
+function roundTaken(dates, dateStr) {
+  const want = roundOrdinal(dateStr);
+  if (want == null) return false;
+  const pool = dates instanceof SeriesDates ? dates.cadence : dates;
+  for (const d of pool || []) if (roundOrdinal(d) === want) return true;
+  return false;
+}
+
+// Which v13 program step a rounds visit takes (owner 2026-10-29). The 12x program names its step by the calendar month; a rounds
+// visit takes the step of its ROUND, so a visit placed a week early or late still gets its own round's products. `month` is the
+// v13 step's month (1-12); `variant` names the rounds-only form of that step:
+//   'cadence9'  the step's cadenceVariants["9"] (April's LESCO Dimension 18-0-10, 0.5 lb N) - round 2
+//   'rounds'    the step's roundVariants.lawn_rounds_9 (February's 24-0-11 at 1.0 lb N) - round 3
+//   null        the step as written
+// The spot and weed rows of a rounds visit do NOT follow this map; they follow the real date (roundSpotMonth).
+const ROUND_STEPS = Object.freeze({
+  1: Object.freeze({ month: 1, variant: null }),
+  2: Object.freeze({ month: 4, variant: 'cadence9' }),
+  3: Object.freeze({ month: 2, variant: 'rounds' }),
+  4: Object.freeze({ month: 5, variant: null }),
+  5: Object.freeze({ month: 6, variant: null }),
+  6: Object.freeze({ month: 8, variant: null }),
+  7: Object.freeze({ month: 9, variant: null }),
+  8: Object.freeze({ month: 10, variant: null }),
+  9: Object.freeze({ month: 12, variant: null }),
+});
+
+// The step a booked visit takes, or null. ONLY a visit whose own row says recurring_pattern 'lawn_rounds_9' has one (the pattern is
+// written on rounds series only, so no gate is read); every other visit (12x, legacy 9x, one-time, other services) returns null and
+// is planned exactly as before. `row` needs recurring_pattern and scheduled_date.
+function roundStepForVisit(row) {
+  if (row?.recurring_pattern !== LAWN_ROUNDS_9) return null;
+  const home = roundOf(row.scheduled_date);
+  if (!home) return null;
+  const step = ROUND_STEPS[home.round];
+  return { round: home.round, programYear: home.programYear, month: step.month, variant: step.variant };
+}
+
+// The month (1-12) whose window supplies the weed and spot rows of a rounds visit (every as-needed row: lawn-program.js isAsNeededRow):
+// the real date's month, with ONE exception the approved page states. The St. Augustine green-up rule (Celsius alone, no Certainty;
+// February window data) covers all of round 2, real dates Feb 3 to Mar 14, so a St. Augustine round-2 visit dated in March reads
+// February's rows (February has no disease or insect spot rows; March's take-all line comes on the round-3 visit). `realMonth` is 1-12.
+function roundSpotMonth({ round, realMonth, grassTrack }) {
+  if (Number(round) === 2 && Number(realMonth) === 3 && grassTrack === 'st_augustine') return 2;
+  return Number(realMonth);
+}
+
 module.exports = {
   LAWN_ROUNDS_9,
+  ROUND_STEPS,
+  roundStepForVisit,
+  roundSpotMonth,
   ROUNDS_PER_YEAR,
   LAWN_ROUND_TABLE,
   roundOf,
   roundStart,
   roundEnd,
   lawnRoundDate,
+  lawnRoundDateFrom,
+  roundOrdinal,
+  roundTaken,
+  SeriesDates,
+  seriesDatesFromRows,
 };

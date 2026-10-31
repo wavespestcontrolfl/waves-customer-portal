@@ -10,10 +10,13 @@ const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const { postCreditMovement, round2 } = require('./customer-credit');
 const { toE164, isLikelyE164, phoneMatchDigits } = require('../utils/phone');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { promoterPhoneInUseError } = require('./referral-errors');
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+const PHONE_DIGITS_SQL = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g')`;
+
 function normalizePhone(phone) {
   const normalized = toE164(phone);
   return isLikelyE164(normalized) ? normalized : null;
@@ -260,6 +263,24 @@ async function enrollPromoter(customerId, { conn = null, settings: presetSetting
       return { promoter: { ...existing, ...updates, referral_code: code, referral_link: referralLink }, alreadyEnrolled: true };
     }
 
+    // customer_phone is unique as raw text, but stored phones mix E.164 and
+    // domestic spellings, so '(941) 555-0100' and '+19415550100' would both
+    // insert and split one household into two promoters (referrals audit
+    // 10-29, F7). Store the canonical form, and treat the same number in any
+    // other spelling as the unique collision: resolvePromoter's household
+    // fallback (same account) or its 409 path (another account) then runs
+    // exactly as for an exact-text 23505. The advisory lock closes the gap
+    // between this check and the insert for two profiles enrolling at once.
+    const customerPhone = normalizePhone(customer.phone) || customer.phone || '';
+    const phoneVariants = phoneMatchDigits(customerPhone);
+    if (phoneVariants.length) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`referral-promoter-phone:${phoneVariants[phoneVariants.length - 1]}`]);
+      const sameNumber = await trx('referral_promoters')
+        .whereRaw(`${PHONE_DIGITS_SQL('customer_phone')} IN (${phoneVariants.map(() => '?').join(', ')})`, phoneVariants)
+        .first('id');
+      if (sameNumber) throw promoterPhoneInUseError();
+    }
+
     const code = customer.referral_code || (await generateUniqueCode(trx));
     const link = referralLinkForCode(code, settings.base_url);
 
@@ -271,7 +292,7 @@ async function enrollPromoter(customerId, { conn = null, settings: presetSetting
     }
 
     const [promoter] = await trx('referral_promoters').insert({
-      customer_phone: customer.phone || '',
+      customer_phone: customerPhone,
       customer_email: customer.email || '',
       first_name: customer.first_name || '',
       last_name: customer.last_name || '',
@@ -346,10 +367,20 @@ async function findHouseholdPromoter(customerId, dbx = db) {
     .where({ id: customerId })
     .first('id', 'phone', 'account_id');
   if (!profile?.phone || !profile?.account_id) return null;
+  // By digits, not exact text: an older promoter snapshot can keep a
+  // domestic spelling after the profile's phone became E.164 (F7). The
+  // account scope is what makes the match safe; it stays.
+  const phoneVariants = phoneMatchDigits(profile.phone);
   const promoter = await dbx('referral_promoters as rp')
     .join('customers as c', 'rp.customer_id', 'c.id')
-    .where('rp.customer_phone', profile.phone)
     .where('c.account_id', profile.account_id)
+    .where(function () {
+      this.where('rp.customer_phone', profile.phone);
+      if (phoneVariants.length) {
+        this.orWhereRaw(`${PHONE_DIGITS_SQL('rp.customer_phone')} IN (${phoneVariants.map(() => '?').join(', ')})`, phoneVariants);
+      }
+    })
+    .orderBy('rp.id')
     .first('rp.*');
   return promoter || null;
 }
@@ -378,96 +409,122 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 
   const normalizedPhone = normalizePhone(phone);
   if (!normalizedPhone) throw new Error('Enter a valid phone number');
-  const promoter = await db('referral_promoters').where({ id: promoterId }).first();
-  if (!promoter) throw new Error('Promoter not found');
 
   const settings = await getSettings();
-  const referralLink = getPromoterReferralLink(promoter, settings);
 
-  // --- Fraud checks ---
-
-  // Monthly cap
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
-  const monthCount = await db('referrals')
-    .where({ promoter_id: promoterId })
-    .where('created_at', '>=', monthStart)
-    .count('* as c')
-    .first();
-  if (parseInt(monthCount.c) >= settings.max_referrals_per_month) {
-    throw new Error(`Monthly referral limit reached (${settings.max_referrals_per_month})`);
-  }
-
-  // Duplicate phone (same promoter)
-  const dupCheck = await db('referrals')
-    .where({ promoter_id: promoterId })
-    .where(function () {
-      this.where('referee_phone', normalizedPhone)
-        .orWhere('referee_phone', phone.trim());
-    })
-    .first();
-  if (dupCheck) throw new Error('You have already referred this phone number');
-
-  // Self-referral — check phone (any format), email, AND existing customer link
-  const promoterCustomer = promoter.customer_id
-    ? await db('customers').where({ id: promoter.customer_id }).first()
-    : null;
-  const promoterPhone = normalizePhone(promoter.customer_phone || promoterCustomer?.phone);
-  const promoterEmail = (promoter.customer_email || promoterCustomer?.email || '').toLowerCase().trim();
-  const refEmailLc = (email || '').toLowerCase().trim();
-  if (promoterPhone && promoterPhone === normalizedPhone) {
-    throw new Error('Cannot refer yourself');
-  }
-  if (promoterEmail && refEmailLc && promoterEmail === refEmailLc) {
-    throw new Error('Cannot refer yourself');
-  }
-
-  // Already a customer (lookup by phone OR email — either disqualifies).
-  // Match phone by digits, not exact string: customers.phone mixes stored
-  // E.164 / domestic-formatted / bare-digit shapes (same reasoning as
-  // admin-customers.js's cross-account phone check and creditReferralOnFirstService
-  // below), so a legacy '(941) 555-1234' row must still match a typed
-  // '941-555-1234' that normalizes to the same E.164 number.
-  const phoneDigitVariants = phoneMatchDigits(normalizedPhone);
-  const existingCustomer = await db('customers')
-    .where(function () {
-      if (phoneDigitVariants.length) {
-        this.whereRaw(
-          `regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (${phoneDigitVariants.map(() => '?').join(',')})`,
-          phoneDigitVariants,
-        ).orWhere('phone', normalizedPhone).orWhere('phone', phone.trim());
-      } else {
-        this.where('phone', normalizedPhone).orWhere('phone', phone.trim());
-      }
-      if (refEmailLc) this.orWhereRaw('LOWER(email) = ?', [refEmailLc]);
-    })
-    .first();
-  if (existingCustomer) {
-    // Block self-referral via second account (same person, different phone+email)
-    if (promoter.customer_id && existingCustomer.id === promoter.customer_id) {
-      throw new Error('Cannot refer yourself');
-    }
-    throw new Error('This person is already a Waves customer');
-  }
-
-  // --- Create referral in the 007 referrals table ---
   const nameParts = name.trim().split(/\s+/);
   const firstName = nameParts[0];
   const lastName = nameParts.slice(1).join(' ');
 
-  const [referral] = await db('referrals').insert({
-    referrer_customer_id: promoter.customer_id,
-    referee_name: name.trim(),
-    referee_phone: normalizedPhone || phone.trim(),
-    referee_email: email?.trim() || null,
-    referral_code: promoter.referral_code,
-    status: 'pending',
-    source: source,
-    promoter_id: promoterId,
-    referrer_reward_amount: settings.referrer_reward_cents / 100,
-    referrer_reward_status: 'pending',
-  }).returning('*');
+  // The checks below read before the insert writes, so two overlapping
+  // submits could both pass the monthly cap and the duplicate-phone check
+  // (referrals audit 10-29, F6). Locking the promoter row makes check + insert
+  // one step per promoter: a second submit waits, then sees the first row.
+  // Lock order is customer, then promoter, the same as enrollPromoter: the
+  // referral insert's foreign key takes a key-share lock on the referrer's
+  // customer row, so taking it after the promoter lock could deadlock with
+  // an enroll that holds the customer and waits on the promoter.
+  const { promoter, referral } = await db.transaction(async (trx) => {
+    const unlocked = await trx('referral_promoters').where({ id: promoterId }).first('customer_id');
+    if (!unlocked) throw new Error('Promoter not found');
+    if (unlocked.customer_id) {
+      await trx('customers').where({ id: unlocked.customer_id }).forKeyShare().first('id');
+    }
+    const promoter = await trx('referral_promoters').where({ id: promoterId }).forUpdate().first();
+    if (!promoter) throw new Error('Promoter not found');
+
+    // --- Fraud checks ---
+
+    // Monthly cap
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const monthCount = await trx('referrals')
+      .where({ promoter_id: promoterId })
+      .where('created_at', '>=', monthStart)
+      .count('* as c')
+      .first();
+    if (parseInt(monthCount.c) >= settings.max_referrals_per_month) {
+      throw new Error(`Monthly referral limit reached (${settings.max_referrals_per_month})`);
+    }
+
+    // Duplicate phone (same promoter)
+    const dupCheck = await trx('referrals')
+      .where({ promoter_id: promoterId })
+      .where(function () {
+        this.where('referee_phone', normalizedPhone)
+          .orWhere('referee_phone', phone.trim());
+      })
+      .first();
+    if (dupCheck) throw new Error('You have already referred this phone number');
+
+    // Self-referral — check phone (any format), email, AND existing customer link
+    const promoterCustomer = promoter.customer_id
+      ? await trx('customers').where({ id: promoter.customer_id }).first()
+      : null;
+    const promoterPhone = normalizePhone(promoter.customer_phone || promoterCustomer?.phone);
+    const promoterEmail = (promoter.customer_email || promoterCustomer?.email || '').toLowerCase().trim();
+    const refEmailLc = (email || '').toLowerCase().trim();
+    if (promoterPhone && promoterPhone === normalizedPhone) {
+      throw new Error('Cannot refer yourself');
+    }
+    if (promoterEmail && refEmailLc && promoterEmail === refEmailLc) {
+      throw new Error('Cannot refer yourself');
+    }
+
+    // Already a customer (lookup by phone OR email — either disqualifies).
+    // Match phone by digits, not exact string: customers.phone mixes stored
+    // E.164 / domestic-formatted / bare-digit shapes (same reasoning as
+    // admin-customers.js's cross-account phone check and creditReferralOnFirstService
+    // below), so a legacy '(941) 555-1234' row must still match a typed
+    // '941-555-1234' that normalizes to the same E.164 number.
+    const phoneDigitVariants = phoneMatchDigits(normalizedPhone);
+    const existingCustomer = await trx('customers')
+      .where(function () {
+        if (phoneDigitVariants.length) {
+          this.whereRaw(
+            `regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (${phoneDigitVariants.map(() => '?').join(',')})`,
+            phoneDigitVariants,
+          ).orWhere('phone', normalizedPhone).orWhere('phone', phone.trim());
+        } else {
+          this.where('phone', normalizedPhone).orWhere('phone', phone.trim());
+        }
+        if (refEmailLc) this.orWhereRaw('LOWER(email) = ?', [refEmailLc]);
+      })
+      .first();
+    if (existingCustomer) {
+      // Block self-referral via second account (same person, different phone+email)
+      if (promoter.customer_id && existingCustomer.id === promoter.customer_id) {
+        throw new Error('Cannot refer yourself');
+      }
+      throw new Error('This person is already a Waves customer');
+    }
+
+    // --- Create referral in the 007 referrals table ---
+    const [referral] = await trx('referrals').insert({
+      referrer_customer_id: promoter.customer_id,
+      referee_name: name.trim(),
+      referee_phone: normalizedPhone || phone.trim(),
+      referee_email: email?.trim() || null,
+      referral_code: promoter.referral_code,
+      status: 'pending',
+      source: source,
+      promoter_id: promoterId,
+      referrer_reward_amount: settings.referrer_reward_cents / 100,
+      referrer_reward_status: 'pending',
+    }).returning('*');
+
+    // --- Update promoter stats ---
+    await trx('referral_promoters').where({ id: promoterId }).increment({
+      total_referrals_sent: 1,
+    }).update({
+      last_referral_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    return { promoter, referral };
+  });
+  const referralLink = getPromoterReferralLink(promoter, settings);
 
   // --- Create lead via lead-attribution ---
   let leadId = null;
@@ -498,14 +555,6 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   } catch (err) {
     logger.warn(`[ReferralEngine] Lead creation failed: ${err.message}`);
   }
-
-  // --- Update promoter stats ---
-  await db('referral_promoters').where({ id: promoterId }).increment({
-    total_referrals_sent: 1,
-  }).update({
-    last_referral_at: new Date(),
-    updated_at: new Date(),
-  });
 
   // --- Send invite SMS ---
   const smsBody = await renderReferralSms('referral_invite', {
@@ -542,10 +591,11 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 
 // The referrer's reward email (referral.reward_earned template). Sent
 // immediately at conversion, beside the reward SMS, when
-// require_service_completion is off; when it is on, sent alone by
-// sendDueReferralRewardEmails at the next 9:00 AM ET after the first-service
-// credit (owner 2026-10-29). Best-effort and idempotent per referral, so the
-// two call sites can never double-send. Promoters aren't always customers, so
+// require_service_completion is off (sendDueReferralRewardEmails sends one that
+// never went out); when it is on, sent alone by sendDueReferralRewardEmails at
+// the next 9:00 AM ET after the first-service credit (owner 2026-10-29).
+// Best-effort and idempotent per referral, so the call sites can never
+// double-send. Promoters aren't always customers, so
 // the send goes straight to promoter.customer_email.
 async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
   try {
@@ -619,6 +669,22 @@ function recentRewardCreditsQuery(conn, now) {
     .select('r.*', 'l.delta as credit_dollars', 'l.created_at as credited_at');
 }
 
+// Conversions paid at once (require_service_completion off) put the reward on
+// the promoter balance inside convertReferral's transaction and email after it
+// commits. A failure before that email exists is only logged, and a retried
+// conversion is refused, so the converted referral row is the pending notice:
+// one the conversion's own email never reached is sent here, once (same key).
+function recentImmediateRewardsQuery(conn, now) {
+  return conn('referrals')
+    .where('status', 'signed_up')
+    .where('referrer_reward_status', 'earned')
+    .where('first_service_completed', false)
+    .whereNotNull('promoter_id')
+    .where('converted_at', '>=', new Date(now.getTime() - REWARD_EMAIL_LOOKBACK_DAYS * 86400000))
+    .orderBy('converted_at', 'asc')
+    .select('*');
+}
+
 // Run by scheduler.js (every 15 minutes, 9:00-11:45 AM ET). A credit whose
 // morning was missed goes out the next morning; one older than
 // REWARD_EMAIL_LOOKBACK_DAYS is left alone. The email library decides whether
@@ -627,21 +693,26 @@ function recentRewardCreditsQuery(conn, now) {
 async function sendDueReferralRewardEmails({ now = new Date() } = {}) {
   const { shouldRetryExistingMessage } = require('./email-template-library');
   const credits = await recentRewardCreditsQuery(db, now);
+  const immediate = await recentImmediateRewardsQuery(db, now);
+  const due = [
+    ...credits.map((row) => ({ row, at: row.credited_at, dollars: Number(row.credit_dollars), destination: 'account_credit' })),
+    ...immediate.map((row) => ({ row, at: row.converted_at, dollars: Number(row.referrer_reward_amount), destination: 'referral_balance' })),
+  ];
   let attempted = 0;
-  for (const credit of credits) {
-    if (nextRewardEmailAt(credit.credited_at) > now) continue;
+  for (const { row, at, dollars, destination } of due) {
+    if (nextRewardEmailAt(at) > now) continue;
     const earlier = await db('email_messages')
-      .where({ idempotency_key: `referral.reward_earned:${credit.id}` })
+      .where({ idempotency_key: `referral.reward_earned:${row.id}` })
       .first('status');
     if (earlier && !shouldRetryExistingMessage(earlier)) continue;
-    const promoter = await db('referral_promoters').where({ id: credit.promoter_id }).first();
+    const promoter = await db('referral_promoters').where({ id: row.promoter_id }).first();
     if (!promoter) continue;
     // Best-effort, as before: sendRewardEarnedEmail logs a send error, and the
     // next run tries again while the credit is inside the lookback.
-    await sendRewardEarnedEmail(promoter, credit, Number(credit.credit_dollars), 'account_credit');
+    await sendRewardEarnedEmail(promoter, row, dollars, destination);
     attempted += 1;
   }
-  return { credits: credits.length, attempted };
+  return { credits: credits.length, immediate: immediate.length, attempted };
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +735,13 @@ function referralRewardAlreadyStaged(referral) {
     || STAGED_REWARD_STATUSES.includes(referral.referrer_reward_status);
 }
 
-async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
+// deferredOnly (the new-referral bell's Confirm, referral-inbound-bell.js): this conversion may neither send
+// nor pay anything now. It is refused inside the money-critical section below, under the promoter row lock,
+// when the program pays rewards at once or the conversion earns a milestone (a bonus and a text). `trx`: run
+// that section on the caller's transaction (only with deferredOnly, so no post-commit leg can run before the
+// caller commits), so a refusal also undoes what the caller wrote.
+async function convertReferral(referralId, { customerId, tier, monthlyValue, trx: callerTrx = null, deferredOnly = false } = {}) {
+  if (callerTrx && !deferredOnly) throw new Error('convertReferral joins a caller transaction only when deferredOnly');
   const settings = await getSettings();
 
   // Calculate reward (base + tier bonus)
@@ -678,7 +755,7 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
   // Money-critical section. Lock the referral row and only credit when it is still in a
   // pre-conversion state, so a double-click / retry that hits convert twice can no longer
   // credit the promoter balance twice. The referral flip + balance increment commit together.
-  const outcome = await db.transaction(async (trx) => {
+  const convert = async (trx) => {
     const referral = await trx('referrals').where({ id: referralId }).forUpdate().first();
     if (!referral) throw new Error('Referral not found');
 
@@ -694,6 +771,18 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
     // Idempotency guard: anything already converted/rejected/lost is a no-op (no re-credit).
     if (!CONVERTIBLE_STATUSES.includes(referral.status)) {
       return { referral, alreadyConverted: true };
+    }
+
+    if (deferredOnly) {
+      if (!settings.require_service_completion) {
+        throw referralError(409, 'REWARD_NOT_DEFERRED', 'Referral rewards are paid at once now. Confirm it in Referrals → Queue.');
+      }
+      const promoter = referral.promoter_id
+        ? await trx('referral_promoters').where({ id: referral.promoter_id }).forUpdate().first('total_referrals_converted', 'milestone_level')
+        : null;
+      if (promoter && milestoneLevelEarned(Number(promoter.total_referrals_converted || 0) + 1, promoter.milestone_level)) {
+        throw referralError(409, 'MILESTONE_DUE', 'This referral earns a milestone bonus. Confirm it in Referrals → Queue.');
+      }
     }
 
     const updates = {
@@ -726,7 +815,8 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
     }
 
     return { referral, alreadyConverted: false, milestoneAward };
-  });
+  };
+  const outcome = callerTrx ? await convert(callerTrx) : await db.transaction(convert);
 
   if (outcome.alreadyConverted) {
     logger.info(`[ReferralEngine] Referral ${referralId} already converted (status=${outcome.referral.status}); skipping re-credit.`);
@@ -745,8 +835,9 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
 
   // Post-commit side effects — NON money-critical (the milestone award already
   // committed in the transaction above). Wrapped so a transient failure here can't
-  // bubble a 500: on retry the admin would hit the alreadyConverted no-op and these
-  // would be skipped for good.
+  // bubble a 500: on retry the admin would hit the alreadyConverted no-op. The
+  // reward email is the one leg sent later if it never went out here
+  // (sendDueReferralRewardEmails); the texts stay best-effort.
   //
   // Reward SMS routing depends on WHEN the reward is earned:
   //  - require_service_completion ON  → deferred: the real money is issued when
@@ -820,64 +911,6 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
 
   logger.info(`[ReferralEngine] Referral ${referralId} converted. Reward: $${rewardDollars}`);
   return { referralId, rewardCents, rewardDollars, tier, requiresServiceCompletion: settings.require_service_completion };
-}
-
-// ---------------------------------------------------------------------------
-// 4. confirmFirstService
-// ---------------------------------------------------------------------------
-async function confirmFirstService(customerId) {
-  // Find referral where the converted customer matches
-  const referral = await db('referrals')
-    .where(function () {
-      this.where('referee_phone', '!=', '').whereIn('status', ['signed_up']);
-    })
-    .where('first_service_completed', false)
-    .first();
-
-  // Try by customer lookup
-  const customer = await db('customers').where({ id: customerId }).first();
-  if (!customer) return null;
-
-  const normalizedPhone = normalizePhone(customer.phone);
-  const matchedReferral = await db('referrals')
-    .whereIn('status', ['signed_up'])
-    .where('first_service_completed', false)
-    .where(function () {
-      this.where('referee_phone', customer.phone)
-        .orWhere('referee_phone', normalizedPhone);
-    })
-    .first();
-
-  if (!matchedReferral) return null;
-
-  const settings = await getSettings();
-  const rewardCents = Math.round((matchedReferral.referrer_reward_amount || 50) * 100);
-
-  // Update referral
-  await db('referrals').where({ id: matchedReferral.id }).update({
-    first_service_completed: true,
-    referrer_reward_status: 'earned',
-    status: 'credited',
-    updated_at: new Date(),
-  });
-
-  // Move pending to available for promoter
-  if (matchedReferral.promoter_id) {
-    await db('referral_promoters').where({ id: matchedReferral.promoter_id }).update({
-      available_balance_cents: db.raw('available_balance_cents + ?', [rewardCents]),
-      pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [rewardCents]),
-      referral_balance_cents: db.raw('referral_balance_cents + ?', [rewardCents]),
-      updated_at: new Date(),
-    });
-
-    // Auto-credit if enabled
-    if (settings.auto_credit_enabled) {
-      logger.info(`[ReferralEngine] Auto-credited $${(rewardCents / 100).toFixed(2)} to promoter ${matchedReferral.promoter_id}`);
-    }
-  }
-
-  logger.info(`[ReferralEngine] First service confirmed for referral ${matchedReferral.id}`);
-  return { referralId: matchedReferral.id, promoterId: matchedReferral.promoter_id, rewardCents };
 }
 
 // Retire (mark 'superseded') every still-uncredited pending_service referral for
@@ -1049,9 +1082,17 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   if (!visit || !(visit.is_recurring || visit.recurring_pattern)) return null;
 
   const normalizedPhone = normalizePhone(customer.phone);
-  // Phone predicate reused for the guard, the match, and the dedupe sweep.
+  // Phone predicate reused for the guard, the match, and the dedupe sweep. By
+  // digits too, not exact text only: an older referral can keep a domestic
+  // spelling ('(941) 555-1234') after the customer's phone became E.164 (same
+  // rule as findHouseholdPromoter). One predicate for all three keeps the
+  // once-only guard and the sibling sweep as wide as the match.
+  const phoneVariants = phoneMatchDigits(normalizedPhone || customer.phone);
   const matchesPhone = function () {
     this.where('referee_phone', customer.phone).orWhere('referee_phone', normalizedPhone);
+    if (phoneVariants.length) {
+      this.orWhereRaw(`${PHONE_DIGITS_SQL('referee_phone')} IN (${phoneVariants.map(() => '?').join(', ')})`, phoneVariants);
+    }
   };
 
   // Reward at most once per referee phone, EVER. submitReferral dedupes only per
@@ -1176,6 +1217,19 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
 // ---------------------------------------------------------------------------
 // 5. checkMilestones
 // ---------------------------------------------------------------------------
+// The milestone level a promoter with `converted` conversions has earned past
+// `currentLevel`, or null. Pure: the one rule applyMilestone awards by, which
+// the new-referral bell also reads so it never offers a Confirm that would
+// award one (a bonus and a text at the tap; referral-inbound-bell.js).
+const MILESTONE_BONUS_SETTING = { champion: 'milestone_10_bonus_cents', ambassador: 'milestone_5_bonus_cents', advocate: 'milestone_3_bonus_cents' };
+function milestoneLevelEarned(converted, currentLevel) {
+  const level = currentLevel || 'none';
+  if (converted >= 10 && level !== 'champion') return 'champion';
+  if (converted >= 5 && !['champion', 'ambassador'].includes(level)) return 'ambassador';
+  if (converted >= 3 && !['champion', 'ambassador', 'advocate'].includes(level)) return 'advocate';
+  return null;
+}
+
 // Award a milestone bonus inside an EXISTING transaction. Locks the promoter
 // row with forUpdate() and re-reads the level under the lock, so concurrent
 // conversions for the same promoter serialize and a threshold can't be crossed
@@ -1186,23 +1240,9 @@ async function applyMilestone(trx, promoterId, settings) {
   if (!promoter) return null;
 
   const converted = promoter.total_referrals_converted;
-  const currentLevel = promoter.milestone_level || 'none';
-
-  let newLevel = currentLevel;
-  let bonusCents = 0;
-
-  if (converted >= 10 && currentLevel !== 'champion') {
-    newLevel = 'champion';
-    bonusCents = settings.milestone_10_bonus_cents;
-  } else if (converted >= 5 && !['champion', 'ambassador'].includes(currentLevel)) {
-    newLevel = 'ambassador';
-    bonusCents = settings.milestone_5_bonus_cents;
-  } else if (converted >= 3 && !['champion', 'ambassador', 'advocate'].includes(currentLevel)) {
-    newLevel = 'advocate';
-    bonusCents = settings.milestone_3_bonus_cents;
-  }
-
-  if (newLevel === currentLevel) return null;
+  const newLevel = milestoneLevelEarned(converted, promoter.milestone_level);
+  if (!newLevel) return null;
+  const bonusCents = settings[MILESTONE_BONUS_SETTING[newLevel]];
 
   await trx('referral_promoters').where({ id: promoterId }).update({
     milestone_level: newLevel,
@@ -1301,6 +1341,38 @@ async function getSettings() {
 // ---------------------------------------------------------------------------
 // 7. updateSettings
 // ---------------------------------------------------------------------------
+const SETTING_BOOLEAN_KEYS = ['program_active', 'auto_credit_enabled', 'require_service_completion'];
+const SETTING_TEMPLATE_KEYS = ['invite_sms_template', 'reward_sms_template', 'milestone_sms_template'];
+const SETTING_COUNT_KEYS = ['max_referrals_per_month', 'cooldown_days'];
+
+// Money and count settings feed promoter balances and fraud limits, so a
+// negative, fractional or non-numeric value must never reach the table. No
+// upper bound on purpose: that is a business decision. Every column is
+// nullable and the form posts the whole row back, so a stored null passes
+// through unchanged rather than blocking an unrelated save.
+function validateSettingValue(key, value) {
+  if (value === null) return null;
+  if (key.endsWith('_cents') || SETTING_COUNT_KEYS.includes(key)) {
+    const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {
+      throw referralError(400, 'INVALID_SETTING', `${key} must be a whole number that is 0 or more`);
+    }
+    return n;
+  }
+  if (SETTING_BOOLEAN_KEYS.includes(key)) {
+    if (typeof value !== 'boolean') throw referralError(400, 'INVALID_SETTING', `${key} must be true or false`);
+    return value;
+  }
+  if (SETTING_TEMPLATE_KEYS.includes(key)) {
+    if (value !== null && typeof value !== 'string') throw referralError(400, 'INVALID_SETTING', `${key} must be text`);
+    return value;
+  }
+  if (key === 'base_url' && typeof value !== 'string') {
+    throw referralError(400, 'INVALID_SETTING', 'base_url must be text');
+  }
+  return value;
+}
+
 async function updateSettings(updates) {
   const allowed = [
     'program_active', 'base_url', 'referrer_reward_cents', 'referee_discount_cents',
@@ -1313,7 +1385,7 @@ async function updateSettings(updates) {
 
   const filtered = {};
   for (const key of allowed) {
-    if (updates[key] !== undefined) filtered[key] = updates[key];
+    if (updates[key] !== undefined) filtered[key] = validateSettingValue(key, updates[key]);
   }
   filtered.updated_at = new Date();
 
@@ -1473,12 +1545,12 @@ module.exports = {
   submitReferral,
   convertReferral,
   updateReferralStatus,
-  confirmFirstService,
   creditReferralOnFirstService,
   sendDueReferralRewardEmails,
   nextRewardEmailAt,
   recentRewardCreditsQuery,
   checkMilestones,
+  milestoneLevelEarned,
   getSettings,
   getLiveSettings,
   updateSettings,
