@@ -15,6 +15,7 @@
 		800C9C346EA5B9DC2141B9F1 /* API.swift in Sources */ = {isa = PBXBuildFile; fileRef = 382A9E95DB30F9858AEDB35D /* API.swift */; };
 		86A9F2A9DFE673C345410D1D /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95C2F50AD33493B67A02D814 /* AppState.swift */; };
 		A1F14D26FC2B1C817A01C6BA /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEA410CF31BCB27C5D972663 /* LoginView.swift */; };
+		A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5879EC992F1DFD981D2C3E75 /* Brand.swift */; };
 		ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8F12848DEA3C5874AD613B3 /* PortalView.swift */; };
 		AC3A5837C1092E9D149FB407 /* TerminalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F257791252A99A45F5501281 /* TerminalManager.swift */; };
 		E3D72235F0CE1767D22C1AA5 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F12D9BA969C35A97B98616 /* Keychain.swift */; };
@@ -23,6 +24,7 @@
 
 /* Begin PBXFileReference section */
 		382A9E95DB30F9858AEDB35D /* API.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = API.swift; sourceTree = "<group>"; };
+		5879EC992F1DFD981D2C3E75 /* Brand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Brand.swift; sourceTree = "<group>"; };
 		5B9CD87D59328DCBC2F6C369 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		78F12D9BA969C35A97B98616 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		7D1C0BACE518171B312F5B32 /* CollectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectView.swift; sourceTree = "<group>"; };
@@ -61,6 +63,7 @@
 			children = (
 				382A9E95DB30F9858AEDB35D /* API.swift */,
 				95C2F50AD33493B67A02D814 /* AppState.swift */,
+				5879EC992F1DFD981D2C3E75 /* Brand.swift */,
 				7D1C0BACE518171B312F5B32 /* CollectView.swift */,
 				F72AB2068EA75B9DD83360CE /* HowToTap.swift */,
 				78F12D9BA969C35A97B98616 /* Keychain.swift */,
@@ -168,6 +171,7 @@
 			files = (
 				800C9C346EA5B9DC2141B9F1 /* API.swift in Sources */,
 				86A9F2A9DFE673C345410D1D /* AppState.swift in Sources */,
+				A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */,
 				71F2A1650406233E4A2CD653 /* CollectView.swift in Sources */,
 				693F6579FC4F8E662993A132 /* HowToTap.swift in Sources */,
 				E3D72235F0CE1767D22C1AA5 /* Keychain.swift in Sources */,
@@ -255,7 +259,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/WavesPay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.7;
@@ -263,7 +267,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1;
+				MARKETING_VERSION = 1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wavespestcontrol.wavespay;
 				PRODUCT_NAME = WavesPay;
 				SDKROOT = iphoneos;
@@ -337,7 +341,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/WavesPay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.7;
@@ -345,7 +349,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1;
+				MARKETING_VERSION = 1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wavespestcontrol.wavespay;
 				PRODUCT_NAME = WavesPay;
 				SDKROOT = iphoneos;

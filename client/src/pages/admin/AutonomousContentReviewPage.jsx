@@ -345,14 +345,14 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
         <div className="relative flex items-stretch justify-between gap-4">
           <div className="min-w-0 flex-1 px-4 py-4 sm:px-6 sm:py-6">
             <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-11 font-medium uppercase tracking-label text-white/80">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-14 font-medium uppercase tracking-label text-white/80">
                 <Bot size={13} strokeWidth={2} className="text-[#7BD66A]" /> Autonomous content
               </span>
             </div>
             <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">
               Autonomous blog activity
             </h1>
-            <p className="mt-1.5 max-w-md text-13 text-white/65 sm:text-14">
+            <p className="mt-1.5 max-w-md text-14 text-white/65">
               Blog posts are drafted, checked, repaired, and published automatically. Failed checks are retried or
               skipped with a recorded reason. No approval is needed.
             </p>
@@ -381,7 +381,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       </div>
 
       {error && (
-        <div className="mt-4 flex items-center gap-2 rounded-md bg-[#FEECEB] px-3 py-2.5 text-13 text-[#B42318]">
+        <div className="mt-4 flex items-center gap-2 rounded-md bg-[#FEECEB] px-3 py-2.5 text-14 text-[#B42318]">
           <AlertTriangle size={16} strokeWidth={2} className="shrink-0" />
           <span>{error}</span>
           <button

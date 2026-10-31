@@ -7,7 +7,6 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
- *   GATE_WAVEGUARD_EXTEND_PICK=true (owner 2026-10-30, option B: when an estimate moves a linked member up a WaveGuard tier from any starting tier, the estimate tool lists each current service at the new tier price (current price / (1 - old tier %) x (1 - new tier %)) with an estimated margin and a tick box. Only ticked services show on the customer's estimate and reprice on accept; works only while GATE_WAVEGUARD_EXTEND_EXISTING is on. Off = the Bronze-start-only automatic card)
  *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
  *   GATE_MOVE_NOTICE_EMAIL=true (owner 2026-10-24 "reschedule email": the email version of a reschedule or cancellation text that reached nobody. A customer whose line cannot take texts (a landline, a carrier bounce) otherwise hears nothing when a visit moves or is cancelled. On, when the reschedule text (handleReschedule, sendRescheduleNoticeForVisit) or the cancellation text (handleCancellation) reached no recipient and was not held (send window, visit move, unreadable settings), or a carrier later bounced it (handleUndeliveredSms), the customer gets the same notice by email (appointment.rescheduled / appointment.cancelled, transactional). No usable email raises the no-channel admin alert. One email per notice. Off = today's behavior: no reschedule or cancellation email. Kill: unset)
  *   GATE_PUBLIC_LLM_SHARED_CAP=true (security audit run 2, 2026-10-22 #13: the public paid-LLM routes (Ask Waves chat, lawn-assessment and pest-identifier photo analysis) also share one daily ceiling across all IPs and processes, counted in Postgres (public_llm_daily_usage, Eastern calendar day), on top of the per-IP in-memory limiters. Each route counts once, right before the paid call, after its own limiter, honeypot, Turnstile and validation; 1500/day Ask Waves (PUBLIC_LLM_DAILY_CAP_ASK_WAVES), 300/day photo (PUBLIC_LLM_DAILY_CAP_PHOTO); over the cap = the same 429 message. A database error fails open. Read at call time via publicLlmSharedCapLive(), strict 'true', dark by default; off = unchanged, no database call. Sends nothing to a customer.)
@@ -23,6 +22,7 @@
  *   GATE_EMAIL_AUTH_STRICT=true (inbound email trust: hasAlignedAuth parses only real Authentication-Results method results, and a vendor invoice books an expense only when the sender authenticated as its From domain; strict `=== 'true'`, read at call time by emailAuthStrictLive(); dark by default; sends nothing to a customer)
  *   GATE_DEDUPE_NO_UNVERIFIED_BACKFILL=true (the nightly duplicate auto-merge does not merge an untouched anonymous web-intake row whose typed email is not the kept customer's email; the pair stays on the Duplicates page for a manual merge; manual merges unchanged; strict opt-in read at call time by customer-dedupe.js; dark by default; sends nothing to a customer)
  *   GATE_NEWSLETTER_CLICK_BOUND=true (security audit run 2, 2026-10-22: the newsletter event link /api/public/newsletter/e/:token/:eventId redirects to the event's URL only when the token is a real delivery and the event is in that send's lineup (locked or alternate ids); any other pair goes to the homepage, so the portal host is not an open redirect; the target is the URL the send carried (newsletter_sends.event_url_snapshot, written at send time). Read at call time via newsletterClickBoundLive(), strict 'true', dark by default; off = redirect exactly as before. Sends nothing.)
+ *   GATE_NEWSLETTER_AUTO_SEND=true (owner 2026-10-30, option A: the weekly issue sends itself Tuesday at 6:00 AM ET once the automatic checks pass. The Monday proof step queues it and emails the owner an FYI copy; a HOLD reply or Cancel schedule in History skips that week. The inactive-reader check-in email also queues itself. Needs GATE_NEWSLETTER_PROOF_APPROVAL on. Read at call time via newsletterAutoSendLive(), strict 'true', dark by default; off = the issue waits for an APPROVED reply, as before. Emails the list.)
  *   GATE_ESTIMATE_LAWN_LIMITS=true (owner 2026-10-22: a recurring lawn estimate says in writing what the program can and can't fix, and the office can flag other grasses (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) and suspected virus streaks on the lawn's turf profile; each flag adds one line to the estimate page, the estimate PDF and the pdfkit fallback. The tech sheet warns when Celsius WG is picked on a carpetgrass lawn. Read at call time via estimateLawnLimitsLive(), strict 'true', dark by default; off = every estimate, turf profile and tech sheet output exactly as before. Sends nothing and prints no prices.)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
@@ -429,6 +429,7 @@
  *   GATE_DICTATION_CUSTOMER_NAMES=true (owner 2026-10-20, after a dictated surname was heard as a common word: staff dictation word list (needs GATE_SERVER_DICTATION) adds a "Customers who may be named" section, full names: the customer on screen first, then customers with a visit today or tomorrow (a technician login: only their own stops), customers who texted or called in the last 48 hours and recently updated active customers (admin logins only), and passes their surnames as extra transcriber keyword hints. Products shrink to make room; the prompt stays at 1800 characters. The list is cached 5 minutes per login scope and day. Strict opt-in: exactly 'true' in every environment, read at call time via dictationCustomerNamesLive(). Ships DARK; off = the word list and keyword hints are exactly as before. Sends nothing to a customer.)
  *   GATE_DICTATION_MONEY_NORMALIZE=true (owner 2026-10-21, after "sixty-one thirty-three" came back as 6133, $60.33 and $61.33: the staff mic's transcript is read for dollar amounts. In a money context only (a $ or a word like price, charge, rate, a month), the server SUGGESTS (never rewrites; the transcript is returned exactly as heard) "$61.33" for "sixty-one thirty-three", "61 33" or "sixty one dollars and thirty three cents" and "$105" for "a hundred and five"; a run-together "$6133" is kept as typed and flagged ambiguous, so the Intelligence Bar asks with answer buttons between $61.33 and $6,133. Phone numbers, street numbers, times, dates, ZIPs, invoice numbers and quantities with units are never touched. Strict opt-in: exactly 'true' in every environment, read at call time via dictationMoneyNormalizeLive(). Ships DARK; off = the transcript is returned as before. Sends nothing to a customer.)
  *   GATE_SERVICE_SHEET_PRICE_SCOPE=true (owner 2026-10-26 "Build it as shown", bug 4 of the 10-24 price audit: the service-line sheet (MobileServiceEditModal, phone checkout and the Dispatch checkout's service line) asks "This appointment only / This and following appointments" when a recurring-series visit's price is edited, the same choice Edit appointment offers, and posts it as priceServiceScope. Needs GATE_EDIT_APPT_PRICE_SERVICE_SCOPE too: /series-summary answers canScopeSheetPrice:true only when both are on. Strict opt-in, read at module load via isEnabled('serviceSheetPriceScope'); off = the sheet asks nothing and posts no scope, exactly as before. Kill switch: delete the variable.)
+ *   GATE_TAX_DEADLINE_BELLS=true (owner 2026-10-30, "All tax deadlines ring": the 8:23 AM ET tax deadline job raises each reminder as an admin bell (category tax, owner Settings override still wins) in place of the text to the owner phone, which the bell policy had silenced since 2026-09-01 while the job still marked the row reminded. Payroll rows ring 14 days before, 3 days before, the business day before and each morning after a missed date until marked; other rows (sales tax, estimated tax) ring once, 14 days before. A bell closes when its row is marked filed or paid. Read at call time via taxDeadlineBellsLive(), strict 'true', dark by default; off = the text and the reminded marks are exactly as before. Sends nothing to a customer. Rollback = unset.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3276,6 +3277,11 @@ const gates = {
   // payrollTaxCalendarLive(). Kill switch: unset GATE_PAYROLL_TAX_CALENDAR.
   payrollTaxCalendar: process.env.GATE_PAYROLL_TAX_CALENDAR === 'true',
 
+  // Tax deadline bells (owner 2026-10-30): the 8:23 ET tax deadline reminders ring
+  // the admin bell. OFF in every environment; read at call time via
+  // taxDeadlineBellsLive(). Kill switch: unset GATE_TAX_DEADLINE_BELLS.
+  taxDeadlineBells: process.env.GATE_TAX_DEADLINE_BELLS === 'true',
+
   // Payroll layer 3a (owner 2026-10-25): the line-by-line figures for Form 941,
   // RT-6, Form 940 and W-2/W-3 in the Payroll tab. OFF in every environment;
   // read at call time via payrollFormFiguresLive(). Kill switch: unset
@@ -3895,11 +3901,6 @@ const gates = {
   // unset or any non-'true' value — estimates and accepts revert to the
   // 2026-08-05 review-bell behavior.
   waveguardExtendExisting: process.env.GATE_WAVEGUARD_EXTEND_EXISTING === 'true',
-  // Staff pick which current services take the new tier (owner 2026-10-30,
-  // option B), from ANY starting tier — Silver to Gold included. Rides on
-  // waveguardExtendExisting (both must be on). Money surface — fail-closed
-  // ==='true'. Off: the Bronze-start-only automatic extension above.
-  waveguardExtendPick: process.env.GATE_WAVEGUARD_EXTEND_PICK === 'true',
 
   // Bank Import (2026-08-13): statement-CSV staging + expense reconciliation
   // under /admin/tax. Staff-only and read-mostly, but OFF in every
@@ -5036,6 +5037,13 @@ const gates = {
   // GATE_PEST_INSIDER_PROOF at call time. Kill = unset — today's behavior:
   // draft + notification only, no proof attempt.
   pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
+
+  // Weekly newsletter sends itself after its checks (owner 2026-10-30,
+  // option A). Ships DARK: off unless exactly 'true'. This entry is for
+  // logGateStatus only; newsletterAutoSendLive() is read at call time by
+  // services/newsletter-proof.js, newsletter-sunset.js and the History stop
+  // route. Kill = unset: the issue waits for an APPROVED reply again.
+  newsletterAutoSend: process.env.GATE_NEWSLETTER_AUTO_SEND === 'true',
   // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
   // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
   // version for what this deliberately leaves out). Ships DARK: off unless
@@ -6279,6 +6287,15 @@ function dedupeNoUnverifiedBackfillLive() {
 // to the URLs snapshotted on the send (security audit run 2).
 function newsletterClickBoundLive() {
   return process.env.GATE_NEWSLETTER_CLICK_BOUND === 'true';
+}
+
+// GATE_NEWSLETTER_AUTO_SEND read at CALL time, strict `=== 'true'`, dark by
+// default (owner 2026-10-30, option A). On, the weekly proof step queues the
+// issue for its Tuesday 6:00 AM ET target and the owner's copy is FYI (reply
+// HOLD to skip the week); the inactive-reader check-in email queues itself.
+// Off = the issue waits for an APPROVED reply. Emails the list.
+function newsletterAutoSendLive() {
+  return process.env.GATE_NEWSLETTER_AUTO_SEND === 'true';
 }
 
 // GATE_ESTIMATE_LAWN_LIMITS read at CALL time — strict `=== 'true'`, dark by
@@ -8427,6 +8444,14 @@ function payrollTaxCalendarLive() {
   return process.env.GATE_PAYROLL_TAX_CALENDAR === 'true';
 }
 
+// GATE_TAX_DEADLINE_BELLS read at CALL time — strict 'true' only, so an unset
+// variable is off. Gates the bell path of the 8:23 ET tax deadline job
+// (services/tax-deadline-reminders.js) and the bell close in PUT
+// /api/admin/tax/filings/:id. Off = the owner-phone text, exactly as before.
+function taxDeadlineBellsLive() {
+  return process.env.GATE_TAX_DEADLINE_BELLS === 'true';
+}
+
 // GATE_PAYROLL_FORM_FIGURES read at CALL time — strict 'true' only, so an unset
 // variable is off. Gates GET /api/admin/payroll/forms (services/payroll-form-
 // figures.js) and the Tax forms section of the Payroll tab. Off = the route
@@ -8950,6 +8975,8 @@ module.exports.aioGapSweepMonthlyLive = aioGapSweepMonthlyLive;
 module.exports.payrollLive = payrollLive;
 // GATE_PAYROLL_TAX_CALENDAR reader, on its own line so gate PRs never conflict.
 module.exports.payrollTaxCalendarLive = payrollTaxCalendarLive;
+// GATE_TAX_DEADLINE_BELLS reader, on its own line so gate PRs never conflict.
+module.exports.taxDeadlineBellsLive = taxDeadlineBellsLive;
 // GATE_PAYROLL_FORM_FIGURES reader, on its own line so gate PRs never conflict.
 module.exports.payrollFormFiguresLive = payrollFormFiguresLive;
 // GATE_PAYROLL_TIME_OFF reader, on its own line so gate PRs never conflict.
@@ -9337,6 +9364,8 @@ module.exports.RETIRED_GATES = RETIRED;
 module.exports.callEnrichCodesRequireAniLive = callEnrichCodesRequireAniLive;
 module.exports.backlinkSignupUrlGuardLive = backlinkSignupUrlGuardLive;
 module.exports.newsletterClickBoundLive = newsletterClickBoundLive;
+// GATE_NEWSLETTER_AUTO_SEND reader, on its own line so gate PRs never conflict.
+module.exports.newsletterAutoSendLive = newsletterAutoSendLive;
 // GATE_BILL_TO_NO_VISIT_INVOICES reader, on its own line so gate PRs never conflict.
 module.exports.billToNoVisitInvoicesLive = billToNoVisitInvoicesLive;
 // GATE_QUIET_OVERDUE_LIST reader, on its own line so gate PRs never conflict.

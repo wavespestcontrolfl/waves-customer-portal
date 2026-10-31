@@ -86,7 +86,9 @@ function assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes 
     }
   } else {
     const dur = Number.parseInt(durationMinutes, 10);
-    endMin = startMin + (Number.isInteger(dur) && dur > 0 ? dur : (capacityEnabled() ? 30 : DEFAULT_DURATION_MINUTES));
+    // The row keeps the one-hour promise in both modes (owner 2026-10-30): capacity mode used to
+    // write 30 here (the 2026-10-05 failure); only the PLAN uses minutes (planning-minutes.js).
+    endMin = startMin + (Number.isInteger(dur) && dur > 0 ? dur : DEFAULT_DURATION_MINUTES);
   }
   if (endMin <= startMin) {
     throw invalidWindow(`Appointment end must be after its start — got ${minutesToHHMM(startMin)}-${minutesToHHMM(endMin)}`);

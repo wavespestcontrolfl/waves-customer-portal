@@ -4138,9 +4138,11 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY MONDAY 7AM ET — Newsletter autopilot
-  // Auto-drafts the weekly flagship digest from approved events. Never
-  // auto-sends — creates a draft for admin review. Skips if fewer than 3
-  // eligible events and notifies admin to approve more.
+  // Auto-drafts the weekly flagship digest from approved events and proofs
+  // it. Under GATE_NEWSLETTER_AUTO_SEND a draft that passes every check
+  // queues itself for Tuesday 6:00 AM ET (owner 2026-10-30, option A); off,
+  // it waits for an APPROVED reply. Skips if fewer than 3 eligible events
+  // and notifies admin to approve more.
   // =========================================================================
   cron.schedule('0 7 * * 1', async () => {
     try {
@@ -4155,7 +4157,8 @@ function initScheduledJobs() {
   // =========================================================================
   // MONDAY 2PM + TUESDAY 4:30AM ET — Missed-tick catch-up for the Monday-7AM
   // autopilot. The early-Tuesday recovery still leaves 90 minutes for proof
-  // approval before the exact 6:00AM delivery target; it never auto-approves.
+  // approval before the exact 6:00AM delivery target; it approves nothing
+  // itself (under GATE_NEWSLETTER_AUTO_SEND the proof step queues the issue).
   // Re-run autoDraftFlagship ONLY for a week that was NEVER ATTEMPTED (no
   // calendar row, or status 'planned'). A deliberately-deleted draft (status
   // 'drafted' with a null send_id) is left alone so it can't silently reappear,
@@ -4731,8 +4734,9 @@ function initScheduledJobs() {
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
   // the post to build_failed if it blows up. runExclusive: this tick
-  // contains the SCHEDULER-lane auto-merge (pollPost → mergeAstro for posts
-  // claimed at publish_status='publishing'), and a merge plus its post-merge
+  // contains the scheduler-claim auto-merge (pollPost → mergeAstro for posts
+  // still at publish_status='publishing' — after the scheduler's review
+  // handoff that means a crash-stranded claim), and a merge plus its post-merge
   // chain must not double-run across overlapping deploy instances — the same
   // rule the autonomous-pr-poll tick below already follows. It also keeps
   // the per-poll merge cap meaningful (two concurrent ticks each merging
@@ -7161,6 +7165,15 @@ function initScheduledJobs() {
       // so quarters with no pay run and new hires are on the calendar and
       // get this run's reminder. Never throws.
       await require('./payroll-tax-calendar').syncPayrollFilingsSafe();
+
+      // GATE_TAX_DEADLINE_BELLS (owner 2026-10-30): the reminders ring the admin bell, one per row and
+      // stage, in place of the text below (the bell policy had silenced that text since 2026-09-01).
+      // The typeof guard keeps a suite that mocks feature-gates without the reader on today's text.
+      const gates = require('../config/feature-gates');
+      if (typeof gates.taxDeadlineBellsLive === 'function' && gates.taxDeadlineBellsLive()) {
+        await require('./tax-deadline-reminders').runTaxDeadlineReminders({ now });
+        return;
+      }
 
       // Find filings due in the next 14 days that haven't been reminded yet
       const upcomingFilings = await db('tax_filing_calendar')

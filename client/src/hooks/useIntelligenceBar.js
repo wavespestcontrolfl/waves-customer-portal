@@ -9,6 +9,7 @@
  *   onAfterSubmit    — (data) => void, runs after every successful query
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useOutletContext } from 'react-router-dom';
 import {
   getRecents,
   addRecent,
@@ -46,6 +47,9 @@ export function useIntelligenceBar({
   onAfterSubmit,
   getRequestKey,
 } = {}) {
+  // Pinned prompts belong to the signed-in staff account: the user the admin
+  // shell verified (AdminLayoutV2 outlet). No account, no pins.
+  const userId = useOutletContext()?.user?.id;
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
@@ -61,7 +65,7 @@ export function useIntelligenceBar({
   const [quickActions, setQuickActions] = useState([]);
   const [expanded, setExpanded] = useState(false);
   const [recentPrompts, setRecentPrompts] = useState(() => getRecents(context));
-  const [favorites, setFavorites] = useState(() => getFavorites(context));
+  const [favorites, setFavorites] = useState(() => getFavorites(context, userId));
   // Attached photos for the next query (vision). Each: {mediaType,data,name,previewUrl}.
   const [attachments, setAttachments] = useState([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
@@ -150,8 +154,8 @@ export function useIntelligenceBar({
 
   useEffect(() => {
     setRecentPrompts(getRecents(context));
-    setFavorites(getFavorites(context));
-  }, [context]);
+    setFavorites(getFavorites(context, userId));
+  }, [context, userId]);
 
   useEffect(() => {
     const qs = context ? `?context=${context}` : '';
@@ -162,9 +166,9 @@ export function useIntelligenceBar({
 
   const toggleFavorite = useCallback((text) => {
     if (!text) return;
-    const next = toggleFavoriteStorage(context, text);
+    const next = toggleFavoriteStorage(context, userId, text);
     setFavorites(next);
-  }, [context]);
+  }, [context, userId]);
 
   const setAttachmentBusy = useCallback((busy) => {
     attachmentsLoadingRef.current = busy;

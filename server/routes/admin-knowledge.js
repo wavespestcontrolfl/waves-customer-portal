@@ -9,6 +9,9 @@ const WikiLinter = require('../services/knowledge/wiki-linter');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// A technician reads the wiki and asks it questions (POST /query). Every
+// other write and paid job is owner-only here too, not only behind
+// GATE_STAFF_DEFAULT_DENY (operations audit OP-13).
 
 // =========================================================================
 // ARTICLES
@@ -67,7 +70,7 @@ router.get('/article/:id', async (req, res, next) => {
 });
 
 // PUT /api/admin/knowledge/article/:id — update article
-router.put('/article/:id', async (req, res, next) => {
+router.put('/article/:id', requireAdmin, async (req, res, next) => {
   try {
     const updates = { ...req.body, updated_at: new Date() };
     if (updates.content) {
@@ -82,7 +85,7 @@ router.put('/article/:id', async (req, res, next) => {
 });
 
 // POST /api/admin/knowledge/article/:id/verify — mark as human-verified
-router.post('/article/:id/verify', async (req, res, next) => {
+router.post('/article/:id/verify', requireAdmin, async (req, res, next) => {
   try {
     await db('knowledge_base').where('id', req.params.id).update({ last_verified: new Date(), updated_at: new Date() });
     res.json({ success: true });
@@ -116,7 +119,7 @@ router.get('/queries', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/knowledge/queries/:id/rate — rate a response
-router.post('/queries/:id/rate', async (req, res, next) => {
+router.post('/queries/:id/rate', requireAdmin, async (req, res, next) => {
   try {
     await db('knowledge_queries').where('id', req.params.id).update({ response_quality: req.body.rating });
     res.json({ success: true });
@@ -124,7 +127,7 @@ router.post('/queries/:id/rate', async (req, res, next) => {
 });
 
 // POST /api/admin/knowledge/file-back — file a Q&A answer back into the wiki
-router.post('/file-back', async (req, res, next) => {
+router.post('/file-back', requireAdmin, async (req, res, next) => {
   try {
     const result = await WikiQA.fileBack(req.body.queryId);
     res.json(result);
@@ -186,7 +189,7 @@ router.post('/sources', requireAdmin, async (req, res, next) => {
 // =========================================================================
 
 // POST /api/admin/knowledge/compile — compile a specific source
-router.post('/compile', async (req, res, next) => {
+router.post('/compile', requireAdmin, async (req, res, next) => {
   try {
     const { sourceId } = req.body;
     const result = await WikiCompiler.compileSource(sourceId);
@@ -195,7 +198,7 @@ router.post('/compile', async (req, res, next) => {
 });
 
 // POST /api/admin/knowledge/compile-all — compile all unprocessed sources
-router.post('/compile-all', async (req, res, next) => {
+router.post('/compile-all', requireAdmin, async (req, res, next) => {
   try {
     const results = await WikiCompiler.compileAllUnprocessed();
     res.json({ results });
@@ -203,7 +206,7 @@ router.post('/compile-all', async (req, res, next) => {
 });
 
 // POST /api/admin/knowledge/rebuild-index
-router.post('/rebuild-index', async (req, res, next) => {
+router.post('/rebuild-index', requireAdmin, async (req, res, next) => {
   try {
     await WikiCompiler.rebuildIndex();
     res.json({ success: true });
@@ -212,7 +215,7 @@ router.post('/rebuild-index', async (req, res, next) => {
 
 // POST /api/admin/knowledge/seed-wiki-folder
 // Registers and compiles every .md file under /wiki at repo root.
-router.post('/seed-wiki-folder', async (req, res, next) => {
+router.post('/seed-wiki-folder', requireAdmin, async (req, res, next) => {
   try {
     const result = await WikiCompiler.seedFromWikiFolder();
     res.json(result);
@@ -222,7 +225,7 @@ router.post('/seed-wiki-folder', async (req, res, next) => {
 // POST /api/admin/knowledge/import-blog-posts
 // Body: { tagFilter?: string, limit?: number }
 // Groups blog posts by tag and compiles each cluster into a set of KB articles.
-router.post('/import-blog-posts', async (req, res, next) => {
+router.post('/import-blog-posts', requireAdmin, async (req, res, next) => {
   try {
     const { tagFilter, limit } = req.body || {};
     const result = await WikiCompiler.importBlogPosts({ tagFilter, limit: limit ? parseInt(limit) : undefined });

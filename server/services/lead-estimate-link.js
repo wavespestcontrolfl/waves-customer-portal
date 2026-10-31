@@ -301,8 +301,10 @@ function assertLeadCanAttachEstimate({ lead, estimate, estimateId, allowReplacin
   }
 }
 
+// technicians has one `name` column (no first_name / last_name), so reading those
+// recorded every staff-created estimate as 'system'.
 function performedByFromTechnician(technician) {
-  const name = [technician?.first_name, technician?.last_name].filter(Boolean).join(' ').trim();
+  const name = String(technician?.name || '').trim();
   return name || 'system';
 }
 

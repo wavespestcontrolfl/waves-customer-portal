@@ -61,6 +61,7 @@ const {
   extractTopReplyText,
   htmlReplyToText,
   isApprovalReply,
+  isHoldReply,
   maskEmail,
   sendNewsletterProof,
   maybeHandleProofApproval,
@@ -69,7 +70,7 @@ const {
 
 function chain(overrides = {}) {
   const q = {};
-  ['where', 'whereRaw', 'whereNull', 'whereIn', 'select', 'orderBy', 'limit']
+  ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'select', 'orderBy', 'limit']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => overrides.first);
   q.update = jest.fn(async () => (overrides.update !== undefined ? overrides.update : 1));
@@ -682,4 +683,151 @@ describe('maybeHandleProofApproval', () => {
       scheduledFor: TARGET_SEND_AT.toISOString(),
     }));
   });
+});
+
+describe('GATE_NEWSLETTER_AUTO_SEND — the weekly issue sends itself (owner 2026-10-30, option A)', () => {
+  const AUTO_QUEUED = {
+    ...PROOFED_DRAFT,
+    status: 'scheduled',
+    scheduled_for: TARGET_SEND_AT,
+    proof_approved_at: PROOF_STAMP,
+    proof_approval_email_id: null,
+  };
+  const REPLY = {
+    id: 'email-2',
+    subject: 'Re: FYI: [PROOF-ab12cd34] Bubbles & Sea Lions',
+    from_address: 'contact@wavespestcontrol.com',
+    body_text: 'HOLD\n\nOn Mon wrote:\n> To skip this week, reply HOLD',
+  };
+  const SKIPPED_WEEK = { first: { id: 'cal-1', week_of: '2026-07-21', target_send_at: TARGET_SEND_AT, status: 'skipped' } };
+
+  beforeEach(() => { process.env.GATE_NEWSLETTER_AUTO_SEND = 'true'; });
+  afterAll(() => { delete process.env.GATE_NEWSLETTER_AUTO_SEND; });
+
+  test('an issue that passes every check gets an FYI copy and is queued once the copy went out', async () => {
+    const { sendsChain, calendarChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r).toEqual(expect.objectContaining({ sent: true, queued: true }));
+    expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', status: 'draft' });
+    // The claim stays a draft the dispatcher never picks up...
+    const [[claim], [queue]] = sendsChain.update.mock.calls;
+    expect(claim.proof_token).toBe(r.token);
+    expect(claim.status).toBeUndefined();
+    // ...and the issue is queued only after the copy went out, bound to the claim.
+    expect(mockSendOne.mock.invocationCallOrder[0]).toBeLessThan(sendsChain.update.mock.invocationCallOrder[1]);
+    expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', proof_token: r.token, status: 'draft' });
+    expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_approved_at');
+    expect(sendsChain.whereRaw).toHaveBeenCalledWith(expect.stringContaining("date_trunc('milliseconds', updated_at)"), [claim.proof_sent_at]);
+    expect(queue).toEqual(expect.objectContaining({
+      status: 'scheduled',
+      scheduled_for: TARGET_SEND_AT,
+      proof_approved_at: expect.any(Date),
+      proof_approval_email_id: null,
+      proof_refused_at: null,
+    }));
+    expect(calendarChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    const args = mockSendOne.mock.calls[0][0];
+    expect(args.subject).toBe(`FYI: [PROOF-${r.token}] Bubbles & Sea Lions`);
+    expect(args.html).toContain('Sends by itself');
+    expect(args.html).toContain('reply <strong>HOLD</strong>');
+    expect(args.html).not.toContain('Reply <strong>APPROVED</strong>');
+    expect(args.text).toContain('reply HOLD');
+    // No "reply APPROVED" bell: a queued issue needs no one.
+    expect(mockTrigger).not.toHaveBeenCalledWith('newsletter_proof_sent', expect.anything());
+  });
+
+  test('a failed copy never queues the issue, and the claim is released so the catch-up retries', async () => {
+    mockSendOne.mockImplementation(async () => { throw new Error('sendgrid 503'); });
+    const { sendsChain, calendarChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('proof_send_failed');
+    expect(sendsChain.update.mock.calls.some(([patch]) => patch.status === 'scheduled')).toBe(false);
+    expect(sendsChain.update.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ proof_token: null, proof_sent_at: null }));
+    expect(calendarChain.update).not.toHaveBeenCalled();
+  });
+
+  test('an issue that changed before it could be queued stays unqueued and the owner is told', async () => {
+    const { sendsChain, calendarChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    sendsChain.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0); // claim lands, queue finds the row changed
+    const r = await sendNewsletterProof('send-1');
+    expect(r).toEqual(expect.objectContaining({ sent: true, queued: false }));
+    expect(calendarChain.update).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      sendId: 'send-1',
+      errors: ['The FYI copy went out, but the issue changed before it could be queued, so it will not send this week.'],
+    }));
+  });
+
+  test('a failed check queues nothing and raises the alert that says why', async () => {
+    mockValidate.mockReturnValue({ errors: ['hallucinated claim'], warnings: [] });
+    const { sendsChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('validation_failed');
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({ errors: ['hallucinated claim'] }));
+  });
+
+  test('a Pest Insider proof still waits for an APPROVED reply', async () => {
+    const { sendsChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, newsletter_type: 'pest-insider-monthly', proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.queued).toBe(false);
+    expect(sendsChain.update.mock.calls[0][0].status).toBeUndefined();
+    expect(mockSendOne.mock.calls[0][0].subject).toMatch(/^ACT: /);
+  });
+
+  test('switch off: the weekly issue waits for APPROVED, as before', async () => {
+    delete process.env.GATE_NEWSLETTER_AUTO_SEND;
+    const { sendsChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.queued).toBe(false);
+    expect(sendsChain.update.mock.calls[0][0].status).toBeUndefined();
+    expect(mockSendOne.mock.calls[0][0].subject).toMatch(/^ACT: /);
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_sent', expect.anything());
+  });
+
+  test('a skipped week gets no proof', async () => {
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } }, calendar: SKIPPED_WEEK });
+    expect(await sendNewsletterProof('send-1')).toEqual({ skipped: true, reason: 'week_skipped' });
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('HOLD stops an auto-queued issue and skips its week', async () => {
+    const { sendsChain, calendarChain } = wireDb({ sends: { first: AUTO_QUEUED } });
+    expect(await maybeHandleProofApproval(REPLY)).toBe(true);
+    expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', proof_token: 'ab12cd34', status: 'scheduled' });
+    expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_approval_email_id');
+    const hold = sendsChain.update.mock.calls[0][0];
+    expect(hold).toEqual(expect.objectContaining({ status: 'draft', scheduled_for: null, proof_approved_at: null }));
+    // The token goes, so a later reply on the thread can never approve the held issue.
+    expect(hold.proof_token).toBeNull();
+    // proof_sent_at stays: no catch-up proofs the held issue again.
+    expect(hold).not.toHaveProperty('proof_sent_at');
+    expect(calendarChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped' }));
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('a reply with no hold word leaves the queued issue alone', async () => {
+    const { sendsChain } = wireDb({ sends: { first: AUTO_QUEUED } });
+    expect(await maybeHandleProofApproval({ ...REPLY, body_text: "Looks great, can't wait" })).toBe(true);
+    expect(sendsChain.update).not.toHaveBeenCalled();
+  });
+
+  test('HOLD after the send was claimed changes nothing', async () => {
+    const { sendsChain } = wireDb({ sends: { first: { ...AUTO_QUEUED, status: 'sending' } } });
+    expect(await maybeHandleProofApproval(REPLY)).toBe(true);
+    expect(sendsChain.update).not.toHaveBeenCalled();
+  });
+
+  test('HOLD does not touch an issue approved by an APPROVED reply', async () => {
+    const { sendsChain } = wireDb({ sends: { first: { ...AUTO_QUEUED, proof_approval_email_id: 'email-1' } } });
+    expect(await maybeHandleProofApproval(REPLY)).toBe(true);
+    expect(sendsChain.update).not.toHaveBeenCalled();
+  });
+
+  test.each(['HOLD', 'hold please', 'Stop this one', 'skip this week', "don't send", 'don’t send', 'do not send it', 'cancel', 'pause'])(
+    'isHoldReply accepts %j', (t) => expect(isHoldReply(t)).toBe(true),
+  );
+  test.each(['Looks great', "can't wait", 'approved', '', undefined])(
+    'isHoldReply rejects %j', (t) => expect(isHoldReply(t)).toBe(false),
+  );
 });

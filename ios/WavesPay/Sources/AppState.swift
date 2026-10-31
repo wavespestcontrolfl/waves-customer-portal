@@ -18,8 +18,8 @@ final class AppState: ObservableObject {
         case idle
         case validating
         case ready(API.ValidatedHandoff)
-        case collecting
-        case success(String)     // paymentIntentId
+        case collecting(CollectStep)
+        case success(Receipt)
         case failure(String)     // human message
 
         var isActive: Bool {
@@ -35,6 +35,10 @@ final class AppState: ObservableObject {
             }
         }
     }
+
+    // Before the tap: reader and charge setup. After it: the surcharge check
+    // and the confirm.
+    enum CollectStep { case starting, finishing }
 
     private struct PendingResult {
         let requestId: String?
@@ -97,18 +101,25 @@ final class AppState: ObservableObject {
             PendingHandoff.jti = JWTDecoder.extractClaim(token: token, key: "jti")
             pendingResult?.invoiceId = validated.invoice_id
             flow = .ready(validated)
+            // Connect the reader while staff and customer read the amount,
+            // unless the staff page already did.
+            TerminalManager.shared.prepare()
         } catch {
             fail(error.localizedDescription)
         }
     }
 
     func beginCollecting() {
-        flow = .collecting
+        flow = .collecting(.starting)
     }
 
-    func collected(paymentIntentId: String) {
-        flow = .success(paymentIntentId)
-        report(.succeeded, paymentIntentId: paymentIntentId)
+    func cardRead() {
+        flow = .collecting(.finishing)
+    }
+
+    func collected(_ receipt: Receipt) {
+        flow = .success(receipt)
+        report(.succeeded, paymentIntentId: receipt.paymentIntentId)
     }
 
     func fail(_ message: String) {
@@ -153,6 +164,16 @@ final class AppState: ObservableObject {
         else { return nil }
         return token
     }
+}
+
+// What the success screen shows: the confirmed charge, not the invoice
+// amount, so a credit card's surcharge is included.
+struct Receipt {
+    let paymentIntentId: String
+    let amountCents: Int
+    let currency: String
+    let customerName: String?
+    let card: String?        // "Visa •••• 4242 · Credit"
 }
 
 // One-shot holders for values that need to survive across views during a

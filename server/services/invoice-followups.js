@@ -697,7 +697,21 @@ async function newSequencePlanFor(trx, invoice, { adoption, steps }) {
   // P1): the default swallows the read error as "not on autopay" and would
   // arm an ACTIVE row for an enrolled customer. The throw rolls this
   // transaction back, so no row exists and the next sweep retries.
-  const onAutopay = await customerOnAutopay(customer, { db: trx, ...(adoption ? { failClosed: true } : {}) });
+  let onAutopay = !!await customerOnAutopay(customer, { db: trx, ...(adoption ? { failClosed: true } : {}) });
+  // Auto Pay never collects a bill from a won Bill-by-invoice proposal (owner
+  // 2026-10-30, bill-by-invoice.js), so no charge or failure would end its
+  // hold: its reminders run. A failed read arms the reminders too (this
+  // path's own posture for an unreadable Auto Pay read); adoption fails
+  // closed and retries, like its method read.
+  if (onAutopay) {
+    try {
+      onAutopay = !await require('./bill-by-invoice').billByInvoiceInvoice(trx, invoice);
+    } catch (err) {
+      if (adoption) throw err;
+      onAutopay = false;
+      logger.warn(`[invoice-followups] Bill-by-invoice check failed for invoice ${invoice.id} — reminders armed: ${err.message}`);
+    }
+  }
 
   // Anchor the cadence to when the invoice went out. Falls back through
   // sent_at → sms_sent_at → created_at so edge cases (manual-only, email-only,
@@ -712,7 +726,7 @@ async function newSequencePlanFor(trx, invoice, { adoption, steps }) {
     logger.info(`[invoice-followups] adoption left invoice ${invoice.id} for a person: every ladder step has passed`);
     return null;
   }
-  return { stepIndex: landing.stepIndex, nextTouchAt: landing.nextAt, onAutopay: !!onAutopay };
+  return { stepIndex: landing.stepIndex, nextTouchAt: landing.nextAt, onAutopay };
 }
 
 async function insertSequence(trx, invoice, plan) {
@@ -815,7 +829,9 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
   if (await activePaymentPlan(database, invoice.id)) return { arms: false, state: 'payment_plan', cadence };
   try {
     const customer = knownCustomer || await database('customers').where({ id: invoice.customer_id }).first();
-    const onAutopay = await customerOnAutopay(customer, { db: database, failClosed: true });
+    // The same Bill-by-invoice exception the new sequence takes (newSequencePlanFor).
+    const onAutopay = await customerOnAutopay(customer, { db: database, failClosed: true })
+      && !await require('./bill-by-invoice').billByInvoiceInvoice(database, invoice);
     return { arms: true, state: onAutopay ? 'autopay_hold' : 'active', cadence };
   } catch {
     return { arms: true, state: 'autopay_unreadable', cadence };
@@ -3269,7 +3285,9 @@ async function visitBillLane(svc, invoice) {
     apptCardOneTimeCharge: appt.apptCardOneTimeCharge, apptCardLaneUnresolved: appt.apptCardLaneUnresolved, customerAutopayActive: true,
     conn: db, strict: true,
   });
-  const candidate = perApplicationBilling || appt.apptCardOneTimeCharge || ext.extendedChargeCandidate;
+  // A Bill-by-invoice visit is on no Auto Pay lane (bill-by-invoice.js): the hold is released to its reminders.
+  const perApplicationCharge = await verdicts.resolvePerApplicationCharge({ svc, perApplicationBilling, conn: db, strict: true });
+  const candidate = perApplicationCharge || appt.apptCardOneTimeCharge || ext.extendedChargeCandidate;
   return { candidate, autopayActive: customerAutopayActive, perApplicationBilling, appt, ext };
 }
 

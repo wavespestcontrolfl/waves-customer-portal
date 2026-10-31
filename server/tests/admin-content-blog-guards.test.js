@@ -21,7 +21,7 @@ jest.mock('../services/content-astro/spoke-sites', () => ({ invalidSpokeSites: (
 jest.mock('../services/content/autonomous-review-queue', () => ({}));
 jest.mock('../services/content/internal-link-review-queue', () => ({}));
 jest.mock('../config/feature-gates', () => ({ isEnabled: () => true }));
-jest.mock('../services/content-astro/astro-publisher', () => ({ publishAstro: jest.fn(), generatePlannedImage: jest.fn() }));
+jest.mock('../services/content-astro/astro-publisher', () => ({ publishAstro: jest.fn(), generatePlannedImage: jest.fn(), mergeAstro: jest.fn() }));
 
 const db = require('../models/db');
 const router = require('../routes/admin-content-v2');
@@ -54,6 +54,7 @@ function setupDb() {
       orWhereNull: jest.fn(() => q),
       orWhere: jest.fn(() => q),
       orderBy: jest.fn(() => q),
+      offset: jest.fn((n) => { q._offset = n; return q; }),
       limit: jest.fn(() => Promise.resolve(tableState.rows || [])),
       groupBy: jest.fn(() => Promise.resolve([])),
       select: jest.fn(() => q),
@@ -208,6 +209,20 @@ describe('GET /blog sort/limit hardening', () => {
     const bad = await invoke('get', '/blog', { query: { limit: 'abc' } });
     expect(bad.nextErr?.statusCode).toBe(400);
   });
+
+  test('pages with offset and reports every matching row as total (audit BLOG-12)', async () => {
+    setupDb();
+    tableState.rows = [{ id: 'a' }];
+    tableState.post = { count: '523' };
+    const page = await invoke('get', '/blog', { query: { status: 'published', offset: '200' } });
+    expect(page.statusCode).toBe(200);
+    expect(page.payload).toMatchObject({ posts: [{ id: 'a' }], total: 523, offset: 200 });
+    const listQuery = db.mock.results.find((r) => r.value.offset.mock.calls.length)?.value;
+    expect(listQuery.offset).toHaveBeenCalledWith(200);
+
+    const bad = await invoke('get', '/blog', { query: { offset: '-1' } });
+    expect(bad.nextErr?.statusCode).toBe(400);
+  });
 });
 
 // codex r4 (P0): the manual publish lane must own the row while publishAstro
@@ -355,5 +370,26 @@ describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invis
     setupDb();
     tableState.post = { id: POST_ID, status: 'queued', publish_claimed_at: new Date() };
     expect((await invoke('put', '/blog/:id', { params: { id: POST_ID }, body: { title: 'T' } })).statusCode).toBe(409);
+  });
+});
+
+describe('merge-astro returns the row after the merge (audit BLOG-07)', () => {
+  const AstroPublisher = require('../services/content-astro/astro-publisher');
+
+  test('the editor gets the merged row', async () => {
+    setupDb();
+    AstroPublisher.mergeAstro.mockResolvedValue({ merged: true, unpublished: true, pr_number: 9, live_url: null });
+    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'draft', astro_pr_number: null };
+    const r = await invoke('post', '/blog/:id/merge-astro', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(200);
+    expect(r.payload).toMatchObject({ success: true, unpublished: true, post: { astro_status: 'draft', status: 'draft' } });
+  });
+
+  test('a failed read after a merged PR still reports the merge, with post null', async () => {
+    db.mockImplementation(() => ({ where: () => ({ first: () => Promise.reject(new Error('connection reset')) }) }));
+    AstroPublisher.mergeAstro.mockResolvedValue({ merged: true, unpublished: false, pr_number: 9, live_url: 'https://x.invalid/p/' });
+    const r = await invoke('post', '/blog/:id/merge-astro', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(200);
+    expect(r.payload).toMatchObject({ success: true, merged: true, post: null });
   });
 });

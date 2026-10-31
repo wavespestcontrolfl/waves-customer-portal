@@ -4,7 +4,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
-  NEW_HIRE_FLOOR, legalHolidaysIrs, legalHolidaysFlorida, rollIrs, rollFlorida, payrollObligations, withBalances,
+  NEW_HIRE_FLOOR, legalHolidaysIrs, legalHolidaysFlorida, rollIrs, rollFlorida, previousBusinessDayIrs, previousBusinessDayFlorida, payrollObligations, withBalances,
 } = require('../services/payroll-tax-calendar');
 
 let nextId = 0;
@@ -63,6 +63,14 @@ describe('roll rules', () => {
     expect(rollIrs('2027-03-15')).toBe('2027-03-15'); // Monday, no holiday
   });
 
+  test('the business day before a due date skips weekends and the same holiday set', () => {
+    expect(previousBusinessDayIrs('2027-02-16')).toBe('2027-02-12'); // 15 Feb is Washington's Birthday
+    expect(previousBusinessDayIrs('2027-03-16')).toBe('2027-03-15');
+    expect(previousBusinessDayIrs('2026-11-30')).toBe('2026-11-27'); // Friday after Thanksgiving is not an IRS holiday
+    expect(previousBusinessDayFlorida('2026-11-30')).toBe('2026-11-25'); // ...but it is a Florida one
+    expect(previousBusinessDayFlorida('2027-02-01')).toBe('2027-01-29');
+  });
+
   test('Florida dates skip weekends and state or federal holidays', () => {
     expect(rollFlorida('2027-01-31')).toBe('2027-02-01');
     expect(rollFlorida('2027-10-31')).toBe('2027-11-01');
@@ -88,6 +96,8 @@ describe('payrollObligations', () => {
       due_date: '2027-02-16',
       amount_due: '506.00',
     });
+    // IRS Direct Pay choices, with the quarter of the deposit's month.
+    expect(map['payroll:941_deposit:2027-01'].notes).toContain('IRS Direct Pay: Reason for payment = Federal tax deposit; Apply payment to = 941; Tax period = Q1 2027');
     expect(map['payroll:941_deposit:2027-02']).toMatchObject({
       period_label: 'Feb 2027', due_date: '2027-03-15', amount_due: '253.00',
     });

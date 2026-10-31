@@ -22,7 +22,8 @@
  *   skeletonBars         — widths array for loading skeleton bars
  *   bodyClassName        — extra classes on outer container
  *
- * Recents + favorites are persisted in localStorage per-context by the hook.
+ * Recents + favorites (Pinned) are persisted in localStorage per context by
+ * the hook; Pinned prompts per staff account (utils/ibStorage).
  */
 
 import { useRef } from "react";
@@ -30,36 +31,13 @@ import { cn } from "../ui";
 import { useIntelligenceBar } from "../../hooks/useIntelligenceBar";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
+import { renderAnswerInline } from "./answerInline";
 
-export function renderInline(text) {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g);
-  return parts.map((part, i) => {
-    if (part.startsWith("**") && part.endsWith("**")) {
-      return (
-        <strong key={i} className="text-ink-primary font-medium">
-          {part.slice(2, -2)}
-        </strong>
-      );
-    }
-    if (part.includes("`")) {
-      const codeParts = part.split(/(`[^`]+`)/g);
-      return codeParts.map((cp, j) => {
-        if (cp.startsWith("`") && cp.endsWith("`")) {
-          return (
-            <code
-              key={`${i}-${j}`}
-              className="u-nums text-12 bg-zinc-100 text-ink-primary px-1.5 py-px rounded-xs"
-            >
-              {cp.slice(1, -1)}
-            </code>
-          );
-        }
-        return cp;
-      });
-    }
-    return part;
-  });
-}
+// Bold, links and `code` in answer text (components/admin/answerInline).
+const ANSWER_INLINE = {
+  strong: { className: "text-ink-primary font-medium" },
+  code: { className: "u-nums text-14 bg-zinc-100 text-ink-primary px-1.5 py-px rounded-xs" },
+};
 
 export function renderMarkdown(text) {
   if (!text) return null;
@@ -94,7 +72,7 @@ export function renderMarkdown(text) {
         <div key={key++} className="flex gap-2 pl-1 mb-1">
           {" "}
           <span className="u-dot u-dot--filled mt-1.5 flex-shrink-0" />{" "}
-          <span>{renderInline(line.replace(/^[-•*]\s/, ""))}</span>{" "}
+          <span>{renderAnswerInline(line.replace(/^[-•*]\s/, ""), ANSWER_INLINE)}</span>{" "}
         </div>,
       );
       continue;
@@ -104,10 +82,10 @@ export function renderMarkdown(text) {
       elements.push(
         <div key={key++} className="flex gap-2 pl-1 mb-1">
           {" "}
-          <span className="u-nums text-12 font-medium text-ink-primary min-w-[1.25rem]">
+          <span className="u-nums text-14 font-medium text-ink-primary min-w-[1.25rem]">
             {num}.
           </span>{" "}
-          <span>{renderInline(line.replace(/^\d+\.\s/, ""))}</span>{" "}
+          <span>{renderAnswerInline(line.replace(/^\d+\.\s/, ""), ANSWER_INLINE)}</span>{" "}
         </div>,
       );
       continue;
@@ -118,7 +96,7 @@ export function renderMarkdown(text) {
     }
     elements.push(
       <div key={key++} className="mb-1">
-        {renderInline(line)}
+        {renderAnswerInline(line, ANSWER_INLINE)}
       </div>,
     );
   }
@@ -152,7 +130,7 @@ export function QuickChip({ label, onClick, title, promoted = false }) {
       title={title}
       aria-label={title ? `${label} — ${title}` : label}
       className={cn(
-        "inline-flex items-center h-6 px-3 text-11 font-medium border-hairline rounded-sm u-focus-ring transition-colors whitespace-nowrap",
+        "inline-flex items-center h-8 px-3 text-14 font-medium border-hairline rounded-sm u-focus-ring transition-colors whitespace-nowrap",
         promoted
           ? "bg-zinc-900 text-white border-zinc-900 hover:bg-zinc-800"
           : "bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-50 hover:text-ink-primary",
@@ -257,11 +235,11 @@ export default function IntelligenceBarShell({
             onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
             placeholder={placeholder}
-            className="w-full h-11 sm:h-9 pl-3 pr-20 bg-white border-hairline border-zinc-200 rounded-sm text-14 sm:text-13 text-ink-primary placeholder-ink-tertiary focus:outline-none focus:border-zinc-900 u-focus-ring"
+            className="w-full h-11 sm:h-9 pl-3 pr-24 bg-white border-hairline border-zinc-200 rounded-sm text-14 text-ink-primary placeholder-ink-tertiary focus:outline-none focus:border-zinc-900 u-focus-ring"
           />{" "}
           <div className="absolute right-1.5 top-1/2 -translate-y-1/2">
             {loading ? (
-              <span className="u-label text-ink-secondary px-2 animate-pulse">
+              <span className="text-14 text-ink-secondary px-2 animate-pulse">
                 {loadingLabel}
               </span>
             ) : (
@@ -269,12 +247,12 @@ export default function IntelligenceBarShell({
                 onClick={() => submit()}
                 disabled={!prompt.trim() || attachmentsLoading}
                 className={cn(
-                  "h-8 sm:h-6 px-3 text-11 uppercase tracking-label font-medium rounded-xs u-focus-ring transition-colors",
+                  "h-8 sm:h-7 px-3 text-14 uppercase tracking-label font-medium rounded-xs u-focus-ring transition-colors",
                   "bg-zinc-900 text-white hover:bg-zinc-800",
                   (!prompt.trim() || attachmentsLoading) && "cursor-not-allowed opacity-60",
                 )}
               >
-                {attachmentsLoading ? "Attaching..." : askLabel}
+                {askLabel}
               </button>
             )}
           </div>{" "}
@@ -309,12 +287,19 @@ export default function IntelligenceBarShell({
         {(response || activeTask || pendingActions.length > 0 || conversationHistory.length > 0) && (
           <button
             onClick={clear}
-            className="h-6 px-2 u-label text-ink-secondary border-hairline border-zinc-200 rounded-xs hover:bg-zinc-50 u-focus-ring"
+            className="h-8 px-2 text-14 uppercase tracking-label font-medium text-ink-secondary border-hairline border-zinc-200 rounded-xs hover:bg-zinc-50 u-focus-ring"
           >
             Clear
           </button>
         )}
       </div>
+      {/* Below the bar, not on the Ask button: at 14px the words would be
+          wider than the room the input keeps for the button. */}
+      {attachmentsLoading && (
+        <div role="status" className="px-4 pb-3 text-14 text-ink-secondary">
+          Attaching photo…
+        </div>
+      )}
       {(tasksAvailable || taskHistoryError) && <details className="px-4 pb-3 text-14 text-ink-secondary" onToggle={event => { if (event.currentTarget.open) void loadTasks(); }}>
         <summary className="min-h-11 flex items-center cursor-pointer u-focus-ring">Saved requests</summary>
         <p className="mb-2">Clearing a chat does not cancel actions.</p>
@@ -344,7 +329,7 @@ export default function IntelligenceBarShell({
                 onClick={() => removeAttachment(i)}
                 title="Remove"
                 aria-label={`Remove ${a.name}`}
-                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-11 leading-none border-hairline border-zinc-200"
+                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-14 leading-none border-hairline border-zinc-200"
               >
                 ×
               </button>
@@ -356,7 +341,7 @@ export default function IntelligenceBarShell({
       {expanded && !response && !loading && favorites.length > 0 && (
         <div className="px-4 pb-3">
           {" "}
-          <div className="u-label text-ink-tertiary mb-1.5">Pinned</div>{" "}
+          <div className="text-14 uppercase tracking-label font-medium text-ink-tertiary mb-1.5">Pinned</div>{" "}
           <div className="flex flex-wrap gap-2">
             {favorites.map((p, i) => (
               <div
@@ -371,7 +356,7 @@ export default function IntelligenceBarShell({
                   }}
                   title={p}
                   aria-label={p}
-                  className="h-6 px-3 text-11 font-medium text-ink-primary hover:bg-zinc-50 u-focus-ring max-w-[240px] truncate"
+                  className="h-8 px-3 text-14 font-medium text-ink-primary hover:bg-zinc-50 u-focus-ring max-w-[240px] truncate"
                 >
                   {p}
                 </button>{" "}
@@ -379,7 +364,7 @@ export default function IntelligenceBarShell({
                   onClick={() => toggleFavorite(p)}
                   title="Unpin"
                   aria-label={`Unpin ${p}`}
-                  className="h-6 px-1.5 text-11 text-ink-primary border-l border-hairline border-zinc-200 hover:bg-zinc-50 u-focus-ring"
+                  className="h-8 px-2 text-14 text-ink-primary border-l border-hairline border-zinc-200 hover:bg-zinc-50 u-focus-ring"
                 >
                   Unpin
                 </button>{" "}
@@ -395,7 +380,7 @@ export default function IntelligenceBarShell({
           {groupActions(quickActions).map((g, gi) => (
             <div key={g.group ?? `g-${gi}`} className={gi === 0 ? "" : "mt-2"}>
               {g.group && (
-                <div className="u-label text-ink-tertiary mb-1.5">
+                <div className="text-14 uppercase tracking-label font-medium text-ink-tertiary mb-1.5">
                   {g.group}
                 </div>
               )}
@@ -428,7 +413,7 @@ export default function IntelligenceBarShell({
       {expanded && !response && !loading && recentPrompts.length > 0 && (
         <div className="px-4 pb-3">
           {" "}
-          <div className="u-label text-ink-tertiary mb-1.5">Recent</div>
+          <div className="text-14 uppercase tracking-label font-medium text-ink-tertiary mb-1.5">Recent</div>
           {recentPrompts.map((p, i) => {
             const isFav = favorites.includes(p);
             return (
@@ -442,7 +427,7 @@ export default function IntelligenceBarShell({
                     setPrompt(p);
                     submit(p);
                   }}
-                  className="flex-1 text-left text-12 text-ink-secondary hover:text-ink-primary truncate u-focus-ring"
+                  className="flex-1 text-left text-14 text-ink-secondary hover:text-ink-primary truncate u-focus-ring"
                 >
                   {p}
                 </button>{" "}
@@ -451,7 +436,7 @@ export default function IntelligenceBarShell({
                   title={isFav ? "Unpin" : "Pin"}
                   aria-label={isFav ? `Unpin ${p}` : `Pin ${p}`}
                   className={cn(
-                    "h-5 min-w-8 px-1.5 flex items-center justify-center text-11 rounded-xs u-focus-ring transition-colors",
+                    "h-6 min-w-8 px-1.5 flex items-center justify-center text-14 rounded-xs u-focus-ring transition-colors",
                     isFav
                       ? "text-ink-primary"
                       : "text-ink-tertiary hover:text-ink-primary",
@@ -492,7 +477,7 @@ export default function IntelligenceBarShell({
           <div
             role={isError ? "alert" : undefined}
             className={cn(
-              "text-13 leading-relaxed mt-3",
+              "text-14 leading-relaxed mt-3",
               isError ? "text-alert-fg" : "text-ink-primary",
             )}
           >
@@ -513,13 +498,13 @@ export default function IntelligenceBarShell({
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={followupPlaceholder}
-              className="flex-1 h-8 px-3 bg-white border-hairline border-zinc-200 rounded-sm text-12 text-ink-primary placeholder-ink-tertiary focus:outline-none focus:border-zinc-900 u-focus-ring"
+              className="flex-1 h-8 px-3 bg-white border-hairline border-zinc-200 rounded-sm text-14 text-ink-primary placeholder-ink-tertiary focus:outline-none focus:border-zinc-900 u-focus-ring"
             />{" "}
             <button
               onClick={() => submit()}
               disabled={!prompt.trim() || loading}
               className={cn(
-                "h-8 px-3 text-11 uppercase tracking-label font-medium rounded-sm u-focus-ring transition-colors",
+                "h-8 px-3 text-14 uppercase tracking-label font-medium rounded-sm u-focus-ring transition-colors",
                 prompt.trim()
                   ? "bg-zinc-900 text-white hover:bg-zinc-800"
                   : "bg-zinc-100 text-ink-tertiary opacity-40",

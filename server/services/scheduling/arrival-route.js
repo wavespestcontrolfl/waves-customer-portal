@@ -16,6 +16,7 @@ const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServi
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
+const { placedVisitMinutes } = require('./planning-minutes');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 const warningDetail = require('./route-warning-detail');
 
@@ -291,6 +292,7 @@ async function loadArrivalRouteContext({
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
   routeOrderPinned,
   travel, preserveCapacity, blocks,
+  planningMinutes,
   vanDepartureMin,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
   home: startPoints ? await loadTechStartPoint(conn, techId) : RouteOptimizer.HQ };
@@ -433,20 +435,32 @@ function routeDriveMinutes(stops, origin, end = RouteOptimizer.HQ) {
  *  20-minute job in a 60-minute window 60 minutes beside its sibling —
  *  codex #4435 r3/r4 P1) — a genuinely long service is still covered: the
  *  chain's floor is the longest member's workDuration, which includes it.
- *  Exempt from owner planning minutes (planning-minutes.js): the caller's
- *  already-resolved allowance (booking funnel, estimate profile, re-service
- *  catalog) applies to THIS row; owner minutes apply only to the other
- *  stops already on the route. */
+ *  Exempt from owner planning minutes (planning-minutes.js) unless the table
+ *  applies to it (placedVisitMinutes, capacity mode, allowance of the legacy
+ *  hour or less): the caller's already-resolved allowance (booking funnel,
+ *  estimate profile, re-service catalog) otherwise applies to THIS row. With
+ *  `context.planningMinutes === false` (the night arrival search) it is always
+ *  exempt. */
 function buildPlacementTarget(context, windowStart, windowEnd, durationMinutes) {
   // A whole visit (loadArrivalRouteContext `unit`): its other members' work
   // is added to the tapped member's. Zero for every other target.
   const siblingWork = Number(context.target?.siblingWorkMinutes) || 0;
+  const allowance = context.prospective ? Number(durationMinutes)
+    : Math.max(workDuration({ ...context.target, planning_exempt: true }), Number(durationMinutes) || 0);
+  // Capacity mode plans the placed visit at the owner table too (owner
+  // 2026-10-30) — unless the caller turned planning minutes off for the whole
+  // call (the night arrival search) or the table does not apply (null).
+  const planned = context.planningMinutes === false ? null
+    : placedVisitMinutes(context.target, allowance, { preserveCapacity: context.preserveCapacity });
   return {
     ...context.target, window_start: windowStart, window_end: windowEnd,
     raw_estimate_minutes: (Number(context.target?.estimated_duration_minutes) || 0) + siblingWork,
-    planning_exempt: true,
-    estimated_duration_minutes: siblingWork + (context.prospective ? Number(durationMinutes)
-      : Math.max(workDuration({ ...context.target, planning_exempt: true }), Number(durationMinutes) || 0)),
+    // A planned visit reads the table through workDuration like every other
+    // stop (a window span is a promise, never work); preserveCapacity rides
+    // on it the way evaluateArrivalPlacement stamps the route's rows.
+    planning_exempt: planned == null,
+    ...(planned != null && context.preserveCapacity ? { preserveCapacity: true } : {}),
+    estimated_duration_minutes: siblingWork + (planned ?? allowance),
   };
 }
 

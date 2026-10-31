@@ -217,9 +217,10 @@ describe("AdminLayoutV2", () => {
   it("explicit sign-out clears local Email recovery and Ask prompts, and invalidates pending callbacks", async () => {
     const session = loadEmailDrafts(1);
     updateEmailDrafts(session, (drafts) => ({ ...drafts, replies: { fixture: "Private unsent edit" } }));
-    const askPrompts = ["admin_ib_recents:1", "admin_ib_recents:2", "admin_ib_recents", "ib.recents.schedule"];
+    // ib.favorites.* is the older pinned list shared by every login.
+    const askPrompts = ["admin_ib_recents:1", "admin_ib_recents:2", "admin_ib_recents", "ib.recents.schedule", "ib.favorites.schedule"];
     for (const key of askPrompts) localStorage.setItem(key, JSON.stringify(["Fixture private prompt"]));
-    localStorage.setItem("ib.favorites.schedule", JSON.stringify(["Fixture starred prompt"]));
+    localStorage.setItem("ib.pinned.1.schedule", JSON.stringify(["Fixture pinned prompt"]));
     render(<MemoryRouter initialEntries={["/admin/dashboard"]}><Routes>
       <Route element={<AdminLayoutV2 />}><Route path="/admin/dashboard" element={<div>Admin child</div>} /></Route>
       <Route path="/admin/login" element={<div>Signed out</div>} />
@@ -229,9 +230,9 @@ describe("AdminLayoutV2", () => {
     await screen.findByText("Signed out");
     expect(loadEmailDrafts(1).drafts.replies).toEqual({});
     expect(updateEmailDrafts(session, () => ({ replies: { fixture: "Late result" } }))).toBeNull();
-    // Every login's recent Ask prompts go; starred prompts are deliberate saves and stay.
+    // Every login's recent Ask prompts go; a login's own pinned prompts are deliberate saves and stay.
     for (const key of askPrompts) expect(localStorage.getItem(key), key).toBeNull();
-    expect(localStorage.getItem("ib.favorites.schedule")).not.toBeNull();
+    expect(localStorage.getItem("ib.pinned.1.schedule")).not.toBeNull();
   });
 
   // Sign-out calls navigate() from a plain button — no popstate, no <a

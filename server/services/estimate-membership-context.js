@@ -1480,11 +1480,10 @@ async function computeMembershipContext(database, {
   // the global streetScope instead (their pricing scoped the same way), and
   // this bound is then redundant.
   extensionStreetScope = null,
-  // Option B (GATE_WAVEGUARD_EXTEND_PICK): { ticked, unticked } family keys
+  // Staff pick (owner 2026-10-30 option B): { ticked, unticked } family keys
   // from the estimate tool's list — only ticked families freeze, from any
   // starting tier; unticked ones are the staff's keep-price choice. Absent
-  // (an older tab, an agent lane) or the gate off: the Bronze-start-only
-  // automatic plan.
+  // (an older tab, an agent lane): the Bronze-start-only automatic plan.
   extensionPick,
 } = {}) {
   try {
@@ -1563,9 +1562,9 @@ async function computeMembershipContext(database, {
     // Two deliberate exclusions keep every displayed number exactly
     // billable (codex #3338 r3+r4):
     //  - BRONZE-ORIGIN upgrades only (current tier discount 0%) unless
-    //    staff pick the services (GATE_WAVEGUARD_EXTEND_PICK, owner
-    //    2026-10-30 option B). Above Bronze the new price is the
-    //    contracted price moved from the old tier rate to the new one
+    //    staff pick the services (owner 2026-10-30 option B). Above
+    //    Bronze the new price is the contracted price moved from the old
+    //    tier rate to the new one
     //    (price / (1 − old) × (1 − new): $90 Silver-priced at Gold gives
     //    $85, the Gold rate off the $100 basis), never −5pp off the
     //    contracted price ($85.50). Staff see each figure and tick which
@@ -1582,11 +1581,8 @@ async function computeMembershipContext(database, {
       const { customerPreservesMonthlyMembership } = require('./billing-cadence');
       return customerPreservesMonthlyMembership(customer);
     })();
-    // Staff pick (option B): ignored with the pick gate off, so the
-    // Bronze-start-only automatic plan stays exactly as is.
-    const pickedKeys = Array.isArray(extensionPick?.ticked) && isEnabled('waveguardExtendPick')
-      ? new Set(extensionPick.ticked.map(String))
-      : null;
+    // Staff pick (option B); no pick = the Bronze-start-only automatic plan.
+    const pickedKeys = Array.isArray(extensionPick?.ticked) ? new Set(extensionPick.ticked.map(String)) : null;
     if (upgraded && (oldTier.discount === 0 || pickedKeys) && !monthlyLaneMember
       && freezeExtensionPlan === true && isEnabled('waveguardExtendExisting')) {
       const { etDateString } = require('../utils/datetime-et');
@@ -1970,45 +1966,96 @@ function membershipScopeArgs({ groupedEstimate = false, perPropertyStreetScope =
   return { ...scope, freezeExtensionPlan: !!perPropertyStreetScope };
 }
 
-// Estimated margin (percent, one decimal) at the new price for one offered
-// family: the per-visit cost the pricing engine stated on the estimate that
-// set the family up (that line's list per-visit price × (1 − its list
-// margin)). null when the frozen rows trace to no single creating estimate
-// or that estimate's engine line carries no margin — the tool shows none.
-async function offeredFamilyMarginPct(database, service) {
-  const rowIds = Array.isArray(service?.rowIds) ? service.rowIds : [];
-  if (!rowIds.length || !(Number(service.newPerVisit) > 0)) return null;
-  // Children of a recurring series may carry no estimate stamp; their root does.
-  const rows = await database('scheduled_services').whereIn('id', rowIds)
-    .select('id', 'recurring_parent_id', 'source_estimate_id');
-  const parentIds = [...new Set(rows.map((row) => row.recurring_parent_id).filter(Boolean).map(String))];
-  const parents = parentIds.length
-    ? await database('scheduled_services').whereIn('id', parentIds).select('id', 'source_estimate_id')
-    : [];
-  const parentEstimate = new Map(parents.map((row) => [String(row.id), row.source_estimate_id]));
-  const estimateIds = new Set(rows
-    .map((row) => row.source_estimate_id || parentEstimate.get(String(row.recurring_parent_id)))
-    .filter(Boolean).map(String));
-  if (estimateIds.size !== 1) return null;
-  const estimate = await database('estimates').where({ id: [...estimateIds][0] }).first('estimate_data');
-  const estData = estimate ? parseEstimateData(estimate) : null;
-  const line = (estData?.engineResult?.lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
+// The families the tick list prices on TODAY's engine: the estimate tool's
+// service code and the option that carries the plan's visits a year.
+const TODAY_ENGINE_PLANS = {
+  pest_control: { code: 'PEST', visitsOption: 'pestFreq' },
+  lawn_care: { code: 'LAWN', visitsOption: 'lawnFreq' },
+};
+
+// Planned cost per visit of an engine line: its list per-visit price x
+// (1 - its list margin). On a 42-day series (about 8.7 visits a year, not the
+// count the engine prices) the line's yearly admin and callback reserve
+// spread over the visits the series really makes; only lawn lines carry
+// them. null when the line carries no price or margin.
+function plannedVisitCost(line, visits, fortyTwoDaySeries) {
   const margin = Number(line?.margin);
-  const visits = estimateVisitsFor(estData, service.key);
-  const listPerVisit = Number(line?.perApp) > 0
-    ? Number(line.perApp)
-    : (Number(line?.annual) > 0 && visits > 0 ? Number(line.annual) / visits : 0);
-  if (!(listPerVisit > 0) || !Number.isFinite(margin)) return null;
-  return Math.round((1 - (listPerVisit * (1 - margin)) / Number(service.newPerVisit)) * 1000) / 10;
+  const listPerVisit = Number(line?.perApp) > 0 ? Number(line.perApp) : Number(line?.annual) / visits;
+  if (!(Number.isFinite(listPerVisit) && listPerVisit > 0 && Number.isFinite(margin))) return null;
+  const spread = fortyTwoDaySeries && visits > 0
+    ? ((Number(line.costs?.annualAdmin) || 0) + (Number(line.costs?.annualCallbackReserve) || 0)) * (42 / 365 - 1 / visits)
+    : 0;
+  return listPerVisit * (1 - margin) + spread;
 }
 
-// The estimate tool's tick list (GATE_WAVEGUARD_EXTEND_PICK, owner
-// 2026-10-30 option B): each current service this quote would move up a
-// tier, at the new price, with an estimated margin, under the same property
-// scope a save uses. Staff-only and read-only; null when either extension
-// gate is off, the quote raises no tier, or nothing is eligible.
+// Estimated margin (percent, one decimal) at the new price for one offered
+// family, from the estimate that set the family up. Pest and lawn re-price
+// that estimate's saved property inputs on TODAY's engine (live pricing
+// config) at the plan the customer has now (visitsPerYear); any other family,
+// a setup estimate without saved inputs, or an unknown current plan reads
+// that estimate's own engine line. null when the frozen rows trace to no
+// single setup estimate, today's engine prices a different plan than the
+// customer has, or the line carries no margin — the tool then shows none.
+// The caller has synced the pricing config.
+async function offeredFamilyMarginPct(database, service, visitsPerYear) {
+  const rowIds = Array.isArray(service?.rowIds) ? service.rowIds : [];
+  if (!rowIds.length || !(Number(service.newPerVisit) > 0)) return null;
+  // Children of a recurring series may carry no estimate stamp or pattern;
+  // their root does.
+  const series = ['id', 'source_estimate_id', 'recurring_pattern', 'recurring_interval_days'];
+  const rows = await database('scheduled_services').whereIn('id', rowIds)
+    .select(...series, 'recurring_parent_id');
+  const parentIds = [...new Set(rows.map((row) => row.recurring_parent_id).filter(Boolean).map(String))];
+  const parents = parentIds.length
+    ? await database('scheduled_services').whereIn('id', parentIds).select(...series)
+    : [];
+  const parentById = new Map(parents.map((row) => [String(row.id), row]));
+  const estimateIds = new Set(rows
+    .map((row) => row.source_estimate_id || parentById.get(String(row.recurring_parent_id))?.source_estimate_id)
+    .filter(Boolean).map(String));
+  if (estimateIds.size !== 1) return null;
+  // The stored series, not GATE_LAWN_9X_ROUNDS: the gate decides how NEW
+  // series are written, and a rounds series (lawn_rounds_9) makes 9 visits a
+  // year. The scheduler's own gap says which rows repeat every 42 days
+  // (every_6_weeks, or custom with a 42-day interval). Required at call
+  // time, as the cadence read above does.
+  const { normalizeRecurringPattern, intervalDaysForPattern } = require('./recurring-appointment-seeder');
+  const fortyTwoDaySeries = rows.every((row) => {
+    const own = row.recurring_pattern ? row : parentById.get(String(row.recurring_parent_id)) || {};
+    return intervalDaysForPattern(normalizeRecurringPattern(own.recurring_pattern), own.recurring_interval_days) === 42;
+  });
+  // A missing row parses to {} (parseEstimateData), which has no line.
+  const estData = parseEstimateData(await database('estimates').where({ id: [...estimateIds][0] }).first('estimate_data'));
+  const plan = TODAY_ENGINE_PLANS[service.key];
+  const request = estData?.engineRequest;
+  const lineFor = (lineItems) => (lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
+  let line = lineFor(estData?.engineResult?.lineItems);
+  let visits = estimateVisitsFor(estData, service.key);
+  if (plan && request?.profile && visitsPerYear > 0) {
+    // Lazy-require the route adapter (service -> route load order), as the save's replay does.
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const { generateEstimate } = require('./pricing-engine');
+    line = lineFor(generateEstimate(translateV2CallToV1Input(
+      request.profile, [plan.code], { ...request.options, [plan.visitsOption]: visitsPerYear },
+    )).lineItems);
+    // The engine sells fewer plans than customers hold and prices any other
+    // count as a default plan (pest 3x as quarterly; lawn 4x, and 6x while
+    // that tier is hidden, as 9x). Its line states the visits it priced (pest
+    // visitsPerYear, lawn frequency): a different plan gives no margin.
+    if (Number(line?.visitsPerYear ?? line?.frequency) !== visitsPerYear) return null;
+    visits = visitsPerYear;
+  }
+  const cost = plannedVisitCost(line, visits, fortyTwoDaySeries);
+  return cost === null ? null : Math.round((1 - cost / Number(service.newPerVisit)) * 1000) / 10;
+}
+
+// The estimate tool's tick list (owner 2026-10-30 option B): each current
+// service this quote would move up a tier, at the new price, with an
+// estimated margin, under the same property scope a save uses. Staff-only
+// and read-only; null when GATE_WAVEGUARD_EXTEND_EXISTING is off, the quote
+// raises no tier, or nothing is eligible.
 async function currentServiceTierOffer(database, { customerId, estData, groupedEstimate, perPropertyStreetScope }) {
-  if (!isEnabled('waveguardExtendPick') || !isEnabled('waveguardExtendExisting')) return null;
+  if (!isEnabled('waveguardExtendExisting')) return null;
   const ctx = await computeMembershipContext(database, {
     customerId,
     estData,
@@ -2018,11 +2065,13 @@ async function currentServiceTierOffer(database, { customerId, estData, groupedE
     extensionPick: { ticked: Object.keys(SERVICE_LABEL), unticked: [] },
   });
   if (!ctx?.upgrade || !ctx.existingServices?.length) return null;
+  // The plan each family has now (visits a year), for the margin's engine run.
+  const visitsByKey = new Map((ctx.currentServices || []).map((svc) => [svc.key, Number(svc.visitsPerYear)]));
   const services = [];
   for (const svc of ctx.existingServices) {
     let marginPct = null;
     try {
-      marginPct = await offeredFamilyMarginPct(database, svc);
+      marginPct = await offeredFamilyMarginPct(database, svc, visitsByKey.get(svc.key));
     } catch (err) {
       logger.warn(`[membership-context] tick-list margin skipped for ${svc.key}: ${err.message}`);
     }

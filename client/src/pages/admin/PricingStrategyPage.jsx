@@ -45,14 +45,23 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
   const [tab, setTab] = useState("money-model");
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState(null);
+  const [dashboardAttempt, setDashboardAttempt] = useState(0);
   const [toast, setToast] = useState("");
 
+  // A failed read is shown as a failure: the Model tab used to render every
+  // count as 0 (operations audit OP-11).
   useEffect(() => {
     adminFetch("/admin/pricing/dashboard")
       .then(setDashboard)
-      .catch(() => {})
+      .catch((error) => setDashboardError(error.message || "Request failed"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [dashboardAttempt]);
+  const retryDashboard = () => {
+    setLoading(true);
+    setDashboardError(null);
+    setDashboardAttempt((attempt) => attempt + 1);
+  };
 
   const showToast = (message) => {
     setToast(message);
@@ -88,7 +97,7 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
           ))}
         </div>
       )}
-      {tab === "money-model" && <MoneyModelTab dashboard={dashboard} loading={loading} />}
+      {tab === "money-model" && <MoneyModelTab dashboard={dashboard} loading={loading} error={dashboardError} onRetry={retryDashboard} />}
       {tab === "value-calc" && <ValueEquationTab />}
       {tab === "offers" && <OfferBuilderTab />}
       {tab === "upsells" && <UpsellEngineTab showToast={showToast} />}
@@ -143,8 +152,9 @@ function MetricCard({ label, value, tone }) {
   );
 }
 
-function MoneyModelTab({ dashboard, loading }) {
+function MoneyModelTab({ dashboard, loading, error, onRetry }) {
   if (loading) return <ActionFeedback className="min-h-20">Loading money model...</ActionFeedback>;
+  if (error) return <ActionFeedback error onRetry={onRetry} className="min-h-20">Couldn't load the money model — {error}</ActionFeedback>;
   // GET /admin/pricing/dashboard returns overview / stages / funnel
   // (server/services/pricing-intelligence.js:397-435). The flat totalCustomers,
   // mrr and revenueByStage fields this tab used to read are not in that
@@ -314,11 +324,17 @@ const BASE_OFFERS = [
 function OfferBuilderTab() {
   const [offers, setOffers] = useState([]);
   const [loading, setLoading] = useState(true);
-  useEffect(() => { adminFetch("/admin/pricing/offers").then((data) => setOffers(data.offers || [])).catch(() => {}).finally(() => setLoading(false)); }, []);
+  const [error, setError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => { adminFetch("/admin/pricing/offers").then((data) => setOffers(data.offers || [])).catch((requestError) => setError(requestError.message || "Request failed")).finally(() => setLoading(false)); }, [attempt]);
   if (loading) return <ActionFeedback className="min-h-20">Loading offers...</ActionFeedback>;
+  const retry = () => { setLoading(true); setError(null); setAttempt((n) => n + 1); };
+  // No "+ New offer" button: it had no handler, and nothing outside this tab
+  // reads offer_packages (operations audit OP-12).
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-18 font-medium text-zinc-900">Grand Slam offers</h2><Button>+ New offer</Button></div>
+      <h2 className="text-18 font-medium text-zinc-900">Grand Slam offers</h2>
+      {error && <ActionFeedback error onRetry={retry}>Couldn't load custom offer packages — {error}</ActionFeedback>}
       <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
         {BASE_OFFERS.map((offer) => (
           <Card key={offer.name}><CardHeader><CardTitle className="text-16">{offer.name}</CardTitle></CardHeader><CardBody className="space-y-3">
@@ -352,12 +368,21 @@ function UpsellEngineTab({ showToast }) {
   const [rules, setRules] = useState([]);
   const [opportunities, setOpportunities] = useState([]);
   const [loading, setLoading] = useState(true);
+  // A failed read is a failure, not "none found" (null = that read failed).
+  const [failed, setFailed] = useState({ rules: false, opportunities: false });
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     Promise.all([
-      adminFetch("/admin/pricing/upsell-rules").catch(() => ({ rules: [] })),
-      adminFetch("/admin/pricing/upsell-opportunities").catch(() => ({ opportunities: [] })),
-    ]).then(([ruleData, opportunityData]) => { setRules(ruleData.rules || []); setOpportunities((opportunityData.opportunities || []).map(normalizeOpportunity)); setLoading(false); });
-  }, []);
+      adminFetch("/admin/pricing/upsell-rules").catch(() => null),
+      adminFetch("/admin/pricing/upsell-opportunities").catch(() => null),
+    ]).then(([ruleData, opportunityData]) => {
+      setRules(ruleData?.rules || []);
+      setOpportunities((opportunityData?.opportunities || []).map(normalizeOpportunity));
+      setFailed({ rules: !ruleData, opportunities: !opportunityData });
+      setLoading(false);
+    });
+  }, [attempt]);
+  const retry = () => { setLoading(true); setAttempt((n) => n + 1); };
   const triggerUpsell = async (customerId) => {
     // The route returns { success, upsell, messageSent } and never a `message`
     // (admin-pricing-strategy.js:367), and messageSent is the outbound SMS body
@@ -373,8 +398,8 @@ function UpsellEngineTab({ showToast }) {
   if (loading) return <ActionFeedback className="min-h-20">Loading upsell data...</ActionFeedback>;
   return (
     <div className="space-y-5">
-      <Card><CardHeader><CardTitle className="text-16">Upsell opportunities ({opportunities.length})</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">
-        {opportunities.length === 0 ? <p className="py-6 text-center text-ink-secondary">No upsell opportunities found</p> : opportunities.slice(0, 10).map((opportunity) => (
+      <Card><CardHeader><CardTitle className="text-16">Upsell opportunities{failed.opportunities ? "" : ` (${opportunities.length})`}</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">
+        {failed.opportunities ? <ActionFeedback error onRetry={retry}>Couldn't load upsell opportunities.</ActionFeedback> : opportunities.length === 0 ? <p className="py-6 text-center text-ink-secondary">No upsell opportunities found</p> : opportunities.slice(0, 10).map((opportunity) => (
           <div key={opportunity.customerId} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3"><div><div className="font-medium text-zinc-900">{opportunity.customerName}</div>{/* No service count: neither findBestUpsell branch
                 (pricing-intelligence.js:268-312) returns one, so main's
                 "{serviceCount} services" always rendered undefined. */}
@@ -382,7 +407,7 @@ function UpsellEngineTab({ showToast }) {
         ))}
       </CardBody></Card>
       <Card><CardHeader><CardTitle className="text-16">Upsell rules</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">
-        {rules.length === 0 ? <p className="py-6 text-center text-ink-secondary">No upsell rules configured</p> : rules.map((rule) => <div key={rule.id} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3"><div><div className="font-medium text-zinc-900">{rule.name}</div><div className="text-ui-caption text-ink-secondary">Trigger: {rule.trigger_event} · Offer: {rule.offer_service}</div></div><div className="flex flex-wrap items-center gap-2"><span className="text-ui-caption text-ink-secondary u-nums">{rule.times_triggered || 0} triggered · {rule.times_converted || 0} converted</span><Badge tone={rule.enabled ? "strong" : "neutral"}>{rule.enabled ? "Active" : "Disabled"}</Badge></div></div>)}
+        {failed.rules ? <ActionFeedback error onRetry={retry}>Couldn't load upsell rules.</ActionFeedback> : rules.length === 0 ? <p className="py-6 text-center text-ink-secondary">No upsell rules configured</p> : rules.map((rule) => <div key={rule.id} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3"><div><div className="font-medium text-zinc-900">{rule.name}</div><div className="text-ui-caption text-ink-secondary">Trigger: {rule.trigger_event} · Offer: {rule.offer_service}</div></div><div className="flex flex-wrap items-center gap-2"><span className="text-ui-caption text-ink-secondary u-nums">{rule.times_triggered || 0} triggered · {rule.times_converted || 0} converted</span><Badge tone={rule.enabled ? "strong" : "neutral"}>{rule.enabled ? "Active" : "Disabled"}</Badge></div></div>)}
       </CardBody></Card>
     </div>
   );
@@ -391,6 +416,8 @@ function UpsellEngineTab({ showToast }) {
 function LTVAnalysisTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
   const [recalculating, setRecalculating] = useState(false);
   // A mounted ref, not an effect-scoped flag: recalculate() outlives the effect,
   // so both async paths need the same guard before they setState.
@@ -405,9 +432,10 @@ function LTVAnalysisTab() {
   useEffect(() => {
     adminFetch("/admin/pricing/ltv-analysis")
       .then((next) => { if (mounted.current) setData(next); })
-      .catch(() => {})
+      // A failed read is not "No LTV data yet".
+      .catch((requestError) => { if (mounted.current) setError(requestError.message || "Request failed"); })
       .finally(() => { if (mounted.current) setLoading(false); });
-  }, []);
+  }, [attempt]);
   const recalculate = useCallback(async () => {
     setRecalculating(true);
     try {
@@ -419,6 +447,7 @@ function LTVAnalysisTab() {
     if (mounted.current) setRecalculating(false);
   }, []);
   if (loading) return <ActionFeedback className="min-h-20">Loading LTV analysis...</ActionFeedback>;
+  if (error) return <ActionFeedback error onRetry={() => { setLoading(true); setError(null); setAttempt((n) => n + 1); }} className="min-h-20">Couldn't load LTV analysis — {error}</ActionFeedback>;
   if (!data) return <ActionFeedback className="min-h-20">No LTV data yet. Click "Recalculate" to generate.</ActionFeedback>;
   // GET /admin/pricing/ltv-analysis returns summary / channelPerformance /
   // retentionCurve (server/routes/admin-pricing-strategy.js:451-478); the flat

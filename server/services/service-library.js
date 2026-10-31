@@ -52,9 +52,20 @@ const BOOLEAN_COLS = new Set([
   'customer_visible', 'booking_enabled', 'public_quote_selectable', 'is_active', 'is_archived',
 ]);
 
-function withSchedulingDuration(service) {
+// The owner's 2026-09-09 routine allowance (30 minutes on 17 routine keys) wrote 30-minute rows
+// and was turned off 2026-10-05. Under capacity mode the ROW keeps the one-hour promise; only the
+// PLAN uses minutes (scheduling/planning-minutes.js, owner 2026-10-30). The column and its data stay;
+// a version-1 policy from any other source still applies.
+const RETIRED_POLICY_SOURCES = new Set(['owner_2026_09_09']);
+
+function activeSchedulingPolicy(service) {
   const policy = service?.scheduling_duration_policy;
-  if (!service || !capacityEnabled() || policy?.version !== 1) return service;
+  return policy?.version === 1 && !RETIRED_POLICY_SOURCES.has(policy.source) ? policy : null;
+}
+
+function withSchedulingDuration(service) {
+  const policy = activeSchedulingPolicy(service);
+  if (!service || !capacityEnabled() || !policy) return service;
   return { ...service, default_duration_minutes: policy.default_duration_minutes,
     min_duration_minutes: policy.min_duration_minutes, max_duration_minutes: policy.max_duration_minutes };
 }
@@ -62,8 +73,8 @@ function withSchedulingDuration(service) {
 // All booking callers use the catalog allowance. Appointment overrides are
 // supplied separately by staff paths and must never be truncated to this range.
 function serviceDurationMinutes(service, fallback = 60, { preserveCapacity = false } = {}) {
-  const policy = service?.scheduling_duration_policy;
-  const duration = Number(preserveCapacity && policy?.version === 1
+  const policy = activeSchedulingPolicy(service);
+  const duration = Number(preserveCapacity && policy
     ? policy.default_duration_minutes : withSchedulingDuration(service)?.default_duration_minutes);
   return Number.isInteger(duration) && duration > 0 ? duration : fallback;
 }

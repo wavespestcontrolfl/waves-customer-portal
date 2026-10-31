@@ -259,3 +259,35 @@ describe('gate on', () => {
     expect(db).not.toHaveBeenCalled();
   });
 });
+
+// Operations audit OP-14: license status on the ET calendar. A license is
+// valid THROUGH its expiry day (repo rule, admin-contracts
+// applicatorLicenseCurrent); the old UTC-midnight instant math read a
+// 2026-10-30 expiry as expired from 8 PM ET on 10/29. Only Date is faked: the
+// route is called over real HTTP.
+describe('license status on the ET calendar', () => {
+  const onlyDate = ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'];
+  afterEach(() => jest.useRealTimers());
+
+  test.each([
+    ['9 PM ET the evening before', '2026-10-30T01:00:00Z', '2026-10-30', 'expiring_soon'],
+    ['11:59 PM ET on the expiry day', '2026-10-31T03:59:00Z', '2026-10-30', 'expiring_soon'],
+    ['12:01 AM ET the day after', '2026-10-31T04:01:00Z', '2026-10-30', 'expired'],
+    ['a pg Date at UTC midnight, the day after', '2026-10-31T04:01:00Z', new Date('2026-10-30T00:00:00Z'), 'expired'],
+    ['91 days out', '2026-07-31T16:00:00Z', '2026-10-30', 'active'],
+    ['90 days out', '2026-08-01T16:00:00Z', '2026-10-30', 'expiring_soon'],
+  ])('%s', async (_label, now, expiry, status) => {
+    jest.useFakeTimers({ now: new Date(now), doNotFake: onlyDate });
+    table('technicians', [licenseRow({ license_expiry: expiry })]);
+    const { json } = await call('GET', '/licenses');
+    expect(json.technicians[0].licenseStatus).toBe(status);
+  });
+
+  test('reads license_expiry as YYYY-MM-DD, the shape the edit dialog sends back', async () => {
+    table('technicians', [licenseRow()]);
+    await call('GET', '/licenses');
+    const select = calls.technicians.find(([name]) => name === 'select')[1];
+    expect(select).toContainEqual({ raw: "to_char(license_expiry, 'YYYY-MM-DD') as license_expiry" });
+    expect(select).not.toContain('license_expiry');
+  });
+});

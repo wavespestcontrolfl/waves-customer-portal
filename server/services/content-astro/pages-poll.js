@@ -201,16 +201,18 @@ async function pollPost(post, { allowMerge = true } = {}) {
         updated_at: new Date(),
       });
 
-      // DELIBERATE auto-merge path for SCHEDULER-driven posts: publish_status
-      // 'publishing' is the content-scheduler's transient claim state while it
-      // drives a scheduled post live, and mergeAstro below is Codex-gated
-      // (assertCodexReviewClear) before any merge. Note the coupling: a row
-      // STRANDED at 'publishing' (process crashed mid-publish) would keep this
-      // branch armed indefinitely — the content-scheduler's stale-publishing
-      // sweep (resetStalePublishingBlogs, ~30 min) bounds that window by
-      // resetting crashed claims out of 'publishing' ('pending' when no Astro
-      // state exists yet, 'pending_review' otherwise). Keep that sweep in
-      // mind before changing this condition.
+      // Scheduler-claim auto-merge: publish_status 'publishing' is the
+      // content-scheduler's transient claim while it opens a scheduled post's
+      // PR. The scheduler hands the row to 'pending_review' as soon as the PR
+      // is open, so a scheduled post normally waits for an admin's Approve &
+      // Go Live (the calendar says so). This branch therefore fires only for a
+      // claim a crash stranded after the PR opened, and mergeAstro below is
+      // Codex-gated (assertCodexReviewClear) before any merge. The
+      // content-scheduler's stale-publishing sweep (resetStalePublishingBlogs,
+      // ~30 min) bounds that window by resetting crashed claims out of
+      // 'publishing' ('pending' when no Astro state exists yet,
+      // 'pending_review' otherwise). Keep that sweep in mind before changing
+      // this condition.
       if (post.astro_status === 'pr_open' && post.publish_status === 'publishing') {
         if (post.astro_requires_human_merge) {
           // Named-competitor content on the UNATTENDED lane: publishAstro

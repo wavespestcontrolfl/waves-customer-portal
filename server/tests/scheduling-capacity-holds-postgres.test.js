@@ -71,11 +71,14 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
     }
   });
 
-  test('concurrent customers cannot both consume the final thirty minutes', async () => {
+  // The placed visit plans the owner table now (owner 2026-10-30: this fixture's uncadenced
+  // 'pest_control' reads one-time pest, 45), so the last gap is the 60 minutes before the block;
+  // the row it holds is still its 30-minute allowance.
+  test('concurrent customers cannot both consume the final gap', async () => {
     await f.db('scheduled_services').insert(f.baseStop({ window_start: '08:00', window_end: '16:00',
       estimated_duration_minutes: 480, route_order: 1 }));
     await f.db('tech_schedule_blocks').insert({ id: require('node:crypto').randomUUID(), date: f.date,
-      technician_id: f.ids.technician, block_type: 'blocked', start_time: '16:45', end_time: '18:00' });
+      technician_id: f.ids.technician, block_type: 'blocked', start_time: '17:00', end_time: '18:00' });
     const outcomes = await Promise.allSettled(f.ids.estimates.map(estimateId => reserveSlot({
       estimateId, slotId: f.signedSlot(estimateId, 30, '16:00'),
     })));

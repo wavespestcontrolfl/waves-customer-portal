@@ -35,7 +35,7 @@ function installFetch() {
     const method = (opts.method || 'GET').toUpperCase();
     const hit = routes[`${method} ${path.split('?')[0]}`];
     if (!hit) return json(404, { error: `no mock for ${method} ${path}` });
-    return hit(opts);
+    return hit(opts, path);
   });
 }
 
@@ -141,6 +141,72 @@ describe('Referrals dialogs and payout feedback', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Insufficient promoter balance for this payout');
     expect(global.fetch.mock.calls.filter(([u]) => String(u).includes('/approve'))).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled();
+  });
+
+  it('Convert: editing the search after a pick drops that customer; only a fresh pick links one', async () => {
+    const JORDAN = { id: 'c2', firstName: 'Jordan', lastName: 'Reyes', phone: '555-0111' };
+    routes['GET /admin/customers'] = (_opts, path) =>
+      json(200, { customers: /search=jor/i.test(path) ? [JORDAN] : [CUSTOMER] });
+    const bodies = [];
+    routes['POST /admin/referrals/r1/convert'] = (opts) => {
+      bodies.push(JSON.parse(opts.body));
+      return json(409, { error: 'stop here' });
+    };
+    await renderPage();
+    fireEvent.click(screen.getByRole('button', { name: /^Queue/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Convert' }));
+    const dialog = await screen.findByRole('dialog');
+    const field = within(dialog).getByLabelText('Customer Search');
+
+    fireEvent.change(field, { target: { value: 'ada' } });
+    fireEvent.click(await within(dialog).findByRole('button', { name: /Ada Lovelace/ }));
+    fireEvent.change(field, { target: { value: 'Jordan' } });
+    await within(dialog).findByRole('button', { name: /Jordan Reyes/ });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Convert' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Pick the customer from the search results');
+    expect(bodies).toHaveLength(0);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Jordan Reyes/ }));
+    expect(within(dialog).queryByRole('alert')).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Convert' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].customerId).toBe('c2');
+
+    // Clearing the field converts without a linked customer, as before.
+    fireEvent.change(field, { target: { value: '' } });
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Convert' })).toBeEnabled());
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Convert' }));
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1].customerId).toBe('');
+  });
+
+  it('Customer search: an older reply never replaces newer results, and a cleared field stays empty', async () => {
+    const JORDAN = { id: 'c2', firstName: 'Jordan', lastName: 'Reyes', phone: '555-0111' };
+    const held = [];
+    routes['GET /admin/customers'] = (_opts, path) => {
+      if (/search=jor/i.test(path)) return json(200, { customers: [JORDAN] });
+      return new Promise((resolve) => { held.push(() => resolve(json(200, { customers: [CUSTOMER] }))); });
+    };
+    await renderPage();
+    fireEvent.click(screen.getByRole('button', { name: /^Queue/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Convert' }));
+    const dialog = await screen.findByRole('dialog');
+    const field = within(dialog).getByLabelText('Customer Search');
+
+    fireEvent.change(field, { target: { value: 'ada' } });
+    fireEvent.change(field, { target: { value: 'jor' } });
+    await within(dialog).findByRole('button', { name: /Jordan Reyes/ });
+    held.shift()();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(within(dialog).queryByRole('button', { name: /Ada Lovelace/ })).toBeNull();
+    expect(within(dialog).getByRole('button', { name: /Jordan Reyes/ })).toBeInTheDocument();
+
+    fireEvent.change(field, { target: { value: 'ada' } });
+    fireEvent.change(field, { target: { value: '' } });
+    held.shift()();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(within(dialog).queryByRole('button', { name: /Ada Lovelace/ })).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: /Jordan Reyes/ })).toBeNull();
   });
 
   it('Settings: captions are associated with their controls; toggles name setting and state', async () => {

@@ -6,11 +6,16 @@
  *   2. The safety valve trips only on BOTH bounds (≥MIN_VALVE_COUNT eligible
  *      AND >MAX_FLAG_FRACTION of the active list) — a tracking outage must
  *      pause the run, a small real cohort must not.
- *   3. The parked win-back draft is owner-gated by construction: status
- *      'draft', reengagement type (never AI-validated, never auto-sent),
+ *   3. With GATE_NEWSLETTER_AUTO_SEND off, the parked win-back draft is
+ *      owner-gated by construction: status 'draft', reengagement type
+ *      (never AI-validated, never auto-sent),
  *      targets exactly the reengagement_due tag, no social auto-share, and
  *      its copy carries the greeting token + team sign-off with no
  *      price/safety claims.
+ *   3b. With the switch on (owner 2026-10-30, option A) a win-back the job
+ *      stages queues itself for the next scheduler tick and the "win-back
+ *      waiting" alert resolves itself; a draft parked earlier (maybe edited)
+ *      stays parked and keeps the alert.
  *   4. A sunset ('inactive') subscriber who re-subscribes goes through the
  *      normal DOI resubscribe path AND gets the hygiene markers cleared —
  *      without this they'd be stuck invisible forever.
@@ -23,6 +28,9 @@ const {
   runNewsletterSunset,
   safetyValveTripped,
   buildWinbackDraftRow,
+  ensureWinbackDraft,
+  stageWinback,
+  syncAlert,
   MIN_VALVE_COUNT,
   REENGAGEMENT_TAG,
   REENGAGEMENT_TYPE,
@@ -98,6 +106,111 @@ describe('win-back draft row', () => {
     expect(all.toLowerCase()).not.toMatch(/\bsafe\b/);
     expect(row.from_name).toBe('Waves Pest Control');
     expect(all).not.toContain('Waves Lawn & Pest');
+  });
+});
+
+describe('win-back under GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A)', () => {
+  function chain({ first, update = 1, returning = [{ id: 'wb-1' }] } = {}) {
+    const q = {};
+    ['where', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.first = jest.fn(async () => first);
+    q.update = jest.fn(async () => update);
+    q.insert = jest.fn(() => {
+      // insert().returning() for the win-back, insert().onConflict().merge().returning() for the alert
+      const ins = { returning: jest.fn(async () => returning) };
+      ins.onConflict = jest.fn(() => ({ merge: jest.fn(() => ins) }));
+      return ins;
+    });
+    return q;
+  }
+
+  test('the staged win-back is queued for the next scheduler tick', async () => {
+    const q = chain({ first: undefined });
+    db.mockImplementation(() => q);
+    expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: true, openSendId: 'wb-1', queued: true });
+    const row = q.insert.mock.calls[0][0];
+    expect(row.status).toBe('scheduled');
+    expect(row.scheduled_for).toBeInstanceOf(Date);
+    // Approved with no approving email = auto-queued: the dispatcher holds it while the switch is off.
+    expect(row.proof_approved_at).toBeInstanceOf(Date);
+    expect(row).not.toHaveProperty('proof_approval_email_id');
+    expect(row.segment_filter).toEqual({ tags: [REENGAGEMENT_TAG] });
+  });
+
+  test('switch off: the win-back is parked as a draft, as before', async () => {
+    const q = chain({ first: undefined });
+    db.mockImplementation(() => q);
+    expect((await ensureWinbackDraft(12, { autoSend: false })).queued).toBe(false);
+    expect(q.insert.mock.calls[0][0].status).toBe('draft');
+    expect(q.insert.mock.calls[0][0]).not.toHaveProperty('scheduled_for');
+  });
+
+  test('a win-back parked before the switch went on stays parked: it may have been edited', async () => {
+    const q = chain({ first: { id: 'wb-old', status: 'draft' } });
+    db.mockImplementation(() => q);
+    expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: false, openSendId: 'wb-old', parked: true });
+    expect(q.update).not.toHaveBeenCalled();
+    expect(q.insert).not.toHaveBeenCalled();
+  });
+
+  test('a win-back already queued or sending is left alone', async () => {
+    const q = chain({ first: { id: 'wb-old', status: 'sending' } });
+    db.mockImplementation(() => q);
+    expect(await ensureWinbackDraft(12, { autoSend: true })).toEqual({ created: false, openSendId: 'wb-old', parked: false });
+    expect(q.update).not.toHaveBeenCalled();
+  });
+
+  // Consecutive weekly cohorts: the first cohort keeps the tag through its
+  // grace window, so a second tag-wide win-back would mail it again.
+  function wireStage({ inGrace, open }) {
+    const subs = chain();
+    ['whereNotNull', 'whereExists', 'whereNotExists', 'withMaterialized'].forEach((m) => { subs[m] = jest.fn(() => subs); });
+    subs.count = jest.fn(() => subs);
+    subs.first = jest.fn(async () => ({ c: inGrace }));
+    const sends = chain({ first: open });
+    db.mockImplementation((table) => (table === 'newsletter_subscribers' ? subs : sends));
+    return { subs, sends };
+  }
+
+  test('next week, while the first cohort is in its grace window, no second win-back is staged', async () => {
+    const { subs, sends } = wireStage({ inGrace: 7, open: undefined });
+    expect(await stageWinback(3, { autoSend: true })).toEqual({ created: false, openSendId: null, waitingOnGrace: 7 });
+    expect(subs.whereExists).toHaveBeenCalledTimes(1);
+    expect(sends.insert).not.toHaveBeenCalled();
+  });
+
+  test('once the first cohort recovered or was sunset, the next win-back queues itself', async () => {
+    const { sends } = wireStage({ inGrace: 0, open: undefined });
+    expect(await stageWinback(3, { autoSend: true })).toEqual({ created: true, openSendId: 'wb-1', queued: true });
+    expect(sends.insert.mock.calls[0][0].status).toBe('scheduled');
+  });
+
+  test('switch off: no grace check, the draft is parked for the owner as before', async () => {
+    const { subs, sends } = wireStage({ inGrace: 7, open: undefined });
+    expect((await stageWinback(3, { autoSend: false })).queued).toBe(false);
+    expect(subs.whereExists).not.toHaveBeenCalled();
+    expect(sends.insert.mock.calls[0][0].status).toBe('draft');
+  });
+
+  test('the "win-back waiting" alert resolves itself; the safety valve still alerts', async () => {
+    const q = chain({ update: 1 });
+    db.mockImplementation(() => q);
+    db.schema = { hasTable: jest.fn(async () => true) };
+    db.raw = jest.fn((sql) => sql);
+    try {
+      expect(await syncAlert({ valveTripped: false, cohortAwaiting: 12, autoSend: true }, new Date())).toEqual({ resolved: true });
+      expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'resolved' }));
+      expect(q.insert).not.toHaveBeenCalled();
+      await syncAlert({ valveTripped: true, candidates: 300, sunsetCandidates: 0, activeCount: 600, cohortAwaiting: 0, autoSend: true }, new Date());
+      expect(q.insert).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringContaining('Newsletter sunset paused') }));
+      // A draft parked before the switch still needs the owner.
+      q.insert.mockClear();
+      await syncAlert({ valveTripped: false, cohortAwaiting: 12, autoSend: true, winbackParked: true }, new Date());
+      expect(q.insert).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringContaining('Newsletter win-back waiting') }));
+    } finally {
+      delete db.schema;
+      delete db.raw;
+    }
   });
 });
 

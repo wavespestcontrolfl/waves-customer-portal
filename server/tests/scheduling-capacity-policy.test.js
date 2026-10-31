@@ -2,7 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { serviceFamilyPreference, defaultTimeWindow, timeWindowForPreferenceKey } = require('../services/auto-dispatch/service-category');
-const { withSchedulingDuration } = require('../services/service-library');
+const { withSchedulingDuration, serviceDurationMinutes } = require('../services/service-library');
 const { capacityForServices, capacityFromReservation, windowForCapacityService } = require('../services/combined-visit-capacity');
 const RouteOptimizer = require('../services/route-optimizer');
 const { placementFitsShift } = require('../services/scheduling/policy');
@@ -29,6 +29,34 @@ test('catalog policy is gated and explicit custom allowances remain intact', () 
   expect(withSchedulingDuration({ default_duration_minutes: 120 }).default_duration_minutes).toBe(120);
   delete process.env.GATE_SCHEDULING_CAPACITY;
   expect(withSchedulingDuration(row).default_duration_minutes).toBe(60);
+});
+
+// Owner 2026-10-30: the 2026-09-09 routine catalog allowance (30 minutes, source 'owner_2026_09_09') wrote
+// 30-minute rows and was switched off 2026-10-05. Rows keep the hour in capacity mode; only the plan uses minutes.
+describe('the retired owner_2026_09_09 catalog policy never shortens a row or an allowance', () => {
+  const retired = { default_duration_minutes: 60, min_duration_minutes: 30, max_duration_minutes: 90,
+    scheduling_duration_policy: { version: 1, default_duration_minutes: 30, min_duration_minutes: 30,
+      max_duration_minutes: 40, source: 'owner_2026_09_09', previous_default_minutes: 60 } };
+  const other = { ...retired, scheduling_duration_policy: { ...retired.scheduling_duration_policy, source: 'owner_future' } };
+
+  test('capacity mode reads the catalog hour, and so does the persisted preserveCapacity path', () => {
+    expect(withSchedulingDuration(retired)).toBe(retired);
+    expect(serviceDurationMinutes(retired)).toBe(60);
+    expect(serviceDurationMinutes(retired, 60, { preserveCapacity: true })).toBe(60);
+  });
+
+  test('a policy from another source still applies, with the gate and with preserveCapacity', () => {
+    expect(withSchedulingDuration(other).default_duration_minutes).toBe(30);
+    expect(serviceDurationMinutes(other)).toBe(30);
+    expect(serviceDurationMinutes(other, 60, { preserveCapacity: true })).toBe(30);
+  });
+
+  test('gate off is unchanged: the catalog default, with or without the retired policy', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    expect(serviceDurationMinutes(retired)).toBe(60);
+    expect(serviceDurationMinutes(other)).toBe(60);
+    expect(withSchedulingDuration(retired)).toBe(retired);
+  });
 });
 
 test('service-family preference is finite, weighted by work, and unknown work stays neutral', () => {

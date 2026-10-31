@@ -16,6 +16,11 @@ import WebKit
 // detail = { requestId, status: 'succeeded' | 'failed' | 'canceled',
 //            invoiceId?, paymentIntentId?, message? }
 //
+// Reader warm-up: a signed-in staff page posts { type: 'prepareReader' } and
+// defines window.wavesAdminConnectionToken(), which resolves with a Stripe
+// connection token from POST /api/stripe/terminal/connection-token under the
+// page's own sign-in. The app then connects the reader before any payment.
+//
 // The page side of this contract is client/src/lib/tapToPay.js.
 
 enum Portal {
@@ -93,6 +98,8 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     weak var webView: WKWebView?
     // The web view whose page asked for the open payment; it gets the answer.
     private weak var requester: WKWebView?
+    // The page that last asked to prepare the reader; it fetches the tokens.
+    private weak var readerPage: WKWebView?
     private var paymentController: UIViewController?
     private weak var popup: UIViewController?
     private var offlineView: UIView?
@@ -110,15 +117,22 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     // MARK: - Tap to Pay bridge
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        // Only a portal page's top frame may start a payment: the main view or
-        // a portal popup, which shares the bridge.
+        // Only a portal page's top frame may use the bridge: the main view or
+        // a portal popup, which shares it.
         guard let sender = message.webView,
               message.frameInfo.isMainFrame,
               message.frameInfo.securityOrigin.protocol == Portal.origin.scheme,
               message.frameInfo.securityOrigin.host == Portal.origin.host,
-              let body = message.body as? [String: Any],
-              body["type"] as? String == "tapToPay"
+              let body = message.body as? [String: Any]
         else { return }
+        switch body["type"] as? String {
+        case "tapToPay": startPayment(body, from: sender)
+        case "prepareReader": prepareReader(from: sender)
+        default: break
+        }
+    }
+
+    private func startPayment(_ body: [String: Any], from sender: WKWebView) {
         let requestId = body["requestId"] as? String
         if app.flow.isActive {
             // One payment at a time: answer this page, keep the open payment.
@@ -138,6 +152,33 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         requester = sender
         app.startCollect(from: url, requestId: requestId)
     }
+
+    private func prepareReader(from page: WKWebView) {
+        readerPage = page
+        TerminalManager.shared.pageConnectionToken = { [weak self] in
+            guard let self else { throw Self.noTokenPage }
+            return try await self.connectionTokenFromPage()
+        }
+        TerminalManager.shared.prepare()
+    }
+
+    private func connectionTokenFromPage() async throws -> String {
+        guard let page = readerPage ?? webView, let url = page.url, Portal.isPortal(url) else {
+            throw Self.noTokenPage
+        }
+        let secret = try await page.callAsyncJavaScript(
+            "return await window.wavesAdminConnectionToken();",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let secret = secret as? String, !secret.isEmpty else { throw Self.noTokenPage }
+        return secret
+    }
+
+    private static let noTokenPage = NSError(domain: "wavespay", code: -5, userInfo: [
+        NSLocalizedDescriptionKey: "No signed-in portal page to connect the card reader.",
+    ])
 
     func deliver(_ result: TapToPayResult) {
         deliver(result, to: requester ?? webView)
@@ -169,6 +210,8 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
             return
         }
         let controller = UIHostingController(rootView: PaymentSheet().environmentObject(app))
+        // The Waves look is light by design; dark mode would fight the glass.
+        controller.overrideUserInterfaceStyle = .light
         controller.isModalInPresentation = flow.isBusy
         controller.presentationController?.delegate = self
         guard present(controller) else {

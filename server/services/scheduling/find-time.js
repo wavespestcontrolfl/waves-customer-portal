@@ -357,7 +357,9 @@ async function findCapacitySlots(opts) {
           // Same as the non-capacity path above.
           unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
-          service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' ') } }),
+          service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' '),
+          // Several services under one joined label name no single planning-minutes row (placedVisitMinutes).
+          ...(requestedServices.length > 1 ? { combined_services: true } : {}) } }),
       });
       if (!context) continue;
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')

@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { etParts, etDateString, validCalendarDate } = require('../utils/datetime-et');
+const { etParts, etDateString, validCalendarDate, addETDays } = require('../utils/datetime-et');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { taxPeriodFor } = require('../utils/tax-period');
 const featureGates = require('../config/feature-gates');
@@ -773,7 +773,7 @@ router.get('/filings', async (req, res, next) => {
     }
     res.json({
       filings: filings.map(f => ({
-        id: f.id, filingType: f.filing_type, title: f.title,
+        id: f.id, filingType: f.filing_type, sourceKey: f.source_key || null, title: f.title,
         periodLabel: f.period_label, dueDate: f.due_date,
         extendedDueDate: f.extended_due_date, status: f.status,
         amountDue: f.amount_due ? parseFloat(f.amount_due) : null,
@@ -786,6 +786,42 @@ router.get('/filings', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The statuses tax_filing_calendar uses (its migration comment and the Filing calendar tab). `paid`
+// must match exactly: paidDeposits in payroll-form-figures.js counts only 'paid'.
+const FILING_STATUSES = ['upcoming', 'prepared', 'filed', 'paid', 'late'];
+const DONE_FILING_STATUSES = ['filed', 'paid'];
+
+// Checks the request's own fields, before the row is read. Trims update.confirmation_number in place.
+function filingFieldProblem(update) {
+  if (update.confirmation_number !== undefined && update.confirmation_number !== null) {
+    const conf = typeof update.confirmation_number === 'string' ? update.confirmation_number.trim() : null;
+    if (conf === null || conf.length > 100) return 'confirmationNumber must be text of at most 100 characters';
+    update.confirmation_number = conf || null;
+  }
+  if (update.status !== undefined && !FILING_STATUSES.includes(update.status)) {
+    return `status must be one of: ${FILING_STATUSES.join(', ')}`;
+  }
+  return null;
+}
+
+// Server-enforced rules for a row moving to filed or paid, or getting an amount paid. Returns the 400 text, or null.
+// A payroll row (source_key payroll:) needs a confirmation number, the request's or the stored one.
+// A paid filing MUST carry a valid amount (codex r4-push P1): the quarterly estimate credits SUM(amount_paid) of
+// paid rows, and an amount-less paid row silently credits $0 and re-bills the installment. Explicit null/blank is
+// rejected BEFORE coercion (Number(null) is 0, r5-push P1): the merged row needs a real amount whether the request
+// changes status, the amount, or both. The client prompt is a convenience, not the gate.
+function filingUpdateProblem(update, current, movesToDone) {
+  if (movesToDone && String(current.source_key || '').startsWith('payroll:')) {
+    const conf = update.confirmation_number !== undefined ? update.confirmation_number : current.confirmation_number;
+    if (!(typeof conf === 'string' && conf.trim())) return 'confirmationNumber is required to mark a payroll filing filed or paid';
+  }
+  const mergedStatus = update.status !== undefined ? update.status : current.status;
+  if (mergedStatus !== 'paid' || !(update.status === 'paid' || update.amount_paid !== undefined)) return null;
+  const amtSource = update.amount_paid !== undefined ? update.amount_paid : current.amount_paid;
+  const amt = amtSource === null || amtSource === '' ? NaN : Number(amtSource);
+  return Number.isFinite(amt) && amt >= 0 ? null : 'amountPaid is required when marking a filing paid — future estimates credit it';
+}
+
 router.put('/filings/:id', async (req, res, next) => {
   try {
     const fields = req.body;
@@ -796,33 +832,24 @@ router.put('/filings/:id', async (req, res, next) => {
       confirmationNumber: 'confirmation_number', notes: 'notes',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
-    if (update.confirmation_number !== undefined && update.confirmation_number !== null) {
-      const conf = typeof update.confirmation_number === 'string' ? update.confirmation_number.trim() : null;
-      if (conf === null || conf.length > 100) {
-        return res.status(400).json({ error: 'confirmationNumber must be text of at most 100 characters' });
-      }
-      update.confirmation_number = conf || null;
-    }
-    // Server-enforced (codex r4-push P1): a paid filing MUST carry a valid
-    // amount — the quarterly estimate credits SUM(amount_paid) of paid
-    // rows, and an amount-less paid row silently credits $0 and re-bills
-    // the installment. The client prompt is a convenience, not the gate.
-    if (update.status === 'paid' || update.amount_paid !== undefined) {
-      const row = await db('tax_filing_calendar').where({ id: req.params.id }).first();
-      if (!row) return res.status(404).json({ error: 'Filing not found' });
-      const mergedStatus = update.status !== undefined ? update.status : row.status;
-      if (mergedStatus === 'paid') {
-        // Explicit null/blank rejection BEFORE coercion (Number(null) is 0
-        // — r5-push P1): the merged row must carry a real amount whether
-        // the request changes status, the amount, or both.
-        const amtSource = update.amount_paid !== undefined ? update.amount_paid : row.amount_paid;
-        const amt = amtSource === null || amtSource === '' ? NaN : Number(amtSource);
-        if (!Number.isFinite(amt) || amt < 0) {
-          return res.status(400).json({ error: 'amountPaid is required when marking a filing paid — future estimates credit it' });
-        }
-      }
+    const fieldProblem = filingFieldProblem(update);
+    if (fieldProblem) return res.status(400).json({ error: fieldProblem });
+    const movesToDone = update.status !== undefined && DONE_FILING_STATUSES.includes(update.status);
+    let current = null;
+    if (movesToDone || update.status === 'paid' || update.amount_paid !== undefined) {
+      current = await db('tax_filing_calendar').where({ id: req.params.id }).first();
+      if (!current) return res.status(404).json({ error: 'Filing not found' });
+      const problem = filingUpdateProblem(update, current, movesToDone);
+      if (problem) return res.status(400).json({ error: problem });
+      // A paid row with no paid date, in the request or stored, gets today (ET).
+      if (update.status === 'paid' && update.paid_date === undefined && !current.paid_date) update.paid_date = etDateString();
     }
     await db('tax_filing_calendar').where({ id: req.params.id }).update(update);
+    // GATE_TAX_DEADLINE_BELLS: a marked row's reminder bells are done. The typeof guard keeps a suite
+    // that mocks feature-gates without the reader working: off.
+    if (movesToDone && typeof featureGates.taxDeadlineBellsLive === 'function' && featureGates.taxDeadlineBellsLive()) {
+      await require('../services/tax-deadline-reminders').closeBellsForFiling(req.params.id);
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -951,8 +978,14 @@ router.post('/mileage', async (req, res, next) => {
     const { vehicleName, tripDate, startAddress, endAddress, distanceMiles,
       durationMinutes, purpose, notes } = req.body;
 
-    if (!tripDate || !distanceMiles) {
-      return res.status(400).json({ error: 'tripDate and distanceMiles are required' });
+    // A real calendar date and a positive, finite distance. A negative trip
+    // booked a negative deduction and lowered the YTD totals, summaries and
+    // mileage exports; a zero, blank or non-numeric one is no trip at all.
+    const tripDay = validCalendarDate(tripDate);
+    const miles = ['string', 'number'].includes(typeof distanceMiles) && String(distanceMiles).trim() !== ''
+      ? Number(distanceMiles) : NaN;
+    if (!tripDay || !Number.isFinite(miles) || miles <= 0) {
+      return res.status(400).json({ error: 'tripDate (YYYY-MM-DD) and a positive distanceMiles are required' });
     }
 
     // A hand-entered trip IS an operator classification — mark it as such so
@@ -964,7 +997,7 @@ router.post('/mileage', async (req, res, next) => {
     const resolvedPurpose = purpose || 'business';
     const isBusiness = resolvedPurpose === 'business';
     // Date-effective (the IRS changes the rate mid-year).
-    const irsRate = isBusiness ? require('../services/bouncie-mileage').getIrsRate(tripDate) : 0;
+    const irsRate = isBusiness ? require('../services/bouncie-mileage').getIrsRate(tripDay) : 0;
     // REFUSE a business trip with no verified rate (a date past the horizon →
     // rate 0), same as classifyTrips: persisting $0 would look reviewed and
     // never self-heal when the rate is added (reports sum persisted values).
@@ -973,14 +1006,14 @@ router.post('/mileage', async (req, res, next) => {
         error: 'No verified IRS mileage rate for this trip’s date yet — add the published rate before recording a business trip for it.',
       });
     }
-    const deductionAmount = isBusiness ? parseFloat((distanceMiles * irsRate).toFixed(2)) : 0;
+    const deductionAmount = isBusiness ? parseFloat((miles * irsRate).toFixed(2)) : 0;
 
     const [inserted] = await db('mileage_log').insert({
       vehicle_name: vehicleName || 'Manual Entry',
-      trip_date: tripDate,
+      trip_date: tripDay,
       start_address: startAddress || null,
       end_address: endAddress || null,
-      distance_miles: distanceMiles,
+      distance_miles: miles,
       duration_minutes: durationMinutes || null,
       purpose: resolvedPurpose,
       is_business: isBusiness,
@@ -995,12 +1028,23 @@ router.post('/mileage', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /mileage/sync-bouncie — pull from Bouncie API
+// POST /mileage/sync-bouncie — pull from Bouncie API. With no dates (the Tax
+// page's Sync from Bouncie button) it syncs the last 7 Eastern days through
+// today: one Bouncie request per vehicle, enough to catch up a missed week of
+// the nightly sync. Trips already imported are skipped, so overlaps are safe.
+const BOUNCIE_SYNC_DEFAULT_DAYS = 7;
 router.post('/mileage/sync-bouncie', async (req, res, next) => {
   try {
-    const { startDate, endDate } = req.body;
-    if (!startDate || !endDate) {
-      return res.status(400).json({ error: 'startDate and endDate are required' });
+    const body = req.body || {};
+    let startDate = etDateString(addETDays(new Date(), 1 - BOUNCIE_SYNC_DEFAULT_DAYS));
+    let endDate = etDateString();
+    if (body.startDate != null || body.endDate != null) {
+      startDate = validCalendarDate(body.startDate);
+      endDate = validCalendarDate(body.endDate);
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: 'Send startDate and endDate as YYYY-MM-DD, or neither for the last 7 days' });
+      }
+      if (endDate < startDate) return res.status(400).json({ error: 'endDate must be on or after startDate' });
     }
 
     const BouncieService = require('../services/bouncie');
@@ -1008,6 +1052,8 @@ router.post('/mileage/sync-bouncie', async (req, res, next) => {
 
     res.json({
       success: true,
+      startDate,
+      endDate,
       tripsImported: result.tripsImported,
       totalMiles: result.totalMiles,
       deductionAmount: result.deductionAmount,
@@ -1019,7 +1065,10 @@ router.post('/mileage/sync-bouncie', async (req, res, next) => {
 // GET /mileage/stats — YTD totals
 router.get('/mileage/stats', async (req, res, next) => {
   try {
-    const year = req.query.year || String(new Date().getFullYear());
+    // The Eastern year: the UTC server clock reaches New Year at 7 PM ET on
+    // Dec 31, and the Mileage tab asks without a year.
+    const year = String(req.query.year || etParts().year);
+    if (!/^\d{4}$/.test(year)) return res.status(400).json({ error: 'year must be YYYY' });
     const startDate = `${year}-01-01`;
     const endDate = `${year}-12-31`;
 

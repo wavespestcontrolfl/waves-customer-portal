@@ -554,3 +554,50 @@ describe('tlsFor (connection TLS)', () => {
     }
   });
 });
+
+// Territories by ZIP, build 6 (owner 2026-10-30): --zips moves only the listed ZIPs' series, and
+// the plan carries each listed ZIP's territory technician so --execute can hand the ZIP over too.
+describe('second-tech-handover planner — --zips (territory handover)', () => {
+  const crypto = require('crypto');
+  const { planIdOf } = require(script);
+  const territory = [{ zip: '34293', area: 'venice', technician_id: null }, { zip: '34285', area: 'venice', technician_id: null }];
+
+  test('parseArgs takes a sorted, de-duplicated ZIP list and refuses anything else', () => {
+    expect(parseArgs(['--from', OWNER, '--zips', '34293, 34285,34293']).zips).toEqual(['34285', '34293']);
+    expect(parseArgs(['--from', OWNER]).zips).toBeNull();
+    const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => parseArgs(['--from', OWNER, '--zips', '3429'])).toThrow('exit 2');
+    expect(() => parseArgs(['--from', OWNER, '--zips', 'FL 34293'])).toThrow('exit 2');
+    exit.mockRestore(); err.mockRestore();
+  });
+
+  test('a series outside the listed ZIPs stays whole (outside_zips); a listed one moves', () => {
+    const south = parent({ zip: '34293' });
+    const north = parent({ zip: '34219' });
+    const noZip = parent({ zip: null });
+    const p = plan([south, north, noZip], [visit(south, MON), visit(north, TUE), visit(noZip, WED)], { zips: ['34285', '34293'], territory });
+    expect(p.ids.series).toEqual([south.id]);
+    expect(p.skipped.outside_zips).toMatchObject({ series: 2, visits: 2 });
+    // The line count still counts every series of these lines.
+    expect(p.series.in_lines).toBe(3);
+    expect(p.zips).toEqual(['34285', '34293']);
+    expect(p.territory).toEqual(territory);
+  });
+
+  test('without --zips the PLAN ID is exactly the pre-territory id', () => {
+    const args = { from: OWNER, to: HIRE, start: START, lines: ['general'], retemplate: ['S-a'], moves: [{ series_id: 'S-a', visit_id: 'V-a', date: MON }] };
+    const rows = [JSON.stringify(['S-a', '', '', OWNER]), JSON.stringify(['S-a', 'V-a', MON, OWNER])].sort();
+    const legacy = crypto.createHash('sha256')
+      .update(JSON.stringify({ v: 1, from: OWNER, to: HIRE, start: START, lines: ['general'], rows })).digest('hex');
+    expect(planIdOf(args)).toBe(legacy);
+  });
+
+  test('the ZIP list and each ZIP\'s current territory technician are part of the PLAN ID', () => {
+    const args = { from: OWNER, to: HIRE, start: START, lines: ['general'], retemplate: [], moves: [] };
+    const withZips = planIdOf({ ...args, zips: ['34293'], territory: [{ zip: '34293', technician_id: null }] });
+    expect(withZips).not.toBe(planIdOf(args));
+    expect(planIdOf({ ...args, zips: ['34293'], territory: [{ zip: '34293', technician_id: OTHER }] })).not.toBe(withZips);
+    expect(planIdOf({ ...args, zips: ['34285'], territory: [{ zip: '34285', technician_id: null }] })).not.toBe(withZips);
+  });
+});

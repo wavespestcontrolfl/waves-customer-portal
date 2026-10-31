@@ -381,3 +381,67 @@ describe('CompliancePage dashboard failure states', () => {
     expect(screen.queryByText('Loading dashboard…')).not.toBeInTheDocument();
   });
 });
+
+// Operations audit OP-08/OP-09: a failed restriction read is "unknown", never
+// "No Active Nitrogen Blackout" or "No lawn customers found", and a failed
+// Check Limits says so for the customer that was checked.
+describe('CompliancePage nitrogen and limits failure states', () => {
+  const ok = (body) => ({ ok: true, json: async () => body });
+  const fail = (status) => ({ ok: false, status, json: async () => ({ error: `HTTP ${status}` }) });
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('waves_admin_token', 'test-token');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the blackout status as unknown with Retry when only the nitrogen read fails', async () => {
+    let nitrogenFails = true;
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes('/nitrogen-status')) {
+        return nitrogenFails ? fail(503) : ok({ activeBlackoutCount: 0, blackoutPeriods: [] });
+      }
+      return ok({ ytdApplications: 3, recentApplications: [] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderCompliance();
+    expect(await screen.findByText('Nitrogen Blackout Status Unknown')).toBeInTheDocument();
+    expect(screen.queryByText('No Active Nitrogen Blackout')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/Couldn't load nitrogen status — HTTP 503/);
+    nitrogenFails = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('No Active Nitrogen Blackout')).toBeInTheDocument();
+  });
+
+  it('never reports "No lawn customers found" for a failed nitrogen read on Limits', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/nitrogen-status') ? fail(503) : ok({}))));
+    renderCompliance('/admin/compliance?tab=limits');
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Couldn't load nitrogen status — HTTP 503/);
+    expect(screen.queryByText('No lawn customers found')).not.toBeInTheDocument();
+  });
+
+  it('shows a failed Check Limits for the submitted customer and clears the old result', async () => {
+    let limitsFail = false;
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/product-limits')) {
+        return limitsFail ? fail(503) : ok({ customerName: 'Synthetic Customer', limits: [{ limitType: 'annual_max_apps', limitValue: 4, currentUsage: 1, status: 'ok' }] });
+      }
+      return ok({ customers: [] });
+    }));
+    renderCompliance('/admin/compliance?tab=limits');
+    fireEvent.change(screen.getByPlaceholderText('Customer ID…'), { target: { value: 'cust-1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check Limits' }));
+    expect(await screen.findByText('Synthetic Customer')).toBeInTheDocument();
+
+    limitsFail = true;
+    fireEvent.change(screen.getByPlaceholderText('Customer ID…'), { target: { value: 'cust-2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check Limits' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't check limits for customer cust-2 — HTTP 503");
+    expect(screen.queryByText('Synthetic Customer')).not.toBeInTheDocument();
+    expect(screen.queryByText('Checking…')).not.toBeInTheDocument();
+  });
+});
