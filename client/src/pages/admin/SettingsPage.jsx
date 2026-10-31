@@ -1323,6 +1323,9 @@ function BlackoutDaysTab() {
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // The day being unblocked: a double-click used to send a second DELETE,
+  // whose "Not found" showed as an error after the day was already gone.
+  const [removingId, setRemovingId] = useState(null);
   // Only the newest read may land. A read that started before a write
   // finished can carry the old list or days off back over that write.
   const loadSeq = useRef(0);
@@ -1435,6 +1438,8 @@ function BlackoutDaysTab() {
   };
 
   const remove = async (id) => {
+    if (removingId) return;
+    setRemovingId(id);
     try {
       // adminFetch resolves parsed JSON even for non-401 HTTP errors — check
       // the body before mutating state, or a failed DELETE would show the
@@ -1445,6 +1450,8 @@ function BlackoutDaysTab() {
       rereadIfStale();
     } catch (e) {
       setError(e.message);
+    } finally {
+      setRemovingId(null);
     }
   };
 
@@ -1569,7 +1576,7 @@ function BlackoutDaysTab() {
                 <div className="font-medium text-zinc-900 u-nums">{fmtDay(b.date)}</div>
                 {b.reason && <div className="text-ui-caption text-ink-secondary">{b.reason}</div>}
               </div>
-              <Button variant="secondary" onClick={() => remove(b.id)}>Unblock</Button>
+              <Button variant="secondary" onClick={() => remove(b.id)} disabled={removingId !== null}>Unblock</Button>
             </div>
           ))}
         </div>
@@ -1977,6 +1984,8 @@ function GbpConnectSection() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [busy, setBusy] = useState(null);
+  // Shown in the card, not in a blocking browser alert.
+  const [connectError, setConnectError] = useState(null);
 
   const params = new URLSearchParams(window.location.search);
   const justConnected =
@@ -1998,6 +2007,7 @@ function GbpConnectSection() {
 
   const connect = async (id) => {
     setBusy(id);
+    setConnectError(null);
     try {
       const d = await adminFetch(
         `/admin/settings/google/auth-url?location=${encodeURIComponent(id)}`,
@@ -2006,9 +2016,9 @@ function GbpConnectSection() {
         window.location.href = d.url; // off to Google's consent screen
         return;
       }
-      alert(d.error || "Could not start Google connection");
+      setConnectError(d.error || "Could not start Google connection");
     } catch (e) {
-      alert("Connect failed: " + e.message);
+      setConnectError("Connect failed: " + e.message);
     } finally {
       setBusy(null);
     }
@@ -2028,6 +2038,7 @@ function GbpConnectSection() {
       {justConnected && (
         <ActionFeedback className="mb-3">Connected {justConnected}. Status below may take a moment to refresh.</ActionFeedback>
       )}
+      {connectError && <ActionFeedback error className="mb-3">{connectError}</ActionFeedback>}
       {loading ? (
         <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
       ) : loadError ? (
@@ -2066,6 +2077,8 @@ function LinkedInConnectSection() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // Shown in the card, not in a blocking browser alert.
+  const [connectError, setConnectError] = useState(null);
 
   const params = new URLSearchParams(window.location.search);
   const justConnected = params.get("linkedinOAuth") === "success";
@@ -2087,15 +2100,16 @@ function LinkedInConnectSection() {
 
   const connect = async () => {
     setBusy(true);
+    setConnectError(null);
     try {
       const d = await adminFetch("/admin/settings/linkedin/auth-url");
       if (d.url) {
         window.location.href = d.url; // off to LinkedIn's consent screen
         return;
       }
-      alert(d.error || "Could not start LinkedIn connection");
+      setConnectError(d.error || "Could not start LinkedIn connection");
     } catch (e) {
-      alert("Connect failed: " + e.message);
+      setConnectError("Connect failed: " + e.message);
     } finally {
       setBusy(false);
     }
@@ -2124,6 +2138,7 @@ function LinkedInConnectSection() {
           admin of the Waves company page.
         </ActionFeedback>
       )}
+      {connectError && <ActionFeedback error className="mb-3">{connectError}</ActionFeedback>}
       {loading ? (
         <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
       ) : loadError ? (

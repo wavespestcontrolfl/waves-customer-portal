@@ -47,7 +47,7 @@ const COMPANY = {
 // only when the gate's payload for that key prices the visitor's actual
 // problem — either inputless, or via the number field the island's chip now
 // collects (palm → palmCount, bedBug → rooms, treeShrub → optional count,
-// plugging → optional patch area). Still out: stinging (the engine scopes
+// plugging → required plug area). Still out: stinging (the engine scopes
 // jobs across species/tier/removal/aggression/height — no honest gate
 // version) and cockroach (page-seed only — chat can't tell a regular-roach
 // knockdown from a German cleanout).

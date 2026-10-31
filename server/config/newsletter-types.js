@@ -210,6 +210,7 @@ const TEMPLATE_TO_TYPE = {
 };
 
 const FLAGSHIP_TYPE_KEY = 'local-weekly-fresh-events';
+const PEST_INSIDER_TYPE = 'pest-insider-monthly';
 
 function getNewsletterType(key) {
   return NEWSLETTER_TYPES[key] || null;
@@ -233,6 +234,7 @@ module.exports = {
   NEWSLETTER_TYPES,
   TEMPLATE_TO_TYPE,
   FLAGSHIP_TYPE_KEY,
+  PEST_INSIDER_TYPE,
   getNewsletterType,
   getFlagshipType,
   isFlagshipType,

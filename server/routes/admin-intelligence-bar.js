@@ -1181,6 +1181,11 @@ function confirmationDisplayParams(toolName, params, preview) {
         visit_prices: preview.per_app_changes
           .map((r) => `${r.label || r.family} $${r.before} → $${r.after}`).join(', '),
       } : {}),
+      // Visits the scheduler adds later bill from the series price template.
+      ...(Array.isArray(preview.template_changes) && preview.template_changes.length ? {
+        future_visit_prices: preview.template_changes
+          .map((r) => `${r.label || r.family} future visits $${r.before} → $${r.after}`).join(', '),
+      } : {}),
       // Outstanding balance stays payable through the cancel — a money fact
       // the card must show (the dialog shows the same line).
       ...(Number(preview.open_balance) > 0 ? {

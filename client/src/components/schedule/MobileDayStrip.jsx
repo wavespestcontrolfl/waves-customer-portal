@@ -203,7 +203,7 @@ export default function MobileDayStrip({ date, onSelect }) {
   return (
     <div className="mb-4">
       <div
-        className="px-1 pb-1.5 text-12 uppercase tracking-label font-medium text-zinc-900 u-nums"
+        className="px-1 pb-1.5 text-14 uppercase tracking-label font-medium text-zinc-900 u-nums"
         aria-live="polite"
       >
         {visibleMonth}
@@ -233,23 +233,25 @@ export default function MobileDayStrip({ date, onSelect }) {
                 selected
                   ? 'bg-zinc-900 text-white border-zinc-900'
                   : 'bg-white text-zinc-900 border-zinc-300 hover:bg-zinc-50',
+                // 16px month gap: the 14px sideways month label fits
+                // between the two days without touching either border.
                 firstOfMonth &&
                   !selected &&
-                  'ml-3 border-l-[1.5px] border-l-zinc-500',
-                firstOfMonth && selected && 'ml-3',
+                  'ml-4 border-l-[1.5px] border-l-zinc-500',
+                firstOfMonth && selected && 'ml-4',
               )}
             >
               {firstOfMonth && (
                 <span
                   aria-hidden="true"
-                  className="absolute -left-3 top-1/2 -translate-y-1/2 rotate-180 [writing-mode:vertical-rl] text-11 uppercase tracking-label font-medium text-zinc-400 leading-none"
+                  className="absolute -left-4 top-1/2 -translate-y-1/2 rotate-180 [writing-mode:vertical-rl] text-14 uppercase tracking-label font-medium text-zinc-400 leading-none"
                 >
                   {monthShort}
                 </span>
               )}
               <span
                 className={cn(
-                  'text-11 uppercase tracking-label font-medium leading-none',
+                  'text-14 uppercase tracking-label font-medium leading-none',
                   selected ? 'text-white' : 'text-zinc-400',
                 )}
               >

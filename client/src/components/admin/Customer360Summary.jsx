@@ -19,10 +19,12 @@ function NextAppointment({ isAdmin, customer, upcoming, instructions, onViewServ
   </section>;
 }
 
-function LatestCommunication({ comms, loading, error, customer, onMessage }) {
+// `restricted`: a non-admin never loads message history (the profile's history
+// fetch is admin-only), so say so instead of the retry hint, which cannot help.
+function LatestCommunication({ comms, loading, error, restricted, customer, onMessage }) {
   const latest = comms[0];
   return <section className="c360-latest-message"><h2>Latest communication</h2>
-    {error ? <p>Communication history is unavailable. Open the conversation to retry.</p> : loading ? <p>Loading communication…</p> : latest ? <><p className="text-ink-secondary">{latest.channel === "voice" ? "Call" : latest.direction === "inbound" ? "Received" : "Outbound"} · {formatETDateTime(latest.createdAt, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p><p className="c360-summary-excerpt">{latest.aiSummary || latest.body || "Attachment"}</p></> : <p>No communication recorded.</p>}
+    {restricted ? <p>Message history requires admin access.</p> : error ? <p>Communication history is unavailable. Open the conversation to retry.</p> : loading ? <p>Loading communication…</p> : latest ? <><p className="text-ink-secondary">{latest.channel === "voice" ? "Call" : latest.direction === "inbound" ? "Received" : "Outbound"} · {formatETDateTime(latest.createdAt, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p><p className="c360-summary-excerpt">{latest.aiSummary || latest.body || "Attachment"}</p></> : <p>No communication recorded.</p>}
     {customer.phone && <Button variant="secondary" aria-haspopup="dialog" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); onMessage(); }}>Open conversation</Button>}
   </section>;
 }
@@ -56,7 +58,7 @@ export default function Customer360Summary({ isAdmin, customer, upcoming, servic
   const accessNotes = alerts.filter((item) => !item.alert);
   return <div className="c360-operational-summary">
     <NextAppointment isAdmin={isAdmin} customer={customer} upcoming={upcoming} instructions={preferences.special_instructions} onViewServices={onViewServices} />
-    <LatestCommunication comms={comms} loading={commsLoading} error={commsError} customer={customer} onMessage={onMessage} />
+    <LatestCommunication comms={comms} loading={commsLoading} error={commsError} restricted={!isAdmin} customer={customer} onMessage={onMessage} />
     <section className="c360-latest-service"><h2>Latest service</h2>{service ? <><h3>{service.service_type}</h3><p>{date(service.service_date)}{service.technician_name ? ` · ${service.technician_name}` : ""}</p><Button variant="secondary" onClick={onViewServices}>View service record & report</Button></> : <p>No completed service recorded.</p>}</section>
     <AttentionSummary isAdmin={isAdmin} customer={customer} balance={balance} unread={unread} alerts={alerts} onTab={onTab} />
     <section className="c360-access-summary"><h2>Access & important notes</h2>{accessNotes.length ? accessNotes.map((item, index) => <p key={index}>{item.text}</p>) : <p>No access instructions recorded.</p>}{customer.crmNotes && <p>{customer.crmNotes}</p>}</section>

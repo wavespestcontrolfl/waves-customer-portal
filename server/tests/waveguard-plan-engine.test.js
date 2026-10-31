@@ -21,6 +21,7 @@ const {
   summarizeAnnualN,
   summarizeMaterialCost,
   summarizeOrdinanceStatus,
+  summarizeTurfProfileCompleteness,
 } = require('../services/waveguard-plan-engine');
 const {
   calculateAppliedNutrients,
@@ -1177,5 +1178,28 @@ describe('ordinance jurisdiction for a profile with no county', () => {
     expect(blocks.map((b) => b.code)).toEqual(['actual_nitrogen_blackout']);
     expect(blocks[0].message).toMatch(/Manatee County/);
     expect(await actualProductBlackoutBlocks(svc({ city: 'Nowhere', customer_zip: '99999' }), [{ productId: 'p1' }], db)).toEqual([]);
+  });
+});
+
+describe('turf profile completeness (owner 2026-10-31: soil tests run on triggers only)', () => {
+  const fullProfile = {
+    grass_type: 'st_augustine',
+    cultivar: 'Floratam',
+    county: 'Manatee',
+    lawn_sqft: 5000,
+    irrigation_type: 'in_ground',
+  };
+
+  test('a profile with no soil test date is complete', () => {
+    const summary = summarizeTurfProfileCompleteness({ ...fullProfile, soil_test_date: null });
+    expect(summary.status).toBe('complete');
+    expect(summary.missing).toEqual([]);
+    expect(summary.required.map((field) => field.key)).not.toContain('soil_test_date');
+  });
+
+  test('a missing required field is still reported', () => {
+    const summary = summarizeTurfProfileCompleteness({ ...fullProfile, cultivar: '' });
+    expect(summary.status).toBe('incomplete');
+    expect(summary.missing.map((field) => field.key)).toEqual(['cultivar']);
   });
 });

@@ -216,6 +216,11 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     perAppChanges: !wholeAccount && plan && Array.isArray(plan.perAppRows)
       ? plan.perAppRows.map((r) => ({ id: r.id, family: r.family, label: labelOf(r.family), before: r.before, after: r.after }))
       : [],
+    // Per-application lane (scoped): the series price template that visits
+    // added LATER bill from — approved with the rest (rides the fingerprint).
+    templateChanges: !wholeAccount && plan && Array.isArray(plan.templateRows)
+      ? plan.templateRows.map((r) => ({ rootId: r.rootId, family: r.family, label: labelOf(r.family), field: r.field, source: r.source, before: r.before, after: r.after }))
+      : [],
     visitsCancelled,
     nextVisitCancelled,
     pulledVisitKeys,

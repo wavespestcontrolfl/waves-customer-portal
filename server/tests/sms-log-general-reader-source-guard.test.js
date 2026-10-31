@@ -604,11 +604,6 @@ const ALLOWLIST = [
     reason: 'message_type restricted to \'payment_expiry\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
-    file: 'services/workflows/referral-nudge.js',
-    snippet: 'const recentNudge = await db(\'sms_log\')',
-    reason: 'message_type restricted to \'referral_nudge\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
-  },
-  {
     file: 'services/workflows/renewal-reminder.js',
     snippet: 'const recent = await db(\'sms_log\')',
     reason: 'message_type restricted to \'renewal\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',

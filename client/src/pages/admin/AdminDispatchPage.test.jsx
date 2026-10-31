@@ -143,7 +143,7 @@ describe("AdminDispatchPage", () => {
     for (const label of ["Board", "Schedule", "Protocols"]) {
       expect(screen.getByRole("button", { name: label })).not.toHaveClass("hidden");
     }
-    for (const label of ["Matching", "Booking", "Scores", "Insights"]) {
+    for (const label of ["Scores", "Insights"]) {
       const button = screen.getByRole("button", { name: label });
       expect(button).not.toHaveClass("hidden");
       fireEvent.click(button);
@@ -151,10 +151,20 @@ describe("AdminDispatchPage", () => {
     }
   });
 
-  it("hides the Matching and Booking dispatcher tabs from a technician, who keeps the rest", async () => {
-    // POST /dispatch/match/simulate and /dispatch/csr/slots are closed to a
-    // technician by the staff allow-list; an admin still gets both tabs (see
-    // the full-strip test above).
+  it.each(["match", "csr"])("has no Matching or Booking tab, and an old ?tab=%s link opens Board (schedule audit S2/S3)", async (oldTab) => {
+    // Both tabs showed fixed example slots and rules that never ran; the
+    // owner chose to hide them (2026-10-31).
+    renderSchedule(`/admin/dispatch?tab=${oldTab}`);
+
+    for (const label of ["Matching", "Booking"]) {
+      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
+    }
+    expect(await screen.findByText("Dispatch board workspace")).toBeInTheDocument();
+    expect(screen.queryByText(/Dispatch workspace:/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Board" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("gives a technician Schedule, Protocols and Scores only", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
     renderSchedule("/admin/dispatch?tab=csr");
 

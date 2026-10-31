@@ -1297,6 +1297,7 @@ class GoogleBusinessService {
             customerId: row.customer_id,
             locationId: row.location_id,
             starRating: row.star_rating,
+            reviewCreatedAt: existing?.review_created_at || normalized.review_created_at,
             source: 'google_review',
           });
         }, (outcome) => outcome && outcome.reason === 'error');
@@ -1480,6 +1481,10 @@ class GoogleBusinessService {
       // (after both branches) has the row's id either way — existing.id on
       // the update path, the freshly inserted id on the insert path.
       let placesReviewRowId = existing?.id || null;
+      // The review's Google post time either way: the stored row's on the
+      // update path, Places' `time` on the insert path. The thank-you's age
+      // rule reads it (an edit moves Places' `time`; the stored date does not).
+      const placesPostedAt = existing ? existing.review_created_at : new Date(review.time * 1000).toISOString();
       // review.linked_5star's durable intent marker id, set inside whichever
       // branch below actually writes the customer_id transition (codex
       // round 3 on #5154) — mirrors _upsertGbpReview's attributionIntentId.
@@ -1613,7 +1618,6 @@ class GoogleBusinessService {
         // recovers and takes the update path, so this insert is its only
         // chance to enter the pipeline.
         const { autoReplyInsertFields } = require('./review-reply/runner');
-        const placesCreatedAt = new Date(review.time * 1000).toISOString();
         const insertStarRating = review.rating || 0;
         placesReviewRowId = await db.transaction(async (trx) => {
           const [insertedReview] = await trx('google_reviews').insert({
@@ -1625,10 +1629,10 @@ class GoogleBusinessService {
             review_text: review.text || null,
             review_reply: ownerReply,
             reply_updated_at: ownerReply ? new Date() : null,
-            review_created_at: placesCreatedAt,
+            review_created_at: placesPostedAt,
             customer_id: customerId,
             synced_at: sampleSyncStart.toISOString(),
-            ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt, star_rating: insertStarRating }),
+            ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesPostedAt, star_rating: insertStarRating }),
           }).returning('id');
           const newId = insertedReview?.id || null;
           // A brand-new Places-sourced review the name matcher already tied
@@ -1664,6 +1668,7 @@ class GoogleBusinessService {
             customerId: effectiveCustomerId,
             locationId: loc.id,
             starRating: review.rating || 0,
+            reviewCreatedAt: placesPostedAt,
             source: 'google_review_places',
           });
           // review.linked_5star (email_template_automation, dark/shadow) —

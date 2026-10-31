@@ -191,8 +191,8 @@ async function relationshipEligible(stream, emailKey, customer, database) {
     // who later re-activated (customer-stages.js keeps it as a fallback
     // signal, never the sole one), and a legacy churned row can lack it
     // entirely. pipeline_stage === 'churned' is the live-state check every
-    // other reader (admin-cancellation.js, revenue-forecast.js,
-    // cancellation-processor.js) treats as authoritative on its own.
+    // other reader (admin-cancellation.js, cancellation-processor.js)
+    // treats as authoritative on its own.
     if (isWinbackKey(emailKey)) return customer.pipeline_stage === 'churned';
     // A live customer is the canonical customer-stages.js condition (the
     // same one whereLiveCustomer applies in SQL): active, not deleted, and in

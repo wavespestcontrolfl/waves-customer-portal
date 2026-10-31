@@ -619,8 +619,62 @@ describe('DACS report + CSV export surface the captured site and weather', () =>
       + 'Site Address,Product Name,EPA Reg Number,Active Ingredient,'
       + 'Application Rate,Rate Unit,Quantity Applied,Quantity Unit,'
       + 'Area Treated (sqft),Application Method,Target Pest,Restricted Use,'
-      + 'Application Site,Weather Conditions,Wind Speed (mph),Soil Temp (F)'
+      + 'Application Site,Weather Conditions,Wind Speed (mph),Soil Temp (F),'
+      + 'Wind Reading Time (ET),Wind Direction'
     );
-    expect(row.endsWith(',perimeter,Partly cloudy 84F 71% RH,6,78.1')).toBe(true);
+    // No saved weather on this fixture: the two new columns are empty, never invented.
+    expect(row.endsWith(',perimeter,Partly cloudy 84F 71% RH,6,78.1,,')).toBe(true);
+  });
+
+  describe('wind record proof (service_records.conditions)', () => {
+    const withConditions = (sr_conditions) => ({ ...LEDGER_ROW, sr_conditions });
+
+    test('joins the visit record and keeps retracted rows out', async () => {
+      const q = chain({ rows: [LEDGER_ROW] });
+      db.mockReturnValueOnce(q);
+      await ComplianceService.getDacsReport('2026-01-01', '2026-12-31');
+      expect(q.leftJoin).toHaveBeenCalledWith('service_records as sr', 'pah.service_record_id', 'sr.id');
+      expect(q.select.mock.calls[0]).toContain('sr.conditions as sr_conditions');
+      expect(q.whereNull).toHaveBeenCalledWith('pah.retracted_at');
+    });
+
+    test('reading time is the model reading instant as an ET wall time; direction is the compass label', async () => {
+      db.mockReturnValueOnce(chain({
+        rows: [withConditions({
+          wind_mph: 6, wind_dir: 'SSW', reading_at: '2026-06-12T17:45:00.000Z', captured_at: '2026-06-12T17:50:09.000Z',
+        })],
+      }));
+      const report = await ComplianceService.getDacsReport('2026-01-01', '2026-12-31');
+      expect(report.applications[0]).toMatchObject({ windReadingTime: '2026-06-12 1:45 PM', windDirection: 'SSW' });
+    });
+
+    test('a record saved before reading_at existed falls back to captured_at; midnight and noon read 12', async () => {
+      db.mockReturnValueOnce(chain({
+        rows: [
+          withConditions({ wind_mph: 6, captured_at: '2026-06-12T04:05:00.000Z' }),
+          withConditions(JSON.stringify({ wind_mph: 6, captured_at: '2026-06-12T16:00:00.000Z', wind_dir: 'N' })),
+        ],
+      }));
+      const report = await ComplianceService.getDacsReport('2026-01-01', '2026-12-31');
+      expect(report.applications[0]).toMatchObject({ windReadingTime: '2026-06-12 12:05 AM', windDirection: null });
+      expect(report.applications[1]).toMatchObject({ windReadingTime: '2026-06-12 12:00 PM', windDirection: 'N' });
+    });
+
+    test('null, malformed or empty conditions give null fields', async () => {
+      db.mockReturnValueOnce(chain({
+        rows: [withConditions(null), withConditions('not json'), withConditions({ reading_at: 'junk', captured_at: 'junk' })],
+      }));
+      const report = await ComplianceService.getDacsReport('2026-01-01', '2026-12-31');
+      for (const a of report.applications) expect(a).toMatchObject({ windReadingTime: null, windDirection: null });
+    });
+
+    test('CSV appends the two values at the very end, after Soil Temp', async () => {
+      db.mockReturnValueOnce(chain({
+        rows: [withConditions({ wind_dir: 'NNW', reading_at: '2026-06-12T17:45:00.000Z' })],
+      }));
+      const csv = await ComplianceService.exportDacsCSV('2026-01-01', '2026-12-31');
+      const [, row] = csv.split('\n');
+      expect(row.endsWith(',perimeter,Partly cloudy 84F 71% RH,6,78.1,2026-06-12 1:45 PM,NNW')).toBe(true);
+    });
   });
 });

@@ -10442,10 +10442,12 @@ function useCustomerPayer({
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
   useEffect(() => {
+    // /admin/payers is requireAdmin: a non-admin's request is always refused.
+    if (!isAdmin) return;
     adminFetch("/admin/payers")
       .then((r) => setPayers(Array.isArray(r?.payers) ? r.payers : []))
       .catch(() => setPayers([]));
-  }, []);
+  }, [isAdmin]);
   const savePayer = async (payerId) => {
     setPayerSaving(true);
     setProfileActionErr("");

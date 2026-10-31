@@ -165,6 +165,12 @@ describe("ToolHealthPage foundation migration", () => {
     expect(screen.getByText(/^Not current: last successful update \S+ ago \(24h window\) · retrying every 30s$/)).toBeInTheDocument();
   });
 
+  it("says the error list is the latest of a larger count", async () => {
+    // The fixture lists 1 recent error out of summary.failed = 3.
+    mount();
+    expect(await screen.findByText("Latest 1 of 3")).toBeInTheDocument();
+  });
+
   it("keeps the owner-only integrations link hidden for a technician profile", async () => {
     profileRole = "technician";
     mount();
