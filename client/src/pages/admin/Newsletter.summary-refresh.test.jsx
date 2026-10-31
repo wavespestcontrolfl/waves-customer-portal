@@ -171,3 +171,103 @@ it('ignores an older retry failure after a newer events refresh succeeds', async
   expect(screen.queryByText('Loading events…')).not.toBeInTheDocument();
   expect(eventReads).toBe(3);
 });
+
+// Audit 2026-10-30 NEWS-03 / NEWS-08: History kept its mount-time rows while
+// the page refreshed /sends, and a failed read looked like "No campaigns yet".
+const historySend = (overrides = {}) => ({
+  id: 'send-1',
+  subject: 'Synthetic weekly issue',
+  status: 'sending',
+  recipient_count: 10,
+  delivered_count: 0,
+  ...overrides,
+});
+
+it('History shows the refreshed delivery status while the tab stays open', async () => {
+  localStorage.setItem('waves_admin_token', 'fixture');
+  let sendsReads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    const path = String(url).split('?')[0];
+    if (path.endsWith('/sends')) {
+      sendsReads += 1;
+      const send = sendsReads === 1
+        ? historySend()
+        : historySend({ status: 'sent', delivered_count: 10, sent_at: '2026-10-27T10:05:00.000Z' });
+      return response({ sends: [send], counts: { [send.status]: 1 } });
+    }
+    if (path.endsWith('/subscribers')) return response({ subscribers: [], counts: { active: 10 } });
+    return response({});
+  }));
+  render(<MemoryRouter initialEntries={['/admin/newsletter?tab=history']}><NewsletterPage /></MemoryRouter>);
+  expect(await screen.findByText('Sending…')).toBeInTheDocument();
+  fireEvent(window, new Event('focus'));
+  expect(await screen.findByText('Sent')).toBeInTheDocument();
+  expect(screen.queryByText('Sending…')).not.toBeInTheDocument();
+  expect(screen.getByText('10 (100%)')).toBeInTheDocument();
+});
+
+it('History shows a failed read with retry instead of an empty list', async () => {
+  localStorage.setItem('waves_admin_token', 'fixture');
+  let sendsReads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    const path = String(url).split('?')[0];
+    if (path.endsWith('/sends')) {
+      sendsReads += 1;
+      if (sendsReads === 1) return response({ error: 'Synthetic outage' }, { ok: false, status: 503 });
+      return response({ sends: [historySend({ status: 'sent' })], counts: { sent: 1 } });
+    }
+    if (path.endsWith('/subscribers')) return response({ subscribers: [], counts: { active: 10 } });
+    return response({});
+  }));
+  render(<MemoryRouter initialEntries={['/admin/newsletter?tab=history']}><NewsletterPage /></MemoryRouter>);
+  expect(await screen.findByText('Campaigns could not be loaded.')).toBeInTheDocument();
+  expect(screen.queryByText(/No campaigns yet/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  expect(await screen.findByText('Synthetic weekly issue')).toBeInTheDocument();
+  expect(screen.queryByText('Campaigns could not be loaded.')).not.toBeInTheDocument();
+});
+
+it('History keeps the last rows through a failed refresh and marks them out of date', async () => {
+  localStorage.setItem('waves_admin_token', 'fixture');
+  let sendsReads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    const path = String(url).split('?')[0];
+    if (path.endsWith('/sends')) {
+      sendsReads += 1;
+      if (sendsReads === 2) return response({ error: 'Synthetic outage' }, { ok: false, status: 503 });
+      return response({ sends: [historySend({ status: 'sent' })], counts: { sent: 1 } });
+    }
+    if (path.endsWith('/subscribers')) return response({ subscribers: [], counts: { active: 10 } });
+    return response({});
+  }));
+  render(<MemoryRouter initialEntries={['/admin/newsletter?tab=history']}><NewsletterPage /></MemoryRouter>);
+  expect(await screen.findByText('Synthetic weekly issue')).toBeInTheDocument();
+  fireEvent(window, new Event('focus'));
+  expect(await screen.findByText('Campaigns could not be refreshed. This list may be out of date.')).toBeInTheDocument();
+  expect(screen.getByText('Synthetic weekly issue')).toBeInTheDocument();
+});
+
+it('a failed A/B breakdown read shows an error with retry instead of loading forever', async () => {
+  localStorage.setItem('waves_admin_token', 'fixture');
+  let detailReads = 0;
+  const abSend = historySend({ status: 'sent', subject_b: 'Synthetic subject B', delivered_count: 10 });
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    const path = String(url).split('?')[0];
+    if (path.endsWith('/sends/send-1')) {
+      detailReads += 1;
+      if (detailReads === 1) return response({ error: 'Synthetic outage' }, { ok: false, status: 503 });
+      return response({ variantStats: { a: { delivered: 5, opened: 2 }, b: { delivered: 5, opened: 1 } } });
+    }
+    if (path.endsWith('/sends')) return response({ sends: [abSend], counts: { sent: 1 } });
+    if (path.endsWith('/subscribers')) return response({ subscribers: [], counts: { active: 10 } });
+    return response({});
+  }));
+  render(<MemoryRouter initialEntries={['/admin/newsletter?tab=history']}><NewsletterPage /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Show A/B breakdown' }));
+  expect(await screen.findByText("Couldn't load the A/B breakdown.")).toBeInTheDocument();
+  expect(screen.queryByText('Loading variant breakdown…')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  await waitFor(() => expect(detailReads).toBe(2));
+  expect(await screen.findByText('Synthetic subject B')).toBeInTheDocument();
+  expect(screen.queryByText("Couldn't load the A/B breakdown.")).not.toBeInTheDocument();
+});

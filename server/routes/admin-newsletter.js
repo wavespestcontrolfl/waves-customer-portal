@@ -80,6 +80,10 @@ const FROM_EMAIL_ALLOWLIST = (process.env.NEWSLETTER_FROM_ALLOWLIST
   || 'newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
 ).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// GET /sends lists the newest SENDS_LIST_LIMIT rows plus every older row in
+// one of these statuses (each still has an edit/cancel/resume action).
+const SENDS_LIST_LIMIT = 500;
+const ACTIONABLE_SEND_STATUSES = ['draft', 'scheduled', 'sending', 'failed'];
 
 // Every :id route in this router addresses a UUID-backed newsletter row.
 // Reject malformed input before Knex/Postgres tries to cast it, yielding a
@@ -407,24 +411,35 @@ router.get('/sends', async (req, res, next) => {
     } catch (err) {
       logger.warn(`[newsletter] relink before /sends failed: ${err.message}`);
     }
+    // Whether a Resume still has someone to mail: a failed/sent campaign
+    // with an outstanding retryable ledger row can have its copy corrected
+    // in place and resumed (PATCH correct-and-resume; the same predicate as
+    // hasOutstandingDeliveries, codex round 14 P2).
+    const outstandingExists = () => NewsletterSender
+      .outstandingEligibleDeliveries('newsletter_sends.id', { correlate: true })
+      .select(db.raw('1'));
     // Order by effective send date (sent_at for sent rows, otherwise created_at)
     // so Beehiiv-imported historical posts slot into chronological order
     // instead of bunching at "now" by import time.
-    const rows = await db('newsletter_sends')
+    const listSends = () => db('newsletter_sends')
       .leftJoin('technicians', 'newsletter_sends.created_by', 'technicians.id')
       .select(
         'newsletter_sends.*',
         'technicians.name as created_by_name',
-        // Whether a Resume still has someone to mail: a failed/sent campaign
-        // with an outstanding retryable ledger row can have its copy
-        // corrected in place and resumed (PATCH correct-and-resume; the same
-        // predicate as hasOutstandingDeliveries, codex round 14 P2).
-        db.raw('EXISTS (?) AS has_outstanding', [
-          NewsletterSender.outstandingEligibleDeliveries('newsletter_sends.id', { correlate: true }).select(db.raw('1')),
-        ]),
+        db.raw('EXISTS (?) AS has_outstanding', [outstandingExists()]),
       )
-      .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')
-      .limit(500);
+      .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC');
+    const recentRows = await listSends().limit(SENDS_LIST_LIMIT);
+    // A row that still needs an action (edit, cancel, resume or recover)
+    // is listed however old it is: past the newest-500 window it would
+    // otherwise lose its only entry point. Every such row is older than the
+    // window, so appending keeps the date order.
+    const recentIds = new Set(recentRows.map((row) => row.id));
+    const actionableRows = await listSends().where((q) => {
+      q.whereIn('newsletter_sends.status', ACTIONABLE_SEND_STATUSES)
+        .orWhere((sent) => sent.where('newsletter_sends.status', 'sent').whereExists(outstandingExists()));
+    });
+    const rows = [...recentRows, ...actionableRows.filter((row) => !recentIds.has(row.id))];
 
     // Attach derived engagement rates per send so the History view renders
     // open/click/bounce/unsub/complaint rates without re-deriving the math
@@ -1888,8 +1903,14 @@ router.post('/events/bulk-action', async (req, res, next) => {
       return res.status(400).json({ error: 'action must be approve, reject, feature, or reset' });
     }
 
+    // Refuse an oversized request instead of truncating it: a silent cut
+    // let the inbox report 100 events updated when only 50 were. The inbox
+    // sends a larger selection in batches of this size.
     const MAX_BULK = 50;
-    const safeIds = ids.slice(0, MAX_BULK).filter(
+    if (ids.length > MAX_BULK) {
+      return res.status(400).json({ error: `at most ${MAX_BULK} ids per request` });
+    }
+    const safeIds = ids.filter(
       (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id),
     );
     if (safeIds.length === 0) {
@@ -1915,7 +1936,11 @@ router.post('/events/bulk-action', async (req, res, next) => {
     }
     // Featuring is an editorial star, not ship history — counters advance
     // only in markEventsFeatured when an issue actually sends (Codex r3 P1).
-    const count = await db('events_raw').whereIn('id', safeIds).update(updates);
+    // The updated ids go back to the inbox so a row that was not updated
+    // (deleted meanwhile) stays selected instead of being reported done.
+    const updatedRows = await db('events_raw').whereIn('id', safeIds).update(updates, ['id']);
+    const updatedIds = (updatedRows || []).map((row) => row.id);
+    const count = updatedIds.length;
 
     // Freshness recompute kept for parity with the single-event PATCH: the
     // counters didn't move, but a bulk feature over rows with stale
@@ -1934,7 +1959,7 @@ router.post('/events/bulk-action', async (req, res, next) => {
       }
     }
 
-    res.json({ success: true, updated: count });
+    res.json({ success: true, updated: count, updatedIds });
   } catch (err) { next(err); }
 });
 
@@ -1952,9 +1977,14 @@ router.post('/events/merge', async (req, res, next) => {
     if (!Array.isArray(duplicateIds) || duplicateIds.length === 0) {
       return res.status(400).json({ error: 'duplicateIds required' });
     }
+    // Same rule as bulk-action: refuse, never truncate, so the confirm that
+    // named the whole selection cannot merge only part of it.
     const MAX_MERGE = 50;
+    if (duplicateIds.length > MAX_MERGE) {
+      return res.status(400).json({ error: `at most ${MAX_MERGE} duplicates per merge` });
+    }
     const dups = [...new Set(
-      duplicateIds.slice(0, MAX_MERGE).filter((id) => typeof id === 'string' && UUID_RE.test(id)),
+      duplicateIds.filter((id) => typeof id === 'string' && UUID_RE.test(id)),
     )].filter((id) => id !== primaryId);
     if (dups.length === 0) {
       return res.status(400).json({ error: 'no valid duplicate UUIDs distinct from primaryId' });

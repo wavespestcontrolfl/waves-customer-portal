@@ -2484,11 +2484,21 @@ function AiDraftModal({
 
 // ── History ────────────────────────────────────────────────────────
 
-export function HistoryView() {
+// History reads the page-level /sends payload (NewsletterPage refreshes it on
+// focus, on an interval and after any action here), so delivery status and
+// recovery controls stay current while the tab is open. A failed refresh
+// keeps the last loaded rows on screen, marked as not refreshed, with Retry.
+export function HistoryView({ sendsData, sendsLoading, onRefresh }) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [sends, setSends] = useState([]);
-  const [aggregate, setAggregate] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [lastLoaded, setLastLoaded] = useState(null);
+  useEffect(() => {
+    if (sendsData) setLastLoaded(sendsData);
+  }, [sendsData]);
+  const shown = sendsData || lastLoaded;
+  const sends = shown?.sends || [];
+  const aggregate = shown?.aggregate || null;
+  const loading = sendsLoading && !shown;
+  const readFailed = !sendsLoading && !sendsData;
   // Per-send variant breakdown (a vs b counts) — fetched lazily when the
   // operator expands an A/B row, then cached.
   const [variantStats, setVariantStats] = useState({});
@@ -2499,22 +2509,7 @@ export function HistoryView() {
   const [quizOpenId, setQuizOpenId] = useState(null);
   const [feedbackResults, setFeedbackResults] = useState({});
   const [feedbackOpenId, setFeedbackOpenId] = useState(null);
-  const load = useCallback(() => {
-    setLoading(true);
-    adminFetch("/admin/newsletter/sends")
-      .then((d) => {
-        setSends(d.sends || []);
-        setAggregate(d.aggregate || null);
-      })
-      .catch(() => {
-        setSends([]);
-        setAggregate(null);
-      })
-      .finally(() => setLoading(false));
-  }, []);
-  useEffect(() => {
-    load();
-  }, [load]);
+  const load = onRefresh;
   const cancelSchedule = async (id) => {
     if (!confirm("Cancel this scheduled send and return it to draft?")) return;
     try {
@@ -2571,37 +2566,41 @@ export function HistoryView() {
 
   // Toggle the A/B breakdown panel. First open lazy-loads /sends/:id (the
   // detail endpoint includes variantStats); subsequent toggles read from
-  // the cache.
-  const toggleVariants = async (id) => {
-    if (expandedId === id) {
-      setExpandedId(null);
-      return;
+  // the cache. A failed read is cached as { error: true }, so the panel
+  // shows it with a retry (retry=true re-reads without toggling), and
+  // reopening a failed panel reads again. The feedback and quiz panels
+  // below work the same way.
+  const toggleVariants = async (id, retry = false) => {
+    if (!retry) {
+      if (expandedId === id) {
+        setExpandedId(null);
+        return;
+      }
+      setExpandedId(id);
+      if (variantStats[id] && !variantStats[id].error) return;
     }
-    setExpandedId(id);
-    if (variantStats[id]) return;
+    setVariantStats((prev) => ({ ...prev, [id]: undefined }));
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}`);
-      if (d.variantStats) {
-        setVariantStats((prev) => ({
-          ...prev,
-          [id]: d.variantStats,
-        }));
-      }
+      setVariantStats((prev) => ({ ...prev, [id]: d.variantStats || {} }));
     } catch {
-      /* surfaces as 'no breakdown available' below */
+      setVariantStats((prev) => ({ ...prev, [id]: { error: true } }));
     }
   };
 
   // Toggle the reaction-feedback panel. First open lazy-loads /sends/:id
   // (the detail endpoint includes the 👍/😐/👎 rollup); subsequent toggles
   // read from the cache.
-  const toggleFeedback = async (id) => {
-    if (feedbackOpenId === id) {
-      setFeedbackOpenId(null);
-      return;
+  const toggleFeedback = async (id, retry = false) => {
+    if (!retry) {
+      if (feedbackOpenId === id) {
+        setFeedbackOpenId(null);
+        return;
+      }
+      setFeedbackOpenId(id);
+      if (feedbackResults[id] && !feedbackResults[id].error) return;
     }
-    setFeedbackOpenId(id);
-    if (feedbackResults[id]) return;
+    setFeedbackResults((prev) => ({ ...prev, [id]: undefined }));
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}`);
       setFeedbackResults((prev) => ({
@@ -2622,13 +2621,16 @@ export function HistoryView() {
 
   // Toggle the quiz-results panel. First open lazy-loads the aggregated answer
   // breakdown; subsequent toggles read from the cache.
-  const toggleQuiz = async (id) => {
-    if (quizOpenId === id) {
-      setQuizOpenId(null);
-      return;
+  const toggleQuiz = async (id, retry = false) => {
+    if (!retry) {
+      if (quizOpenId === id) {
+        setQuizOpenId(null);
+        return;
+      }
+      setQuizOpenId(id);
+      if (quizResults[id] && !quizResults[id].error) return;
     }
-    setQuizOpenId(id);
-    if (quizResults[id]) return;
+    setQuizResults((prev) => ({ ...prev, [id]: undefined }));
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}/quiz-results`);
       setQuizResults((prev) => ({
@@ -2700,10 +2702,19 @@ export function HistoryView() {
             </p>
           </div>
         )}
+        {readFailed && shown && (
+          <ActionFeedback error onRetry={onRefresh} className="mx-4 mt-3">
+            Campaigns could not be refreshed. This list may be out of date.
+          </ActionFeedback>
+        )}
         {loading ? (
           <div className="text-ui-body text-ink-secondary p-6 text-center">
             Loading…
           </div>
+        ) : readFailed && !shown ? (
+          <ActionFeedback error onRetry={onRefresh} className="m-4">
+            Campaigns could not be loaded.
+          </ActionFeedback>
         ) : sends.length === 0 ? (
           <div className="text-ui-body text-ink-secondary p-8 text-center">
             No campaigns yet. Compose your first newsletter in the Compose tab.
@@ -2891,13 +2902,20 @@ export function HistoryView() {
                       stats={variantStats[s.id]}
                       subjectA={s.subject}
                       subjectB={s.subject_b}
+                      onRetry={() => toggleVariants(s.id, true)}
                     />
                   )}
                   {hasQuiz && quizIsOpen && (
-                    <QuizResultsBreakdown data={quizResults[s.id]} />
+                    <QuizResultsBreakdown
+                      data={quizResults[s.id]}
+                      onRetry={() => toggleQuiz(s.id, true)}
+                    />
                   )}
                   {feedbackOpenId === s.id && (
-                    <FeedbackBreakdown data={feedbackResults[s.id]} />
+                    <FeedbackBreakdown
+                      data={feedbackResults[s.id]}
+                      onRetry={() => toggleFeedback(s.id, true)}
+                    />
                   )}
                 </div>
               );
@@ -2915,7 +2933,16 @@ export function HistoryView() {
 // counts (labeled via the server quiz config), total responses, and the
 // response rate over recipients. Monochrome bars (zinc) — this is data, not
 // an alert, so no decorative color.
-function QuizResultsBreakdown({ data }) {
+// A failed panel read, with a retry, so it never reads as "loading" or "none".
+function BreakdownReadError({ what, onRetry }) {
+  return (
+    <ActionFeedback error onRetry={onRetry} className="mx-5 mb-3 -mt-2">
+      Couldn't load {what}.
+    </ActionFeedback>
+  );
+}
+
+function QuizResultsBreakdown({ data, onRetry }) {
   if (!data) {
     return (
       <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
@@ -2924,11 +2951,7 @@ function QuizResultsBreakdown({ data }) {
     );
   }
   if (data.error) {
-    return (
-      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
-        Couldn't load quiz results.
-      </div>
-    );
+    return <BreakdownReadError what="quiz results" onRetry={onRetry} />;
   }
   if (!data.totalResponses) {
     return (
@@ -3017,7 +3040,7 @@ const FEEDBACK_MISSING_LABELS = {
   "family-activities": "Family activities",
   "home-tips": "Home tips",
 };
-function FeedbackBreakdown({ data }) {
+function FeedbackBreakdown({ data, onRetry }) {
   if (!data) {
     return (
       <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
@@ -3026,11 +3049,7 @@ function FeedbackBreakdown({ data }) {
     );
   }
   if (data.error) {
-    return (
-      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
-        Couldn't load reader feedback.
-      </div>
-    );
+    return <BreakdownReadError what="reader feedback" onRetry={onRetry} />;
   }
   const reactions = data.feedback?.reactions || {};
   const missing = data.feedback?.missing || {};
@@ -3110,13 +3129,16 @@ function FeedbackBreakdown({ data }) {
 // most ESPs use; falls back to no-winner when both rates are within
 // half a percentage point.
 
-function VariantBreakdown({ stats, subjectA, subjectB }) {
+function VariantBreakdown({ stats, subjectA, subjectB, onRetry }) {
   if (!stats) {
     return (
       <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
         Loading variant breakdown…
       </div>
     );
+  }
+  if (stats.error) {
+    return <BreakdownReadError what="the A/B breakdown" onRetry={onRetry} />;
   }
   const a = stats.a;
   const b = stats.b;
@@ -3244,12 +3266,21 @@ function AggStat({ label, value, alert }) {
 // ── Subscribers ───────────────────────────────────────────────────
 
 const SUBSCRIBERS_PAGE_SIZE = 100;
+function subscriberQuery(filter, q, offset) {
+  const qs = new URLSearchParams();
+  if (filter !== "all") qs.set("status", filter);
+  if (q) qs.set("q", q);
+  qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
+  qs.set("offset", String(offset));
+  return qs;
+}
 export function SubscribersView() {
   const [subs, setSubs] = useState([]);
   const [counts, setCounts] = useState({});
   const [filter, setFilter] = useState("active");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [offset, setOffset] = useState(0);
@@ -3294,17 +3325,17 @@ export function SubscribersView() {
   };
 
   // Initial / filter-changed fetch — resets the list. Re-runs whenever
-  // the filter or search query changes (via the useEffect below).
+  // the filter or search query changes (via the useEffect below). Each run
+  // gets a new controller, which loadMore uses to drop a page that belongs
+  // to an older query.
   const load = useCallback(() => {
     subscribersAbortRef.current?.abort();
     const controller = new AbortController();
     subscribersAbortRef.current = controller;
     setLoading(true);
-    const qs = new URLSearchParams();
-    if (filter !== "all") qs.set("status", filter);
-    if (q) qs.set("q", q);
-    qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
-    qs.set("offset", "0");
+    setLoadingMore(false);
+    setLoadError("");
+    const qs = subscriberQuery(filter, q, 0);
     adminFetch(`/admin/newsletter/subscribers?${qs}`, { signal: controller.signal })
       .then((d) => {
         if (controller.signal.aborted) return;
@@ -3315,10 +3346,12 @@ export function SubscribersView() {
         setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
       })
       .catch((e) => {
-        if (e.name !== "AbortError") {
-          setSubs([]);
-          setHasMore(false);
-        }
+        if (controller.signal.aborted || e.name === "AbortError") return;
+        // The rows on screen belong to the previous query, so they go; the
+        // failure shows with Retry instead of reading as an empty filter.
+        setSubs([]);
+        setHasMore(false);
+        setLoadError(e.message || "Subscribers could not be loaded.");
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
@@ -3329,22 +3362,28 @@ export function SubscribersView() {
     return () => subscribersAbortRef.current?.abort();
   }, [load]);
   const loadMore = async () => {
+    // The list's controller stands for its query: load() aborts and
+    // replaces it on every filter or search change (and on unmount), so a
+    // page that answers after that belongs to an old query and is dropped
+    // before it can touch the rows, offset or hasMore.
+    const listController = subscribersAbortRef.current;
+    const stale = () =>
+      subscribersAbortRef.current !== listController || listController.signal.aborted;
+    if (!listController || stale()) return;
     setLoadingMore(true);
-    const qs = new URLSearchParams();
-    if (filter !== "all") qs.set("status", filter);
-    if (q) qs.set("q", q);
-    qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
-    qs.set("offset", String(offset));
+    const qs = subscriberQuery(filter, q, offset);
     try {
       const d = await adminFetch(`/admin/newsletter/subscribers?${qs}`);
+      if (stale()) return;
       const next = d.subscribers || [];
       setSubs((prev) => [...prev, ...next]);
       setOffset((cur) => cur + next.length);
       setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
     } catch (e) {
+      if (stale()) return;
       showStatus("Load more failed: " + e.message, true);
     } finally {
-      setLoadingMore(false);
+      if (!stale()) setLoadingMore(false);
     }
   };
   const exportCsv = async () => {
@@ -3589,6 +3628,10 @@ export function SubscribersView() {
           <div className="text-ui-body text-ink-secondary p-6 text-center">
             Loading…
           </div>
+        ) : loadError ? (
+          <ActionFeedback error onRetry={load} className="m-4">
+            Subscribers could not be loaded: {loadError}
+          </ActionFeedback>
         ) : subs.length === 0 ? (
           <div className="text-ui-body text-ink-secondary p-8 text-center">
             No subscribers in this filter.

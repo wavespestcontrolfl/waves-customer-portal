@@ -749,6 +749,21 @@ function AdminStatusBadge({ status }) {
     </span>
   );
 }
+// The bulk-action and merge routes refuse more ids than this per request.
+const EVENT_BULK_BATCH = 50;
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// The notice reports what the server actually updated, never the selection.
+function bulkActionNotice(action, requested, updated, failure) {
+  const left = requested - updated;
+  if (!failure && left === 0) return `${plural(updated, "event")} updated.`;
+  const done = `${updated} of ${plural(requested, "event")} updated.`;
+  if (failure) {
+    return `${done} Bulk ${action} failed: ${failure.message}. ${left} still selected.`;
+  }
+  return `${done} ${left} could not be updated and ${left === 1 ? "is" : "are"} still selected.`;
+}
+
 function EventInboxView({ onDraftFromEvent }) {
   const [events, setEvents] = useState([]);
   const [counts, setCounts] = useState({});
@@ -853,18 +868,27 @@ function EventInboxView({ onDraftFromEvent }) {
       return;
     cancelPendingEventRead();
     setActionStatus(`${action} in progress…`);
-    try {
-      await adminFetch("/admin/newsletter/events/bulk-action", {
-        method: "POST",
-        body: JSON.stringify({ action, ids: [...selected] }),
-      });
-      setActionStatus(
-        `${selected.size} event${selected.size === 1 ? "" : "s"} updated.`,
-      );
-      fetchEvents();
-    } catch (e) {
-      setActionStatus(`Bulk ${action} failed: ${e.message}`);
+    // The route takes at most EVENT_BULK_BATCH ids, so a larger selection
+    // goes in batches. Only ids the server reports as updated leave the
+    // selection; the rest stay selected and the notice says so.
+    const ids = [...selected];
+    const updated = new Set();
+    let failure = null;
+    for (let i = 0; i < ids.length && !failure; i += EVENT_BULK_BATCH) {
+      try {
+        const result = await adminFetch("/admin/newsletter/events/bulk-action", {
+          method: "POST",
+          body: JSON.stringify({ action, ids: ids.slice(i, i + EVENT_BULK_BATCH) }),
+        });
+        (result.updatedIds || []).forEach((id) => updated.add(id));
+      } catch (e) {
+        failure = e;
+      }
     }
+    const remaining = ids.filter((id) => !updated.has(id));
+    setSelected(new Set(remaining));
+    setActionStatus(bulkActionNotice(action, ids.length, updated.size, failure));
+    fetchEvents(true);
   };
 
   // Merge duplicates. The survivor is chosen by a visible, deterministic rule
@@ -885,6 +909,14 @@ function EventInboxView({ onDraftFromEvent }) {
     const duplicateIds = chosen
       .filter((e) => e.id !== primaryId)
       .map((e) => e.id);
+    // The merge route refuses more duplicates than one batch; say so before
+    // the confirm instead of promising a merge of the whole selection.
+    if (duplicateIds.length > EVENT_BULK_BATCH) {
+      setActionStatus(
+        `Merge up to ${EVENT_BULK_BATCH + 1} events at a time. ${selected.size} are selected.`,
+      );
+      return;
+    }
     if (
       !confirm(
         `Keep "${primary.title}" and merge ${duplicateIds.length} duplicate${duplicateIds.length === 1 ? "" : "s"} into it?\n\n` +
@@ -894,11 +926,14 @@ function EventInboxView({ onDraftFromEvent }) {
       return;
     cancelPendingEventRead();
     try {
-      await adminFetch("/admin/newsletter/events/merge", {
+      const result = await adminFetch("/admin/newsletter/events/merge", {
         method: "POST",
         body: JSON.stringify({ primaryId, duplicateIds }),
       });
       setSelected(new Set());
+      setActionStatus(
+        `Merged ${plural(result.merged ?? 0, "duplicate")} into "${primary.title}".`,
+      );
       fetchEvents();
     } catch (e) {
       alert("Merge failed: " + e.message);
@@ -1860,7 +1895,13 @@ export default function NewsletterPage() {
             }}
           />
         )}
-        {tab === "history" && <HistoryView />}
+        {tab === "history" && (
+          <HistoryView
+            sendsData={sendsData}
+            sendsLoading={sendsLoading}
+            onRefresh={() => setRefreshKey((k) => k + 1)}
+          />
+        )}
         {tab === "subscribers" && <SubscribersView />}
         {tab === "events" && (
           <EventInboxView onDraftFromEvent={onDraftFromEvent} />

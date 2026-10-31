@@ -133,10 +133,52 @@ it.each(['bulk', 'merge'])('recovers inbox polling after a failed %s action canc
  fireEvent.change(screen.getByRole('combobox',{name:'Freshness'}),{target:{value:'fresh'}});
  await screen.findByText('Loading events...');
  fireEvent.click(action==='merge'?screen.getByRole('button',{name:'Merge 2'}):screen.getByRole('button',{name:'Approve',exact:true}));
- if(action==='bulk')await screen.findByText('Bulk approve failed: Synthetic action failure');
+ if(action==='bulk')await screen.findByText('0 of 2 events updated. Bulk approve failed: Synthetic action failure. 2 still selected.');
  else await waitFor(()=>expect(alert).toHaveBeenCalledWith('Merge failed: Synthetic action failure'));
  expect(cancelledSignal.aborted).toBe(true);
  expect(screen.queryByText('Loading events...')).not.toBeInTheDocument();
  fireEvent(window,new Event('online'));
  expect(await screen.findByText('Refreshed event')).toBeInTheDocument();
+});
+
+// Audit 2026-10-30 NEWS-04: the route takes 50 ids per request; the inbox
+// once reported a 100-event selection as updated after only 50 were.
+it('sends a large selection in batches, reports the server count and keeps unprocessed events selected', async () => {
+ const events=Array.from({length:60},(_,i)=>({id:`event-${i}`,title:`Batch event ${i}`,adminStatus:'pending'}));
+ const batches=[];
+ const original=fetch.getMockImplementation();
+ fetch.mockImplementation((url,options)=>{
+  if(String(url).includes('/events/inbox'))return Promise.resolve(response({events,counts:{pending:60}}));
+  if(String(url).endsWith('/events/bulk-action')){
+   const {ids}=JSON.parse(options.body);batches.push(ids);
+   const updatedIds=ids.filter(id=>id!=='event-59');
+   return Promise.resolve(response({success:true,updated:updatedIds.length,updatedIds}));
+  }
+  return original(url,options);
+ });
+ render(<MemoryRouter initialEntries={['/admin/newsletter?tab=events']}><NewsletterPage/></MemoryRouter>);
+ await screen.findByText('Batch event 0');
+ fireEvent.click(within(screen.getAllByRole('columnheader')[0]).getByRole('checkbox'));
+ fireEvent.click(within(screen.getByText('60 selected').parentElement).getByRole('button',{name:'Approve',exact:true}));
+ expect(await screen.findByText('59 of 60 events updated. 1 could not be updated and is still selected.')).toBeInTheDocument();
+ expect(batches.map(ids=>ids.length)).toEqual([50,10]);
+ expect(screen.getByText('1 selected')).toBeInTheDocument();
+ expect(within(screen.getByText('Batch event 59').closest('tr')).getByRole('checkbox')).toBeChecked();
+});
+
+it('refuses a merge larger than one request before the confirm', async () => {
+ const events=Array.from({length:52},(_,i)=>({id:`dup-${i}`,title:`Duplicate ${i}`,adminStatus:'pending'}));
+ const original=fetch.getMockImplementation();
+ fetch.mockImplementation((url,options)=>{
+  if(String(url).includes('/events/inbox'))return Promise.resolve(response({events,counts:{pending:52}}));
+  return original(url,options);
+ });
+ const confirmSpy=vi.fn(()=>true);vi.stubGlobal('confirm',confirmSpy);
+ render(<MemoryRouter initialEntries={['/admin/newsletter?tab=events']}><NewsletterPage/></MemoryRouter>);
+ await screen.findByText('Duplicate 0');
+ fireEvent.click(within(screen.getAllByRole('columnheader')[0]).getByRole('checkbox'));
+ fireEvent.click(screen.getByRole('button',{name:'Merge 52'}));
+ expect(await screen.findByText('Merge up to 51 events at a time. 52 are selected.')).toBeInTheDocument();
+ expect(confirmSpy).not.toHaveBeenCalled();
+ expect(fetch.mock.calls.some(([url])=>String(url).endsWith('/events/merge'))).toBe(false);
 });
