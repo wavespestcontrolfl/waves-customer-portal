@@ -13,6 +13,8 @@ jest.mock('../services/weather-forecast', () => ({ getDailyRainOutlookBounded: j
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
+  // The same-hour technician scope (GATE_MULTI_TECH_CONFIRM) reads the real call-time reader.
+  multiTechConfirmLive: jest.requireActual('../config/feature-gates').multiTechConfirmLive,
 }));
 jest.mock('../services/scheduling/customer-route-check', () => ({
   customerRouteCheckMode: jest.fn(() => 'off'),

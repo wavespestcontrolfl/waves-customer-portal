@@ -375,6 +375,7 @@ function serviceLabelForKey(key) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'lawn_care': return 'Lawn Care';
     case 'mosquito': return 'Mosquito Control';
+    case 'mosquito_misting': return 'Mosquito Misting Service Plan';
     case 'termite_bait': return 'Termite Bait';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
@@ -4915,6 +4916,8 @@ const SERVICE_CARD_HEADLINES = {
   pest_control: 'Pest Protection by Waves — whatever\u2019s getting inside, it stops here',
   commercial_pest: 'Commercial Pest Protection by Waves — priced from your property, built for your business',
   mosquito: 'Mosquito Defense by Waves — evenings outside, mosquito-free',
+  // The misting SYSTEM plan is its own service (owner 2026-10-30, item A): never the barrier line above.
+  mosquito_misting: 'Mosquito Misting Service Plan',
   termite_bait: 'Termite Defense by Waves — protecting the biggest investment you own',
   lawn_care: 'Lawn Care by Waves — pick the program that fits your turf',
   tree_shrub: 'Tree & Shrub Care by Waves — ornamental protection through the seasons',
@@ -5618,6 +5621,8 @@ export function ServiceSection({
             suppressCombinedTotal={section.key === 'bundle' && !billsMonthly}
             monthlyAverageLine={monthlyAverageLine}
             monthlyAverageContext={monthlyAverageContext}
+            // The misting plan's refill line (null on every other section).
+            refill={section.refill || null}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor

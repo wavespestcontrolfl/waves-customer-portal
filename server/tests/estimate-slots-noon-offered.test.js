@@ -22,6 +22,8 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   zoneRouteDaysLive: jest.fn(() => false),
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
+  // The same-hour technician scope (GATE_MULTI_TECH_CONFIRM) reads the real call-time reader.
+  multiTechConfirmLive: jest.requireActual('../config/feature-gates').multiTechConfirmLive,
 }));
 
 const db = require('../models/db');

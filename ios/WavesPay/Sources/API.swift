@@ -34,6 +34,22 @@ enum API {
         // Present only when surcharge is enabled; the credit total includes 2.9%.
         let surcharge_cents: Int?
         let credit_total_cents: Int?
+        // What the customer pays for: the invoice's service lines and the
+        // totals rows down to the amount due. Older servers send neither.
+        let invoice_number: String?
+        let items: [Item]?
+        let adjustments: [Adjustment]?
+
+        struct Item: Decodable {
+            let description: String
+            // Nil when the rows do not add up to the charge: names only.
+            let amount_cents: Int?
+        }
+
+        struct Adjustment: Decodable {
+            let label: String        // "Account credit applied"
+            let amount_cents: Int    // negative for a deduction
+        }
     }
 
     struct PaymentIntentResponse: Decodable {

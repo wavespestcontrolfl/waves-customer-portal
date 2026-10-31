@@ -27,6 +27,14 @@ const {
 // mutate customer data and back an owner-only surface — admin role only.
 router.use(adminAuthenticate, requireAdmin);
 
+// GATE_DATA_HYGIENE_UI: gate off = the whole review surface is off (list,
+// metrics, scan, approve, reject, reveal, revert), indistinguishable from an
+// unshipped route. Turn the gate back on to review or revert. The scanner
+// cron, extraction and auto-apply are separate gates and do not use this path.
+router.use((_req, res, next) => (
+  isEnabled('dataHygieneReviewUi') === true ? next() : res.status(404).json({ error: 'Not found' })
+));
+
 const ALLOWED_STATUSES = new Set(['pending', 'auto_applied', 'approved', 'rejected', 'superseded', 'stale', 'reverted', 'all']);
 const ALLOWED_PHASES = new Set(['normalization', 'extraction']);
 const PROPERTY_PREF_APPLY_FIELDS = new Set([

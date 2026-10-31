@@ -5,7 +5,7 @@
 // never the raw query value.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -122,6 +122,52 @@ describe("AgentsHubPage Typed tab (GATE_TYPED_DECISIONS)", () => {
   });
 });
 
+describe("AgentsHubPage Hygiene tab (GATE_DATA_HYGIENE_UI)", () => {
+  it("is absent while the probe says the gate is off; ?tab=hygiene falls back to Overview", async () => {
+    renderHub("/admin/agents?tab=hygiene");
+    await screen.findByText("Overview workspace");
+    expect(screen.queryByRole("button", { name: "Hygiene" })).toBeNull();
+    expect(screen.queryByText("Hygiene workspace")).toBeNull();
+  });
+
+  it("fails closed when the probe request fails", async () => {
+    adminFetch.mockRejectedValue(new Error("down"));
+    renderHub("/admin/agents?tab=hygiene");
+    await screen.findByText("Overview workspace");
+    expect(screen.queryByRole("button", { name: "Hygiene" })).toBeNull();
+  });
+
+  it("appears next to Shadow, and ?tab=hygiene renders it, only when the probe reports hygiene: true", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/control/hub") return { ...HUB, features: { queue: false, hygiene: true } };
+      throw new Error(`unexpected fetch ${path}`);
+    });
+    renderHub("/admin/agents?tab=hygiene");
+    expect(await screen.findByText("Hygiene workspace")).toBeInTheDocument();
+    const labels = screen.getAllByRole("button").map((b) => b.textContent);
+    expect(labels.indexOf("Hygiene")).toBe(labels.indexOf("Shadow") + 1);
+  });
+
+  it.each([
+    [{}, "xl:grid-cols-6"],
+    [{ hygiene: true }, "xl:grid-cols-7"],
+    [{ hygiene: true, typed: true }, "xl:grid-cols-8"],
+    [{ hygiene: true, typed: true, queue: true }, "xl:grid-cols-9"],
+    [{ typed: true }, "xl:grid-cols-7"],
+  ])("keeps the tab grid valid for probe %j", async (features, cols) => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/control/hub") return { ...HUB, features };
+      throw new Error(`unexpected fetch ${path}`);
+    });
+    const { container } = render(
+      <MemoryRouter initialEntries={["/admin/agents"]}>
+        <Routes><Route path="/admin/agents" element={<AgentsHubPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(container.querySelector(`[class~="${cols}"]`)).not.toBeNull());
+  });
+});
+
 describe("AgentsHubPage usage reporting", () => {
   it("reports the rendered fallback for an invalid ?tab=, never the raw value", () => {
     renderHub("/admin/agents?tab=typo");
@@ -137,10 +183,14 @@ describe("AgentsHubPage usage reporting", () => {
     );
   });
 
-  it("reports a valid deep-linked tab (legacy data-hygiene redirect target)", () => {
+  it("reports a valid deep-linked tab (legacy data-hygiene redirect target) once the probe says Hygiene is on", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/control/hub") return { ...HUB, features: { queue: false, hygiene: true } };
+      throw new Error(`unexpected fetch ${path}`);
+    });
     renderHub("/admin/agents?tab=hygiene");
 
-    expect(screen.getByText("Hygiene workspace")).toBeInTheDocument();
+    expect(await screen.findByText("Hygiene workspace")).toBeInTheDocument();
     expect(trackAdminPageView).toHaveBeenCalledWith({
       pathname: "/admin/agents",
       search: "?tab=hygiene",

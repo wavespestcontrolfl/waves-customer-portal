@@ -83,7 +83,8 @@ function markUnknownDetours(slots) {
  * recommends can sit on an unassigned visit the commit will still reject.
  * Mirror the dispatch slot-check occupancy guard (tech-blind BY DESIGN —
  * one active field technician, so every overlap is a real clash and every
- * commit gate is tech-blind too; see scheduling/occupancy.js — same overlap
+ * commit gate is tech-blind too; with GATE_MULTI_TECH_CONFIRM on each slot's
+ * check is scoped to its own technician, as the save is; see scheduling/occupancy.js — same overlap
  * predicate, excludeServiceIds honored) and veto those hours. The engine
  * emits only the EARLIEST start per route gap, so a vetoed candidate must
  * not discard its whole gap — walk the gap through latest_start_min at the
@@ -130,8 +131,12 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
     await Promise.all([...new Set(slots.map((s) => s.date))].map(async (d) => {
       occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
     }));
+    // The slot's own technician scopes the check when GATE_MULTI_TECH_CONFIRM is on (the
+    // option is ignored with the gate off): another technician's visit does not veto this
+    // technician's hour, an unassigned one still does.
     const clearAt = (s, m) => s.route_mode === 'arrival_windows' || conflictsForTarget(
-      occupancyByDate.get(s.date), null, s.date, { start: toHHMM(m), end: toHHMM(m + spanMin) }, { excludeServiceIds: excluded },
+      occupancyByDate.get(s.date), null, s.date, { start: toHHMM(m), end: toHHMM(m + spanMin) },
+      { excludeServiceIds: excluded, technicianId: s.technician?.id ?? null },
     ).length === 0;
     keptPerGap = slots.map((s) => {
       const kept = [];
@@ -334,9 +339,9 @@ async function scorePickedHour({
  * New appointment "who adds the least drive at this hour" list): the
  * gap-mode verdict once per technician with a gap on `from`, each against
  * that tech's own slots. The occupancy check passes the technician, so it
- * is tech-scoped only where the save is (GATE_MULTI_TECH_CONFIRM); with
- * that gate off an hour any visit holds fits nobody, as the save refuses
- * it. Returns the fits only, least added drive first; unknown detours last.
+ * is tech-scoped only where the save is (GATE_MULTI_TECH_CONFIRM, hour or
+ * capacity mode); with that gate off an hour any visit holds fits nobody, as
+ * the save refuses it. Returns the fits only, least added drive first; unknown detours last.
  */
 async function scorePickedHourByTech({
   rawSlots, from, today, sameDayFloorMin, pickedStart, pickedEnd, spanMin, excluded,

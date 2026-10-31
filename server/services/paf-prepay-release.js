@@ -54,6 +54,30 @@ const staleAlertKey = (estimateId) => `paf-prepay-no-first-visit:${estimateId}`;
 const chargeAlertKey = (estimateId, round = 0) => `paf-prepay-charge-failed:${estimateId}${round ? `:${round}` : ''}`;
 const unbilledAlertKey = (estimateId) => `paf-prepay-cancelled-after-visit:${estimateId}`;
 
+// The invoices of the years whose charge still waits for the first visit.
+// None is due yet: the release gives the draft its due date when a visit of
+// the plan is performed, so until then the approval day it carries is not a
+// due date, and the Invoices page and the Intelligence Bar never count it
+// overdue. Keyed off the job, as the release is. Read through each year's
+// term (prepay_invoice_id), so only prepay years' estimates are parsed, never
+// every estimate.
+const AWAITING_FIRST_VISIT_INVOICE_IDS_SQL = `SELECT w.invoice_id FROM (
+    SELECT t.prepay_invoice_id AS invoice_id,
+      (SELECT e.estimate_data -> 'prepayAutoChargeJob' FROM estimates e WHERE e.id = t.source_estimate_id) AS job
+    FROM annual_prepay_terms t
+    WHERE t.prepay_invoice_id IS NOT NULL
+  ) w
+  WHERE w.job ->> 'deferred_to_first_visit' = 'true'
+    AND w.job ->> 'status' = '${AWAITING}'
+    AND w.job ->> 'invoice_id' = w.invoice_id::text`;
+
+// The same invoices as a set of ids, for a reader that judges one row at a time.
+async function awaitingFirstVisitInvoiceIds(conn = db) {
+  if (!(await conn.schema.hasTable('annual_prepay_terms'))) return new Set();
+  const { rows } = await conn.raw(AWAITING_FIRST_VISIT_INVOICE_IDS_SQL);
+  return new Set(rows.map((row) => String(row.invoice_id)));
+}
+
 function parseData(raw) {
   if (typeof raw === 'string') {
     try { return JSON.parse(raw); } catch { return null; }
@@ -603,6 +627,8 @@ async function isFirstHeldVisitOfUnpaidYear(svc, conn = db) {
 module.exports = {
   isFirstHeldVisitOfUnpaidYear,
   AWAITING,
+  AWAITING_FIRST_VISIT_INVOICE_IDS_SQL,
+  awaitingFirstVisitInvoiceIds,
   planHasUnfinishedCompletion,
   termStillCovered,
   visitStillPerformed,

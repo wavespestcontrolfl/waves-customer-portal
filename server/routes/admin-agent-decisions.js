@@ -137,14 +137,49 @@ function mapReplyTraining(row) {
   };
 }
 
-function applyPhoneOrCustomerFilter(q, { customerId, phone }) {
+const PHONE_LAST10_SQL = "RIGHT(REGEXP_REPLACE(COALESCE(%s, ''), '[^0-9]', '', 'g'), 10) = ?";
+
+// Identity boundary for a decision's context (audit AG-02). Phones are not
+// unique: rentals, second homes and property managers share one number, so a
+// bare phone match pulls another linked customer's texts and calls into this
+// decision's context and its saved training example.
+//   - customer known: rows linked to that customer, plus UNLINKED rows on the
+//     phone only while no other live customer has that phone. Rows linked to
+//     anyone else never come in. A shared number resolves to omission.
+//   - no customer: phone-only, as before.
+async function resolveContextIdentity({ customerId, phone }) {
   const last10 = normalizePhoneLast10(phone);
+  let includeUnlinked = true;
+  if (customerId && last10) {
+    const other = await db('customers')
+      .whereNull('deleted_at')
+      .whereNot('id', customerId)
+      .whereRaw(PHONE_LAST10_SQL.replace('%s', 'phone'), [last10])
+      .first('id');
+    includeUnlinked = !other;
+  }
+  return { customerId: customerId || null, last10, includeUnlinked };
+}
+
+// `alsoId` is the decision's own trigger row: matched by id, never by phone, so
+// it is the subject under review and not another customer's history.
+function applyPhoneOrCustomerFilter(q, { customerId, last10, includeUnlinked }, alsoId = null) {
+  const onPhone = function matchPhone() {
+    this.whereRaw(PHONE_LAST10_SQL.replace('%s', 'from_phone'), [last10])
+      .orWhereRaw(PHONE_LAST10_SQL.replace('%s', 'to_phone'), [last10]);
+  };
   q.where(function filterByIdentity() {
-    if (customerId) this.where('customer_id', customerId);
-    if (last10) {
-      this.orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10]);
+    if (!customerId) {
+      if (last10) this.where(onPhone);
+    } else {
+      this.where('customer_id', customerId);
+      if (last10 && includeUnlinked) {
+        this.orWhere(function unlinkedOnPhone() {
+          this.whereNull('customer_id').where(onPhone);
+        });
+      }
     }
+    if (alsoId) this.orWhere('id', alsoId);
   });
 }
 
@@ -175,6 +210,7 @@ async function loadDecisionContext(decision) {
   const input = decision.inputSnapshot || {};
   const phone = decision.customerPhone || decision.sourceFromPhone || input?.sms?.from || input?.sms?.from_phone || null;
   const customerId = decision.customerId || null;
+  const identity = await resolveContextIdentity({ customerId, phone });
 
   const [
     customer,
@@ -188,7 +224,7 @@ async function loadDecisionContext(decision) {
     decision.leadId ? db('leads').where({ id: decision.leadId }).first() : null,
     decision.estimateId ? db('estimates').where({ id: decision.estimateId }).first() : null,
     (async () => {
-      if (!(customerId || normalizePhoneLast10(phone))) return [];
+      if (!(identity.customerId || identity.last10)) return [];
       // codex #4331 P2 (structural pass): an unresolved review-ask
       // reservation must not read as a message Waves definitely sent in
       // this Agent Review decision's context payload.
@@ -196,18 +232,18 @@ async function loadDecisionContext(decision) {
         .select('id', 'direction', 'from_phone', 'to_phone', 'message_body', 'message_type', 'status', 'admin_user_id', 'created_at')
         .orderBy('created_at', 'desc')
         .limit(18);
-      applyPhoneOrCustomerFilter(q, { customerId, phone });
+      applyPhoneOrCustomerFilter(q, identity, decision.smsLogId);
       const rows = await q;
       return rows.reverse();
     })(),
     (async () => {
-      if (!(customerId || normalizePhoneLast10(phone))) return [];
+      if (!(identity.customerId || identity.last10)) return [];
       const q = db('call_log')
         .select('*')
         .modify((qb) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(qb))
         .orderBy('created_at', 'desc')
         .limit(6);
-      applyPhoneOrCustomerFilter(q, { customerId, phone });
+      applyPhoneOrCustomerFilter(q, identity);
       return q;
     })(),
     customerId ? db('service_records')
