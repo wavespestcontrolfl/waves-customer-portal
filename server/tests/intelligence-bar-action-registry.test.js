@@ -72,6 +72,14 @@ test('Estimates can discover real inventory executors without preloading every d
   }));
 });
 
+test('list_commercial_proposals is found for its own searches and never pushes the estimate tools out of a customer estimate search', () => {
+  const scope = { role: 'admin', context: 'procurement', fullAccess: true };
+  const ids = (query) => registry.discover({ query }, scope).result.capabilities.map((c) => c.id);
+  expect(ids('commercial proposals')).toContain('list_commercial_proposals');
+  expect(ids('customer estimate')).toEqual(expect.arrayContaining(['get_customer_estimate_context', 'save_customer_estimate']));
+  expect(ids('customer estimate')).not.toContain('list_commercial_proposals');
+});
+
 test('Quick Links load on the pages that write texts, emails, blog posts and schedule notes, not on Estimates', () => {
   const names = (context) => registry.initialTools(context, { role: 'admin', context }).map(t => t.name);
   for (const context of ['comms', 'customers', 'dashboard', 'schedule', 'dispatch', 'seo', 'blog', 'email', 'reviews', 'leads']) {

@@ -169,8 +169,10 @@ Use for: change-of-pricing context before drafting an estimate.`,
   GET_ESTIMATE_DETAIL_TOOL,
   {
     name: 'list_commercial_proposals',
-    description: `List the live commercial proposals (estimates with an authored proposal), newest first, as ids, codes, dates and flags only: estimate_id, estimate_number, status, customer_id, created/sent/viewed/expires times, bill_by_invoice, payment_terms code, building_use, closed_online (the customer page offers nothing: won, declined, expired or archived), signing { state, blocked } (null while GATE_COMMERCIAL_PROPOSAL_SIGN is off) and first_visit { state, reason } (null while GATE_COMMERCIAL_FIRST_VISIT is off; booked adds visit_date). Never names, addresses, titles, notes or prices. scope open (default) leaves out accepted, declined and expired proposals; all keeps them. Archived proposals are never listed. Follow next_offset when has_more is true.
-Use for: "which commercial proposals would this change hit?", "list the open commercial proposals", "which proposals can sign online?"`,
+    // Kept to words only this tool needs: discover_capabilities loads the 12 best keyword matches with ties broken by
+    // name, so field names such as customer_id or estimate_id pushed save_customer_estimate out of a "customer
+    // estimate" search (CI on #7367). The row fields are in the result and in the MCP allow-list (mcp-admin.js).
+    description: `List live commercial proposals with their online signing and picker readiness, as ids, codes, dates and flags. Use for: which commercial proposals a change would hit, and which can sign online.`,
     input_schema: {
       type: 'object',
       properties: {
