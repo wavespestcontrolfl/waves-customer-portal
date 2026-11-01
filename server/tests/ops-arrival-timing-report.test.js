@@ -60,7 +60,7 @@ describe('arrival-timing-report', () => {
   });
 
   test('a still stretch stays on one trip and one spot; the longest silence is the widest gap between samples', () => {
-    const window = { fromMs: Date.parse(at('15:00:00')), toMs: Date.parse(at('15:30:00')) };
+    const window = { fromMs: Date.parse(at('15:00:00')), toMs: Date.parse(at('15:12:00')) };
     const samples = [
       sampleAt('14:50:00'), // before the window
       sampleAt('15:00:00', { speed: 15, lat: HOUSE.lat + 0.004 }),
@@ -70,6 +70,17 @@ describe('arrival-timing-report', () => {
       sampleAt('15:11:00', { trip: 'trip-2', lat: HOUSE.lat + 0.0005 }), // moved 55 m: a new stretch
     ];
     expect(report.stillEvidence(samples, window)).toEqual({ samples: 7, longestStillS: 360, longestSilenceS: 240 });
+  });
+
+  test('the silence also counts from the arrival to the first sample and from the last sample to completion', () => {
+    const window = { fromMs: Date.parse(at('15:00:00')), toMs: Date.parse(at('15:30:00')) };
+    // Bouncie went quiet 10 seconds after the arrival: 29 min 50 s of silence, not 10 s.
+    expect(report.stillEvidence([sampleAt('15:00:00'), sampleAt('15:00:10')], window).longestSilenceS).toBe(1790);
+    // the first sample came 20 minutes after the arrival
+    expect(report.stillEvidence([sampleAt('15:20:00'), sampleAt('15:25:00'), sampleAt('15:30:00')], window).longestSilenceS)
+      .toBe(1200);
+    // no sample during the visit: silent throughout
+    expect(report.stillEvidence([sampleAt('14:50:00')], window)).toEqual({ samples: 0, longestStillS: 0, longestSilenceS: 1800 });
   });
 
   test('trip events: GPS points and end times are counted per normalized type', () => {

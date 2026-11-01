@@ -4,7 +4,12 @@
  * rule tied to the truck parking (the planned GATE_ARRIVAL_ENGINE_OFF) needs to be true before it goes live (owner
  * 2026-11-01: the arrival triggers early; tie it to the truck turning off).
  *
- *   railway run --service Postgres node ops/agents/arrival-timing-report.js --from 2026-10-01 --to 2026-10-31 [--json]
+ *   PG_CA_FILE=~/ops-oneshots/certs/railway-pg-root.pem railway run --service Postgres -- \
+ *     railway run --service waves-customer-portal node ops/agents/arrival-timing-report.js --from 2026-10-01 --to 2026-10-31 [--json]
+ *
+ * The outer run gives DATABASE_PUBLIC_URL; the inner run gives the portal's GPS_ARRIVAL_* variables, which override
+ * the arrival radius in system_settings. The database login is the pinned-root TLS + SCRAM-SHA-256-PLUS connection
+ * of ops/agents/second-tech-handover.js: PG_CA_FILE is required for the public proxy (see that file's header).
  *
  * Per ET day (at most 120 per run), trip link's own DRY RUN (server/services/trip-link.js linkDay, which writes
  * nothing) matches each completed visit to the truck stop it served. A stop starts at the truck's last GPS sample
@@ -24,14 +29,11 @@
 'use strict';
 
 if (require.main === module) {
-  // Before any server module loads: every connection this process opens is read-only, and the shared db module
-  // (loadArrivalConfig reads system_settings through it) points at the public proxy with the same TLS setup as the
-  // other `railway run` scripts (inventory-agent-replay.js).
+  // Before any server module loads: every connection this process opens is read-only, and the app's own knex
+  // (loadArrivalConfig reads system_settings through it) loads pointed at a dead port. main() hands it the pinned
+  // connection settings; if that ever fails to take, its read-only probe errors and the run refuses.
   process.env.PGOPTIONS = '-c default_transaction_read_only=on';
-  if (process.env.DATABASE_PUBLIC_URL) {
-    process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
-    if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
-  }
+  process.env.DATABASE_URL = 'postgres://127.0.0.1:1/arrival-timing-report-unused';
 }
 
 const { firstPresent, normalizeEventType, pointFromPayload, pointFromSource, tripIdentity } = require('../../server/services/bouncie-payload');
@@ -147,17 +149,19 @@ function samplesOf(rawPayload) {
 
 /**
  * What Bouncie reported while the truck stood at a visit it never shut off for: the longest stretch of samples at
- * 2 mph or less within 25 m on one trip, and the longest silence between samples. A long still stretch means the
- * idle rule can see an idling truck; a long silence means Bouncie goes quiet while it idles.
+ * 2 mph or less within 25 m on one trip, and the longest silence, counted from the arrival to the first sample,
+ * between samples, and from the last sample to completion (a visit with no sample was silent throughout). A long
+ * still stretch means the idle rule can see an idling truck; a long silence means Bouncie goes quiet while it idles.
  */
 function stillEvidence(samples, { fromMs, toMs }) {
   const inWindow = samples.filter((s) => s.ms >= fromMs && s.ms <= toMs).sort((a, b) => a.ms - b.ms);
   let longestStill = 0;
   let longestSilence = 0;
+  let lastHeardMs = fromMs;
   let run = null;
-  for (let i = 0; i < inWindow.length; i += 1) {
-    const s = inWindow[i];
-    if (i > 0) longestSilence = Math.max(longestSilence, s.ms - inWindow[i - 1].ms);
+  for (const s of inWindow) {
+    longestSilence = Math.max(longestSilence, s.ms - lastHeardMs);
+    lastHeardMs = s.ms;
     const still = s.speed != null && s.speed <= STILL_MAX_SPEED_MPH;
     const drift = run ? distanceMeters(run.lat, run.lng, s.lat, s.lng) : null;
     const continues = still && run && s.trip === run.trip && drift != null && drift <= STILL_MAX_DRIFT_METERS;
@@ -165,6 +169,7 @@ function stillEvidence(samples, { fromMs, toMs }) {
     else run = still ? { trip: s.trip, lat: s.lat, lng: s.lng, start: s.ms, end: s.ms } : null;
     if (run) longestStill = Math.max(longestStill, run.end - run.start);
   }
+  longestSilence = Math.max(longestSilence, toMs - lastHeardMs);
   return {
     samples: inWindow.length,
     longestStillS: Math.round(longestStill / 1000),
@@ -297,22 +302,18 @@ async function main(argv) {
   const opts = parseArgs(argv.filter((arg) => arg !== '--json'));
   const days = daysBetween(opts.from, opts.to);
   if (!process.env.DATABASE_PUBLIC_URL) {
-    throw new Error('DATABASE_PUBLIC_URL is not set: run via railway run --service Postgres node ops/agents/arrival-timing-report.js');
+    throw new Error('DATABASE_PUBLIC_URL is not set: run via railway run --service Postgres -- railway run --service'
+      + ' waves-customer-portal node ops/agents/arrival-timing-report.js (with PG_CA_FILE, see the header)');
   }
-  const knex = require('knex');
+  const { readOnlyConn } = require('./second-tech-handover');
   const sharedDb = require('../../server/models/db');
   const { linkDay } = require('../../server/services/trip-link');
   const { loadArrivalConfig } = require('../../server/services/gps-arrival-detector');
   const { etDayBounds } = require('../../server/services/visit-gps-context');
-  const conn = knex({
-    client: 'pg',
-    connection: process.env.DATABASE_PUBLIC_URL,
-    pool: {
-      min: 1,
-      max: 1,
-      afterCreate: (pg, done) => pg.query('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY', (err) => done(err, pg)),
-    },
-  });
+  // Pinned root, discrete fields (a URL ssl* option is refused) and a SCRAM-SHA-256-PLUS-only login; the app's knex
+  // takes the very same settings before its first query.
+  const conn = readOnlyConn(process.env.DATABASE_PUBLIC_URL);
+  sharedDb.client.connectionSettings = conn.client.connectionSettings;
   try {
     await assertReadOnly(conn);
     await assertReadOnly(sharedDb);
