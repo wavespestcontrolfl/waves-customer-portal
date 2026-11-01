@@ -11,10 +11,11 @@
 #      live pricing_config and diff against a baseline captured from PROD's
 #      admin-edited rows — a fresh migration-seeded DB legitimately differs,
 #      so setting DATABASE_URL globally turns them red by design, not by bug.
-#   2. The self-skipping DB-gated suites run WITH DATABASE_URL (the `server`
-#      job) against the migrated database, serially (--runInBand: they share tables and
-#      clash under parallel workers; the job runs four serial lanes, each on
-#      its own Postgres server). products-catalog-label-fields is
+#   2. The self-skipping DB-gated suites run WITH DATABASE_URL (the
+#      `server-db` job) against the migrated database, serially
+#      (--runInBand: they share tables and clash under parallel workers),
+#      as two halves, each on its own Postgres server.
+#      products-catalog-label-fields is
 #      excluded — like the golden masters it pins prod-parity data
 #      (admin-corrected EPA reg numbers), which a fresh seed cannot satisfy.
 #
@@ -71,7 +72,7 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      # Three more servers so the longest steps can run beside the rest (see
+      # Two more servers so the two longest lanes can run beside the rest (see
       # "Lanes" below). Separate servers, not extra databases on one
       # server: 167 suites refuse any database not named waves_test.
       postgres-b:
@@ -100,19 +101,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      postgres-d:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: waves
-          POSTGRES_PASSWORD: waves
-          POSTGRES_DB: waves_test
-        ports:
-          - 5435:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
     env:
       NODE_ENV: test
       JWT_SECRET: ci-only-test-secret
@@ -136,69 +124,25 @@ jobs:
             env:
               DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
             run: npx knex migrate:latest --knexfile server/knexfile.js
-          - name: Migrate the fourth server
-            env:
-              DATABASE_URL: postgresql://waves:waves@localhost:5435/waves_test
-            run: npx knex migrate:latest --knexfile server/knexfile.js
       # Lanes (2026-10-08 trial). Measured on five green runs: this job
       # set the length of every run at 16-18 min, and two steps were 8 of
       # those minutes. They now run as background steps, each on its own
       # server, while every other step runs below on the first server exactly
       # as before. Each lane is still serial against its own database. They
       # sit here, not in their old places, so they start at once. The
-      # `wait-all` step at the end of the job fails if any one failed.
-      # 2026-11-01: the DB-gated step alone took 14.6 of this job's 16.3 min
-      # (median of 160 runs), so it runs as two halves on two servers.
-      # `jest --shard` gives every file to exactly one half.
-      - name: DB-gated suites, first half (serial, against the migrated database)
-        id: db-gated
-        background: true
-        working-directory: server
-        env:
-          DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
-        # --forceExit removed 2026-07-16: the open handle was the shared app
-        # pool (models/db) pulled at module scope by lawn-intelligence in
-        # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
-        # afterAll, and the full serial run exits cleanly on its own.
-        run: |
-          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
-            | grep -v products-catalog-label-fields \
-            | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand --shard=1/2
-      - name: DB-gated suites, second half (serial, against the migrated database)
-        id: db-gated-2
-        background: true
-        working-directory: server
-        env:
-          DATABASE_URL: postgresql://waves:waves@localhost:5435/waves_test
-        run: |
-          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
-            | grep -v products-catalog-label-fields \
-            | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand --shard=2/2
+      # `wait-all` step at the end of the job fails if either one failed.
+      # 2026-11-01: the DB-gated suites moved to the `server-db` job (their
+      # lane took 14.6 of this job's 16.3 min, median of 160 runs), and the
+      # closeout lane, which the 2026-10-31 sweep grew to 16.4 min, runs as
+      # two lanes: closeout, gate-code and lawn suites on the third server,
+      # and the sweep's suites on the second.
       # The gate-code suites in the second command gate on
       # `process.env.DATABASE_URL ? describe : describe.skip`, not the
       # `const SKIP` line the DB-gated step greps for, so until 2026-10-30 they
-      # ran nowhere in CI. They run here, after closeout on the third server,
-      # which finishes well before the job's longest lane. Do not add the
-      # `const SKIP` line to them, or they run twice.
+      # ran nowhere in CI. Do not add the `const SKIP` line to them, or they
+      # run twice.
       # The third command runs 64 more suites with that same gate (46 of them
       # lawn suites), which also ran nowhere in CI until 2026-10-31.
-      # The last five commands (sweep #7246 B1, 2026-10-31) run suites whose
-      # own variable no step set. Every suite that reads REPAIR_TEST_DATABASE_URL
-      # builds its own throwaway schema, so its grep lane picks up a new one by
-      # itself. The APP_TEST suites copy the migrated tables into a private
-      # schema. The next command sets each single-suite variable, plus
-      # DATABASE_URL, which two of those suites require to match. The
-      # audit-clone suites refuse any database not named waves_audit_*, and
-      # the IB workflow baseline wants a waves_ib_workflow_* database of its
-      # own: the first command copies the freshly migrated database to both
-      # before any suite writes to it. Nothing else connects to this server,
-      # so the copy cannot meet a busy template.
-      # tests/ci-db-suites-reached.test.js fails when a self-skipping Postgres
-      # suite reaches no step that sets its variable; the suites that cannot
-      # run here yet are listed, with reasons, in
-      # tests/fixtures/ci-db-suites-not-run.json.
       - name: Grouped closeout and gate-code transaction tests
         id: closeout
         background: true
@@ -208,7 +152,6 @@ jobs:
           REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
         run: |
-          node -e "const { Client } = require('pg'); const c = new Client({ connectionString: 'postgresql://waves:waves@localhost:5434/postgres' }); c.connect().then(() => c.query('CREATE DATABASE waves_audit_ci TEMPLATE waves_test')).then(() => c.query('CREATE DATABASE waves_ib_workflow_ci TEMPLATE waves_test')).then(() => c.end(), (e) => { console.error(e); process.exit(1); });"
           npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
           DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand tests/access-code-capture-postgres.test.js tests/admin-neighborhood-access-postgres.test.js tests/admin-schedule-neighborhood-gate-actions.pg.test.js tests/neighborhood-access-postgres.test.js tests/neighborhood-access-sweep-postgres.test.js tests/neighborhood-access-visit-actions-postgres.test.js tests/neighborhood-caller-link-passes-postgres.test.js tests/neighborhood-gate-fallback-postgres.test.js tests/neighborhood-naming-postgres.test.js
           DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand \
@@ -276,6 +219,31 @@ jobs:
             tests/sms-reply-outcomes-postgres.test.js \
             tests/supplies-consumption.test.js \
             tests/termite-renewal-bill-to-fence-postgres.test.js
+      # The sweep's commands (sweep #7246 B1, 2026-10-31) run suites whose
+      # own variable no step set. Every suite that reads REPAIR_TEST_DATABASE_URL
+      # builds its own throwaway schema, so its grep lane picks up a new one by
+      # itself. The APP_TEST suites copy the migrated tables into a private
+      # schema. The next command sets each single-suite variable, plus
+      # DATABASE_URL, which two of those suites require to match. The
+      # audit-clone suites refuse any database not named waves_audit_*, and
+      # the IB workflow baseline wants a waves_ib_workflow_* database of its
+      # own: the first command copies the freshly migrated database to both
+      # before any suite writes to it. Nothing else connects to this server,
+      # so the copy cannot meet a busy template.
+      # tests/ci-db-suites-reached.test.js fails when a self-skipping Postgres
+      # suite reaches no step that sets its variable; the suites that cannot
+      # run here yet are listed, with reasons, in
+      # tests/fixtures/ci-db-suites-not-run.json.
+      - name: Postgres suites with their own database variables (serial, on the second server)
+        id: own-variables
+        background: true
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+          REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+        run: |
+          node -e "const { Client } = require('pg'); const c = new Client({ connectionString: 'postgresql://waves:waves@localhost:5433/postgres' }); c.connect().then(() => c.query('CREATE DATABASE waves_audit_ci TEMPLATE waves_test')).then(() => c.query('CREATE DATABASE waves_ib_workflow_ci TEMPLATE waves_test')).then(() => c.end(), (e) => { console.error(e); process.exit(1); });"
           grep -l 'process.env.REPAIR_TEST_DATABASE_URL' tests/*.test.js \
             | grep -v termite-annual-renewal-decline-coverage-postgres \
             | tee /dev/stderr \
@@ -299,7 +267,7 @@ jobs:
             tests/llm-cost.test.js \
             tests/misting-layouts-migration-postgres.test.js \
             tests/misting-layouts-service-postgres.test.js
-          U=postgresql://waves:waves@localhost:5434/waves_test
+          U=postgresql://waves:waves@localhost:5433/waves_test
           DATABASE_URL=$U ACTIVITY_TIMELINE_TEST_DATABASE_URL=$U ANNUAL_PLAN_DOCUMENT_TEST_DATABASE_URL=$U BLOG_RECONCILE_TEST_DATABASE_URL=$U COPY_AUDIT_TEST_DATABASE_URL=$U DISCLAIMED_HOLDS_TEST_DATABASE_URL=$U DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL=$U IB_TEST_DATABASE_URL=$U LAWN_COPY_V6_TEST_DATABASE_URL=$U LAWN_GATE_TEST_DATABASE_URL=$U LAWN_VISIT_MEMORY_TEST_DATABASE_URL=$U LEAD_EMAIL_LINKS_TEST_DATABASE_URL=$U MANUAL_SMS_TEST_DATABASE_URL=$U RECAP_TEST_DATABASE_URL=$U SIBLING_RESPLIT_TEST_DATABASE_URL=$U SMS_OPERATIONS_TEST_DATABASE_URL=$U TEST_SCHEDULE_DB_URL=$U TS_FIELD_TEST_DATABASE_URL=$U UPDATE_DETAILS_DISCOUNT_TEST_DATABASE_URL=$U UPDATE_DETAILS_NEGATIVE_MONEY_TEST_DATABASE_URL=$U VOICE_RECOVERY_TEST_DATABASE_URL=$U \
             npx jest --ci --silent --runInBand \
             tests/annual-plan-documents-postgres.test.js \
@@ -336,7 +304,7 @@ jobs:
             tests/voice-relay-close-postgres.test.js \
             tests/voice-relay-recovery-postgres.test.js \
             tests/voice-relay-segments-postgres.test.js
-          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_audit_ci CONSULTATION_STATS_TEST_DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_audit_ci npx jest --ci --silent --runInBand \
+          DATABASE_URL=postgresql://waves:waves@localhost:5433/waves_audit_ci CONSULTATION_STATS_TEST_DATABASE_URL=postgresql://waves:waves@localhost:5433/waves_audit_ci npx jest --ci --silent --runInBand \
             tests/admin-customers-archive-billing-winddown.test.js \
             tests/admin-customers-churn-canonical-winddown.test.js \
             tests/admin-dispatch-day-feed-tech-scope.pg.test.js \
@@ -356,7 +324,7 @@ jobs:
             tests/referral-existing-customer-domestic-phone.test.js \
             tests/series-extend-anchor-exception-refuter.test.js \
             tests/series-extend-anchor-ignores-exception.test.js
-          IB_TEST_DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_ib_workflow_ci npx jest --ci --silent --runInBand tests/intelligence-bar-workflow-baseline-db.test.js
+          IB_TEST_DATABASE_URL=postgresql://waves:waves@localhost:5433/waves_ib_workflow_ci npx jest --ci --silent --runInBand tests/intelligence-bar-workflow-baseline-db.test.js
       # Right after the migration, on purpose: the reconcile reads the WHOLE
       # customer/subscriber tables (its counts assume only migration seeds)
       # and its write-mode cases would import or link any row another suite
@@ -663,7 +631,90 @@ jobs:
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js server/tests/invoice-property-history-db.test.js server/tests/customer-properties-db.test.js server/tests/intelligence-bar-properties-db.test.js server/tests/intelligence-bar-inventory-db.test.js server/tests/intelligence-bar-customer-estimates-db.test.js server/tests/intelligence-bar-billing-reader-db.test.js
-      - name: Wait for the three background lanes (fails if any one failed)
+      - name: Wait for the two background lanes (fails if either failed)
+        wait-all:
+
+  # Step 2 of the two-step design, on a runner of its own (2026-11-01): the
+  # DB-gated suites set the length of every run while they shared the
+  # `server` job's 4 vCPU (14.6 of its 16.3 min, median of 160 runs). They
+  # run as two halves, each serial against its own server; `jest --shard`
+  # gives every file to exactly one half.
+  server-db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres-b:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      JWT_SECRET: ci-only-test-secret
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - parallel:
+          - name: Migrate the first server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+          - name: Migrate the second server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+      - name: DB-gated suites, first half (serial, against the migrated database)
+        id: db-gated
+        background: true
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        # --forceExit removed 2026-07-16: the open handle was the shared app
+        # pool (models/db) pulled at module scope by lawn-intelligence in
+        # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
+        # afterAll, and the full serial run exits cleanly on its own.
+        run: |
+          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
+            | grep -v products-catalog-label-fields \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand --shard=1/2
+      - name: DB-gated suites, second half (serial, against the migrated database)
+        id: db-gated-2
+        background: true
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+        run: |
+          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
+            | grep -v products-catalog-label-fields \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand --shard=2/2
+      - name: Wait for both halves (fails if either failed)
         wait-all:
 
   # Step 1 of the two-step design: the full jest suite WITHOUT DATABASE_URL
