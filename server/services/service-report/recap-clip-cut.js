@@ -7,6 +7,7 @@
 // Concurrency is recap-media's design: the clip row is locked FOR UPDATE and read again, the recap row is
 // marked first (recap-pipeline.markRecapClipsChanged) and the clip changes after, in one transaction.
 // Lock order is the clip row, then the recap row. S3 deletes run after the commit.
+const crypto = require('node:crypto');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -117,7 +118,9 @@ async function cutClip(clip, dir) {
     '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart',
     outPath,
   ]);
-  const key = `${clip.s3_key}.cut.mp4`;
+  // A key of its own per attempt: two attempts on one clip (a stale-cutting recovery) never share a
+  // cut, so neither can delete the cut the other's row points to.
+  const key = `${clip.s3_key}.cut-${crypto.randomUUID().slice(0, 8)}.mp4`;
   await uploadFrom(key, outPath, 'video/mp4');
   return { key, bytes: (await fsp.stat(outPath)).size, start, source };
 }
@@ -128,9 +131,7 @@ async function cutClip(clip, dir) {
 async function finishCut(knex, clip, cut, now) {
   return knex.transaction(async (trx) => {
     const current = await trx('service_media').where({ id: clip.id }).forUpdate().first();
-    if (!current || current.status !== 'cutting' || current.s3_key !== clip.s3_key) {
-      return { abandoned: true, cutIsInUse: current?.s3_key === cut.key };
-    }
+    if (!current || current.status !== 'cutting' || current.s3_key !== clip.s3_key) return { abandoned: true };
     await recapPipeline.markRecapClipsChanged(current.scheduled_service_id, { ...current, status: 'ready' }, { knex: trx, now });
     await trx('service_media').where({ id: clip.id }).update({
       s3_key: cut.key, content_type: 'video/mp4', status: 'ready', duration_ms: CUT_MS, bytes: cut.bytes, updated_at: now,
@@ -152,7 +153,7 @@ async function processClip(knex, clip, now) {
     cut = await cutClip(clip, dir);
     const outcome = await finishCut(knex, clip, cut, now);
     if (outcome.abandoned) {
-      if (!outcome.cutIsInUse) await deleteQuietly(cut.key, 'clip removed while cutting');
+      await deleteQuietly(cut.key, 'clip changed or removed while cutting');
       return 'abandoned';
     }
     await deleteQuietly(clip.s3_key, 'original after the cut');

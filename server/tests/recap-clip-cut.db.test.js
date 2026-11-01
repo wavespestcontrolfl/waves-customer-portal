@@ -78,6 +78,10 @@ const isFrameRun = (args) => args.some((a) => String(a).startsWith('fps='));
 const isCutRun = (args) => args.includes('-ss');
 const originalDeleted = () => transcode.deleteObject.mock.calls.some(([key]) => key === ORIGINAL_KEY);
 
+// The cut key the job uploaded (each attempt makes its own: <original>.cut-<8 hex>.mp4).
+const uploadedKeys = () => transcode.uploadFrom.mock.calls.map(([key]) => key);
+const cutKeyOf = (original) => uploadedKeys().find((key) => key.startsWith(`${original}.cut-`));
+
 describeDb('glasses clip cuts', () => {
   const tempDirs = [];
   const keyByDir = new Map();
@@ -136,7 +140,7 @@ describeDb('glasses clip cuts', () => {
     expect(await processPendingClipCuts()).toEqual({ claimed: 1, ready: 1, failed: 0, abandoned: 0 });
 
     expect(await clipRow(clip.id)).toMatchObject({
-      status: 'ready', s3_key: `${ORIGINAL_KEY}.cut.mp4`, content_type: 'video/mp4', duration_ms: 5000, bytes: CUT_BYTES,
+      status: 'ready', s3_key: cutKeyOf(ORIGINAL_KEY), content_type: 'video/mp4', duration_ms: 5000, bytes: CUT_BYTES,
       role: 'perimeter', caption: 'Sealing your perimeter barrier',
     });
     expect(await mockPg('service_recaps').where({ id: recap.id }).first('status', 'clip_revision', 'approved_at'))
@@ -151,7 +155,8 @@ describeDb('glasses clip cuts', () => {
     expect(frameArgs.slice(frameArgs.indexOf('-frames:v'), frameArgs.indexOf('-frames:v') + 2)).toEqual(['-frames:v', '30']);
 
     expect(transcode.downloadTo).toHaveBeenCalledWith(ORIGINAL_KEY, expect.any(String));
-    expect(transcode.uploadFrom).toHaveBeenCalledWith(`${ORIGINAL_KEY}.cut.mp4`, expect.any(String), 'video/mp4');
+    expect(cutKeyOf(ORIGINAL_KEY)).toMatch(/\.cut-[0-9a-f]{8}\.mp4$/);
+    expect(transcode.uploadFrom).toHaveBeenCalledWith(cutKeyOf(ORIGINAL_KEY), expect.any(String), 'video/mp4');
     expect(transcode.deleteObject.mock.calls).toEqual([[ORIGINAL_KEY]]);
     for (const dir of tempDirs) await expect(fsp.stat(dir)).rejects.toThrow();
   });
@@ -202,7 +207,7 @@ describeDb('glasses clip cuts', () => {
     expect(await clipRow(clip.id)).toBeUndefined();
     expect(await mockPg('service_recaps').where({ id: recap.id }).first('status', 'clip_revision'))
       .toEqual({ status: 'ready', clip_revision: 0 });
-    expect(transcode.deleteObject.mock.calls).toEqual([[`${ORIGINAL_KEY}.cut.mp4`]]);
+    expect(transcode.deleteObject.mock.calls).toEqual([[cutKeyOf(ORIGINAL_KEY)]]);
   });
 
   test('a clip that is no longer cutting (it was changed meanwhile) is left alone too', async () => {
@@ -211,7 +216,23 @@ describeDb('glasses clip cuts', () => {
 
     expect(await processPendingClipCuts()).toMatchObject({ claimed: 1, ready: 0, abandoned: 1 });
     expect((await clipRow(clip.id)).status).toBe('failed');
-    expect(transcode.deleteObject.mock.calls).toEqual([[`${ORIGINAL_KEY}.cut.mp4`]]);
+    expect(transcode.deleteObject.mock.calls).toEqual([[cutKeyOf(ORIGINAL_KEY)]]);
+  });
+
+  test('two attempts on one clip never share a cut key; the abandoned one deletes only its own cut', async () => {
+    const clip = await insertClip();
+    // First attempt: while it cuts, the row is changed under it (as a stale-cutting recovery would).
+    transcode.uploadFrom.mockImplementationOnce(async () => {
+      await mockPg('service_media').where({ id: clip.id }).update({ status: 'processing' });
+    });
+    expect(await processPendingClipCuts()).toMatchObject({ claimed: 1, ready: 0, abandoned: 1 });
+    // Second attempt cuts it.
+    expect(await processPendingClipCuts()).toMatchObject({ claimed: 1, ready: 1, abandoned: 0 });
+
+    const [first, second] = uploadedKeys();
+    expect(first).not.toBe(second);
+    expect((await clipRow(clip.id)).s3_key).toBe(second);
+    expect(transcode.deleteObject.mock.calls).toEqual([[first], [ORIGINAL_KEY]]);
   });
 
   test('a failed cut sets that clip failed and the next clip is still cut', async () => {
@@ -227,7 +248,7 @@ describeDb('glasses clip cuts', () => {
     expect(await processPendingClipCuts()).toEqual({ claimed: 2, ready: 1, failed: 1, abandoned: 0 });
 
     expect(await clipRow(first.id)).toMatchObject({ status: 'failed', s3_key: ORIGINAL_KEY });
-    expect(await clipRow(second.id)).toMatchObject({ status: 'ready', s3_key: 'recap-media/test/second.mov.cut.mp4' });
+    expect(await clipRow(second.id)).toMatchObject({ status: 'ready', s3_key: cutKeyOf('recap-media/test/second.mov') });
     expect(originalDeleted()).toBe(false);
     for (const dir of tempDirs) await expect(fsp.stat(dir)).rejects.toThrow();
   });
@@ -240,7 +261,7 @@ describeDb('glasses clip cuts', () => {
       expect(await processPendingClipCuts()).toMatchObject({ claimed: 1, ready: 0, failed: 1 });
     } finally { mark.mockRestore(); }
     expect(await clipRow(clip.id)).toMatchObject({ status: 'failed', s3_key: ORIGINAL_KEY });
-    expect(transcode.deleteObject.mock.calls).toEqual([[`${ORIGINAL_KEY}.cut.mp4`]]);
+    expect(transcode.deleteObject.mock.calls).toEqual([[cutKeyOf(ORIGINAL_KEY)]]);
   });
 
   test('a clip stuck in cutting for 15 minutes goes back to processing; a newer one is left cutting', async () => {
