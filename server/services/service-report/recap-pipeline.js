@@ -15,7 +15,11 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const RETRY_DELAYS_MINUTES = [5, 30, 240];
 const RECAP_DURATION_MS = 28000; // composition is fixed at 840f / 30fps
 
+// recap-delivery's in-flight window: a send_attempt_at newer than this is a send in progress.
+const RECAP_SEND_STALE_MS = 5 * 60 * 1000;
+
 const isMissingTable = (err) => err?.code === '42P01' || err?.code === '42703';
+const glassesClipsOn = () => typeof gates.recapGlassesClipsLive === 'function' && gates.recapGlassesClipsLive();
 const nextAttemptAt = (now, attempts) => new Date(now.getTime() + RETRY_DELAYS_MINUTES[Math.min(Math.max(attempts, 0), RETRY_DELAYS_MINUTES.length - 1)] * 60 * 1000);
 
 async function getRecap(scheduledServiceId, knex = db) {
@@ -81,10 +85,17 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
       // Never regenerate a recap already SENT to the customer — keep the approved
       // asset + link live. force only re-renders ready/failed/approved-but-unsent.
       if (!force || existing.sent_at) return { ok: true, queued: false, recap: existing };
-      const [updated] = await knex('service_recaps').where({ id: existing.id }).update({
-        status: 'pending', attempts: 0, next_attempt_at: now, locked_at: null, last_error: null,
-        approved_at: null, approved_by: null, updated_at: now,
-      }).returning('*');
+      // Never pull a recap out from under a send in progress (send_attempt_at inside the
+      // sender's window): the customer's link would point at a video no longer approved.
+      const sendStaleBefore = new Date(now.getTime() - RECAP_SEND_STALE_MS);
+      const [updated] = await knex('service_recaps').where({ id: existing.id })
+        .whereNull('sent_at')
+        .andWhere((b) => b.whereNull('send_attempt_at').orWhere('send_attempt_at', '<', sendStaleBefore))
+        .update({
+          status: 'pending', attempts: 0, next_attempt_at: now, locked_at: null, last_error: null,
+          approved_at: null, approved_by: null, updated_at: now,
+        }).returning('*');
+      if (!updated) return { ok: true, queued: false, recap: existing };
       return { ok: true, queued: true, recap: updated };
     }
     const [inserted] = await knex('service_recaps').insert({
@@ -108,7 +119,7 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
 // enqueueRecap leaves a sent recap alone and a pending/rendering one as it is. Never throws:
 // the confirm that called it has already succeeded.
 async function rebuildRecapForLateClip(scheduledServiceId, media, { knex = db } = {}) {
-  if (!(typeof gates.recapGlassesClipsLive === 'function' && gates.recapGlassesClipsLive())) return { rebuilt: false };
+  if (!glassesClipsOn()) return { rebuilt: false };
   if (media?.status !== 'ready') return { rebuilt: false };
   try {
     const existing = await getRecap(scheduledServiceId, knex);
@@ -118,6 +129,22 @@ async function rebuildRecapForLateClip(scheduledServiceId, media, { knex = db } 
   } catch (err) {
     logger.warn(`[recap-pipeline] late-clip rebuild failed for ${scheduledServiceId}: ${err.message}`);
     return { rebuilt: false };
+  }
+}
+
+// GATE_RECAP_GLASSES_CLIPS: a clip that became ready after this render claimed the recap may
+// be missing from the video (its media was read after the claim). Render once more, so the
+// recap the customer gets has it. The next claim moves locked_at past the clip: no loop.
+async function rerenderForClipsAddedDuringRender(recap, knex) {
+  if (!glassesClipsOn() || !recap.locked_at) return;
+  try {
+    const newer = await knex('service_media')
+      .where({ scheduled_service_id: recap.scheduled_service_id, status: 'ready' })
+      .where('updated_at', '>', recap.locked_at)
+      .first('id');
+    if (newer) await enqueueRecap(recap.scheduled_service_id, { force: true, knex });
+  } catch (err) {
+    logger.warn(`[recap-pipeline] re-render check after render failed for ${recap.scheduled_service_id}: ${err.message}`);
   }
 }
 
@@ -201,6 +228,7 @@ async function processRecap(recap, knex = db) {
       rendered_at: new Date(), locked_at: null, last_error: null, updated_at: new Date(),
       greeting_version: RECAP_GREETING_VERSION,
     });
+    await rerenderForClipsAddedDuringRender(recap, knex);
     return { status: 'ready', key };
   } catch (err) {
     const now = new Date();
@@ -234,7 +262,7 @@ async function processDueRecaps({ now = new Date(), limit = CLAIM_LIMIT } = {}, 
 }
 
 module.exports = {
-  CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION,
+  CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION, RECAP_SEND_STALE_MS,
   getRecap, enqueueRecap, rebuildRecapForLateClip, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender,
   claimDueRecaps, recoverStaleRecaps, processRecap, processDueRecaps,
 };

@@ -54,7 +54,7 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   // An approved video rendered before the greeting rule would greet a no-first-name
   // customer by their surname: re-render it (back to pending, approval cleared) instead
   // of sending it (codex #5674 r1).
-  const { recapNeedsGreetingRerender, enqueueRecap } = require('./recap-pipeline');
+  const { recapNeedsGreetingRerender, enqueueRecap, RECAP_SEND_STALE_MS } = require('./recap-pipeline');
   if (await recapNeedsGreetingRerender(recap, knex)) {
     await enqueueRecap(scheduledServiceId, { force: true, knex });
     return { ok: false, reason: 'rerendering_greeting' };
@@ -92,9 +92,10 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   // sent_at is set only once the provider confirms, so a crash mid-send leaves the recap
   // retryable (sent_at stays null) instead of stuck "sent". Only one approval wins, and a
   // stale in-flight marker (process died) is re-claimable after the window.
-  const SEND_STALE_MS = 5 * 60 * 1000;
-  const staleBefore = new Date(Date.now() - SEND_STALE_MS);
-  const claimed = await knex('service_recaps').where({ id: recap.id })
+  // The claim re-checks approval too: a late clip or Regenerate that re-queued the render
+  // after the read above cleared it, and that recap must not be sent.
+  const staleBefore = new Date(Date.now() - RECAP_SEND_STALE_MS);
+  const claimed = await knex('service_recaps').where({ id: recap.id, status: 'approved' })
     .whereNull('sent_at')
     .andWhere((b) => b.whereNull('send_attempt_at').orWhere('send_attempt_at', '<', staleBefore))
     .update({ send_attempt_at: knex.fn.now(), updated_at: knex.fn.now() });

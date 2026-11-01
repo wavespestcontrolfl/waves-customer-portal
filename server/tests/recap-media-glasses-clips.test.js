@@ -129,6 +129,8 @@ function recapKnex(existing, { failUpdate = false } = {}) {
   const knex = () => {
     const chain = {
       where: () => chain,
+      whereNull: () => chain,
+      andWhere: () => chain,
       first: async () => existing,
       update: (patch) => {
         if (failUpdate) throw new Error('db down');
