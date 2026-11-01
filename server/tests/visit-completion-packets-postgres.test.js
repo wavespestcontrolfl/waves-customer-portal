@@ -548,8 +548,10 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(result).toMatchObject({ status: 202 });
     const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
     expect(invoices).toHaveLength(1);
-    const day = (value) => String(value instanceof Date
-      ? etDateString(value) : value).slice(0, 10);
+    // A DATE column reads back as local midnight: take its local calendar fields, as the Net 30 test above does.
+    const day = (value) => (value instanceof Date
+      ? [value.getFullYear(), String(value.getMonth() + 1).padStart(2, '0'), String(value.getDate()).padStart(2, '0')].join('-')
+      : String(value).slice(0, 10));
     expect(day(invoices[0].due_date)).toBe(etDateString(addETDays(new Date(), 30)));
   });
 
