@@ -163,12 +163,9 @@ function initTimeTrackingCrons() {
 
       logger.info(`[time-tracking-cron] Weekly summaries computed: ${computed} techs for week of ${weekStartStr}`);
 
-      // One admin bell while any week waits for approval; none (and an open one closes) when none does.
-      if (pendingCount > 0) {
-        await timesheetBells.raiseWeekBell(weekStartStr, pendingCount);
-      } else {
-        await timesheetBells.closeWeekBell(weekStartStr);
-      }
+      // One admin bell while the Approvals page lists a week that waits (every technician with worked time, deactivated
+      // ones too); none, and an open one closes, when it lists none. pendingCount is only the fallback if that read fails.
+      await timesheetBells.reconcileWeekBell(weekStartStr, { fallbackCount: pendingCount });
     } catch (err) {
       logger.error('[time-tracking-cron] Weekly summary job failed', { error: err.message });
     }

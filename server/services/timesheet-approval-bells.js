@@ -4,8 +4,9 @@
  * Monday 5 AM text to the owner's cell, which production silences (an owner-phone internal_alert is redirected to
  * internal_admin_alert, which the admin bell policy mutes), so nobody was told a week waited.
  * One bell per week (dedupeKey timesheets-approve:<weekStart>), who: person. It closes itself: the Monday cron closes it
- * when no week is pending, and approveWeek closes it after the last pending week is approved (settleWeekBell). Sends
- * nothing to a customer or staff member. A bell never blocks the cron or an approval: every function here swallows
+ * when the Approvals page lists no waiting week, and approveWeek closes it after the last pending week is approved
+ * (settleWeekBell). Both count with the Approvals page's own list (getPendingWeeks). Sends nothing to a customer or
+ * staff member. A bell never blocks the cron or an approval: every function here swallows
  * its own error.
  */
 const db = require('../models/db');
@@ -60,27 +61,19 @@ async function closeWeekBell(weekStart, { conn = db, episodes = require('./admin
   }
 }
 
-// Weekly summaries of a week that are not approved and have worked time (a daily summary inside the week), the same
-// set the Monday cron counts.
-async function countPendingWeeks(conn, weekStart) {
-  const row = await conn('time_weekly_summary')
-    .where('time_weekly_summary.week_start', weekStart)
-    .whereRaw("time_weekly_summary.status IS DISTINCT FROM 'approved'")
-    .whereExists(function worked() {
-      this.select(conn.raw('1')).from('time_entry_daily_summary')
-        .whereRaw('time_entry_daily_summary.technician_id = time_weekly_summary.technician_id')
-        .whereRaw('time_entry_daily_summary.work_date >= time_weekly_summary.week_start')
-        .whereRaw('time_entry_daily_summary.work_date <= time_weekly_summary.week_end');
-    })
-    .count('* as n')
-    .first();
-  return Number(row && row.n) || 0;
+// How many weeks of this payroll week still wait for approval: the Approvals page's own list (getPendingWeeks), so the
+// bell and the page agree. That list covers every technician with worked time (deactivated ones too) and builds a
+// missing weekly summary on demand. Required at call time: timesheet-approval.js requires this module.
+async function countPendingWeeks(weekStart) {
+  const { getPendingWeeks } = require('./timesheet-approval');
+  return (await getPendingWeeks(weekStart)).filter((week) => week.status !== 'approved').length;
 }
 
-// After an approval: close the week's bell once no weekly summary of that week still waits. Never throws.
+// After an approval: close the week's bell once the Approvals page lists no week that still waits. A count that fails
+// closes nothing. Never throws.
 async function settleWeekBell(weekStart, { conn = db, countPending = countPendingWeeks, episodes } = {}) {
   try {
-    if (await countPending(conn, weekStart) > 0) return 0;
+    if (await countPending(weekStart) > 0) return 0;
   } catch (err) {
     logger.warn(`[timesheet-approval] pending weeks not counted (${errTag(err)})`);
     return 0;
@@ -88,4 +81,20 @@ async function settleWeekBell(weekStart, { conn = db, countPending = countPendin
   return closeWeekBell(weekStart, { conn, ...(episodes ? { episodes } : {}) });
 }
 
-module.exports = { raiseWeekBell, closeWeekBell, settleWeekBell, countPendingWeeks, specFor, keyFor };
+// The Monday cron: one bell while the Approvals page lists a week that waits, none (and an open one closes) when it
+// lists none. When the count fails, nothing closes; the cron's own count of its active technicians (fallbackCount)
+// still raises the bell, so a week that waits is never missed. Never throws.
+async function reconcileWeekBell(weekStart, { fallbackCount = 0, countPending = countPendingWeeks, raise, conn, episodes } = {}) {
+  let waiting = null;
+  try {
+    waiting = await countPending(weekStart);
+  } catch (err) {
+    logger.warn(`[timesheet-approval] pending weeks not counted (${errTag(err)})`);
+  }
+  const count = waiting === null ? fallbackCount : waiting;
+  if (count > 0) return raiseWeekBell(weekStart, count, raise ? { raise } : {});
+  if (waiting === null) return false;
+  return (await closeWeekBell(weekStart, { ...(conn ? { conn } : {}), ...(episodes ? { episodes } : {}) })) > 0;
+}
+
+module.exports = { raiseWeekBell, closeWeekBell, settleWeekBell, reconcileWeekBell, countPendingWeeks, specFor, keyFor };
