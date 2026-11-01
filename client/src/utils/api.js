@@ -850,6 +850,12 @@ export class ApiClient {
     return this.request('/misting-system');
   }
 
+  // Home-tab Yard Wrapped year-in-review card (dark behind GATE_YARD_WRAPPED: gate off, outside Dec 1 - Jan 31,
+  // not a member or under 3 visits = { enabled: false }).
+  getYardWrapped() {
+    return this.request('/yard-wrapped');
+  }
+
   getStationMap() {
     return this.request('/property/station-map');
   }

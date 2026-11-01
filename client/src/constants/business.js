@@ -38,3 +38,9 @@ export const WAVES_ADDRESS_LINE = '13649 Luxe Ave #110, Bradenton, FL 34211';
 // Marketing-site Products & Safety page — what we apply, re-entry guidance,
 // household/pet notes. Keep in sync with server/constants/business.js.
 export const WAVES_PRODUCTS_SAFETY_URL = 'https://www.wavespestcontrol.com/products-and-safety/';
+
+// Registered company name and website — keep in sync with WAVES_BUSINESS_NAME and
+// WAVES_WEBSITE_URL in server/constants/business.js (the client bundle can't import it).
+// Florida rule 5E-14.142: pest advertising carries the registered name (Yard Wrapped share).
+export const WAVES_BUSINESS_NAME = 'Waves Pest Control, LLC';
+export const WAVES_WEBSITE_URL = 'https://wavespestcontrol.com';
