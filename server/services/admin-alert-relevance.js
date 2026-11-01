@@ -851,9 +851,11 @@ function portalItemAnswered(s) {
 
 // What closing a portal item bell also settles: its request row, resolved quietly with the reason as the
 // admin note (portal-inbox.js; no customer email). Failing here never undoes the bell's close.
+// The request is resolved only if nobody touched it after the bell's ask (askedAtOf: the ask, not a re-ring's
+// bumped created_at): a refreshed request is a newer revision, with a bell of its own.
 function resolveRequestOf(bell, note) {
   const meta = parseMeta(bell.metadata);
-  return require('./portal-inbox').resolveRequestQuietly(uuidOrNull(meta.requestId), uuidOrNull(meta.customerId), note);
+  return require('./portal-inbox').resolveRequestQuietly(uuidOrNull(meta.requestId), uuidOrNull(meta.customerId), note, { notAfter: askedAtOf(bell, meta) });
 }
 
 // A lead_contacted Leads bell (GATE_LEAD_CONTACTED_CLOSE): the emitters promise "done when
@@ -1161,7 +1163,9 @@ async function takeOverPersonDone(row, cls, todayET) {
     await exact(db('notifications'), 'relevance').update({ done_by: row.done_by });
     return null;
   }
-  // Not counted as a retire: the row was already out of the bell.
+  // Not counted as a retire: the row was already out of the bell. The request behind it is settled like any
+  // other close: a person's Done on the bell did not touch it.
+  await settleAfterRetire(cls, current, reason);
   logger.info(`[alert-relevance] notification ${row.id}: took over a person's Done (${reason})`);
   return null;
 }

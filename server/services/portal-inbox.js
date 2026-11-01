@@ -212,8 +212,13 @@ async function closeRequestAlertsOnResolve(request, statusChanged, actor) {
 // answered the customer, or an estimate went out) is resolved to match, quietly: the same write as
 // closeRequestsOlder for one row, and NO customer email. Only a request still open, and only the
 // customer's own. `note` goes on the request as an admin note. Returns the number of rows resolved.
-async function resolveRequestQuietly(requestId, customerId, note, conn = db, now = new Date()) {
+// `notAfter` is the closing bell's ask time: a request touched after it (the shared CTA writer refreshes the
+// same request id with a new offer snapshot and bumps updated_at, and rings another bell) is a newer
+// revision the old answer does not cover, so the same UPDATE refuses it. No usable boundary, no write.
+async function resolveRequestQuietly(requestId, customerId, note, { notAfter = null, conn = db, now = new Date() } = {}) {
   if (!requestId || !customerId) return 0;
+  const boundary = notAfter ? new Date(notAfter) : null;
+  if (!boundary || Number.isNaN(boundary.getTime())) return 0;
   const cleaned = cut(note, 200);
   const rows = await conn('service_requests')
     .where({ id: requestId, customer_id: customerId })
@@ -221,6 +226,7 @@ async function resolveRequestQuietly(requestId, customerId, note, conn = db, now
     // (acknowledged, scheduled) is a newer revision the sweep must not
     // overwrite, and a terminal row is already done.
     .whereRaw("coalesce(status, 'new') = 'new'")
+    .where('updated_at', '<=', boundary)
     .update({
       status: 'resolved',
       resolved_at: now,

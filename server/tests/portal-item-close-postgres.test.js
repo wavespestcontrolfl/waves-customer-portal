@@ -54,7 +54,9 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
   // A text the system sent on its own (a reminder): no person wrote it, so it answers nothing.
   const automatedText = (customer, at) => staffText(customer, at, { message_type: 'appointment_reminder', metadata: JSON.stringify({}) });
   const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
-  const requestRow = (customer, over = {}) => insert('service_requests', { customer_id: customer.id, category: 'general', subject: 'Fixture request', description: 'Please call', status: 'new', ...over });
+  // Filed long before any bell in these tests (a request is written first, its bell after), untouched since.
+  const FILED = new Date(Date.now() - 3 * 24 * 60 * MIN);
+  const requestRow = (customer, over = {}) => insert('service_requests', { customer_id: customer.id, category: 'general', subject: 'Fixture request', description: 'Please call', status: 'new', created_at: FILED, updated_at: FILED, ...over });
   const state = async (b) => { const r = await get(b.id); return r.done_at ? [r.done_by, r.resolution] : null; };
 
   // The bell POST /api/requests raises.
@@ -177,14 +179,14 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const customer = await customerWith();
       const other = await customerWith();
       const open = await requestRow(customer);
-      expect(await portalInbox.resolveRequestQuietly(open.id, other.id, 'wrong customer')).toBe(0);
+      expect(await portalInbox.resolveRequestQuietly(open.id, other.id, 'wrong customer', { notAfter: new Date() })).toBe(0);
       expect((await getRequest(open.id)).status).toBe('new');
-      expect(await portalInbox.resolveRequestQuietly(open.id, customer.id, 'Answered by text')).toBe(1);
-      expect(await portalInbox.resolveRequestQuietly(open.id, customer.id, 'again')).toBe(0);
+      expect(await portalInbox.resolveRequestQuietly(open.id, customer.id, 'Answered by text', { notAfter: new Date() })).toBe(1);
+      expect(await portalInbox.resolveRequestQuietly(open.id, customer.id, 'again', { notAfter: new Date() })).toBe(0);
       const row = await getRequest(open.id);
       expect([row.status, row.admin_notes]).toEqual(['resolved', 'Answered by text']);
       const noted = await requestRow(customer, { admin_notes: 'Called twice' });
-      await portalInbox.resolveRequestQuietly(noted.id, customer.id, 'A person called back');
+      await portalInbox.resolveRequestQuietly(noted.id, customer.id, 'A person called back', { notAfter: new Date() });
       expect((await getRequest(noted.id)).admin_notes).toBe('Called twice\nA person called back');
     });
 
@@ -192,10 +194,61 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const customer = await customerWith();
       for (const status of ['acknowledged', 'scheduled']) {
         const moved = await requestRow(customer, { status });
-        expect(await portalInbox.resolveRequestQuietly(moved.id, customer.id, 'Answered by text')).toBe(0);
+        expect(await portalInbox.resolveRequestQuietly(moved.id, customer.id, 'Answered by text', { notAfter: new Date() })).toBe(0);
         expect((await getRequest(moved.id)).status).toBe(status);
       }
     });
+    test('quiet resolve refuses a request touched after the ask (a refreshed offer is a newer revision), and a call with no boundary writes nothing', async () => {
+      const customer = await customerWith();
+      const ask = mins(new Date(), -300);
+      const untouched = await requestRow(customer, { updated_at: mins(ask, -1) });
+      const refreshed = await requestRow(customer, { updated_at: mins(ask, 60) });
+      expect(await portalInbox.resolveRequestQuietly(refreshed.id, customer.id, 'Estimate sent', { notAfter: ask })).toBe(0);
+      expect(await portalInbox.resolveRequestQuietly(untouched.id, customer.id, 'Estimate sent')).toBe(0);
+      expect(await portalInbox.resolveRequestQuietly(untouched.id, customer.id, 'Estimate sent', { notAfter: 'not a date' })).toBe(0);
+      expect([(await getRequest(refreshed.id)).status, (await getRequest(untouched.id)).status]).toEqual(['new', 'new']);
+      expect(await portalInbox.resolveRequestQuietly(untouched.id, customer.id, 'Estimate sent', { notAfter: ask })).toBe(1);
+    });
+
+    test('a request refreshed after the ask: the old bell closes on the estimate delivered before the refresh, the refreshed request stays new; the refresh\'s own bell is judged on its own', async () => {
+      const now = new Date();
+      const askAt = mins(now, -300);
+      const refreshAt = mins(askAt, 120);
+      const customer = await customerWith();
+      // The shared CTA writer refreshed this same request id (new snapshot, updated_at bumped, status still new).
+      const request = await requestRow(customer, { category: 'add_service', requested_service: 'mosquito', source: 'portal_home', updated_at: refreshAt });
+      const original = await bundleBell(customer, request, askAt);
+      const second = await bundleBell(customer, request, refreshAt);
+      await insert('estimates', { status: 'accepted', customer_id: customer.id, estimate_data: delivered(mins(askAt, 30)) });
+      on();
+      await sweep(now);
+      expect(await state(original)).toEqual(['relevance', 'Estimate was sent']);
+      // The refresh's bell asked after that estimate: still open.
+      expect(await state(second)).toBeNull();
+      const row = await getRequest(request.id);
+      expect([row.status, row.admin_notes, row.status_version]).toEqual(['new', null, 0]);
+    }, 60000);
+
+    test('a bell a person marked Done first: the sweep takes the close over and the request still resolves quietly (once the answer is verified)', async () => {
+      const now = new Date();
+      const bellAt = mins(now, -300);
+      const answered = await customerWith();
+      const unanswered = await customerWith();
+      const a = { request: await requestRow(answered) };
+      const u = { request: await requestRow(unanswered) };
+      a.bell = await requestBell(answered, a.request, bellAt);
+      u.bell = await requestBell(unanswered, u.request, bellAt);
+      for (const c of [a, u]) await db('notifications').where({ id: c.bell.id }).update({ read_at: mins(bellAt, 5), done_at: mins(bellAt, 10), done_by: '1', resolution: 'Handled' });
+      await staffText(answered, mins(bellAt, 20));
+      on();
+      await sweep(now);
+      expect((await get(a.bell.id)).done_by).toBe('relevance');
+      const row = await getRequest(a.request.id);
+      expect([row.status, row.admin_notes]).toEqual(['resolved', 'Answered by text']);
+      // Nothing answered it: the person's Done stands and the request stays open.
+      expect((await get(u.bell.id)).done_by).toBe('1');
+      expect((await getRequest(u.request.id)).status).toBe('new');
+    }, 60000);
   });
 
   describe('GATE_PORTAL_LATE_RERING', () => {

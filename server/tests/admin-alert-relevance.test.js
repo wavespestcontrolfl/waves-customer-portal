@@ -2013,8 +2013,9 @@ describe('customer-contact classes', () => {
         expect(bundle1).toMatchObject({ done_by: 'relevance', resolution: 'Estimate was sent' });
         for (const open of [cancel, nested, answeredOnly]) expect(open.done_at ?? null).toBeNull();
         expect(mockResolveRequest).toHaveBeenCalledTimes(2);
-        expect(mockResolveRequest).toHaveBeenCalledWith(REQ, CUST, 'Answered by text');
-        expect(mockResolveRequest).toHaveBeenCalledWith(REQ, CUST, 'Estimate sent');
+        // the boundary is the closing bell's ask time (askedAt, else created_at)
+        expect(mockResolveRequest).toHaveBeenCalledWith(REQ, CUST, 'Answered by text', { notAfter: request.created_at });
+        expect(mockResolveRequest).toHaveBeenCalledWith(REQ, CUST, 'Estimate sent', { notAfter: bundle1.created_at });
       });
 
       test('a failed request resolve is logged and never undoes the bell\'s close; the gate switched off puts the bell back and resolves nothing', async () => {
@@ -2031,6 +2032,30 @@ describe('customer-contact classes', () => {
         expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ rearmed: 1, retired: 0 });
         expect(request.done_at ?? null).toBeNull();
         expect(mockResolveRequest).not.toHaveBeenCalled();
+      });
+
+      test('a bell a person marked Done first: once the answer is verified the takeover also resolves the request quietly; with no answer the Done and the request stand', async () => {
+        gate('true'); pi('true');
+        const doneAt = new Date('2026-09-27T14:00:00Z');
+        const answered = { ...requestBell(), read_at: doneAt, done_at: doneAt, done_by: '7', resolution: 'Handled' };
+        const waiting = { ...requestBell({ requestId: uid(63) }), read_at: doneAt, done_at: doneAt, done_by: '7', resolution: 'Handled' };
+        mockTables.notifications = [answered, waiting];
+        mockBundles = new Map([[String(answered.id), bundle({ textAt: at(20) })], [String(waiting.id), bundle()]]);
+        await runAdminAlertRelevanceSweep({ now: NOW_AFTER });
+        expect(answered).toMatchObject({ done_by: 'relevance', resolution: 'Handled' });
+        expect(waiting.done_by).toBe('7');
+        expect(mockResolveRequest).toHaveBeenCalledTimes(1);
+        expect(mockResolveRequest).toHaveBeenCalledWith(REQ, CUST, 'Answered by text', { notAfter: answered.created_at });
+      });
+
+      test('the request boundary is the ask, not a re-ring\'s bumped created_at (metadata.askedAt first)', async () => {
+        gate('true'); pi('true');
+        const row = requestBell({ askedAt: T0.toISOString(), lateReRungAt: at(180).toISOString() });
+        row.created_at = at(180);
+        mockTables.notifications = [row];
+        mockBundles = new Map([[String(row.id), bundle({ anchor: T0, textAt: at(20) })]]);
+        await runAdminAlertRelevanceSweep({ now: NOW_AFTER });
+        expect(mockResolveRequest).toHaveBeenCalledWith(REQ, CUST, 'Answered by text', { notAfter: T0 });
       });
 
       test('re-arm: a request bell stays closed only while a person\'s contact after the bell holds', async () => {
