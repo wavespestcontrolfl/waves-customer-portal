@@ -561,7 +561,7 @@ function buildTreatmentCategories({ turfType, visit, seasonBand }) {
 // we treat are st augustine"). No product name, rate, tier, visit count, date, or grass-specific line.
 const V13_COPY = Object.freeze({
   title: 'Your Waves Lawn Care Program Overview',
-  intro: (customerName) => `Based on your estimate for ${customerName}. The program follows the time of year. What each visit applies is set on site: your grass, your county’s fertilizer rules, sun and shade, new sod, the weather, and the spots we map for insects, disease or bermudagrass.`,
+  intro: (customerName) => `Based on your estimate for ${customerName}. The program follows the time of year. What each visit applies is set on site: your grass, your county's fertilizer rules, sun and shade, new sod, the weather, and the spots we map for insects, disease or bermudagrass.`,
   programLabel: 'Year-round, set to your lawn',
   programTitle: 'How Your Program Works',
   programBody: 'Most of the lawns we treat are St. Augustine, so the program is built around it. Each visit adjusts to the lawn in front of us, and every product is applied within its label.',

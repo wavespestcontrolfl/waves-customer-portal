@@ -239,7 +239,7 @@ describe('a 9-visit rounds estimate', () => {
       expect(content.property.planLabel).toBe('9 visits a year, one per round');
       expect(content.intro).toContain('Your plan is nine visits a year, one in each round.');
       expect(content.intro).not.toContain('The program follows the time of year.');
-      expect(content.intro).toContain('What each visit applies is set on site: your grass, your county’s fertilizer rules');
+      expect(content.intro).toContain("What each visit applies is set on site: your grass, your county's fertilizer rules");
       expect(content.season.roundLabel).toBeUndefined();
     });
   });

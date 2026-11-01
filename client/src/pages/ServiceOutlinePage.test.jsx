@@ -540,7 +540,7 @@ describe('ServiceOutlinePage drawn sections', () => {
       expect(cards.map((li) => li.querySelector('details').open)).toEqual([false, true, false]);
       expect(cards.filter((li) => li.getAttribute('aria-current') === 'step').map((li) => li.id)).toEqual(['round-2']);
       expect(within(cards[1]).getByText('Now')).toBeInTheDocument();
-      // Glass puts a full border on what it marks, so it sits on the <li> and the <details> keeps its color rail.
+      // Glass forces its own border and shadow on what it marks, so it sits on the <li> and the <details> keeps the current ring.
       expect(cards.every((li) => li.getAttribute('data-glass') === 'soft')).toBe(true);
       expect(cards.every((li) => !li.querySelector('details').hasAttribute('data-glass'))).toBe(true);
       expect(cards[1].querySelector('details')).toHaveClass('ring-2', 'ring-inset', 'ring-waves-blue');

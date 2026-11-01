@@ -360,13 +360,6 @@ const STEP_FILLS = {
   insects: "bg-zinc-100",
   inspection: "bg-zinc-100",
 };
-const STEP_RAILS = {
-  feeding: "border-l-waves-success",
-  barrier: "border-l-waves-blue-deeper",
-  micros: "border-l-waves-blue",
-  insects: "border-l-zinc-400",
-  inspection: "border-l-zinc-400",
-};
 const toneOf = (step) => STEP_TONES[step] || "text-waves-blue-deeper";
 
 // A link the outline points to (a Waves blog post or a UF/IFAS page), drawn as a small card. It leaves the portal, so
@@ -506,14 +499,13 @@ function YearBarVisual({ blocks = [], anchorPrefix = "round", months = [], ancho
 }
 
 // One round card: the header line carries the dates, the body the whole-lawn steps, spot work, why now, one thing to
-// do at home and links. The round that holds today starts open. The glass border sits on the <li>, because glass forces a
-// full border on whatever it marks and that would hide the <details> color rail.
+// do at home and links. The round that holds today starts open. The glass sits on the <li>, because glass forces its own
+// border and shadow on whatever it marks, and that would hide the current card's ring on the <details>.
 function RoundCard({ round, labels, current }) {
   const main = round.main || [];
-  const rail = STEP_RAILS[main[0]] || "";
   return (
     <li id={`round-${round.n}`} aria-current={current ? "step" : undefined} data-glass="soft" className="scroll-mt-24 rounded-md">
-      <details open={current || undefined} className={`group rounded-md border-l-4 ${rail} ${current ? "ring-2 ring-inset ring-waves-blue" : ""}`}>
+      <details open={current || undefined} className={`group rounded-md ${current ? "ring-2 ring-inset ring-waves-blue" : ""}`}>
         <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 [&::-webkit-details-marker]:hidden">
           <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-waves-blue-deeper text-lg font-bold text-white" aria-hidden="true">
             {round.n}
@@ -597,7 +589,7 @@ function FactPicture({ picture, className = "" }) {
 function FactMedia({ item }) {
   if (item.pictures) {
     return (
-      <div className="mt-3 grid grid-cols-2 gap-3 sm:mt-0">
+      <div className={`grid grid-cols-2 gap-3 ${item.wide ? "mt-3 sm:mt-0" : "mt-3"}`}>
         {item.pictures.map((picture) => <FactPicture key={picture.image} picture={picture} />)}
       </div>
     );

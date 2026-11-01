@@ -388,6 +388,7 @@ const ymd = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`;
 const dateParts = (dateStr) => dateStr.split('-').map(Number);
 const dayNumber = (dateStr) => { const [y, m, d] = dateParts(dateStr); return Date.UTC(y, m - 1, d) / 86400000; };
 const dayDiff = (from, to) => Math.round(dayNumber(to) - dayNumber(from));
+// A leap year for the month windows' last day, so February runs to 02-29 and a leap day still falls in February.
 const LEAP_YEAR = 2024;
 const daysInMonth = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
 const monthDay = (dateStr) => { const [, m, d] = dateParts(dateStr); return `${MONTH_ABBR[m - 1]} ${d}`; };
