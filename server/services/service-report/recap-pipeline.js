@@ -113,38 +113,38 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
   }
 }
 
-// GATE_RECAP_GLASSES_CLIPS: a clip confirmed after the recap was built, and before it was sent,
-// re-renders it so the clip is in the video the customer gets (force clears any approval). Only a
-// clip the renderer will use (`ready`) matters; a `processing` clip rebuilds when it is cut.
-// enqueueRecap leaves a sent recap alone and a pending/rendering one as it is. Never throws:
-// the confirm that called it has already succeeded.
-async function rebuildRecapForLateClip(scheduledServiceId, media, { knex = db } = {}) {
-  if (!glassesClipsOn()) return { rebuilt: false };
-  if (media?.status !== 'ready') return { rebuilt: false };
+// GATE_RECAP_GLASSES_CLIPS: a clip confirmed before the recap was sent must be in the video the
+// customer gets. One UPDATE on the recap row, so it orders against a render's finish, an approval and
+// a send claim: clip_revision counts the clip; a built recap (not pending or rendering) with no send
+// in progress goes back to pending, approval cleared; a pending one renders with the clip anyway, and
+// a rendering one renders again at its finish (processRecap compares clip_revision). A sent recap, or
+// one being sent, keeps its video. Only a clip the renderer uses (`ready`) counts; a `processing` clip
+// counts when it is cut. Never throws: the confirm that called it has already succeeded.
+async function rebuildRecapForLateClip(scheduledServiceId, media, { knex = db, now = new Date() } = {}) {
+  if (!glassesClipsOn()) return { marked: false };
+  if (media?.status !== 'ready') return { marked: false };
   try {
-    const existing = await getRecap(scheduledServiceId, knex);
-    if (!existing || existing.sent_at) return { rebuilt: false };
-    const result = await enqueueRecap(scheduledServiceId, { force: true, knex });
-    return { rebuilt: Boolean(result.queued) };
+    if (await callbackRecapRetired(scheduledServiceId, knex)) return { marked: false };
+    const requeue = "(status NOT IN ('pending', 'rendering') AND (send_attempt_at IS NULL OR send_attempt_at < :sendStaleBefore))";
+    const result = await knex.raw(`
+      UPDATE service_recaps SET
+        clip_revision = clip_revision + 1,
+        status = CASE WHEN ${requeue} THEN 'pending' ELSE status END,
+        attempts = CASE WHEN ${requeue} THEN 0 ELSE attempts END,
+        next_attempt_at = CASE WHEN ${requeue} THEN :now ELSE next_attempt_at END,
+        locked_at = CASE WHEN ${requeue} THEN NULL ELSE locked_at END,
+        last_error = CASE WHEN ${requeue} THEN NULL ELSE last_error END,
+        approved_at = CASE WHEN ${requeue} THEN NULL ELSE approved_at END,
+        approved_by = CASE WHEN ${requeue} THEN NULL ELSE approved_by END,
+        updated_at = :now
+      WHERE scheduled_service_id = :id AND sent_at IS NULL
+      RETURNING status
+    `, { id: scheduledServiceId, now, sendStaleBefore: new Date(now.getTime() - RECAP_SEND_STALE_MS) });
+    const row = (result.rows || [])[0];
+    return { marked: Boolean(row), status: row ? row.status : null };
   } catch (err) {
     logger.warn(`[recap-pipeline] late-clip rebuild failed for ${scheduledServiceId}: ${err.message}`);
-    return { rebuilt: false };
-  }
-}
-
-// GATE_RECAP_GLASSES_CLIPS: a clip that became ready after this render claimed the recap may
-// be missing from the video (its media was read after the claim). Render once more, so the
-// recap the customer gets has it. The next claim moves locked_at past the clip: no loop.
-async function rerenderForClipsAddedDuringRender(recap, knex) {
-  if (!glassesClipsOn() || !recap.locked_at) return;
-  try {
-    const newer = await knex('service_media')
-      .where({ scheduled_service_id: recap.scheduled_service_id, status: 'ready' })
-      .where('updated_at', '>', recap.locked_at)
-      .first('id');
-    if (newer) await enqueueRecap(recap.scheduled_service_id, { force: true, knex });
-  } catch (err) {
-    logger.warn(`[recap-pipeline] re-render check after render failed for ${recap.scheduled_service_id}: ${err.message}`);
+    return { marked: false };
   }
 }
 
@@ -224,16 +224,25 @@ async function processRecap(recap, knex = db) {
     }
     outFile = await renderRecapToFile(payload);
     const key = await putRecapFromFile(recap.scheduled_service_id, outFile);
-    await knex('service_recaps').where({ id: recap.id }).update({
+    const finish = {
       // Persist only non-secret media metadata — payload.media carries 2h presigned
       // S3 URLs (src) that must not be retained in the DB.
       status: 'ready', s3_key: key, duration_ms: RECAP_DURATION_MS,
       media: JSON.stringify((payload.media || []).map((m) => ({ role: m.role, caption: m.caption, type: m.type }))),
       rendered_at: new Date(), locked_at: null, last_error: null, updated_at: new Date(),
       greeting_version: RECAP_GREETING_VERSION,
-    });
-    await rerenderForClipsAddedDuringRender(recap, knex);
-    return { status: 'ready', key };
+    };
+    if (glassesClipsOn() && recap.clip_revision != null) {
+      // GATE_RECAP_GLASSES_CLIPS: a clip counted after this claim may be missing from the video, so
+      // render again instead of publishing. Decided in the UPDATE that publishes, on the recap row:
+      // no clip, approval or send claim can fall between the check and the publish.
+      const late = Number(recap.clip_revision);
+      finish.status = knex.raw("CASE WHEN clip_revision <> ? THEN 'pending' ELSE 'ready' END", [late]);
+      finish.attempts = knex.raw('CASE WHEN clip_revision <> ? THEN 0 ELSE attempts END', [late]);
+      finish.next_attempt_at = knex.raw('CASE WHEN clip_revision <> ? THEN ? ELSE next_attempt_at END', [late, new Date()]);
+    }
+    const [done] = await knex('service_recaps').where({ id: recap.id }).update(finish).returning('status');
+    return { status: done?.status || 'ready', key };
   } catch (err) {
     const now = new Date();
     const attempts = Number(recap.attempts || 0);

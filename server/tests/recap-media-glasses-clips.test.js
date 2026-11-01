@@ -123,22 +123,15 @@ describe('confirmUpload with the glasses gate on', () => {
   });
 });
 
-// service_recaps: the existing row (getRecap) and the force re-queue (enqueueRecap), recorded.
-function recapKnex(existing, { failUpdate = false } = {}) {
-  const calls = { update: null };
-  const knex = () => {
-    const chain = {
-      where: () => chain,
-      whereNull: () => chain,
-      andWhere: () => chain,
-      first: async () => existing,
-      update: (patch) => {
-        if (failUpdate) throw new Error('db down');
-        calls.update = patch;
-        return { returning: async () => [{ ...existing, ...patch }] };
-      },
-    };
-    return chain;
+// The late-clip mark is one UPDATE on the recap row; its SQL behavior (re-queue, sent, rendering, a send in
+// progress) runs on Postgres in recap-late-clip-races.db.test.js. Here: when it must not run at all.
+function markKnex({ fail = false } = {}) {
+  const calls = { raw: 0 };
+  const knex = () => ({ where: () => ({ orderBy: () => ({ first: async () => null }) }) });
+  knex.raw = async () => {
+    calls.raw += 1;
+    if (fail) throw new Error('db down');
+    return { rows: [{ status: 'pending' }] };
   };
   return { knex, calls };
 }
@@ -147,47 +140,29 @@ const READY = { status: 'ready' };
 describe('rebuildRecapForLateClip', () => {
   test('gate off: nothing is touched', async () => {
     delete process.env.GATE_RECAP_GLASSES_CLIPS;
-    const { knex, calls } = recapKnex({ id: 'r1', status: 'ready', sent_at: null });
-    expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ rebuilt: false });
-    expect(calls.update).toBeNull();
+    const { knex, calls } = markKnex();
+    expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ marked: false });
+    expect(calls.raw).toBe(0);
   });
 
   describe('gate on', () => {
     beforeEach(() => { process.env.GATE_RECAP_GLASSES_CLIPS = 'true'; });
 
-    test('an unsent recap is force re-queued and its approval cleared', async () => {
-      const { knex, calls } = recapKnex({ id: 'r1', status: 'approved', sent_at: null });
-      expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ rebuilt: true });
-      expect(calls.update).toMatchObject({ status: 'pending', approved_at: null, approved_by: null, attempts: 0 });
+    test('a ready clip marks the recap row', async () => {
+      const { knex, calls } = markKnex();
+      expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ marked: true, status: 'pending' });
+      expect(calls.raw).toBe(1);
     });
 
-    test('a sent recap is never re-rendered', async () => {
-      const { knex, calls } = recapKnex({ id: 'r1', status: 'approved', sent_at: new Date() });
-      expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ rebuilt: false });
-      expect(calls.update).toBeNull();
+    test('a processing clip does not count yet', async () => {
+      const { knex, calls } = markKnex();
+      expect(await pipeline.rebuildRecapForLateClip('v1', { status: 'processing' }, { knex })).toEqual({ marked: false });
+      expect(calls.raw).toBe(0);
     });
 
-    test('a visit with no recap is left alone (no recap is created)', async () => {
-      const { knex, calls } = recapKnex(undefined);
-      expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ rebuilt: false });
-      expect(calls.update).toBeNull();
-    });
-
-    test('a recap that is rendering is left as it is', async () => {
-      const { knex, calls } = recapKnex({ id: 'r1', status: 'rendering', sent_at: null });
-      expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ rebuilt: false });
-      expect(calls.update).toBeNull();
-    });
-
-    test('a processing clip does not rebuild yet', async () => {
-      const { knex, calls } = recapKnex({ id: 'r1', status: 'ready', sent_at: null });
-      expect(await pipeline.rebuildRecapForLateClip('v1', { status: 'processing' }, { knex })).toEqual({ rebuilt: false });
-      expect(calls.update).toBeNull();
-    });
-
-    test('a rebuild failure is swallowed', async () => {
-      const { knex } = recapKnex({ id: 'r1', status: 'ready', sent_at: null }, { failUpdate: true });
-      await expect(pipeline.rebuildRecapForLateClip('v1', READY, { knex })).resolves.toEqual({ rebuilt: false });
+    test('a failed mark is swallowed', async () => {
+      const { knex } = markKnex({ fail: true });
+      await expect(pipeline.rebuildRecapForLateClip('v1', READY, { knex })).resolves.toEqual({ marked: false });
     });
   });
 });

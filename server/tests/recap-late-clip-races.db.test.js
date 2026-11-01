@@ -1,9 +1,9 @@
-// Late recap clips (GATE_RECAP_GLASSES_CLIPS, owner 2026-11-01) against the two races a re-render can lose,
-// through PostgreSQL: a forced re-render never pulls a recap out from under a send in progress, a send whose recap
-// was re-queued after its read is not claimed (no customer text for a video that is no longer approved), and a clip
-// that became ready while a render ran queues one more render. Every write runs in a transaction that is rolled
-// back. An approval whose recap was re-queued, or replaced by a newer render, after its read approves nothing.
-// Synthetic rows only. Skips without DATABASE_URL (CI runs it against the migrated database).
+// Late recap clips (GATE_RECAP_GLASSES_CLIPS, owner 2026-11-01) against the races a re-render can lose, through
+// PostgreSQL. Every state change orders on the service_recaps row: the late-clip mark (clip_revision + re-queue),
+// a render's finish (publishes 'ready' only when clip_revision is still the claimed one), an approval (only the
+// render it read) and a send claim (only an approved recap). A forced re-render never pulls a recap out from under
+// a send in progress. Every write runs in a transaction that is rolled back. Synthetic rows only. Skips without
+// DATABASE_URL (CI runs it against the migrated database).
 const SKIP = !process.env.DATABASE_URL;
 
 jest.mock('../models/db', () => {
@@ -154,6 +154,43 @@ describeDb('late recap clips: the send and render races', () => {
     });
   });
 
+  describe('the late-clip mark', () => {
+    beforeEach(() => { process.env.GATE_RECAP_GLASSES_CLIPS = 'true'; });
+    const READY_CLIP = { status: 'ready' };
+    const row = (id) => mockPg('service_recaps').where({ id }).first('status', 'approved_at', 'clip_revision', 'attempts');
+
+    test('a built, unsent recap goes back to pending with its approval cleared', async () => {
+      const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(1), approved_by: 'tech', attempts: 3 });
+      expect(await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: true, status: 'pending' });
+      expect(await row(recap.id)).toEqual({ status: 'pending', approved_at: null, clip_revision: 1, attempts: 0 });
+    });
+
+    test('a rendering recap keeps rendering; only the count moves', async () => {
+      const recap = await insertRecap({ status: 'rendering', locked_at: minutesAgo(1), attempts: 1 });
+      expect(await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: true, status: 'rendering' });
+      expect(await row(recap.id)).toMatchObject({ status: 'rendering', clip_revision: 1, attempts: 1 });
+    });
+
+    test('a recap being sent keeps its approval', async () => {
+      const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(1), send_attempt_at: minutesAgo(1) });
+      await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP);
+      expect(await row(recap.id)).toMatchObject({ status: 'approved', approved_at: expect.any(Date) });
+    });
+
+    test('a sent recap is not touched', async () => {
+      const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(9), sent_at: minutesAgo(8) });
+      expect(await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: false, status: null });
+      expect(await row(recap.id)).toMatchObject({ status: 'approved', clip_revision: 0 });
+    });
+
+    test('gate off: nothing is touched', async () => {
+      delete process.env.GATE_RECAP_GLASSES_CLIPS;
+      const recap = await insertRecap({ status: 'ready' });
+      expect(await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: false });
+      expect(await row(recap.id)).toMatchObject({ status: 'ready', clip_revision: 0 });
+    });
+  });
+
   describe('a render that finishes', () => {
     beforeEach(() => {
       buildRecapPayload.mockResolvedValue({ media: [] });
@@ -161,29 +198,38 @@ describeDb('late recap clips: the send and render races', () => {
       putRecapFromFile.mockResolvedValue('recaps/test/visit-recap-v1.mp4');
     });
 
-    async function renderWithClipReadyAt(clipReadyAt) {
-      const recap = await insertRecap({ status: 'rendering', locked_at: minutesAgo(2), attempts: 1 });
-      await mockPg('service_media').insert({
-        scheduled_service_id: recap.scheduled_service_id, media_type: 'video', role: 'perimeter',
-        s3_key: 'recap-media/test/clip.mp4', status: 'ready', duration_ms: 5000, updated_at: clipReadyAt,
-      });
-      await pipeline.processRecap(recap);
-      return (await mockPg('service_recaps').where({ id: recap.id }).first('status')).status;
+    // The claim's copy of the row is what processRecap gets (claimDueRecaps RETURNING r.*).
+    async function claimedRecap() {
+      return insertRecap({ status: 'rendering', locked_at: minutesAgo(2), attempts: 1, rendered_at: null });
     }
 
-    test('gate on: a clip that became ready during the render queues one more render', async () => {
+    test('gate on: a clip counted during the render queues one more render, and nothing can be approved or sent', async () => {
       process.env.GATE_RECAP_GLASSES_CLIPS = 'true';
-      expect(await renderWithClipReadyAt(minutesAgo(1))).toBe('pending');
+      const claimed = await claimedRecap();
+      await pipeline.rebuildRecapForLateClip(claimed.scheduled_service_id, { status: 'ready' });
+
+      expect(await pipeline.processRecap(claimed)).toMatchObject({ status: 'pending' });
+      expect(await pipeline.approveRecap(claimed.scheduled_service_id, { approvedBy: 'tech' }))
+        .toEqual({ ok: false, error: 'not_ready (pending)' });
+      expect(await sendRecap(claimed.scheduled_service_id)).toMatchObject({ ok: false });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await mockPg('service_recaps').where({ id: claimed.id }).first('status', 'attempts'))
+        .toEqual({ status: 'pending', attempts: 0 });
     });
 
-    test('gate on: a clip that was ready before the render claimed it changes nothing', async () => {
+    test('gate on: no clip after the claim publishes ready', async () => {
       process.env.GATE_RECAP_GLASSES_CLIPS = 'true';
-      expect(await renderWithClipReadyAt(minutesAgo(5))).toBe('ready');
+      const claimed = await claimedRecap();
+      expect(await pipeline.processRecap(claimed)).toMatchObject({ status: 'ready' });
+      expect((await mockPg('service_recaps').where({ id: claimed.id }).first('status')).status).toBe('ready');
     });
 
     test('gate off: the render ends ready, exactly as before', async () => {
       delete process.env.GATE_RECAP_GLASSES_CLIPS;
-      expect(await renderWithClipReadyAt(minutesAgo(1))).toBe('ready');
+      const claimed = await claimedRecap();
+      await mockPg('service_recaps').where({ id: claimed.id }).update({ clip_revision: 4 });
+      expect(await pipeline.processRecap(claimed)).toMatchObject({ status: 'ready' });
+      expect((await mockPg('service_recaps').where({ id: claimed.id }).first('status')).status).toBe('ready');
     });
   });
 });

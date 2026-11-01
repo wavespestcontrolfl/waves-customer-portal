@@ -30,7 +30,7 @@ jest.mock('../services/service-report/recap-media', () => ({
 }));
 jest.mock('../services/service-report/recap-pipeline', () => ({
   ...jest.requireActual('../services/service-report/recap-pipeline'),
-  rebuildRecapForLateClip: jest.fn(async () => ({ rebuilt: true })),
+  rebuildRecapForLateClip: jest.fn(async () => ({ marked: true, status: 'pending' })),
 }));
 
 const router = require('../routes/admin-dispatch');
