@@ -145,6 +145,26 @@ async function loadSendFacts(dbh, invoiceId) {
   return { invoice, payer, customer, to: `+1${nanpNationalDigits(payer.ap_phone)}` };
 }
 
+// What the canonical send answered, as this module's result. Only an ACCEPTED provider handoff is a sent text.
+async function settleOutcome(dbh, outcome, invoice, payer) {
+  const o = outcome || {};
+  // The claim in withBillingTextLegLock answers a concurrent or replayed call for this key with the first text's acceptance.
+  if (o.sent === true && o.deduped === true) return result(false, 'already_texted', 'The payer was already texted for this send');
+  // The provider reports a switched-off template as sent:true with deliveryOutcome 'not_sent' (twilio.js "template-disabled").
+  if (o.sent === true && o.deliveryOutcome !== 'accepted') {
+    const off = o.raw && o.raw.templateDisabled === true;
+    return result(false, off ? 'template_disabled' : 'not_sent', off ? 'The invoice text template is switched off' : 'The text was not accepted');
+  }
+  if (o.sent === true) {
+    await stampLogRow(dbh, o, { payerId: payer.id, invoiceId: invoice.id });
+    return result(true, 'sent', 'Payer texted');
+  }
+  const code = o.code || 'not_sent';
+  const reason = o.reason || o.error || 'The text was not sent';
+  logger.warn(`[payer-invoice-sms] invoice ${invoice.id} text not sent: ${code} (${reason})`);
+  return result(false, code, reason, o.deferred ? { deferred: true, nextAllowedAt: o.nextAllowedAt } : {});
+}
+
 /**
  * @param {Object} args
  * @param {string} args.invoiceId
@@ -205,23 +225,7 @@ async function sendPayerInvoiceText({ invoiceId, database, operatorInitiated, em
         invoice_id: invoice.id,
       },
     });
-    // The claim in withBillingTextLegLock answers a concurrent or replayed call for this key with the first text's acceptance.
-    if (outcome && outcome.sent === true && outcome.deduped === true) {
-      return result(false, 'already_texted', 'The payer was already texted for this send');
-    }
-    // The provider reports a switched-off template as sent:true with deliveryOutcome 'not_sent' (twilio.js "template-disabled").
-    if (outcome && outcome.sent === true && outcome.deliveryOutcome !== 'accepted') {
-      const off = outcome.raw && outcome.raw.templateDisabled === true;
-      return result(false, off ? 'template_disabled' : 'not_sent', off ? 'The invoice text template is switched off' : 'The text was not accepted');
-    }
-    if (outcome && outcome.sent === true) {
-      await stampLogRow(dbh, outcome, { payerId: payer.id, invoiceId: invoice.id });
-      return result(true, 'sent', 'Payer texted');
-    }
-    const code = (outcome && outcome.code) || 'not_sent';
-    const reason = (outcome && (outcome.reason || outcome.error)) || 'The text was not sent';
-    logger.warn(`[payer-invoice-sms] invoice ${invoice.id} text not sent: ${code} (${reason})`);
-    return result(false, code, reason, outcome && outcome.deferred ? { deferred: true, nextAllowedAt: outcome.nextAllowedAt } : {});
+    return await settleOutcome(dbh, outcome, invoice, payer);
   } catch (err) {
     logger.warn(`[payer-invoice-sms] invoice ${invoiceId} text failed: ${err.message}`);
     return result(false, 'error', err.message);
