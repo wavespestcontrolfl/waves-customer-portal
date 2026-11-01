@@ -443,7 +443,9 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                           )}
                           {e.decline_reason && (
                             <div className="text-ui-body text-alert-fg mt-0.5">
-                              Declined: {e.decline_reason}
+                              {/* An expired offer can carry a staff reason too (the
+                                  estimates page's Pick reason): it was lost, not declined. */}
+                              {e.status === "expired" ? "Lost" : "Declined"}: {e.decline_reason}
                             </div>
                           )}
                         </div>{" "}

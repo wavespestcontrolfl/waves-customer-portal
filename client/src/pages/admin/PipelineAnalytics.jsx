@@ -155,6 +155,37 @@ export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
   return age > 48 * HOUR && age < 168 * HOUR;
 }
 
+// Call today (GATE_ESTIMATE_CALL_LIST) = the hot window the 48h "Going cold" check misses: a VIEWED
+// offer whose last customer touch was 2h–48h ago and that nobody has phoned or followed up on since.
+// The upper edge is inclusive and isGoingColdEstimate starts strictly past 48h, so the two never
+// share an offer (and the 7d+ overdue bucket sits further out still). Needs a phone to call.
+export function isCallTodayEstimate(estimate, nowMs = Date.now()) {
+  if (estimate?.status !== "viewed" || estimate.archivedAt) return false;
+  if (!String(estimate.customerPhone || "").trim()) return false;
+  const last = lastEngagementMs(estimate);
+  if (last == null) return false;
+  const age = nowMs - last;
+  if (age < 2 * HOUR || age > 48 * HOUR) return false;
+  // Any contact AFTER the customer's last touch takes the offer off the list.
+  for (const contact of [estimate.lastCalledAt, estimate.lastFollowUpAt]) {
+    const ts = contact ? new Date(contact).getTime() : NaN;
+    if (!Number.isNaN(ts) && ts > last) return false;
+  }
+  return true;
+}
+
+// Pick reason (GATE_ESTIMATE_CALL_LIST) = an offer the expiry sweep closed after the customer opened
+// it (disposition expired_viewed), expired in the last 30 days, that no staff member has given a
+// reason yet. A staff reason takes it off the list.
+export function isPickReasonEstimate(estimate, nowMs = Date.now()) {
+  if (estimate?.status !== "expired" || estimate.archivedAt) return false;
+  if (estimate.disposition !== "expired_viewed") return false;
+  if (estimate.dispositionSource === "staff") return false;
+  const expired = resolutionDate(estimate);
+  const ts = expired ? new Date(expired).getTime() : NaN;
+  return !Number.isNaN(ts) && nowMs - ts <= 30 * DAY;
+}
+
 function serviceLineEntriesForEstimate(estimate) {
   if (Array.isArray(estimate.serviceLines) && estimate.serviceLines.length) {
     return estimate.serviceLines.map((line) => ({
@@ -469,6 +500,7 @@ export default function PipelineAnalytics({
   activeFilter,
   dateRange = "all",
   onDateRangeChange,
+  callListEnabled = false,
 }) {
   const selectedRange = dateRange || "all";
   const metrics = useMemo(() => {
@@ -591,6 +623,13 @@ export default function PipelineAnalytics({
     const goingCold = activeRows.filter((e) =>
       isGoingColdEstimate(e, nowMs),
     ).length;
+    // GATE_ESTIMATE_CALL_LIST: counted only while the gate is on.
+    const callToday = callListEnabled
+      ? activeRows.filter((e) => isCallTodayEstimate(e, nowMs)).length
+      : 0;
+    const pickReason = callListEnabled
+      ? activeRows.filter((e) => isPickReasonEstimate(e, nowMs)).length
+      : 0;
 
     return {
       inRange,
@@ -633,10 +672,12 @@ export default function PipelineAnalytics({
         lowMargin,
         pricingWarnings,
         goingCold,
+        callToday,
+        pickReason,
       },
       total,
     };
-  }, [estimates, selectedRange]);
+  }, [estimates, selectedRange, callListEnabled]);
 
   return (
     <div>
@@ -809,7 +850,13 @@ export default function PipelineAnalytics({
         </div>
         <div className="text-ui-body text-ink-tertiary">All-time queue</div>
       </div>
-      <div className="grid grid-cols-3 gap-2 mb-5">
+      <div
+        className={
+          callListEnabled
+            ? "grid grid-cols-2 gap-2 mb-5 md:grid-cols-5"
+            : "grid grid-cols-3 gap-2 mb-5"
+        }
+      >
         <AttentionCard
           label="Follow-up overdue"
           value={metrics.attention.followUpOverdue}
@@ -832,6 +879,24 @@ export default function PipelineAnalytics({
           filterKey="going_cold"
           onFilterChange={onFilterChange}
         />
+        {callListEnabled && (
+          <>
+            <AttentionCard
+              label="Call today"
+              value={metrics.attention.callToday}
+              sub="Viewed · 2h–48h, no call yet"
+              filterKey="call_today"
+              onFilterChange={onFilterChange}
+            />
+            <AttentionCard
+              label="Pick reason"
+              value={metrics.attention.pickReason}
+              sub="Expired · last 30 days, no reason"
+              filterKey="pick_reason"
+              onFilterChange={onFilterChange}
+            />
+          </>
+        )}
       </div>
     </div>
   );
@@ -843,4 +908,5 @@ PipelineAnalytics.propTypes = {
   activeFilter: PropTypes.string,
   dateRange: PropTypes.oneOf(["all", "7d", "30d", "90d", "ytd"]),
   onDateRangeChange: PropTypes.func,
+  callListEnabled: PropTypes.bool,
 };

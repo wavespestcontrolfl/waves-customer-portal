@@ -27,6 +27,9 @@ vi.mock("./PipelineAnalytics", () => ({
   default: () => <div>Pipeline summary</div>,
   isFollowUpOverdueEstimate: () => false,
   isGoingColdEstimate: () => false,
+  isCallTodayEstimate: () => false,
+  isPickReasonEstimate: () => false,
+  lastEngagementMs: () => null,
 }));
 vi.mock("./WinLossSlicesCard", () => ({ default: () => null }));
 vi.mock("./SourcePerformanceCard", () => ({ default: () => null }));
