@@ -15,9 +15,10 @@ jest.mock('../services/messaging/validators/consent', () => ({
   ...jest.requireActual('../services/messaging/validators/consent'),
   loadContactState: jest.fn(async () => ({})),
 }));
+// The REAL checkSuppression; the suppression read is a stub the tests steer (loaded, a STOP row, or a failed lookup).
 jest.mock('../services/messaging/validators/suppression', () => ({
-  loadSuppressionState: jest.fn(async (_input, contactState) => contactState),
-  checkSuppression: jest.fn(() => ({ ok: true })),
+  ...jest.requireActual('../services/messaging/validators/suppression'),
+  loadSuppressionState: jest.fn(async (_input, contactState) => { contactState.suppressionLoaded = true; return contactState; }),
 }));
 jest.mock('../services/messaging/validators/line-type', () => ({ checkLineType: jest.fn(() => ({ ok: true })) }));
 jest.mock('../services/messaging/validators/voice', () => ({ validateNoCustomerEmoji: jest.fn(() => ({ ok: true })) }));
@@ -40,6 +41,7 @@ const { checkPayerRecipient, payerTextInvoiceProblem } = require('../services/me
 const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { persistAudit } = require('../services/messaging/audit');
+const { loadSuppressionState, checkSuppression } = require('../services/messaging/validators/suppression');
 const { sendViaTwilio } = require('../services/messaging/providers/twilio-sms');
 
 const policy = resolvePolicy('customer', 'payer_payment_link');
@@ -70,6 +72,7 @@ function fakeDb() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  loadSuppressionState.mockImplementation(async (_input, contactState) => { contactState.suppressionLoaded = true; return contactState; });
   rows = {
     invoices: { id: 'inv-1', customer_id: 'cust-1', payer_id: 7, payer_statement_id: null, status: 'sending', total: '150.00', credit_applied: 0, amount_paid: 0, scheduled_send_error: null },
     payers: { id: 7, active: true, ap_phone: '(941) 555-0123' },
@@ -79,7 +82,7 @@ beforeEach(() => {
 
 describe('policy', () => {
   test('is a distinct purpose that proves the payer phone and reads no homeowner consent', () => {
-    expect(policy).toMatchObject({ requirePayerPhoneMatch: true, requireConsent: 'none', requireIds: ['customerId', 'invoiceId'] });
+    expect(policy).toMatchObject({ requirePayerPhoneMatch: true, requireVerifiedSuppression: true, requireConsent: 'none', requireIds: ['customerId', 'invoiceId'] });
     expect(resolvePolicy('customer', 'payment_link').requirePayerPhoneMatch).toBeUndefined();
   });
 
@@ -183,5 +186,58 @@ describe('wiring in send-customer-message', () => {
     });
     const result = await sendCustomerMessage(INPUT);
     expect(result.sent).toBe(false);
+  });
+
+  describe('phone suppression (no prefs backup for the payer)', () => {
+    test('an unreadable suppression row refuses, retryable, before the provider', async () => {
+      loadSuppressionState.mockImplementation(async (_input, contactState) => { contactState.suppressionLookupFailed = true; return contactState; });
+      const result = await sendCustomerMessage(INPUT);
+      expect(result).toMatchObject({ sent: false, blocked: true, code: 'SUPPRESSION_LOOKUP_FAILED', retryable: true });
+      expect(sendViaTwilio).not.toHaveBeenCalled();
+    });
+
+    test('a STOP row that appears between the pipeline and the handoff stops the send', async () => {
+      sendViaTwilio.mockImplementation(async (_input, hooks) => {
+        // The payer texts STOP while the provider request is prepared: the handoff's read sees it.
+        loadSuppressionState.mockImplementation(async (_i, contactState) => {
+          contactState.suppression = { reason: 'opt_out_keyword', created_at: '2026-11-03' };
+          contactState.suppressionLoaded = true;
+          return contactState;
+        });
+        const verdict = await hooks.preSendCheck();
+        return verdict.ok
+          ? { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: `SM${'e'.repeat(32)}` }
+          : { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent' };
+      });
+      const result = await sendCustomerMessage(INPUT);
+      expect(result.sent).toBe(false);
+      expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
+        validatorsFailed: expect.arrayContaining(['check_suppression_boundary']),
+        blockedBy: expect.objectContaining({ code: 'SUPPRESSED_OPT_OUT' }),
+      }));
+    });
+
+    test('a suppression read that THROWS at the handoff refuses, retryable', async () => {
+      sendViaTwilio.mockImplementation(async (_input, hooks) => {
+        loadSuppressionState.mockImplementation(async () => { throw new Error('db down'); });
+        const verdict = await hooks.preSendCheck();
+        return verdict.ok
+          ? { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: `SM${'f'.repeat(32)}` }
+          : { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent' };
+      });
+      const result = await sendCustomerMessage(INPUT);
+      expect(result.sent).toBe(false);
+      expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
+        validatorsFailed: expect.arrayContaining(['check_suppression_boundary']),
+        blockedBy: expect.objectContaining({ code: 'SUPPRESSION_LOOKUP_FAILED' }),
+      }));
+    });
+
+    test('checkSuppression: the policy flag alone makes an unloaded row a refusal; other SMS purposes still fail open', async () => {
+      const unloaded = { suppressionLookupFailed: true };
+      await expect(checkSuppression(INPUT, policy, unloaded)).resolves.toMatchObject({ ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', retryable: true, deliveryOutcome: 'not_sent' });
+      await expect(checkSuppression({ ...INPUT, purpose: 'payment_link' }, resolvePolicy('customer', 'payment_link'), unloaded)).resolves.toEqual({ ok: true });
+      await expect(checkSuppression(INPUT, policy, { suppressionLoaded: true })).resolves.toEqual({ ok: true });
+    });
   });
 });

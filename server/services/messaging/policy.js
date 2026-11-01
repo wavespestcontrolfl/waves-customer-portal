@@ -170,6 +170,9 @@ const TRUST_RANK = {
  *                             email equivalent.
  *   - minIdentityTrust        Minimum identityTrustLevel required to send.
  *   - requireIds              Field names on the input that must be present.
+ *   - requireVerifiedSuppression  Optional. true makes an unreadable phone-suppression row a
+ *                             retryable refusal (SMS otherwise fails open on it) and
+ *                             re-reads it at the provider handoff.
  *   - requirePayerPhoneMatch  Optional. true makes the recipient number prove
  *                             itself as the invoice's ACTIVE payer AP phone
  *                             (validators/payer-recipient.js).
@@ -356,6 +359,8 @@ const PURPOSE_POLICY = {
   //    payer's ap_phone for the invoice's payer_id, read from the DB at the
   //    pipeline step and again at the provider boundary (validators/
   //    payer-recipient.js). The customer's own phone never qualifies.
+  //  - requireVerifiedSuppression: the phone-keyed STOP list is the ONLY opt-out check for the payer, so it must load (a
+  //    lookup error refuses, retryable) and is read again at the provider handoff.
   //  - requireConsent 'none': consent here would read the HOMEOWNER's
   //    notification_prefs (customerId is the invoice's customer, so the text
   //    shows on that timeline), and a homeowner's STOP or toggle says nothing
@@ -374,6 +379,9 @@ const PURPOSE_POLICY = {
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId', 'invoiceId'],
     requirePayerPhoneMatch: true,
+    // No notification_prefs backup exists for the payer's phone, so an unreadable suppression row refuses (retryable) and the
+    // row is read again at the provider handoff (send-customer-message.js recheckVerifiedSuppression).
+    requireVerifiedSuppression: true,
   },
   // Card-on-file capture link for a booked visit (appointment-card-request
   // funnel). No invoice exists yet — nothing is charged from this message —

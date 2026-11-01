@@ -35,8 +35,6 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 const MESSAGE_TYPE = 'payer_invoice';
 const ENTRY_POINT = 'payer_invoice_sms';
-// sms_log statuses that mean Twilio took the text (billing-text-leg-dedupe.js uses the same set).
-const ACCEPTED_STATUSES = ['queued', 'sent', 'delivered'];
 
 const result = (sent, code, reason, extra = {}) => ({ sent, code, reason, ...extra });
 const clean = (value) => String(value == null ? '' : value).trim();
@@ -100,23 +98,16 @@ async function serviceTypeOf(invoice) {
   }
 }
 
-// One text per send episode. The episode is the persisted email row: a provider-deduped email replay returns the ORIGINAL row,
-// so a send and its replay share one key and the text is not repeated; a deliberate resend writes a new row and texts again.
-// Without a row (the SMTP fallback, which has no replay) the episode is the instant the email was accepted.
+// One text per send episode. The existing claim (messaging/billing-text-leg-dedupe.js withBillingTextLegLock, which covers
+// purpose payer_payment_link) runs the dedupe lookup and the send under one lock keyed on this key. The episode is the
+// persisted email row: a provider-deduped email replay returns the ORIGINAL row, so a send and its replay share one key and
+// the text is not repeated; a deliberate resend writes a new row and texts again. Without a row (the SMTP fallback, which
+// has no replay) the episode is the instant the email was accepted.
 function eventKeyFor(invoiceId, { emailMessageId, emailAcceptedAt } = {}) {
   if (emailMessageId) return `invoice:${invoiceId}:payer_sms:${emailMessageId}`;
   const at = emailAcceptedAt ? new Date(emailAcceptedAt) : new Date();
   const stamp = Number.isNaN(at.getTime()) ? new Date() : at;
   return `invoice:${invoiceId}:payer_sms:${stamp.toISOString()}`;
-}
-
-async function alreadyTexted(dbh, customerId, key) {
-  const row = await dbh('sms_log')
-    .where({ customer_id: customerId, direction: 'outbound', message_type: MESSAGE_TYPE })
-    .whereRaw("metadata->>'notificationEventKey' = ?", [key])
-    .whereIn('status', ACCEPTED_STATUSES)
-    .first('id');
-  return !!row;
 }
 
 // The accepted sms_log row carries the payer and the invoice, so the text can be traced from either. Best effort: the
@@ -176,7 +167,6 @@ async function sendPayerInvoiceText({ invoiceId, database, operatorInitiated, em
     }
     const { invoice, payer, customer, to } = facts;
     const key = eventKeyFor(invoice.id, { emailMessageId, emailAcceptedAt });
-    if (await alreadyTexted(dbh, customer.id, key)) return result(false, 'already_texted', 'The payer was already texted for this send');
 
     const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
       kind: 'invoice',
@@ -214,6 +204,10 @@ async function sendPayerInvoiceText({ invoiceId, database, operatorInitiated, em
         invoice_id: invoice.id,
       },
     });
+    // The claim in withBillingTextLegLock answers a concurrent or replayed call for this key with the first text's acceptance.
+    if (outcome && outcome.sent === true && outcome.deduped === true) {
+      return result(false, 'already_texted', 'The payer was already texted for this send');
+    }
     if (outcome && outcome.sent === true) {
       await stampLogRow(dbh, outcome, { payerId: payer.id, invoiceId: invoice.id });
       return result(true, 'sent', 'Payer texted');
