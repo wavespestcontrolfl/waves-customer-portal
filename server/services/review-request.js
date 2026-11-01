@@ -2069,8 +2069,8 @@ const ReviewService = {
       // Webhooks pass a narrow projection. Resolve omitted ownership before
       // considering the representative service record's review preferences.
       const Packets = require('./visit-completion-packets');
-      // trigger 'payment': a combined visit closed with GATE_REVIEW_ASK_AT_VISIT on asked at its
-      // summary, so the payment starts nothing there.
+      // trigger 'payment': a combined visit that already asked after its summary (GATE_REVIEW_ASK_AT_VISIT)
+      // gets no second ask from the payment.
       const packetResult = invoice?.id && invoice.visit_completion_packet_id === undefined
         ? await Packets.enrollVisitCompletionReviewForInvoice(invoice.id, db, { trigger: "payment" })
         : (invoice?.visit_completion_packet_id ? await Packets.enrollVisitCompletionReview(invoice.visit_completion_packet_id, db, { trigger: "payment" }) : null);
@@ -2088,9 +2088,10 @@ const ReviewService = {
         try { notes = JSON.parse(notes); } catch { notes = {}; }
       }
       // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): this visit's completion made its review ask after the
-      // report text, paid or not, so a payment never starts another. The completion turns the marker off
-      // when it made no such ask; that visit, and every visit completed before the switch, keeps this ask.
-      if (notes.reviewAskAtVisit === true) {
+      // report text (started, or a final skip), paid or not, so a payment never starts another. A visit
+      // with no such marker (no visit-time ask, a passing failure, completed before the switch, or the
+      // payment came first) keeps this ask; the per-record dedupe keeps it to one.
+      if (notes.reviewAskedAtVisit === true) {
         logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): asked at the visit`);
         return { enrolled: false, reason: "asked_at_visit" };
       }

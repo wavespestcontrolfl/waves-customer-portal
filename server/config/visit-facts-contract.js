@@ -1177,7 +1177,6 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   reviewScheduledFor: 'Review-ask scheduling bookkeeping (the computed send time).',
   customerRequestedReview: 'Review-ask scheduling bookkeeping (who asked, when, where) — carried through paid-invoice deferral, never itself a report claim.',
   reviewFirstAskLock: 'Review-ask audit marker (GATE_REVIEW_FIRST_ASK_LOCK): a never-asked customer\'s "no ask" kept on, or turned off with the "Complaint on site" reason; read back by a committed retry and the visit-closeout packet, never a report claim.',
-  reviewAskAtVisit: 'Review-ask timing marker (GATE_REVIEW_ASK_AT_VISIT): true = the visit asks after its report text even while its invoice is unpaid and a payment starts no ask; false = this completion made no visit-time ask, or it failed for a passing reason, so a payment keeps the ask it gave before the switch; read by the completion, the visit-closeout packet and enrollForPaidInvoice, never a report claim.',
   incompleteReason: 'Internal completion-state bookkeeping (why a visit is marked incomplete), not a customer-facing fact.',
   payLinkOmitted: 'Office bookkeeping: the operator chose "report only, no pay link"; read by the next-day office alert (report-only-payment-alert.js), never rendered on the report.',
   servicePhotoVisit: 'Frozen visit identity for binding recovered photo uploads and report reconciliation to their original completion record; internal ownership/revision bookkeeping, not a customer report fact.',

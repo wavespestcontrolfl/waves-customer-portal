@@ -47,12 +47,15 @@ describe('legacy (non-cadence) bundling', () => {
     expect(block).toContain('!invoiceUnpaidAtCompletion');
   });
 
-  test('GATE_REVIEW_ASK_AT_VISIT: the marker fallback never touches a combined visit member (the packet owns its ask)', () => {
+  test('GATE_REVIEW_ASK_AT_VISIT: the asked-at-visit marker is written only after the visit-time ask answered', () => {
+    // A payment that lands first keeps its own ask (the per-record dedupe keeps it to one); a marker written
+    // ahead of the enrollment would let that payment skip an ask that then failed.
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    const start = source.indexOf('GATE_REVIEW_ASK_AT_VISIT: the marker stays on only');
-    const block = source.slice(start, source.indexOf('{ reviewAskAtVisit: false }', start));
-    expect(start).toBeGreaterThan(-1);
-    expect(block).toContain('!packetEffects');
+    const enroll = source.indexOf('reviewEnrollment = await ReviewService.enrollPostService(');
+    const marker = source.indexOf('{ reviewAskedAtVisit: true }');
+    expect(enroll).toBeGreaterThan(-1);
+    expect(marker).toBeGreaterThan(enroll);
+    expect(source).not.toContain('reviewAskAtVisit: true');
   });
 });
 

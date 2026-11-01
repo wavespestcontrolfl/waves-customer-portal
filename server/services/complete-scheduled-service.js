@@ -7305,11 +7305,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // review ask days after the visit (or from the later payment)
             // must never fire from a quiet backlog closeout.
             requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
-            // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): frozen with the record, so the review decision
-            // below, a resumed completion, a combined visit's summary and a later payment all read the one
-            // answer: an unpaid invoice does not hold this visit's ask, and the payment starts none.
-            // Absent with the switch off.
-            ...(require('../config/feature-gates').reviewAskAtVisitLive() ? { reviewAskAtVisit: true } : {}),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             // GATE_REVIEW_FIRST_ASK_LOCK audit: a never-asked customer's "no ask" was kept on (forcedOn) or
@@ -13941,11 +13936,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Explicit delayed timing skips the bundle and schedules a separate review
     // request below.
     const invoiceUnpaidAtCompletion = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
-    // GATE_REVIEW_ASK_AT_VISIT: a record completed with the switch on asks after its report text even
-    // while the invoice is unpaid (enrollPostService below). The link still never rides inside the
+    // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): with the switch on, an unpaid invoice no longer holds the
+    // ask; it goes after the report text (enrollPostService below). The link still never rides inside the
     // pay-link text: shouldBundleReview keeps refusing an unpaid invoice.
-    const recordAsksAtVisit = parseJsonObject(record.structured_notes).reviewAskAtVisit === true;
-    const invoiceBlocksReview = invoiceUnpaidAtCompletion && !recordAsksAtVisit;
+    const reviewAskAtVisit = require('../config/feature-gates').reviewAskAtVisitLive();
+    const invoiceBlocksReview = invoiceUnpaidAtCompletion && !reviewAskAtVisit;
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms
@@ -15991,16 +15986,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         reviewEnrollment = { started: false, reason: 'error' };
       }
     }
-    // GATE_REVIEW_ASK_AT_VISIT: the marker stays on only for a visit whose visit-time ask ran to a final
-    // outcome. A visit this completion did not ask for (no requestReview posted, a suppression, a recap or
-    // system closeout), or whose ask failed for a passing reason (the two a combined visit retries), turns
-    // it off: a later payment keeps the ask it gave before the switch. A combined visit's members are
-    // left alone: the packet owns their ask.
-    if (recordAsksAtVisit && !packetEffects
-      && (!reviewEnrollment || (reviewEnrollment.started === false
-        && ['plan_resolution_failed', 'error'].includes(reviewEnrollment.reason)))) {
-      await mergeRecordNotesKeys(record.id, { reviewAskAtVisit: false }).catch((markErr) => {
-        logger.error(`[dispatch] Review ask-at-visit fallback for record ${record.id} not stored: ${markErr.message}`);
+    // GATE_REVIEW_ASK_AT_VISIT: once the visit-time ask has answered (started, or a final skip such as
+    // recently asked), the record says so and a later payment starts no ask (enrollForPaidInvoice). Written
+    // only after the answer: a payment before it keeps today's path, and the per-record dedupe keeps that
+    // to one ask. No visit-time ask, or a passing failure (the two a combined visit retries): no marker,
+    // so the payment keeps the ask it gave before the switch.
+    if (reviewAskAtVisit && reviewEnrollment
+      && !(reviewEnrollment.started === false && ['plan_resolution_failed', 'error'].includes(reviewEnrollment.reason))) {
+      await mergeRecordNotesKeys(record.id, { reviewAskedAtVisit: true }).catch((markErr) => {
+        logger.error(`[dispatch] Review asked-at-visit marker for record ${record.id} not stored: ${markErr.message}`);
       });
     }
 

@@ -4536,11 +4536,11 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(out3).toEqual({ enrolled: false, reason: 'not_completion_invoice' });
   });
 
-  test('GATE_REVIEW_ASK_AT_VISIT: a visit completed with the switch on asked after its report text, so its payment starts no ask', async () => {
+  test('GATE_REVIEW_ASK_AT_VISIT: a visit whose visit-time ask answered gets no second ask from its payment', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
       customers: [{ id: 'av-1', first_name: 'Ada', last_name: 'V', phone: '+19410000081', nearest_location_id: 'venice' }],
-      service_records: [{ id: 'sr-av', customer_id: 'av-1', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', reviewAskAtVisit: true }) }],
+      service_records: [{ id: 'sr-av', customer_id: 'av-1', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', reviewAskedAtVisit: true }) }],
     });
     db.mockImplementation(mock);
     const enrolled = jest.spyOn(ReviewService, 'enrollPostService');
@@ -4550,10 +4550,10 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences).toHaveLength(0);
     enrolled.mockRestore();
 
-    // The completion turned the marker off after a passing enrollment failure: the payment is the recovery.
+    // No marker (no visit-time ask, a passing failure, or the payment came first): the payment keeps its ask.
     const mock2 = makeMock({
       customers: [{ id: 'av-2', first_name: 'Bo', last_name: 'V', phone: '+19410000082', nearest_location_id: 'venice' }],
-      service_records: [{ id: 'sr-av2', customer_id: 'av-2', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', reviewAskAtVisit: false }) }],
+      service_records: [{ id: 'sr-av2', customer_id: 'av-2', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed' }) }],
     });
     db.mockImplementation(mock2);
     const out2 = await ReviewService.enrollForPaidInvoice({ id: 'inv-av2', customer_id: 'av-2', service_record_id: 'sr-av2', invoice_number: 'WPC-AV2' }, { source: 'stripe_webhook' });
