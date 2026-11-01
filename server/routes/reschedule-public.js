@@ -659,13 +659,9 @@ async function loadWeatherMove(svc, now = new Date()) {
 // has no time until the customer picks one. Auto-placed: nobody picked, and
 // Auto-Dispatch booked it after the pick-by instant (its placement keeps the
 // marker and stamps last_auto_dispatch_at). Not behind the gate: a link already
-// sent keeps working after a kill.
-function waitingForPick(svc) {
-  return handedToCustomer(svc) && !svc.window_start;
-}
-
+// sent keeps working after a kill. Waiting = awaitingCustomerPick.
 function autoPlacedAfterPick(svc) {
-  if (!handedToCustomer(svc) || !svc.window_start || !svc.last_auto_dispatch_at) return false;
+  if (!svc?.customer_pick_by || !svc.window_start || !svc.last_auto_dispatch_at) return false;
   return new Date(svc.last_auto_dispatch_at).getTime() > new Date(svc.customer_pick_by).getTime();
 }
 
@@ -675,7 +671,7 @@ function autoPlacedAfterPick(svc) {
 // of buildAvailabilityForService read only `days`, which the count never touches.
 const PICK_BEST_SLOT_COUNT = 6;
 function pickSlotCount(svc) {
-  return waitingForPick(svc) ? { bestSlotCount: PICK_BEST_SLOT_COUNT } : {};
+  return awaitingCustomerPick(svc) ? { bestSlotCount: PICK_BEST_SLOT_COUNT } : {};
 }
 
 // "Wed, Nov 4 at 8 PM" (ET). The clock comes from etParts, so the AM/PM spacing
@@ -713,7 +709,7 @@ async function loadPickHandoff(svc) {
 // may still pick, `autoPlacedFromPick` once Auto-Dispatch booked it for them.
 // {} for every other visit (no query), so their payload is unchanged.
 async function customerPickFields(svc, now = new Date()) {
-  const waiting = waitingForPick(svc);
+  const waiting = awaitingCustomerPick(svc);
   if (!waiting && !autoPlacedAfterPick(svc)) return {};
   const handoff = await loadPickHandoff(svc);
   if (!waiting) {

@@ -5337,6 +5337,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     // The Confirmed badge above still renders: it is pure status display.
     // A contact session is view-only too (owner 2026-10-20).
     if (readOnlyVisits) return null;
+    // A visit handed to the customer has no time yet: the server refuses a
+    // confirm (409 PICK_A_TIME); the card's "Pick a time" link is the action.
+    if (s.customerPickBy) return null;
     const busy = !!confirmingIds[s.id];
     return (
       <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" data-glass-size="primary" style={{

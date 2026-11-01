@@ -64,6 +64,8 @@ describe('ScheduleTab — visit waiting for the customer to pick a day', () => {
     expect(screen.getByRole('link', { name: 'Pick a time' })).toHaveAttribute('href', waiting.rescheduleUrl);
     expect(screen.queryByText('Time TBD')).not.toBeInTheDocument();
     expect(screen.queryByText(/72 hours before this visit/)).not.toBeInTheDocument();
+    // No time yet: the server refuses a confirm (409 PICK_A_TIME), so no Confirm button.
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
   });
 
   it('omits the link when the visit has no reschedule link', async () => {
@@ -91,5 +93,6 @@ describe('ScheduleTab — ordinary windowless visit', () => {
     expect(screen.getByText("We'll confirm your time window 72 hours before this visit")).toBeInTheDocument();
     expect(screen.queryByText('New day: your pick')).not.toBeInTheDocument();
     expect(screen.queryByText(/Pick a new time by/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
   });
 });
