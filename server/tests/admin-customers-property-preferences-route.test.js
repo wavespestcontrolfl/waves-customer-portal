@@ -548,3 +548,51 @@ describe('the new-sod record — staff-only sodLaidOn / sodCovers / sodArea', ()
     expect(portalSource).not.toMatch(/sod_|sodLaid|lawn-sod-holds/);
   });
 });
+
+// Away Watch dates (GATE_AWAY_WATCH): the admin writer shares the portal's rules; gate off = an unknown field.
+describe('PUT /api/admin/customers/:id/property-preferences — Away Watch dates', () => {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const day = (n) => etDateString(addETDays(new Date(), n));
+  const nonMember = mockState.customerRow;
+  // Away Watch is a member perk: these cases run for a WaveGuard member unless a test says otherwise.
+  beforeEach(() => { mockState.customerRow = { ...nonMember, waveguard_tier: 'Gold' }; });
+  afterEach(() => { delete process.env.GATE_AWAY_WATCH; mockState.customerRow = nonMember; });
+
+  test('gate on, a non-member: the dates are an unknown field, never stored or returned', async () => {
+    process.env.GATE_AWAY_WATCH = 'true';
+    mockState.customerRow = nonMember;
+    const res = await putPrefs({ awayWatchFrom: day(1), awayWatchUntil: day(40), accessNotes: 'Side gate' });
+    expect(res.status).toBe(200);
+    expect(mockState.prefsRow.access_notes).toBe('Side gate');
+    expect(mockState.prefsRow.away_watch_from).toBeUndefined();
+    expect(res.body.preferences).not.toHaveProperty('awayWatchFrom');
+    expect(res.body.preferences).not.toHaveProperty('away_watch_from');
+  });
+
+  test('gate on: the pair saves and comes back as plain ET day strings', async () => {
+    process.env.GATE_AWAY_WATCH = 'true';
+    const res = await putPrefs({ awayWatchFrom: day(1), awayWatchUntil: day(40) });
+    expect(res.status).toBe(200);
+    expect(res.body.preferences).toMatchObject({ away_watch_from: day(1), away_watch_until: day(40) });
+    expect(mockAccountMembershipEmail.sendAccountUpdated).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a lone date is refused on awayWatchUntil and the rest of the batch still saves', async () => {
+    process.env.GATE_AWAY_WATCH = 'true';
+    const res = await putPrefs({ awayWatchFrom: day(1), accessNotes: 'Side gate' });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected).toEqual([{ field: 'awayWatchFrom', message: 'Away dates must be set or cleared together.' }, { field: 'awayWatchUntil', message: 'Away dates must be set or cleared together.' }]);
+    expect(mockState.prefsRow.access_notes).toBe('Side gate');
+    expect(mockState.prefsRow.away_watch_from).toBeUndefined();
+  });
+
+  test('gate off: the dates are an unknown field, so nothing is stored and a lone batch is a 400', async () => {
+    const res = await putPrefs({ awayWatchFrom: day(1), awayWatchUntil: day(40) });
+    expect(res.status).toBe(400);
+    expect(mockState.prefsRow).toBeNull();
+    const mixed = await putPrefs({ awayWatchFrom: day(1), awayWatchUntil: day(40), accessNotes: 'Side gate' });
+    expect(mixed.status).toBe(200);
+    expect(mixed.body.preferences).not.toHaveProperty('away_watch_from');
+    expect(mockState.prefsRow.away_watch_from).toBeUndefined();
+  });
+});

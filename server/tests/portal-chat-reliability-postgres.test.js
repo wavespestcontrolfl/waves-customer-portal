@@ -137,6 +137,39 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     expect(order).toEqual(['start:one', 'end:one', 'start:two', 'end:two']);
   });
 
+  test('a failed turn runs the rescue on a finalize turn and its committed hand-off is the response', async () => {
+    const requestId = randomUUID();
+    let rescueTurn;
+    const response = await runPortalTurn(args(requestId, async () => {
+      throw new Error('provider down');
+    }, {
+      rescueTurn: async (rescue) => {
+        rescueTurn = rescue;
+        const handoff = { reply: 'Handed off.', conversationId: null, escalated: true, generated: false };
+        return rescue.transaction('rescue hand-off', async (trx) => {
+          await trx('ai_escalations').insert({ customer_id: customerId, portal_chat_request_id: rescue.requestRowId });
+          return rescue.persistCommittedResult(trx, handoff);
+        });
+      },
+    }));
+
+    expect(rescueTurn.requestRowId).toBeTruthy();
+    expect(response).toEqual(expect.objectContaining({ reply: 'Handed off.', escalated: true, requestId }));
+    expect(await mockApp('ai_escalations').count('* as n').first()).toMatchObject({ n: '1' });
+    const receipt = await mockApp('portal_chat_requests').where({ request_id: requestId }).first();
+    expect(receipt.state).toBe('completed');
+  });
+
+  test('a rescue that throws leaves today\'s timeout reply', async () => {
+    const requestId = randomUUID();
+    const response = await runPortalTurn(args(requestId, async () => {
+      throw new Error('provider down');
+    }, { rescueTurn: async () => { throw new Error('filing failed'); } }));
+
+    expect(response.reply).toMatch(/trouble getting that answer/);
+    expect(await mockApp('ai_escalations').count('* as n').first()).toMatchObject({ n: '0' });
+  });
+
   test('a deadline fences a late continuation before it can write', async () => {
     const requestId = randomUUID();
     const response = await runPortalTurn(args(requestId, async (turn) => {

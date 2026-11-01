@@ -12,11 +12,16 @@
  * box on the edit form, sent with the same save. No reschedule_log
  * row is written, so the ~20 readers of that table see no change.
  *
+ * GATE_STAFF_EDIT_LOCK_START_ONLY (dark): on, a change to only the window END
+ * (a shorter or longer visit, same date and start) no longer locks; the
+ * customer's promise is the start time. Off, an end change locks as before.
+ *
  * Pure: decides from the locked row before the edit and the update about to be
  * written. The edit route merges staffEditLockPatch() in its occupancy step, next
  * to recurringDispatchDuePatch().
  */
 const { toDateStr } = require('./dates');
+const { staffEditLockStartOnlyLive } = require('../../config/feature-gates');
 
 // en_route / on_site count too: the edit route rewinds a moved live visit to
 // 'confirmed' later in the same save, so the status this save persists is live.
@@ -24,7 +29,8 @@ const LIVE_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_site']);
 const hhmm = (t) => (t == null || t === '' ? null : String(t).slice(0, 5));
 
 // True when this edit puts a live recurring child occurrence on a slot a person
-// chose: its date or its window actually changes. A same-slot save, a field-only
+// chose: its date or its window actually changes (with GATE_STAFF_EDIT_LOCK_START_ONLY
+// on, its date or window START: an end-only change keeps the slot). A same-slot save, a field-only
 // edit, a cleared window (unplacing) and non-recurring / template / terminal rows
 // never lock.
 function staffEditLocksVisit(before, updates) {
@@ -35,7 +41,8 @@ function staffEditLocksVisit(before, updates) {
     && toDateStr(updates.scheduled_date) !== toDateStr(before.scheduled_date);
   const startChanged = updates.window_start !== undefined && hhmm(updates.window_start) !== hhmm(before.window_start);
   const endChanged = updates.window_end !== undefined && hhmm(updates.window_end) !== hhmm(before.window_end);
-  if (!dateChanged && !startChanged && !endChanged) return false;
+  const endCounts = endChanged && !staffEditLockStartOnlyLive();
+  if (!dateChanged && !startChanged && !endCounts) return false;
   const landsWithoutWindow = updates.window_start === null
     || (updates.window_start === undefined && before.window_start == null);
   return !landsWithoutWindow;

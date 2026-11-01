@@ -21,6 +21,7 @@ import { cardBrandLabel } from '../lib/cardBrand';
 import { microdepositSavedPhrases } from '../lib/microdeposit';
 import AutopayCard from '../components/billing/AutopayCard';
 import { annualPrepayRenewalLine } from '../lib/annualPrepayRenewal';
+import { AWAY_WATCH_COPY, awayWatchSummary } from '../lib/awayWatchCopy';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
@@ -8372,6 +8373,82 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationWaterSource', 'irrigationIssues',
 ]);
 
+// Away Watch dates. The pair saves whole or not at all, so nothing is sent until both days are chosen (one autosave
+// carries both); clearing both, or Remove, sends two nulls. A draft that loses a day before its autosave leaves
+// withdraws the queued pair (withdrawPair), so a pair the screen no longer shows never saves.
+const AWAY_WATCH_PAIR_FIELDS = ['awayWatchFrom', 'awayWatchUntil'];
+function withoutAwayWatchPair(fields) {
+  const copy = { ...fields };
+  AWAY_WATCH_PAIR_FIELDS.forEach((field) => { delete copy[field]; });
+  return copy;
+}
+function AwayWatchFields({ prefs, updateField, withdrawPair, error, styles }) {
+  const { labelStyle, inputStyle, fieldGrid, muted, focusBorder, blurBorder } = styles;
+  const [from, setFrom] = useState(prefs.awayWatchFrom || '');
+  const [until, setUntil] = useState(prefs.awayWatchUntil || '');
+  const change = (nextFrom, nextUntil) => {
+    setFrom(nextFrom);
+    setUntil(nextUntil);
+    if (nextFrom && nextUntil) {
+      updateField('awayWatchFrom', nextFrom);
+      updateField('awayWatchUntil', nextUntil);
+    } else if (!nextFrom && !nextUntil) {
+      updateField('awayWatchFrom', null);
+      updateField('awayWatchUntil', null);
+    } else {
+      withdrawPair();
+    }
+  };
+  const dateInput = (value, label, onChange, min) => (
+    <div>
+      <label style={labelStyle}>{label}</label>
+      <input
+        type="date"
+        value={value}
+        min={min || undefined}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={label}
+        aria-invalid={error ? true : undefined}
+        className="waves-focus-ring"
+        style={error ? { ...inputStyle, borderColor: B.red } : inputStyle}
+        onFocus={focusBorder}
+        onBlur={blurBorder}
+      />
+    </div>
+  );
+  return (
+    <div>
+      <p style={{ margin: '0 0 14px', fontSize: 14, lineHeight: 1.5, color: muted }}>{AWAY_WATCH_COPY.description}</p>
+      <div style={fieldGrid}>
+        {dateInput(from, AWAY_WATCH_COPY.fromLabel, (v) => change(v, until))}
+        {dateInput(until, AWAY_WATCH_COPY.untilLabel, (v) => change(from, v), from)}
+      </div>
+      {error && <div role="alert" style={{ marginTop: 8, fontSize: 14, color: B.red }}>{error}</div>}
+      {(from || until) && !(from && until) && <div style={{ marginTop: 8, fontSize: 14, color: muted }}>{AWAY_WATCH_COPY.bothDays}</div>}
+      {(from || until) && (
+        <button
+          type="button"
+          onClick={() => change('', '')}
+          className="waves-focus-ring"
+          style={{ ...inputStyle, width: 'auto', marginTop: 12, cursor: 'pointer', fontWeight: 700, color: B.glassNavy }}
+        >
+          {AWAY_WATCH_COPY.remove}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// The Property tab section, after Pets. Shown only when the server says GATE_AWAY_WATCH is live.
+function AwayWatchSection({ enabled, prefs, updateField, withdrawPair, error, styles }) {
+  if (!enabled) return null;
+  return (
+    <PropertySection title={AWAY_WATCH_COPY.title} icon="camera" summary={awayWatchSummary(prefs)}>
+      <AwayWatchFields prefs={prefs} updateField={updateField} withdrawPair={withdrawPair} error={error} styles={styles} />
+    </PropertySection>
+  );
+}
+
 function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -8409,7 +8486,12 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // GATE_IRRIGATION_OWNER_RATES: the server says which head rate table its emails use (key present only while the gate
   // is live), so the line under Minutes per Zone shows the number the server would use.
   const [ownerRates, setOwnerRates] = useState(false);
+  // GATE_AWAY_WATCH: the server says whether the Away Watch section shows (key present only while the gate is live).
+  const [awayWatchEnabled, setAwayWatchEnabled] = useState(false);
   const irrigationEditRevision = useRef(0);
+  // Bumped each time the member withdraws an Away Watch pair: a save that left before the withdrawal and then fails
+  // never re-queues that pair.
+  const awayWatchPairRevision = useRef(0);
   const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
   const [savedWateringRevision, setSavedWateringRevision] = useState(0);
 
@@ -8426,6 +8508,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
         setIrrigationSuppressed(d.irrigationSuppressed === true);
         setOwnerRates(d.irrigationOwnerRates === true);
+        setAwayWatchEnabled(d.awayWatchEnabled === true);
         setLoading(false);
       })
       .catch(err => {
@@ -8479,9 +8562,23 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // (load + every save response).
         toSave.confirmed_as_of = lastSavedRef.current?.irrigationHomeChangedAt ?? null;
         const savingIrrigationRevision = irrigationEditRevision.current;
+        const savingAwayWatchRevision = awayWatchPairRevision.current;
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
+          // A pair the member withdrew while this save was in flight saved anyway: show the window the server now
+          // holds, so the summary (and the inputs, when the section reopens) never hide an active Away Watch. A newer
+          // Away Watch edit still queued (Remove, a new pair) wins: saves run one after another, so it is still in
+          // pendingRef here, and its own save settles the screen.
+          if (result?.preferences && awayWatchPairRevision.current !== savingAwayWatchRevision
+            && AWAY_WATCH_PAIR_FIELDS.some((field) => field in toSave)
+            && !AWAY_WATCH_PAIR_FIELDS.some((field) => field in pendingRef.current)) {
+            setPrefs((prev) => ({
+              ...prev,
+              awayWatchFrom: result.preferences.awayWatchFrom ?? null,
+              awayWatchUntil: result.preferences.awayWatchUntil ?? null,
+            }));
+          }
           const rejectedFields = Array.isArray(result?.rejected) ? result.rejected : [];
           // A field the server validated and saved THIS round clears any
           // stale message from an earlier rejection of the same field; a
@@ -8536,6 +8633,13 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           // before. A genuine transport/5xx failure (no per-field detail)
           // still re-queues the whole batch, unchanged.
           const rejectedFields = Array.isArray(err?.rejected) ? err.rejected : [];
+          // What a failure may re-queue: never an Away Watch pair the member withdrew after this save left, and never
+          // `confirmed_as_of` (every flush synthesizes it fresh), so a batch left with no real field queues nothing.
+          const requeueable = (fields) => {
+            const kept = awayWatchPairRevision.current === savingAwayWatchRevision ? { ...fields } : withoutAwayWatchPair(fields);
+            delete kept.confirmed_as_of;
+            return kept;
+          };
           if (rejectedFields.length) {
             setFieldErrors(prev => {
               const next = { ...prev };
@@ -8549,9 +8653,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             // metadata-only request that the server 400s with no `rejected`
             // list — which re-queues it again, forever, and every
             // property-switch flush keeps failing on it.
-            const retryable = Object.fromEntries(
+            const retryable = requeueable(Object.fromEntries(
               Object.entries(toSave).filter(([k]) => k !== 'confirmed_as_of' && !rejectedSet.has(k)),
-            );
+            ));
             if (Object.keys(retryable).length) {
               pendingRef.current = { ...retryable, ...pendingRef.current };
             }
@@ -8560,7 +8664,8 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             // left wins) so the next flush retries these without clobbering
             // fresher input. The UI is not reverted, so queue and screen
             // agree.
-            pendingRef.current = { ...toSave, ...pendingRef.current };
+            const retry = requeueable(toSave);
+            if (Object.keys(retry).length) pendingRef.current = { ...retry, ...pendingRef.current };
           }
           throw err;
         }
@@ -8618,6 +8723,16 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         });
     }, 1000);
   }, [flushAllPendingSaves]);
+
+  // Away Watch: drop both dates from the queued autosave (other queued edits stay), put them back to the server's
+  // latest view, and clear their stale messages: the incomplete draft on screen saves nothing.
+  const withdrawAwayWatchPair = useCallback(() => {
+    awayWatchPairRevision.current += 1;
+    pendingRef.current = withoutAwayWatchPair(pendingRef.current);
+    const saved = lastSavedRef.current || {};
+    setPrefs((prev) => ({ ...prev, awayWatchFrom: saved.awayWatchFrom ?? null, awayWatchUntil: saved.awayWatchUntil ?? null }));
+    setFieldErrors((prev) => Object.fromEntries(Object.entries(prev).filter(([field]) => !AWAY_WATCH_PAIR_FIELDS.includes(field))));
+  }, []);
 
   // The 1s debounce above survives this tab's unmount, but switching
   // properties swaps the access token first — a delayed PUT would then write
@@ -9225,6 +9340,15 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           </>
         )}
       </PropertySection>
+
+      <AwayWatchSection
+        enabled={awayWatchEnabled}
+        prefs={prefs}
+        updateField={updateField}
+        withdrawPair={withdrawAwayWatchPair}
+        error={fieldErrors.awayWatchUntil || fieldErrors.awayWatchFrom}
+        styles={{ labelStyle, inputStyle, fieldGrid, muted, focusBorder, blurBorder }}
+      />
 
       <PropertySection title="Scheduling" icon="calendar" summary={scheduleSummary}>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
