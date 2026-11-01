@@ -111,3 +111,15 @@ describe('the portal Irrigation section is the target of the report button', () 
     expect(document.getElementById('irrigation')).not.toHaveTextContent('Weekly Inches');
   });
 });
+
+describe('the Pets section is the target of the Home pet-name ask (GATE_PET_NAME_TEXT)', () => {
+  it('has id="pets" and scrolls to it once the tab has loaded, when the URL carries #pets', async () => {
+    window.history.replaceState(null, '', '/?tab=property#pets');
+    render(<PropertyTab customer={lawnCustomer} />);
+    const target = await waitFor(() => { const el = document.getElementById('pets'); expect(el).not.toBeNull(); return el; });
+    expect(target.tagName).toBe('SECTION');
+    expect(target).toHaveTextContent('Pets');
+    await waitFor(() => expect(scrolled.filter((entry) => entry.id === 'pets').length).toBeGreaterThanOrEqual(1));
+    expect(scrolled.some((entry) => entry.id === 'irrigation')).toBe(false);
+  });
+});

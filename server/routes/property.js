@@ -10,6 +10,8 @@ const { signedMapImagePathFromLiveConfig } = require('../services/signed-map-ima
 const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
 const { irrigationOwnerRatesLive } = require('../services/irrigation-rates');
 const AwayWatch = require('../services/away-watch');
+const { yardPets } = require('../services/pet-name-line');
+const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
 
 // GATE_IRRIGATION_OWNER_RATES: the portal's "About N inches a week" line must use the table the emails use, and the
 // client cannot read the environment, so the preferences response carries the choice. The key exists only while the
@@ -120,6 +122,23 @@ const { IRRIGATION_SIZING_FIELDS } = require('../services/irrigation-schedule-co
 // =========================================================================
 // GET /api/property/preferences
 // =========================================================================
+// GATE_PET_NAME_TEXT: the Home tab asks a WaveGuard member for their dogs' and cats' names while the pet-named visit
+// text is live and no name it could use is on file (pet-name-line.js yardPets: a dog, a cat or an untyped pet with a
+// usable name). Gate off or a non-member answers { ask: false } with no read; a failed read answers { ask: false }.
+router.get('/pet-name-ask', async (req, res) => {
+  const gates = require('../config/feature-gates');
+  if (typeof gates.petNameTextLive !== 'function' || !gates.petNameTextLive() || !isMembershipCustomerRow(req.customer)) {
+    return res.json({ ask: false });
+  }
+  try {
+    const prefs = await db('property_preferences').where({ customer_id: req.customerId }).first('pets_structured');
+    return res.json({ ask: yardPets(prefs?.pets_structured).length === 0 });
+  } catch (err) {
+    logger.warn(`[property] pet-name ask read failed for ${req.customerId}: ${err.message}`);
+    return res.json({ ask: false });
+  }
+});
+
 router.get('/preferences', async (req, res, next) => {
   try {
     const [prefs, hasLawnCare] = await Promise.all([
