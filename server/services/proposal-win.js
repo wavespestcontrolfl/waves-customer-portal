@@ -401,8 +401,9 @@ async function proposalTermsDueDate(conn, sourceEstimateId, baseDate) {
 // The Net days a won proposal's visit invoices carry, else 0. An invoice-mode proposal carries its own Net term: these
 // are the visits Auto Pay never collects (bill-by-invoice.js). An Auto Pay proposal whose customer has turned Auto Pay
 // off carries Net 30, as the agreement's payment paragraph says ("cancel autopay with 30 days' written notice, after
-// which invoices are due Net 30", shared/commercial-agreement-terms.cjs; owner 2026-11-01). Only a real turn-off counts
-// (autopayTurnedOffSince): a pause, a missing card or a customer who never enrolled keeps the visit's own due date.
+// which invoices are due Net 30", shared/commercial-agreement-terms.cjs; owner 2026-11-01). Only a recorded turn-off
+// counts (autopayTurnedOffSince): a pause, a card that expires while Auto Pay stays on, or a customer who never enrolled
+// keeps the visit's own due date.
 async function proposalTermsNetDays(conn, estimate) {
   const { PAYMENT_TERM_NET_DAYS } = require('./payer');
   const BillByInvoice = require('./bill-by-invoice');
@@ -415,11 +416,14 @@ async function proposalTermsNetDays(conn, estimate) {
     ? PAYMENT_TERM_NET_DAYS[INVOICE_PAYMENT_TERMS] : 0;
 }
 
-// True when the customer turned Auto Pay off after `since` (the proposal's creation) and had been enrolled before that.
+// True when the customer's Auto Pay was turned off after `since` (the proposal's creation), following an enrollment.
 // The column alone proves nothing: never-enrolled customers default to autopay_enabled = false (migration
 // 20260815000001). The record is autopay_log's latest autopay_enabled | autopay_disabled row, which every turn-off path
-// commits with the state change (the rule recurring-card-on-file.js explicitAutopayDisable applies): it must be a
-// disable, made after `since`, with an enable before it. A pause writes no toggle row. Throws on a failed read.
+// commits with the state change: it must be a disable, made after `since`, with an enable before it. Every recorded
+// turn-off counts, whatever its source, the same rule recurring-card-on-file.js explicitAutopayDisable applies: the
+// customer or staff turning it off, a removed or detached card, a replacement card that cannot be charged, a cancelled
+// contract. Each one stops Auto Pay, and the agreement then says Net 30. A pause or an expired card writes no toggle row.
+// Throws on a failed read.
 async function autopayTurnedOffSince(conn, customerId, since) {
   const customer = await conn('customers').where({ id: customerId }).first('autopay_enabled');
   if (!customer || customer.autopay_enabled === true) return false;

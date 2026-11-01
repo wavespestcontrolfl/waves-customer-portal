@@ -316,6 +316,13 @@ describe('proposalTermsDueDate', () => {
         .toBe('2026-12-03');
     });
 
+    test('every recorded turn-off counts, whatever its source (a detached card, an unchargeable replacement, a cancelled contract)', async () => {
+      for (const details of [{ source: 'payment_method_detached' }, { source: 'set_default_card' }, { reason: 'contract_cancelled' }]) {
+        const toggles = [{ ...disabled('2026-11-01T12:00:00Z'), details }, enabled('2026-10-22T12:00:00Z')];
+        expect(await due(tablesConn({ estimate: autopayRow(), toggles }))).toBe('2026-12-03');
+      }
+    });
+
     test('never enrolled: the default false flag with no toggle, or a disable with no enrollment before it, keeps the caller\'s date', async () => {
       expect(await due(tablesConn({ estimate: autopayRow(), toggles: [] }))).toBeNull();
       expect(await due(tablesConn({ estimate: autopayRow(), toggles: [disabled('2026-11-01T12:00:00Z')] }))).toBeNull();
