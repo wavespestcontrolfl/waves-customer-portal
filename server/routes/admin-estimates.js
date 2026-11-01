@@ -4329,6 +4329,16 @@ router.get('/', async (req, res, next) => {
     const acceptanceRecordIds = await acceptanceRecordIdSet(estimates);
     // GATE_COMMISSION_SOLD_BY: null (no read, no key) while the gate is off.
     const soldByById = await loadSoldByForList(db, estimates);
+    // GATE_ESTIMATE_CALL_LIST: the newest outbound call to each VIEWED row's phone, one batched read.
+    // Gate off = no read and lastCalledAt stays null; a failed read costs only the field.
+    let lastCalledById = new Map();
+    if (require('../config/feature-gates').estimateCallListLive?.() === true) {
+      try {
+        lastCalledById = await require('../services/estimate-call-list').lastCalledAtByEstimateId(db, estimates);
+      } catch (err) {
+        logger.warn(`[estimates] call-list lastCalledAt read failed: ${err.message}`);
+      }
+    }
 
     res.json({
       estimates: estimates.map(e => {
@@ -4403,6 +4413,8 @@ router.get('/', async (req, res, next) => {
           notes: e.notes,
           followUpCount: e.follow_up_count || 0,
           lastFollowUpAt: e.last_follow_up_at,
+          // GATE_ESTIMATE_CALL_LIST: newest outbound call to a viewed row's phone; null otherwise.
+          lastCalledAt: lastCalledById.get(e.id) || null,
           declineReason: e.decline_reason,
           disposition: e.disposition || null,
           dispositionSource: e.disposition_source || null,
@@ -5176,6 +5188,10 @@ router.put('/:id/proposal', async (req, res, next) => {
       ...(revivingBid ? { status: estimate.viewed_at ? 'viewed' : estimate.sent_at ? 'sent' : 'draft' } : {}),
       ...(revivingBid && ['expired_unviewed', 'expired_viewed', 'expired_unsent'].includes(estimate.disposition)
         ? { disposition: null, disposition_source: null, disposition_at: null, disposition_note: null } : {}),
+      // A staff loss reason (GATE_ESTIMATE_CALL_LIST) does not survive a revive either. Judged on
+      // the LOCKED row: a Pick reason saved after the pre-read must not ride into the live offer.
+      ...(revivingBid && require('../services/estimate-disposition').isStaffLossRow(locked)
+        ? require('../services/estimate-disposition').STAFF_LOSS_CLEARED_UPDATES : {}),
       updated_at: db.fn.now(),
     });
     if (!count) return { updatedCount: 0 };
@@ -6124,13 +6140,16 @@ router.patch('/:id', async (req, res, next) => {
     // a code so the pipeline's free-text action and older tabs keep working.
     // The human label is preserved in decline_reason for existing badges.
     const wantsDisposition = req.body.disposition !== undefined || req.body.declineReason !== undefined;
+    let expiredReason = false;
     if (wantsDisposition) {
       // Loss fields land ONLY on a decline transition in this same request
       // or a reason edit on an already-declined row (codex pre-push P1): a
       // live estimate stamped here would carry the stale staff loss through
       // expiry/conversion via their COALESCEs. Archive reasons belong to
       // the archive endpoint.
-      if (req.body.status !== 'declined' && estimate.status !== 'declined') {
+      // GATE_ESTIMATE_CALL_LIST adds one more: a staff reason on an EXPIRED row, status left alone.
+      expiredReason = require('../services/estimate-call-list').staffReasonOnExpiredAllowed(estimate, req.body);
+      if (!expiredReason && req.body.status !== 'declined' && estimate.status !== 'declined') {
         return res.status(400).json({ error: 'A decline reason can only be set while declining the estimate (or editing an already-declined one).' });
       }
       const { staffDispositionUpdates } = require('../services/estimate-disposition');
@@ -6225,6 +6244,9 @@ router.patch('/:id', async (req, res, next) => {
     // not land on the now-hidden row and report success.
     updateQuery = estimate.archived_at ? updateQuery.whereNotNull('archived_at') : updateQuery.whereNull('archived_at');
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status }).whereRaw(REPRICE_PENDING_ABSENT_SQL);
+    // A staff reason on an expired row lands only while the row is still expired: an extension that
+    // revived it between the read and this write must not leave a loss reason on a live offer.
+    if (expiredReason) updateQuery = updateQuery.where({ status: 'expired' });
     const changesDeliveryOptions = updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined;
     if (changesDeliveryOptions) {
       updateQuery = updateQuery.whereNot({ status: 'sending' }).whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);

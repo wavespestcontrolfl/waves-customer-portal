@@ -24,6 +24,7 @@ const { leadIdForEstimate } = require('./estimate-lead-linkage');
 const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { estimateOptedOutOfEngagement } = require('./estimate-comms-eligibility');
+const { isStaffLossRow, STAFF_LOSS_CLEARED_UPDATES, STAFF_LOSS_ROW_SQL } = require('./estimate-disposition');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -282,20 +283,26 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['estimate-group-send', String(estimate.estimate_group_id)]);
       const locked = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id })
-        .orderBy('id').forUpdate().select('id', 'estimate_data');
+        .orderBy('id').forUpdate().select('id', 'estimate_data', 'disposition', 'disposition_source');
       anchor = locked.find((row) => row.id === estimate.id);
     } else {
       // A generic proposal save can add a fixed hold after public preflight.
       // Judge the locked row before the write so refusal keeps its public
       // FIXED_BID_VALIDITY / generic-404 classification.
       anchor = await trx('estimates').where({ id: estimate.id }).whereNull('estimate_group_id')
-        .forUpdate().first('estimate_data');
+        .forUpdate().first('estimate_data', 'disposition', 'disposition_source');
     }
     if (!anchor) {
       const err = new Error('Estimate changed groups while extending — retry.');
       err.statusCode = 409;
       throw err;
     }
+    // …and a staff loss reason (the Pick reason on an expired offer, GATE_ESTIMATE_CALL_LIST) goes
+    // too, with the competitor fields and the legacy decline_reason label that path wrote beside it.
+    // Judged on the LOCKED row, never the caller's snapshot (codex pre-push P1): a reason saved
+    // after the snapshot was read is cleared as well, and one saved after this lock waits for it and
+    // then finds the row live (its write is guarded on status = 'expired') and answers 409.
+    if (revivedStatus && isStaffLossRow(anchor)) Object.assign(updates, STAFF_LOSS_CLEARED_UPDATES);
     // The county-roll address block (and every other off-surface marker)
     // is judged on the LOCKED anchor and reasserted on the write: a flag
     // stamped after the public eligibility read must not revive the row
@@ -391,10 +398,15 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           status: db.raw("CASE WHEN status IN ('expired','send_failed') AND COALESCE(disposition, '') <> 'expired_unsent' THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),
           // Mirror of the anchor row's revival clear (codex pre-push P1):
           // a revived sibling sheds the sweep's expiry classification.
-          disposition: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition END"),
-          disposition_source: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_source END"),
-          disposition_at: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_at END"),
-          disposition_note: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_note END"),
+          // A staff loss reason on a revived (expired) sibling goes the same way, with its competitor
+          // fields and legacy label. Every SET expression reads the pre-update row.
+          disposition: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition END`),
+          disposition_source: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_source END`),
+          disposition_at: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_at END`),
+          disposition_note: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_note END`),
+          competitor_name: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE competitor_name END`),
+          competitor_price: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE competitor_price END`),
+          decline_reason: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE decline_reason END`),
           updated_at: db.fn.now(),
         });
     }
