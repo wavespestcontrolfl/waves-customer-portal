@@ -24058,7 +24058,36 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return payload;
       }
     };
-    if (!svc.pre_service_brief) return res.json(await withFacts({ brief: null }));
+    // GATE_AWAY_WATCH: the Away Watch lines the job card carries for this visit (a WaveGuard member away, the visit's
+    // own day inside the window, at home) ride every answer to the tech's Visit Brief, so the tech knows about the
+    // 3-photo closeout rule and the Welcome Home sweep before the visit. The lookup runs after the facts block's
+    // reassignment recheck, so whatever it answers (lines, nothing, an error) one more recheck covers the whole answer,
+    // and a reassignment it catches withholds everything like the facts block does (the payload may already hold live
+    // access codes and the cached brief). Gate off: no lookup and no recheck, the answer exactly as before. Fail-soft:
+    // a lookup or recheck outage omits the key.
+    const withAwayWatch = async (payload) => {
+      const AwayWatch = require('../services/away-watch');
+      if (!AwayWatch.awayWatchLive()) return payload;
+      let awayWatch = null;
+      try {
+        awayWatch = await AwayWatch.awayWatchCardLines(db, svc.id);
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief Away Watch lines failed for ${svc.id}: ${err.message}`);
+      }
+      try {
+        const stillOwned = await db('scheduled_services')
+          .where({ 'scheduled_services.id': svc.id })
+          .modify((q) => technicianCurrentVisitFilter(req, q))
+          .first('scheduled_services.id');
+        if (!stillOwned) return { brief: null };
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief Away Watch recheck failed for ${svc.id}: ${err.message}`);
+        return payload;
+      }
+      return awayWatch ? { ...payload, awayWatch } : payload;
+    };
+    const answer = async (payload) => res.json(await withAwayWatch(await withFacts(payload)));
+    if (!svc.pre_service_brief) return answer({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
     // from the read path (regeneration is already gated, and a rollback
@@ -24068,7 +24097,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const parsedBrief = typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief;
     if (String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE) {
       if (!PrevisitBrief.briefGateEnabled()) {
-        return res.json(await withFacts({ brief: null }));
+        return answer({ brief: null });
       }
       // A reschedule or a direct service_type rewrite (edit modal,
       // estimate acceptance, call flows) leaves the stored brief behind —
@@ -24077,7 +24106,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       // grounding-hash mismatch, both stamps being hashed facts).
       const staleReason = PrevisitBrief.briefStaleReason(parsedBrief, svc);
       if (staleReason) {
-        return res.json(await withFacts({ brief: null, stale: staleReason }));
+        return answer({ brief: null, stale: staleReason });
       }
     }
     const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
@@ -24086,7 +24115,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // visit brief's access block is a snapshot from the :19/:49 sweep —
     // a gate code changed since generation must reach the tech from the
     // live facts, not the cached copy.
-    res.json(await withFacts(served));
+    await answer(served);
   } catch (err) { next(err); }
 });
 

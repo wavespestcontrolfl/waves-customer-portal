@@ -26,6 +26,7 @@
  *   GATE_ESTIMATE_LAWN_LIMITS=true (owner 2026-10-22: a recurring lawn estimate says in writing what the program can and can't fix, and the office can flag other grasses (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) and suspected virus streaks on the lawn's turf profile; each flag adds one line to the estimate page, the estimate PDF and the pdfkit fallback. The tech sheet warns when Celsius WG is picked on a carpetgrass lawn. Read at call time via estimateLawnLimitsLive(), strict 'true', dark by default; off = every estimate, turf profile and tech sheet output exactly as before. Sends nothing and prints no prices.)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
+ *   GATE_AWAY_WATCH=true (WaveGuard perk Away Watch + Welcome Home, owner approved 2026-10-31 and told us to build 2026-11-01: a WaveGuard member (isMembershipCustomerRow; every surface and every consumer checks it, so dates on a non-member's row do nothing) sets the day they leave and the day they are back, in the customer app (Property tab) or in Customer 360 (a technician's 360 view never carries the dates). On each visit inside that window the tech job card and the tech Visit Brief (GET /admin/schedule/:id/visit-brief, key awayWatch, after the reassignment recheck) say to take 3 photos of the outside of the home from the ground and note standing water, the closeout refuses a performed visit with fewer than 3 photos (away_watch_closeout_photos_upload_required; the body's completion photos, the visit photos staged from Tech Home and a linked lawn assessment's customer-visible photos each count once), and the last visit before the return day also says to do a lanai cobweb sweep (no product). The photos reach the member in the normal completion text and service report; it sends no new message. Strict opt-in: exactly 'true', read at call time by server/config/feature-gates.js awayWatchLive(). Dark by default; off = the two writers ignore away_watch_from / away_watch_until, neither GET returns them, the job card and closeout are unchanged. Not a security or home-watch service. The pest Away Mode (property_preferences.away_mode_until) is a separate feature.)
  *   GATE_SMS_BARE_YES_REPLY=true (owner 2026-10-29, weekly sweep #5007 B3: a bare "YES" text from a number with nothing to re-subscribe (no active suppression, texts not turned off on the customer, no recipient ask the YES would confirm) is an ordinary reply: it reaches the reply bell and the inbound consumers instead of getting "You've been re-subscribed". START and the other opt-in keywords are unchanged; a failed lookup keeps the opt-in. Read at call time by server/routes/twilio-webhook.js via smsBareYesReplyLive(); dark by default; off = a bare YES is START, as before. Sends nothing new to a customer.)
  *   GATE_CALL_EMAIL_CHECKS=true (owner 2026-10-29 "yes build", after the call-agent audit: checks on an email heard on a call. The Gemini-only spelling decoder falls back to OpenAI (the 2026-10-05 spelled-email rule keeps working when Gemini fails); a domain with no mail server is set aside with an email_invalid card; a SendGrid "no mail server" failure is a bad address (no retry; the office alert and the recording re-check, never an automatic correction or resend); the office can type the right address on any email card. Read at call time via callEmailChecksLive(); dark by default; off = exactly as before. It sends no new kind of message.)
  *   GATE_SMS_VOICE_PROFILE_PIN=<voice_profiles.version integer> (owner 2026-10-24 "do all": the texting AI's drafter uses THAT voice profile version instead of the newest approved one. Only a version that was once approved (status approved, or superseded with an approval row in activity_log) counts; a missing, pending or rejected version, or a value that is not a whole number, falls back to the newest approved profile and logs once, with no customer data. The nightly distiller keeps running and approving as before: only the drafter's reading is pinned. The same pin is what graduation, the sealed exam and auto-send read as the effective profile. The phone agent keeps reading the newest approved profile. Each draft's intended_actions.voice_profile_version already carries the version used. Read at call time by server/services/sms-shadow-drafter.js via smsVoiceProfilePinVersion(); dark by default (unset = byte-identical); a set pin adds the prompt-version tag v. Sends nothing to a customer.)
@@ -1574,6 +1575,9 @@ const gates = {
   // read with no bell. Read at call time by server/routes/twilio-webhook.js
   // smsCourtesyAfterTemplateLive() — this entry is for logGateStatus only.
   smsCourtesyAfterTemplate: process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
+  // Away Watch + Welcome Home (owner 2026-10-31): a member's away dates drive a tech job-card line and a
+  // 3-photo closeout minimum. Read at call time by awayWatchLive() — this entry is for logGateStatus only.
+  awayWatch: process.env.GATE_AWAY_WATCH === 'true',
   // Bare YES as a reply (owner 2026-10-29, weekly sweep #5007 B3): a bare "YES" from a number
   // with nothing to re-subscribe is an ordinary inbound reply, not START. Read at call time by
   // server/routes/twilio-webhook.js smsBareYesReplyLive() — this entry is for logGateStatus only.
@@ -8798,6 +8802,13 @@ function smsCourtesyAfterTemplateLive() {
   return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
 }
 
+// GATE_AWAY_WATCH read at CALL time — strict `=== 'true'`. The one reader for Away Watch + Welcome Home
+// (property-preferences-schema.js writers, routes/property.js and admin-customers.js responses,
+// job-card.js lines, complete-scheduled-service.js photo minimum). Off = no change anywhere.
+function awayWatchLive() {
+  return process.env.GATE_AWAY_WATCH === 'true';
+}
+
 // GATE_SMS_PROMPT_AUTOPROMOTE read at CALL time: 'true' = candidates, exams, activation and
 // rollback; 'observe' = candidates, exams and recorded decisions only, nothing activates;
 // unset or anything else = off. The canonical reader for sms-prompt-patch.js and the cron.
@@ -9363,6 +9374,8 @@ module.exports.specialtyReportVoiceLive = specialtyReportVoiceLive;
 
 // GATE_SMS_COURTESY_AFTER_TEMPLATE reader, on its own line so gate PRs never conflict.
 module.exports.smsCourtesyAfterTemplateLive = smsCourtesyAfterTemplateLive;
+// GATE_AWAY_WATCH reader, on its own line so gate PRs never conflict.
+module.exports.awayWatchLive = awayWatchLive;
 // GATE_SMS_BARE_YES_REPLY reader, on its own line so gate PRs never conflict.
 module.exports.smsBareYesReplyLive = smsBareYesReplyLive;
 

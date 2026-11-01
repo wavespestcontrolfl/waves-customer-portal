@@ -85,6 +85,7 @@ const { buildCompletionAdvisory, approvedReportProductFacts, withApplicationHold
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
+const AwayWatch = require('./away-watch');
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
@@ -1322,6 +1323,14 @@ function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MI
   err.isOperational = true;
   err.code = 'tree_shrub_closeout_photos_upload_required';
   err.details = errors.map((entry) => entry.message).filter(Boolean);
+  return err;
+}
+
+// GATE_AWAY_WATCH: same refusal path as the Tree & Shrub minimum, its own code and words.
+function awayWatchPhotoUploadRequiredError(uploadResult) {
+  const err = treeShrubPhotoUploadRequiredError(uploadResult, AwayWatch.AWAY_WATCH_MIN_PHOTOS);
+  err.message = AwayWatch.CLOSEOUT_PHOTO_MESSAGE;
+  err.code = 'away_watch_closeout_photos_upload_required';
   return err;
 }
 
@@ -4652,6 +4661,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // P1 #4127) — the legacy Tree/Shrub form gate above already does.
     const treeShrubPhotoGateRequired = treeShrubCloseoutRequired
       || ((typedFindingsType === 'tree_shrub' || hasTreeShrubCompanion) && !isIncompleteVisit && !issuedInvoiceCloseout);
+    // GATE_AWAY_WATCH (owner 2026-10-31): a performed visit whose own scheduled day is inside the member's away
+    // window needs AWAY_WATCH_MIN_PHOTOS uploaded photos. Not performed (inspection_only, customer_declined,
+    // incomplete) and the invoice-issued closeout (no photos submitted) are exempt. Gate off: no read, no rule.
+    const awayWatchPhotoGateRequired = !AwayWatch.NOT_PERFORMED_OUTCOMES.includes(visitOutcome)
+      && !issuedInvoiceCloseout
+      && await AwayWatch.visitInAwayWatchWindow(db, svc.id);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -8847,7 +8862,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Packets keep photo identities, not retryable image bytes. Every
         // submitted photo must therefore be durable before the record phase
         // returns; a failed upload rolls the packet back for a complete retry.
-        if (treeShrubPhotoGateRequired || (packetRecords && completionPhotos?.length)) {
+        if (treeShrubPhotoGateRequired || awayWatchPhotoGateRequired || (packetRecords && completionPhotos?.length)) {
           completionPhotoUploadResult = await uploadServicePhotoDataUrls({
             serviceRecordId: record.id,
             photos: completionPhotos,
@@ -8867,6 +8882,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
               TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
             );
           }
+          // Away Watch counts every photo this closeout attaches, not only the body's: the visit photos staged
+          // from Tech Home or the pest sheet (promoted above) and the linked lawn assessment's photos count too,
+          // so a Fast Complete sheet with no photo field of its own can still close an away visit.
+          if (awayWatchPhotoGateRequired && await AwayWatch.awayWatchClosePhotoCount(trx, {
+            promotedIds: [...promotedPhotoIds],
+            uploadResult: completionPhotoUploadResult,
+            lawnAssessmentId: linkedLawnAssessmentId,
+          }) < AwayWatch.AWAY_WATCH_MIN_PHOTOS) {
+            throw awayWatchPhotoUploadRequiredError(completionPhotoUploadResult);
+          }
           if (packetRecords && completionPhotoUploadResult.failed > 0) {
             throw packetPhotoUploadRequiredError(completionPhotoUploadResult);
           }
@@ -8878,7 +8903,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
               uniqueUploaded: uniqueCompletionPhotosUploaded,
               failed: completionPhotoUploadResult.failed,
               uploadedAt: new Date().toISOString(),
-              ...(treeShrubPhotoGateRequired ? { requiredMinimum: TREE_SHRUB_MIN_CLOSEOUT_PHOTOS } : {}),
+              ...(treeShrubPhotoGateRequired || awayWatchPhotoGateRequired ? {
+                requiredMinimum: Math.max(
+                  treeShrubPhotoGateRequired ? TREE_SHRUB_MIN_CLOSEOUT_PHOTOS : 0,
+                  awayWatchPhotoGateRequired ? AwayWatch.AWAY_WATCH_MIN_PHOTOS : 0,
+                ),
+              } : {}),
             },
           };
           record.structured_notes = photoNotes;

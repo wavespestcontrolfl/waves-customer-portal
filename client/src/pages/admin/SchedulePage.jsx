@@ -7401,6 +7401,14 @@ export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFe
   );
 }
 
+// GATE_AWAY_WATCH: the Away Watch / Welcome Home lines for a visit inside the member's away window. The server
+// words them; the key is absent while the gate is off or the visit is outside the window.
+export function JobCardAwayWatch({ lines, D }) {
+  return (lines || []).map((line) => (
+    <p key={line} style={{ fontSize: 14, lineHeight: 1.5, fontWeight: 500, color: D.text, margin: "0 0 8px" }}>{line}</p>
+  ));
+}
+
 export function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
@@ -7415,6 +7423,7 @@ export function JobCardTab({ card, loading, error, D }) {
       {card.paragraph?.text && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
+      <JobCardAwayWatch lines={card.awayWatch?.lines} D={D} />
       <JobCardCustomerRequest request={card.notes?.customerRequest} D={D} />
       <JobCardCustomerTexts texts={card.notes?.customerTexts} D={D} />
       <JobCardPrepPhotos serviceId={card.serviceId} submissions={card.notes?.prepPhotos} D={D} />
