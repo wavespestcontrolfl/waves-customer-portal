@@ -92,13 +92,18 @@ function serviceTaxRule(registry, service) {
 // it off a commercial account is taxed by property type and service, so there is nothing to predict). Business building: the row's rule, which is the per-row rule GET /proposal
 // served for a saved row that names a service (kept only while the row's service is unchanged), else the family
 // registry's rule the builder restores. Undefined when there is no basis (no pick, or a service the registry lacks).
-// The calculator answers a verified exemption first (tax-calculator.js step 1): an exempt customer's self-pay bills carry no
-// tax whatever the building use or the gate, and an exemption read that failed (null) leaves no basis for any row. A payer-billed
-// bill can follow the payer's own exemption instead (calculateTax skipCustomerExemption), which the builder cannot know; the
-// warning covers the self-pay bill.
-function billedTaxableFor(buildingUse, row, registry, savedRules, { buildingUseTaxLive, taxExemptVerified } = {}) {
-  if (taxExemptVerified === null) return undefined;
-  if (taxExemptVerified === true) return false;
+// Visit close answers the Bill-To payer first (payer.resolveForInvoice; GET /proposal serves the account's payer as
+// billToTaxBasis): an exempt payer's bills carry no tax, and a taxed payer's bills skip the customer's own exemption
+// (calculateTax skipCustomerExemption). A self-pay bill answers a verified exemption first (tax-calculator.js step 1): an
+// exempt customer's bills carry no tax whatever the building use or the gate. A read that failed (null) leaves no basis
+// for any row.
+function billedTaxableFor(buildingUse, row, registry, savedRules, { buildingUseTaxLive, taxExemptVerified, billToTaxBasis } = {}) {
+  if (billToTaxBasis === null) return undefined;
+  if (billToTaxBasis === 'payer_exempt') return false;
+  if (billToTaxBasis !== 'payer_taxed') {
+    if (taxExemptVerified === null) return undefined;
+    if (taxExemptVerified === true) return false;
+  }
   if (buildingUse === 'residential') return buildingUseTaxLive ? false : undefined;
   if (buildingUse !== 'nonresidential') return undefined;
   const saved = row.id ? savedRules?.[row.id] : null;
@@ -456,6 +461,8 @@ function CommercialProposalEditor() {
   const [buildingUseTaxLive, setBuildingUseTaxLive] = useState(false);
   // GET /proposal taxExemptVerified: true / false, or null when the read failed (no row warnings then).
   const [taxExemptVerified, setTaxExemptVerified] = useState(false);
+  // GET /proposal billToTaxBasis: 'self', 'payer_exempt' or 'payer_taxed'; null when the read failed (no row warnings then).
+  const [billToTaxBasis, setBillToTaxBasis] = useState('self');
   // Family → generated inclusions/exclusions/taxability registry, served on
   // load like responsibilityRegistry — the family-change resync prunes the
   // old family's generated lines and installs the new family's stack by
@@ -500,6 +507,8 @@ function CommercialProposalEditor() {
     setAutopayEnabled(data.commercialAutopayEnabled === true);
     setBuildingUseTaxLive(data.buildingUseTaxLive === true);
     setTaxExemptVerified(data.taxExemptVerified === null ? null : data.taxExemptVerified === true);
+    setBillToTaxBasis(data.billToTaxBasis === null ? null
+      : ['payer_exempt', 'payer_taxed'].includes(data.billToTaxBasis) ? data.billToTaxBasis : 'self');
     if (!bidToolsChosenRef.current) {
       setBidToolsOpen(
         (data.projectCosting?.rows?.length || 0) > 0
@@ -617,7 +626,7 @@ function CommercialProposalEditor() {
   const taxRate = (Number(taxRatePct) || 0) / 100;
   const programsMode = programsState.some(programRowIsPriced);
   // Staff warning on a row whose Taxable box differs from what visit bills do (billedTaxableFor); none on a locked proposal.
-  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current, { buildingUseTaxLive, taxExemptVerified }));
+  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current, { buildingUseTaxLive, taxExemptVerified, billToTaxBasis }));
   const differingTaxRows = [
     ...programsState,
     ...(programsMode ? [] : buildings.flatMap((b) => b.lineItems || [])),

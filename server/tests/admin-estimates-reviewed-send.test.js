@@ -1873,6 +1873,37 @@ describe('GET /:id/proposal taxExemptVerified (the Taxable-box warning compares 
   });
 });
 
+describe('GET /:id/proposal billToTaxBasis (a payer-billed visit bill follows the payer\'s tax status)', () => {
+  const payer = require('../services/payer');
+  afterEach(() => jest.restoreAllMocks());
+
+  test.each([
+    ['no active Bill-To payer', { payerId: null, taxExempt: false }, 'self'],
+    ['a tax-exempt payer', { payerId: 'synthetic-payer', taxExempt: true }, 'payer_exempt'],
+    ['a taxed payer', { payerId: 'synthetic-payer', taxExempt: false }, 'payer_taxed'],
+  ])('%s', async (_label, resolved, expected) => {
+    row.customer_id = 'synthetic-customer';
+    const resolve = jest.spyOn(payer, 'resolveForInvoice').mockResolvedValue(resolved);
+    expect((await invoke('/:id/proposal', 'get')).body.billToTaxBasis).toBe(expected);
+    expect(resolve).toHaveBeenCalledWith({ customerId: 'synthetic-customer', throwOnError: true });
+  });
+
+  test('no linked customer: self, without a payer lookup', async () => {
+    row.customer_id = null;
+    const resolve = jest.spyOn(payer, 'resolveForInvoice');
+    expect((await invoke('/:id/proposal', 'get')).body.billToTaxBasis).toBe('self');
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  test('a failed payer read is null (unknown), and the builder read still succeeds', async () => {
+    row.customer_id = 'synthetic-customer';
+    jest.spyOn(payer, 'resolveForInvoice').mockRejectedValue(new Error('synthetic lookup failure'));
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.billToTaxBasis).toBeNull();
+    expect(res.body.proposal).toBeTruthy();
+  });
+});
+
 describe('commercial Auto Pay payment term', () => {
   const recurring = (commercialTerms) => ({
     enabled: true,

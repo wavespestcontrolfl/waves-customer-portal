@@ -4544,6 +4544,18 @@ router.get('/:id/proposal', async (req, res, next) => {
         taxExemptVerified = Boolean(await require('../services/tax-calculator').findVerifiedExemption(estimate.customer_id));
       } catch (_) { taxExemptVerified = null; }
     }
+    // Whose tax status the visit bills follow. Visit close resolves the Bill-To payer first (payer.resolveForInvoice in
+    // complete-scheduled-service.js); a visit booked from a proposal carries no payer of its own, so the account's active
+    // payer decides. An exempt payer's bills carry no tax; a taxed payer's bills skip the customer's own exemption
+    // (calculateTax skipCustomerExemption). 'self' with no linked customer or no active payer. A failed read is null:
+    // the builder then predicts nothing for any row.
+    let billToTaxBasis = 'self';
+    if (estimate.customer_id) {
+      try {
+        const payer = await require('../services/payer').resolveForInvoice({ customerId: estimate.customer_id, throwOnError: true });
+        if (payer?.payerId) billToTaxBasis = payer.taxExempt === true ? 'payer_exempt' : 'payer_taxed';
+      } catch (_) { billToTaxBasis = null; }
+    }
     const proposalGenerate = require('../services/estimate-proposal-generate');
     // Never throws: a failed read is null, and the family defaults apply.
     const taxabilityMap = await proposalGenerate.loadTaxabilityMap(db);
@@ -4568,6 +4580,9 @@ router.get('/:id/proposal', async (req, res, next) => {
       // Verified exemption (true / false; null = could not be read): an exempt customer's self-pay bills carry no tax whatever the
       // building use, so the builder's Taxable-box warning compares with not taxable (null: no warning).
       taxExemptVerified,
+      // Bill-To tax basis ('self' / 'payer_exempt' / 'payer_taxed'; null = could not be read): a payer-billed visit bill
+      // follows the payer's tax status, not the customer's exemption, so the Taxable-box warning follows it too.
+      billToTaxBasis,
       // GATE_COMMERCIAL_PROPOSAL_SIGN: where the customer's online agreement stands (none / awaiting /
       // signed) for the builder's read-only line. The key is absent with the gate off.
       ...(commercialAgreement ? { commercialAgreement } : {}),
