@@ -240,6 +240,13 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     ['a visit staff locked from Auto-Dispatch', async () => {
       await trx('scheduled_services').where({ id: serviceId }).update({ auto_dispatch_locked: true });
     }, 'auto_dispatch_held'],
+    ['a visit Auto-Dispatch already moved twice (the default limit)', async () => {
+      const moved = { scheduled_service_id: serviceId, customer_id: customerId, reason_code: 'auto_dispatch', initiated_by: 'auto_dispatch', original_window: '09:00-10:00', new_window: '13:00-14:00' };
+      await trx('reschedule_log').insert([
+        { ...moved, original_date: today, new_date: today },
+        { ...moved, original_date: today, new_date: today, original_window: '13:00-14:00', new_window: '09:00-10:00' },
+      ]);
+    }, 'auto_move_limit'],
   ])('%s: refused before any write', async (_label, arrange, reason) => {
     await insertVisit();
     await arrange();
@@ -248,7 +255,8 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     expect(await handOff()).toEqual({ ok: false, reason });
 
     expect(await visitRow()).toEqual(before);
-    expect(await trx('reschedule_log').where({ scheduled_service_id: serviceId })).toEqual([]);
+    // No hand-off row (a case's own setup may log earlier Auto-Dispatch moves).
+    expect(await trx('reschedule_log').where({ scheduled_service_id: serviceId, reason_code: 'customer_pick' })).toEqual([]);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });

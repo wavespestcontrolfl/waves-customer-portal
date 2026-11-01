@@ -3098,20 +3098,43 @@ function placeholderOfLength(url) {
 // link. previewUrl is a placeholder of the link the send will use (the
 // visit's existing short code, or a fresh code's length); nothing is minted
 // here. Throws on a read failure (callers refuse).
+// The text promises Auto-Dispatch books the visit if the customer does not
+// pick. Null when its run could; else the refusal. Each check is Auto-Dispatch's
+// own rule (or the rebooker's, for the non-admin move it makes), asked about the
+// row as the hand-off leaves it: parked on the due date, with no window. The
+// staff lock and exclusion are pickVisitRefusal's (they are rechecked on the
+// locked row); the day-move guard and the person-placed check never hold a
+// windowless due-date row, and AUTO_DISPATCH_REQUIRE_PORTAL_PREFERENCES
+// already turns isCustomerRecurringDispatchEnabled() off.
+async function autoDispatchFallbackRefusal(service, now) {
+  const adConfig = require('./auto-dispatch/config');
+  if (!adConfig.isCustomerRecurringDispatchEnabled()) return 'auto_dispatch_off';
+  // No usable location: MISSING_GEO.
+  if (!require('./auto-dispatch/geo').resolveGeo(service)) return 'no_location';
+  // The parked date must be one the plan's calendar allows a non-admin mover:
+  // in season (OFF_SEASON) and inside the visit's own lawn round (OUT_OF_ROUND,
+  // measured from the date it sits on now, before the hand-off moves it).
+  const { dueDate } = pickDates(now);
+  if (require('./recurring-appointment-seeder').clampDateToSeason(service.recurring_pattern, dueDate) !== dueDate) return 'out_of_season';
+  if (SmartRebooker.leavesOwnRound(service.recurring_pattern, dateOnlyString(service.scheduled_date), dueDate, etDateString(now))) return 'out_of_round';
+  // An unresolved plan_lapsed alert: RECURRING_PLAN_INACTIVE (same read, same fail-open rule).
+  if (!(await require('./auto-dispatch/eligibility').isRecurringPlanActive(service, db)).active) return 'plan_lapsed';
+  // The automatic-move limit, counted from the durable log (fails closed).
+  const moveLimit = require('./auto-dispatch/move-limit');
+  const config = adConfig.getAutoDispatchConfig();
+  const counts = await moveLimit.loadMoveCounts(db, [service.id], config);
+  if (moveLimit.limitSkip(service, counts, config)) return counts ? 'auto_move_limit' : 'pick_check_failed';
+  return null;
+}
+
 async function pickContext(service, now) {
   const refusal = pickVisitRefusal(service, now);
   if (refusal) return { ok: false, reason: refusal };
   // An active, not archived customer with a phone.
   if (service.customer_active !== true || service.customer_deleted_at) return { ok: false, reason: 'customer_inactive' };
   if (!service.phone) return { ok: false, reason: 'no_phone' };
-  if (!require('./auto-dispatch/config').isCustomerRecurringDispatchEnabled()) return { ok: false, reason: 'auto_dispatch_off' };
-  // Auto-Dispatch skips a visit with no usable location (MISSING_GEO), so it
-  // could never book one the customer leaves alone.
-  if (!require('./auto-dispatch/geo').resolveGeo(service)) return { ok: false, reason: 'no_location' };
-  // Nor one whose plan carries an unresolved plan_lapsed alert (its own
-  // plan-active gate, same read and same fail-open rule).
-  const plan = await require('./auto-dispatch/eligibility').isRecurringPlanActive(service, db);
-  if (!plan.active) return { ok: false, reason: 'plan_lapsed' };
+  const fallbackRefusal = await autoDispatchFallbackRefusal(service, now);
+  if (fallbackRefusal) return { ok: false, reason: fallbackRefusal };
   // The landed row (confirmation cleared) must stay one the customer may see
   // and move, or the link would open a refusal.
   const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
@@ -3384,6 +3407,9 @@ const PICK_REFUSAL_COPY = {
   auto_dispatch_off: 'Auto-Dispatch is off, so nothing would book this visit if the customer does not pick.',
   no_location: 'This visit has no map location, so Auto-Dispatch could not book it if the customer does not pick.',
   plan_lapsed: 'This plan has lapsed, so Auto-Dispatch would not book this visit if the customer does not pick.',
+  out_of_season: 'A week from now is outside this seasonal plan, so pick a day yourself.',
+  out_of_round: 'A week from now is outside this lawn round, so pick a day yourself.',
+  auto_move_limit: 'Auto-Dispatch already moved this visit as many times as it may, so pick a day yourself.',
   office_review_pending: 'This booking is waiting for office review.',
   customer_texts_off: 'This customer does not get texts.',
   text_check_failed: 'Could not check whether this customer gets texts. Try again.',

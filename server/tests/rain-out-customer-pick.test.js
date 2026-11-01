@@ -23,6 +23,8 @@ jest.mock('../services/rebooker', () => {
     LIVE_LIFECYCLE_RESET: actual.LIVE_LIFECYCLE_RESET,
     needsLifecycleRewind: actual.needsLifecycleRewind,
     dateExceptionStamp: actual.dateExceptionStamp,
+    // The plan calendar's lawn-round rule the hand-off asks before parking a visit.
+    leavesOwnRound: actual.leavesOwnRound,
     applyLiveMoveHistory: jest.fn(actual.applyLiveMoveHistory),
     applyLiveMovePostCommitEffects: jest.fn().mockResolvedValue({ techCleared: true }),
   };
@@ -46,7 +48,10 @@ jest.mock('../services/messaging/validators/suppression', () => ({
   checkSuppression: jest.fn(),
 }));
 jest.mock('../services/reschedule-link', () => ({ buildRescheduleLink: jest.fn() }));
-jest.mock('../services/auto-dispatch/config', () => ({ isCustomerRecurringDispatchEnabled: jest.fn() }));
+jest.mock('../services/auto-dispatch/config', () => ({
+  ...jest.requireActual('../services/auto-dispatch/config'),
+  isCustomerRecurringDispatchEnabled: jest.fn(),
+}));
 jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlook: jest.fn().mockResolvedValue(null),
   getHourlyRainOutlook: jest.fn().mockResolvedValue(null),
@@ -98,6 +103,7 @@ function builder(table, inTrx) {
   const b = {
     where() { return b; }, leftJoin() { return b; }, select() { return b; }, forUpdate() { return b; },
     whereIn() { return b; }, whereNull() { return b; }, orderBy() { return b; },
+    whereRaw() { return b; }, groupBy() { return b; }, count() { return b; },
     async first() {
       state.reads.push(`${inTrx ? 'trx:' : ''}${table}`);
       if (table === 'scheduled_services') {
@@ -114,6 +120,13 @@ function builder(table, inTrx) {
     async update(patch) { state.writes.push({ op: 'update', table, patch }); return 1; },
     async insert(row) { state.writes.push({ op: 'insert', table, row }); return [1]; },
   };
+  // The automatic-move count (auto-dispatch/move-limit countAutoMoves) awaits the bare query.
+  if (table === 'reschedule_log' && !inTrx) {
+    b.then = (resolve, reject) => {
+      state.reads.push('reschedule_log');
+      return Promise.resolve(state.autoMoveRows || []).then(resolve, reject);
+    };
+  }
   return b;
 }
 
@@ -240,9 +253,17 @@ describe('handOffToCustomer refusals write nothing', () => {
     ['a visit staff locked from Auto-Dispatch', { auto_dispatch_locked: true }, 'auto_dispatch_held'],
     ['a visit excluded from Auto-Dispatch', { auto_dispatch_excluded: true }, 'auto_dispatch_held'],
     ['a visit with no usable location', { customer_latitude: null, customer_longitude: null }, 'no_location'],
+    ['a Feb-Oct seasonal visit whose parked date is in winter', { recurring_pattern: 'seasonal_feb_oct' }, 'out_of_season'],
+    ['a lawn round visit whose parked date leaves its round', { recurring_pattern: 'lawn_rounds_9' }, 'out_of_round'],
   ])('%s: %s', async (_label, patch, reason) => {
     state.service = { ...state.service, ...patch };
     expect(await handOff()).toEqual({ ok: false, reason });
+    expectNothingWritten();
+  });
+
+  test('a visit Auto-Dispatch already moved as many times as it may: auto_move_limit', async () => {
+    state.autoMoveRows = [{ scheduled_service_id: 'svc-1', moves: 2 }];
+    expect(await handOff()).toEqual({ ok: false, reason: 'auto_move_limit' });
     expectNothingWritten();
   });
 
