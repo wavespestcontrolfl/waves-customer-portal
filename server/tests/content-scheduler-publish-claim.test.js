@@ -483,18 +483,19 @@ describe('atomic SOCIAL publishing claim', () => {
     expect(plainCall).not.toHaveProperty('noAiImage');
   });
 
-  test('a series row posts its hosted image (also as the GBP picture), its video and its GBP locations; a campaign draft is unchanged', async () => {
+  test('a series row posts its hosted image (also as the GBP picture when it asked for GBP), its video and its GBP locations; a campaign draft is unchanged', async () => {
     const SocialMedia = enableSocial();
     SocialMedia.publishToAll.mockResolvedValue({ ok: true });
     const base = { ...social, source_type: 'series', source_guid: 'series:wk-1', platforms_posted: '["facebook","gbp"]', custom_content: '{"facebook":"fb","gbp":"gbp copy"}' };
     const still = { ...base, id: 'soc-s1', image_url: 'https://cdn.example.com/series-1.jpg', gbp_location_ids: ['sarasota', 'venice'] };
     const reel = { ...base, id: 'soc-s2', platforms_posted: '["facebook","instagram"]', video_url: 'https://cdn.example.com/series-2.mp4', gbp_location_ids: null };
     const draft = { ...base, id: 'soc-c1', source_type: 'campaign_builder', image_url: 'https://cdn.example.com/card.png', video_url: 'https://cdn.example.com/x.mp4', gbp_location_ids: ['venice'] };
-    mockState.pendingSocials = [still, reel, draft];
+    const feed = { ...base, id: 'soc-s3', platforms_posted: '["facebook","instagram"]', image_url: 'https://cdn.example.com/series-3.jpg' };
+    mockState.pendingSocials = [still, reel, draft, feed];
 
     await ContentScheduler.processScheduledPosts();
 
-    const [stillCall, reelCall, draftCall] = SocialMedia.publishToAll.mock.calls.map(([arg]) => arg);
+    const [stillCall, reelCall, draftCall, feedCall] = SocialMedia.publishToAll.mock.calls.map(([arg]) => arg);
     expect(stillCall).toMatchObject({
       guid: 'series:wk-1',
       channels: ['facebook', 'gbp'],
@@ -512,6 +513,9 @@ describe('atomic SOCIAL publishing claim', () => {
     // the campaign draft keeps exactly its old options: image only, no video, no GBP fields
     expect(draftCall).toMatchObject({ imageUrl: 'https://cdn.example.com/card.png', noAiImage: true, postId: 'soc-c1' });
     for (const key of ['videoUrl', 'gbpImageUrl', 'gbpLocationIds']) expect(draftCall).not.toHaveProperty(key);
+    // The image is the GBP picture only on a row that asked for GBP.
+    expect(feedCall).toMatchObject({ imageUrl: 'https://cdn.example.com/series-3.jpg', noAiImage: true, postId: 'soc-s3' });
+    expect(feedCall).not.toHaveProperty('gbpImageUrl');
   });
 
   test('a series row reads gbp_location_ids from a JSON string, and on a dry run passes no postId', async () => {

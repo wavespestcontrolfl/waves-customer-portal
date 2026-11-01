@@ -98,8 +98,8 @@ function storedList(value) {
 // own media. A saved campaign draft: its own image, and never a fresh generated
 // image in place of the saved one. A series post (routes/social-series-ingest.js,
 // source_type 'series'): its hosted image or video, the same image as the GBP
-// picture, and the GBP locations it names (gbp_location_ids; none stored = every
-// location). A real publish folds its results into the same row (postId: one
+// picture when the row asked for GBP, and the GBP locations it names
+// (gbp_location_ids; none stored = every location). A real publish folds its results into the same row (postId: one
 // History entry). A dry run does not: publishToAll would replace the REQUESTED
 // channels in platforms_posted with results, and the next tick reads them; it
 // records like a typed scheduled post instead. A saved draft takes no GBP image
@@ -111,8 +111,13 @@ function storedPostOptions(social, { dryRun = false } = {}) {
     const imageUrl = httpUrlOrNull(social.image_url);
     const videoUrl = httpUrlOrNull(social.video_url);
     const gbpLocationIds = storedList(social.gbp_location_ids);
+    // The image doubles as the GBP picture only on a row that asked for GBP:
+    // the intake accepts only media the series job uploaded through /media
+    // (its rendered cards), never another CDN object.
+    const gbpImage = imageUrl && storedChannels(social.platforms_posted).includes('gbp');
     return {
-      ...(imageUrl ? { imageUrl, gbpImageUrl: imageUrl } : {}),
+      ...(imageUrl ? { imageUrl } : {}),
+      ...(gbpImage ? { gbpImageUrl: imageUrl } : {}),
       ...(videoUrl ? { videoUrl } : {}),
       ...(gbpLocationIds ? { gbpLocationIds } : {}),
       noAiImage: true,

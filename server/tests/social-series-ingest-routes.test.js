@@ -52,6 +52,9 @@ const { noStore } = require('../middleware/no-store');
 
 const TOKEN = 'series-test-token-0123456789';
 const CDN = 'cdn.example.com';
+// What POST /media mints (uploadImageToS3 / uploadVideoToS3 under a series-<uuid> name).
+const IMG_URL = `https://${CDN}/social-media/series-11111111-2222-4333-8444-555555555555.jpg`;
+const VID_URL = `https://${CDN}/social-media/series-66666666-7777-4888-9999-000000000000.mp4`;
 const NOW = Date.parse('2026-11-02T12:00:00Z');
 
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(32)]);
@@ -104,7 +107,7 @@ const good = (over = {}) => ({
   title: 'Week 12: pest myths',
   platforms: ['facebook', 'instagram', 'gmb'],
   caption: 'Week 12: three pest myths about Florida homes.',
-  mediaUrl: `https://${CDN}/social-media/series-abc.jpg`,
+  mediaUrl: IMG_URL,
   gbpLocation: 'Sarasota',
   scheduleDate: '2026-11-03T09:00:00-05:00',
   ...over,
@@ -201,17 +204,27 @@ describe('POST /posts validation', () => {
   test('instagram needs media; a video needs media and cannot go to gbp', async () => {
     await refused({ mediaUrl: undefined, platforms: ['instagram'] }, 'media_required');
     await refused({ mediaUrl: undefined, isVideo: true, platforms: ['facebook'] }, 'media_required');
-    await refused({ isVideo: true, platforms: ['facebook', 'gbp'] }, 'video_not_supported_on_gbp');
+    await refused({ isVideo: true, mediaUrl: VID_URL, platforms: ['facebook', 'gbp'] }, 'video_not_supported_on_gbp');
   });
 
-  test('mediaUrl must be https on the social CDN host', async () => {
+  test('mediaUrl must be a URL /media minted: https, the social CDN host, a series-<uuid> path', async () => {
     await refused({ mediaUrl: 'https://evil.example.com/a.jpg' }, 'invalid_media_url');
+    // Another object on the same CDN (a studio image, a blog hero) is refused.
+    await refused({ mediaUrl: `https://${CDN}/social-media/studio-ai-scene.jpg` }, 'invalid_media_url');
+    await refused({ mediaUrl: `https://${CDN}/social-media/series-1.jpg` }, 'invalid_media_url');
+    await refused({ mediaUrl: `${IMG_URL}?x=1` }, 'invalid_media_url');
+    await refused({ mediaUrl: IMG_URL.replace('.jpg', '.png') }, 'invalid_media_url');
     await refused({ mediaUrl: `http://${CDN}/a.jpg` }, 'invalid_media_url');
     await refused({ mediaUrl: `https://${CDN}.evil.example.com/a.jpg` }, 'invalid_media_url');
     await refused({ mediaUrl: `https://user@evil.example.com@${CDN}/a.jpg` }, 'invalid_media_url');
     await refused({ mediaUrl: 'not a url' }, 'invalid_media_url');
     delete process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     await refused({}, 'invalid_media_url');
+  });
+
+  test('the media kind must match isVideo', async () => {
+    await refused({ platforms: ['facebook'], mediaUrl: VID_URL }, 'media_kind_mismatch');
+    await refused({ platforms: ['facebook'], mediaUrl: IMG_URL, isVideo: true }, 'media_kind_mismatch');
   });
 
   test('gbp needs a known location', async () => {
@@ -257,7 +270,7 @@ describe('POST /posts storage', () => {
       status: 'scheduled',
       publish_status: 'pending',
       scheduled_for: '2026-11-03T14:00:00.000Z',
-      image_url: `https://${CDN}/social-media/series-abc.jpg`,
+      image_url: IMG_URL,
       video_url: null,
     });
     // jsonb columns are sent as JSON text, requested channels only (gbp spelling)
@@ -278,14 +291,14 @@ describe('POST /posts storage', () => {
       id: 'reel-1',
       platforms: ['facebook', 'gbp'].filter((p) => p !== 'gbp'),
       caption: 'A short reel.',
-      mediaUrl: `https://${CDN}/social-media/series-1.mp4`,
+      mediaUrl: VID_URL,
       isVideo: true,
     });
     expect(status).toBe(201);
     const { row } = mockInserts[0];
     expect(row.title).toBe('reel-1');
     expect(row.scheduled_for).toBe(new Date(NOW).toISOString());
-    expect(row.video_url).toBe(`https://${CDN}/social-media/series-1.mp4`);
+    expect(row.video_url).toBe(VID_URL);
     expect(row.image_url).toBeNull();
     expect(row.gbp_location_ids).toBeNull();
     expect(JSON.parse(row.custom_content)).toEqual({ facebook: 'A short reel.' });
@@ -302,6 +315,25 @@ describe('POST /posts storage', () => {
       await post(good({ platforms: [spelling], mediaUrl: undefined, gbpLocation: location }));
       expect(JSON.parse(mockInserts[0].row.gbp_location_ids)).toEqual(expected);
     }
+  });
+
+  test('a stored id answers deduped before the time window and the switches: a retry never reads as failed', async () => {
+    mockExisting.row = { id: 'row-old', scheduled_for: new Date('2026-10-01T13:05:00Z') };
+    const late = await post(good({ scheduleDate: '2026-10-01T09:05:00-04:00' }));
+    expect(late.status).toBe(200);
+    expect(late.json).toMatchObject({ ok: true, id: 'row-old', deduped: true });
+    mockFlags.scheduledPosts = false;
+    mockFlags.instagramEnabled = false;
+    expect((await post(good())).json).toMatchObject({ ok: true, id: 'row-old', deduped: true });
+    expect(mockInserts).toHaveLength(0);
+  });
+
+  test('a failed dedupe lookup is a retryable 503', async () => {
+    const db = require('../models/db');
+    db.mockImplementationOnce(() => { throw new Error('db down'); });
+    const { status, json } = await post(good());
+    expect(status).toBe(503);
+    expect(json).toEqual({ ok: false, reason: 'store_failed' });
   });
 
   test('200 deduped when the id is already stored: nothing else is written', async () => {

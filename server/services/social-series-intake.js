@@ -26,6 +26,11 @@ const MAX_CHANNEL_CAPTION_CHARS = { gbp: 1500 };
 const ISO_WITH_OFFSET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/i;
 const MAX_PAST_MS = 60 * 60 * 1000;
 const MAX_AHEAD_MS = 60 * 24 * 60 * 60 * 1000;
+// The only paths POST /media mints: uploadImageToS3 stores social-media/series-<uuid>.jpg,
+// uploadVideoToS3 social-media/series-<uuid>.mp4. Any other object on the CDN (an
+// AI-generated studio image, a blog hero) is refused, so a series row can only post
+// media the series job itself uploaded.
+const MINTED_PATH_RE = /^\/social-media\/series-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|mp4)$/;
 // Request spelling -> the channel name publishToAll and the scheduler use.
 const CHANNEL_ALIASES = { facebook: 'facebook', instagram: 'instagram', gmb: 'gbp', gbp: 'gbp' };
 
@@ -78,16 +83,19 @@ function validateCaptions(body) {
   return { value: { caption, overrides } };
 }
 
-// Only a URL the /media route minted: https on the social CDN host.
+// Only a URL the /media route minted: https on the social CDN host, on a
+// series-<uuid> path, no query or fragment. Returns the URL and its kind.
 function validateMediaUrl(raw) {
   if (raw === undefined || raw === null) return { value: null };
   const cdn = String(process.env.SOCIAL_MEDIA_CDN_DOMAIN || '').trim().toLowerCase();
   let url = null;
   try { url = new URL(String(raw)); } catch { url = null; }
-  if (!cdn || !url || url.protocol !== 'https:' || url.username || url.password || url.host.toLowerCase() !== cdn) {
-    return refuse('invalid_media_url', 'mediaUrl must be an https URL on the social media host, from POST /media');
+  const minted = url && MINTED_PATH_RE.exec(url.pathname);
+  if (!cdn || !url || url.protocol !== 'https:' || url.username || url.password
+    || url.host.toLowerCase() !== cdn || url.search || url.hash || !minted) {
+    return refuse('invalid_media_url', 'mediaUrl must be a URL that POST /media returned');
   }
-  return { value: url.toString() };
+  return { value: { url: url.toString(), kind: minted[1] === 'mp4' ? 'video' : 'image' } };
 }
 
 function validateMedia(body, channels) {
@@ -96,9 +104,12 @@ function validateMedia(body, channels) {
   if (body.isVideo !== undefined && typeof body.isVideo !== 'boolean') return refuse('invalid_is_video', 'isVideo must be a boolean');
   const isVideo = body.isVideo === true;
   if (isVideo && !media.value) return refuse('media_required', 'isVideo requires mediaUrl');
+  if (media.value && (media.value.kind === 'video') !== isVideo) {
+    return refuse('media_kind_mismatch', isVideo ? 'isVideo needs an .mp4 mediaUrl' : 'an .mp4 mediaUrl needs isVideo: true');
+  }
   if (isVideo && channels.includes('gbp')) return refuse('video_not_supported_on_gbp', 'a video post cannot go to gbp');
   if (channels.includes('instagram') && !media.value) return refuse('media_required', 'instagram requires mediaUrl');
-  return { value: { mediaUrl: media.value, isVideo } };
+  return { value: { mediaUrl: media.value ? media.value.url : null, isVideo } };
 }
 
 // 'all' -> null (every GBP location). Otherwise one WAVES_LOCATIONS id, or a
@@ -200,6 +211,19 @@ function dbRow(row) {
   };
 }
 
+// The guid a body's id maps to, or null when the id is not valid (the full
+// validation then refuses it).
+function seriesGuidOf(body) {
+  const id = isPlainObject(body) ? validateId(body.id) : refuse('invalid_body');
+  return id.error ? null : `${SOURCE_TYPE}:${id.value}`;
+}
+
+// The stored row for a guid, as the route answers it, or null.
+async function findSeriesPost(guid) {
+  const stored = await db('social_media_posts').where({ source_guid: guid, source_type: SOURCE_TYPE }).first('id', 'scheduled_for');
+  return stored ? { id: stored.id, scheduledFor: new Date(stored.scheduled_for).toISOString() } : null;
+}
+
 // Idempotent on source_guid (partial unique index idx_social_posts_series_guid_unique).
 // Returns { id, deduped, scheduledFor }.
 async function insertSeriesPost(row) {
@@ -219,6 +243,6 @@ async function insertSeriesPost(row) {
 }
 
 module.exports = {
-  SOURCE_TYPE, ID_RE, validateSeriesPost, insertSeriesPost,
+  SOURCE_TYPE, ID_RE, validateSeriesPost, insertSeriesPost, seriesGuidOf, findSeriesPost,
 };
 module.exports._private = { dbRow, validateGbpLocation, validateMediaUrl, validateSchedule };

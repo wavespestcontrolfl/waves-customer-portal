@@ -34,7 +34,9 @@ const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
-const { validateSeriesPost, insertSeriesPost } = require('../services/social-series-intake');
+const {
+  validateSeriesPost, insertSeriesPost, seriesGuidOf, findSeriesPost,
+} = require('../services/social-series-intake');
 
 const router = express.Router();
 // Token-route privacy baseline on every outcome: no-store, noindex, no-referrer.
@@ -133,7 +135,24 @@ function disabledRefusal(channels) {
   return off ? { reason: 'platform_disabled', detail: off } : null;
 }
 
+// An id that is already stored answers deduped FIRST, before the time window,
+// the copy checks and the SOCIAL_FLAGS refusals: a retry of an accepted post
+// (its time now past, or a channel switched off since) must read as done, or
+// the caller would treat a stored post as failed and send it again elsewhere.
+async function storedAlready(body) {
+  const guid = seriesGuidOf(body);
+  return guid ? findSeriesPost(guid) : null;
+}
+
 router.post('/posts', darkUnlessConfigured, ingestAuth, async (req, res) => {
+  let existing = null;
+  try {
+    existing = await storedAlready(req.body);
+  } catch (err) {
+    logger.error(`[social-series-ingest] dedupe lookup failed: ${err.message}`);
+    return res.status(503).json({ ok: false, reason: 'store_failed' });
+  }
+  if (existing) return res.status(200).json({ ok: true, ...existing, deduped: true });
   const { error, value } = validateSeriesPost(req.body);
   if (error) return res.status(400).json({ ok: false, reason: error.reason, detail: error.detail });
   const disabled = disabledRefusal(value.row.platforms_posted);
