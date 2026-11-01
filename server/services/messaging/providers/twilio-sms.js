@@ -407,6 +407,7 @@ function mapPurposeToMessageType(purpose) {
     case 'payment_failure':     return 'payment_failure';
     case 'autopay':             return 'autopay';
     case 'payment_link':        return 'payment_link';
+    case 'payer_payment_link':  return 'payer_invoice';
     case 'estimate_followup':   return 'manual';
     case 'booking_abandonment_followup': return 'manual';
     case 'review_request':      return 'review_request';
