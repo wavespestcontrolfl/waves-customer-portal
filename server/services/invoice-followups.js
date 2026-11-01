@@ -713,10 +713,18 @@ async function newSequencePlanFor(trx, invoice, { adoption, steps }) {
     }
   }
 
-  // Anchor the cadence to when the invoice went out. Falls back through
-  // sent_at → sms_sent_at → created_at so edge cases (manual-only, email-only,
-  // or older rows without sent_at populated) still get scheduled correctly.
-  const anchorAt = invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
+  // Where the cadence starts (newSequenceAnchor). A failed read arms nothing: a guessed send-day start would text
+  // "past due" before a Net-terms due date. Adoption throws and retries; the direct send leaves the invoice to the
+  // orphan adoption sweep, which arms it from a good read.
+  let start;
+  try {
+    start = await newSequenceAnchor(trx, invoice);
+  } catch (err) {
+    if (adoption) throw err;
+    logger.warn(`[invoice-followups] reminder start read failed for invoice ${invoice.id}, left for adoption: ${err.message}`);
+    return null;
+  }
+  const anchorAt = start.anchor;
   // Adoption lands the row on its first step whose send day has not
   // passed, already re-dated past this run, in this same insert (Codex
   // #5202 r1 P2: a separate deferral write could fail after the stale
@@ -726,7 +734,23 @@ async function newSequencePlanFor(trx, invoice, { adoption, steps }) {
     logger.info(`[invoice-followups] adoption left invoice ${invoice.id} for a person: every ladder step has passed`);
     return null;
   }
-  return { stepIndex: landing.stepIndex, nextTouchAt: landing.nextAt, onAutopay };
+  return { stepIndex: landing.stepIndex, nextTouchAt: landing.nextAt, onAutopay, anchorAt: start.anchorAt };
+}
+
+// Where a NEW sequence's cadence starts. Normally when the invoice went out: sent_at, then sms_sent_at, then created_at
+// (manual-only, email-only and older rows still schedule). A bill from a won commercial proposal that is due after the
+// day it went out (Net terms, proposal-win.js proposalTermsDueDate) starts on its due date instead (owner 2026-11-01):
+// it is not past due before then, and every step after the first says how many days past due it is. That start is
+// returned as `anchorAt` for the row's anchor_at, so later steps, a void re-arm (voidStopRearmAnchor) and the customer
+// schedule (sequenceAnchor) keep it. Throws when the proposal read fails.
+async function newSequenceAnchor(conn, invoice) {
+  const sentAnchor = invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
+  const dueDay = invoice.due_date ? etCalendarDayOf(invoice.due_date) : null;
+  if (!dueDay || !sentAnchor || dueDay <= etDateString(new Date(sentAnchor))) return { anchor: sentAnchor, anchorAt: null };
+  if (!await require('./bill-by-invoice').wonProposalInvoice(conn, invoice)) return { anchor: sentAnchor, anchorAt: null };
+  // Noon UTC is morning in New York, so the steps count from the due date's own calendar day (anchorTo10amNY).
+  const anchorAt = new Date(`${dueDay}T12:00:00Z`);
+  return { anchor: anchorAt, anchorAt };
 }
 
 async function insertSequence(trx, invoice, plan) {
@@ -737,6 +761,7 @@ async function insertSequence(trx, invoice, plan) {
     step_index: plan.stepIndex,
     next_touch_at: plan.onAutopay ? null : plan.nextTouchAt,
     is_autopay_held: plan.onAutopay,
+    ...(plan.anchorAt ? { anchor_at: plan.anchorAt } : {}),
   }).returning('*');
   return row;
 }
@@ -811,9 +836,10 @@ async function scheduleForInvoice(invoiceId, { adoption = false, approvedCadence
 
 // What scheduleForInvoice would do for this invoice row once the send lands, read-only (the
 // Intelligence Bar's effects plan shows it on the send card). It applies scheduleForInvoice's own
-// predicates: followupArmBlock, an existing row (and the void re-arm), activePaymentPlan, and
+// predicates: followupArmBlock, an existing row (and the void re-arm), activePaymentPlan, the new row's
+// start (newSequenceAnchor: `startsOn` is the due date a Net-terms bill counts its steps from), and
 // customerOnAutopay for the Auto Pay hold. state is one of: active, autopay_hold, payment_plan,
-// not_schedulable, payer_billed, rearm, existing:<status>, autopay_unreadable, no_invoice.
+// not_schedulable, payer_billed, rearm, existing:<status>, start_unreadable, autopay_unreadable, no_invoice.
 async function planFollowupSequence(invoice, database = db, knownCustomer = null) {
   const cadence = followupSteps().map((step) => step.daysAfterSend);
   const block = invoice ? followupArmBlock(invoice) : 'no_invoice';
@@ -827,14 +853,22 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
     return { arms: ['active', 'autopay_hold'].includes(decision.kind), state: REARM_STATE[decision.kind], cadence, nextTouchAt: decision.nextTouchAt || null };
   }
   if (await activePaymentPlan(database, invoice.id)) return { arms: false, state: 'payment_plan', cadence };
+  // The send arms nothing on an unreadable start (newSequencePlanFor): the orphan adoption sweep arms it later.
+  let start;
+  try {
+    start = await newSequenceAnchor(database, invoice);
+  } catch {
+    return { arms: false, state: 'start_unreadable', cadence };
+  }
+  const startsOn = start.anchorAt ? etCalendarDayOf(start.anchorAt) : null;
   try {
     const customer = knownCustomer || await database('customers').where({ id: invoice.customer_id }).first();
     // The same Bill-by-invoice exception the new sequence takes (newSequencePlanFor).
     const onAutopay = await customerOnAutopay(customer, { db: database, failClosed: true })
       && !await require('./bill-by-invoice').billByInvoiceInvoice(database, invoice);
-    return { arms: true, state: onAutopay ? 'autopay_hold' : 'active', cadence };
+    return { arms: true, state: onAutopay ? 'autopay_hold' : 'active', cadence, ...(startsOn ? { startsOn } : {}) };
   } catch {
-    return { arms: true, state: 'autopay_unreadable', cadence };
+    return { arms: true, state: 'autopay_unreadable', cadence, ...(startsOn ? { startsOn } : {}) };
   }
 }
 

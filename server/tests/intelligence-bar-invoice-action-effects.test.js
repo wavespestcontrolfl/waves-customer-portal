@@ -67,6 +67,12 @@ describe('planSendEffects', () => {
     expect(byKey(plan, 'credit')).toMatchObject({ applies: false, state: 'skipped' });
   });
 
+  test('a Net-terms bill names the due date its reminder days count from', async () => {
+    Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'active', cadence: [3, 10, 17, 30, 60, 90], startsOn: '2026-12-03' });
+    const plan = await effects.planSendEffects(invoice(), customer, {});
+    expect(byKey(plan, 'followups').line).toBe('Sending this invoice also arms billing reminders on Day 3, 10, 17, 30, 60, 90 after its due date (2026-12-03) unless Auto Pay or a payment plan suppresses them (currently: reminders will run)');
+  });
+
   test('a resend converts no lead and says it sends again; Auto Pay and a payment plan show as the reminder state', async () => {
     const plan = await effects.planSendEffects(invoice({ status: 'sent', sent_at: new Date('2098-12-01T15:00:00Z') }), customer, {});
     expect(byKey(plan, 'delivery')).toMatchObject({ state: 'resend' });
