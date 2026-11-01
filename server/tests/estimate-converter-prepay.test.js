@@ -747,3 +747,129 @@ describe('commercial prepay blended tax rate (taxable pest share only)', () => {
     expect(Math.round(50050 * rate * 100) / 100).toBe(3.5);
   });
 });
+
+// Armed lawn cost floor vs the annual-prepay % (owner approved 2026-11-01,
+// audit item D3): prepay takes up to 5% off a lawn line but never lands below
+// the line's 35% collected-margin floor F. Per line the prepaid amount is
+// min(A, max(A * 0.95, F)).
+describe('annual prepay respects the armed lawn cost floor', () => {
+  const lawnMix = [{ service: 'lawn_care', name: 'Lawn Care' }];
+
+  // armed: true/false stamps pricingMetadata.lawnCostFloorArmed; undefined
+  // leaves the estimate silent (falls to the live global, which is false).
+  const lawnEstimate = ({ annual, floor, armed, programMinMonthly, extraLines = [] }) => ({
+    result: {
+      pricingMetadata: {
+        ...(armed === undefined ? {} : { lawnCostFloorArmed: armed }),
+        ...(programMinMonthly === undefined ? {} : { lawnProgramMinimumMonthly: programMinMonthly }),
+      },
+      lineItems: [
+        {
+          service: 'lawn_care',
+          name: 'Lawn Care',
+          annual,
+          annualAfterDiscount: annual,
+          minimumCollectedAnnualPrice: floor,
+          costFloorAnnual: floor,
+        },
+        ...extraLines,
+      ],
+    },
+  });
+
+  const prepay = (estimateData, baseAnnual, recurringServices = lawnMix) => resolveAnnualPrepayInvoiceTotal({
+    baseAnnual, recurringServices, estimateData,
+  });
+
+  test('a line far above its floor keeps the full 5%', () => {
+    const data = lawnEstimate({ annual: 700, floor: 584.6, armed: true });
+    const { protectedFloor, discountRate } = annualPrepayDiscountComponents({ recurringServices: lawnMix, estimateData: data });
+    expect(discountRate).toBe(0.05);
+    expect(protectedFloor).toBe(0);
+    const r = prepay(data, 700);
+    expect(r.amount).toBe(665);
+    expect(r.discount).toBe(35);
+    expect(r.rate).toBe(0.05);
+  });
+
+  test('a line where 5% would undercut the floor is clamped to the floor to the cent', () => {
+    // 4,500 sf St. Augustine Gold: annual $589.05, floor $584.60. A flat 5%
+    // invoiced $559.60 (below the floor) before this fix.
+    const data = lawnEstimate({ annual: 589.05, floor: 584.6, armed: true });
+    const r = prepay(data, 589.05);
+    expect(r.amount).toBe(584.6);
+    expect(r.discount).toBe(4.45);
+    // The clamp is the exact floor, never a cent under it.
+    for (const [annual, floor] of [[589.05, 584.6], [630.82, 630.82 - 0.37], [1234.56, 1200.01], [777.77, 760.13]]) {
+      const out = prepay(lawnEstimate({ annual, floor, armed: true }), annual).amount;
+      expect(out).toBeGreaterThanOrEqual(floor);
+      expect(out - floor).toBeLessThanOrEqual(0.01);
+    }
+  });
+
+  test('a line already at or below its floor gets no prepay cut', () => {
+    expect(prepay(lawnEstimate({ annual: 600, floor: 600, armed: true }), 600).amount).toBe(600);
+    // Acknowledged manual-discount breach: line sits below its floor. The
+    // protection ignores the breach (it only ever caps the discount).
+    const breached = lawnEstimate({ annual: 560, floor: 600, armed: true });
+    breached.result.pricingMetadata.manualDiscountFloorBreach = { acknowledged: true };
+    const r = prepay(breached, 560);
+    expect(r.amount).toBe(560);
+    expect(r.discount).toBe(0);
+  });
+
+  test('a disarmed estimate is unchanged: floor fields alone never arm anything', () => {
+    // Explicit disarm stamp.
+    const off = lawnEstimate({ annual: 589.05, floor: 584.6, armed: false });
+    expect(prepay(off, 589.05).amount).toBe(559.6);
+    expect(annualPrepayDiscountComponents({ recurringServices: lawnMix, estimateData: off }).protectedFloor).toBe(0);
+    // Silent estimate (no stamp, global off): the reporting fields are not evidence.
+    const silent = lawnEstimate({ annual: 589.05, floor: 584.6 });
+    expect(prepay(silent, 589.05).amount).toBe(559.6);
+  });
+
+  test('solo pest (discountRate 0) is unchanged even with an armed lawn line in the data', () => {
+    const data = lawnEstimate({ annual: 589.05, floor: 584.6, armed: true });
+    const soloPest = [{ service: 'pest_control', name: 'Pest Control' }];
+    const comps = annualPrepayDiscountComponents({ recurringServices: soloPest, estimateData: data });
+    expect(comps.discountRate).toBe(0);
+    expect(comps.protectedFloor).toBe(0);
+  });
+
+  test('lawn plus a non-discountable line: foam stays at full price, lawn clamps to its floor', () => {
+    const foam = { service: 'foam_recurring', name: 'Recurring Termite Foam Service', annual: 1108 };
+    const data = lawnEstimate({ annual: 589.05, floor: 584.6, armed: true, extraLines: [foam] });
+    const services = [...lawnMix, { service: 'foam_recurring', name: 'Recurring Termite Foam Service' }];
+    const r = prepay(data, 1108 + 589.05, services);
+    expect(r.amount).toBe(1108 + 584.6);
+    // With lawn well above its floor the lawn keeps the full 5%.
+    const high = lawnEstimate({ annual: 700, floor: 584.6, armed: true, extraLines: [foam] });
+    expect(prepay(high, 1108 + 700, services).amount).toBe(1108 + 665);
+  });
+
+  test('program minimum plus cost floor on one line protects the max, not the sum', () => {
+    // Program minimum $50/mo = $600/yr; cost floor $680; annual $700.
+    // Program leg protects $600; cost leg protects P = (680 - 665) / .05 = $300.
+    // Max = $600 -> 600 + 100 * .95 = $695 (>= floor $680). A sum ($900) would
+    // protect more than the whole line and cancel the prepay entirely.
+    const both = lawnEstimate({ annual: 700, floor: 680, armed: true, programMinMonthly: 50 });
+    expect(annualPrepayDiscountComponents({ recurringServices: lawnMix, estimateData: both }).protectedFloor).toBe(600);
+    expect(prepay(both, 700).amount).toBe(695);
+    // Cost floor above the program leg's reach: the cost slice wins.
+    const costWins = lawnEstimate({ annual: 700, floor: 690, armed: true, programMinMonthly: 40 });
+    expect(annualPrepayDiscountComponents({ recurringServices: lawnMix, estimateData: costWins }).protectedFloor).toBe(500);
+    expect(prepay(costWins, 700).amount).toBe(690);
+  });
+
+  test('SSR protectedFloor + rate reassemble to the invoice total for the stored annual', () => {
+    for (const [annual, floor] of [[589.05, 584.6], [700, 584.6], [600, 600], [1010.1, 1000]]) {
+      const data = lawnEstimate({ annual, floor, armed: true });
+      const { discountRate, protectedFloor } = annualPrepayDiscountComponents({ recurringServices: lawnMix, estimateData: data });
+      const clampedFloor = Math.min(annual, protectedFloor);
+      const discountable = Math.max(0, Math.round((annual - clampedFloor) * 100) / 100);
+      const ssr = Math.round((clampedFloor + discountable * (1 - discountRate)) * 100) / 100;
+      expect(ssr).toBe(prepay(data, annual).amount);
+      expect(ssr).toBe(Math.min(annual, Math.max(Math.round(annual * 0.95 * 100) / 100, floor)));
+    }
+  });
+});

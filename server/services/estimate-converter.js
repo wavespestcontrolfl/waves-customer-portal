@@ -18,6 +18,7 @@ const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
 const { withoutAssessmentVisits } = require('./assessment-booking');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
+const { estimateLawnFloorArmed } = require('./estimate-floor-signal-replay');
 // Canonical service-key tier membership (aliased: this module's local
 // serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
 const { serviceCountsTowardWaveGuardTier: serviceKeyCountsTowardTier } = require('./pricing-engine/discount-engine');
@@ -3602,7 +3603,51 @@ function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
   return resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData);
 }
 
-function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
+// Cost-floor arm state for the prepay slice. Same signal estimate-public's
+// ladder/v1 paths use: the engine's resolved pricingMetadata.lawnCostFloorArmed
+// stamp first (plus the other per-estimate evidence estimateLawnFloorArmed
+// reads), then the live global when the estimate is silent. The floor fields
+// (minimumCollectedAnnualPrice / costFloorAnnual) ride EVERY quote for margin
+// reporting, so their presence alone is never evidence of arming.
+function lawnCostFloorArmedForPrepay(estimateData = {}) {
+  const stamped = estimateLawnFloorArmed(normalizeEstimateData(estimateData));
+  if (typeof stamped === 'boolean') return stamped;
+  return LAWN_PRICING_V2.useLawnCostFloor === true;
+}
+
+// The 35% collected-margin floor a stored lawn line carries (annual dollars,
+// 0 when absent). Same field vocabulary as the engine's WaveGuard guard and
+// estimate-public's stored-row reader (lawnRowFloorMonthly).
+function lawnLineCostFloorAnnual(item = {}) {
+  const raw = Number(
+    item.minimumCollectedAnnualPrice
+    ?? item.costFloorAnnual
+    ?? item.marginFloorAnnual
+    ?? item.prov?.minimumCollectedAnnualPrice
+    ?? item.prov?.costFloorAnnual,
+  );
+  return Number.isFinite(raw) && raw > 0 ? Math.round(raw * 100) / 100 : 0;
+}
+
+// Slice P of a lawn line's annual A that the prepay % must NOT touch so the
+// prepaid amount is min(A, max(A * (1 - r), F)): the prepay still takes up to
+// r off the line but never lands below its cost floor F. Solving
+// P + (A - P)(1 - r) = F gives P = (F - A(1 - r)) / r, clamped to [0, A]. A
+// line far above F gets P = 0 (full rate); a line at or below F gets P = A
+// (no cut). Rounded UP to the cent so cent rounding never lands under F.
+function lawnCostFloorPrepaySlice(annual, floor, rate) {
+  if (!(annual > 0) || !(floor > 0) || !(rate > 0)) return 0;
+  const raw = (floor - annual * (1 - rate)) / rate;
+  if (!(raw > 0)) return 0;
+  const cents = Math.ceil(raw * 100 - 1e-6) / 100;
+  return Math.max(0, Math.min(annual, cents));
+}
+
+// Annual-prepay protected slice for recurring lawn lines: per line, the larger
+// of (a) the program-minimum floor and (b) the armed cost-floor slice. A max,
+// not a sum: both protect the same line. discountRate 0 (or a disarmed cost
+// floor) leaves only the program-minimum leg, exactly as before.
+function lawnProgramMinimumProtectedAnnual(estimateData = {}, { discountRate = 0 } = {}) {
   // Deliberately IGNORES an acknowledged floor breach (codex P2 on #2947
   // round 4): the breach disarm exists so render/accept never clamp the
   // authorized sub-floor price back UP — but this protection only ever CAPS
@@ -3610,20 +3655,28 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
   // Dropping it on a breached estimate would let a customer-selected prepay
   // % stack a further cut below the number the confirmation card authorized.
   const minMonthly = resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData);
-  if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
-  const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
-  const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
+  const floorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
+    ? Math.round(minMonthly * 12 * 100) / 100
+    : 0;
+  const costFloorArmed = discountRate > 0 && lawnCostFloorArmedForPrepay(estimateData);
+  if (!(floorAnnual > 0) && !costFloorArmed) return 0;
+  const lineProtected = (item) => {
     const annual = recurringLineAnnualAmount(item);
-    // Protect the FULL floor per line, not min(annual, floor): the floor is
-    // what the customer is actually billed — public render/accept clamp every
-    // recurring lawn line up to the program minimum, so a stale pre-floor
-    // stored annual (e.g. $408 on an outstanding link whose bundle re-clamps
-    // to $600) must not leave the clamped-up slice discountable, or the
-    // prepay % lands the invoice below the minimum. Over-protection is the
-    // safe direction: the caller's Math.min(base, floor) cap means it can
+    if (!(annual > 0)) return 0;
+    // Protect the FULL program floor per line, not min(annual, floor): the
+    // floor is what the customer is actually billed — public render/accept
+    // clamp every recurring lawn line up to the program minimum, so a stale
+    // pre-floor stored annual (e.g. $408 on an outstanding link whose bundle
+    // re-clamps to $600) must not leave the clamped-up slice discountable, or
+    // the prepay % lands the invoice below the minimum. Over-protection is
+    // the safe direction: the caller's Math.min(base, floor) cap means it can
     // only shrink the prepay discount, never raise the invoice above base.
-    return annual > 0 ? sum + floorAnnual : sum;
-  }, 0) * 100) / 100;
+    const costSlice = costFloorArmed
+      ? lawnCostFloorPrepaySlice(annual, lawnLineCostFloorAnnual(item), discountRate)
+      : 0;
+    return Math.max(floorAnnual, costSlice);
+  };
+  const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => sum + lineProtected(item), 0) * 100) / 100;
   // Acceptance restamps recurring.services (NOT engine lineItems), so a
   // stale source must never shrink the protection below what the accepted
   // rows warrant — take the larger of the two sources. Both protect exactly
@@ -3661,7 +3714,7 @@ function annualPrepayDiscountComponents({ recurringServices = [], estimateData =
     : ANNUAL_PREPAY_DISCOUNT_PCT;
   const protectedFloor = Math.round((
     nonDiscountableRecurringAnnualFloor(estimateData)
-    + lawnProgramMinimumProtectedAnnual(estimateData)
+    + lawnProgramMinimumProtectedAnnual(estimateData, { discountRate })
   ) * 100) / 100;
   return { discountRate, protectedFloor };
 }
