@@ -65,15 +65,18 @@ afterEach(() => {
   jest.clearAllMocks();
 });
 
-test('a confirmed clip asks the pipeline to rebuild, then answers with the clip status', async () => {
+test('a confirm hands the recap mark to the clip change (same transaction), then answers with the clip status', async () => {
   recapMedia.confirmUpload.mockResolvedValue({ ok: true, row: { id: 'm1', status: 'processing' } });
   const res = await invoke(params, { durationMs: 45000 });
   expect(res.statusCode).toBe(200);
   expect(res.body).toEqual({ ok: true, id: 'm1', status: 'processing' });
-  expect(recapPipeline.markRecapClipsChanged).toHaveBeenCalledWith('visit-1', { id: 'm1', status: 'processing' });
+  const [mediaId, options] = recapMedia.confirmUpload.mock.calls[0];
+  expect([mediaId, options.scheduledServiceId, options.durationMs]).toEqual(['m1', 'visit-1', 45000]);
+  await options.onChange({ id: 'm1', status: 'ready' }, 'trx-1');
+  expect(recapPipeline.markRecapClipsChanged).toHaveBeenCalledWith('visit-1', { id: 'm1', status: 'ready' }, { knex: 'trx-1' });
 });
 
-test('a refused clip never reaches the rebuild', async () => {
+test('a refused clip answers with the copy for the gate', async () => {
   recapMedia.confirmUpload.mockResolvedValue({ ok: false, reason: 'too_long' });
   process.env.GATE_RECAP_GLASSES_CLIPS = 'true';
   const res = await invoke(params, { durationMs: 70000 });
@@ -93,18 +96,20 @@ test('gate off: a too-large clip keeps the 20-second copy', async () => {
 describe('removing a clip', () => {
   const DELETE = { path: '/:serviceId/recap-media/:mediaId', method: 'delete' };
 
-  test('a removed clip asks the pipeline to mark the recap with the removed row', async () => {
+  test('a removal hands the recap mark to the clip change (same transaction)', async () => {
     recapMedia.deleteMedia.mockResolvedValue({ id: 'm1', status: 'ready' });
     const res = await invoke(params, {}, DELETE);
     expect(res.body).toEqual({ ok: true });
-    expect(recapPipeline.markRecapClipsChanged).toHaveBeenCalledWith('visit-1', { id: 'm1', status: 'ready' });
+    const [mediaId, options] = recapMedia.deleteMedia.mock.calls[0];
+    expect([mediaId, options.scheduledServiceId]).toEqual(['m1', 'visit-1']);
+    await options.onChange({ id: 'm1', status: 'ready' }, 'trx-1');
+    expect(recapPipeline.markRecapClipsChanged).toHaveBeenCalledWith('visit-1', { id: 'm1', status: 'ready' }, { knex: 'trx-1' });
   });
 
-  test('a clip that was not there marks nothing', async () => {
+  test('a clip that was not there answers ok: false', async () => {
     recapMedia.deleteMedia.mockResolvedValue(false);
     const res = await invoke(params, {}, DELETE);
     expect(res.body).toEqual({ ok: false });
-    expect(recapPipeline.markRecapClipsChanged).not.toHaveBeenCalled();
   });
 });
 

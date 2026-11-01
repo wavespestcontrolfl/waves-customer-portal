@@ -123,38 +123,34 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
 // GATE_RECAP_GLASSES_CLIPS: a clip confirmed, or removed, before the recap was sent must be in (or out
 // of) the video the customer gets. One UPDATE on the recap row, so it orders against a render's finish,
 // an approval and a send claim: clip_revision counts the changes since the last published render (the
-// finish resets it to 0), and a built recap (not pending or rendering)
-// with no send in progress goes back to pending, approval cleared; a pending one renders the new clip set
-// anyway, and a rendering one renders again at its finish (processRecap compares clip_revision). A sent
-// recap keeps its video; one being sent keeps its approval, and if that send fails, sendRecap sees the
-// count and renders again instead of sending the old video. Only a clip the renderer uses (`ready`) counts; a
-// `processing` clip counts when it is cut. Never throws: the confirm or removal has already happened.
+// finish resets it to 0), and a built recap (not pending or rendering) with no send in progress goes
+// back to pending, approval cleared; a pending one renders the new clip set anyway, and a rendering one
+// renders again at its finish (processRecap compares clip_revision). A sent recap keeps its video; one
+// being sent keeps its approval, and if that send fails, sendRecap sees the count and renders again
+// instead of sending the old video. Only a clip the renderer uses (`ready`) counts; a `processing` clip
+// counts when it is cut. The routes run it first inside the clip change's transaction (recap-media
+// onChange), so a database error throws and rolls the clip change back with it.
 async function markRecapClipsChanged(scheduledServiceId, media, { knex = db, now = new Date() } = {}) {
   if (!glassesClipsOn()) return { marked: false };
   if (media?.status !== 'ready') return { marked: false };
-  try {
-    if (await callbackRecapRetired(scheduledServiceId, knex)) return { marked: false };
-    const requeue = "(status NOT IN ('pending', 'rendering') AND (send_attempt_at IS NULL OR send_attempt_at < :sendStaleBefore))";
-    const result = await knex.raw(`
-      UPDATE service_recaps SET
-        clip_revision = clip_revision + 1,
-        status = CASE WHEN ${requeue} THEN 'pending' ELSE status END,
-        attempts = CASE WHEN ${requeue} THEN 0 ELSE attempts END,
-        next_attempt_at = CASE WHEN ${requeue} THEN :now ELSE next_attempt_at END,
-        locked_at = CASE WHEN ${requeue} THEN NULL ELSE locked_at END,
-        last_error = CASE WHEN ${requeue} THEN NULL ELSE last_error END,
-        approved_at = CASE WHEN ${requeue} THEN NULL ELSE approved_at END,
-        approved_by = CASE WHEN ${requeue} THEN NULL ELSE approved_by END,
-        updated_at = :now
-      WHERE scheduled_service_id = :id AND sent_at IS NULL
-      RETURNING status
-    `, { id: scheduledServiceId, now, sendStaleBefore: new Date(now.getTime() - RECAP_SEND_STALE_MS) });
-    const row = (result.rows || [])[0];
-    return { marked: Boolean(row), status: row ? row.status : null };
-  } catch (err) {
-    logger.warn(`[recap-pipeline] late-clip rebuild failed for ${scheduledServiceId}: ${err.message}`);
-    return { marked: false };
-  }
+  if (await callbackRecapRetired(scheduledServiceId, knex)) return { marked: false };
+  const requeue = "(status NOT IN ('pending', 'rendering') AND (send_attempt_at IS NULL OR send_attempt_at < :sendStaleBefore))";
+  const result = await knex.raw(`
+    UPDATE service_recaps SET
+      clip_revision = clip_revision + 1,
+      status = CASE WHEN ${requeue} THEN 'pending' ELSE status END,
+      attempts = CASE WHEN ${requeue} THEN 0 ELSE attempts END,
+      next_attempt_at = CASE WHEN ${requeue} THEN :now ELSE next_attempt_at END,
+      locked_at = CASE WHEN ${requeue} THEN NULL ELSE locked_at END,
+      last_error = CASE WHEN ${requeue} THEN NULL ELSE last_error END,
+      approved_at = CASE WHEN ${requeue} THEN NULL ELSE approved_at END,
+      approved_by = CASE WHEN ${requeue} THEN NULL ELSE approved_by END,
+      updated_at = :now
+    WHERE scheduled_service_id = :id AND sent_at IS NULL
+    RETURNING status
+  `, { id: scheduledServiceId, now, sendStaleBefore: new Date(now.getTime() - RECAP_SEND_STALE_MS) });
+  const row = (result.rows || [])[0];
+  return { marked: Boolean(row), status: row ? row.status : null };
 }
 
 async function approveRecap(scheduledServiceId, { approvedBy = null, knex = db } = {}) {

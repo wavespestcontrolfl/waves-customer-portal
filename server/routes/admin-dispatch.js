@@ -7629,12 +7629,16 @@ router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) =
     if (!(await recapOwnerOk(req, res))) return undefined;
     // Size/duration verified server-side (authoritative S3 size) in confirmUpload;
     // oversized/missing objects are dropped + rejected so they never hit the renderer.
-    const result = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.serviceId, durationMs: req.body?.durationMs });
+    // The recap's late-clip mark commits with the clip (GATE_RECAP_GLASSES_CLIPS; a no-op when off).
+    const result = await recapMedia.confirmUpload(req.params.mediaId, {
+      scheduledServiceId: req.params.serviceId,
+      durationMs: req.body?.durationMs,
+      onChange: (row, trx) => recapPipeline.markRecapClipsChanged(req.params.serviceId, row, { knex: trx }),
+    });
     if (!result.ok) {
       const failure = recapMedia.confirmFailure(result.reason);
       return res.status(failure.status).json({ error: failure.error });
     }
-    await recapPipeline.markRecapClipsChanged(req.params.serviceId, result.row);
     return res.json({ ok: true, id: result.row.id, status: result.row.status });
   } catch (err) { return next(err); }
 });
@@ -7650,8 +7654,10 @@ router.get('/:serviceId/recap-media', async (req, res, next) => {
 router.delete('/:serviceId/recap-media/:mediaId', async (req, res, next) => {
   try {
     if (!(await recapOwnerOk(req, res))) return undefined;
-    const removed = await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.serviceId });
-    if (removed) await recapPipeline.markRecapClipsChanged(req.params.serviceId, removed);
+    const removed = await recapMedia.deleteMedia(req.params.mediaId, {
+      scheduledServiceId: req.params.serviceId,
+      onChange: (row, trx) => recapPipeline.markRecapClipsChanged(req.params.serviceId, row, { knex: trx }),
+    });
     return res.json({ ok: Boolean(removed) });
   } catch (err) { return next(err); }
 });

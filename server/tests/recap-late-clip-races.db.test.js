@@ -2,9 +2,21 @@
 // PostgreSQL. Every state change orders on the service_recaps row: the late-clip mark (clip_revision + re-queue),
 // a render's finish (publishes 'ready' only when clip_revision is still the claimed one), an approval (only the
 // render it read) and a send claim (only an approved recap). A forced re-render never pulls a recap out from under
-// a send in progress. Every write runs in a transaction that is rolled back. Synthetic rows only. Skips without
-// DATABASE_URL (CI runs it against the migrated database).
+// a send in progress. A clip change (confirm or removal) and its recap mark commit together, the mark first.
+// Writes run in a transaction that is rolled back, except the two-connection test, which commits its rows and
+// deletes them after. Synthetic rows only. Skips without DATABASE_URL (CI runs it against the migrated database).
 const SKIP = !process.env.DATABASE_URL;
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+let mockHeadBytes = 1000;
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn(() => ({ send: jest.fn(async () => ({ ContentLength: mockHeadBytes })) })),
+  PutObjectCommand: jest.fn(),
+  GetObjectCommand: jest.fn(),
+  HeadObjectCommand: jest.fn(),
+  DeleteObjectCommand: jest.fn(),
+}));
+jest.mock('../config', () => ({ ...jest.requireActual('../config'), s3: { bucket: 'test-bucket', region: 'us-east-1' } }));
 
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
@@ -27,6 +39,7 @@ const { buildRecapPayload } = require('../services/service-report/recap-payload'
 const { renderRecapToFile } = require('../services/service-report/recap-render');
 const { putRecapFromFile } = require('../services/service-report/recap-storage');
 const pipeline = require('../services/service-report/recap-pipeline');
+const recapMedia = require('../services/service-report/recap-media');
 const { sendRecap } = require('../services/service-report/recap-delivery');
 
 const describeDb = SKIP ? describe.skip : describe;
@@ -253,6 +266,71 @@ describeDb('late recap clips: the send and render races', () => {
       await mockPg('service_recaps').where({ id: claimed.id }).update({ clip_revision: 4 });
       expect(await pipeline.processRecap(claimed)).toMatchObject({ status: 'ready' });
       expect((await mockPg('service_recaps').where({ id: claimed.id }).first('status')).status).toBe('ready');
+    });
+  });
+  describe('a clip change and its recap mark commit together', () => {
+    beforeEach(() => { process.env.GATE_RECAP_GLASSES_CLIPS = 'true'; });
+    const markFails = async () => { throw new Error('mark failed'); };
+    const insertClip = async (scheduledServiceId, status) => (await mockPg('service_media').insert({
+      scheduled_service_id: scheduledServiceId, media_type: 'video', role: 'perimeter',
+      s3_key: 'recap-media/test/clip.mp4', status, duration_ms: 5000,
+    }).returning('*'))[0];
+
+    test('a failed mark rolls the confirm back: the clip stays uploading', async () => {
+      const recap = await insertRecap({ status: 'ready' });
+      const clip = await insertClip(recap.scheduled_service_id, 'uploading');
+      await expect(recapMedia.confirmUpload(clip.id, { scheduledServiceId: recap.scheduled_service_id, durationMs: 5000, onChange: markFails }))
+        .rejects.toThrow('mark failed');
+      expect((await mockPg('service_media').where({ id: clip.id }).first('status')).status).toBe('uploading');
+    });
+
+    test('a failed mark rolls the removal back: the clip is still there', async () => {
+      const recap = await insertRecap({ status: 'ready' });
+      const clip = await insertClip(recap.scheduled_service_id, 'ready');
+      await expect(recapMedia.deleteMedia(clip.id, { scheduledServiceId: recap.scheduled_service_id, onChange: markFails }))
+        .rejects.toThrow('mark failed');
+      expect((await mockPg('service_media').where({ id: clip.id }).first('status')).status).toBe('ready');
+    });
+
+    describe('on two connections', () => {
+      // These rows are committed, so a second connection sees them; each test deletes its own.
+      let committedRecap = null;
+      afterEach(async () => {
+        if (!committedRecap) return;
+        await database('service_media').where({ scheduled_service_id: committedRecap.scheduled_service_id }).del();
+        await database('service_recaps').where({ id: committedRecap.id }).del();
+        committedRecap = null;
+      });
+
+      test('a removal holds the recap row until it commits: a render claim skips it, an approval is refused', async () => {
+        const scheduledServiceId = randomUUID();
+        [committedRecap] = await database('service_recaps').insert({
+          scheduled_service_id: scheduledServiceId, status: 'ready', s3_key: 'recaps/test/visit-recap-v1.mp4',
+          rendered_at: minutesAgo(3), greeting_version: pipeline.RECAP_GREETING_VERSION,
+        }).returning('*');
+        const [clip] = await database('service_media').insert({
+          scheduled_service_id: scheduledServiceId, media_type: 'video', role: 'perimeter',
+          s3_key: 'recap-media/test/clip.mp4', status: 'ready', duration_ms: 5000,
+        }).returning('*');
+        let renderClaim;
+        let approval;
+
+        await recapMedia.deleteMedia(clip.id, {
+          scheduledServiceId,
+          onChange: async (row, trx) => {
+            await pipeline.markRecapClipsChanged(scheduledServiceId, row, { knex: trx });
+            // Mid-change, from other connections: the render's SKIP LOCKED claim, and the tech's approval.
+            renderClaim = await database.raw('SELECT id FROM service_recaps WHERE id = ? FOR UPDATE SKIP LOCKED', [committedRecap.id]);
+            approval = pipeline.approveRecap(scheduledServiceId, { approvedBy: 'tech', knex: database });
+          },
+        }, database);
+
+        expect(renderClaim.rows).toEqual([]);
+        expect(await approval).toMatchObject({ ok: false });
+        expect(await database('service_recaps').where({ id: committedRecap.id }).first('status', 'approved_at', 'clip_revision'))
+          .toEqual({ status: 'pending', approved_at: null, clip_revision: 1 });
+        expect(await database('service_media').where({ id: clip.id }).first()).toBeUndefined();
+      });
     });
   });
 });

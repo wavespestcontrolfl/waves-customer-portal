@@ -143,7 +143,7 @@ function clipLimits(isVideo, realBytes, durationMs) {
 // size (not the client-reported bytes, which can be spoofed/missing), then marks
 // it ready. Oversized/missing objects are dropped (row + S3) and rejected, so they
 // can never reach the renderer. Returns { ok, row } | { ok:false, reason }.
-async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = null } = {}, knex = db) {
+async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = null, onChange = null } = {}, knex = db) {
   const lookup = knex('service_media').where({ id: mediaId });
   if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
   const row = await lookup.first();
@@ -164,9 +164,15 @@ async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = 
     return { ok: false, reason: verdict.reason };
   }
 
-  const [updated] = await knex('service_media').where({ id: row.id }).update({
-    status: verdict.needsCutting ? 'processing' : 'ready', bytes: realBytes, duration_ms: durationMs, updated_at: new Date(),
-  }).returning('*');
+  // onChange (the routes mark the recap row) runs first, in the same transaction: the recap row is
+  // locked before the clip changes, so an approval, send claim or render claim waits for, or skips,
+  // the change and never sees one half of it. A failed mark rolls the clip change back.
+  const patch = { status: verdict.needsCutting ? 'processing' : 'ready', bytes: realBytes, duration_ms: durationMs };
+  const updated = await knex.transaction(async (trx) => {
+    if (onChange) await onChange({ ...row, ...patch }, trx);
+    const [changed] = await trx('service_media').where({ id: row.id }).update({ ...patch, updated_at: new Date() }).returning('*');
+    return changed;
+  });
   return { ok: true, row: updated };
 }
 
@@ -177,13 +183,17 @@ async function listMedia(scheduledServiceId, knex = db) {
     .select('id', 'media_type', 'role', 'caption', 'status', 'duration_ms', 'created_at');
 }
 
-// Returns the removed row (false when there was none), so a caller can tell whether a rendered clip went.
-async function deleteMedia(mediaId, { scheduledServiceId = null } = {}, knex = db) {
+// Returns the removed row (false when there was none). onChange runs first in the removal's
+// transaction (see confirmUpload); the S3 object goes after the commit.
+async function deleteMedia(mediaId, { scheduledServiceId = null, onChange = null } = {}, knex = db) {
   const lookup = knex('service_media').where({ id: mediaId });
   if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
   const row = await lookup.first();
   if (!row) return false;
-  await knex('service_media').where({ id: row.id }).del();
+  await knex.transaction(async (trx) => {
+    if (onChange) await onChange(row, trx);
+    await trx('service_media').where({ id: row.id }).del();
+  });
   if (config.s3?.bucket && row.s3_key) {
     try { await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: row.s3_key })); }
     catch (err) { logger.warn(`[recap-media] S3 delete failed for ${row.s3_key}: ${err.message}`); }

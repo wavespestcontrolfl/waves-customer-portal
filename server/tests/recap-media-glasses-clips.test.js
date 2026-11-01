@@ -44,6 +44,7 @@ function mediaKnex(row) {
     };
     return chain;
   };
+  knex.transaction = async (work) => work(knex);
   return { knex, calls };
 }
 const videoRow = { id: 'm1', media_type: 'video', s3_key: 'k', scheduled_service_id: 'v1' };
@@ -160,9 +161,9 @@ describe('markRecapClipsChanged', () => {
       expect(calls.raw).toBe(0);
     });
 
-    test('a failed mark is swallowed', async () => {
+    test('a failed mark throws, so the clip change it runs in rolls back', async () => {
       const { knex } = markKnex({ fail: true });
-      await expect(pipeline.markRecapClipsChanged('v1', READY, { knex })).resolves.toEqual({ marked: false });
+      await expect(pipeline.markRecapClipsChanged('v1', READY, { knex })).rejects.toThrow('db down');
     });
   });
 });

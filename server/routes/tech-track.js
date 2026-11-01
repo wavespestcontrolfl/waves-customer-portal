@@ -1615,12 +1615,16 @@ router.post('/:id/recap-media/presign', async (req, res, next) => {
 router.post('/:id/recap-media/:mediaId/confirm', async (req, res, next) => {
   try {
     if (!(await loadOwnedServiceOr403(req, res))) return undefined;
-    const result = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.id, durationMs: req.body?.durationMs });
+    // The recap's late-clip mark commits with the clip (GATE_RECAP_GLASSES_CLIPS; a no-op when off).
+    const result = await recapMedia.confirmUpload(req.params.mediaId, {
+      scheduledServiceId: req.params.id,
+      durationMs: req.body?.durationMs,
+      onChange: (row, trx) => recapPipeline.markRecapClipsChanged(req.params.id, row, { knex: trx }),
+    });
     if (!result.ok) {
       const failure = recapMedia.confirmFailure(result.reason);
       return res.status(failure.status).json({ error: failure.error });
     }
-    await recapPipeline.markRecapClipsChanged(req.params.id, result.row);
     return res.json({ ok: true, id: result.row.id, status: result.row.status });
   } catch (err) { return next(err); }
 });
@@ -1636,8 +1640,10 @@ router.get('/:id/recap-media', async (req, res, next) => {
 router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
   try {
     if (!(await loadOwnedServiceOr403(req, res))) return undefined;
-    const removed = await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.id });
-    if (removed) await recapPipeline.markRecapClipsChanged(req.params.id, removed);
+    await recapMedia.deleteMedia(req.params.mediaId, {
+      scheduledServiceId: req.params.id,
+      onChange: (row, trx) => recapPipeline.markRecapClipsChanged(req.params.id, row, { knex: trx }),
+    });
     return res.json({ ok: true });
   } catch (err) { return next(err); }
 });
