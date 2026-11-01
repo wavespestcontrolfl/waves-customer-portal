@@ -32,6 +32,7 @@ function estimateRow(overrides = {}, proposalOverrides = {}) {
         taxRate: 0.07,
         taxLabel: 'Sales tax',
         commercialTerms: { paymentTerms: 'net30' },
+        buildingUse: 'nonresidential',
         buildings: [{ name: 'Main building', lineItems: [{ description: 'Quarterly pest service', quantity: 1, unitPrice: 300, frequency: 'quarterly', taxable: true }] }],
         ...proposalOverrides,
       },

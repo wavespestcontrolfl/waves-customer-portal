@@ -92,7 +92,16 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
   );
 }
 
-export function DeclineModalV2({ estimate, onClose, onSaved }) {
+// `reasonOnly` (GATE_ESTIMATE_CALL_LIST, "Pick reason"): the same reasons and fields, but it PATCHes
+// only { disposition, competitorName, competitorPrice, dispositionNote } with no status, so an
+// expired offer keeps its status and gains the staff loss reason.
+export function reasonOnlyPayload(fields) {
+  // eslint-disable-next-line no-unused-vars -- status and the legacy label stay out of a reason pick
+  const { status, declineReason, ...rest } = declinePayload(fields);
+  return rest;
+}
+
+export function DeclineModalV2({ estimate, onClose, onSaved, reasonOnly = false }) {
   const [reason, setReason] = useState("");
   const [competitorName, setCompetitorName] = useState("");
   const [competitorPrice, setCompetitorPrice] = useState("");
@@ -107,7 +116,9 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
     try {
       await adminFetch(`/admin/estimates/${estimate.id}`, {
         method: "PATCH",
-        body: JSON.stringify(declinePayload({ reason, competitorName, competitorPrice, note })),
+        body: JSON.stringify(
+          (reasonOnly ? reasonOnlyPayload : declinePayload)({ reason, competitorName, competitorPrice, note }),
+        ),
       });
       onSaved();
     } catch (err) {
@@ -121,7 +132,7 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
       {" "}
       <DialogHeader>
         {" "}
-        <DialogTitle>Mark as lost</DialogTitle>{" "}
+        <DialogTitle>{reasonOnly ? "Pick reason" : "Mark as lost"}</DialogTitle>{" "}
         <div className="text-ui-body text-ink-secondary mt-0.5">
           {estimate.customerName}
           {estimate.address ? ` — ${estimate.address.split(",")[0]}` : ""}
@@ -192,11 +203,11 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
           Cancel
         </Button>{" "}
         <Button
-          variant="danger"
+          variant={reasonOnly ? "primary" : "danger"}
           onClick={handleSave}
           disabled={saving || incomplete}
         >
-          {saving ? "Saving…" : "Mark as Lost"}
+          {saving ? "Saving…" : reasonOnly ? "Save reason" : "Mark as Lost"}
         </Button>{" "}
       </DialogFooter>{" "}
     </Dialog>

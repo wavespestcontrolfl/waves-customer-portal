@@ -15,7 +15,7 @@ const {
   normalizeInventoryUnit,
   unitDefinition,
 } = require('../services/inventory-units');
-const { applyInventoryUnitFix } = require('../services/inventory-unit-review');
+const { applyInventoryUnitFix, looksLiquidProduct } = require('../services/inventory-unit-review');
 const {
   calcLandedCost,
   convertToOz,
@@ -240,11 +240,6 @@ function assertSupportedInventoryUnit(unit, field = 'Inventory unit') {
     err.statusCode = 400;
     throw err;
   }
-}
-
-function looksLiquidProduct(product = {}) {
-  const text = `${product.name || ''} ${product.category || ''} ${product.subcategory || ''} ${product.formulation || ''} ${product.unit_type || ''}`.toLowerCase();
-  return /\b(liquid|flowable|sc|sl|ec|ew|solution|sprayable|hydretain|talstar|atrazine|dismiss|headway|medallion|primo|acelepryn|dispatch|carbonpro|k-flow)\b/.test(text);
 }
 
 function unitReviewReasons(product = {}) {

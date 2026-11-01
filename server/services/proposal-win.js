@@ -383,21 +383,59 @@ async function assertProposalTermsMatchPayer({ trx, customerId, proposal }) {
   }
 }
 
-// The due date of a visit invoice billed from an accepted invoice-mode commercial proposal: the base date plus the
-// agreement's Net term (net15 / net30 / net60, payer.js's shared PAYMENT_TERM_NET_DAYS map, never a parse). The win
-// makes no invoice (owner 2026-10-30, option A), so the visit invoices keep the agreement's terms. Null when the visit's
-// estimate is not such a proposal, or its term is none or due on receipt: the caller keeps its own due date. These are
-// the visits Auto Pay never collects (bill-by-invoice.js).
+// The due date of a visit invoice billed from a won commercial proposal on Net terms: the base date plus the Net days
+// proposalTermsNetDays gives (payer.js's shared PAYMENT_TERM_NET_DAYS map, never a parse). The win makes no invoice
+// (owner 2026-10-30, option A), so the visit invoices keep the agreement's terms. Null when the visit's estimate is no
+// such proposal, or its term is none or due on receipt: the caller keeps its own due date.
 async function proposalTermsDueDate(conn, sourceEstimateId, baseDate) {
   if (!conn || !sourceEstimateId || !baseDate) return null;
-  const estimate = await conn('estimates').where({ id: sourceEstimateId }).first('status', 'bill_by_invoice', 'estimate_data');
-  const proposal = require('./bill-by-invoice').billByInvoiceProposal(estimate);
-  if (!proposal) return null;
-  const days = require('./payer').PAYMENT_TERM_NET_DAYS[proposal.commercialTerms?.paymentTerms] || 0;
+  const estimate = await conn('estimates').where({ id: sourceEstimateId })
+    .first('status', 'bill_by_invoice', 'estimate_data', 'customer_id', 'created_at');
+  const days = await proposalTermsNetDays(conn, estimate);
   if (!(days > 0)) return null;
   // The base is already a calendar date (YYYY-MM-DD): whole days are added to its own fields, no clock or zone involved.
   const [year, month, day] = String(baseDate instanceof Date ? baseDate.toISOString() : baseDate).slice(0, 10).split('-').map(Number);
   return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
+// The Net days a won proposal's visit invoices carry, else 0. An invoice-mode proposal carries its own Net term: these
+// are the visits Auto Pay never collects (bill-by-invoice.js). An Auto Pay proposal whose customer has turned Auto Pay
+// off carries Net 30, as the agreement's payment paragraph says ("cancel autopay with 30 days' written notice, after
+// which invoices are due Net 30", shared/commercial-agreement-terms.cjs; owner 2026-11-01). Only a recorded turn-off
+// counts (autopayTurnedOffSince): a pause, a card that expires while Auto Pay stays on, or a customer who never enrolled
+// keeps the visit's own due date.
+async function proposalTermsNetDays(conn, estimate) {
+  const { PAYMENT_TERM_NET_DAYS } = require('./payer');
+  const BillByInvoice = require('./bill-by-invoice');
+  const invoiceProposal = BillByInvoice.billByInvoiceProposal(estimate);
+  if (invoiceProposal) return PAYMENT_TERM_NET_DAYS[invoiceProposal.commercialTerms?.paymentTerms] || 0;
+  const { AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
+  const won = BillByInvoice.wonAuthoredProposal(estimate);
+  if (won?.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS || !estimate.customer_id) return 0;
+  return await autopayTurnedOffSince(conn, estimate.customer_id, estimate.created_at)
+    ? PAYMENT_TERM_NET_DAYS[INVOICE_PAYMENT_TERMS] : 0;
+}
+
+// True when the customer's Auto Pay was turned off after `since` (the proposal's creation), following an enrollment.
+// The column alone proves nothing: never-enrolled customers default to autopay_enabled = false (migration
+// 20260815000001). The record is autopay_log's latest autopay_enabled | autopay_disabled row, which every turn-off path
+// commits with the state change: it must be a disable, made after `since`, with an enable before it. Every recorded
+// turn-off counts, whatever its source, the same rule recurring-card-on-file.js explicitAutopayDisable applies: the
+// customer or staff turning it off, a removed or detached card, a replacement card that cannot be charged, a cancelled
+// contract. Each one stops Auto Pay, and the agreement then says Net 30. A pause or an expired card writes no toggle row.
+// Throws on a failed read.
+async function autopayTurnedOffSince(conn, customerId, since) {
+  const customer = await conn('customers').where({ id: customerId }).first('autopay_enabled');
+  if (!customer || customer.autopay_enabled === true) return false;
+  const [last, ...earlier] = await conn('autopay_log')
+    .where({ customer_id: customerId })
+    .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
+    .orderBy('created_at', 'desc')
+    .limit(50)
+    .select('event_type', 'created_at');
+  if (last?.event_type !== 'autopay_disabled') return false;
+  if (since && new Date(last.created_at).getTime() < new Date(since).getTime()) return false;
+  return earlier.some((row) => row.event_type === 'autopay_enabled');
 }
 
 module.exports = {

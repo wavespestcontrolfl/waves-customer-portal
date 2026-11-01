@@ -79,6 +79,7 @@ const lawnHealthRoutes = require('./routes/lawn-health');
 const feedRoutes = require('./routes/feed');
 const satisfactionRoutes = require('./routes/satisfaction');
 const mistingSystemRoutes = require('./routes/misting-system');
+const yardWrappedRoutes = require('./routes/yard-wrapped');
 const propertyRoutes = require('./routes/property');
 const customerPricingAiRoutes = require('./routes/customer-pricing-ai');
 const referralRoutes = require('./routes/referrals-v2');
@@ -764,6 +765,8 @@ app.use('/api/feed', feedRoutes);
 app.use('/api/satisfaction', satisfactionRoutes);
 // Misting system card on Home — dark behind GATE_MOSQUITO_MISTING (request-time read).
 app.use('/api/misting-system', mistingSystemRoutes);
+// Yard Wrapped year-in-review card on Home — dark behind GATE_YARD_WRAPPED (request-time read).
+app.use('/api/yard-wrapped', yardWrappedRoutes);
 app.use('/api/property', propertyRoutes);
 // Unified Property Score — dark behind GATE_PROPERTY_SCORE (request-time read).
 app.use('/api/property-score', require('./routes/property-score'));

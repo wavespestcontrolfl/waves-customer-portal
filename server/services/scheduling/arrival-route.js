@@ -8,7 +8,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const RouteOptimizer = require('../route-optimizer');
 const { loadTechStartPoint } = require('./tech-start-point');
-const { gateEnvValue, multiTechConfirmLive } = require('../../config/feature-gates');
+const { gateEnvValue, multiTechConfirmLive, routeOrderTimeFallbackLive } = require('../../config/feature-gates');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
@@ -19,6 +19,7 @@ const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { placedVisitMinutes } = require('./planning-minutes');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 const warningDetail = require('./route-warning-detail');
+const { timeFallbackOrder } = require('./route-order-time-fallback');
 
 /** The customer's primary premise, aliased the way effectivePremise (and
  *  stampedAddressDiverges) expect. Every query that feeds the co-visit merge
@@ -1250,9 +1251,15 @@ async function assertCapacityEligibility(conn, context, serviceTypes) {
 // number is not rewritten. Returns the order written.
 async function writeRouteOrder(conn, fit, targetId) {
   const order = fit.routeOrder.map(id => id === '__candidate__' ? targetId : id);
+  return writeOrderNumbers(conn, order, fit.target.scheduled_date, fit.target.technician_id);
+}
+
+// The fenced writer both placements share: where id, date and technician; only
+// a row whose number changes is written.
+async function writeOrderNumbers(conn, order, scheduledDate, technicianId) {
   for (let i = 0; i < order.length; i++) {
     await conn('scheduled_services').where({ id: order[i] })
-      .where({ scheduled_date: fit.target.scheduled_date, technician_id: fit.target.technician_id })
+      .where({ scheduled_date: scheduledDate, technician_id: technicianId })
       .whereRaw('route_order IS DISTINCT FROM ?', [i + 1]).update({ route_order: i + 1 });
   }
   return order;
@@ -1297,6 +1304,20 @@ function refusePlacement(serviceId, source, reason, date) {
   return null;
 }
 
+// GATE_ROUTE_ORDER_TIME_FALLBACK (owner 2026-11-01): the check refused, so number the day by arrival time
+// (route-order-time-fallback.js) instead of leaving the visit last. Ordering only, no arrival simulation;
+// runs inside placeInSavepoint's savepoint, under the tech-day lock it holds.
+async function placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId, reason }) {
+  const order = timeFallbackOrder(context.rows, { ...context.target, id: serviceId, technician_id: technicianId });
+  if (!order) return null;
+  await writeOrderNumbers(sp, order, date, technicianId);
+  logger.info(`[arrival-route] route order placed by time after refusal: service=${String(serviceId).slice(0, 8)} reason=${reason}`);
+  await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
+    resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
+    metadata: { policy: 'route_order_time_fallback_2026_11_01', reason, route_order: order, ...(source ? { source } : {}) } });
+  return order;
+}
+
 async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) {
   const row = await sp('scheduled_services').where({ id: serviceId })
     .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
@@ -1317,8 +1338,14 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) 
   const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
     windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true,
     ...(lateDays === true && gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}) });
-  if (!fit.feasible) return refuse(fit.reason || 'no_order');
-  if (!fit.routeOrder) return refuse('no_order');
+  // GATE_ROUTE_ORDER_TIME_FALLBACK: a refused check still numbers the visit by its arrival time.
+  const refuseOrNumberByTime = async reason => {
+    const refused = refuse(reason);
+    if (!(typeof routeOrderTimeFallbackLive === 'function' && routeOrderTimeFallbackLive())) return refused;
+    return placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId: row.technician_id, reason });
+  };
+  if (!fit.feasible) return refuseOrNumberByTime(fit.reason || 'no_order');
+  if (!fit.routeOrder) return refuseOrNumberByTime('no_order');
   const order = await writeRouteOrder(sp, fit, serviceId);
   await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
     resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,

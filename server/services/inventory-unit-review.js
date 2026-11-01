@@ -18,11 +18,19 @@
  * (GATE_INVENTORY_UNIT_AUTOFIX === 'true', opt-in in EVERY environment —
  * auto-writer pattern, same as dataHygieneAutoApply). Cron: 3:45am ET,
  * runExclusive 'inventory-unit-autofix' (job_health via cron-lock).
+ *
+ * Second phase (owner 2026-11-01, Action inbox agents A): DRY products whose
+ * unit is a bare ounce are converted to g or lb (exact weight conversion,
+ * stock and threshold converted with it). Its own gate,
+ * GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true', read at call time via
+ * inventoryUnitAutofixDryOzLive(); it also needs the sweep gate above. Dry-oz
+ * fixes ring no bell: each leaves a movement audit row, and the alias digest
+ * below is worded exactly as before. resolveDryOzTarget() decides, and parks everything doubtful.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, inventoryUnitAutofixDryOzLive } = require('../config/feature-gates');
 const {
   convertInventoryQuantity,
   normalizeInventoryUnit,
@@ -153,6 +161,157 @@ function resolveInventoryUnitAlias(rawUnit) {
   return target;
 }
 
+// Moved here from routes/admin-inventory.js so the Unit Review page and the
+// dry-oz sweep share ONE definition of "looks liquid".
+function looksLiquidProduct(product = {}) {
+  const text = `${product.name || ''} ${product.category || ''} ${product.subcategory || ''} ${product.formulation || ''} ${product.unit_type || ''}`.toLowerCase();
+  return /\b(liquid|flowable|sc|sl|ec|ew|solution|sprayable|hydretain|talstar|atrazine|dismiss|headway|medallion|primo|acelepryn|dispatch|carbonpro|k-flow)\b/.test(text);
+}
+
+// --- Dry-oz target -------------------------------------------------------
+// A bare "oz" is ambiguous (weight or fluid). A product whose formulation is
+// positively dry (WDG, granular, powder, dust, paste, gel bait...) holds
+// WEIGHT ounces, so oz -> g / lb is an exact conversion. Anything else stays
+// parked for a human.
+const DRY_FORMULATION_RE = /\b(wdg|wg|wsg|wp|sp|df|sg)\b|granul|powder|dust|\bpaste\b|\bgel\b|pellet|\bmeal\b|\bdry\b|bait block|bait chunk/;
+// Count stock lives in 'each' (inventory-units.js refuses oz <-> each). Count
+// words are read across EVERY catalog text field, not only the formulation: a
+// "Granular Bait Station" (formulation granular) is counted by the station. A
+// bare "bait" word is deliberately NOT dry evidence and NOT a count sign.
+const COUNT_WORD_RE = /cartridge|briquet|station|tablet|\btrap|supply|live plug|foam|\beach\b|\bcount\b|\bpieces?\b/;
+const COUNT_BASE_UNITS = new Set(['each', 'ea', 'count', 'ct', 'piece', 'pc', 'station', 'placement']);
+const LIQUID_FORMULATION_RE = /\b(sc|se|ec|ew|cs|me|mec|sl|aq|flowable|liquid|concentrate|suspension|emulsion|emulsifiable|microemulsion|oil|solution)\b/;
+const VOLUME_BASE_UNITS = new Set(['fl_oz', 'floz', 'gal', 'gallon', 'qt', 'quart', 'pt', 'pint', 'ml', 'l', 'liter', 'litre']);
+// A pound or more of weight ounces.
+const DRY_OZ_POUND_THRESHOLD_OZ = 16;
+
+function isOzFamilyUnit(rawUnit) {
+  const squashed = String(rawUnit == null ? '' : rawUnit).trim().replace(/ /g, '_').toLowerCase().replace(/s$/, '');
+  return squashed === 'oz' || squashed === 'ounce';
+}
+
+// The quantity part of a rate/default unit ("fl_oz/1000sf" -> fl_oz,
+// "each/station" -> each), spelling-normalized.
+function baseUnitOf(rawUnit) {
+  return String(rawUnit == null ? '' : rawUnit).split('/')[0]
+    .trim().toLowerCase().replace(/\./g, '').replace(/\s+/g, '_').replace(/s$/, '');
+}
+
+function isVolumeBaseUnit(rawUnit) {
+  return VOLUME_BASE_UNITS.has(baseUnitOf(rawUnit));
+}
+
+function hasDryEvidence(formulation) {
+  if (!formulation || formulation === 'unspecified') return false;
+  if (!DRY_FORMULATION_RE.test(formulation)) return false;
+  return !LIQUID_FORMULATION_RE.test(formulation);
+}
+
+// A price with no cost unit: inventory-cost.js reads it as per inventory
+// unit, while other readers fall back to the usage or dose unit, so converting
+// the inventory unit would silently re-price it for some readers and not
+// others. Those rows stay for a person.
+function hasImplicitCostBasis(product) {
+  return numberOrNullValue(product.cost_per_unit) != null && !String(product.cost_unit == null ? '' : product.cost_unit).trim();
+}
+
+// An explicit cost unit must still price the converted stock. Weight units and
+// the oz family convert to g / lb; a volume (fl_oz), count (each) or unknown
+// cost unit does not, so inventory-cost.js would stop costing the product's
+// usage (and contradicts the dry reading anyway). Those rows stay for a person.
+function costUnitBlocksWeight(product) {
+  const raw = String(product.cost_unit == null ? '' : product.cost_unit).trim();
+  if (!raw) return false;
+  const def = unitDefinition(raw);
+  return !def || (def.dimension !== 'weight' && def.dimension !== 'ambiguous');
+}
+
+// A per-visit supplies product (per_completion_usage > 0). supplies-consumption.js
+// prices that usage only while cost_unit equals inventory_unit, so a converted
+// unit would leave its later visits uncosted. Those rows stay for a person.
+function hasPerVisitUsage(product) {
+  return (numberOrNullValue(product.per_completion_usage) || 0) > 0;
+}
+
+// Any sign the product is stocked by the piece: a count word in the name,
+// category, subcategory, formulation or unit type, or a rate/default unit
+// counted per item ("each/station").
+function hasCountEvidence(product) {
+  const text = [product.name, product.category, product.subcategory, product.formulation, product.unit_type]
+    .map((value) => String(value == null ? '' : value)).join(' ').toLowerCase();
+  if (COUNT_WORD_RE.test(text)) return true;
+  return [product.rate_unit, product.default_unit].some((unit) => COUNT_BASE_UNITS.has(baseUnitOf(unit)));
+}
+
+/**
+ * 'g', 'lb' or null (null = stays parked for a human). Pure.
+ * Target: 'lb' from 16 oz of stock up (the bag convention), else 'g' (keeps
+ * small containers readable: 0.4433 oz = 12.5673 g but 0.0277 lb). Both are
+ * exact weight conversions. Null or zero stock -> 'g'.
+ */
+function resolveDryOzTarget(product = {}) {
+  if (!isOzFamilyUnit(product.inventory_unit)) return null;
+  const formulation = String(product.formulation == null ? '' : product.formulation).trim().toLowerCase();
+  if (!hasDryEvidence(formulation)) return null;
+  if (hasCountEvidence(product)) return null;
+  if (hasImplicitCostBasis(product) || costUnitBlocksWeight(product)) return null;
+  if (hasPerVisitUsage(product)) return null;
+  if (looksLiquidProduct(product)) return null;
+  if (isVolumeBaseUnit(product.rate_unit) || isVolumeBaseUnit(product.default_unit)) return null;
+  return Number(product.inventory_on_hand) >= DRY_OZ_POUND_THRESHOLD_OZ ? 'lb' : 'g';
+}
+
+// Zero is zero in every unit of the same dimension. convertInventoryQuantity
+// refuses a non-positive amount, so a row counted down to 0 could never be
+// fixed: the Unit Review Fix answered 400 and the dry-oz sweep would retry it
+// every night. Units that cannot convert still return null (refused).
+function convertStockAmount(amount, fromUnit, toUnit) {
+  if (amount === 0) return convertInventoryQuantity(1, fromUnit, toUnit) == null ? null : 0;
+  return convertInventoryQuantity(amount, fromUnit, toUnit);
+}
+
+// Every other quantity the catalog keeps IN the inventory unit: the
+// auto-reorder amount (procurement/auto-reorder.js pairs reorder_quantity
+// with inventory_unit) and the per-visit supplies usage (supplies-consumption.js
+// deducts per_completion_usage in inventory_unit). A unit conversion converts
+// them with the stock, or a 32 oz reorder would read as 32 g or 32 lb.
+const UNIT_BOUND_QUANTITY_COLUMNS = ['reorder_quantity', 'per_completion_usage'];
+
+function numberOrNullValue(value) {
+  if (value === '' || value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+// { updates, audit } for the unit-bound columns the locked row carries; throws
+// the same 400 as stock when one cannot convert. A column absent from the row
+// (older schema) or empty is left alone.
+function convertUnitBoundQuantities(product, fromUnit, toUnit) {
+  const updates = {};
+  const audit = {};
+  for (const column of UNIT_BOUND_QUANTITY_COLUMNS) {
+    if (!Object.prototype.hasOwnProperty.call(product, column)) continue;
+    const before = numberOrNullValue(product[column]);
+    if (before == null) continue;
+    const after = convertStockAmount(before, fromUnit, toUnit);
+    if (after == null) {
+      const err = new Error(`Cannot convert ${column} from ${fromUnit} to ${toUnit}`);
+      err.statusCode = 400;
+      throw err;
+    }
+    updates[column] = after;
+    audit[column] = { before, after };
+  }
+  return { updates, audit };
+}
+
+// True when the locked row no longer matches what the caller decided on.
+function isStaleLock(product, { expectedCurrentUnit, lockedCheck }) {
+  if (expectedCurrentUnit !== undefined
+    && String(product.inventory_unit || '') !== String(expectedCurrentUnit || '')) return true;
+  return Boolean(lockedCheck) && !lockedCheck(product);
+}
+
 /**
  * Normalize one product's inventory unit. Extracted from the admin route —
  * route behavior is unchanged (same guards, same conversion, same movement
@@ -161,6 +320,10 @@ function resolveInventoryUnitAlias(rawUnit) {
  *     changed since the caller selected it (an admin fix mid-sweep wins).
  *   alwaysRecordMovement — audit a zero-quantity 'correction' movement even
  *     when no numbers changed, so every autonomous rename leaves a trail.
+ *   lockedCheck — fn(lockedProductRow); false = outcome 'stale', no write
+ *     (re-checks the caller's decision against the row it now holds locked).
+ *   movementReason — audit-row reason text (default: the alias/normalization
+ *     strings below).
  * Throws err.statusCode 400/404 like the route always did.
  */
 async function applyInventoryUnitFix({
@@ -172,6 +335,8 @@ async function applyInventoryUnitFix({
   adjustedBy = null,
   expectedCurrentUnit = undefined,
   alwaysRecordMovement = false,
+  lockedCheck = undefined,
+  movementReason = undefined,
 }) {
   // Mirrors the route's assertSupportedInventoryUnit exactly (including its
   // empty-string pass-through) so extracting this changed no route behavior.
@@ -181,6 +346,11 @@ async function applyInventoryUnitFix({
     err.statusCode = 400;
     throw err;
   }
+
+  const reasons = {
+    conversion: movementReason || 'Inventory unit normalization',
+    rename: movementReason || 'Inventory unit alias normalization (no quantity change)',
+  };
 
   return dbi.transaction(async (trx) => {
     const product = await trx('products_catalog')
@@ -193,10 +363,10 @@ async function applyInventoryUnitFix({
       throw err;
     }
     const currentUnit = product.inventory_unit || null;
-    if (expectedCurrentUnit !== undefined
-      && String(currentUnit || '') !== String(expectedCurrentUnit || '')) {
-      // The row changed between the caller's read and this lock — a human
-      // (or another sweep) already acted; leave their choice alone.
+    if (isStaleLock(product, { expectedCurrentUnit, lockedCheck })) {
+      // The row changed between the caller's read and this lock (a human or
+      // another sweep already acted) or the caller's own re-check failed:
+      // leave the row alone.
       return { outcome: 'stale', product };
     }
     const numberOrNull = (value) => {
@@ -209,15 +379,17 @@ async function applyInventoryUnitFix({
     let stockAfter = stockBefore;
     let thresholdAfter = thresholdBefore;
     let conversion = null;
+    let unitBound = { updates: {}, audit: {} };
 
     if (convertExistingStock && currentUnit && normalizeInventoryUnit(currentUnit) !== normalizeInventoryUnit(targetUnit)) {
-      stockAfter = stockBefore != null ? convertInventoryQuantity(stockBefore, currentUnit, targetUnit) : null;
-      thresholdAfter = thresholdBefore != null ? convertInventoryQuantity(thresholdBefore, currentUnit, targetUnit) : null;
+      stockAfter = stockBefore != null ? convertStockAmount(stockBefore, currentUnit, targetUnit) : null;
+      thresholdAfter = thresholdBefore != null ? convertStockAmount(thresholdBefore, currentUnit, targetUnit) : null;
       if ((stockBefore != null && stockAfter == null) || (thresholdBefore != null && thresholdAfter == null)) {
         const err = new Error(`Cannot convert existing inventory from ${currentUnit} to ${targetUnit}`);
         err.statusCode = 400;
         throw err;
       }
+      unitBound = convertUnitBoundQuantities(product, currentUnit, targetUnit);
       conversion = {
         fromUnit: currentUnit,
         toUnit: targetUnit,
@@ -225,6 +397,7 @@ async function applyInventoryUnitFix({
         stockAfter,
         thresholdBefore,
         thresholdAfter,
+        ...(Object.keys(unitBound.audit).length ? { otherQuantities: unitBound.audit } : {}),
       };
     }
 
@@ -232,11 +405,12 @@ async function applyInventoryUnitFix({
       inventory_unit: targetUnit,
       inventory_on_hand: stockAfter,
       low_stock_threshold: thresholdAfter,
+      ...unitBound.updates,
       updated_at: new Date(),
     });
 
     if (conversion && stockBefore != null) {
-      const stockBeforeInNextUnit = convertInventoryQuantity(stockBefore, currentUnit, targetUnit);
+      const stockBeforeInNextUnit = convertStockAmount(stockBefore, currentUnit, targetUnit);
       await trx('product_inventory_movements').insert({
         product_id: product.id,
         movement_type: 'correction',
@@ -246,7 +420,7 @@ async function applyInventoryUnitFix({
         stock_after: stockAfter || 0,
         metadata: {
           source: movementSource,
-          reason: 'Inventory unit normalization',
+          reason: reasons.conversion,
           conversion,
           adjustedBy,
         },
@@ -263,7 +437,7 @@ async function applyInventoryUnitFix({
         stock_after: stockAfter != null ? stockAfter : 0,
         metadata: {
           source: movementSource,
-          reason: 'Inventory unit alias normalization (no quantity change)',
+          reason: reasons.rename,
           fromUnit: currentUnit,
           toUnit: targetUnit,
           adjustedBy,
@@ -309,7 +483,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     if (fixable.length >= BATCH_CAP || page.length < CANDIDATE_PAGE_SIZE) break;
   }
 
-  const results = { applied: 0, parked, stale: 0, errors: 0, fixes: [] };
+  const results = { applied: 0, parked, stale: 0, errors: 0, fixes: [], dryOz: { applied: 0, parked: 0, stale: 0, errors: 0, fixes: [] } };
   for (const candidate of fixable) {
     const { target } = candidate;
     try {
@@ -336,49 +510,124 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     }
   }
 
+  if (inventoryUnitAutofixDryOzLive()) {
+    await runDryOzPhase({ dbi, results });
+  }
+
+  // One digest for alias renames only, worded exactly as before. Dry-oz fixes
+  // ring nothing (deterministic fixes apply with an audit trail and no bell):
+  // each leaves its movement row, and the Unit Review count drops.
   if (results.applied > 0) {
-    try {
-      // Remaining-for-review = the FULL unit-review predicate (missing unit,
-      // ambiguous oz, still-unsupported), same shape as dashboard-alerts.
-      // The SHARED queue predicate (applyUnitReviewQueueFilter) — the same
-      // filter the review route and dashboard-alerts run, so this count can
-      // never disagree with what the page shows.
-      const remaining = await applyUnitReviewQueueFilter(dbi('products_catalog'))
-        .count('* as count')
-        .first();
-      const remainingCount = Number.parseInt(remaining?.count || 0, 10);
-      const sample = results.fixes.slice(0, 5)
-        .map((f) => `${f.name} (${f.from} → ${f.to})`)
-        .join(', ');
-      const more = results.fixes.length > 5 ? ` and ${results.fixes.length - 5} more` : '';
-      await require('./notification-service').notifyAdmin(
-        'system',
-        `Inventory: ${results.applied} unit alias${results.applied === 1 ? '' : 'es'} auto-fixed`,
-        `${sample}${more}. Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row. ${remainingCount} product${remainingCount === 1 ? '' : 's'} still need${remainingCount === 1 ? 's' : ''} unit review.`,
-        {
-          link: '/admin/inventory?tab=unit-review',
-          metadata: {
-            applied: results.applied,
-            parked: results.parked,
-            stale: results.stale,
-            errors: results.errors,
-            remainingForReview: remainingCount,
-            fixes: results.fixes,
-          },
-        },
-      );
-    } catch (notifyErr) {
-      logger.warn(`[inventory-unit-autofix] digest notify failed (non-blocking): ${notifyErr.message}`);
+    await sendAliasDigest({ dbi, results });
+  }
+
+  logger.info(`[inventory-unit-autofix] sweep: applied=${results.applied} parked=${results.parked} stale=${results.stale} errors=${results.errors} dryOz applied=${results.dryOz.applied} parked=${results.dryOz.parked} stale=${results.dryOz.stale} errors=${results.dryOz.errors}`);
+  return results;
+}
+
+/**
+ * Dry-oz phase (gate inventoryUnitAutofixDryOz, on top of the sweep gate):
+ * oz-family rows with positive dry-by-weight evidence are converted to g/lb
+ * with their stock and threshold. Same one-transaction-per-product posture
+ * as the alias phase; the decision is re-checked under the row lock.
+ */
+async function runDryOzPhase({ dbi, results }) {
+  const dry = results.dryOz;
+  let rows;
+  try {
+    rows = await dbi('products_catalog')
+      .whereRaw(OZ_FAMILY_SQL)
+      .select('id', 'name', 'category', 'subcategory', 'formulation', 'unit_type', 'inventory_unit',
+        'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit', 'cost_per_unit', 'cost_unit',
+        'per_completion_usage')
+      .orderBy('name')
+      .orderBy('id');
+  } catch (err) {
+    dry.errors += 1;
+    logger.warn(`[inventory-unit-autofix] dry-oz scan failed (skipped): ${err.message}`);
+    return;
+  }
+
+  const fixable = [];
+  for (const row of rows || []) {
+    const target = resolveDryOzTarget(row);
+    if (!target) {
+      dry.parked += 1;
+    } else if (fixable.length < BATCH_CAP) {
+      fixable.push({ ...row, target });
     }
   }
 
-  logger.info(`[inventory-unit-autofix] sweep: applied=${results.applied} parked=${results.parked} stale=${results.stale} errors=${results.errors}`);
-  return results;
+  for (const candidate of fixable) {
+    const { target } = candidate;
+    try {
+      const { outcome } = await applyInventoryUnitFix({
+        dbi,
+        productId: candidate.id,
+        nextUnit: target,
+        convertExistingStock: true,
+        movementSource: 'inventory_unit_review_autofix_dry_oz',
+        adjustedBy: 'auto:inventory-unit-autofix',
+        expectedCurrentUnit: candidate.inventory_unit,
+        alwaysRecordMovement: true,
+        movementReason: `Dry product: weight ounces converted to ${target}`,
+        lockedCheck: (locked) => resolveDryOzTarget(locked) === target,
+      });
+      if (outcome === 'applied') {
+        dry.applied += 1;
+        dry.fixes.push({ productId: candidate.id, name: candidate.name, from: candidate.inventory_unit, to: target });
+      } else {
+        dry.stale += 1;
+      }
+    } catch (err) {
+      dry.errors += 1;
+      logger.warn(`[inventory-unit-autofix] dry-oz fix failed for product ${candidate.id} (left parked): ${err.message}`);
+    }
+  }
+}
+
+// The alias digest, unchanged from before the dry-oz phase existed.
+async function sendAliasDigest({ dbi, results }) {
+  try {
+    // Remaining-for-review = the FULL unit-review predicate (missing unit,
+    // ambiguous oz, still-unsupported), same shape as dashboard-alerts.
+    // The SHARED queue predicate (applyUnitReviewQueueFilter) — the same
+    // filter the review route and dashboard-alerts run, so this count can
+    // never disagree with what the page shows.
+    const remaining = await applyUnitReviewQueueFilter(dbi('products_catalog'))
+      .count('* as count')
+      .first();
+    const remainingCount = Number.parseInt(remaining?.count || 0, 10);
+    const sample = results.fixes.slice(0, 5)
+      .map((f) => `${f.name} (${f.from} → ${f.to})`)
+      .join(', ');
+    const more = results.fixes.length > 5 ? ` and ${results.fixes.length - 5} more` : '';
+    await require('./notification-service').notifyAdmin(
+      'system',
+      `Inventory: ${results.applied} unit alias${results.applied === 1 ? '' : 'es'} auto-fixed`,
+      `${sample}${more}. Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row. ${remainingCount} product${remainingCount === 1 ? '' : 's'} still need${remainingCount === 1 ? 's' : ''} unit review.`,
+      {
+        link: '/admin/inventory?tab=unit-review',
+        metadata: {
+          applied: results.applied,
+          parked: results.parked,
+          stale: results.stale,
+          errors: results.errors,
+          remainingForReview: remainingCount,
+          fixes: results.fixes,
+        },
+      },
+    );
+  } catch (notifyErr) {
+    logger.warn(`[inventory-unit-autofix] digest notify failed (non-blocking): ${notifyErr.message}`);
+  }
 }
 
 module.exports = {
   applyInventoryUnitFix,
   applyUnitReviewQueueFilter,
+  looksLiquidProduct,
+  resolveDryOzTarget,
   resolveInventoryUnitAlias,
   runInventoryUnitAutofixSweep,
   _test: {

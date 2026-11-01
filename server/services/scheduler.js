@@ -1934,6 +1934,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:52AM ET — Lead repeat sweep (owner 2026-11-01, Action inbox
+  // agents A). Files an unanswered lead that repeats the same person's open
+  // lead (same phone and name, within 30 days) as its duplicate, so the
+  // inbox counts each person once and the real lead can settle. Lead status
+  // and history only; sends nothing. Gate GATE_LEAD_REPEAT_SWEEP is read at
+  // call time; kill = unset. runExclusive: an overlapping tick must not file
+  // from a stale read.
+  // =========================================================================
+  cron.schedule('52 4 * * *', async () => {
+    if (!require('../config/feature-gates').leadRepeatSweepLive()) return;
+    logger.info('Running: Lead repeat sweep');
+    try {
+      await runExclusive('lead-repeat-sweep', () =>
+        require('./lead-repeat-sweep').runLeadRepeatSweep());
+    } catch (err) {
+      logger.error(`Lead repeat sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY VENDOR PRICE SCAN (gated: cronJobs AND priceScanWeekly)
   // Scans top-spend products for a cheaper competitor per-unit price and stages a
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
