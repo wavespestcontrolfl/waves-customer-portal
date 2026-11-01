@@ -132,7 +132,7 @@ describe("Portal inbox tab", () => {
     const row = (await screen.findByText("Kim Sample")).closest("[data-testid]");
     fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
     await waitFor(() => expect(screen.queryByText("Kim Sample")).not.toBeInTheDocument());
-    expect(adminFetch).toHaveBeenCalledWith("/admin/requests/req-1", { method: "PATCH", body: JSON.stringify({ status: "resolved" }) });
+    expect(adminFetch).toHaveBeenCalledWith("/admin/requests/req-1", { method: "PATCH", body: JSON.stringify({ status: "resolved", quiet: true }) });
   });
 
   it("shows the saved hand-off summary, which can hold what the last message does not (an email change)", async () => {

@@ -113,6 +113,13 @@
  *     GATE_ALERT_CONTACT_CLOSE (the weaker of the two wins). The add-a-service chat keeps its
  *     estimate rule, and also closes on this contact. The confirmed-email-change bell
  *     (`portal-chat-email-change:`) is never judged: its answer is the account change.
+ *   - GATE_PORTAL_ITEM_CLOSE (boolean, own gate; owner 2026-11-01): two more portal classes. A portal request
+ *     bell (category `service`, `doneWhen: 'request_answered'`, a request id and a customer id) closes on the
+ *     same person contact after the bell as the chat hand-off. An add-service request bell (trigger
+ *     `bundle_quote_requested` carrying its request id at the top of its metadata) closes once an estimate was
+ *     handed to that customer after the bell. Whenever the sweep closes one of them it also resolves that
+ *     request row quietly (portal-inbox.js resolveRequestQuietly: no customer email). The contact close rides
+ *     on GATE_ALERT_CONTACT_CLOSE like the chat class. A cancellation bell (`cancellation_reviewed`) is never judged.
  */
 
 const db = require('../models/db');
@@ -133,6 +140,10 @@ const REPEAT_FORM_PREFIX = 'lead-repeat-form:';
 // (sms-reply-alert-delivery.js threadBellKey). Repeated, not imported (it pulls
 // in the webhook's delivery code); a test pins the two together.
 const SMS_THREAD_PREFIX = 'sms-thread:';
+
+// GATE_PORTAL_ITEM_CLOSE as a class gate: 'true' or 'off' (a boolean gate has no shadow). Read at call
+// time, and guarded like the other late-added readers: a test that mocks feature-gates without it reads off.
+const portalItemGate = () => (require('../config/feature-gates').portalItemCloseLive?.() ? 'true' : 'off');
 
 const RETIRED_BY = 'alert-relevance';
 const PAGE_SIZE = 200;
@@ -264,7 +275,7 @@ function bellEventAt(row) {
   return times.length ? new Date(Math.max(...times.map((d) => d.getTime()))) : null;
 }
 
-const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered']);
+const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered']);
 
 // What a customer-contact bell is about, for the witnesses: the text, call or
 // email it names, or the lead's own phone. Nothing here reads the customer's
@@ -306,7 +317,8 @@ async function loadContact(rows, data, conn) {
     // A gated class that judges by the contact witnesses also rides on GATE_ALERT_CONTACT_CLOSE.
     if (cls.gate && cls.contactRule && data.contactMode === 'off') continue;
     // The portal chat contact witnesses (customer kind) are read only while their own gate is on.
-    if (cls.contact === 'customer' && portalChatAnsweredCloseMode() === 'off') continue;
+    // (The portal item classes read them under their own gate, GATE_PORTAL_ITEM_CLOSE, checked above.)
+    if (cls.contact === 'customer' && cls.gate !== portalItemGate && portalChatAnsweredCloseMode() === 'off') continue;
     const refs = cls.contact ? contactRefs(cls.contact, row, data) : null;
     if (!refs) continue;
     // A lead_contacted or portal chat bell can be refreshed and rung again: its boundary is its latest event.
@@ -325,6 +337,25 @@ async function loadContact(rows, data, conn) {
   } catch (err) {
     data.contactFailed = true;
     logger.warn(`[alert-relevance] customer-contact witnesses failed to load: ${errSummary(err)}`);
+  }
+}
+
+// Each add-a-service portal chat bell, add-service request bell (GATE_PORTAL_ITEM_CLOSE) and repeat-form
+// alert: was an estimate handed off to its customer after the bell? The promise lane's own handoff witness
+// (call-commitments.js handedOffWithin: a real delivery or the customer's acceptance after the boundary) and
+// its estimate-ownership fence, never sent_at: a suppressed send stamps sent_at with nothing delivered, and
+// an estimate accepted during its first send is delivered with sent_at still null. One small query per bell
+// (these classes are a handful of rows).
+async function loadQuoteHandoffs(rows, data, conn) {
+  for (const row of rows) {
+    const meta = parseMeta(row.metadata);
+    const customerId = isAddServiceChat(meta) || (isBundleRequestBell(meta) && portalItemGate() !== 'off')
+      ? uuidOrNull(meta.customerId) : uuidOrNull(repeatFormCustomerId(meta));
+    const bellAt = row.created_at ? new Date(row.created_at) : null;
+    if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
+    const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
+    const handedOff = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id');
+    if (handedOff) data.quoteHandedOff.add(String(row.id));
   }
 }
 
@@ -366,23 +397,7 @@ async function loadSubjects(rows, conn = db) {
   if (promiseIds.length) {
     data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'human_state', 'reviewed_at'));
   }
-  // Each add-a-service portal chat bell and repeat-form alert: was an
-  // estimate handed off to its customer after the bell? The promise lane's
-  // own handoff witness (call-commitments.js handedOffWithin: a real delivery
-  // or the customer's acceptance after the boundary) and its estimate-ownership
-  // fence, never sent_at: a suppressed send stamps sent_at with nothing
-  // delivered, and an estimate accepted during its first send is delivered
-  // with sent_at still null. One small query per bell (both classes are a
-  // handful of rows).
-  for (const row of rows) {
-    const meta = parseMeta(row.metadata);
-    const customerId = isAddServiceChat(meta) ? uuidOrNull(meta.customerId) : uuidOrNull(repeatFormCustomerId(meta));
-    const bellAt = row.created_at ? new Date(row.created_at) : null;
-    if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
-    const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
-    const handedOff = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id');
-    if (handedOff) data.quoteHandedOff.add(String(row.id));
-  }
+  await loadQuoteHandoffs(rows, data, conn);
   if (visitIds.length) {
     // The service date as text: a DATE parsed to a JS Date lands at the
     // host's midnight, the previous ET day on a UTC host.
@@ -627,8 +642,21 @@ const PORTAL_CHAT_PREFIX = 'portal-chat-escalation:';
 function isAddServiceChat(meta) {
   return String(meta.dedupeKey || '').startsWith(PORTAL_CHAT_PREFIX) && meta.topic === 'add_service';
 }
+// An add-service request bell (GATE_PORTAL_ITEM_CLOSE): the trigger `bundle_quote_requested` rung for a
+// request row (a portal home card, a service report card, a public estimate), carrying that request id and
+// its customer at the TOP of its metadata (notification-triggers.js adds both while the gate is on; the
+// trigger's own fields stay nested under `payload`). The same answer as the add-service chat: an estimate.
+const BUNDLE_QUOTE_TRIGGER = 'bundle_quote_requested';
+function isBundleRequestBell(meta) {
+  return meta.triggerKey === BUNDLE_QUOTE_TRIGGER && !!uuidOrNull(meta.requestId) && !!uuidOrNull(meta.customerId);
+}
 function addServiceQuoted(s) {
-  return isAddServiceChat(s.meta) && s.quoteHandedOff ? 'Estimate was sent' : null;
+  return (isAddServiceChat(s.meta) || isBundleRequestBell(s.meta)) && s.quoteHandedOff ? 'Estimate was sent' : null;
+}
+// A portal request bell (POST /api/requests: category `service`, `doneWhen: 'request_answered'`, its request
+// and customer ids). A cancellation bell has another promise (`cancellation_reviewed`) and never matches.
+function isPortalRequestBell(meta) {
+  return meta.doneWhen === 'request_answered' && !!uuidOrNull(meta.requestId) && !!uuidOrNull(meta.customerId);
 }
 // Any portal chat hand-off that asks for a customer answer (`doneWhen: 'customer_answered'`) and names
 // its customer. The confirmed-email-change bell (`portal-chat-email-change:`, `doneWhen: 'email_changed'`)
@@ -780,6 +808,15 @@ function leadContacted(s) {
   return contactAfter(c, c.textAt) || contactAfter(c, c.backAt) ? 'Lead was contacted' : null;
 }
 
+// The first fact, in order, that a person reached the customer after the bell's anchor: a call back, an
+// answered call, a text, a Gmail send. The reasons are plain words (they become the bell's resolution).
+function personContactReason(c) {
+  if (contactAfter(c, c.backAt)) return 'A person called back';
+  if (contactAfter(c, c.inAt)) return 'A person answered their call';
+  if (contactAfter(c, c.textAt)) return 'Answered by text';
+  if (contactAfter(c, c.replyAt)) return 'Answered by email';
+  return null;
+}
 // A portal chat hand-off (GATE_PORTAL_CHAT_ANSWERED_CLOSE; owner 2026-10-31: "a chat item closes itself
 // when someone texts, calls or emails that customer after the request"): a person called back, answered
 // the customer's call, texted or emailed that customer after the bell's latest event (the witnesses'
@@ -791,12 +828,21 @@ function portalChatAnswered(s) {
   if (!c) return null;
   const mode = portalChatAnsweredCloseMode();
   if (mode === 'off') return null;
-  let reason = null;
-  if (contactAfter(c, c.backAt)) reason = 'A person called back';
-  else if (contactAfter(c, c.inAt)) reason = 'A person answered their call';
-  else if (contactAfter(c, c.textAt)) reason = 'Answered by text';
-  else if (contactAfter(c, c.replyAt)) reason = 'Answered by email';
+  const reason = personContactReason(c);
   return reason ? { reason, mode } : null;
+}
+// The same contact for a portal request bell, under GATE_PORTAL_ITEM_CLOSE (the class gate, so 'true' here).
+function portalItemAnswered(s) {
+  const c = s.contact;
+  const reason = c ? personContactReason(c) : null;
+  return reason ? { reason, mode: 'true' } : null;
+}
+
+// What closing a portal item bell also settles: its request row, resolved quietly with the reason as the
+// admin note (portal-inbox.js; no customer email). Failing here never undoes the bell's close.
+function resolveRequestOf(bell, note) {
+  const meta = parseMeta(bell.metadata);
+  return require('./portal-inbox').resolveRequestQuietly(uuidOrNull(meta.requestId), uuidOrNull(meta.customerId), note);
 }
 
 // A lead_contacted Leads bell (GATE_LEAD_CONTACTED_CLOSE): the emitters promise "done when
@@ -857,6 +903,18 @@ const CLASSES = [
   { // the same hand-off for every other topic: closed only by a person's contact (add_service matched above)
     key: 'portal_chat_answered', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAnswerableChat,
     gate: portalChatAnsweredCloseMode, contact: 'customer', contactRule: portalChatAnswered,
+  },
+  { // requests.js POST /api/requests — a customer's request from the app (GATE_PORTAL_ITEM_CLOSE). Closed by a
+    // person's contact with that customer after the bell, like a chat hand-off; its request row is resolved quietly.
+    key: 'portal_request_answered', categories: ['service'], doneWhen: 'request_answered', match: isPortalRequestBell,
+    gate: portalItemGate, contact: 'customer', contactRule: portalItemAnswered,
+    onRetired: (bell, reason) => resolveRequestOf(bell, reason),
+  },
+  { // notification-triggers.js bundle_quote_requested — an add-service request (GATE_PORTAL_ITEM_CLOSE). Closed by
+    // an estimate handed to that customer after the bell; its request row is resolved quietly as "Estimate sent".
+    key: 'portal_add_service_request', categories: ['estimate'], triggerKey: BUNDLE_QUOTE_TRIGGER, match: isBundleRequestBell,
+    gate: portalItemGate, rule: addServiceQuoted,
+    onRetired: (bell) => resolveRequestOf(bell, 'Estimate sent'),
   },
   { // lead-webhook.js ringRepeatFormAlert — it dedupes on OPEN rows only, so a
     // retirement ends the episode and the lead's next form rings a fresh row.
@@ -1027,12 +1085,27 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
     const latest = await stillOurs(db('notifications')).first('id', 'category', 'link', 'metadata', 'created_at');
     if (!latest) return null;
     const judged = { ...latest, metadata: unretired(latest.metadata) };
-    if (judge(cls, subjectFor(judged, await loadSubjects([judged]), todayET)).reason) return reason;
+    if (judge(cls, subjectFor(judged, await loadSubjects([judged]), todayET)).reason) {
+      await settleAfterRetire(cls, judged, reason);
+      return reason;
+    }
   } catch (err) {
     logger.warn(`[alert-relevance] notification ${row.id}: the check after retiring failed, putting it back: ${errSummary(err)}`);
   }
   await stillOurs(db('notifications')).update(undone(doneAt));
   return null;
+}
+
+// A class that settles more than its bell (the portal request classes also resolve their request row) says
+// so in `onRetired`. It runs once the retirement stood its final judgement, and a failure is logged and
+// never undoes the close.
+async function settleAfterRetire(cls, bell, reason) {
+  if (!cls.onRetired) return;
+  try {
+    await cls.onRetired(bell, reason);
+  } catch (err) {
+    logger.warn(`[alert-relevance] notification ${bell.id}: the request behind it was not resolved: ${errSummary(err)}`);
+  }
 }
 
 // Rows this module retired (done, stamped) in the last REARM_DAYS,
@@ -1216,7 +1289,21 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (rearmed) logger.info(`[alert-relevance] put back ${rearmed} alert(s) whose subject is relevant again`);
   if (wouldClose) logger.info(`[alert-relevance] shadow: recorded ${wouldClose} alert(s) the customer-contact rules would close`);
   const anyShadow = [alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode, portalChatAnsweredCloseMode].some((mode) => mode() === 'shadow');
-  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}) };
+  const lateReRung = await lateReRingPass(now);
+  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}) };
+}
+
+// GATE_PORTAL_LATE_RERING: portal items past their one business hour ring once more (portal-late-rering.js).
+// After the closes above, so a bell this run just closed is not rung. Off: nothing is read or written. A
+// failure is logged and never fails the sweep.
+async function lateReRingPass(now) {
+  if (!require('../config/feature-gates').portalLateReringLive?.()) return null;
+  try {
+    return (await require('./portal-late-rering').runPortalLateRering({ now })).rung;
+  } catch (err) {
+    logger.warn(`[alert-relevance] the late re-ring pass failed: ${errSummary(err)}`);
+    return null;
+  }
 }
 
 module.exports = {
@@ -1225,6 +1312,8 @@ module.exports = {
   loadSubjects,
   subjectFor,
   refsFromRow,
+  bellEventAt,
+  parseMeta,
   judge,
   whereLiveBooking,
   CLASSES,

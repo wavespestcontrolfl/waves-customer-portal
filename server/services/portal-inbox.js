@@ -208,6 +208,30 @@ async function closeRequestAlertsOnResolve(request, statusChanged, actor) {
   return closeAlertsWhenHandled('requestId', request.id, actor);
 }
 
+// A request whose admin bell was settled by the alert-relevance sweep (GATE_PORTAL_ITEM_CLOSE: a person
+// answered the customer, or an estimate went out) is resolved to match, quietly: the same write as
+// closeRequestsOlder for one row, and NO customer email. Only a request still open, and only the
+// customer's own. `note` goes on the request as an admin note. Returns the number of rows resolved.
+async function resolveRequestQuietly(requestId, customerId, note, conn = db, now = new Date()) {
+  if (!requestId || !customerId) return 0;
+  const cleaned = cut(note, 200);
+  const rows = await conn('service_requests')
+    .where({ id: requestId, customer_id: customerId })
+    .whereRaw("coalesce(status, 'new') not in (?, ?, ?)", TERMINAL_REQUEST_STATUSES)
+    .update({
+      status: 'resolved',
+      resolved_at: now,
+      status_version: conn.raw('status_version + 1'),
+      admin_notes: conn.raw(
+        "CASE WHEN coalesce(admin_notes, '') = '' THEN ?::text ELSE admin_notes || E'\\n' || ?::text END",
+        [cleaned, cleaned],
+      ),
+      updated_at: now,
+    })
+    .returning('id');
+  return rows.length;
+}
+
 function parseCloseCutoff(raw, now = new Date()) {
   const when = new Date(raw);
   if (!raw || Number.isNaN(when.getTime())) return { error: 'cutoff must be an ISO date' };
@@ -274,5 +298,6 @@ module.exports = {
   closeAlerts,
   closeAlertsWhenHandled,
   closeRequestAlertsOnResolve,
+  resolveRequestQuietly,
   parseCloseCutoff,
 };

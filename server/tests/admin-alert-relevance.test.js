@@ -20,6 +20,9 @@ const mockLoadContactBundles = jest.fn(async () => (typeof mockBundles === 'func
 jest.mock('../services/admin-alert-contact-witnesses', () => ({ loadContactBundles: (...args) => mockLoadContactBundles(...args) }));
 const mockAuditWouldClose = jest.fn(async ({ items }) => items.length);
 jest.mock('../services/audit-log', () => ({ auditAlertWouldClose: (...args) => mockAuditWouldClose(...args) }));
+// The quiet request resolve the portal item classes run after a close (its SQL runs in the Postgres suite).
+const mockResolveRequest = jest.fn(async () => 1);
+jest.mock('../services/portal-inbox', () => ({ resolveRequestQuietly: (...args) => mockResolveRequest(...args) }));
 let mockTables;
 let mockQueries;
 let mockHooks;
@@ -181,6 +184,8 @@ beforeEach(() => {
   delete process.env.GATE_LEAD_CONTACTED_CLOSE;
   delete process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE;
   delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS;
+  delete process.env.GATE_PORTAL_ITEM_CLOSE;
+  delete process.env.GATE_PORTAL_LATE_RERING;
   mockBundles = new Map();
   mockTables = { notifications: [], scheduled_services: [], 'scheduled_services as ss': [], leads: [], estimates: [] };
   mockQueries = [];
@@ -1883,6 +1888,138 @@ describe('customer-contact classes', () => {
         mockBundles = new Map([[String(row.id), bundle()]]);
         expect((await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).rearmed).toBe(1);
         expect(row.done_at ?? null).toBeNull();
+      });
+    });
+
+    describe('portal items close like chat items (GATE_PORTAL_ITEM_CLOSE)', () => {
+      const REQ = uid(61);
+      const pi = (value) => { if (value === undefined) delete process.env.GATE_PORTAL_ITEM_CLOSE; else process.env.GATE_PORTAL_ITEM_CLOSE = value; };
+      // The bell POST /api/requests raises (requests.js): category service, doneWhen request_answered, requestId + customerId.
+      const requestBell = (over = {}) => note({
+        category: 'service', link: `/admin/customers?customerId=${CUST}`,
+        metadata: { area: 'Customers', doneWhen: 'request_answered', requestId: REQ, customerId: CUST, category: 'general', ...over },
+      });
+      const cancellationBell = () => requestBell({ doneWhen: 'cancellation_reviewed' });
+      // The add-service bell (notification-triggers bundle_quote_requested): trigger fields under payload; with the gate on the
+      // request id and customer ride at the top as well.
+      const bundleBell = (over = {}) => note({
+        category: 'estimate', link: `/admin/customers?customerId=${CUST}`,
+        metadata: { triggerKey: 'bundle_quote_requested', priority: 'high', payload: { customerId: CUST, requestId: REQ, bundled: false }, requestId: REQ, customerId: CUST, ...over },
+      });
+
+      test.each([[undefined, false], ['', false], ['on', false], ['1', false], ['TRUE', false], [' true', false], ['true', true]])('GATE_PORTAL_ITEM_CLOSE = %j -> live %s (strict)', (value, live) => {
+        pi(value);
+        expect(require('../config/feature-gates').portalItemCloseLive()).toBe(live);
+      });
+      test.each([[undefined, false], ['yes', false], ['TRUE', false], ['true', true]])('GATE_PORTAL_LATE_RERING = %j -> live %s (strict)', (value, live) => {
+        if (value === undefined) delete process.env.GATE_PORTAL_LATE_RERING; else process.env.GATE_PORTAL_LATE_RERING = value;
+        expect(require('../config/feature-gates').portalLateReringLive()).toBe(live);
+      });
+
+      test('the classes exist only while the gate is true; a cancellation bell, a bell with no request id or customer, and a bundle bell whose request id is still nested never match', () => {
+        gate('true');
+        const rows = [requestBell(), bundleBell()];
+        for (const row of rows) { expect(classify(row)).toBeNull(); }
+        expect(classify(requestBell(), { anyMode: true }).key).toBe('portal_request_answered');
+        expect(classify(bundleBell(), { anyMode: true }).key).toBe('portal_add_service_request');
+        pi('true');
+        expect(classify(requestBell()).key).toBe('portal_request_answered');
+        expect(classify(bundleBell()).key).toBe('portal_add_service_request');
+        expect(classify(cancellationBell())).toBeNull();
+        expect(classify(requestBell({ requestId: undefined }))).toBeNull();
+        expect(classify(requestBell({ requestId: 'not-an-id' }))).toBeNull();
+        expect(classify(requestBell({ customerId: undefined }))).toBeNull();
+        expect(classify(requestBell({ doneWhen: undefined }))).toBeNull();
+        // Raised before the gate: the request id is nested under payload only, so it is not judged.
+        expect(classify(bundleBell({ requestId: undefined, customerId: undefined }))).toBeNull();
+        expect(classify(bundleBell({ requestId: undefined }))).toBeNull();
+        // The same trigger's self-applied bundle (no request row) carries no request id at all.
+        expect(classify(note({ category: 'estimate', metadata: { triggerKey: 'bundle_quote_requested', payload: { bundled: true, customerId: CUST } } }))).toBeNull();
+      });
+
+      test('a request bell: the four reasons in order, only from a fact after the bell; a visit or an estimate is no reason; own gate off = nothing read', async () => {
+        gate('true'); pi('true');
+        expect((await judged(requestBell(), { backAt: at(20), inAt: at(20), textAt: at(20), replyAt: at(20) })).reason).toBe('A person called back');
+        expect((await judged(requestBell(), { inAt: at(20), textAt: at(20) })).reason).toBe('A person answered their call');
+        expect((await judged(requestBell(), { textAt: at(20), replyAt: at(20) })).reason).toBe('Answered by text');
+        expect((await judged(requestBell(), { replyAt: at(20) })).reason).toBe('Answered by email');
+        expect(await judged(requestBell(), { backAt: at(-20), inAt: at(-20), textAt: at(-20), replyAt: at(-20) })).toMatchObject({ reason: null, would: null });
+        expect(await judged(requestBell(), { textAt: T0 })).toMatchObject({ reason: null, would: null });
+        expect(await judged(requestBell(), { visitAt: at(20), quote: true })).toMatchObject({ reason: null, would: null });
+        // The witnesses are read for the customer, from the bell's creation, under the new gate alone (the chat gate stays off).
+        expect(mockLoadContactBundles.mock.calls.pop()[0].map((i) => [i.kind, i.refs, i.bellAt])).toEqual([['customer', { customerId: CUST }, T0]]);
+        pi(undefined);
+        mockLoadContactBundles.mockClear();
+        expect(await judged(requestBell(), { textAt: at(20) })).toMatchObject({ cls: null, reason: null });
+        expect(mockLoadContactBundles).not.toHaveBeenCalled();
+      });
+
+      test('it rides on GATE_ALERT_CONTACT_CLOSE: shadow there = would only, off there = nothing', async () => {
+        pi('true');
+        gate('shadow');
+        expect(await judged(requestBell(), { textAt: at(20) })).toMatchObject({ reason: null, would: 'Answered by text' });
+        gate(undefined);
+        mockLoadContactBundles.mockClear();
+        expect(await judged(requestBell(), { textAt: at(20) })).toMatchObject({ cls: 'portal_request_answered', reason: null, would: null });
+        expect(mockLoadContactBundles).not.toHaveBeenCalled();
+      });
+
+      test('an add-service request bell closes on an estimate handed to its customer, not on contact alone; the estimate lookup is made for it only under the gate', async () => {
+        gate('true'); pi('true');
+        expect(await judged(bundleBell(), { backAt: at(20), textAt: at(20) })).toMatchObject({ cls: 'portal_add_service_request', reason: null });
+        mockTables.estimates = [{ id: uid(534), customer_id: CUST }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ cls: 'portal_add_service_request', reason: 'Estimate was sent' });
+        mockTables.estimates = [];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
+      });
+
+      test('the sweep (gate on): an answered request bell closes and its request resolves quietly with the reason; an estimate closes the add-service bell as "Estimate sent"; a cancellation bell and a nested bundle bell are untouched', async () => {
+        const request = requestBell();
+        const cancel = cancellationBell();
+        const bundle1 = bundleBell();
+        const nested = bundleBell({ requestId: undefined });
+        const answeredOnly = requestBell({ requestId: uid(62) });
+        mockTables.notifications = [request, cancel, bundle1, nested, answeredOnly];
+        mockTables.estimates = [{ id: uid(535), customer_id: CUST }];
+        mockBundles = new Map([[String(request.id), bundle({ textAt: at(20) })], [String(cancel.id), bundle({ textAt: at(20) })], [String(answeredOnly.id), bundle()]]);
+        gate('true');
+        // Gate off: nothing closes, nothing resolves.
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 0 });
+        expect(mockResolveRequest).not.toHaveBeenCalled();
+        pi('true');
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 2, byClass: { portal_request_answered: 1, portal_add_service_request: 1 } });
+        expect(request).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+        expect(bundle1).toMatchObject({ done_by: 'relevance', resolution: 'Estimate was sent' });
+        for (const open of [cancel, nested, answeredOnly]) expect(open.done_at ?? null).toBeNull();
+        expect(mockResolveRequest).toHaveBeenCalledTimes(2);
+        expect(mockResolveRequest).toHaveBeenCalledWith(REQ, CUST, 'Answered by text');
+        expect(mockResolveRequest).toHaveBeenCalledWith(REQ, CUST, 'Estimate sent');
+      });
+
+      test('a failed request resolve is logged and never undoes the bell\'s close; the gate switched off puts the bell back and resolves nothing', async () => {
+        const request = requestBell();
+        mockTables.notifications = [request];
+        mockBundles = new Map([[String(request.id), bundle({ backAt: at(20) })]]);
+        mockResolveRequest.mockRejectedValueOnce(new Error('boom'));
+        gate('true'); pi('true');
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 1 });
+        expect(request).toMatchObject({ done_by: 'relevance', resolution: 'A person called back' });
+        expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('the request behind it was not resolved'));
+        mockResolveRequest.mockClear();
+        pi(undefined);
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ rearmed: 1, retired: 0 });
+        expect(request.done_at ?? null).toBeNull();
+        expect(mockResolveRequest).not.toHaveBeenCalled();
+      });
+
+      test('re-arm: a request bell stays closed only while a person\'s contact after the bell holds', async () => {
+        gate('true'); pi('true');
+        const row = closedRow(requestBell(), 'Answered by text');
+        mockTables.notifications = [row];
+        mockBundles = new Map([[String(row.id), bundle({ textAt: at(20) })]]);
+        expect((await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).rearmed).toBe(0);
+        mockBundles = new Map([[String(row.id), bundle()]]);
+        expect((await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).rearmed).toBe(1);
       });
     });
   });
