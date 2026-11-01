@@ -93,19 +93,20 @@ async function readYearRecords(database, customerId, year, scope) {
 }
 
 // Visits per service line (distinct days that line has a record) and per
-// technician (distinct days). The total adds the lines up, plus one for a day
+// technician, in the same unit. The total adds the lines up, plus one for a day
 // whose records are all of a line the card does not name.
 function summarizeVisits(records) {
   const dayLines = new Map();
-  const techDays = new Map();
+  const techVisits = new Map();
   const techNames = new Map();
   for (const row of records) {
     const line = String(row.service_line || '').trim() || detectServiceLine(row.service_type);
+    const shown = SHOWN_LINES.includes(line);
     if (!dayLines.has(row.day)) dayLines.set(row.day, new Set());
-    if (SHOWN_LINES.includes(line)) dayLines.get(row.day).add(line);
+    if (shown) dayLines.get(row.day).add(line);
     if (row.technician_id != null) {
-      if (!techDays.has(row.technician_id)) techDays.set(row.technician_id, new Set());
-      techDays.get(row.technician_id).add(row.day);
+      if (!techVisits.has(row.technician_id)) techVisits.set(row.technician_id, new Set());
+      techVisits.get(row.technician_id).add(`${row.day}|${shown ? line : ''}`);
       techNames.set(row.technician_id, row.technician_name);
     }
   }
@@ -119,7 +120,7 @@ function summarizeVisits(records) {
     .filter((line) => lineCounts.has(line))
     .map((line) => ({ line, count: lineCounts.get(line) }))
     .sort((a, b) => b.count - a.count);
-  const topTech = [...techDays.entries()]
+  const topTech = [...techVisits.entries()]
     .map(([id, set]) => ({ name: String(techNames.get(id) || '').trim(), count: set.size }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))[0];
   const first = topTech ? topTech.name.split(/\s+/)[0] : '';
@@ -151,14 +152,18 @@ async function readTreatedFor(database, records) {
 
 // Tech-confirmed lawn assessments dated in the year, oldest first, read the way
 // the Lawn Health card reads them (lawn-health.js), including its saved-property
-// history reader behind GATE_LAWN_PROPERTY_HISTORY.
+// history reader behind GATE_LAWN_PROPERTY_HISTORY. With that gate off the only
+// read is customer-wide, which the Lawn Health card never dresses as one house's:
+// under a selected saved property it would put another house's scores and photo
+// under this card's house echo, so the card goes without them.
 async function readYearAssessments(database, customerId, year, scope) {
   const gates = require('../config/feature-gates');
+  const selectedHouse = scope && scope.enabled && scope.scoped && scope.property ? scope.property.id : undefined;
   if (typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) {
-    const propertyId = scope && scope.enabled && scope.scoped && scope.property ? scope.property.id : undefined;
-    const rows = await require('./lawn-assessment-history').latestForCustomer(customerId, { propertyId }, database);
+    const rows = await require('./lawn-assessment-history').latestForCustomer(customerId, { propertyId: selectedHouse }, database);
     return rows.filter((row) => dateOnlyString(row.visit_date).startsWith(`${year}-`));
   }
+  if (selectedHouse) return [];
   return database('lawn_assessments')
     .where({ customer_id: customerId, confirmed_by_tech: true })
     .whereBetween('service_date', [`${year}-01-01`, `${year}-12-31`])

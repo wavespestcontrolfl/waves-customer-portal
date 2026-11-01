@@ -227,6 +227,33 @@ describe('buildYardWrapped', () => {
     expect(out).toEqual({ enabled: false });
   });
 
+  test('the top technician is ranked in the card\'s own visit unit: a pest and a lawn visit on one day are two', async () => {
+    const tables = baseTables();
+    const lee = { technician_id: 't3', technician_name: 'Lee Park' };
+    tables.service_records = [
+      ...['2026-02-01', '2026-03-01', '2026-04-01'].map((d) => record(d)),
+      ...['2026-05-01', '2026-06-01'].flatMap((d) => [record(d, { id: `p-${d}`, ...lee }), record(d, { id: `l-${d}`, service_line: 'lawn', ...lee })]),
+    ];
+    const out = await buildYardWrapped({ customerId: 'c1', year: 2026, database: fakeDb({ tables }) });
+    // Jordan: 3 pest visits on 3 days. Lee: pest and lawn on 2 days = 4 visits.
+    expect(out.technicianFirstName).toBe('Lee');
+  });
+
+  test('a selected saved house with the lawn history gate off: no lawn score or photo, and no customer-wide lawn read', async () => {
+    const before = process.env.GATE_LAWN_PROPERTY_HISTORY;
+    delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+    try {
+      const database = fakeDb({ tables: baseTables() });
+      const scope = { customerId: 'c1', enabled: true, multi: true, scoped: true, closed: false, property: { id: 'house-2' } };
+      const out = await buildYardWrapped({ customerId: 'c1', year: 2026, scope, database });
+      expect(out.enabled).toBe(true);
+      expect(out).not.toHaveProperty('lawnScore');
+      expect(out).not.toHaveProperty('photoUrl');
+      expect(database.reads).not.toContain('lawn_assessments');
+      expect(database.reads).not.toContain('lawn_assessment_photos');
+    } finally { if (before === undefined) delete process.env.GATE_LAWN_PROPERTY_HISTORY; else process.env.GATE_LAWN_PROPERTY_HISTORY = before; }
+  });
+
   test('a technician name that is not a plain first name is left out', async () => {
     const tables = baseTables();
     tables.service_records = tables.service_records.map((r) => ({ ...r, technician_name: '555-0100 office' }));
