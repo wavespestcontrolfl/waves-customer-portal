@@ -252,8 +252,9 @@ async function firstVisitOnlineFor(estimateId, conn = db) {
 // The builder's first-visit line (owner 2026-11-01, proposal readiness): { state: 'booked', visit } once a live visit is
 // linked to the estimate, { state: 'online' } when the signer will book the first visit online, else
 // { state: 'office', reason }. The checks are firstVisitCtaFor's and firstVisitOnlineFor's (the plan, the customer at the
-// signed premises, the completion tax), which the customer page and the signed-agreement alert keep calling. The route
-// asks only with GATE_COMMERCIAL_FIRST_VISIT on. Never throws: a failed read is { state: 'unknown' }.
+// signed premises, the completion tax, and for a signed agreement the quote as signed), which the customer page and the
+// signed-agreement alert keep calling. The route asks only with GATE_COMMERCIAL_FIRST_VISIT on. Never throws: a failed
+// read is { state: 'unknown' }.
 async function firstVisitReadiness(estimate, conn = db) {
   try {
     const visit = await linkedFirstVisit(estimate.id, conn);
@@ -264,6 +265,12 @@ async function firstVisitReadiness(estimate, conn = db) {
     if (!customer) return { state: 'office', reason: 'no_customer' };
     if (!atSignedPremises(check.plan, customer)) return { state: 'office', reason: 'address' };
     if (!(await completionTaxMatches(check.plan, customer.id, conn))) return { state: 'office', reason: 'tax' };
+    // Signed, but the proposal changed since: firstVisitCtaFor serves no picker, so the office books it.
+    const agreement = require('./commercial-proposal-agreement');
+    const { state } = await agreement.agreementStateForEstimate(estimate.id, conn);
+    if (state === 'signed' && !(await agreement.signedQuoteMatches(estimate, conn))) {
+      return { state: 'office', reason: 'changed_since_signing' };
+    }
     return { state: 'online' };
   } catch (err) {
     logger.warn(`[commercial-first-visit] readiness skipped for estimate ${estimate?.id}: ${err.code || 'error'}`);

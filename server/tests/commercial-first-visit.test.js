@@ -591,6 +591,14 @@ describe('firstVisitReadiness (the builder Readiness card, owner 2026-11-01)', (
     expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'tax' });
   });
 
+  test('signed, then the proposal changed: the customer page serves no picker, so the office books it', async () => {
+    mockSignedQuoteMatches.mockResolvedValue(false);
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'changed_since_signing' });
+    // Not signed yet: no signed quote to compare, so the signer books online once they sign.
+    mockAgreementState.mockResolvedValue({ state: 'none' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'online' });
+  });
+
   test('a failed read: unknown, never a throw', async () => {
     rows.scheduled_services = () => { throw new Error('synthetic read failure'); };
     expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'unknown' });
