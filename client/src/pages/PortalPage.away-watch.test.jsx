@@ -67,6 +67,36 @@ describe('Away Watch section on the Property tab', () => {
     expect(screen.queryByText(AWAY_WATCH_COPY.bothDays)).toBeNull();
   });
 
+  it('a complete pair that loses a day before its autosave leaves saves nothing; other queued edits still save', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { awayWatchFrom: '2026-05-01', awayWatchUntil: '2026-08-01' }, hasLawnCare: false, awayWatchEnabled: true });
+    render(<PropertyTab customer={customer} />);
+    const section = await sectionOf();
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.fromLabel), { target: { value: '2026-06-01' } });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '2026-09-15' } });
+    // Before the debounce fires, the member clears the back day.
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '' } });
+    expect(screen.getByText(AWAY_WATCH_COPY.bothDays)).toBeInTheDocument();
+    // The summary goes back to the pair the server holds, not the withdrawn draft.
+    expect(within(section).getByText('Away May 1 to Aug 1')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    expect(api.updatePropertyPreferences).not.toHaveBeenCalled();
+  });
+
+  it('withdrawing the pair keeps another queued edit: only that edit saves', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: {}, hasLawnCare: false, awayWatchEnabled: true });
+    render(<PropertyTab customer={customer} />);
+    await sectionOf();
+    fireEvent.change(screen.getByLabelText('Community Gate'), { target: { value: '#1234' } });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.fromLabel), { target: { value: '2026-06-01' } });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '2026-09-15' } });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.fromLabel), { target: { value: '' } });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    const sent = api.updatePropertyPreferences.mock.calls[0][0];
+    expect(sent).toMatchObject({ neighborhoodGateCode: '#1234' });
+    expect(sent).not.toHaveProperty('awayWatchFrom');
+    expect(sent).not.toHaveProperty('awayWatchUntil');
+  });
+
   it('a saved pair shows its summary; Remove sends two nulls and empties the inputs', async () => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { awayWatchFrom: '2026-06-01', awayWatchUntil: '2026-09-15' }, hasLawnCare: false, awayWatchEnabled: true });
     render(<PropertyTab customer={customer} />);

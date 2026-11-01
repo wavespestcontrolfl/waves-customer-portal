@@ -130,7 +130,7 @@ describe('gate on', () => {
   test('a lone date is refused with a message on awayWatchUntil; the rest of the batch still saves and no date is stored', async () => {
     const { status, body } = await call('PUT', { awayWatchFrom: day(1), parkingNotes: 'Driveway' });
     expect(status).toBe(200);
-    expect(body.rejected).toEqual([{ field: 'awayWatchUntil', message: 'Away dates must be set or cleared together.' }]);
+    expect(body.rejected).toEqual([{ field: 'awayWatchFrom', message: 'Away dates must be set or cleared together.' }, { field: 'awayWatchUntil', message: 'Away dates must be set or cleared together.' }]);
     expect(db._state.row.parking_notes).toBe('Driveway');
     expect(db._state.row.away_watch_from).toBeUndefined();
   });
@@ -138,7 +138,8 @@ describe('gate on', () => {
   test('a batch of only a bad pair is a 400 with the reason and nothing stored', async () => {
     const { status, body } = await call('PUT', { awayWatchFrom: day(10), awayWatchUntil: day(5) });
     expect(status).toBe(400);
-    expect(body.rejected).toHaveLength(1);
+    // Both dates are named, so the app never re-queues one of them alone.
+    expect(body.rejected.map((r) => r.field)).toEqual(['awayWatchFrom', 'awayWatchUntil']);
     expect(db._state.row).toBeNull();
   });
 });

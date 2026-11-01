@@ -8374,8 +8374,10 @@ const IRRIGATION_EDIT_FIELDS = new Set([
 ]);
 
 // Away Watch dates. The pair saves whole or not at all, so nothing is sent until both days are chosen (one autosave
-// carries both); clearing both, or Remove, sends two nulls.
-function AwayWatchFields({ prefs, updateField, error, styles }) {
+// carries both); clearing both, or Remove, sends two nulls. A draft that loses a day before its autosave leaves
+// withdraws the queued pair (withdrawPair), so a pair the screen no longer shows never saves.
+const AWAY_WATCH_PAIR_FIELDS = ['awayWatchFrom', 'awayWatchUntil'];
+function AwayWatchFields({ prefs, updateField, withdrawPair, error, styles }) {
   const { labelStyle, inputStyle, fieldGrid, muted, focusBorder, blurBorder } = styles;
   const [from, setFrom] = useState(prefs.awayWatchFrom || '');
   const [until, setUntil] = useState(prefs.awayWatchUntil || '');
@@ -8388,6 +8390,8 @@ function AwayWatchFields({ prefs, updateField, error, styles }) {
     } else if (!nextFrom && !nextUntil) {
       updateField('awayWatchFrom', null);
       updateField('awayWatchUntil', null);
+    } else {
+      withdrawPair();
     }
   };
   const dateInput = (value, label, onChange, min) => (
@@ -8431,11 +8435,11 @@ function AwayWatchFields({ prefs, updateField, error, styles }) {
 }
 
 // The Property tab section, after Pets. Shown only when the server says GATE_AWAY_WATCH is live.
-function AwayWatchSection({ enabled, prefs, updateField, error, styles }) {
+function AwayWatchSection({ enabled, prefs, updateField, withdrawPair, error, styles }) {
   if (!enabled) return null;
   return (
     <PropertySection title={AWAY_WATCH_COPY.title} icon="camera" summary={awayWatchSummary(prefs)}>
-      <AwayWatchFields prefs={prefs} updateField={updateField} error={error} styles={styles} />
+      <AwayWatchFields prefs={prefs} updateField={updateField} withdrawPair={withdrawPair} error={error} styles={styles} />
     </PropertySection>
   );
 }
@@ -8689,6 +8693,17 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         });
     }, 1000);
   }, [flushAllPendingSaves]);
+
+  // Away Watch: drop both dates from the queued autosave (other queued edits stay), put them back to the server's
+  // latest view, and clear their stale messages: the incomplete draft on screen saves nothing.
+  const withdrawAwayWatchPair = useCallback(() => {
+    const queued = { ...pendingRef.current };
+    AWAY_WATCH_PAIR_FIELDS.forEach((field) => { delete queued[field]; });
+    pendingRef.current = queued;
+    const saved = lastSavedRef.current || {};
+    setPrefs((prev) => ({ ...prev, awayWatchFrom: saved.awayWatchFrom ?? null, awayWatchUntil: saved.awayWatchUntil ?? null }));
+    setFieldErrors((prev) => Object.fromEntries(Object.entries(prev).filter(([field]) => !AWAY_WATCH_PAIR_FIELDS.includes(field))));
+  }, []);
 
   // The 1s debounce above survives this tab's unmount, but switching
   // properties swaps the access token first — a delayed PUT would then write
@@ -9301,6 +9316,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         enabled={awayWatchEnabled}
         prefs={prefs}
         updateField={updateField}
+        withdrawPair={withdrawAwayWatchPair}
         error={fieldErrors.awayWatchUntil || fieldErrors.awayWatchFrom}
         styles={{ labelStyle, inputStyle, fieldGrid, muted, focusBorder, blurBorder }}
       />

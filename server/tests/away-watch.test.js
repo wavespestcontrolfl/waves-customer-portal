@@ -42,32 +42,34 @@ describe('writer rules (shared by the customer and the admin writer)', () => {
   test.each([
     ['one date only', { awayWatchFrom: day(1) }],
     ['one date set, one cleared', { awayWatchFrom: day(1), awayWatchUntil: null }],
-  ])('both or neither: %s is refused and nothing is saved', (_label, body) => {
+  ])('both or neither: %s is refused, nothing is saved, and both dates are named', (_label, body) => {
     const out = run({ ...body, parkingNotes: 'Driveway' });
     expect(out.value).toEqual({ parkingNotes: 'Driveway' });
-    expect(out.rejected).toEqual([{ field: 'awayWatchUntil', message: AwayWatch.MESSAGES.together }]);
+    expect(out.rejected).toEqual([{ field: 'awayWatchFrom', message: AwayWatch.MESSAGES.together }, { field: 'awayWatchUntil', message: AwayWatch.MESSAGES.together }]);
   });
 
   test('the leave day cannot be after the back day; the same day is allowed', () => {
-    expect(run({ awayWatchFrom: day(10), awayWatchUntil: day(5) }).rejected).toEqual([{ field: 'awayWatchUntil', message: AwayWatch.MESSAGES.order }]);
+    expect(run({ awayWatchFrom: day(10), awayWatchUntil: day(5) }).rejected).toEqual([{ field: 'awayWatchFrom', message: AwayWatch.MESSAGES.order }, { field: 'awayWatchUntil', message: AwayWatch.MESSAGES.order }]);
     expect(run({ awayWatchFrom: day(10), awayWatchUntil: day(10) }).rejected).toEqual([]);
   });
 
   test('the window is at most 240 days (240 passes, 241 is refused)', () => {
     expect(run({ awayWatchFrom: day(0), awayWatchUntil: day(240) }).rejected).toEqual([]);
-    expect(run({ awayWatchFrom: day(0), awayWatchUntil: day(241) }).rejected).toEqual([{ field: 'awayWatchUntil', message: AwayWatch.MESSAGES.tooLong }]);
+    expect(run({ awayWatchFrom: day(0), awayWatchUntil: day(241) }).rejected).toEqual([{ field: 'awayWatchFrom', message: AwayWatch.MESSAGES.tooLong }, { field: 'awayWatchUntil', message: AwayWatch.MESSAGES.tooLong }]);
   });
 
   test('the back day cannot be before today in ET; leaving in the past is fine while the member is still away', () => {
-    expect(run({ awayWatchFrom: day(-20), awayWatchUntil: day(-1) }).rejected).toEqual([{ field: 'awayWatchUntil', message: AwayWatch.MESSAGES.past }]);
+    expect(run({ awayWatchFrom: day(-20), awayWatchUntil: day(-1) }).rejected).toEqual([{ field: 'awayWatchFrom', message: AwayWatch.MESSAGES.past }, { field: 'awayWatchUntil', message: AwayWatch.MESSAGES.past }]);
     expect(run({ awayWatchFrom: day(-20), awayWatchUntil: day(0) }).rejected).toEqual([]);
   });
 
   test.each(['2026-02-31', 'next week', '2026-6-1', 20260601])('%p is not a calendar day: both dates are dropped and one message names it', (bad) => {
     const out = run({ awayWatchFrom: bad, awayWatchUntil: day(20) });
     expect(out.value).toEqual({});
-    expect(out.rejected).toHaveLength(1);
-    expect(out.rejected[0].field).toBe('awayWatchFrom');
+    // The bad day keeps its own message; the good one is dropped with it and named too, with the same words.
+    expect(out.rejected).toHaveLength(2);
+    expect(out.rejected.map((r) => r.field)).toEqual(['awayWatchFrom', 'awayWatchUntil']);
+    expect(out.rejected[1].message).toBe(out.rejected[0].message);
   });
 
   test('the cancel-flow Away Mode column is not a field here', () => {

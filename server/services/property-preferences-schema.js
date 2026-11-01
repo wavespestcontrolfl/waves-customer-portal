@@ -221,14 +221,22 @@ function validatePrefsBody(schemas, body) {
 }
 
 // The Away Watch pair saves whole or not at all: one rejected date, a lone
-// date, or a pair that breaks the order/span/past rules drops both.
+// date, or a pair that breaks the order/span/past rules drops both, and BOTH
+// are reported, so a client that re-queues the fields a 400 did not name never
+// keeps one date queued alone (pre-push audit P1).
 function settleAwayWatchPair(value, rejected) {
-  const sent = AwayWatch.AWAY_WATCH_FIELDS.filter((k) => k in value);
-  const alreadyRejected = rejected.some((r) => AwayWatch.AWAY_WATCH_FIELDS.includes(r.field));
-  if (!sent.length && !alreadyRejected) return;
-  const message = alreadyRejected ? null : AwayWatch.awayWatchPairError(value.awayWatchFrom ?? null, value.awayWatchUntil ?? null, sent.length);
-  if (message) rejected.push({ field: 'awayWatchUntil', message });
-  if (message || alreadyRejected) AwayWatch.AWAY_WATCH_FIELDS.forEach((k) => delete value[k]);
+  const fields = AwayWatch.AWAY_WATCH_FIELDS;
+  const sent = fields.filter((k) => k in value);
+  const fieldRejection = rejected.find((r) => fields.includes(r.field));
+  if (!sent.length && !fieldRejection) return;
+  const message = fieldRejection
+    ? fieldRejection.message
+    : AwayWatch.awayWatchPairError(value.awayWatchFrom ?? null, value.awayWatchUntil ?? null, sent.length);
+  if (!message) return;
+  for (const field of fields) {
+    delete value[field];
+    if (!rejected.some((r) => r.field === field)) rejected.push({ field, message });
+  }
 }
 
 function camelToSnake(str) {

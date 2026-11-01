@@ -567,7 +567,7 @@ describe('PUT /api/admin/customers/:id/property-preferences — Away Watch dates
     process.env.GATE_AWAY_WATCH = 'true';
     const res = await putPrefs({ awayWatchFrom: day(1), accessNotes: 'Side gate' });
     expect(res.status).toBe(200);
-    expect(res.body.rejected).toEqual([{ field: 'awayWatchUntil', message: 'Away dates must be set or cleared together.' }]);
+    expect(res.body.rejected).toEqual([{ field: 'awayWatchFrom', message: 'Away dates must be set or cleared together.' }, { field: 'awayWatchUntil', message: 'Away dates must be set or cleared together.' }]);
     expect(mockState.prefsRow.access_notes).toBe('Side gate');
     expect(mockState.prefsRow.away_watch_from).toBeUndefined();
   });
