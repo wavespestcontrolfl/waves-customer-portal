@@ -2,7 +2,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const logger = require('../services/logger');
 const {
-  coverageSeriesSlot, seriesSlotAbsentDays, seriesSlotPatch, seriesSlotHandoff, inSavepoint,
+  coverageSeriesSlot, seriesSlotAbsentDays, seriesSlotPatch, seriesSlotHandoff, inSavepoint, recheckTechnician,
 } = require('../services/annual-prepay-series-slot');
 
 // A knex-shaped conn: scheduled_services resolves to `visits`, technicians to `.first()`.
@@ -263,4 +263,29 @@ describe('inSavepoint', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom scheduled_services'));
   });
 
+});
+
+// Pre-push audit P1: the slot is read once per term, so its technician is rechecked on each seed's own transaction.
+describe('recheckTechnician', () => {
+  test('reads the technician FOR SHARE on a savepoint of the seed transaction', async () => {
+    const { conn: sp, calls } = makeConn({ isTransaction: true, tech: activeTech });
+    const trx = { isTransaction: true, transaction: jest.fn(async (cb) => cb(sp)) };
+    await expect(recheckTechnician(trx, 'tech-1')).resolves.toBe('tech-1');
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(calls.forShare).toBe(1);
+  });
+
+  test('a technician offboarded since the slot read is not assigned', async () => {
+    const { conn } = makeConn({ tech: { id: 'tech-1', employment_status: 'terminated', field_dispatchable: false } });
+    await expect(recheckTechnician(conn, 'tech-1')).resolves.toBeNull();
+  });
+
+  test('a failed read gives no technician and warns; no technician id reads nothing', async () => {
+    const { conn } = makeConn({ throwOn: 'technicians' });
+    await expect(recheckTechnician(conn, 'tech-1')).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
+    const { conn: idle } = makeConn();
+    await expect(recheckTechnician(idle, null)).resolves.toBeNull();
+    expect(idle).not.toHaveBeenCalled();
+  });
 });

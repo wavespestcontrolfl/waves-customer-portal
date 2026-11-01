@@ -114,6 +114,23 @@ async function coverageSeriesSlot(conn, {
   }
 }
 
+/**
+ * The slot technician rechecked on the seed's own transaction (FOR SHARE, so an
+ * offboarding's FOR UPDATE cannot commit under the insert), in a savepoint: the
+ * recurring seeder's rule (seedFollowUpsForParent reads the inherited
+ * technician FOR SHARE on the writing transaction). Null when the technician is
+ * no longer assignable or the read fails. Never throws.
+ */
+async function recheckTechnician(trx, technicianId) {
+  if (!technicianId) return null;
+  try {
+    return await inSavepoint(trx, (q) => assignableTechnicianId(q, technicianId));
+  } catch (err) {
+    logger.warn(`[annual-prepay-series-slot] technician ${technicianId} recheck failed (${err.message}) — seeding without a technician`);
+    return null;
+  }
+}
+
 // The `${technicianId}:${date}` keys of the dates in `dates` the slot's
 // technician is marked out. Empty when the slot has no technician. Reads in a savepoint. Never throws.
 async function seriesSlotAbsentDays(conn, slot, dates) {
@@ -186,6 +203,7 @@ async function seriesSlotHandoff(conn, row, { cols = null, now = new Date() } = 
 
 module.exports = {
   inSavepoint,
+  recheckTechnician,
   coverageSeriesSlot,
   seriesSlotAbsentDays,
   seriesSlotPatch,

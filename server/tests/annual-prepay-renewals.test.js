@@ -2386,6 +2386,7 @@ describe('annual prepay renewal helpers', () => {
     };
     const SLOT = { technicianId: 'tech-1', windowStart: '09:00' };
     let slotSpy;
+    let recheckSpy;
     let insertQueries;
     // The seed's transaction as knex gives it: callable like db (same query queues), isTransaction, savepoints
     // on itself, and db.raw's occupancy TRY-lock answer (locked). A copied time is written only under that lock.
@@ -2398,6 +2399,8 @@ describe('annual prepay renewal helpers', () => {
     };
     beforeEach(() => {
       slotSpy = jest.spyOn(SeriesSlot, 'coverageSeriesSlot').mockResolvedValue(SLOT);
+      // The per-seed recheck is unit-tested in annual-prepay-series-slot.test.js; here it confirms the technician.
+      recheckSpy = jest.spyOn(SeriesSlot, 'recheckTechnician').mockImplementation(async (trx, id) => id);
       db.transaction = jest.fn(async (cb) => cb(asTrx()));
     });
     afterEach(() => {
@@ -2504,6 +2507,17 @@ describe('annual prepay renewal helpers', () => {
         expect(inserted(i)).toMatchObject({ technician_id: 'tech-1', window_start: null, window_end: null });
         expect(inserted(i).recurring_dispatch_due_date).toBe(inserted(i).scheduled_date);
       }
+    });
+
+    test('gate on, the technician is offboarded after the slot read: the per-seed recheck leaves every seed unassigned', async () => {
+      gateOn();
+      handoffGateOn();
+      jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+      recheckSpy.mockResolvedValue(null);
+      await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
+      expect(recheckSpy).toHaveBeenCalledTimes(4);
+      expect(recheckSpy.mock.calls[0][0].isTransaction).toBe(true);
+      for (let i = 0; i < 4; i += 1) expect(inserted(i)).toMatchObject({ technician_id: null, window_start: '09:00' });
     });
 
     test('gate on, taken-hour hand-off gate off: technician only, no time and no probe', async () => {

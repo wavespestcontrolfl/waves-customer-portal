@@ -1849,6 +1849,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (!seriesSlot) return;
     const SeriesSlot = require('./annual-prepay-series-slot');
     const patch = SeriesSlot.seriesSlotPatch(seriesSlot, { scheduledDate, absentDays: seriesAbsentDays, timed });
+    // Rechecked on the writing transaction (FOR SHARE): a technician offboarded since the slot read is not assigned.
+    if (patch.technicianId) patch.technicianId = await SeriesSlot.recheckTechnician(trx, patch.technicianId);
     seedSlotPatches.set(scheduledDate, patch);
     if (!patch.windowStart) return;
     // The seeder's own clock (`today`) decides the hand-off date, like every date it seeds.
