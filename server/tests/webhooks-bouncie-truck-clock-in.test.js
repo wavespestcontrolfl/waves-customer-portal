@@ -251,6 +251,32 @@ describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)
     expect(truckClockIn.maybeClockInFromTruck).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['missing', { ...TRIP_END_NO_GPS, end: { timeZone: 'America/New_York', odometer: 100, fuelConsumed: 1 } }],
+    ['malformed', { ...TRIP_END_NO_GPS, end: { ...TRIP_END_NO_GPS.end, timestamp: 'not-a-date' } }],
+  ])('a trip-end with a %s timestamp is never an engine-off: no last-location read, no detector call', async (_label, payload) => {
+    installDb({ lastLocation: { lat: '27.4386000', lng: '-82.3719000', heading: 0, reported_at: new Date().toISOString() } });
+
+    await router._test.processTrackingEvent({ logId: 29, eventType: 'tripEnd', payload });
+
+    expect(tables.vehicle_locations.first).not.toHaveBeenCalled();
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).not.toHaveBeenCalled();
+    expect(pingTechLocation).not.toHaveBeenCalled();
+    expect(truckClockIn.maybeClockInFromTruck).not.toHaveBeenCalled();
+    expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
+  });
+
+  test('a trip-end with its own GPS but a malformed timestamp keeps the payload point (no engine-off marker)', async () => {
+    installDb();
+    const payload = { ...TRIP_END_WITH_GPS, end: { ...TRIP_END_WITH_GPS.end, timestamp: 'not-a-date' } };
+
+    await router._test.processTrackingEvent({ logId: 30, eventType: 'tripEnd', payload });
+
+    const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[0][0];
+    expect(point).toEqual(expect.objectContaining({ lat: 27.51, lng: -82.52, speed_mph: 4, ignition: null }));
+    expect(point.engine_off).toBeUndefined();
+  });
+
   test('a trip-data sample is untouched by the gate (same point, no engine-off marker, no last-location read)', async () => {
     installDb({ lastLocation: { lat: 1, lng: 2, reported_at: ENDED_AT } });
 

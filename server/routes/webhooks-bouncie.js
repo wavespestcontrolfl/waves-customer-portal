@@ -143,10 +143,14 @@ const ENGINE_OFF_LAST_LOCATION_MAX_MS = 10 * 60 * 1000;
 // The engine-off point of a trip-end: its own GPS, else the truck's last known
 // location (stored coordinates reused exactly), else a position-less marker the
 // detector records as engine_off_no_position. ignition false, speed 0,
-// reported_at = the trip-end time.
+// reported_at = the trip-end time. Only the provider's own trip-end time counts,
+// never "now": an undated or replayed trip-end would otherwise pass the
+// detector's freshness and en-route checks as a fresh engine-off. Without one,
+// null: the event is handled as before and never as an engine-off.
 async function engineOffPoint({ imei, payload, ownPoint }) {
   const endedMs = Date.parse(firstPresent(payload.end?.timestamp, ownPoint?.reported_at, payload.timestamp) || '');
-  const endedAt = new Date(Number.isFinite(endedMs) ? endedMs : Date.now());
+  if (!Number.isFinite(endedMs)) return null;
+  const endedAt = new Date(endedMs);
   const base = { ignition: false, speed_mph: 0, reported_at: endedAt.toISOString(), engine_off: true };
   if (ownPoint) {
     return { ...ownPoint, ...base, position_source: 'trip_end_gps', last_location_gap_s: null };
@@ -173,6 +177,7 @@ const isEngineOffArrivalEvent = (eventType) => eventType === 'trip-end' && arriv
 // nothing is upserted or pinged, and truck clock-in has no position to read.
 async function engineOffArrivalPoint({ tech, payload, ownPoint }) {
   const point = await engineOffPoint({ imei: tech.bouncie_imei, payload, ownPoint });
+  if (!point) return ownPoint;
   if (point.lat != null) return point;
   try {
     const techStatus = await db('tech_status')
