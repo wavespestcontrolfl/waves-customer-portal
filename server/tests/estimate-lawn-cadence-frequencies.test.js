@@ -1,4 +1,5 @@
 const {
+  annualPrepayHasSellableIncentive,
   lawnFrequenciesFromResultStats,
   lawnFrequenciesFromEngineResult,
   applySelectedLawnTierToEstimateData,
@@ -1115,6 +1116,34 @@ describe('applySelectedLawnTierToEstimateData — the selected cadence floor rea
   test('a frequency with no marginFloorMonthly (floor not armed for it) adds no lawnFloorMonthly', () => {
     const after = applySelectedLawnTierToEstimateData(armedNineVisitEstimate(), premium);
     expect(after.result.recurring.services[0]).not.toHaveProperty('lawnFloorMonthly');
+  });
+});
+
+describe('annualPrepayHasSellableIncentive — each offered lawn cadence uses its own floor', () => {
+  // Engine-backed save (no v1 result, no recurring.services): the default 12x
+  // line sits AT its floor ($760), so it earns no prepay discount; the offered
+  // 9x cadence ($700, floor $600) does. Restamping only rewrites rows that
+  // exist, so the candidates must read the SUPPLEMENTED data, as accept does.
+  const engineBacked = () => ({
+    engineInputs: {},
+    engineResult: {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      lineItems: [{
+        service: 'lawn_care', name: 'Lawn Care', annual: 760, annualAfterDiscount: 760, monthly: 63.33,
+        minimumCollectedAnnualPrice: 760, costFloorAnnual: 760, visitsPerYear: 12,
+      }],
+    },
+  });
+  const enhanced9x = {
+    key: 'enhanced', serviceCategory: 'lawn_care', annual: 700, monthly: 58.33, visitsPerYear: 9, marginFloorMonthly: 50,
+  };
+
+  test('an engine-backed estimate offers prepay when a cheaper cadence clears its own floor', () => {
+    expect(annualPrepayHasSellableIncentive({ annual_total: 760 }, engineBacked(), { frequencies: [enhanced9x] })).toBe(true);
+  });
+
+  test('with only the floor-bound default cadence there is no sellable prepay incentive', () => {
+    expect(annualPrepayHasSellableIncentive({ annual_total: 760 }, engineBacked(), { frequencies: [] })).toBe(false);
   });
 });
 

@@ -21800,14 +21800,16 @@ function annualPrepayHasSellableIncentive(estimate = {}, estData = null, payload
   // Premium/monthly cadence, and hiding prepay for the whole payload would
   // deny it. (The stored annual_total is the default-cadence candidate.)
   // Each offered lawn cadence is priced from the data restamped to THAT
-  // cadence (its own cost floor), the way accept quotes it; the stored
-  // default candidate stays on the stored data.
+  // cadence (its own cost floor), the way accept quotes it. Accept reads the
+  // SUPPLEMENTED data (engine-backed saves get their recurring rows there), so
+  // the candidates do too: restamping only rewrites rows that exist.
+  const pricingData = withSupplementedRecurringServices(estData || {}) || estData || {};
   const candidates = [
-    { baseAnnual: Number(estimate.annual_total ?? estimate.annualTotal) || 0, estimateData: estData || {} },
+    { baseAnnual: Number(estimate.annual_total ?? estimate.annualTotal) || 0, estimateData: pricingData },
     ...(Array.isArray(payload.frequencies)
       ? payload.frequencies.map((f) => ({
         baseAnnual: Number(f?.annual) || 0,
-        estimateData: applySelectedLawnTierToEstimateData(estData || {}, f),
+        estimateData: applySelectedLawnTierToEstimateData(pricingData, f),
       }))
       : []),
   ].filter((c) => c.baseAnnual > 0);
