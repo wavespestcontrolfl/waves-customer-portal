@@ -18,6 +18,12 @@
  * (GATE_INVENTORY_UNIT_AUTOFIX === 'true', opt-in in EVERY environment —
  * auto-writer pattern, same as dataHygieneAutoApply). Cron: 3:45am ET,
  * runExclusive 'inventory-unit-autofix' (job_health via cron-lock).
+ *
+ * Second phase (owner 2026-11-01, Action inbox agents A): DRY products whose
+ * unit is a bare ounce are converted to g or lb (exact weight conversion,
+ * stock and threshold converted with it). Its own gate, inventoryUnitAutofixDryOz
+ * (GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true'); it also needs the sweep
+ * gate above. resolveDryOzTarget() decides, and parks everything doubtful.
  */
 
 const db = require('../models/db');
@@ -153,6 +159,66 @@ function resolveInventoryUnitAlias(rawUnit) {
   return target;
 }
 
+// Moved here from routes/admin-inventory.js so the Unit Review page and the
+// dry-oz sweep share ONE definition of "looks liquid".
+function looksLiquidProduct(product = {}) {
+  const text = `${product.name || ''} ${product.category || ''} ${product.subcategory || ''} ${product.formulation || ''} ${product.unit_type || ''}`.toLowerCase();
+  return /\b(liquid|flowable|sc|sl|ec|ew|solution|sprayable|hydretain|talstar|atrazine|dismiss|headway|medallion|primo|acelepryn|dispatch|carbonpro|k-flow)\b/.test(text);
+}
+
+// --- Dry-oz target -------------------------------------------------------
+// A bare "oz" is ambiguous (weight or fluid). A product whose formulation is
+// positively dry (WDG, granular, powder, dust, paste, gel bait...) holds
+// WEIGHT ounces, so oz -> g / lb is an exact conversion. Anything else stays
+// parked for a human.
+const DRY_FORMULATION_RE = /\b(wdg|wg|wsg|wp|sp|df|sg)\b|granul|powder|dust|\bpaste\b|\bgel\b|pellet|\bmeal\b|\bdry\b|bait block|bait chunk/;
+// Count stock lives in 'each' (inventory-units.js refuses oz <-> each). A
+// bare "bait" word is deliberately NOT dry evidence.
+const COUNT_FORMULATION_RE = /cartridge|briquet|station|tablet|\btrap|supply|live plug|foam/;
+const LIQUID_FORMULATION_RE = /\b(sc|se|ec|ew|cs|me|mec|sl|aq|flowable|liquid|concentrate|suspension|emulsion|emulsifiable|microemulsion|oil|solution)\b/;
+const VOLUME_BASE_UNITS = new Set(['fl_oz', 'floz', 'gal', 'gallon', 'qt', 'quart', 'pt', 'pint', 'ml', 'l', 'liter', 'litre']);
+// A pound or more of weight ounces.
+const DRY_OZ_POUND_THRESHOLD_OZ = 16;
+
+function isOzFamilyUnit(rawUnit) {
+  const squashed = String(rawUnit == null ? '' : rawUnit).trim().replace(/ /g, '_').toLowerCase().replace(/s$/, '');
+  return squashed === 'oz' || squashed === 'ounce';
+}
+
+function isVolumeBaseUnit(rawUnit) {
+  const base = String(rawUnit == null ? '' : rawUnit).split('/')[0]
+    .trim().toLowerCase().replace(/\./g, '').replace(/\s+/g, '_').replace(/s$/, '');
+  return VOLUME_BASE_UNITS.has(base);
+}
+
+function hasDryEvidence(formulation) {
+  if (!formulation || formulation === 'unspecified') return false;
+  if (!DRY_FORMULATION_RE.test(formulation)) return false;
+  return !COUNT_FORMULATION_RE.test(formulation) && !LIQUID_FORMULATION_RE.test(formulation);
+}
+
+/**
+ * 'g', 'lb' or null (null = stays parked for a human). Pure.
+ * Target: 'lb' from 16 oz of stock up (the bag convention), else 'g' (keeps
+ * small containers readable: 0.4433 oz = 12.5673 g but 0.0277 lb). Both are
+ * exact weight conversions. Null or zero stock -> 'g'.
+ */
+function resolveDryOzTarget(product = {}) {
+  if (!isOzFamilyUnit(product.inventory_unit)) return null;
+  const formulation = String(product.formulation == null ? '' : product.formulation).trim().toLowerCase();
+  if (!hasDryEvidence(formulation)) return null;
+  if (looksLiquidProduct(product)) return null;
+  if (isVolumeBaseUnit(product.rate_unit) || isVolumeBaseUnit(product.default_unit)) return null;
+  return Number(product.inventory_on_hand) >= DRY_OZ_POUND_THRESHOLD_OZ ? 'lb' : 'g';
+}
+
+// True when the locked row no longer matches what the caller decided on.
+function isStaleLock(product, { expectedCurrentUnit, lockedCheck }) {
+  if (expectedCurrentUnit !== undefined
+    && String(product.inventory_unit || '') !== String(expectedCurrentUnit || '')) return true;
+  return Boolean(lockedCheck) && !lockedCheck(product);
+}
+
 /**
  * Normalize one product's inventory unit. Extracted from the admin route —
  * route behavior is unchanged (same guards, same conversion, same movement
@@ -161,6 +227,10 @@ function resolveInventoryUnitAlias(rawUnit) {
  *     changed since the caller selected it (an admin fix mid-sweep wins).
  *   alwaysRecordMovement — audit a zero-quantity 'correction' movement even
  *     when no numbers changed, so every autonomous rename leaves a trail.
+ *   lockedCheck — fn(lockedProductRow); false = outcome 'stale', no write
+ *     (re-checks the caller's decision against the row it now holds locked).
+ *   movementReason — audit-row reason text (default: the alias/normalization
+ *     strings below).
  * Throws err.statusCode 400/404 like the route always did.
  */
 async function applyInventoryUnitFix({
@@ -172,6 +242,8 @@ async function applyInventoryUnitFix({
   adjustedBy = null,
   expectedCurrentUnit = undefined,
   alwaysRecordMovement = false,
+  lockedCheck = undefined,
+  movementReason = undefined,
 }) {
   // Mirrors the route's assertSupportedInventoryUnit exactly (including its
   // empty-string pass-through) so extracting this changed no route behavior.
@@ -181,6 +253,11 @@ async function applyInventoryUnitFix({
     err.statusCode = 400;
     throw err;
   }
+
+  const reasons = {
+    conversion: movementReason || 'Inventory unit normalization',
+    rename: movementReason || 'Inventory unit alias normalization (no quantity change)',
+  };
 
   return dbi.transaction(async (trx) => {
     const product = await trx('products_catalog')
@@ -193,10 +270,10 @@ async function applyInventoryUnitFix({
       throw err;
     }
     const currentUnit = product.inventory_unit || null;
-    if (expectedCurrentUnit !== undefined
-      && String(currentUnit || '') !== String(expectedCurrentUnit || '')) {
-      // The row changed between the caller's read and this lock — a human
-      // (or another sweep) already acted; leave their choice alone.
+    if (isStaleLock(product, { expectedCurrentUnit, lockedCheck })) {
+      // The row changed between the caller's read and this lock (a human or
+      // another sweep already acted) or the caller's own re-check failed:
+      // leave the row alone.
       return { outcome: 'stale', product };
     }
     const numberOrNull = (value) => {
@@ -246,7 +323,7 @@ async function applyInventoryUnitFix({
         stock_after: stockAfter || 0,
         metadata: {
           source: movementSource,
-          reason: 'Inventory unit normalization',
+          reason: reasons.conversion,
           conversion,
           adjustedBy,
         },
@@ -263,7 +340,7 @@ async function applyInventoryUnitFix({
         stock_after: stockAfter != null ? stockAfter : 0,
         metadata: {
           source: movementSource,
-          reason: 'Inventory unit alias normalization (no quantity change)',
+          reason: reasons.rename,
           fromUnit: currentUnit,
           toUnit: targetUnit,
           adjustedBy,
@@ -309,7 +386,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     if (fixable.length >= BATCH_CAP || page.length < CANDIDATE_PAGE_SIZE) break;
   }
 
-  const results = { applied: 0, parked, stale: 0, errors: 0, fixes: [] };
+  const results = { applied: 0, parked, stale: 0, errors: 0, fixes: [], dryOz: { applied: 0, parked: 0, stale: 0, errors: 0 } };
   for (const candidate of fixable) {
     const { target } = candidate;
     try {
@@ -326,7 +403,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
       });
       if (outcome === 'applied') {
         results.applied += 1;
-        results.fixes.push({ productId: candidate.id, name: candidate.name, from: candidate.inventory_unit, to: target });
+        results.fixes.push({ kind: 'alias', productId: candidate.id, name: candidate.name, from: candidate.inventory_unit, to: target });
       } else {
         results.stale += 1;
       }
@@ -336,52 +413,140 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     }
   }
 
-  if (results.applied > 0) {
-    try {
-      // Remaining-for-review = the FULL unit-review predicate (missing unit,
-      // ambiguous oz, still-unsupported), same shape as dashboard-alerts.
-      // The SHARED queue predicate (applyUnitReviewQueueFilter) — the same
-      // filter the review route and dashboard-alerts run, so this count can
-      // never disagree with what the page shows.
-      const remaining = await applyUnitReviewQueueFilter(dbi('products_catalog'))
-        .count('* as count')
-        .first();
-      const remainingCount = Number.parseInt(remaining?.count || 0, 10);
-      const sample = results.fixes.slice(0, 5)
-        .map((f) => `${f.name} (${f.from} → ${f.to})`)
-        .join(', ');
-      const more = results.fixes.length > 5 ? ` and ${results.fixes.length - 5} more` : '';
-      await require('./notification-service').notifyAdmin(
-        'system',
-        `Inventory: ${results.applied} unit alias${results.applied === 1 ? '' : 'es'} auto-fixed`,
-        `${sample}${more}. Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row. ${remainingCount} product${remainingCount === 1 ? '' : 's'} still need${remainingCount === 1 ? 's' : ''} unit review.`,
-        {
-          link: '/admin/inventory?tab=unit-review',
-          metadata: {
-            applied: results.applied,
-            parked: results.parked,
-            stale: results.stale,
-            errors: results.errors,
-            remainingForReview: remainingCount,
-            fixes: results.fixes,
-          },
-        },
-      );
-    } catch (notifyErr) {
-      logger.warn(`[inventory-unit-autofix] digest notify failed (non-blocking): ${notifyErr.message}`);
+  if (isEnabled('inventoryUnitAutofixDryOz')) {
+    await runDryOzPhase({ dbi, results });
+  }
+
+  if (results.applied > 0 || results.dryOz.applied > 0) {
+    await sendAutofixDigest({ dbi, results });
+  }
+
+  logger.info(`[inventory-unit-autofix] sweep: applied=${results.applied} parked=${results.parked} stale=${results.stale} errors=${results.errors} dryOz=${JSON.stringify(results.dryOz)}`);
+  return results;
+}
+
+/**
+ * Dry-oz phase (gate inventoryUnitAutofixDryOz, on top of the sweep gate):
+ * oz-family rows with positive dry-by-weight evidence are converted to g/lb
+ * with their stock and threshold. Same one-transaction-per-product posture
+ * as the alias phase; the decision is re-checked under the row lock.
+ */
+async function runDryOzPhase({ dbi, results }) {
+  const dry = results.dryOz;
+  let rows;
+  try {
+    rows = await dbi('products_catalog')
+      .whereRaw(OZ_FAMILY_SQL)
+      .select('id', 'name', 'category', 'subcategory', 'formulation', 'unit_type', 'inventory_unit',
+        'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit')
+      .orderBy('name')
+      .orderBy('id');
+  } catch (err) {
+    dry.errors += 1;
+    logger.warn(`[inventory-unit-autofix] dry-oz scan failed (skipped): ${err.message}`);
+    return;
+  }
+
+  const fixable = [];
+  for (const row of rows || []) {
+    const target = resolveDryOzTarget(row);
+    if (!target) {
+      dry.parked += 1;
+    } else if (fixable.length < BATCH_CAP) {
+      fixable.push({ ...row, target });
     }
   }
 
-  logger.info(`[inventory-unit-autofix] sweep: applied=${results.applied} parked=${results.parked} stale=${results.stale} errors=${results.errors}`);
-  return results;
+  for (const candidate of fixable) {
+    const { target } = candidate;
+    try {
+      const { outcome } = await applyInventoryUnitFix({
+        dbi,
+        productId: candidate.id,
+        nextUnit: target,
+        convertExistingStock: true,
+        movementSource: 'inventory_unit_review_autofix_dry_oz',
+        adjustedBy: 'auto:inventory-unit-autofix',
+        expectedCurrentUnit: candidate.inventory_unit,
+        alwaysRecordMovement: true,
+        movementReason: `Dry product: weight ounces converted to ${target}`,
+        lockedCheck: (locked) => resolveDryOzTarget(locked) === target,
+      });
+      if (outcome === 'applied') {
+        dry.applied += 1;
+        results.fixes.push({ kind: 'dry_oz', productId: candidate.id, name: candidate.name, from: candidate.inventory_unit, to: target });
+      } else {
+        dry.stale += 1;
+      }
+    } catch (err) {
+      dry.errors += 1;
+      logger.warn(`[inventory-unit-autofix] dry-oz fix failed for product ${candidate.id} (left parked): ${err.message}`);
+    }
+  }
+}
+
+function digestSample(fixes) {
+  const sample = fixes.slice(0, 5).map((f) => `${f.name} (${f.from} → ${f.to})`).join(', ');
+  return `${sample}${fixes.length > 5 ? ` and ${fixes.length - 5} more` : ''}`;
+}
+
+// Digest text: one sentence per kind that happened, so "no quantities
+// changed" is only ever said about alias renames.
+function buildAutofixDigest(results, remainingCount) {
+  const aliasFixes = results.fixes.filter((f) => f.kind === 'alias');
+  const dryFixes = results.fixes.filter((f) => f.kind === 'dry_oz');
+  const titleParts = [];
+  const bodyParts = [];
+  if (aliasFixes.length) {
+    titleParts.push(`${aliasFixes.length} unit alias${aliasFixes.length === 1 ? '' : 'es'} auto-fixed`);
+    bodyParts.push(`${digestSample(aliasFixes)}. Pure spelling/plural renames only — no quantities changed.`);
+  }
+  if (dryFixes.length) {
+    titleParts.push(`${dryFixes.length} dry product${dryFixes.length === 1 ? '' : 's'} converted from oz`);
+    bodyParts.push(`${digestSample(dryFixes)}. Dry products converted from oz to g or lb — an exact weight conversion; stock and low-stock level converted with it.`);
+  }
+  bodyParts.push(`Each fix left a movement audit row. ${remainingCount} product${remainingCount === 1 ? '' : 's'} still need${remainingCount === 1 ? 's' : ''} unit review.`);
+  return { title: `Inventory: ${titleParts.join(', ')}`, body: bodyParts.join(' ') };
+}
+
+async function sendAutofixDigest({ dbi, results }) {
+  try {
+    // Remaining-for-review = the FULL unit-review predicate (missing unit,
+    // ambiguous oz, still-unsupported), same shape as dashboard-alerts.
+    // The SHARED queue predicate (applyUnitReviewQueueFilter) — the same
+    // filter the review route and dashboard-alerts run, so this count can
+    // never disagree with what the page shows.
+    const remaining = await applyUnitReviewQueueFilter(dbi('products_catalog'))
+      .count('* as count')
+      .first();
+    const remainingCount = Number.parseInt(remaining?.count || 0, 10);
+    const { title, body } = buildAutofixDigest(results, remainingCount);
+    await require('./notification-service').notifyAdmin('system', title, body, {
+      link: '/admin/inventory?tab=unit-review',
+      metadata: {
+        applied: results.applied,
+        parked: results.parked,
+        stale: results.stale,
+        errors: results.errors,
+        dryOz: results.dryOz,
+        remainingForReview: remainingCount,
+        fixes: results.fixes,
+      },
+    });
+  } catch (notifyErr) {
+    logger.warn(`[inventory-unit-autofix] digest notify failed (non-blocking): ${notifyErr.message}`);
+  }
 }
 
 module.exports = {
   applyInventoryUnitFix,
   applyUnitReviewQueueFilter,
+  looksLiquidProduct,
+  resolveDryOzTarget,
   resolveInventoryUnitAlias,
   runInventoryUnitAutofixSweep,
   _test: {
+    buildAutofixDigest,
     applyUnitReviewQueueFilter,
     BATCH_CAP,
     CANDIDATE_PAGE_SIZE,
