@@ -861,6 +861,53 @@ describe('annual prepay respects the armed lawn cost floor', () => {
     expect(prepay(costWins, 700).amount).toBe(690);
   });
 
+  // Saved/accepted shape: engine lineItems keep the DEFAULT cadence's row,
+  // recurring.services holds the row the customer accepted. A row switched to
+  // another cadence carries that cadence's floor as lawnFloorMonthly; its
+  // minimumCollectedAnnualPrice / costFloorAnnual stay the default cadence's.
+  const withServicesRow = (data, row) => ({
+    ...data,
+    recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', ...row }] },
+  });
+
+  test('tier switch: the accepted services row (12x) decides the cost slice, not the stale 9x lineItem', () => {
+    // lineItems 9x: A $589.05 / F $584.60 would protect P = $500 and cost the
+    // customer ~$25 of prepay. The accepted 12x row is $760 vs a $700.08 floor.
+    const data = withServicesRow(
+      lawnEstimate({ annual: 589.05, floor: 584.6, armed: true }),
+      { annual: 760, mo: 63.33, lawnFloorMonthly: 58.34, minimumCollectedAnnualPrice: 584.6, costFloorAnnual: 584.6 },
+    );
+    const { protectedFloor } = annualPrepayDiscountComponents({ recurringServices: lawnMix, estimateData: data });
+    expect(protectedFloor).toBe(0);
+    const r = prepay(data, 760);
+    expect(r.amount).toBe(722);
+    expect(r.rate).toBe(0.05);
+    // A 12x row that does sit near its own floor still clamps to THAT floor.
+    const near = withServicesRow(
+      lawnEstimate({ annual: 589.05, floor: 584.6, armed: true }),
+      { annual: 760, mo: 63.33, lawnFloorMonthly: 62, minimumCollectedAnnualPrice: 584.6 },
+    );
+    expect(prepay(near, 760).amount).toBe(744);
+  });
+
+  test('a services row uses lawnFloorMonthly over its stale minimumCollectedAnnualPrice', () => {
+    // Stale default-cadence floor $500 would leave the full 5% ($665); the
+    // selected cadence floors at 58 * 12 = $696.
+    const data = withServicesRow(
+      lawnEstimate({ annual: 700, floor: 500, armed: true }),
+      { annual: 700, mo: 58.33, lawnFloorMonthly: 58, minimumCollectedAnnualPrice: 500, costFloorAnnual: 500 },
+    );
+    expect(prepay(data, 700).amount).toBe(696);
+  });
+
+  test('services lawn rows with no floor field fall back to the lineItems cost slice', () => {
+    const data = withServicesRow(
+      lawnEstimate({ annual: 589.05, floor: 584.6, armed: true }),
+      { annual: 589.05, mo: 49.09 },
+    );
+    expect(prepay(data, 589.05).amount).toBe(584.6);
+  });
+
   test('SSR protectedFloor + rate reassemble to the invoice total for the stored annual', () => {
     for (const [annual, floor] of [[589.05, 584.6], [700, 584.6], [600, 600], [1010.1, 1000]]) {
       const data = lawnEstimate({ annual, floor, armed: true });
