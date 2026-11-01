@@ -13944,8 +13944,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // GATE_REVIEW_ASK_AT_VISIT: a record completed with the switch on asks after its report text even
     // while the invoice is unpaid (enrollPostService below). The link still never rides inside the
     // pay-link text: shouldBundleReview keeps refusing an unpaid invoice.
-    const invoiceBlocksReview = invoiceUnpaidAtCompletion
-      && parseJsonObject(record.structured_notes).reviewAskAtVisit !== true;
+    const recordAsksAtVisit = parseJsonObject(record.structured_notes).reviewAskAtVisit === true;
+    const invoiceBlocksReview = invoiceUnpaidAtCompletion && !recordAsksAtVisit;
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms
@@ -15962,8 +15962,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // email-only customer must still reach enrollment (Codex P2, r1) — the
     // resolver stops the sequence with no_contact/opted_out when neither
     // channel is available.
+    // null = this completion made no visit-time review ask.
+    let reviewEnrollment = null;
     if (effectiveRequestReview && (svc.cust_phone || reviewCadenceEnabled) && !bundledReviewUrl) {
-      let reviewEnrollment = null;
       try {
         const ReviewService = require('../services/review-request');
         reviewEnrollment = await ReviewService.enrollPostService({
@@ -15989,14 +15990,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         logger.error(`[dispatch] Review request schedule failed: ${e.message}`);
         reviewEnrollment = { started: false, reason: 'error' };
       }
-      // GATE_REVIEW_ASK_AT_VISIT: an unpaid visit's ask that failed for a passing reason (the two a
-      // combined visit retries) turns the marker off, so the payment stays its recovery, as before.
-      if (invoiceUnpaidAtCompletion && !invoiceBlocksReview && reviewEnrollment?.started === false
-        && ['plan_resolution_failed', 'error'].includes(reviewEnrollment.reason)) {
-        await mergeRecordNotesKeys(record.id, { reviewAskAtVisit: false }).catch((markErr) => {
-          logger.error(`[dispatch] Review ask-at-visit fallback for record ${record.id} not stored: ${markErr.message}`);
-        });
-      }
+    }
+    // GATE_REVIEW_ASK_AT_VISIT: the marker stays on only for a visit whose visit-time ask ran to a final
+    // outcome. A visit this completion did not ask for (no requestReview posted, a suppression, a recap or
+    // system closeout), or whose ask failed for a passing reason (the two a combined visit retries), turns
+    // it off: a later payment keeps the ask it gave before the switch. A combined visit's members are
+    // left alone: the packet owns their ask.
+    if (recordAsksAtVisit && !packetEffects
+      && (!reviewEnrollment || (reviewEnrollment.started === false
+        && ['plan_resolution_failed', 'error'].includes(reviewEnrollment.reason)))) {
+      await mergeRecordNotesKeys(record.id, { reviewAskAtVisit: false }).catch((markErr) => {
+        logger.error(`[dispatch] Review ask-at-visit fallback for record ${record.id} not stored: ${markErr.message}`);
+      });
     }
 
     // The first complete transition wakes any already-open customer

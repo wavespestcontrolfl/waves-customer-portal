@@ -7111,8 +7111,9 @@ function reviewProbableReviewerGuardLive() {
 // minutes after the visit report"): 'true' = a visit completed with it on asks for the review after its
 // report text even while its invoice is unpaid, and a later payment never starts an ask for that visit.
 // The completion freezes the answer on the service record (structured_notes.reviewAskAtVisit), so a
-// resumed completion, a combined visit's summary and the payment all read one decision. The review
-// link still never rides inside the pay-link text. Off = an unpaid invoice holds the ask until it is
+// resumed completion, a combined visit's summary and the payment all read one decision; it turns the
+// marker off when it made no visit-time ask, or that ask failed for a passing reason, so a payment
+// then keeps today's ask. The review link still never rides inside the pay-link text. Off = an unpaid invoice holds the ask until it is
 // paid (services/review-request.js enrollForPaidInvoice). Unset is the kill, no redeploy.
 function reviewAskAtVisitLive() {
   return String(process.env.GATE_REVIEW_ASK_AT_VISIT || '').trim().toLowerCase() === 'true';

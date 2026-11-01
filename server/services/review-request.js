@@ -2087,9 +2087,9 @@ const ReviewService = {
       if (typeof notes === "string") {
         try { notes = JSON.parse(notes); } catch { notes = {}; }
       }
-      // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): a visit completed with the switch on asked after
-      // its report text, paid or not. A payment never starts a review text for it, whatever the
-      // completion decided. Visits completed before the switch keep this deferred ask.
+      // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): this visit's completion made its review ask after the
+      // report text, paid or not, so a payment never starts another. The completion turns the marker off
+      // when it made no such ask; that visit, and every visit completed before the switch, keeps this ask.
       if (notes.reviewAskAtVisit === true) {
         logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): asked at the visit`);
         return { enrolled: false, reason: "asked_at_visit" };

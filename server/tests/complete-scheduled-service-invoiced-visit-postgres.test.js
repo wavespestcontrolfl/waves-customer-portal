@@ -214,6 +214,33 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
   });
 
+  test('GATE_REVIEW_ASK_AT_VISIT on, a completion that posts no requestReview: no visit-time ask, so the marker turns off and the payment keeps its ask', async () => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
+    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+    try {
+      expect((await complete(f, { requestReview: undefined })).status).toBe(200);
+      expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      // The stored intent still reads "ask" (the payment path's reading), and the marker no longer skips it.
+      expect(record.structured_notes.requestReview).toBe(true);
+      expect(record.structured_notes.reviewAskAtVisit).toBe(false);
+    } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
+  });
+
+  test.each([
+    ['the visit-time ask runs: the marker stays on, so a later paid event asks nothing', {}, 1, true],
+    ['no requestReview posted: no visit-time ask, so the marker turns off and a paid event keeps its old ask', { requestReview: undefined }, 0, false],
+  ])('GATE_REVIEW_ASK_AT_VISIT on, a paid invoice: %s', async (_label, fields, asks, marker) => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
+    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+    try {
+      expect((await complete(f, fields)).status).toBe(200);
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(asks);
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(record.structured_notes.reviewAskAtVisit).toBe(marker);
+    } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
+  });
+
   test('a paid invoice (a charge taken at the door, no invoice field posted): it stays paid, no second invoice, no pay-link text', async () => {
     const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
     try {

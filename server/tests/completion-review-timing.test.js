@@ -46,6 +46,14 @@ describe('legacy (non-cadence) bundling', () => {
     // GATE_REVIEW_ASK_AT_VISIT lets the ask through as its own text.
     expect(block).toContain('!invoiceUnpaidAtCompletion');
   });
+
+  test('GATE_REVIEW_ASK_AT_VISIT: the marker fallback never touches a combined visit member (the packet owns its ask)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const start = source.indexOf('GATE_REVIEW_ASK_AT_VISIT: the marker stays on only');
+    const block = source.slice(start, source.indexOf('{ reviewAskAtVisit: false }', start));
+    expect(start).toBeGreaterThan(-1);
+    expect(block).toContain('!packetEffects');
+  });
 });
 
 describe('bundled completion review suffix vs the send-time click guard', () => {
