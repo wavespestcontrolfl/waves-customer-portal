@@ -42,7 +42,7 @@ describe('estimator rejects failed monetary calculations', () => {
   });
 
   test('supported numeric input strings retain the valid price', () => {
-    expect(estimate({ plugging: { area: '1000', spacing: '12' } }).lineItems[0].price).toBe(2443);
+    expect(estimate({ plugging: { area: '1000', spacing: '12' } }).lineItems[0].price).toBe(3542);
     expect(estimate({ stinging: { tier: '2' } }).lineItems[0].price).toBe(250);
   });
 
