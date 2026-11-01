@@ -126,19 +126,27 @@ describe('petLineForCompletion', () => {
     buildReentryContext.mockReset();
   });
 
-  function fakeKnex({ prefs, record, fail } = {}) {
+  // The visit row: the visit joined to its customer (membership facts, home address, the visit's stamped address).
+  const HOME = { address_line1: '100 Fixture Street', address_line2: 'Apt 3', city: 'Fixture City', zip: '34201' };
+  const MEMBER_AT_HOME = { waveguard_tier: 'Gold', monthly_rate: 0, ...HOME };
+  function fakeKnex({ prefs, record, visit = MEMBER_AT_HOME, fail } = {}) {
     const reads = [];
-    const knex = (table) => ({
-      where: (where) => ({
+    const knex = (table) => {
+      const chain = {
+        join: () => chain,
+        where: (where) => Object.assign(chain, { lastWhere: where }),
         first: async () => {
           reads.push(table);
           if (fail === table) throw new Error('read failed');
           if (table === 'property_preferences') return prefs;
-          if (table === 'service_records') return record ? { ...record, ...where } : undefined;
+          if (table === 'service_records') return record ? { scheduled_service_id: 'svc1', ...record, ...chain.lastWhere } : undefined;
+          if (table === 'scheduled_services as ss') return visit;
           return undefined;
         },
-      }),
-    });
+      };
+      return chain;
+    };
+    knex.raw = (sql) => sql;
     return { knex, reads };
   }
 
@@ -158,6 +166,31 @@ describe('petLineForCompletion', () => {
     const { knex } = fakeKnex({ prefs: { pets_structured: [dog('Biscuit')] }, record: { advisory: {} } });
     expect(await petLineForCompletion({ customerId: 'c1', recordId: 'r1', knex })).toBe('Biscuit can go back out once the spray has dried.');
     expect(buildReentryContext).toHaveBeenCalledWith({ record: expect.objectContaining({ id: 'r1' }), knex });
+  });
+
+  test('a member perk at the member\'s home: a non-member, a visit at another address or unit, or no linked visit gets no line', async () => {
+    process.env.GATE_PET_NAME_TEXT = 'true';
+    buildReentryContext.mockResolvedValue(outside());
+    const prefs = { pets_structured: [dog('Biscuit')] };
+    for (const visit of [
+      { ...MEMBER_AT_HOME, waveguard_tier: null, monthly_rate: 0 },
+      { ...MEMBER_AT_HOME, waveguard_tier: '', monthly_rate: null },
+      { ...MEMBER_AT_HOME, service_address_line1: '200 Other Road' },
+      { ...MEMBER_AT_HOME, service_address_line1: '100 Fixture Street', service_address_line2: 'Apt 4' },
+      null, // the linked visit row is gone
+    ]) {
+      const { knex } = fakeKnex({ prefs, record: { advisory: {} }, visit });
+      expect([visit, await petLineForCompletion({ customerId: 'c1', recordId: 'r1', knex })]).toEqual([visit, '']);
+    }
+    const unlinked = fakeKnex({ prefs, record: { advisory: {}, scheduled_service_id: null } });
+    expect(await petLineForCompletion({ customerId: 'c1', recordId: 'r1', knex: unlinked.knex })).toBe('');
+    expect(unlinked.reads).toEqual(['property_preferences', 'service_records']);
+    // A legacy member (monthly rate, no tier) is a member.
+    const legacy = fakeKnex({ prefs, record: { advisory: {} }, visit: { ...MEMBER_AT_HOME, waveguard_tier: null, monthly_rate: 49 } });
+    expect(await petLineForCompletion({ customerId: 'c1', recordId: 'r1', knex: legacy.knex })).toBe('Biscuit can go back out once the spray has dried.');
+    // The home's own address typed on the visit, unit omitted, is still the home.
+    const typed = fakeKnex({ prefs, record: { advisory: {} }, visit: { ...MEMBER_AT_HOME, service_address_line1: '100 Fixture St' } });
+    expect(await petLineForCompletion({ customerId: 'c1', recordId: 'r1', knex: typed.knex })).toBe('Biscuit can go back out once the spray has dried.');
   });
 
   test('no named pet: the record is never read', async () => {

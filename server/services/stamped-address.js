@@ -172,4 +172,21 @@ function effectiveServiceAddress(service = {}, customer = {}) {
   };
 }
 
-module.exports = { effectiveServiceAddress, stampedAddressDiverges, stampedDivergesSql, stampedLine2Sql, sqlZip5, premiseStampConflicts, inheritReferenceUnit };
+// Unit-aware "is this visit at the customer's home?" for readers that speak about the home itself (the member perks:
+// the pet-named text, Away Watch). Stricter than stampedDivergesSql, which compares street, city and zip only: a
+// visit stamped for Apt 4 at a home on file as Apt 3 is elsewhere. No stamp is home; a stamp that names the home's
+// street but omits the unit borrows the home's unit (inheritReferenceUnit); a missing value on either side is
+// unknown, not different (premiseStampConflicts). Both readers select VISIT_HOME_COLUMNS from scheduled_services
+// as ss joined to customers as c, so one row carries both sides.
+const VISIT_HOME_COLUMNS = Object.freeze([
+  'ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip',
+  'c.address_line1', 'c.address_line2', 'c.city', 'c.zip',
+]);
+function visitAtCustomerHome(row = {}) {
+  if (!row.service_address_line1) return true;
+  const home = { service_address_line1: row.address_line1, service_address_line2: row.address_line2,
+    service_address_city: row.city, service_address_zip: row.zip };
+  return !premiseStampConflicts(inheritReferenceUnit(row, home), home);
+}
+
+module.exports = { effectiveServiceAddress, stampedAddressDiverges, stampedDivergesSql, stampedLine2Sql, sqlZip5, premiseStampConflicts, inheritReferenceUnit, VISIT_HOME_COLUMNS, visitAtCustomerHome };

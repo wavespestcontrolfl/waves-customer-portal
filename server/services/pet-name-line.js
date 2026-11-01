@@ -25,11 +25,14 @@
  * say `species` where the app says `type`). Only dogs and cats, or a pet with no type: a pet marked
  * Other may be a fish or a bird. An indoor pet is left out of an outside-only line and an outdoor pet
  * out of an inside-only line. One to three names; none, or four and more, means no line, so a long
- * list never crowds the text.
+ * list never crowds the text. WaveGuard members only (isMembershipCustomerRow), and only on a visit at
+ * the member's home: a visit stamped at another address gets no line.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { isMembershipCustomerRow } = require('./waveguard-existing-services');
+const { VISIT_HOME_COLUMNS, visitAtCustomerHome } = require('./stamped-address');
 
 // Pet names arrive as free text from the customer; anything else in an entry is ignored.
 const MAX_NAMES = 3;
@@ -157,6 +160,15 @@ async function petLineForCompletion({ customerId, recordId, knex = db } = {}) {
     if (!yardPets(prefs?.pets_structured).length) return '';
     const record = await knex('service_records').where({ id: recordId }).first();
     if (!record) return '';
+    // A WaveGuard member perk about the member's home, in one read of the visit and its customer: a non-member, or a
+    // visit stamped at another address or another unit (the home's pets do not live there), gets no line.
+    const visit = record.scheduled_service_id
+      ? await knex('scheduled_services as ss')
+        .join('customers as c', 'c.id', 'ss.customer_id')
+        .where('ss.id', record.scheduled_service_id)
+        .first('c.waveguard_tier', 'c.monthly_rate', ...VISIT_HOME_COLUMNS)
+      : null;
+    if (!visit || !isMembershipCustomerRow(visit) || !visitAtCustomerHome(visit)) return '';
     const { buildReentryContext } = require('./service-report/reentry');
     return petLine(prefs.pets_structured, await buildReentryContext({ record, knex }));
   } catch (err) {
