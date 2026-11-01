@@ -7,6 +7,7 @@ const logger = require('../logger');
 const { buildRecapPayload } = require('./recap-payload');
 const { renderRecapToFile, cleanupRecapFile } = require('./recap-render');
 const { putRecapFromFile } = require('./recap-storage');
+const gates = require('../../config/feature-gates');
 
 const CLAIM_LIMIT = 3;
 const STALE_CLAIM_MS = 20 * 60 * 1000;
@@ -98,6 +99,25 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
       return { ok: false, skipped: true };
     }
     throw err;
+  }
+}
+
+// GATE_RECAP_GLASSES_CLIPS: a clip confirmed after the recap was built, and before it was sent,
+// re-renders it so the clip is in the video the customer gets (force clears any approval). Only a
+// clip the renderer will use (`ready`) matters; a `processing` clip rebuilds when it is cut.
+// enqueueRecap leaves a sent recap alone and a pending/rendering one as it is. Never throws:
+// the confirm that called it has already succeeded.
+async function rebuildRecapForLateClip(scheduledServiceId, media, { knex = db } = {}) {
+  if (!(typeof gates.recapGlassesClipsLive === 'function' && gates.recapGlassesClipsLive())) return { rebuilt: false };
+  if (media?.status !== 'ready') return { rebuilt: false };
+  try {
+    const existing = await getRecap(scheduledServiceId, knex);
+    if (!existing || existing.sent_at) return { rebuilt: false };
+    const result = await enqueueRecap(scheduledServiceId, { force: true, knex });
+    return { rebuilt: Boolean(result.queued) };
+  } catch (err) {
+    logger.warn(`[recap-pipeline] late-clip rebuild failed for ${scheduledServiceId}: ${err.message}`);
+    return { rebuilt: false };
   }
 }
 
@@ -215,6 +235,6 @@ async function processDueRecaps({ now = new Date(), limit = CLAIM_LIMIT } = {}, 
 
 module.exports = {
   CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION,
-  getRecap, enqueueRecap, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender,
+  getRecap, enqueueRecap, rebuildRecapForLateClip, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender,
   claimDueRecaps, recoverStaleRecaps, processRecap, processDueRecaps,
 };

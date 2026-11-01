@@ -11919,7 +11919,8 @@ export function StationMarkingStep({
   );
 }
 
-function RecapCapture({ serviceId }) {
+// onAdded: the host card reads the recap again after a clip lands (a late clip re-renders the recap).
+function RecapCapture({ serviceId, onAdded }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
   const rolePickerRef = useModalFocus(!!pendingFile, () => setPendingFile(null));
@@ -11927,6 +11928,8 @@ function RecapCapture({ serviceId }) {
   const [uploading, setUploading] = useState(0);
   const [err, setErr] = useState(null);
   const fileRef = useRef(null);
+  const libraryRef = useRef(null);
+  const { enabled: glassesClips } = useFeatureFlagReady("recap-glasses-v1");
 
   const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-media`)
     .then((d) => setItems(d?.items || [])).catch(() => {});
@@ -11934,7 +11937,7 @@ function RecapCapture({ serviceId }) {
 
   const onPick = (e) => {
     const file = e.target.files && e.target.files[0];
-    if (fileRef.current) fileRef.current.value = "";
+    e.target.value = "";
     if (file) setPendingFile(file);
   };
 
@@ -11957,6 +11960,7 @@ function RecapCapture({ serviceId }) {
         method: "POST", body: JSON.stringify({ bytes: file.size, durationMs }),
       });
       await refresh();
+      if (onAdded) onAdded();
     } catch (e) {
       // Surface the server reason (e.g. unsupported iPhone HEVC/MOV or HEIC) instead of
       // silently dropping the clip; closeout stays unblocked either way.
@@ -11980,6 +11984,8 @@ function RecapCapture({ serviceId }) {
       <div style={{ fontSize: 12.5, color: D.muted, margin: "6px 0 10px", lineHeight: 1.45 }}>Grab a few 5-sec clips of the work — they play in the customer’s recap. Skip it and the recap still generates.</div>
 
       <input ref={fileRef} type="file" accept="video/*,image/*" capture="environment" onChange={onPick} style={{ display: "none" }} />
+      {/* Glasses clips (recap-glasses-v1): no `capture`, so the phone opens the photo library, where the glasses' clips land. Same tag-and-upload flow. */}
+      {glassesClips && <input ref={libraryRef} type="file" accept="video/*" onChange={onPick} style={{ display: "none" }} />}
 
       {items.length > 0 && (
         <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
@@ -11998,9 +12004,16 @@ function RecapCapture({ serviceId }) {
       )}
 
       {err && <div style={{ fontSize: 12, color: D.red, margin: "0 0 8px", lineHeight: 1.4 }}>{err}</div>}
-      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 500, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
-        {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
-      </button>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => fileRef.current && fileRef.current.click()} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 500, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
+          {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
+        </button>
+        {glassesClips && (
+          <button onClick={() => libraryRef.current && libraryRef.current.click()} style={{ flex: 1, padding: "12px", borderRadius: 10, border: `1px solid ${D.border}`, background: "none", color: D.text, fontWeight: 500, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
+            From Photos
+          </button>
+        )}
+      </div>
 
       {pendingFile && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,13,.7)", zIndex: 50, display: "flex", alignItems: "flex-end" }} onClick={() => setPendingFile(null)}>
@@ -12025,11 +12038,12 @@ function RecapCapture({ serviceId }) {
 // Polls the recap render status, plays the MP4 (fetched as an authed blob so the
 // <video> tag doesn't need to carry a JWT), and gates sending on tech approval.
 // Flag-gated (pest-recap-v1) + pest visits only; renders next to FastCloseout.
-function PestRecapCard({ serviceId }) {
+export function PestRecapCard({ serviceId }) {
   const [state, setState] = useState({ status: "loading" });
   const [videoUrl, setVideoUrl] = useState(null);
   const [busy, setBusy] = useState(false);
   const blobRef = useRef(null);
+  const { enabled: glassesClips } = useFeatureFlagReady("recap-glasses-v1");
 
   const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-video`)
     .then((d) => { setState(d || { status: "none" }); return d; })
@@ -12062,6 +12076,15 @@ function PestRecapCard({ serviceId }) {
     })();
     return () => { alive = false; };
   }, [state.status, videoUrl, serviceId]);
+
+  // A recap re-rendering (a late clip, Regenerate) drops the old preview; it reloads when ready.
+  useEffect(() => {
+    if ((state.status === "pending" || state.status === "rendering") && blobRef.current) {
+      URL.revokeObjectURL(blobRef.current);
+      blobRef.current = null;
+      setVideoUrl(null);
+    }
+  }, [state.status]);
 
   const act = async (path, body) => {
     setBusy(true);
@@ -12128,6 +12151,12 @@ function PestRecapCard({ serviceId }) {
           <div style={{ fontSize: 12.5, color: D.amber, marginBottom: 10 }}>Recap render didn’t complete.{state.error ? ` (${state.error})` : ""}</div>
           <button style={btn("#111", "#fff")} disabled={busy} onClick={regenerate}>Try again</button>
         </>
+      )}
+      {/* Late clips: until the recap is approved or sent, a clip added here re-renders it (server gate GATE_RECAP_GLASSES_CLIPS). */}
+      {glassesClips && ((s === "ready" && !state.approved) || s === "failed") && (
+        <div style={{ marginTop: 12 }}>
+          <RecapCapture serviceId={serviceId} onAdded={refresh} />
+        </div>
       )}
       {s === "error" && <div style={{ fontSize: 12.5, color: D.muted }}>Couldn’t load recap status.</div>}
     </div>

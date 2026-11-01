@@ -7,6 +7,7 @@ const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteO
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../../models/db');
 const config = require('../../config');
+const gates = require('../../config/feature-gates');
 const logger = require('../logger');
 
 const s3 = new S3Client({
@@ -104,6 +105,39 @@ async function presignUpload({ scheduledServiceId, role, mediaType = 'video', co
 
 const RECAP_MAX_BYTES = 80 * 1024 * 1024; // ~80MB
 const RECAP_MAX_DURATION_MS = 20000; // ~20s
+// GATE_RECAP_GLASSES_CLIPS: a clip from the phone's photo library (camera glasses) may be longer.
+// Over RECAP_MAX_DURATION_MS it is kept as `processing`; the renderer reads `ready` rows only.
+const RECAP_LIBRARY_MAX_BYTES = 200 * 1024 * 1024; // ~200MB
+const RECAP_LIBRARY_MAX_DURATION_MS = 60000; // ~60s
+
+const glassesClipsOn = () => typeof gates.recapGlassesClipsLive === 'function' && gates.recapGlassesClipsLive();
+
+// Why a confirm was refused → the HTTP answer. Shared by the admin and tech confirm routes.
+function confirmFailure(reason) {
+  const library = glassesClipsOn();
+  if (reason === 'too_long') return { status: 413, error: 'Clip too long — keep glasses clips under 60 seconds.' };
+  if (reason === 'too_large') return { status: 413, error: library ? 'Clip too large — keep glasses clips under 60 seconds.' : 'Clip too large — keep it under ~20 seconds.' };
+  if (reason === 'bad_duration') return { status: 422, error: 'Couldn’t read the clip length — re-record a short clip and try again.' };
+  if (reason === 'not_uploaded') return { status: 409, error: 'Upload not found — try again.' };
+  return { status: 404, error: 'media not found' };
+}
+
+// Video must report a finite, in-range duration — a missing/null duration can't
+// be trusted as "short" (it would let an arbitrarily long clip under the byte cap
+// through to the renderer). Images carry no duration. With the glasses gate on, a
+// video may be longer (and bigger); one past the usual limit waits as `processing`
+// (`needsCutting`). Returns { reason } when refused, else { needsCutting }.
+function clipLimits(isVideo, realBytes, durationMs) {
+  const library = isVideo && glassesClipsOn();
+  const maxDurationMs = library ? RECAP_LIBRARY_MAX_DURATION_MS : RECAP_MAX_DURATION_MS;
+  const dur = Number(durationMs);
+  const unreadable = isVideo && (!Number.isFinite(dur) || dur <= 0);
+  const tooLong = isVideo && !unreadable && dur > maxDurationMs;
+  if (realBytes > (library ? RECAP_LIBRARY_MAX_BYTES : RECAP_MAX_BYTES)) return { reason: 'too_large' };
+  if (tooLong && library) return { reason: 'too_long' };
+  if (unreadable || tooLong) return { reason: 'bad_duration' };
+  return { needsCutting: library && dur > RECAP_MAX_DURATION_MS };
+}
 
 // Verifies the uploaded object exists + is within limits using AUTHORITATIVE S3
 // size (not the client-reported bytes, which can be spoofed/missing), then marks
@@ -124,20 +158,14 @@ async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = 
   }
   if (realBytes == null) { await deleteMedia(mediaId, { scheduledServiceId }, knex); return { ok: false, reason: 'not_uploaded' }; }
 
-  // Video must report a finite, in-range duration — a missing/null duration can't
-  // be trusted as "short" (it would let an arbitrarily long clip under the byte cap
-  // through to the renderer). Images carry no duration.
-  const dur = Number(durationMs);
-  const tooBig = realBytes > RECAP_MAX_BYTES;
-  const badVideoDuration = row.media_type === 'video'
-    && (!Number.isFinite(dur) || dur <= 0 || dur > RECAP_MAX_DURATION_MS);
-  if (tooBig || badVideoDuration) {
+  const verdict = clipLimits(row.media_type === 'video', realBytes, durationMs);
+  if (verdict.reason) {
     await deleteMedia(mediaId, { scheduledServiceId }, knex);
-    return { ok: false, reason: (badVideoDuration && !tooBig) ? 'bad_duration' : 'too_large' };
+    return { ok: false, reason: verdict.reason };
   }
 
   const [updated] = await knex('service_media').where({ id: row.id }).update({
-    status: 'ready', bytes: realBytes, duration_ms: durationMs, updated_at: new Date(),
+    status: verdict.needsCutting ? 'processing' : 'ready', bytes: realBytes, duration_ms: durationMs, updated_at: new Date(),
   }).returning('*');
   return { ok: true, row: updated };
 }
@@ -195,4 +223,4 @@ async function getMediaForRecap(scheduledServiceId, knex = db) {
   return out;
 }
 
-module.exports = { ROLE_MAP, MEDIA_ROLE_IDS, roleInfo, presignUpload, confirmUpload, listMedia, deleteMedia, getMediaForRecap };
+module.exports = { ROLE_MAP, MEDIA_ROLE_IDS, roleInfo, presignUpload, confirmUpload, confirmFailure, listMedia, deleteMedia, getMediaForRecap };

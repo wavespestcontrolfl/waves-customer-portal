@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { deleteRecapClipDraft, getRecapClipDraft, putRecapClipDraft } from '../../lib/completion-resume-store';
 
 // During-visit recap clip capture for the tech portal ("Your Visit, in Motion", P4b).
@@ -148,6 +149,7 @@ function forgetClipOnDevice(serviceId, scope) {
   void deleteRecapClipDraft(serviceId, scope);
 }
 
+const openPicker = (ref) => () => ref.current && ref.current.click();
 const mediaKey = (serviceId, mediaId) => `${serviceId}:${mediaId}`;
 const createRecoveryStore = () => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 });
 const captureButtonLabel = (uploading, failedUpload) => (
@@ -186,6 +188,8 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
   // a new clip can neither hide the restored one nor overwrite its record.
   const [restoringFor, setRestoringFor] = useState(null);
   const fileRef = useRef(null);
+  const libraryRef = useRef(null);
+  const glassesClips = useFeatureFlag('recap-glasses-v1', false);
   const serviceIdRef = useRef(serviceId);
   const serviceGenerationRef = useRef(0);
   const mountedRef = useRef(false);
@@ -268,7 +272,7 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
 
   const onPick = (e) => {
     const file = e.target.files && e.target.files[0];
-    if (fileRef.current) fileRef.current.value = '';
+    e.target.value = '';
     if (file && serviceId) { setPendingFile({ file, serviceId }); setShowMore(false); }
   };
 
@@ -442,6 +446,7 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
   const items = itemState.serviceId === serviceId ? itemState.items : [];
   const visiblePendingFile = pendingFile?.serviceId === serviceId ? pendingFile.file : null;
   const captureDisabled = Boolean(uploading) + Boolean(failedUpload) + Boolean(restoringFor === serviceId) > 0;
+  const captureState = captureDisabled ? { cursor: 'default', opacity: 0.65 } : { cursor: 'pointer', opacity: 1 };
   const chip = { display: 'flex', alignItems: 'center', gap: 7, padding: '12px 10px', borderRadius: 4, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12.5, fontWeight: 500, cursor: 'pointer', textAlign: 'left' };
 
   return (
@@ -490,9 +495,20 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
           )}
         </div>
       )}
-      <button type="button" disabled={captureDisabled} onClick={() => fileRef.current && fileRef.current.click()} style={{ width: '100%', padding: 12, borderRadius: 4, border: 'none', background: C.teal, color: '#fff', fontWeight: 500, fontSize: 14, cursor: captureDisabled ? 'default' : 'pointer', opacity: captureDisabled ? 0.65 : 1 }}>
-        {captureButtonLabel(uploading, failedUpload)}
-      </button>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button type="button" disabled={captureDisabled} onClick={openPicker(fileRef)} style={{ flex: 1, padding: 12, borderRadius: 4, border: 'none', background: C.teal, color: '#fff', fontWeight: 500, fontSize: 14, ...captureState }}>
+          {captureButtonLabel(uploading, failedUpload)}
+        </button>
+        {/* Glasses clips (recap-glasses-v1): the picker has no `capture`, so the phone opens the photo library, where the glasses' clips land. Same tag-and-upload flow. */}
+        {glassesClips && (
+          <>
+            <input ref={libraryRef} type="file" accept="video/*" disabled={captureDisabled} onChange={onPick} style={{ display: 'none' }} />
+            <button type="button" disabled={captureDisabled} onClick={openPicker(libraryRef)} style={{ flex: 1, padding: 12, borderRadius: 4, border: `1px solid ${C.border}`, background: 'none', color: C.text, fontWeight: 500, fontSize: 14, ...captureState }}>
+              From Photos
+            </button>
+          </>
+        )}
+      </div>
 
       {/* zIndex 1000 like the other tech sheets: the bottom nav is fixed at 50 and later in the DOM, so at 50 it painted over the sheet's last rows. */}
       {visiblePendingFile && (
