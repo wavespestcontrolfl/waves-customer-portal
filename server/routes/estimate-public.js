@@ -12541,7 +12541,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const { OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
         await trx('service_requests')
           .where({ customer_id: estimate.customer_id })
-          .whereIn('source', ['service_report', 'portal_home'])
+          .whereIn('source', require('../services/cta-service-request').CTA_REQUEST_SOURCES)
           .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
           .whereRaw("pricing_revision->'mintedEstimate'->>'id' = ?", [String(estimate.id)])
           .update({ status: 'resolved', updated_at: trx.fn.now() });
@@ -20198,7 +20198,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         const { OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
         await trx('service_requests')
           .where({ customer_id: estimate.customer_id })
-          .whereIn('source', ['service_report', 'portal_home'])
+          .whereIn('source', require('../services/cta-service-request').CTA_REQUEST_SOURCES)
           .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
           .whereRaw("pricing_revision->'mintedEstimate'->>'id' = ?", [String(estimate.id)])
           .update({ status: 'resolved', updated_at: trx.fn.now() });
