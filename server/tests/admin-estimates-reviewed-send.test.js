@@ -24,6 +24,8 @@ jest.mock('../config/feature-gates', () => ({
   termiteAnnualPlanSelectionEnabled: jest.fn(() => false),
   commercialProposalSignLive: () => false,
   commercialAutopayLive: jest.fn(() => false),
+  buildingUseTaxLive: jest.fn(() => false),
+  lawnSprayNoTaxLive: jest.fn(() => true),
   satellitePalmCountTypedLive: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
@@ -102,7 +104,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
-const { gateEnvValue, commercialAutopayLive } = require('../config/feature-gates');
+const { gateEnvValue, commercialAutopayLive, buildingUseTaxLive } = require('../config/feature-gates');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { buildPricingBundle } = require('../routes/estimate-public');
 const { estimateOfferVersion } = require('../services/estimate-offer-version');
@@ -1832,6 +1834,124 @@ describe('GET /:id/proposal suggestedTaxRate', () => {
 
 // Owner 2026-10-24 "autopay default" (GATE_COMMERCIAL_AUTOPAY): Auto Pay is the payment term of a proposal that does
 // not bill by invoice, and never sits beside Bill by invoice. Net terms still need Bill by invoice.
+describe('building-use tax gate on the builder read', () => {
+  test('GET /:id/proposal says whether GATE_BUILDING_USE_TAX is live (the Taxable-box warning for Residential follows it)', async () => {
+    Object.assign(row, { status: 'draft', estimate_data: { proposal: { enabled: true, buildings: [] } } });
+    buildingUseTaxLive.mockReturnValue(true);
+    expect((await invoke('/:id/proposal', 'get')).body.buildingUseTaxLive).toBe(true);
+    buildingUseTaxLive.mockReturnValue(false);
+    expect((await invoke('/:id/proposal', 'get')).body.buildingUseTaxLive).toBe(false);
+  });
+
+  test('GET /:id/proposal says whether GATE_LAWN_SPRAY_NO_TAX is live (lawn and tree & shrub bill untaxed only then)', async () => {
+    Object.assign(row, { status: 'draft', estimate_data: { proposal: { enabled: true, buildings: [] } } });
+    const { lawnSprayNoTaxLive } = require('../config/feature-gates');
+    expect((await invoke('/:id/proposal', 'get')).body.lawnSprayNoTaxLive).toBe(true);
+    lawnSprayNoTaxLive.mockReturnValueOnce(false);
+    expect((await invoke('/:id/proposal', 'get')).body.lawnSprayNoTaxLive).toBe(false);
+  });
+});
+
+describe('GET /:id/proposal taxExemptVerified (the Taxable-box warning compares with the calculator\'s exemption check)', () => {
+  const TaxCalculator = require('../services/tax-calculator');
+  afterEach(() => jest.restoreAllMocks());
+
+  test.each([
+    ['an exempt customer', { id: 'exemption-1' }, true],
+    ['a customer with no verified exemption', undefined, false],
+  ])('%s', async (_label, exemption, expected) => {
+    row.customer_id = 'synthetic-customer';
+    const find = jest.spyOn(TaxCalculator, 'findVerifiedExemption').mockResolvedValue(exemption);
+    expect((await invoke('/:id/proposal', 'get')).body.taxExemptVerified).toBe(expected);
+    expect(find).toHaveBeenCalledWith('synthetic-customer');
+  });
+
+  test('no linked customer: false, without an exemption lookup', async () => {
+    row.customer_id = null;
+    const find = jest.spyOn(TaxCalculator, 'findVerifiedExemption');
+    expect((await invoke('/:id/proposal', 'get')).body.taxExemptVerified).toBe(false);
+    expect(find).not.toHaveBeenCalled();
+  });
+
+  test('a failed exemption read is null (unknown), and the builder read still succeeds', async () => {
+    row.customer_id = 'synthetic-customer';
+    jest.spyOn(TaxCalculator, 'findVerifiedExemption').mockRejectedValue(new Error('synthetic lookup failure'));
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.taxExemptVerified).toBeNull();
+    expect(res.body.proposal).toBeTruthy();
+  });
+});
+
+describe('GET /:id/proposal billToTaxBasis (a payer-billed visit bill follows the payer\'s tax status)', () => {
+  const payer = require('../services/payer');
+  afterEach(() => jest.restoreAllMocks());
+
+  test.each([
+    ['no active Bill-To payer', { payerId: null, taxExempt: false }, 'self'],
+    ['a tax-exempt payer', { payerId: 'synthetic-payer', taxExempt: true }, 'payer_exempt'],
+    ['a taxed payer', { payerId: 'synthetic-payer', taxExempt: false }, 'payer_taxed'],
+  ])('%s', async (_label, resolved, expected) => {
+    row.customer_id = 'synthetic-customer';
+    const resolve = jest.spyOn(payer, 'resolveForInvoice').mockResolvedValue(resolved);
+    expect((await invoke('/:id/proposal', 'get')).body.billToTaxBasis).toBe(expected);
+    expect(resolve).toHaveBeenCalledWith({ customerId: 'synthetic-customer', throwOnError: true });
+  });
+
+  test('no linked customer: self, without a payer lookup', async () => {
+    row.customer_id = null;
+    const resolve = jest.spyOn(payer, 'resolveForInvoice');
+    expect((await invoke('/:id/proposal', 'get')).body.billToTaxBasis).toBe('self');
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  test('a failed payer read is null (unknown), and the builder read still succeeds', async () => {
+    row.customer_id = 'synthetic-customer';
+    jest.spyOn(payer, 'resolveForInvoice').mockRejectedValue(new Error('synthetic lookup failure'));
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.billToTaxBasis).toBeNull();
+    expect(res.body.proposal).toBeTruthy();
+  });
+});
+
+describe('GET /:id/proposal accountCommercial (a residential account\'s bills carry no tax until a taxable win)', () => {
+  // The default fake answers every table; only the customer row read changes here.
+  const withCustomer = (customer, { fail = false } = {}) => (table) => {
+    const builder = estimateDatabase(table);
+    if (table === 'customers') {
+      builder.first = jest.fn(async () => {
+        if (fail) throw new Error('synthetic lookup failure');
+        return customer && structuredClone(customer);
+      });
+    }
+    return builder;
+  };
+
+  test.each([
+    ['a commercial account', { property_type: 'commercial' }, true],
+    ['a business account', { property_type: 'business' }, true],
+    ['a residential account', { property_type: 'residential' }, false],
+    ['an account with no type', { property_type: null }, false],
+    ['no customer row', null, null],
+  ])('%s', async (_label, customer, expected) => {
+    row.customer_id = 'synthetic-customer';
+    db.mockImplementation(withCustomer(customer));
+    expect((await invoke('/:id/proposal', 'get')).body.accountCommercial).toBe(expected);
+  });
+
+  test('no linked customer: true (the win creates a new commercial customer)', async () => {
+    row.customer_id = null;
+    expect((await invoke('/:id/proposal', 'get')).body.accountCommercial).toBe(true);
+  });
+
+  test('a failed read is null (unknown), and the builder read still succeeds', async () => {
+    row.customer_id = 'synthetic-customer';
+    db.mockImplementation(withCustomer(null, { fail: true }));
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.accountCommercial).toBeNull();
+    expect(res.body.proposal).toBeTruthy();
+  });
+});
+
 describe('commercial Auto Pay payment term', () => {
   const recurring = (commercialTerms) => ({
     enabled: true,

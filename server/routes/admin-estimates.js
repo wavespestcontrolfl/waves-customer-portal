@@ -4550,6 +4550,37 @@ router.get('/:id/proposal', async (req, res, next) => {
       suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
       suggestedTaxSource = suggestedTaxRate === null ? null : (source || null);
     } catch (_) { suggestedTaxRate = null; suggestedTaxSource = null; }
+    // Whether the customer has a verified tax exemption, from the calculator's own check (calculateTax answers it first for
+    // a self-pay bill). No linked customer = false. A failed read is null: the builder then predicts nothing for any row.
+    let taxExemptVerified = false;
+    if (estimate.customer_id) {
+      try {
+        taxExemptVerified = Boolean(await require('../services/tax-calculator').findVerifiedExemption(estimate.customer_id));
+      } catch (_) { taxExemptVerified = null; }
+    }
+    // Whose tax status the visit bills follow. Visit close resolves the Bill-To payer first (payer.resolveForInvoice in
+    // complete-scheduled-service.js); a visit booked from a proposal carries no payer of its own, so the account's active
+    // payer decides. An exempt payer's bills carry no tax; a taxed payer's bills skip the customer's own exemption
+    // (calculateTax skipCustomerExemption). 'self' with no linked customer or no active payer. A failed read is null:
+    // the builder then predicts nothing for any row.
+    let billToTaxBasis = 'self';
+    if (estimate.customer_id) {
+      try {
+        const payer = await require('../services/payer').resolveForInvoice({ customerId: estimate.customer_id, throwOnError: true });
+        if (payer?.payerId) billToTaxBasis = payer.taxExempt === true ? 'payer_exempt' : 'payer_taxed';
+      } catch (_) { billToTaxBasis = null; }
+    }
+    // Whether the account bills as commercial. Visit close and InvoiceService.create give a residential account no tax
+    // (customers.property_type), and a win makes the account commercial only when the proposal has a taxable amount
+    // (proposal-win.js flagProposalCustomerCommercialIfTaxable); the builder applies that rule to its own rows. No linked
+    // customer = true: the win creates a new commercial customer. A failed read, or no customer row, is null: no warnings.
+    let accountCommercial = true;
+    if (estimate.customer_id) {
+      try {
+        const customer = await db('customers').where({ id: estimate.customer_id }).first('property_type');
+        accountCommercial = customer ? ['commercial', 'business'].includes(customer.property_type) : null;
+      } catch (_) { accountCommercial = null; }
+    }
     const proposalGenerate = require('../services/estimate-proposal-generate');
     // Never throws: a failed read is null, and the family defaults apply.
     const taxabilityMap = await proposalGenerate.loadTaxabilityMap(db);
@@ -4568,6 +4599,21 @@ router.get('/:id/proposal', async (req, res, next) => {
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
       // GATE_COMMERCIAL_AUTOPAY: the builder offers Auto Pay as the payment term (and prefills it).
       commercialAutopayEnabled: require('../config/feature-gates').commercialAutopayLive(),
+      // GATE_BUILDING_USE_TAX: a residential building use means bills carry no tax only while it is on (tax-calculator.js
+      // step 1b); the builder's Taxable-box warning for a Residential pick follows it.
+      buildingUseTaxLive: require('../config/feature-gates').buildingUseTaxLive(),
+      // GATE_LAWN_SPRAY_NO_TAX: lawn and tree & shrub visits bill untaxed only while it is on (TaxCalculator
+      // serviceNotTaxable); with it off the builder's Taxable-box warning predicts nothing for an untaxed business rule.
+      lawnSprayNoTaxLive: require('../config/feature-gates').lawnSprayNoTaxLive(),
+      // Verified exemption (true / false; null = could not be read): an exempt customer's self-pay bills carry no tax whatever the
+      // building use, so the builder's Taxable-box warning compares with not taxable (null: no warning).
+      taxExemptVerified,
+      // Bill-To tax basis ('self' / 'payer_exempt' / 'payer_taxed'; null = could not be read): a payer-billed visit bill
+      // follows the payer's tax status, not the customer's exemption, so the Taxable-box warning follows it too.
+      billToTaxBasis,
+      // Account type (true = commercial or business; null = could not be read): a residential account's bills carry no
+      // tax unless the proposal's win makes it commercial, so the Taxable-box warning follows it too.
+      accountCommercial,
       // GATE_COMMERCIAL_PROPOSAL_SIGN: where the customer's online agreement stands (none / awaiting /
       // signed) for the builder's read-only line. The key is absent with the gate off.
       ...(commercialAgreement ? { commercialAgreement } : {}),

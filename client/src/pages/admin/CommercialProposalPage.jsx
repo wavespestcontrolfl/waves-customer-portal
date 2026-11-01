@@ -85,6 +85,62 @@ function serviceTaxRule(registry, service) {
   return entry ? entry.taxable === true : undefined;
 }
 
+// Visit bills follow the customer's building use and the service, never a row's Taxable box (a proposal win makes no
+// invoice since PR #7115; tax-calculator.js step 1b). The box still sets the quote and the signed agreement, so a row
+// whose box differs from what the builder itself applies for the chosen use gets a staff warning (owner 2026-11-01,
+// audit fix 4). Residential: not taxable, but only while GATE_BUILDING_USE_TAX is on (tax-calculator.js step 1b; with
+// it off a commercial account is taxed by property type and service, so there is nothing to predict). Business building: the row's rule, which is the per-row rule GET /proposal
+// served for a saved row that names a service (kept only while the row's service is unchanged), else the family
+// registry's rule the builder restores. Undefined when there is no basis (no pick, or a service the registry lacks).
+// Visit close answers the Bill-To payer first (payer.resolveForInvoice; GET /proposal serves the account's payer as
+// billToTaxBasis): an exempt payer's bills carry no tax. A residential account's bills carry no tax either
+// (customers.property_type; GET /proposal serves accountCommercial), unless the proposal has a taxable amount: its win then
+// makes the account commercial (proposal-win.js flagProposalCustomerCommercialIfTaxable). A taxed payer's bills skip the
+// customer's own exemption (calculateTax skipCustomerExemption); a self-pay bill answers a verified exemption first
+// (tax-calculator.js step 1): an exempt customer's bills carry no tax whatever the building use or the gate. A read that
+// failed (null) leaves no basis for any row. The business rule is the proposal's service-family default, while a visit
+// bill follows the visit's own service name (TaxCalculator.serviceNotTaxable), so the notice says "usually". An untaxed
+// business rule is mostly the lawn and tree & shrub exemption, which bills only while GATE_LAWN_SPRAY_NO_TAX is on; with
+// it off the visit's name decides, so there is no basis.
+function billedTaxableFor(buildingUse, row, registry, savedRules, {
+  buildingUseTaxLive, taxExemptVerified, billToTaxBasis, accountCommercial = true, proposalTaxable, lawnSprayNoTaxLive = true,
+} = {}) {
+  if (billToTaxBasis === null || accountCommercial === null) return undefined;
+  if (billToTaxBasis === 'payer_exempt') return false;
+  if (accountCommercial === false && !proposalTaxable) return false;
+  if (billToTaxBasis !== 'payer_taxed') {
+    if (taxExemptVerified === null) return undefined;
+    if (taxExemptVerified === true) return false;
+  }
+  if (buildingUse === 'residential') return buildingUseTaxLive ? false : undefined;
+  if (buildingUse !== 'nonresidential') return undefined;
+  const saved = row.id ? savedRules?.[row.id] : null;
+  const rule = saved && saved.service === row.service ? saved.rule : serviceTaxRule(registry, row.service);
+  return rule === false && !lawnSprayNoTaxLive ? undefined : rule;
+}
+const ROW_TAX_NOTICES = {
+  true: 'Visit bills do not read this box: this service is usually billed with tax here.',
+  false: 'Visit bills do not read this box: this service is usually billed without tax here.',
+};
+function rowTaxNotice(buildingUse, row, registry, savedRules, taxBasis) {
+  const billed = billedTaxableFor(buildingUse, row, registry, savedRules, taxBasis);
+  return billed === undefined || billed === (row.taxable === true) ? null : ROW_TAX_NOTICES[billed];
+}
+// The served per-row business rules for the saved rows that name a service, with the service each was computed for.
+function savedBusinessRules(proposal, businessRules) {
+  const out = {};
+  const add = (row) => {
+    if (row?.id && row.service && typeof businessRules[row.id] === 'boolean') out[row.id] = { service: row.service, rule: businessRules[row.id] };
+  };
+  (proposal.correctiveWork || []).forEach(add);
+  (proposal.buildings || []).forEach((b) => (b.lineItems || []).forEach(add));
+  (proposal.programs || []).forEach(add);
+  return out;
+}
+function RowTaxNotice({ text }) {
+  return text ? <div className="col-span-full basis-full text-12 text-zinc-700" role="note" data-testid="row-tax-warning">{text}</div> : null;
+}
+
 const roundMoney = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 // Auto-fill rule for the tax field. The rate comes from the server's
@@ -408,6 +464,18 @@ function CommercialProposalEditor() {
   // eat a hand-authored line that matches a stock sentence (codex 1A-ii
   // r15). Null until generation fills responsibilities.
   const generatedRespByFamilyRef = React.useRef(null);
+  // Served per-row business tax rules of the saved rows (savedBusinessRules): the warning's basis for a Business building.
+  const savedBizRulesRef = React.useRef({});
+  // GET /proposal buildingUseTaxLive: whether a Residential pick means untaxed bills (GATE_BUILDING_USE_TAX).
+  const [buildingUseTaxLive, setBuildingUseTaxLive] = useState(false);
+  // GET /proposal taxExemptVerified: true / false, or null when the read failed (no row warnings then).
+  const [taxExemptVerified, setTaxExemptVerified] = useState(false);
+  // GET /proposal billToTaxBasis: 'self', 'payer_exempt' or 'payer_taxed'; null when the read failed (no row warnings then).
+  const [billToTaxBasis, setBillToTaxBasis] = useState('self');
+  // GET /proposal accountCommercial: false for a residential account; null when the read failed (no row warnings then).
+  const [accountCommercial, setAccountCommercial] = useState(true);
+  // GET /proposal lawnSprayNoTaxLive: whether lawn and tree & shrub visits bill untaxed (GATE_LAWN_SPRAY_NO_TAX).
+  const [lawnSprayNoTaxLive, setLawnSprayNoTaxLive] = useState(true);
   // Family → generated inclusions/exclusions/taxability registry, served on
   // load like responsibilityRegistry — the family-change resync prunes the
   // old family's generated lines and installs the new family's stack by
@@ -429,6 +497,7 @@ function CommercialProposalEditor() {
     // canonical one-time service keeps its own rule), else the family registry's.
     const registry = data.familyRegistry || familyRegistryRef.current;
     const businessRules = data.businessTaxRules || {};
+    savedBizRulesRef.current = savedBusinessRules(p, businessRules);
     const keptRule = (row) => (loadedUse === 'residential'
       ? { bizTaxable: (row.id && typeof businessRules[row.id] === 'boolean') ? businessRules[row.id] : serviceTaxRule(registry, row.service) }
       : {});
@@ -449,6 +518,12 @@ function CommercialProposalEditor() {
     setSavedValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
     setAutopayEnabled(data.commercialAutopayEnabled === true);
+    setBuildingUseTaxLive(data.buildingUseTaxLive === true);
+    setTaxExemptVerified(data.taxExemptVerified === null ? null : data.taxExemptVerified === true);
+    setBillToTaxBasis(data.billToTaxBasis === null ? null
+      : ['payer_exempt', 'payer_taxed'].includes(data.billToTaxBasis) ? data.billToTaxBasis : 'self');
+    setAccountCommercial(data.accountCommercial === null ? null : data.accountCommercial !== false);
+    setLawnSprayNoTaxLive(data.lawnSprayNoTaxLive !== false);
     if (!bidToolsChosenRef.current) {
       setBidToolsOpen(
         (data.projectCosting?.rows?.length || 0) > 0
@@ -565,6 +640,19 @@ function CommercialProposalEditor() {
 
   const taxRate = (Number(taxRatePct) || 0) / 100;
   const programsMode = programsState.some(programRowIsPriced);
+  // Whether the saved proposal has a taxable amount, the condition for a win to make a residential account commercial
+  // (buildProposalFirstInvoice taxableSubtotal > 0): a taxable row priced above $0, counting the rows computeTotals counts.
+  const proposalTaxable = (programsMode ? [] : buildings).some((b) => (b.lineItems || []).some((li) => li.taxable === true && roundMoney(lineAmount(li)) > 0))
+    || programsState.filter(programRowIsPriced).some((pr) => pr.taxable === true && roundMoney(pr.pricePerApplication) > 0)
+    || correctiveWork.filter((w) => String(w.label || '').trim()).some((w) => w.taxable === true && roundMoney(w.amount) > 0);
+  // Staff warning on a row whose Taxable box differs from what visit bills do (billedTaxableFor); none on a locked proposal.
+  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current,
+    { buildingUseTaxLive, taxExemptVerified, billToTaxBasis, accountCommercial, proposalTaxable, lawnSprayNoTaxLive }));
+  const differingTaxRows = [
+    ...programsState,
+    ...(programsMode ? [] : buildings.flatMap((b) => b.lineItems || [])),
+    ...correctiveWork,
+  ].filter((row) => rowNotice(row)).length;
   // Any taxable item that would SAVE (buildings are omitted in programs mode,
   // like computeTotals) — on-screen rows with no description/price count too,
   // so the rate is already there the moment the toggle flips.
@@ -1542,6 +1630,12 @@ function CommercialProposalEditor() {
                         || 'Pick before saving. It sets which rows carry sales tax.'}
                     </span>
                   )}
+                  {differingTaxRows > 0 && (
+                    <span className="mt-1 block text-12 text-zinc-700" role="note" data-testid="row-tax-summary">
+                      Taxable differs from the usual tax rule on {plural(differingTaxRows, 'row')}.
+                      Visit bills do not read the box, so they may not match the quote there.
+                    </span>
+                  )}
                 </div>
               </div>
             </CardBody>
@@ -1777,6 +1871,7 @@ function CommercialProposalEditor() {
                         </Button>
                       )}
                     </div>
+                    <RowTaxNotice text={rowNotice(p)} />
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <label className="block">
                         <span className={LABEL}>Includes</span>
@@ -1947,6 +2042,7 @@ function CommercialProposalEditor() {
                           </Button>
                         )}
                       </div>
+                      <RowTaxNotice text={rowNotice(li)} />
                     </div>
                   ))}
 
@@ -2043,6 +2139,7 @@ function CommercialProposalEditor() {
                     </Button>
                   )}
                 </div>
+                <RowTaxNotice text={rowNotice(w)} />
                 <label className="block">
                   <span className={LABEL}>What it includes</span>
                   <Textarea
