@@ -13,7 +13,7 @@ const lineModule = require('../services/service-report/lawn-program-line');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 
-const { buildProgramLine, PROGRAM_LINES_V13, NO_NITROGEN_MONTHS, QUALIFIERS } = lineModule;
+const { buildProgramLine, PROGRAM_LINES_V13, ROUND_PROGRAM_LINES_V13, ROUND_DETAIL_V13, NO_NITROGEN_MONTHS, QUALIFIERS } = lineModule;
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 
@@ -449,5 +449,94 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
     const all = JSON.stringify(PROGRAM_DETAIL_V13);
     expect(all).not.toMatch(/St\.? Augustine|Bermuda|Zoysia|Bahia/i);
     expect(all).not.toMatch(/\b(?:renew\w*|first|second|again|already|another round|next round|re-?apply\w*)\b/i);
+  });
+});
+
+// ── 9-visit rounds: the report sentence follows the visit's round ───────────
+describe('buildLawnReportV2 with a rounds visit (round passed by the caller)', () => {
+  const noteOn = (date, extra = {}) => withGate('true', () => buildLawnReportV2({
+    lawnAssessment: assessment({ assessmentDate: date }),
+    programVisit: true,
+    protocolVersion: LAWN_V13_VERSION,
+    ...extra,
+  }).snapshot.seasonalNote);
+
+  test('a round visit shows its round line; a visit with no round keeps the month line', () => {
+    // Round 2 runs Feb 3 to Mar 14: early March is month 3 but round 2.
+    expect(noteOn('2026-03-05', { round: 2 })).toBe(ROUND_PROGRAM_LINES_V13[2].line);
+    expect(noteOn('2026-03-05')).toBe(PROGRAM_LINES_V13[3].line);
+    expect(noteOn('2026-03-05', { round: null })).toBe(PROGRAM_LINES_V13[3].line);
+    // Round 3 starts Mar 15; round 1 starts Dec 25 (a December date, round 1).
+    expect(noteOn('2026-03-20', { round: 3 })).toBe(ROUND_PROGRAM_LINES_V13[3].line);
+    expect(noteOn('2026-12-28', { round: 1 })).toBe(ROUND_PROGRAM_LINES_V13[1].line);
+    expect(noteOn('2026-12-28')).toBe(PROGRAM_LINES_V13[12].line);
+  });
+
+  test('the Jun-Sep nitrogen rule still reads the calendar month for a round visit', () => {
+    expect(noteOn('2026-06-18', { round: 5, nitrogenApplied: false })).toBe(ROUND_PROGRAM_LINES_V13[5].line);
+    expect(noteOn('2026-06-18', { round: 5, nitrogenApplied: true })).toMatch(/\S/);
+    expect(noteOn('2026-06-18', { round: 5, nitrogenApplied: true })).not.toBe(ROUND_PROGRAM_LINES_V13[5].line);
+  });
+
+  test('a round changes the sentence and nothing else: same report keys, same snapshot keys, source still program', () => {
+    const month = withGate('true', () => v13Report());
+    const round = withGate('true', () => v13Report({ round: 8 }));
+    expect(Object.keys(round)).toEqual(Object.keys(month));
+    expect(Object.keys(round.snapshot)).toEqual(Object.keys(month.snapshot));
+    expect(round.snapshot.seasonalNoteSource).toBe('program');
+    const strip = (v) => { const c = JSON.parse(JSON.stringify(v)); delete c.snapshot.seasonalNote; return c; };
+    expect(strip(round)).toEqual(strip(month));
+  });
+
+  test('no program line (not a v13 visit, gate off) means a round is ignored too', () => {
+    expect(noteOn('2026-03-05', { round: 2, protocolVersion: '2026.06' })).toMatch(/\S/);
+    expect(noteOn('2026-03-05', { round: 2, protocolVersion: '2026.06' })).not.toBe(ROUND_PROGRAM_LINES_V13[2].line);
+    const off = withEnv({ [GATE]: undefined, GATE_LAWN_V13: 'true' }, () => v13Report({ round: 2 }));
+    expect(off.snapshot).not.toHaveProperty('seasonalNoteSource');
+  });
+});
+
+describe('GATE_LAWN_PROGRAM_DETAIL with a rounds visit', () => {
+  const withBoth = (fn) => withEnv({ [GATE]: 'true', GATE_LAWN_V13: 'true', GATE_LAWN_PROGRAM_DETAIL: 'true' }, fn);
+  const { lawnResultTimingViolation } = require('../services/service-report/report-writer-rules');
+  const { buildProgramDetail, PROGRAM_DETAIL_V13 } = lineModule;
+  const detailOn = (date, round) => withBoth(() => buildLawnReportV2({ lawnAssessment: assessment({ assessmentDate: date }), programVisit: true, protocolVersion: LAWN_V13_VERSION, ...(round ? { round } : {}) }).snapshot.seasonalDetail);
+
+  test('a round with approved detail text shows it; the others keep the month detail; no round is today\'s month detail', () => {
+    // Round 3 dated Mar 20: March\'s "the barrier goes down now" would contradict the round 3 feeding line.
+    expect(detailOn('2026-03-20', 3)).toEqual({ whyNow: ROUND_DETAIL_V13[3].whyNow });
+    expect(detailOn('2026-03-20')).toEqual({ whyNow: PROGRAM_DETAIL_V13[3].whyNow });
+    // Round 1 dated Dec 28: December's potassium feeding would contradict the round 1 barrier line.
+    expect(detailOn('2026-12-28', 1)).toEqual({ whyNow: ROUND_DETAIL_V13[1].whyNow });
+    expect(detailOn('2026-12-28', 1).whyNow).not.toBe(PROGRAM_DETAIL_V13[12].whyNow);
+    expect(detailOn('2026-02-20', 2)).toEqual({ whyNow: ROUND_DETAIL_V13[2].whyNow });
+    // Rounds 7 and 8 have no round text: the month's detail stays.
+    for (const [date, round, month] of [['2026-09-05', 7, 9], ['2026-10-14', 8, 10]]) {
+      expect(detailOn(date, round)).toEqual({ whyNow: PROGRAM_DETAIL_V13[month].whyNow });
+    }
+  });
+
+  test('only rounds 1, 2, 3, 4, 5, 6 and 9 carry round text, and each passes every guard the month detail is held to', () => {
+    expect(Object.keys(ROUND_DETAIL_V13).map(Number)).toEqual([1, 2, 3, 4, 5, 6, 9]);
+    for (const detail of Object.values(ROUND_DETAIL_V13)) {
+      expect(Object.keys(detail)).toEqual(['whyNow']);
+      expect(lawnResultTimingViolation(detail.whyNow)).toBe(false);
+      expect(detail.whyNow).not.toMatch(/LESCO|Stonewall|Dimension|Celsius|Certainty|Artavia|Velista|Arena|Acelepryn|Tetrino|Dylox|Gravex|Dismiss|Nutra|prodiamine|dithiopyr|azoxystrobin|\bper 1,000\b|\blb\b|fl oz/i);
+      expect(detail.whyNow).not.toMatch(/St\.? Augustine|Bermuda|Zoysia|Bahia/i);
+      expect(detail.whyNow).not.toMatch(/\b(?:renew\w*|first|second|again|already|another round|next round|re-?apply\w*)\b/i);
+      expect(detail.whyNow).not.toMatch(/water/i);
+    }
+    // The qualifier rule: the barrier rounds and the insect round keep "where it fits the property"; the spring feeding keeps the fertilizer-rule one.
+    for (const round of [1, 2, 4, 5]) expect(ROUND_DETAIL_V13[round].whyNow).toMatch(/where it fits the property/);
+    expect(ROUND_DETAIL_V13[3].whyNow).toMatch(/where local fertilizer rules allow/);
+  });
+
+  test('the gate and the program line still decide: no line or gate off gives no detail, round or not', () => {
+    withBoth(() => {
+      expect(buildProgramDetail({ month: 3, round: 3, programLine: null })).toBeUndefined();
+      expect(buildProgramDetail({ month: 3, round: 3, programLine: 'x' })).toEqual({ whyNow: ROUND_DETAIL_V13[3].whyNow });
+      expect(buildProgramDetail({ month: 3, round: 99, programLine: 'x' })).toEqual({ whyNow: PROGRAM_DETAIL_V13[3].whyNow });
+    });
+    withEnv({ GATE_LAWN_PROGRAM_DETAIL: undefined }, () => expect(buildProgramDetail({ month: 3, round: 3, programLine: 'x' })).toBeUndefined());
   });
 });

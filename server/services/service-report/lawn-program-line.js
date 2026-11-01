@@ -24,6 +24,10 @@
  *     lawn-protocol-v13.json visit for that month, including its conditions,
  *     so no treatment is invented and no skipped step is stated plainly.
  *
+ * A visit on a 9-visit rounds series (recurring_pattern 'lawn_rounds_9') passes its
+ * round (1-9) and gets the round's sentence instead (ROUND_PROGRAM_LINES_V13); every
+ * other visit keeps the month sentence.
+ *
  * Jun-Sep: the program carries no nitrogen in those months, so a line that
  * describes them would be wrong for a visit that applied a nitrogen product
  * (analysis_n > 0). buildProgramLine returns null for that visit and the caller
@@ -85,6 +89,27 @@ const PROGRAM_LINES_V13 = {
   10: L(`In October the program focuses on ${FALL_FEED} with ${V13_FALL_BARRIER}, plus spot treatment for large patch, grubs and weeds where needed.`, { feed: FALL_FEED, pre_emergent: V13_FALL_BARRIER, fungicide: 'spot treatment for large patch, grubs and weeds where needed', insect_spot: 'spot treatment for large patch, grubs and weeds where needed', broadleaf: 'spot treatment for large patch, grubs and weeds where needed' }),
   11: L('In November the program focuses on a feeding, plus spot treatment for large patch where needed.', { feed: 'a feeding', fungicide: 'spot treatment for large patch where needed' }),
   12: L('In December the program focuses on a light feeding, plus spot treatment for large patch and weeds where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for large patch and weeds where needed', broadleaf: 'spot treatment for large patch and weeds where needed' }),
+};
+
+// Rounds customers (recurring_pattern 'lawn_rounds_9', GATE_LAWN_9X_ROUNDS): the sentence follows the visit's ROUND
+// (lawn-rounds.js roundStepForVisit), not the calendar month, because a round visit takes its round's step on any date
+// inside the round window (round 3 is a feeding all the way from Mar 15 to Apr 23). Words are the owner-approved report
+// sentences of the 9-round scope (2026-10-31). Same rules as the month lines, plus one: no ordinal word, so none says
+// "round". Each claim is proven by lawn-v13-copy.test.js against the ROUND's step lines (lawn-rounds.js ROUND_STEPS month
+// and variant) and the spot rows of the real months the window covers.
+const V13_FEED_BARRIER = 'a feeding with a pre-emergent weed barrier where it fits the property';
+const V13_FALL_FEED_BARRIER = `${FALL_FEED} with ${V13_FALL_BARRIER}`;
+const V13_MICROS_POTASSIUM = 'a micronutrient and potassium feeding where it fits the property';
+const ROUND_PROGRAM_LINES_V13 = {
+  1: L(`In the coolest weeks the program focuses on ${V13_BARRIER} and a micronutrient feeding, plus ${SPOT_DISEASE}.`, { pre_emergent: V13_BARRIER, micros: 'a micronutrient feeding', fungicide: SPOT_DISEASE, broadleaf: SPOT_DISEASE }),
+  2: L(`As the lawn greens up the program focuses on ${V13_FEED_BARRIER}, plus light spot weed control where needed.`, { feed: V13_FEED_BARRIER, pre_emergent: V13_FEED_BARRIER, broadleaf: 'light spot weed control where needed' }),
+  3: L('In spring the program focuses on a slow-release feeding, plus spot treatment for root disease, weeds and chinch bugs where needed.', { feed: 'a slow-release feeding', fungicide: 'spot treatment for root disease, weeds and chinch bugs where needed', broadleaf: 'spot treatment for root disease, weeds and chinch bugs where needed', insect_spot: 'spot treatment for root disease, weeds and chinch bugs where needed' }),
+  4: L('In late spring the program focuses on an insect treatment where it fits the property, plus spot treatment for chinch bugs, weeds and dry spots where needed.', { insect_treatment: 'an insect treatment where it fits the property', insect_spot: 'spot treatment for chinch bugs, weeds and dry spots where needed', broadleaf: 'spot treatment for chinch bugs, weeds and dry spots where needed', dry_spots: 'spot treatment for chinch bugs, weeds and dry spots where needed' }),
+  5: L(`In early summer the program focuses on ${V13_JUNE_MICROS_BARRIER}, plus spot treatment for disease and chinch bugs where needed.`, { micros: V13_JUNE_MICROS_BARRIER, pre_emergent: V13_JUNE_MICROS_BARRIER, fungicide: 'spot treatment for disease and chinch bugs where needed', insect_spot: 'spot treatment for disease and chinch bugs where needed' }),
+  6: L(`In midsummer the program focuses on ${V13_MICROS_POTASSIUM}, plus spot treatment for leaf spot disease and caterpillars where needed.`, { micros: V13_MICROS_POTASSIUM, potassium: V13_MICROS_POTASSIUM, fungicide: 'spot treatment for leaf spot disease and caterpillars where needed', insect_spot: 'spot treatment for leaf spot disease and caterpillars where needed' }),
+  7: L(`In late summer the program focuses on ${V13_MICROS_POTASSIUM}, plus spot treatment for root disease and caterpillars where needed.`, { micros: V13_MICROS_POTASSIUM, potassium: V13_MICROS_POTASSIUM, fungicide: 'spot treatment for root disease and caterpillars where needed', insect_spot: 'spot treatment for root disease and caterpillars where needed' }),
+  8: L(`In fall the program focuses on ${V13_FALL_FEED_BARRIER}, plus spot treatment for large patch, grubs and weeds where needed.`, { feed: V13_FALL_FEED_BARRIER, pre_emergent: V13_FALL_FEED_BARRIER, fungicide: 'spot treatment for large patch, grubs and weeds where needed', insect_spot: 'spot treatment for large patch, grubs and weeds where needed', broadleaf: 'spot treatment for large patch, grubs and weeds where needed' }),
+  9: L('In the cool season the program focuses on a light feeding, plus spot treatment for large patch and weeds where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for large patch and weeds where needed', broadleaf: 'spot treatment for large patch and weeds where needed' }),
 };
 
 // Any applied product with nitrogen (analysis_n > 0). Reads the catalog value on
@@ -192,7 +217,7 @@ async function resolveProgramVisit({ serviceData = null, scheduledService = null
 }
 
 /**
- * @param {{ month?: number|null, applications?: object[], nitrogenApplied?: boolean|null, programVisit?: boolean, protocolVersion?: string|null }} input
+ * @param {{ month?: number|null, round?: number|null, applications?: object[], nitrogenApplied?: boolean|null, programVisit?: boolean, protocolVersion?: string|null }} input
  *   programVisit must be true (a recurring lawn plan visit, see resolveProgramVisit);
  *   anything else, including omitted, returns null.
  *   protocolVersion is the lawn protocol version the visit's plan resolved
@@ -201,11 +226,14 @@ async function resolveProgramVisit({ serviceData = null, scheduledService = null
  *   nitrogenApplied is the caller's catalog-backed answer (report-data reads
  *   analysis_n); null means derive it from `applications`. month is the visit's
  *   calendar month (1-12), already computed at a noon-UTC anchor by the report builder.
+ *   round (1-9) is the visit's lawn round (lawn-rounds.js roundStepForVisit), present only for a
+ *   'lawn_rounds_9' visit: it picks the round sentence instead of the month's. No round = the month
+ *   sentence. The Jun-Sep nitrogen rule still reads the calendar month.
  * @returns {string|null} the program line, or null when there is no honest line
  *   (not a plan visit, not a v13 visit, no valid month, or a Jun-Sep visit that
  *   applied nitrogen); the caller then keeps the season note.
  */
-function buildProgramLine({ month = null, applications = [], nitrogenApplied = null, programVisit = false, protocolVersion = null } = {}) {
+function buildProgramLine({ month = null, round = null, applications = [], nitrogenApplied = null, programVisit = false, protocolVersion = null } = {}) {
   if (programVisit !== true) return null;
   // v13 copy only for a visit whose plan resolved the staged v13 version (the
   // closeout's ledger row, or the scheduled visit's pin, carries it). A visit with
@@ -215,7 +243,7 @@ function buildProgramLine({ month = null, applications = [], nitrogenApplied = n
   const m = Number(month);
   if (!Number.isInteger(m) || m < 1 || m > 12) return null;
   if (NO_NITROGEN_MONTHS.has(m) && (nitrogenApplied === null ? appliedNitrogen(applications) : nitrogenApplied === true)) return null;
-  return PROGRAM_LINES_V13[m].line;
+  return ((Number.isInteger(round) && ROUND_PROGRAM_LINES_V13[round]) || PROGRAM_LINES_V13[m]).line;
 }
 
 
@@ -264,13 +292,46 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
   }),
 });
 
-// The month's detail, only beside a v13 program line (same visits, same month)
-// and only while GATE_LAWN_PROGRAM_DETAIL is live. Watering advice is not part
-// of it: every lawn report already carries the Water This Week card and the
+// A rounds visit's "Why now" line, held to every guard lawn-program-line.test.js applies to PROGRAM_DETAIL_V13 (no outcome
+// timing, no watering advice, no product or grass name, no word that assumes an earlier visit such as "first" or "another").
+// Rounds 3, 4, 5, 6 and 9 are the 9-round outline's own text for that round (2026-10-31 scope). Rounds 1 and 2 are the month
+// details of their steps without the month name (the outline's text says "first" or leans on round 1's barrier), because the
+// calendar month contradicts the round line there: a round 1 visit dated Dec 28 would read December's potassium feeding.
+// Rounds 7 and 8 keep the month's detail (the outline's text says "first" or gives a watering direction); their window
+// months say the same thing as the round line. These texts never contradict the round line, which is why a round 3 visit
+// dated Mar 20 stops reading March's "the barrier goes down now".
+const ROUND_DETAIL_V13 = Object.freeze({
+  1: Object.freeze({
+    whyNow: 'Midwinter brings the coolest weather. Winter weeds are sprouting while the grass grows slowly, so a weed barrier goes down where it fits the property and a micronutrient feeding supports color without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
+  }),
+  2: Object.freeze({
+    whyNow: 'As daylight increases, the lawn starts to green up. A feeding supports that green-up, with a weed barrier where it fits the property ahead of crabgrass and other summer weeds, and we spot treat weeds lightly while they are small.',
+  }),
+  3: Object.freeze({
+    whyNow: 'The soil has warmed and the grass is growing hard, so this round carries the main spring feeding, a slow-release granular, where local fertilizer rules allow. Spring is when take-all root rot shows, so mapped take-all areas get a treatment. We spot treat what we find: weeds in March, chinch bugs in April.',
+  }),
+  4: Object.freeze({
+    whyNow: 'Before the rains, chinch bugs and other lawn insects peak in hot, sunny turf. The sunny turf gets the program\'s one whole-lawn insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
+  }),
+  5: Object.freeze({
+    whyNow: 'The rainy season starts, and local summer fertilizer rules limit nitrogen through September. The lawn gets iron and micronutrients for color instead, plus a weed barrier for summer weeds where it fits the property. In early summer we also bait mole cricket tunnels.',
+  }),
+  6: Object.freeze({
+    whyNow: 'Peak heat and rain. A liquid feeding of iron, micronutrients and potassium keeps the color up through the summer limits, with no nitrogen. We treat caterpillars, leaf spot and chinch bugs where we find them.',
+  }),
+  9: Object.freeze({
+    whyNow: 'Cool, dry weather. This round\'s feeding is a light one with extra potassium for the cool, dry season, and we treat any large patch and weed spots.',
+  }),
+});
+
+// The detail, only beside a v13 program line (same visits) and only while
+// GATE_LAWN_PROGRAM_DETAIL is live. A rounds visit uses its round's text when
+// ROUND_DETAIL_V13 has one, else the calendar month's. Watering advice is not
+// part of it: every lawn report already carries the Water This Week card and the
 // visit's label aftercare, which own the watering direction (codex #6091 r5).
-function buildProgramDetail({ month, programLine } = {}) {
+function buildProgramDetail({ month, round = null, programLine } = {}) {
   if (!programLine || typeof featureGates.lawnProgramDetailLive !== 'function' || !featureGates.lawnProgramDetailLive()) return undefined;
-  const detail = PROGRAM_DETAIL_V13[Number(month)];
+  const detail = (Number.isInteger(round) && ROUND_DETAIL_V13[round]) || PROGRAM_DETAIL_V13[Number(month)];
   return detail ? { whyNow: detail.whyNow } : undefined;
 }
 
@@ -278,7 +339,9 @@ module.exports = {
   buildProgramLine,
   buildProgramDetail,
   PROGRAM_DETAIL_V13,
+  ROUND_DETAIL_V13,
   PROGRAM_LINES_V13,
+  ROUND_PROGRAM_LINES_V13,
   QUALIFIERS,
   NO_NITROGEN_MONTHS,
   appliedNitrogen,

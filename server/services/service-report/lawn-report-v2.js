@@ -633,7 +633,7 @@ function applyRainCardToWater(water, waterSnapshot, rainAdvice, rainAllowed) {
  *   (GATE_LAWN_REPORT_FACTS); null = the product label's re-entry line, as before
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot: storedWaterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6, reentryText, rainAdvice, waterInRule } = {}) {
+function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot: storedWaterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, round = null, photoLimit = 6, reentryText, rainAdvice, waterInRule } = {}) {
   if (!assessmentIn) return null;
   // GATE_LAWN_WATER_RAIN: the aftercare comes first (the rain card stands down for a post-treatment watering instruction),
   // then the water context with the capped rain. Without the frozen permission this is the very same assessment.
@@ -832,14 +832,16 @@ function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, 
   // adds no key (byte-identical payload). The gate is read defensively: a
   // partial feature-gates mock (or a missing export) means off, never a crash
   // in a report build. Only recurring lawn plan visits (`programVisit`,
-  // resolved by the caller) get the line.
+  // resolved by the caller) get the line. `round` (1-9) is set by the caller only
+  // for a 'lawn_rounds_9' visit and picks the round's sentence; the month still
+  // drives the Jun-Sep nitrogen rule.
   const programLine = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()
-    ? buildProgramLine({ month: assessMonth, applications, nitrogenApplied, programVisit, protocolVersion })
+    ? buildProgramLine({ month: assessMonth, round, applications, nitrogenApplied, programVisit, protocolVersion })
     : null;
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
   // GATE_LAWN_PROGRAM_DETAIL: undefined unless live beside a program line, so
   // the key serializes away and the gate-off payload is byte-identical.
-  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine });
+  const seasonalDetail = buildProgramDetail({ month: assessMonth, round, programLine });
 
   const snapshot = {
     overallScore,

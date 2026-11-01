@@ -37,6 +37,7 @@ const {
 } = require('./lawn-progress');
 const { buildSinceLastCopy } = require('./lawn-since-last-copy');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
+const { roundStepForVisit } = require('../lawn-rounds');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const {
   techFindingsCopyLive, normalizeTechFindings, filterCaptionsForCustomer, summaryForCustomer,
@@ -4254,6 +4255,15 @@ async function resolveRecordedProtocolVersion(knex, service) {
   return scheduled?.lawn_protocol_version || null;
 }
 
+// The lawn round (1-9) of a visit on a 9-visit rounds series, else null: the program line follows the round for those
+// visits only. Reads the linked scheduled row's own recurring_pattern and date (lawn-rounds.js roundStepForVisit). Throws on
+// a failed read.
+async function resolveVisitRound(knex, service) {
+  if (!service.scheduled_service_id) return null;
+  const row = await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('recurring_pattern', 'scheduled_date');
+  return roundStepForVisit(row)?.round || null;
+}
+
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
   // Identity facts frozen at completion (report-identity-snapshot.js)
   // overlay the live customer/schedule/technician join; pre-snapshot
@@ -5951,10 +5961,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // attributed) passes none and keeps the legacy sentences. An unreadable
       // record means no line.
       let pinnedProtocolVersion = null;
+      let visitRound = null;
       if (expectationsLive && programVisit && typeof featureGates.lawnV13Live === 'function' && featureGates.lawnV13Live()) {
         try {
           pinnedProtocolVersion = await resolveRecordedProtocolVersion(knex, service);
-        // read-failure-exempt: only the program line depends on the pin; an unreadable pin drops it (old season note), no treatment-memory input.
+          // A 9-visit rounds visit (recurring_pattern 'lawn_rounds_9') gets its round's sentence; every other visit has no round.
+          visitRound = await resolveVisitRound(knex, service);
+        // read-failure-exempt: only the program line depends on the pin and the round; an unreadable one drops it (old season note), no treatment-memory input.
         } catch { programVisit = false; }
       }
       reportV2 = buildLawnReportV2({
@@ -5966,6 +5979,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         frozenTies: reportFacts.frozenTies(service.structured_notes, lawnAssessment.assessmentId),
         ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
         ...(pinnedProtocolVersion ? { protocolVersion: pinnedProtocolVersion } : {}),
+        ...(visitRound ? { round: visitRound } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         // GATE_LAWN_REPORT_FACTS: the frozen re-entry condition, from the record only (null = the label text as before).
@@ -7885,6 +7899,7 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 module.exports = {
   buildReportV1Data,
   resolveRecordedProtocolVersion,
+  resolveVisitRound,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,
   resolveProjectApplicatorTechnician,
