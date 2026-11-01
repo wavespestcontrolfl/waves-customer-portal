@@ -1177,9 +1177,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     };
     const officeApprovalRecheck = async ({ trx }) => {
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
-        .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',
+        .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days', 'customer_pick_by',
           'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',
-          'date_exception', 'date_exception_cadence_date', 'customer_pick_by');
+          'date_exception', 'date_exception_cadence_date');
       // The size rule the page disclosed, judged again on the locked row for EVERY commit (a missed visit
       // too): a series re-anchor can change the regular date while the date and window the expect fence
       // pins stay put, and the single-versus-series decision was made on the unlocked read.
