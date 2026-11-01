@@ -1005,8 +1005,12 @@ For a row with `customer_pick_by` set:
   `GET /api/public/reschedule/:token` answers a movable visit (not
   `not_reschedulable`) and the commit accepts a pick. A windowless row
   without it is refused exactly as before.
-- **Single-visit move.** The date is a placeholder, so a pick never shifts
-  the plan's later visits: the GET sends `reanchorPullForwardDays: null`,
+- **Single-visit move while it has no time.** The date is a placeholder, so
+  a pick never shifts the plan's later visits. This holds while the row has
+  the column and no window (`awaitingCustomerPick`); once any writer gives it
+  a time (the pick, Auto-Dispatch, a staff edit or move, whether or not that
+  writer cleared the column) it is an ordinary visit again. While it holds,
+  the GET sends `reanchorPullForwardDays: null`,
   `collectiveAnchor: false` and `roundsOneOff: null`, omits `nextVisit`, and the
   commit moves only this visit (no series re-anchor). A page that disclosed
   series anchoring for the visit (loaded before the hand-off) gets

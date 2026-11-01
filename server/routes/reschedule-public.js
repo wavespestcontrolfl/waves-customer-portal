@@ -65,7 +65,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 // missed-appointment rule) lives in a service so the promised-link worker
 // reaches the SAME answer this page gives (codex #4293 r3 P2).
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
-const { visitInsideMoveNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
+const { visitInsideMoveNoticeWindow, violatesSelfServeNotice, awaitingCustomerPick } = require('../services/scheduling/self-serve-notice');
 const moveLimits = require('../services/scheduling/customer-move-limits');
 const { roundsOneOffWindow, roundsRegularDate } = require('../services/lawn-rounds');
 
@@ -116,14 +116,14 @@ function isSeriesVisit(svc) {
   return !!svc?.is_recurring;
 }
 
-// Quick Move "let the customer pick a day" (owner 2026-11-01): a visit the office
-// handed to the customer (customer_pick_by set) is a SINGLE-visit move. Its date is
-// a placeholder (the hand-off parks it a week out), so a pick measured from it must
-// never shift the plan's later visits. Not behind the gate: a link already sent
-// keeps working after a kill.
-function handedToCustomer(svc) {
-  return !!svc?.customer_pick_by;
-}
+// Quick Move "let the customer pick a day" (owner 2026-11-01): a visit handed to
+// the customer and still WAITING for its time (awaitingCustomerPick:
+// customer_pick_by set, no start) is a SINGLE-visit move. Its date is a
+// placeholder (the hand-off parks it a week out), so a pick measured from it must
+// never shift the plan's later visits. Once any writer gives it a time (the pick,
+// Auto-Dispatch, a staff edit or move) it is an ordinary visit again, whatever
+// that writer did with the marker. Not behind the gate: a link already sent keeps
+// working after a kill.
 
 // Collective anchoring (owner ruling 2026-07-30, supersedes the 07-13
 // pull-forward-only rule when the gate is on): a recurring series anchors
@@ -152,7 +152,7 @@ function nextVisitDateActive() {
 // other visit, and while collective anchoring is off (the legacy pull-forward
 // rule then decides, unchanged).
 function roundsOneOffTerms(svc) {
-  if (!isSeriesVisit(svc) || handedToCustomer(svc) || !collectiveAnchorActive()) return null;
+  if (!isSeriesVisit(svc) || awaitingCustomerPick(svc) || !collectiveAnchorActive()) return null;
   const w = roundsOneOffWindow(svc.recurring_pattern, roundsRegularDate(svc));
   return w ? { maxDays: w.maxDays, fromDate: w.fromDate, roundStart: w.roundStart, roundEnd: w.roundEnd, start: w.start, end: w.end } : null;
 }
@@ -174,7 +174,7 @@ function roundsOneOffDate(svc, dateStr) {
 // series visit under collective anchoring, else null. Decoration only: any
 // failure returns null and the page keeps its general plan note.
 async function loadNextVisitShift(svc, availability) {
-  if (!nextVisitDateActive() || !isSeriesVisit(svc) || handedToCustomer(svc) || !collectiveAnchorActive()) return null;
+  if (!nextVisitDateActive() || !isSeriesVisit(svc) || awaitingCustomerPick(svc) || !collectiveAnchorActive()) return null;
   // A one-off date of a rounds visit moves nothing else: no next-visit line for it.
   const dates = (availability?.days || []).map((day) => day.date).filter((d) => d && !roundsOneOffDate(svc, d));
   if (!dates.length) return null;
@@ -194,7 +194,7 @@ async function loadNextVisitShift(svc, availability) {
 // page to the write itself and reads nothing. True = mismatch.
 // Same conditions as loadNextVisitShift: outside them the page named nothing.
 function nextVisitDisclosureMismatch(svc, body, nextVisit) {
-  if (!nextVisitDateActive() || !isSeriesVisit(svc) || handedToCustomer(svc) || !collectiveAnchorActive()) return false;
+  if (!nextVisitDateActive() || !isSeriesVisit(svc) || awaitingCustomerPick(svc) || !collectiveAnchorActive()) return false;
   const day = (value) => String(value || '').slice(0, 10) || null;
   const moves = !!(nextVisit?.newDate && nextVisit.currentDate && nextVisit.newDate !== nextVisit.currentDate);
   const expectedTo = moves ? nextVisit.newDate : null;
@@ -305,7 +305,7 @@ async function assertMoveLimitAllows(svc, elig, range, config, date) {
 
 // True when committing `targetDateStr` for this visit re-anchors the series.
 function shouldReanchor(svc, targetDateStr) {
-  if (!isSeriesVisit(svc) || handedToCustomer(svc)) return false;
+  if (!isSeriesVisit(svc) || awaitingCustomerPick(svc)) return false;
   if (collectiveAnchorActive()) {
     const target = String(targetDateStr || '').slice(0, 10);
     return !!target && apptDateStr(svc.scheduled_date) !== target && !roundsOneOffDate(svc, target);
@@ -332,7 +332,7 @@ function shouldReanchor(svc, targetDateStr) {
 // build with a re-anchoring one; it never over-offers one the commit would
 // refuse.
 function pickerMayReanchor(svc, rangeFrom, rangeTo) {
-  if (!isSeriesVisit(svc) || handedToCustomer(svc)) return false;
+  if (!isSeriesVisit(svc) || awaitingCustomerPick(svc)) return false;
   const currentDateStr = apptDateStr(svc.scheduled_date);
   if (collectiveAnchorActive()) {
     if (rangeFrom === currentDateStr && rangeTo === currentDateStr) return false;
@@ -360,7 +360,7 @@ function seriesScopeMismatch(svc, body) {
   if (!isSeriesVisit(svc)) return false;
   const disclosed = body?.disclosed_collective;
   if (typeof disclosed !== 'boolean') return true;
-  if (disclosed !== (collectiveAnchorActive() && !handedToCustomer(svc))) return true;
+  if (disclosed !== (collectiveAnchorActive() && !awaitingCustomerPick(svc))) return true;
   // Older pages omit this field: they can retain legacy behavior while dark,
   // but must refresh before consenting to newly enabled future placement.
   const placementDays = isCustomerRecurringDispatchEnabled() ? 3 : null;
@@ -790,11 +790,11 @@ router.get('/:token', async (req, res, next) => {
       // 2026-07-13). The client uses it to warn before Confirm; the POST
       // enforces the same rule regardless.
       isRecurring: !!(svc.is_recurring || svc.recurring_parent_id),
-      reanchorPullForwardDays: isSeriesVisit(svc) && !handedToCustomer(svc) ? REANCHOR_PULLFORWARD_DAYS : null,
+      reanchorPullForwardDays: isSeriesVisit(svc) && !awaitingCustomerPick(svc) ? REANCHOR_PULLFORWARD_DAYS : null,
       // Collective anchoring active for this visit: the page swaps the
       // recurring note to "your later visits shift to match" and drops the
       // legacy pull-forward warning (every date move re-anchors).
-      collectiveAnchor: isSeriesVisit(svc) && !handedToCustomer(svc) && collectiveAnchorActive(),
+      collectiveAnchor: isSeriesVisit(svc) && !awaitingCustomerPick(svc) && collectiveAnchorActive(),
       // Lawn rounds size rule: dates within maxDays of fromDate and inside
       // [roundStart, roundEnd] move only this visit. Null for every other visit.
       roundsOneOff: disclosedRoundsOneOff(svc),

@@ -617,6 +617,16 @@ describe('a visit handed to the customer to pick is always a single move', () =>
     expect(seriesScopeMismatch(plain, { ...body, disclosed_collective: true })).toBe(false);
     expect(seriesScopeMismatch(plain, body)).toBe(true);
   });
+
+  test('once any writer gives it a time (Auto-Dispatch, a staff edit that left the marker) it is an ordinary visit again', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const timed = { ...handed, scheduled_date: '2026-08-20', window_start: '09:00:00' };
+    expect(shouldReanchor(timed, '2026-08-22')).toBe(true);
+    expect(pickerMayReanchor(timed, '2026-08-22', '2026-08-25')).toBe(true);
+    const body = { disclosed_collective: true, disclosed_current_date: '2026-08-20', disclosed_future_placement_days: null };
+    expect(seriesScopeMismatch(timed, body)).toBe(false);
+    expect(seriesScopeMismatch(timed, { ...body, disclosed_collective: false })).toBe(true);
+  });
 });
 
 // Lawn rounds size rule (owner 2026-10-31): under collective anchoring a lawn_rounds_9 visit moves ALONE
