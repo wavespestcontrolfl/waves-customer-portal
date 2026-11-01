@@ -163,6 +163,19 @@ test('annual summaries are dark by default and add one owner-only document and c
   expect(listAnnualPlanDocumentsForCustomer).toHaveBeenCalledWith('cust-1');
 });
 
+test('a failed annual-summary lookup drops only the summaries; reports and the count still return', async () => {
+  process.env.GATE_ANNUAL_PLAN_DOCUMENTS = 'true';
+  for (const failure of [new AnnualPlanLabelsUnavailableError(), new Error('connection reset')]) {
+    listAnnualPlanDocumentsForCustomer.mockRejectedValueOnce(failure);
+    const res = await fetch(`${base}/api/documents`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.documents.annual_summary).toBeUndefined();
+    expect(body.documents.service_report.map((d) => d.id)).toEqual(['doc-1', 'auto_report_svc-1', 'project_proj-1']);
+    expect(body.total).toBe(4);
+  }
+});
+
 test('contacts never query or list annual summaries even when the download feature is enabled', async () => {
   process.env.GATE_ANNUAL_PLAN_DOCUMENTS = 'true';
   mockSession.contact = { slot: 1 };

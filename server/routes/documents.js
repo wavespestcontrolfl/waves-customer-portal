@@ -942,17 +942,22 @@ router.get('/', authenticate, async (req, res, next) => {
       .count('service_records.id as count');
     const contractCount = await signedContractCount(req.customerId);
 
-    const annualPlanDocs = annualPlanDocumentsLive()
-      ? await listAnnualPlanDocumentsForCustomer(req.customerId)
-      : [];
+    // Annual summaries are an extra: when their lookup fails, the list skips
+    // them and still returns the reports, agreements and receipts. The
+    // annual-plan download route keeps its own retryable 503.
+    let annualPlanDocs = [];
+    if (annualPlanDocumentsLive()) {
+      try {
+        annualPlanDocs = await listAnnualPlanDocumentsForCustomer(req.customerId);
+      } catch (err) {
+        logger.warn(`[documents] annual-plan summaries skipped for customer ${req.customerId}: ${err.code || err.message}`);
+      }
+    }
     const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs, ...annualPlanDocs, ...contractDocs];
     const totalOnFile = parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length + annualPlanDocs.length + contractCount;
 
     res.json({ documents: groupDocumentsByType(allDocs), total: totalOnFile });
   } catch (err) {
-    if (err instanceof AnnualPlanLabelsUnavailableError) {
-      return res.status(503).json({ error: 'Documents are temporarily unavailable. Please try again.' });
-    }
     next(err);
   }
 });
