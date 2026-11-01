@@ -2225,6 +2225,23 @@ describe('dry time audit (GATE_AUTO_DISPATCH_DRY_TIME_ORDER)', () => {
     expect(result.audit.constraints.effective_time_window).toBe('early_morning');
   });
 
+  test('shadow, placed visit: today\'s rules leave it; the audit says the dry window would re-time it on the same date', async () => {
+    const config = { ...CONFIG, minScoreImprovement: 5 };
+    const info = { mode: 'shadow', hours: 4, class: 'long', source: 'service_rule', window_key: 'dry_long', customer_time: false };
+    const prefs = {
+      ...BASE, effective_time_window: TIME_WINDOWS.late_morning, default_time_window: TIME_WINDOWS.late_morning, dry_time: info,
+    };
+    const sameDay = { ...CAND_BIG, detour_minutes: CURRENT.detour_minutes, date: CURRENT.date, start_time: '08:00' };
+    const otherDay = { ...sameDay, date: '2026-08-11' };
+    const lateCurrent = { ...CURRENT, start_time: '11:00' }; // outside 8-10
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: lateCurrent, candidates: [otherDay, sameDay], drops: {} });
+    const result = await _internals.evaluatePlacement(svc(), prefs, {}, config, '2026-06-20');
+    expect(result.kind).toBe('no_change'); // the live path is unchanged
+    expect(result.audit.constraints.dry_time).toMatchObject({
+      live_best: null, shadow_best: { date: CURRENT.date, start: '08:00' }, would_move: true,
+    });
+  });
+
   test('true: the audit carries the class and the current slot, no shadow_best', async () => {
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG], drops: {} });
     const result = await _internals.evaluatePlacement(svc(), { ...BASE, dry_time: dryTime('true') }, {}, CONFIG, '2026-06-20');

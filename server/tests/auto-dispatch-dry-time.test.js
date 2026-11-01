@@ -50,7 +50,7 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
   test('the windows keep the TIME_WINDOWS shape', () => {
     expect(Object.keys(DRY_WINDOWS.long)).toEqual(Object.keys(TIME_WINDOWS.early_morning));
     expect([DRY_WINDOWS.long.startMin, DRY_WINDOWS.long.endMin]).toEqual([480, 600]);
-    expect([DRY_WINDOWS.short.startMin, DRY_WINDOWS.short.endMin]).toEqual([540, 720]);
+    expect([DRY_WINDOWS.short.startMin, DRY_WINDOWS.short.endMin]).toEqual([480, 720]);
     expect([DRY_WINDOWS.proof.startMin, DRY_WINDOWS.proof.endMin]).toEqual([780, 1020]);
   });
 
@@ -190,7 +190,7 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       expect(out.effective_time_window).toBe(DRY_WINDOWS.long);
       expect(out.preferred_time_window).toBeNull();
       expect(out.dry_time).toEqual({
-        mode: 'true', hours: 4, class: 'long', source: 'last_visit_products', window_key: 'dry_long', customer_time: false,
+        mode: 'true', hours: 4, class: 'long', source: 'last_visit_products', window_key: 'dry_long', customer_time: false, counts_in_gain: true,
       });
     });
     test('true keeps an explicit customer time', async () => {
@@ -201,6 +201,7 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       expect(out.effective_time_window).toBe(TIME_WINDOWS.afternoon);
       expect(out.default_time_window).toBe(prefs.default_time_window);
       expect(out.dry_time.customer_time).toBe(true);
+      expect(out.dry_time).not.toHaveProperty('counts_in_gain');
     });
     test('shadow leaves every window alone and records the meta', async () => {
       process.env.GATE_AUTO_DISPATCH_DRY_TIME_ORDER = 'shadow';
@@ -209,6 +210,7 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       expect(out.default_time_window).toBe(prefs.default_time_window);
       expect(out.effective_time_window).toBe(prefs.effective_time_window);
       expect(out.dry_time).toMatchObject({ mode: 'shadow', hours: 2, class: 'short', source: 'service_rule', window_key: 'dry_short' });
+      expect(out.dry_time).not.toHaveProperty('counts_in_gain');
     });
     test('out of season the window is null (neutral time score) in true mode', async () => {
       process.env.GATE_AUTO_DISPATCH_DRY_TIME_ORDER = 'true';
@@ -217,12 +219,14 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       expect(out.default_time_window).toBeNull();
       expect(out.effective_time_window).toBeNull();
       expect(out.dry_time.window_key).toBeNull();
+      expect(out.dry_time).not.toHaveProperty('counts_in_gain');
     });
     test('a rain-proof service gets the afternoon window', async () => {
       process.env.GATE_AUTO_DISPATCH_DRY_TIME_ORDER = 'true';
       const out = await dryTime.withDryTime(prefsFor('Rodent Trapping Followup'), fakeConn([]), { ...ctx, serviceType: 'Rodent Trapping Followup', serviceKey: 'rodent_trapping_followup', runDate: '2026-11-01' });
       expect(out.effective_time_window).toBe(DRY_WINDOWS.proof);
       expect(out.dry_time.source).toBe('rain_ok_service');
+      expect(out.dry_time).not.toHaveProperty('counts_in_gain'); // rain-proof: a soft default only, never move gain
     });
   });
 
@@ -237,6 +241,15 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
     test('out of season the shadow window is null', () => {
       const prefs = { ...prefsFor(), dry_time: { mode: 'shadow', window_key: null, customer_time: false } };
       expect(dryTime.shadowPrefs(prefs).effective_time_window).toBeNull();
+    });
+    test('shadow sets the gain flag on its copy only, and only for a rain-sensitive class', () => {
+      const long = { ...prefsFor(), dry_time: { mode: 'shadow', class: 'long', window_key: 'dry_long', customer_time: false } };
+      expect(dryTime.shadowPrefs(long).dry_time.counts_in_gain).toBe(true);
+      expect(long.dry_time).not.toHaveProperty('counts_in_gain');
+      const proof = { ...prefsFor(), dry_time: { mode: 'shadow', class: 'proof', window_key: 'dry_proof', customer_time: false } };
+      expect(dryTime.shadowPrefs(proof).dry_time).not.toHaveProperty('counts_in_gain');
+      const season = { ...prefsFor(), dry_time: { mode: 'shadow', class: 'long', window_key: null, customer_time: false } };
+      expect(dryTime.shadowPrefs(season).dry_time).not.toHaveProperty('counts_in_gain');
     });
     test('other modes and a customer time return the prefs as they are', () => {
       const base = prefsFor();
@@ -261,6 +274,7 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
         current: { date: '2026-11-03', start: '10:00' },
         live_best: { date: '2026-11-03', start: '10:00' },
         shadow_best: { date: '2026-11-03', start: '08:00' },
+        would_move: true,
       });
     });
     test('shadow with nothing qualifying shows nulls', () => {
@@ -268,9 +282,18 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       expect(note.live_best).toBeNull();
       expect(note.shadow_best).toBeNull();
     });
+    test('would_move is true only when the shadow slot differs from the current slot', () => {
+      const moved = dryTime.auditNote({ dry_time: info }, { current: at('2026-11-03', '11:00'), live: null, shadow: at('2026-11-03', '08:00') });
+      expect(moved.would_move).toBe(true);
+      const stays = dryTime.auditNote({ dry_time: info }, { current: at('2026-11-03', '08:00'), live: null, shadow: at('2026-11-03', '08:00') });
+      expect(stays.would_move).toBe(false);
+      const none = dryTime.auditNote({ dry_time: info }, { current: at('2026-11-03', '08:00'), live: null, shadow: null });
+      expect(none.would_move).toBe(false);
+    });
     test('true mode carries no shadow_best', () => {
       const note = dryTime.auditNote({ dry_time: { ...info, mode: 'true' } }, { current: at('2026-11-03', '10:00'), live: null });
       expect(note).not.toHaveProperty('shadow_best');
+      expect(note).not.toHaveProperty('would_move');
       expect(note.live_best).toBeNull();
     });
   });
@@ -293,4 +316,80 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       expect(a.effective_time_window).toMatchObject({ key: 'dry_long' });
     });
   });
+  // The move gain (scoring.js + move-rules.js): the dry-time credit counts for a
+  // same-day re-time of a placed visit and for nothing on another date.
+  describe('dry-time credit in a placed visit move gain', () => {
+    const { scoreAppointmentPlacement } = require('../services/auto-dispatch/scoring');
+    const moveRules = require('../services/auto-dispatch/move-rules');
+    const CONFIG = { minDayMoveDriveSavingMinutes: 0 };
+    const place = (extra) => ({ detour_minutes: 10, stops_that_day: 3, technician_id: 't1', capability_level: 'qualified', ...extra });
+    const CURRENT = place({ is_current: true, date: '2026-11-03', start_time: '11:00' });
+    const SAME_DAY = place({ is_current: false, date: '2026-11-03', start_time: '08:00' });
+    const OTHER_DAY = place({ is_current: false, date: '2026-11-04', start_time: '08:00' });
+    const dryPrefs = (cls, window, flag, mode = 'true') => ({
+      ...prefsFor('Lawn Care Visit'),
+      default_time_window: window,
+      effective_time_window: window,
+      dry_time: { mode, class: cls, window_key: window.key, customer_time: false, ...(flag ? { counts_in_gain: true } : {}) },
+    });
+    const rank = (prefs, cands, service = { id: 's1' }) => {
+      const scoreCtx = { currentTechnicianId: 't1', changeCount: 0 };
+      const currentScore = scoreAppointmentPlacement(CURRENT, prefs, scoreCtx);
+      const scored = cands.map((cand) => ({ cand, sc: scoreAppointmentPlacement(cand, prefs, scoreCtx) }));
+      return moveRules.rankCandidates({ service, current: CURRENT, currentScore, scored, threshold: 5, config: CONFIG });
+    };
+
+    test('same-day in-window candidate: the credit counts in the gain and it wins', () => {
+      const ranked = rank(dryPrefs('long', DRY_WINDOWS.long, true), [SAME_DAY]);
+      expect(ranked.gain).toBeGreaterThan(8);
+      expect(ranked.qualifies).toBe(true);
+      expect(ranked.best).toBe(SAME_DAY);
+    });
+
+    test('another date: the credit counts for nothing', () => {
+      const ranked = rank(dryPrefs('long', DRY_WINDOWS.long, true), [OTHER_DAY]);
+      expect(ranked.gain).toBe(0);
+      expect(ranked.qualifies).toBe(false);
+    });
+
+    test('a same-day slot beats the other-date slot with the same raw score', () => {
+      const ranked = rank(dryPrefs('long', DRY_WINDOWS.long, true), [OTHER_DAY, SAME_DAY]);
+      expect(ranked.best).toBe(SAME_DAY);
+      expect(ranked.ranked).toEqual([SAME_DAY]);
+    });
+
+    test('a rain-proof class never adds gain: the afternoon window is a soft default only', () => {
+      const ranked = rank(dryPrefs('proof', DRY_WINDOWS.proof, false), [place({ is_current: false, date: '2026-11-03', start_time: '14:00' })]);
+      expect(ranked.gain).toBe(0);
+      expect(ranked.qualifies).toBe(false);
+    });
+
+    test('gate off: the default-window credit stays out of the gain, no new score fields', () => {
+      const off = { ...prefsFor('Lawn Care Visit') };
+      const ranked = rank(off, [SAME_DAY]);
+      expect(ranked.gain).toBe(0);
+      expect(ranked.bestScore).not.toHaveProperty('dry_time_score');
+      expect(ranked.bestScore).not.toHaveProperty('total_without_dry_time');
+      expect(scoreAppointmentPlacement(CURRENT, off).default_time_score).toBeGreaterThan(0);
+    });
+
+    test('shadow: the live ranking is unchanged; the shadow copy ranks as mode true would', () => {
+      const live = dryPrefs('long', DRY_WINDOWS.long, false, 'shadow');
+      live.default_time_window = TIME_WINDOWS.late_morning;
+      live.effective_time_window = TIME_WINDOWS.late_morning;
+      const liveRank = rank(live, [SAME_DAY]);
+      expect(liveRank.gain).toBe(0);
+      expect(liveRank.bestScore).not.toHaveProperty('dry_time_score');
+      const shadowRank = rank(dryTime.shadowPrefs(live), [SAME_DAY]);
+      expect(shadowRank.qualifies).toBe(true);
+      expect(shadowRank.best).toBe(SAME_DAY);
+      expect(shadowRank.bestScore.dry_time_score).toBeGreaterThan(0);
+    });
+
+    test('an unplaced due-date visit still ranks on the raw score', () => {
+      const ranked = rank(dryPrefs('long', DRY_WINDOWS.long, true), [OTHER_DAY], { id: 's1', recurring_dispatch_due_date: '2026-11-03', window_start: null });
+      expect(ranked.gain).toBeGreaterThan(8);
+    });
+  });
+
 });

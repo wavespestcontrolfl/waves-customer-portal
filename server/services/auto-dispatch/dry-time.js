@@ -8,11 +8,17 @@
  * morning, lawn mid-morning; service-category.js) is replaced, all year by
  * default, by a window that follows the products' dry time:
  *   4 h or more    -> 8:00-10:00 AM  (first, so the product dries before the afternoon rain)
- *   1-3 h          -> 9:00 AM-12:00 PM
+ *   1-3 h          -> 8:00 AM-12:00 PM  (8 and 10 AM were equally dry in the backtest)
  *   rain-proof     -> 1:00-5:00 PM   (granular, bait, gel, dust, water-in, rain-OK services)
  *
  * The window stays SOFT scoring (a customer's own time, blackouts and the
- * flex-tier freeze are untouched). Modes: 'off' (byte-identical, no database
+ * flex-tier freeze are untouched). For the rain-sensitive classes (long, short)
+ * the credit also counts in a PLACED visit's move gain, but only for a slot on
+ * the visit's current date (a same-day re-time, never a day move; owner
+ * 2026-10-24: no automatic day moves for rain): prefs.dry_time.counts_in_gain,
+ * read by scoring.js and move-rules.js. A rain-proof visit (class proof) never
+ * gains from it, so no granular, bait or interior visit moves to sit in the
+ * afternoon. Modes: 'off' (byte-identical, no database
  * read), 'shadow' (windows unchanged; the decision is logged beside what the
  * dry window would do), 'true' (the dry window replaces the family default).
  * DRY_TIME_ORDER_SEASON ('MM-DD..MM-DD', wrap-around allowed) narrows the
@@ -24,7 +30,7 @@ const RESCHEDULE_RULES = require('../../config/reschedule-rules');
 
 const DRY_WINDOWS = {
   long: { key: 'dry_long', startMin: 8 * 60, endMin: 10 * 60, label: '8:00–10:00 AM' },
-  short: { key: 'dry_short', startMin: 9 * 60, endMin: 12 * 60, label: '9:00 AM–12:00 PM' },
+  short: { key: 'dry_short', startMin: 8 * 60, endMin: 12 * 60, label: '8:00 AM–12:00 PM' },
   proof: { key: 'dry_proof', startMin: 13 * 60, endMin: 17 * 60, label: '1:00–5:00 PM' },
 };
 
@@ -158,6 +164,12 @@ function withWindow(prefs, window) {
   return { ...prefs, default_time_window: window, effective_time_window: window };
 }
 
+// The credit counts in a placed visit's same-day move gain: a rain-sensitive
+// class with a window and no customer-set time.
+function countsInGain(cls, window, customerTime) {
+  return !!window && cls !== 'proof' && !customerTime;
+}
+
 async function withDryTime(prefs, conn, { customerId, serviceType, serviceKey, runDate }) {
   const mode = dryTimeMode();
   if (mode === 'off') return prefs;
@@ -169,7 +181,9 @@ async function withDryTime(prefs, conn, { customerId, serviceType, serviceKey, r
     ...prefs,
     dry_time: { mode, hours, class: cls, source, window_key: window ? window.key : null, customer_time: customerTime },
   };
-  return mode === 'true' && !customerTime ? withWindow(out, window) : out;
+  if (mode !== 'true' || customerTime) return out;
+  if (countsInGain(cls, window, customerTime)) out.dry_time.counts_in_gain = true;
+  return withWindow(out, window);
 }
 
 // Shadow mode: the prefs the dry window would score with. Others: unchanged.
@@ -177,10 +191,15 @@ function shadowPrefs(prefs) {
   const info = prefs.dry_time;
   if (!info || info.mode !== 'shadow' || info.customer_time) return prefs;
   const window = Object.values(DRY_WINDOWS).find((w) => w.key === info.window_key) || null;
-  return withWindow(prefs, window);
+  const out = withWindow(prefs, window);
+  // The same gain rule mode 'true' would score with.
+  if (countsInGain(info.class, window, false)) out.dry_time = { ...info, counts_in_gain: true };
+  return out;
 }
 
 const startOf = (p) => (p ? { date: p.date, start: p.start_time } : null);
+
+const sameSlot = (a, b) => !!a && !!b && a.date === b.date && a.start === b.start;
 
 // constraints_checked.dry_time for a decision: the visit's dry class and, in
 // shadow mode, where the dry window would have put it beside where today's
@@ -188,11 +207,12 @@ const startOf = (p) => (p ? { date: p.date, start: p.start_time } : null);
 function auditNote(prefs, { current, live, shadow }) {
   const info = prefs.dry_time;
   if (!info) return null;
+  const shadowBest = startOf(shadow);
   return {
     ...info,
     current: startOf(current),
     live_best: startOf(live),
-    ...(info.mode === 'shadow' ? { shadow_best: startOf(shadow) } : {}),
+    ...(info.mode === 'shadow' ? { shadow_best: shadowBest, would_move: !!shadowBest && !sameSlot(shadowBest, startOf(current)) } : {}),
   };
 }
 
