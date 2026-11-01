@@ -203,6 +203,17 @@ describe('candidate selection (the SQL half of the webhook filter)', () => {
     expect(compiled.bindings).toEqual(expect.arrayContaining(['inbound', windowStart, cutoff]));
   });
 
+  test('the destination-line filter runs in SQL before the page limit: location lines only, never the AI line', () => {
+    expect(sql).toContain(`RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ANY(?)`);
+    // the line filter precedes the limit, so a burst of texts to other lines cannot fill the page
+    expect(sql.indexOf('REGEXP_REPLACE')).toBeLessThan(sql.indexOf('limit'));
+    const lines = lateDrafter._internals.draftableLineLast10s();
+    expect(compiled.bindings).toContainEqual(lines);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines).not.toContain('8559260203');
+    expect(lines.every((d) => /^\d{10}$/.test(d))).toBe(true);
+  });
+
   test('a body must be present; opt keywords, reactions, consumed reschedule and lead replies are out; an enforced spam verdict is out', () => {
     expect(sql).toContain("NULLIF(TRIM(s.message_body), '') IS NOT NULL");
     expect(sql).toContain("COALESCE(s.message_type, '') <> ALL(?)");

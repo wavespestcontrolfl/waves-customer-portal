@@ -92,9 +92,22 @@ function defaultFindCustomer(phone) {
 // drafted and that have no draft yet, oldest first. PREHANDLED_INBOUND_TYPES are the flows the
 // webhook finishes before the drafter (opt keywords, reactions, consumed reschedule and lead
 // replies); an enforced spam verdict also returns before it.
+// The staffed location lines the live drafter samples, as last-10 digits, minus the AI line: the SQL half
+// of eligibility()'s line check (same source list as sms-shadow-backfill). Applied before the page limit
+// so a burst of texts to other lines can never fill every page and starve location-line texts. An empty
+// list matches nothing (fails closed).
+function draftableLineLast10s() {
+  return Object.values(TWILIO_NUMBERS.locations || {})
+    .map((l) => l && l.number)
+    .filter((n) => n && !isAiNumber(n) && TWILIO_NUMBERS.findByNumber(n)?.type === 'location')
+    .map((n) => String(n).replace(/\D/g, '').slice(-10))
+    .filter((d) => d.length === 10);
+}
+
 function candidateQuery(dbi, { windowStart, cutoff, fetchLimit }) {
   return dbi('sms_log as s')
     .where('s.direction', 'inbound')
+    .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ANY(?)", [draftableLineLast10s()])
     .whereNotNull('s.customer_id')
     .where('s.created_at', '>=', windowStart)
     .where('s.created_at', '<=', cutoff)
@@ -282,5 +295,5 @@ module.exports = {
   silenceRefusal,
   isAiNumber,
   SOURCE,
-  _internals: { candidateQuery, eligibility, RUN_LOCK_KEY },
+  _internals: { candidateQuery, eligibility, draftableLineLast10s, RUN_LOCK_KEY },
 };
