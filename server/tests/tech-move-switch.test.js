@@ -155,6 +155,25 @@ describe('techMoveRefusal', () => {
       expect(await techMoveRefusal(req)).toEqual({ status: 403, payload: { error: 'Ask the office to move this visit.', code: 'move_not_allowed' } });
     }
   });
+
+  // GATE_QUICKMOVE_CUSTOMER_PICK (owner 2026-11-01): a technician whose switch is off may hand a visit to
+  // the customer, and may do nothing else.
+  test("mode 'customer_pick': allowed for a switch-off tech, a missing row and no id, with no query", async () => {
+    for (const req of [
+      { techRole: 'technician', technicianId: 'tech-1' },
+      { techRole: 'technician', technicianId: 'tech-missing' },
+      { techRole: 'technician' },
+    ]) {
+      expect(await techMoveRefusal(req, { mode: 'customer_pick' })).toBeNull();
+    }
+    expect(db.__state.queries).toEqual([]);
+  });
+
+  test("mode 'move' (the default) and an unknown mode keep the switch", async () => {
+    const refused = { status: 403, payload: { error: 'Ask the office to move this visit.', code: 'move_not_allowed' } };
+    expect(await techMoveRefusal({ techRole: 'technician', technicianId: 'tech-1' }, { mode: 'move' })).toEqual(refused);
+    expect(await techMoveRefusal({ techRole: 'technician', technicianId: 'tech-1' }, { mode: 'anything_else' })).toEqual(refused);
+  });
 });
 
 describe('every move route refuses a technician whose switch is off', () => {

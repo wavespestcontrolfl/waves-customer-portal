@@ -303,3 +303,29 @@ describe('visitInsideMoveNoticeWindow — mirrors visitInsideNoticeWindow agains
     }, now)).toBe(true);
   });
 });
+
+// Quick Move "let the customer pick a day" (owner 2026-11-01): a windowless visit the office handed to
+// the customer is not inside the window; any other windowless visit still is.
+describe('visitInsideMoveNoticeWindow — a visit handed to the customer to pick', () => {
+  const now = new Date('2027-06-01T12:00:00Z');
+  const handedAt = new Date('2027-06-02T00:00:00Z');
+
+  test('no start and customer_pick_by set: not inside the window (the link must work)', () => {
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-09', window_start: null, customer_pick_by: handedAt }, now)).toBe(false);
+  });
+
+  test('no start and no marker: inside the window, as before', () => {
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-09', window_start: null }, now)).toBe(true);
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-09', window_start: null, customer_pick_by: null }, now)).toBe(true);
+    expect(visitInsideMoveNoticeWindow(null, now)).toBe(true);
+  });
+
+  test('a start inside the window stays inside it even with the marker', () => {
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-01', window_start: '20:00', customer_pick_by: handedAt }, now)).toBe(true);
+  });
+
+  test('works with the gate unset (a link already sent must keep working after a kill)', () => {
+    delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-09', window_start: null, customer_pick_by: handedAt }, now)).toBe(false);
+  });
+});

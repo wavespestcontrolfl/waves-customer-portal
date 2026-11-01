@@ -584,6 +584,41 @@ describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
   });
 });
 
+// Quick Move "let the customer pick a day" (owner 2026-11-01): a visit handed to the customer
+// (customer_pick_by set) is a single-visit move whichever anchoring rule is on, and the page and the
+// POST pin agree on that, so a pick measured from the parked placeholder date never shifts the plan.
+describe('a visit handed to the customer to pick is always a single move', () => {
+  afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+  const handedAt = new Date('2026-08-14T00:00:00Z');
+  const plain = { is_recurring: true, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' };
+  const handed = { ...plain, customer_pick_by: handedAt };
+
+  test('collective anchoring on: the plain visit re-anchors, the handed one does not', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    expect(shouldReanchor(plain, '2026-08-15')).toBe(true);
+    expect(shouldReanchor(handed, '2026-08-15')).toBe(false);
+    expect(shouldReanchor(handed, '2026-09-30')).toBe(false);
+    expect(pickerMayReanchor(plain, '2026-08-15', '2026-08-20')).toBe(true);
+    expect(pickerMayReanchor(handed, '2026-08-15', '2026-08-20')).toBe(false);
+  });
+
+  test('collective anchoring off: a big pull-forward re-anchors the plain visit only', () => {
+    expect(shouldReanchor(plain, '2026-07-16')).toBe(true);
+    expect(shouldReanchor(handed, '2026-07-16')).toBe(false);
+    expect(pickerMayReanchor(handed, '2026-07-16', '2026-07-16')).toBe(false);
+  });
+
+  test('the POST scope pin expects the single-move disclosure for a handed visit', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const body = { disclosed_collective: false, disclosed_current_date: '2026-08-13', disclosed_future_placement_days: null };
+    expect(seriesScopeMismatch(handed, body)).toBe(false);
+    expect(seriesScopeMismatch(handed, { ...body, disclosed_collective: true })).toBe(true);
+    // The plain visit still pins the series disclosure.
+    expect(seriesScopeMismatch(plain, { ...body, disclosed_collective: true })).toBe(false);
+    expect(seriesScopeMismatch(plain, body)).toBe(true);
+  });
+});
+
 // Lawn rounds size rule (owner 2026-10-31): under collective anchoring a lawn_rounds_9 visit moves ALONE
 // for a date within 7 days of its regular date inside its round; a bigger move re-anchors. The page
 // discloses the rule, the POST pins it, and the next-visit projection skips those dates.

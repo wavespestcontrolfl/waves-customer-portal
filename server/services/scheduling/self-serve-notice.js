@@ -126,9 +126,15 @@ function earliestSelfServeMoveStart(now = new Date()) {
 // allow the move. Any move clears the column (trigger in migration
 // 20261006230100); the start match is a second guard. A
 // caller whose row select lacks the column keeps the plain notice rule.
+//
+// Quick Move "let the customer pick a day" (owner 2026-11-01): a windowless visit
+// the office handed to the customer (customer_pick_by set) is NOT inside the
+// window. It has no start on purpose, and the customer's link exists to give it
+// one. Deliberately not behind the gate: a link already sent keeps working after a
+// kill. A caller whose row select lacks the column keeps the plain rule.
 function visitInsideMoveNoticeWindow(row, now = new Date()) {
   const startsAt = visitStartInstant(row);
-  if (!startsAt) return true;
+  if (!startsAt) return !(row && row.customer_pick_by);
   if (officeApprovedMove(row, startsAt)) return false;
   return startsAt.getTime() < earliestSelfServeMoveStart(now).getTime();
 }

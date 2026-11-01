@@ -288,6 +288,33 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(mockIoEmit).not.toHaveBeenCalled();
   });
 
+  // Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): a staff or customer
+  // move ends the hand-off; an Auto-Dispatch placement keeps the marker (the 72-hour reminder
+  // wording needs it); a row without the marker adds no column to the write.
+  test.each([
+    ['admin', true],
+    ['customer_self_serve', true],
+    ['auto_dispatch', false],
+  ])('a %s move of a handed-off visit clears customer_pick_by: %s', async (initiatedBy, clears) => {
+    const { updateQuery } = wireRescheduleMocks({ ...liveService('confirmed'), customer_pick_by: new Date('2099-01-02T01:00:00Z') });
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', initiatedBy,
+      { allowLive: true, seriesPolicy: 'single' },
+    );
+    const payload = updateQuery.update.mock.calls[0][0];
+    if (clears) expect(payload).toHaveProperty('customer_pick_by', null);
+    else expect(payload).not.toHaveProperty('customer_pick_by');
+  });
+
+  test('a move of a visit with no hand-off marker writes no customer_pick_by column', async () => {
+    const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
+      { allowLive: true },
+    );
+    expect(updateQuery.update.mock.calls[0][0]).not.toHaveProperty('customer_pick_by');
+  });
+
   // Same-day elapsed-window guard (shared datetime-et.sameDayWindowElapsed).
   // A move to TODAY whose effective window already passed in ET is as
   // unreachable as a past date — it must 409 before any DB write. A move to

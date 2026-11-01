@@ -134,6 +134,32 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     expect(rows[0].id).toBe(ids.unplaced);
   });
 
+  // Quick Move "let the customer pick a day": until customer_pick_by passes, Auto-Dispatch does not
+  // load the handed-off visit and the "still needs a time" bell does not ring for it.
+  test('a visit the customer is still picking for is neither loaded nor flagged until the deadline passes', async () => {
+    const { loadEligibleServices } = require('../services/auto-dispatch');
+    const dueSoon = '2099-01-25';
+    const mk = (pickBy) => ({
+      id: randomUUID(), customer_id: customerId, is_recurring: true, recurring_parent_id: randomUUID(),
+      status: 'pending', scheduled_date: dueSoon, window_start: null, recurring_dispatch_due_date: dueSoon,
+      customer_pick_by: pickBy,
+    });
+    const hour = 3600 * 1000;
+    const open = mk(new Date(Date.now() + hour));
+    const passed = mk(new Date(Date.now() - hour));
+    const never = mk(null);
+    await trx('scheduled_services').insert([open, passed, never]);
+    const loaded = (await loadEligibleServices('2099-01-20', '2099-03-01', '2099-01-20')).map((row) => row.id);
+    expect(loaded).toEqual(expect.arrayContaining([passed.id, never.id]));
+    expect(loaded).not.toContain(open.id);
+
+    notifications.notifyAdmin.mockClear();
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    const flagged = notifications.notifyAdmin.mock.calls.map((call) => call[3].metadata.scheduledServiceId);
+    expect(flagged).toEqual(expect.arrayContaining([passed.id, never.id]));
+    expect(flagged).not.toContain(open.id);
+  });
+
   test.each([true, false])('reschedule holds block same-plan dates for due placement=%s', async (duePlacement) => {
     const parentId = randomUUID();
     await trx('scheduled_services').insert({
