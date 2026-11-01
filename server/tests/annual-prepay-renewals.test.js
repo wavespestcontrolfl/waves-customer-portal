@@ -2366,6 +2366,232 @@ describe('annual prepay renewal helpers', () => {
     });
   });
 
+  describe('GATE_PREPAY_SEED_SERIES_SLOT (owner 2026-11-01, "fix seeder")', () => {
+    const SeriesSlot = require('../services/annual-prepay-series-slot');
+    const PlanTakenHour = require('../services/scheduling/plan-taken-hour');
+    const slotCols = {
+      scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, is_recurring: {}, recurring_pattern: {},
+      recurring_parent_id: {}, recurring_ongoing: {}, technician_id: {}, window_start: {}, window_end: {},
+      time_window: {}, window_display: {}, route_order: {}, recurring_dispatch_due_date: {}, customer_notes: {},
+      zone: {}, notes: {}, estimated_duration_minutes: {},
+    };
+    const QUARTERLY = {
+      id: 'term-s', customer_id: 'customer-s', term_start: '2026-06-15', term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly',
+    };
+    const PROMISED = {
+      id: 'term-p', customer_id: 'customer-p', term_start: '2026-07-30', term_end: '2027-07-30',
+      coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 2, coverage_cadence: 'quarterly',
+      first_visit_date: '2026-08-01', first_visit_window_start: '08:00',
+    };
+    const SLOT = { technicianId: 'tech-1', windowStart: '09:00' };
+    let slotSpy;
+    let recheckSpy;
+    let insertQueries;
+    // The seed's transaction as knex gives it: callable like db (same query queues), isTransaction, savepoints
+    // on itself, and db.raw's occupancy TRY-lock answer (locked). A copied time is written only under that lock.
+    const asTrx = () => {
+      const trx = jest.fn((...args) => db(...args));
+      for (const key of ['raw', 'schema', 'fn', 'client']) if (key in db) trx[key] = db[key];
+      trx.isTransaction = true;
+      trx.transaction = jest.fn(async (cb) => cb(trx));
+      return trx;
+    };
+    beforeEach(() => {
+      slotSpy = jest.spyOn(SeriesSlot, 'coverageSeriesSlot').mockResolvedValue(SLOT);
+      // The per-seed recheck is unit-tested in annual-prepay-series-slot.test.js; here it confirms the technician.
+      recheckSpy = jest.spyOn(SeriesSlot, 'recheckTechnician').mockImplementation(async (trx, id) => id);
+      db.transaction = jest.fn(async (cb) => cb(asTrx()));
+    });
+    afterEach(() => {
+      jest.restoreAllMocks();
+      delete process.env.GATE_PREPAY_SEED_SERIES_SLOT;
+      delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF;
+    });
+
+    const queueQuarterly = (absences = []) => {
+      insertQueries = [
+        query({ returning: [{ id: 'svc-1', scheduled_date: '2026-06-15' }] }),
+        query({ returning: [{ id: 'svc-2', scheduled_date: '2026-09-15' }] }),
+        query({ returning: [{ id: 'svc-3', scheduled_date: '2026-12-15' }] }),
+        query({ returning: [{ id: 'svc-4', scheduled_date: '2027-03-15' }] }),
+      ];
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: slotCols }), query({ rows: [] }), query({ first: undefined }), ...insertQueries],
+        technician_absences: [query({ rows: absences })],
+      });
+    };
+    const seedQuarterly = (absences) => {
+      queueQuarterly(absences);
+      return _private.ensureCoverageRowsForTerm(QUARTERLY, undefined, { today: '2026-01-01' });
+    };
+    const inserted = (i) => insertQueries[i].insert.mock.calls[0][0];
+    const gateOn = () => { process.env.GATE_PREPAY_SEED_SERIES_SLOT = 'true'; };
+    const handoffGateOn = () => { process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true'; };
+
+    test('gate off: seeds carry no technician and no time, and nothing extra is read', async () => {
+      handoffGateOn();
+      await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
+      expect(slotSpy).not.toHaveBeenCalled();
+      const tables = db.mock.calls.map((c) => c[0]);
+      expect(tables).not.toContain('technicians');
+      expect(tables).not.toContain('technician_absences');
+      for (let i = 0; i < 4; i += 1) {
+        expect(inserted(i)).toMatchObject({ technician_id: null, window_start: null, window_end: null });
+        expect(inserted(i)).not.toHaveProperty('recurring_dispatch_due_date');
+      }
+    });
+
+    test('gate on with a source visit: every seed carries the technician and the time', async () => {
+      gateOn();
+      handoffGateOn();
+      jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+      await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
+      expect(slotSpy).toHaveBeenCalledTimes(1);
+      expect(slotSpy.mock.calls[0][1]).toMatchObject({
+        customerId: 'customer-s', coverageServiceType: 'Quarterly Pest Control', today: '2026-01-01',
+      });
+      for (let i = 0; i < 4; i += 1) {
+        expect(inserted(i)).toMatchObject({ technician_id: 'tech-1', window_start: '09:00', window_end: '10:00' });
+      }
+    });
+
+    test('gate on, the source technician is not assignable: seeds carry no technician', async () => {
+      gateOn();
+      handoffGateOn();
+      jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+      slotSpy.mockResolvedValue({ technicianId: null, windowStart: '09:00' });
+      await seedQuarterly();
+      for (let i = 0; i < 4; i += 1) {
+        expect(inserted(i)).toMatchObject({ technician_id: null, window_start: '09:00' });
+      }
+    });
+
+    test('gate on, the technician is out on one date: only that seed has no technician', async () => {
+      gateOn();
+      handoffGateOn();
+      jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+      await seedQuarterly([{ technician_id: 'tech-1', absence_date: '2026-09-15' }]);
+      expect(inserted(0).technician_id).toBe('tech-1');
+      expect(inserted(1).technician_id).toBeNull();
+      expect(inserted(2).technician_id).toBe('tech-1');
+      expect(inserted(3).technician_id).toBe('tech-1');
+    });
+
+    test('gate on, one hour is taken: that seed is windowless with recurring_dispatch_due_date; the others keep the time', async () => {
+      gateOn();
+      handoffGateOn();
+      const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff')
+        .mockImplementation(async (conn, row) => row.scheduled_date === '2026-12-15');
+      await seedQuarterly();
+      expect(inserted(2)).toMatchObject({
+        technician_id: 'tech-1', window_start: null, window_end: null, time_window: null,
+        window_display: null, recurring_dispatch_due_date: '2026-12-15',
+      });
+      expect(inserted(0)).toMatchObject({ window_start: '09:00', window_end: '10:00' });
+      expect(inserted(0)).not.toHaveProperty('recurring_dispatch_due_date');
+      // The probe saw the row the insert would have written: technician, date and time.
+      const probed = probe.mock.calls.map((c) => c[1]);
+      expect(probed[2]).toMatchObject({ customer_id: 'customer-s', technician_id: 'tech-1', scheduled_date: '2026-12-15', window_start: '09:00' });
+    });
+
+    // Pre-push audit P1: a copied time is a timed insert, fenced by the occupancy date lock like seedTimedFirstVisit.
+    test('gate on, the occupancy date lock is busy: no copied time is written unfenced (seeds handed off)', async () => {
+      gateOn();
+      handoffGateOn();
+      const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
+      jest.spyOn(require('../services/scheduling/occupancy'), 'tryAcquireOccupancyLock').mockResolvedValue(false);
+      await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
+      expect(probe).not.toHaveBeenCalled();
+      for (let i = 0; i < 4; i += 1) {
+        expect(inserted(i)).toMatchObject({ technician_id: 'tech-1', window_start: null, window_end: null });
+        expect(inserted(i).recurring_dispatch_due_date).toBe(inserted(i).scheduled_date);
+      }
+    });
+
+    test('gate on, the technician is offboarded after the slot read: the per-seed recheck leaves every seed unassigned', async () => {
+      gateOn();
+      handoffGateOn();
+      jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+      recheckSpy.mockResolvedValue(null);
+      await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
+      expect(recheckSpy).toHaveBeenCalledTimes(4);
+      expect(recheckSpy.mock.calls[0][0].isTransaction).toBe(true);
+      for (let i = 0; i < 4; i += 1) expect(inserted(i)).toMatchObject({ technician_id: null, window_start: '09:00' });
+    });
+
+    test('gate on, taken-hour hand-off gate off: technician only, no time and no probe', async () => {
+      gateOn();
+      const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
+      await seedQuarterly();
+      expect(probe).not.toHaveBeenCalled();
+      for (let i = 0; i < 4; i += 1) {
+        expect(inserted(i)).toMatchObject({ technician_id: 'tech-1', window_start: null, window_end: null });
+        expect(inserted(i)).not.toHaveProperty('recurring_dispatch_due_date');
+      }
+    });
+
+    test('gate on, no source visit: seeds are as they were', async () => {
+      gateOn();
+      handoffGateOn();
+      slotSpy.mockResolvedValue(null);
+      await seedQuarterly();
+      const tables = db.mock.calls.map((c) => c[0]);
+      expect(tables).not.toContain('technician_absences');
+      for (let i = 0; i < 4; i += 1) {
+        expect(inserted(i)).toMatchObject({ technician_id: null, window_start: null, window_end: null });
+      }
+    });
+
+    test('gate on: the slot is resolved once per term, not once per seeded visit', async () => {
+      gateOn();
+      handoffGateOn();
+      jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+      await seedQuarterly();
+      expect(slotSpy).toHaveBeenCalledTimes(1);
+    });
+
+    describe('the promised first visit', () => {
+      const seedPromised = (absences = []) => {
+        insertQueries = [
+          query({ returning: [{ id: 'svc-p1', scheduled_date: '2026-08-01', window_start: '08:00' }] }),
+          query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-11-01' }] }),
+        ];
+        setDbQueues({
+          scheduled_services: [query({ columnInfo: slotCols }), query({ rows: [] }), query({ first: undefined }), query({ rows: [] }), query({ rows: [] }), ...insertQueries],
+          technician_absences: [query({ rows: absences })],
+        });
+        return _private.ensureCoverageRowsForTerm(PROMISED, undefined, { today: '2026-07-31' });
+      };
+
+      test('keeps its promised window and gets the technician; the later visit gets the slot time', async () => {
+        gateOn();
+        handoffGateOn();
+        jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+        await expect(seedPromised()).resolves.toMatchObject({ createdCount: 2 });
+        expect(inserted(0)).toMatchObject({ scheduled_date: '2026-08-01', technician_id: 'tech-1', window_start: '08:00', window_end: '09:00' });
+        expect(inserted(0)).not.toHaveProperty('recurring_dispatch_due_date');
+        expect(inserted(1)).toMatchObject({ scheduled_date: '2026-11-01', technician_id: 'tech-1', window_start: '09:00' });
+      });
+
+      test('on the technician\'s out day the promised visit keeps its window and has no technician', async () => {
+        gateOn();
+        handoffGateOn();
+        jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+        await seedPromised([{ technician_id: 'tech-1', absence_date: '2026-08-01' }]);
+        expect(inserted(0)).toMatchObject({ technician_id: null, window_start: '08:00' });
+        expect(inserted(1).technician_id).toBe('tech-1');
+      });
+
+      test('gate off: the promised visit has its window and no technician', async () => {
+        await seedPromised();
+        expect(slotSpy).not.toHaveBeenCalled();
+        expect(inserted(0)).toMatchObject({ technician_id: null, window_start: '08:00' });
+        expect(inserted(1)).toMatchObject({ technician_id: null, window_start: null });
+      });
+    });
+  });
+
   test('a completed adopted visit is never retimed — history stays intact', async () => {
     const columnQuery = query({
       columnInfo: {
