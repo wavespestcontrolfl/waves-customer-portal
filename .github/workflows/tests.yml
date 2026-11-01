@@ -13,7 +13,7 @@
 #      so setting DATABASE_URL globally turns them red by design, not by bug.
 #   2. The self-skipping DB-gated suites run WITH DATABASE_URL (the `server`
 #      job) against the migrated database, serially (--runInBand: they share tables and
-#      clash under parallel workers; the job runs three serial lanes, each on
+#      clash under parallel workers; the job runs four serial lanes, each on
 #      its own Postgres server). products-catalog-label-fields is
 #      excluded — like the golden masters it pins prod-parity data
 #      (admin-corrected EPA reg numbers), which a fresh seed cannot satisfy.
@@ -71,8 +71,8 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      # Two more servers so the two longest steps can run beside the rest (see
-      # "Three lanes" below). Separate servers, not extra databases on one
+      # Three more servers so the longest steps can run beside the rest (see
+      # "Lanes" below). Separate servers, not extra databases on one
       # server: 167 suites refuse any database not named waves_test.
       postgres-b:
         image: pgvector/pgvector:pg16
@@ -95,6 +95,19 @@ jobs:
           POSTGRES_DB: waves_test
         ports:
           - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres-d:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5435:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
@@ -123,14 +136,21 @@ jobs:
             env:
               DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
             run: npx knex migrate:latest --knexfile server/knexfile.js
-      # Three lanes (2026-10-08 trial). Measured on five green runs: this job
+          - name: Migrate the fourth server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5435/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+      # Lanes (2026-10-08 trial). Measured on five green runs: this job
       # set the length of every run at 16-18 min, and two steps were 8 of
       # those minutes. They now run as background steps, each on its own
       # server, while every other step runs below on the first server exactly
       # as before. Each lane is still serial against its own database. They
       # sit here, not in their old places, so they start at once. The
-      # `wait-all` step at the end of the job fails if either one failed.
-      - name: DB-gated suites (serial, against the migrated database)
+      # `wait-all` step at the end of the job fails if any one failed.
+      # 2026-11-01: the DB-gated step alone took 14.6 of this job's 16.3 min
+      # (median of 160 runs), so it runs as two halves on two servers.
+      # `jest --shard` gives every file to exactly one half.
+      - name: DB-gated suites, first half (serial, against the migrated database)
         id: db-gated
         background: true
         working-directory: server
@@ -144,14 +164,24 @@ jobs:
           grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand
+            | xargs npx jest --ci --silent --runInBand --shard=1/2
+      - name: DB-gated suites, second half (serial, against the migrated database)
+        id: db-gated-2
+        background: true
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5435/waves_test
+        run: |
+          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
+            | grep -v products-catalog-label-fields \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand --shard=2/2
       # The gate-code suites in the second command gate on
       # `process.env.DATABASE_URL ? describe : describe.skip`, not the
       # `const SKIP` line the DB-gated step greps for, so until 2026-10-30 they
-      # ran nowhere in CI. They run here, after closeout on the third server:
-      # this lane sits idle for most of the job, while the DB-gated lane already
-      # sets the job's length. Do not add the `const SKIP` line to them, or they
-      # run twice.
+      # ran nowhere in CI. They run here, after closeout on the third server,
+      # which finishes well before the job's longest lane. Do not add the
+      # `const SKIP` line to them, or they run twice.
       # The third command runs 64 more suites with that same gate (46 of them
       # lawn suites), which also ran nowhere in CI until 2026-10-31.
       # The last five commands (sweep #7246 B1, 2026-10-31) run suites whose
@@ -633,7 +663,7 @@ jobs:
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js server/tests/invoice-property-history-db.test.js server/tests/customer-properties-db.test.js server/tests/intelligence-bar-properties-db.test.js server/tests/intelligence-bar-inventory-db.test.js server/tests/intelligence-bar-customer-estimates-db.test.js server/tests/intelligence-bar-billing-reader-db.test.js
-      - name: Wait for the two background lanes (fails if either failed)
+      - name: Wait for the three background lanes (fails if any one failed)
         wait-all:
 
   # Step 1 of the two-step design: the full jest suite WITHOUT DATABASE_URL
