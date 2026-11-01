@@ -121,10 +121,13 @@ describe('attachDriveLegs', () => {
     attachDriveLegs(onTime);
     expect(leg).toBeGreaterThan(0);
     expect(onTime[1].driveLateMin).toBeNull();
+    expect(onTime[1].driveLateWindowStart).toBeNull();
     // The work ends late enough that the same leg misses the window.
     const late = [stop('a', '11:00', A, { windowEnd: '14:25' }), stop('c', '12:30', C)];
     attachDriveLegs(late);
     expect(late[1].driveLateMin).toBe(14 * 60 + 25 + leg - (12 * 60 + 30 + 120));
+    // The line names the window it misses.
+    expect([late[1].driveLateWindowStart, late[1].driveLateWindowEnd]).toEqual(['12:30', '14:30']);
     // A visit the tech already reached is never flagged.
     const reached = [stop('a', '11:00', A, { windowEnd: '14:25' }), stop('c', '12:30', C, { status: 'in_progress' })];
     attachDriveLegs(reached);
@@ -321,6 +324,22 @@ describe('attachDriveLegs', () => {
     // z ends 09:00, g1 arrives 09:00 + leg and works 7 hours; g2's 13:00
     // window closes at 15:00.
     expect(services[0].driveLateMin).toBe(9 * 60 + leg + 420 - (13 * 60 + 120));
+    // The line on the 09:00 card names the 13:00 member's window.
+    expect([services[0].driveLateWindowStart, services[0].driveLateWindowEnd]).toEqual(['13:00', '15:00']);
+  });
+
+  it('names the shared arrival range of a staggered visit group it flags', () => {
+    const services = [
+      stop('z', '08:00', B, { windowEnd: '10:40', displayOrder: 0 }),
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '10:00', displayOrder: 1 }),
+      stop('g2', '09:30', A, { visitId: 'v1', windowEnd: '10:30', displayOrder: 2 }),
+    ];
+    attachDriveLegs(services);
+    const leg = services[1].driveFromPrevMin;
+    // g2 starts after g1's hour, so the group must arrive by 10:30 (11:30
+    // less 60), not g1's own 11:00.
+    expect(services[1].driveLateMin).toBe(10 * 60 + 40 + leg - (10 * 60 + 30));
+    expect([services[1].driveLateWindowStart, services[1].driveLateWindowEnd]).toEqual(['09:00', '10:30']);
   });
 
   it('names the customer the tech leaves last at a shared pin', () => {

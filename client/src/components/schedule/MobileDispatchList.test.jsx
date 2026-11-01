@@ -373,17 +373,17 @@ describe('MobileDispatchList drive legs', () => {
           // Same physical stop as svc-2: carries the leg but does not draw it.
           { ...SERVICE, id: 'svc-2b', customerName: 'Sample Two', windowStart: '10:00', windowEnd: '11:00', driveFromPrevMin: 14, driveToNextMin: 61 },
           { ...SERVICE, id: 'svc-3', customerName: 'Sample Three', windowStart: '13:00', windowEnd: '14:00', lastStop: true, driveInShown: true, drivePrevName: 'Sample Two', driveFromPrevMin: 61, driveToNextMin: null },
-          // No coordinates on the way in: no line, never "~0 min".
+          // No coordinates on the way in: no line, never "0 min".
           { ...SERVICE, id: 'svc-4', customerName: 'Sample Four', windowStart: '15:00', windowEnd: '16:00', driveInShown: false, driveFromPrevMin: null },
         ]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.getByText('~14 min drive from Sample One')).toBeInTheDocument();
-    expect(screen.getByText('~61 min drive from Sample Two')).toBeInTheDocument();
+    expect(screen.getByText('14 min drive from Sample One')).toBeInTheDocument();
+    expect(screen.getByText('61 min drive from Sample Two')).toBeInTheDocument();
     expect(screen.getAllByText(/min drive from/)).toHaveLength(2);
     expect(screen.queryByText(/to next|from last stop|First stop|Last stop/)).toBeNull();
-    expect(screen.queryByText(/~0 min/)).toBeNull();
+    expect(screen.queryByText(/(^|\D)0 min/)).toBeNull();
     expect(screen.getByText(/~1h 15m driving/)).toBeInTheDocument();
   });
 
@@ -421,23 +421,41 @@ describe('MobileDispatchList drive legs', () => {
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.getByText('~14 min drive from Sample One')).toBeInTheDocument();
+    expect(screen.getByText('14 min drive from Sample One')).toBeInTheDocument();
     expect(screen.queryByText(/driving/)).toBeNull();
   });
 
-  it('turns the line red with the 2-hour window when the tech would land late', () => {
+  it('turns the line red and names the missed window in clock time', () => {
     render(
       <MobileDispatchList
         mode="day"
         date="2026-07-15"
         services={[
-          { ...SERVICE, id: 'svc-late', customerName: 'Sample Late', windowStart: '12:30', windowEnd: '13:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15 },
+          { ...SERVICE, id: 'svc-late', customerName: 'Sample Late', windowStart: '16:00', windowEnd: '17:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 23, driveLateMin: 156, driveLateWindowStart: '16:00', driveLateWindowEnd: '18:00' },
         ]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    const line = screen.getByText('~45 min drive from Sample One · ~15 min past the 2-hour arrival window');
+    const line = screen.getByText('23 min drive from Sample One · 2h 36m past the 4–6 PM window');
     expect(line.parentElement.className).toContain('text-alert-fg');
+  });
+
+  it("names the window the server measured, not the card's own, and never guesses one", () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[
+          // A split visit: the 13:00 member misses, the line sits on the 09:00 card.
+          { ...SERVICE, id: 'svc-split', customerName: 'Sample Split', windowStart: '09:00', windowEnd: '10:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15, driveLateWindowStart: '13:00', driveLateWindowEnd: '15:00' },
+          // No window in the payload: no clock times invented.
+          { ...SERVICE, id: 'svc-bare', customerName: 'Sample Bare', windowStart: '16:00', windowEnd: '17:00', driveInShown: true, drivePrevName: 'Sample Split', driveFromPrevMin: 20, driveLateMin: 60 },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText('45 min drive from Sample One · 15 min past the 1–3 PM window')).toBeInTheDocument();
+    expect(screen.getByText('20 min drive from Sample Split · 1h past the arrival window')).toBeInTheDocument();
   });
 
   it('keeps the red on a completed first card whose stop is still at risk', () => {
@@ -452,7 +470,7 @@ describe('MobileDispatchList drive legs', () => {
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.getByText('~45 min drive from Sample One · ~15 min past the 2-hour arrival window').parentElement.className).toContain('text-alert-fg');
+    expect(screen.getByText(/15 min past/).parentElement.className).toContain('text-alert-fg');
   });
 
   it('keeps the red while another at-risk visit at the stop is not on the way', () => {
@@ -467,7 +485,7 @@ describe('MobileDispatchList drive legs', () => {
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.getByText(/~15 min past the 2-hour arrival window/).parentElement.className).toContain('text-alert-fg');
+    expect(screen.getByText(/15 min past/).parentElement.className).toContain('text-alert-fg');
   });
 
   it('drops the red once the stop is en route', () => {
@@ -481,7 +499,7 @@ describe('MobileDispatchList drive legs', () => {
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    const line = screen.getByText('~45 min drive from Sample One');
+    const line = screen.getByText('45 min drive from Sample One');
     expect(line.parentElement.className).not.toContain('text-alert-fg');
   });
 });
@@ -550,8 +568,8 @@ describe('MobileDispatchList completed visits', () => {
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.queryByText(/past the 2-hour arrival window/)).toBeNull();
-    expect(screen.queryByText(/~45 min drive/)).toBeNull();
+    expect(screen.queryByText(/ past the /)).toBeNull();
+    expect(screen.queryByText(/45 min drive/)).toBeNull();
   });
 
   it('greys a finished visit, tags it Done and hides the drive into it', () => {
@@ -570,8 +588,8 @@ describe('MobileDispatchList completed visits', () => {
     expect(screen.getByText('Sample Next').className).toContain('text-zinc-900');
     expect(screen.getAllByText('Done')).toHaveLength(1);
     expect(screen.getByText('Done').className).toContain('text-14');
-    expect(screen.queryByText('~20 min drive from Sample One')).toBeNull();
-    expect(screen.getByText('~12 min drive from Sample Done')).toBeInTheDocument();
+    expect(screen.queryByText('20 min drive from Sample One')).toBeNull();
+    expect(screen.getByText('12 min drive from Sample Done')).toBeInTheDocument();
   });
 });
 

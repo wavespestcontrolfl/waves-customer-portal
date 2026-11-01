@@ -149,14 +149,23 @@ function isLawnService(service) {
 
 
 // The drive into a stop, drawn as a thin line above its card (owner
-// 2026-10-05): "~59 min drive from <previous stop>". The server stamps each
+// 2026-10-05): "59 min drive from <previous stop>". The server stamps each
 // leg on one card only (driveInShown) and names the stop it comes from, so
 // the line stays right when techs' stops interleave. Red when the tech would
-// land past the customer's 2-hour arrival window (driveLateMin). Absent
-// fields (week view, older payload) and a leg without coordinates render
-// nothing, never "~0 min".
+// land past the customer's 2-hour arrival window (driveLateMin), named in
+// clock time (owner 2026-11-01, option A): "23 min drive from <previous
+// stop> · 2h 36m past the 4–6 PM window". Absent fields (week view, older payload)
+// and a leg without coordinates render nothing, never "0 min".
 // Visits that can no longer run late: on the way, being worked, or done.
 const ON_THE_WAY = new Set(['en_route', 'on_site', 'in_progress', 'completed']);
+
+// "15 min" under an hour, else "2h 36m" (the day total's style).
+function lateLabel(min) {
+  const total = Math.round(min);
+  if (total < 60) return `${total} min`;
+  const h = Math.floor(total / 60);
+  return total % 60 ? `${h}h ${total % 60}m` : `${h}h`;
+}
 
 function DriveLine({ service, statusById }) {
   if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
@@ -172,6 +181,11 @@ function DriveLine({ service, statusById }) {
   // a later visit at the same stop is still at risk.
   if (service.status === 'completed' && !late) return null;
   const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
+  // The window the stop misses, as the server measured it (a split visit's
+  // later member or a visit group's shared range, not always this card's).
+  const missed = service.driveLateWindowStart && service.driveLateWindowEnd
+    ? `the ${formatWindow({ windowStart: service.driveLateWindowStart, windowEnd: service.driveLateWindowEnd })} window`
+    : 'the arrival window';
   return (
     <div
       className={'flex items-center u-nums font-bold border-b border-hairline ' + 'border-zinc-200 ' + (late ? 'bg-alert-bg text-alert-fg' : 'bg-zinc-50 text-ink-tertiary')}
@@ -179,8 +193,8 @@ function DriveLine({ service, statusById }) {
     >
       <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: late ? 1 : 0.4, flexShrink: 0 }} />
       <span className="min-w-0">
-        ~{service.driveFromPrevMin} min drive{from}
-        {late && ` · ~${service.driveLateMin} min past the 2-hour arrival window`}
+        {service.driveFromPrevMin} min drive{from}
+        {late && ` · ${lateLabel(service.driveLateMin)} past ${missed}`}
       </span>
     </div>
   );

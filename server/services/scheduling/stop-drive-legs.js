@@ -25,6 +25,10 @@ function minutesOf(hhmm) {
   return m ? Number(m[1]) * 60 + Number(m[2]) : Infinity;
 }
 
+function hhmmOf(min) {
+  return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+}
+
 // The tie-proximity rule (schedule-tie-proximity.js hasCoords): a 0/0 pin
 // is a failed geocode, never a place.
 function hasGeo(s) {
@@ -164,12 +168,10 @@ function lateByStop(stops, legs) {
       // Only work the tech has not reached can still run late.
       if (p.open) piecesOf.get(st.legs[0].id).push({ id, ids: p.ids });
       if (j === 0 && i > 0) legIn.set(id, legs[i - 1]);
-      const hh = String(Math.floor(p.start / 60)).padStart(2, '0');
-      const mm = String(p.start % 60).padStart(2, '0');
       seq.push({
         id,
         arrivalRange: p.range || null,
-        window_start: `${hh}:${mm}`,
+        window_start: hhmmOf(p.start),
         estimated_duration_minutes: p.work,
         memberIds: [p.id],
         lat: st.anchor.lat,
@@ -185,12 +187,19 @@ function lateByStop(stops, legs) {
     legMinutes: (_prev, stop) => legIn.get(stop.id) ?? 0,
   });
   const lateById = new Map((sim?.arrivals || []).map((a) => [a.id, a.lateMinutes]));
-  // Per card: the largest lateness, and the unreached visits that carry it
+  const rangeById = new Map(seq.map((row) => [row.id, rangeFor(row)]));
+  // Per card: the largest lateness, the window it misses (the line names
+  // it: a split visit's 13:00 member, or a visit group's shared range, is
+  // not the card's own start + 2 h), and the unreached visits that carry it
   // (the phone drops the red once all of them are on the way).
   return new Map([...piecesOf].map(([cardId, pieces]) => {
     const late = pieces.filter((p) => (lateById.get(p.id) || 0) > 0);
+    const worst = late.reduce((w, p) => (!w || lateById.get(p.id) > lateById.get(w.id) ? p : w), null);
+    const missed = worst ? rangeById.get(worst.id) : null;
     return [cardId, {
-      min: Math.max(0, ...late.map((p) => lateById.get(p.id))),
+      min: worst ? lateById.get(worst.id) : 0,
+      windowStart: missed ? hhmmOf(missed.startMin) : null,
+      windowEnd: missed ? hhmmOf(missed.endMin) : null,
       ids: late.flatMap((p) => p.ids),
     }];
   }));
@@ -217,8 +226,9 @@ function stopOrder(a, b) {
  * in is also stamped once (`driveInShown`, on the stop's first card) with
  * the stop it comes from (`drivePrevName`) and `driveLateMin`: the minutes
  * past the customer's 2-hour arrival window (start + 120) the tech lands if
- * the previous stop ends as planned, else null. A leg that cannot be
- * measured marks its stop's first card `driveLegUnknown`.
+ * the previous stop ends as planned, else null, with that window as
+ * `driveLateWindowStart` / `driveLateWindowEnd` ("HH:MM"). A leg that
+ * cannot be measured marks its stop's first card `driveLegUnknown`.
  */
 function attachDriveLegs(services) {
   // A stop with no start time (the grid's all-day strip) has no place in
@@ -233,6 +243,8 @@ function attachDriveLegs(services) {
     s.drivePrevName = null;
     s.driveLateMin = null;
     s.driveLateServiceIds = null;
+    s.driveLateWindowStart = null;
+    s.driveLateWindowEnd = null;
     s.driveLegUnknown = false;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
@@ -293,6 +305,8 @@ function attachDriveLegs(services) {
     if (risk?.min > 0) {
       first.driveLateMin = risk.min;
       first.driveLateServiceIds = risk.ids;
+      first.driveLateWindowStart = risk.windowStart;
+      first.driveLateWindowEnd = risk.windowEnd;
     }
   }
 }
