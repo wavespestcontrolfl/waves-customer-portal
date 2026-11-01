@@ -162,6 +162,9 @@ describe('auth and the dark route', () => {
     const big = await post(JSON.stringify({ id: 'x', caption: 'c'.repeat(300 * 1024) }));
     expect(big.status).toBe(413);
     expect(big.json.reason).toBe('payload_too_large');
+    // Express routes /POSTS to the same handler, so the cap must apply there too.
+    const upper = await call('/POSTS', { body: JSON.stringify({ id: 'x', caption: 'c'.repeat(300 * 1024) }) });
+    expect(upper.status).toBe(413);
   });
 });
 

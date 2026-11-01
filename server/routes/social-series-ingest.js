@@ -163,9 +163,11 @@ function ingestBodyErrorHandler(err, req, res, next) {
 
 const mediaParser = express.raw({ type: Object.keys(MEDIA_TYPES), limit: MEDIA_LIMIT });
 const postsParser = express.json({ limit: POSTS_LIMIT });
-// The chain is mounted on the whole prefix, so each parser runs only on its path.
+// The chain is mounted on the whole prefix, so each parser runs only on its
+// path. Case-insensitive like Express routing, so /MEDIA cannot reach the
+// handler without its capped parser.
 function pathIs(req, path) {
-  return req.path.replace(/\/+$/, '') === path;
+  return req.path.replace(/\/+$/, '').toLowerCase() === path;
 }
 function mediaPreParser(req, res, next) {
   return pathIs(req, '/media') ? mediaParser(req, res, next) : next();
