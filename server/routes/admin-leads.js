@@ -20,7 +20,7 @@ const { leadAddressFields } = require('../utils/address-normalizer');
 const logger = require('../services/logger');
 const { nanpPhoneProblem } = require('../utils/phone');
 const { leadServiceDisplay, catalogNameIndex } = require('../utils/lead-service-display');
-const { leadServiceDisplayLive } = require('../config/feature-gates');
+const { leadServiceDisplayLive, leadNoResponseReasonLive } = require('../config/feature-gates');
 
 // GATE_LEAD_SERVICE_DISPLAY: the Leads screen shows each lead's service the
 // way the booking catalog names it. Read-only: service_interest is untouched,
@@ -507,11 +507,17 @@ router.get('/analytics/lost', async (req, res, next) => {
     const start = start_date ? parseInclusiveStart(start_date) : parseETDateTime(`${etDateString().slice(0, 4)}-01-01T00:00:00`);
     const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
+    // GATE_LEAD_NO_RESPONSE_REASON: the staleness sweep parks quiet leads as
+    // 'unresponsive' with lost_reason 'no_response'; count them as reasons too.
+    const countUnresponsive = leadNoResponseReasonLive();
     const reasons = await db('leads')
       .select('lost_reason')
       .count('* as count')
       .whereNull('deleted_at')
-      .where('status', 'lost')
+      .modify((q) => {
+        if (countUnresponsive) q.whereIn('status', ['lost', 'unresponsive']);
+        else q.where('status', 'lost');
+      })
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
       .groupBy('lost_reason')

@@ -109,6 +109,27 @@ test.each(['Jamie Example', '(941) 555-0101'])('search %s shares row/count crite
   expect(rows.sql).toContain("CONCAT_WS(' '"); expect(rows.bindings).toContain(`%${search}%`);
   if (search.includes('941')) expect(rows.bindings).toContain('%9415550101%');
 });
+describe('GET /analytics/lost and GATE_LEAD_NO_RESPONSE_REASON', () => {
+  afterEach(() => { delete process.env.GATE_LEAD_NO_RESPONSE_REASON; });
+  test('gate off: only lost leads are counted', async () => {
+    lead = null;
+    expect((await request('get', '/analytics/lost', {}, { start_date: '2030-09-24', end_date: '2030-09-24' })).error).toBeUndefined();
+    expect(queries[0].sql).toContain('"status" = ?');
+    expect(queries[0].sql).not.toContain('"status" in');
+    expect(queries[0].bindings).toContain('lost');
+    expect(queries[0].bindings).not.toContain('unresponsive');
+  });
+  test('gate on: unresponsive leads are counted too, so no_response shows as a reason', async () => {
+    process.env.GATE_LEAD_NO_RESPONSE_REASON = 'true';
+    lead = null;
+    expect((await request('get', '/analytics/lost', {}, { start_date: '2030-09-24', end_date: '2030-09-24' })).error).toBeUndefined();
+    expect(queries[0].sql).toContain('"status" in (?, ?)');
+    expect(queries[0].bindings).toEqual(expect.arrayContaining(['lost', 'unresponsive']));
+    // The competitor breakdown stays on lost leads.
+    expect(queries[1].bindings).toContain('lost');
+    expect(queries[1].bindings).not.toContain('unresponsive');
+  });
+});
 test.each(['/analytics/funnel', '/analytics/response', '/analytics/lost'])('%s uses complete ET days', async path => {
   lead = null;
   expect((await request('get', path, {}, { start_date: '2030-09-24', end_date: '2030-09-24' })).error).toBeUndefined();
