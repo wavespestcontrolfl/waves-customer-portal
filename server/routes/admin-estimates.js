@@ -4336,7 +4336,9 @@ router.get('/', async (req, res, next) => {
       try {
         lastCalledById = await require('../services/estimate-call-list').lastCalledAtByEstimateId(db, estimates);
       } catch (err) {
-        logger.warn(`[estimates] call-list lastCalledAt read failed: ${err.message}`);
+        // Never err.message: a Knex error carries the SQL with its bindings, i.e. every customer
+        // phone in the batch's whereIn (AGENTS.md, PII in logs). The driver code is enough.
+        logger.warn(`[estimates] call-list lastCalledAt read failed (${err?.code || 'no code'})`);
       }
     }
 
