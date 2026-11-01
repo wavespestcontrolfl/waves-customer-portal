@@ -88,16 +88,20 @@ describe('writer rules (shared by the customer and the admin writer)', () => {
 describe('responses', () => {
   const row = { id: 'p1', away_watch_from: new Date('2026-06-01T00:00:00Z'), away_watch_until: '2026-09-15', parking_notes: 'x' };
 
-  test('gate off: the two fields are removed from a row (snake or camel)', () => {
-    expect(AwayWatch.withoutAwayWatch(row)).toEqual({ id: 'p1', parking_notes: 'x' });
-    expect(AwayWatch.withoutAwayWatch({ awayWatchFrom: null, awayWatchUntil: null, a: 1 })).toEqual({ a: 1 });
-    expect(AwayWatch.withoutAwayWatch(null)).toBeNull();
+  const member = { waveguard_tier: 'Gold' };
+  const nonMember = { waveguard_tier: null, monthly_rate: 0 };
+
+  test('gate off: the two fields are removed from a row (snake or camel), member or not', () => {
+    expect(AwayWatch.awayWatchFieldsFor(member, row)).toEqual({ id: 'p1', parking_notes: 'x' });
+    expect(AwayWatch.awayWatchFieldsFor(member, { awayWatchFrom: null, awayWatchUntil: null, a: 1 })).toEqual({ a: 1 });
+    expect(AwayWatch.awayWatchFieldsFor(member, null)).toBeNull();
   });
 
-  test('gate on: the fields stay and come back as plain ET day strings', () => {
+  test('gate on: a member gets the fields as plain ET day strings; a non-member never sees them', () => {
     process.env[GATE] = 'true';
-    expect(AwayWatch.withoutAwayWatch(row)).toBe(row);
-    expect(AwayWatch.withAwayWatchDays(row)).toMatchObject({ away_watch_from: '2026-06-01', away_watch_until: '2026-09-15' });
+    expect(AwayWatch.awayWatchFieldsFor(member, row)).toMatchObject({ away_watch_from: '2026-06-01', away_watch_until: '2026-09-15', parking_notes: 'x' });
+    expect(AwayWatch.awayWatchFieldsFor(nonMember, row)).toEqual({ id: 'p1', parking_notes: 'x' });
+    expect(AwayWatch.awayWatchFieldsFor(null, row)).toEqual({ id: 'p1', parking_notes: 'x' });
   });
 
   test('gate off: withAwayWatchDays leaves the row alone', () => {
@@ -141,20 +145,21 @@ describe('awayWatchClosePhotoCount', () => {
 describe('tech job-card lines', () => {
   const AWAY = 'Away Watch: member away until 2026-09-30. Take 3 photos of the outside of the home from the ground and note standing water.';
   const WELCOME = 'Welcome Home: last visit before the member is back. Do a lanai cobweb sweep (no product).';
-  // property_preferences answers .first(); scheduled_services answers the next-visit .first().
+  // The window row (property_preferences joined to the customer's membership facts) answers .first();
+  // scheduled_services answers the next-visit .first().
   const fakeDb = ({ prefs, next = null }) => {
     const reads = [];
     const dbh = (table) => {
       reads.push(table);
       const chain = {};
-      for (const m of ['where', 'whereNotIn', 'orderBy']) chain[m] = () => chain;
-      chain.first = async () => (table === 'property_preferences' ? prefs : next);
+      for (const m of ['join', 'where', 'whereNotIn', 'orderBy']) chain[m] = () => chain;
+      chain.first = async () => (table === 'property_preferences as pp' ? prefs : next);
       return chain;
     };
     dbh.reads = reads;
     return dbh;
   };
-  const prefs = { away_watch_from: '2026-09-01', away_watch_until: '2026-09-30' };
+  const prefs = { away_watch_from: '2026-09-01', away_watch_until: '2026-09-30', waveguard_tier: 'Gold', monthly_rate: 0 };
   const lines = (visitDay, over = {}) => AwayWatch.awayWatchCardLines(fakeDb({ prefs, ...over }), 'c1', visitDay);
 
   beforeEach(() => { process.env[GATE] = 'true'; });
@@ -177,6 +182,12 @@ describe('tech job-card lines', () => {
 
   test('a visit with another one still before the back day does not get Welcome Home', async () => {
     expect((await lines('2026-09-20', { next: { scheduled_date: '2026-09-29' } })).lines).toEqual([AWAY]);
+  });
+
+  test('Away Watch is a member perk: dates on a non-member\'s row add nothing; a legacy member with a monthly rate counts', async () => {
+    expect(await lines('2026-09-04', { prefs: { ...prefs, waveguard_tier: null, monthly_rate: 0 } })).toBeNull();
+    expect(await lines('2026-09-04', { prefs: { ...prefs, waveguard_tier: 'none', monthly_rate: 0 } })).toBeNull();
+    expect(await lines('2026-09-04', { prefs: { ...prefs, waveguard_tier: null, monthly_rate: 89 }, next: { scheduled_date: '2026-09-18' } })).toEqual({ lines: [AWAY] });
   });
 
   test('one date missing, no row: nothing', async () => {
@@ -206,7 +217,7 @@ describe('tech job-card lines', () => {
     };
     const visit = (scheduled_date) => ({ id: 'svc1', customer_id: 'c1', scheduled_date, service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges: false });
     const card = (scheduledDate, rows = {}) => jobCard.buildJobCard('svc1', {
-      dbh: factsDb({ 'scheduled_services as ss': visit(scheduledDate), property_preferences: prefs, ...rows }),
+      dbh: factsDb({ 'scheduled_services as ss': visit(scheduledDate), property_preferences: prefs, 'property_preferences as pp': prefs, ...rows }),
       deps: { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } },
       now: new Date('2026-09-04T12:00:00Z'),
     });

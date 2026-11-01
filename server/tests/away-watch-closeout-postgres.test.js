@@ -84,10 +84,10 @@ const PHOTO = { data: 'data:image/jpeg;base64,aGVsbG8=', name: 'outside.jpg' };
 const photos = (n) => Array.from({ length: n }, (_, i) => ({ ...PHOTO, name: `outside-${i + 1}.jpg` }));
 
 // A pest visit today for a member whose Away Watch window is [from, until).
-async function seedAwayVisit({ from = day(-3), until = day(20), window = true } = {}) {
+async function seedAwayVisit({ from = day(-3), until = day(20), window = true, tier = 'Gold' } = {}) {
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), serviceKey: `fixture_pest_${randomUUID().slice(0, 8)}` };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Away', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
-    email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false });
+    email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, waveguard_tier: tier });
   const [property] = await mockPg('customer_properties').insert({ customer_id: f.customerId, address_line1: '100 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: true }).returning('*');
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `${PEST_TYPE} ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
@@ -212,6 +212,14 @@ postgres('Away Watch closeout photo minimum', () => {
     const f = await seedAwayVisit({ from: day(-10), until: day(0) });
     try {
       expect((await complete(f)).status).toBe(200);
+    } finally { await cleanup(f); }
+  });
+
+  test('gate on, a non-member with away dates on file: no minimum (Away Watch is a member perk)', async () => {
+    const f = await seedAwayVisit({ tier: null });
+    try {
+      expect((await complete(f)).status).toBe(200);
+      expect(await statusOf(f)).toBe('completed');
     } finally { await cleanup(f); }
   });
 

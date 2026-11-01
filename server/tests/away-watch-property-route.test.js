@@ -4,10 +4,13 @@
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
+// Away Watch is a member perk: the logged-in customer is a WaveGuard member unless a test says otherwise.
+const MEMBER = { id: 'cust-1', waveguard_tier: 'Gold', lawn_type: null };
+const mockSession = { customer: MEMBER };
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => {
     req.customerId = 'cust-1';
-    req.customer = { id: 'cust-1', waveguard_tier: null, lawn_type: null };
+    req.customer = mockSession.customer;
     next();
   },
 }));
@@ -141,5 +144,19 @@ describe('gate on', () => {
     // Both dates are named, so the app never re-queues one of them alone.
     expect(body.rejected.map((r) => r.field)).toEqual(['awayWatchFrom', 'awayWatchUntil']);
     expect(db._state.row).toBeNull();
+  });
+
+  test('a non-member gets no flag and no days, and a non-member\'s dates are stripped, never stored', async () => {
+    mockSession.customer = { id: 'cust-1', waveguard_tier: null, monthly_rate: 0, lawn_type: null };
+    try {
+      const get = await call('GET');
+      expect(get.body).not.toHaveProperty('awayWatchEnabled');
+      expect(get.body.preferences || {}).not.toHaveProperty('awayWatchFrom');
+      const put = await call('PUT', { awayWatchFrom: day(1), awayWatchUntil: day(30), parkingNotes: 'Driveway' });
+      expect(put.status).toBe(200);
+      expect(db._state.row.away_watch_from).toBeUndefined();
+      expect(db._state.row.away_watch_until).toBeUndefined();
+      expect(put.body.preferences).not.toHaveProperty('awayWatchFrom');
+    } finally { mockSession.customer = MEMBER; }
   });
 });

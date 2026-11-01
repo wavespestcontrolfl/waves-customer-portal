@@ -24,6 +24,7 @@
 
 const gates = require('../config/feature-gates');
 const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
+const { isMembershipCustomerRow } = require('./waveguard-existing-services');
 
 const AWAY_WATCH_MIN_PHOTOS = 3;
 // The longest stretch one window may cover (about eight months: a full
@@ -58,6 +59,12 @@ function awayWatchLive() {
   return typeof gates.awayWatchLive === 'function' && gates.awayWatchLive();
 }
 
+// Away Watch is a WaveGuard member perk: the app offers the dates, and every consumer honors them, only for a
+// member (isMembershipCustomerRow, the portal's one membership rule). `customer` is a customers row.
+function awayWatchOpenFor(customer) {
+  return awayWatchLive() && !!customer && isMembershipCustomerRow(customer);
+}
+
 // The member's window from a property_preferences row: { from, until } as ET
 // day strings, or null (gate off, either date missing, or no row).
 function awayWatchWindow(prefs) {
@@ -69,10 +76,15 @@ function dayInWindow(window, day) {
   return Boolean(window && day && window.from <= day && day < window.until);
 }
 
+// The member's window, read with the membership facts in one row: dates a non-member saved earlier (or the office
+// set) never add a job card line, a photo minimum or a visit brief line.
 async function loadAwayWatchWindow(dbh, customerId) {
   if (!awayWatchLive() || !customerId) return null;
-  const prefs = await dbh('property_preferences').where({ customer_id: customerId }).first('away_watch_from', 'away_watch_until');
-  return awayWatchWindow(prefs);
+  const row = await dbh('property_preferences as pp')
+    .join('customers as c', 'c.id', 'pp.customer_id')
+    .where('pp.customer_id', customerId)
+    .first('pp.away_watch_from', 'pp.away_watch_until', 'c.waveguard_tier', 'c.monthly_rate');
+  return row && isMembershipCustomerRow(row) ? awayWatchWindow(row) : null;
 }
 
 // Closeout: is this visit's own scheduled day inside the member's window?
@@ -141,9 +153,10 @@ function stripAwayWatchDates(obj) {
   return copy;
 }
 
-// Gate off: the two fields are not part of any response.
-function withoutAwayWatch(obj) {
-  return awayWatchLive() ? obj : stripAwayWatchDates(obj);
+// A preferences response for this customer: the two days as plain ET days for a member while the gate is on, and
+// gone for everyone else.
+function awayWatchFieldsFor(customer, obj) {
+  return awayWatchOpenFor(customer) ? withAwayWatchDays(obj) : stripAwayWatchDates(obj);
 }
 
 // Gate on: the two days as plain ET day strings (a pg date can arrive as a Date).
@@ -163,6 +176,8 @@ module.exports = {
   NOT_PERFORMED_OUTCOMES,
   CLOSEOUT_PHOTO_MESSAGE,
   awayWatchLive,
+  awayWatchOpenFor,
+  awayWatchFieldsFor,
   awayWatchWindow,
   dayInWindow,
   loadAwayWatchWindow,
@@ -171,7 +186,6 @@ module.exports = {
   awayWatchClosePhotoCount,
   awayWatchPairError,
   stripAwayWatchDates,
-  withoutAwayWatch,
   withAwayWatchDays,
   MESSAGES,
 };

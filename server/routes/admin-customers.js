@@ -3820,9 +3820,9 @@ router.get('/:id', async (req, res, next) => {
         address: { line1: n.address_line1, line2: n.address_line2, city: n.city, state: n.state, zip: n.zip },
       })),
       tags: tags.map(t => t.tag),
-      // GATE_AWAY_WATCH: Customer 360 shows the Away Watch dates only while the server says the gate is live.
-      ...(AwayWatch.awayWatchLive() ? { awayWatchEnabled: true } : {}),
-      interactions, preferences: AwayWatch.withoutAwayWatch(AwayWatch.withAwayWatchDays(prefs)), services, payments, scheduled, upcomingScheduled, smsLog,
+      // GATE_AWAY_WATCH: Customer 360 shows the Away Watch dates only for a WaveGuard member while the gate is live.
+      ...(AwayWatch.awayWatchOpenFor(c) ? { awayWatchEnabled: true } : {}),
+      interactions, preferences: AwayWatch.awayWatchFieldsFor(c, prefs), services, payments, scheduled, upcomingScheduled, smsLog,
       visitStats: visitStatsRow ? {
         count: Number(visitStatsRow.count || 0),
         firstDate: dateOnlyForApi(visitStatsRow.first_date),
@@ -5361,9 +5361,15 @@ async function writeAdminPreferences(customerId, updates, outcome = {}, { render
 router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => {
   try {
     const customerId = req.params.id;
+    // Away Watch is members-only (GATE_AWAY_WATCH): read the membership facts once while the gate is on, so a
+    // non-member's dates are an unknown field and a member's saved dates still come back on every save.
+    const awayWatchCustomer = AwayWatch.awayWatchLive()
+      ? await db('customers').where({ id: customerId }).first('waveguard_tier', 'monthly_rate')
+      : null;
+    const prefsBody = AwayWatch.awayWatchOpenFor(awayWatchCustomer) ? req.body : AwayWatch.stripAwayWatchDates(req.body);
     // A mixed batch saves the valid fields and 200s with `rejected` (the
     // portal's per-field contract); nothing valid left is a 400 below.
-    const { value, rejected } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, req.body);
+    const { value, rejected } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, prefsBody);
     const snakeBody = prefsTransformKeys(value, prefsCamelToSnake);
     const updates = {};
     for (const field of ADMIN_PREFS_ALLOWED_FIELDS) {
@@ -5450,7 +5456,7 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     }).catch((err) => logger.warn(`[customers:${customerId}] property_preferences audit failed: ${err.message}`));
     logger.info(`[customers] property_preferences updated for ${customerId}: ${JSON.stringify({ fields: loggedFields })}`);
 
-    res.json({ success: true, preferences: AwayWatch.withoutAwayWatch(AwayWatch.withAwayWatchDays(preferences)), saved: true, ...(rejected.length ? { rejected } : {}) });
+    res.json({ success: true, preferences: AwayWatch.awayWatchFieldsFor(awayWatchCustomer, preferences), saved: true, ...(rejected.length ? { rejected } : {}) });
   } catch (err) { next(err); }
 });
 

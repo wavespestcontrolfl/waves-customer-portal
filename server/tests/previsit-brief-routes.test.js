@@ -69,6 +69,13 @@ jest.mock('../services/previsit-brief', () => ({
   VISIT_BRIEF_TYPE: 'visit_brief_v1',
 }));
 
+// GATE_AWAY_WATCH: the window reader is unit-tested in away-watch.test.js; here only its answer for this visit.
+const mockAwayWatchCardLines = jest.fn(async () => null);
+jest.mock('../services/away-watch', () => ({
+  ...jest.requireActual('../services/away-watch'),
+  awayWatchCardLines: (...args) => mockAwayWatchCardLines(...args),
+}));
+
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
@@ -261,6 +268,41 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
       expect(res.status).toBe(200);
       expect((await res.json()).brief).toEqual({ risk_score: 'High' });
     });
+  });
+
+  test('Away Watch: a member away on the visit day gets the job card lines on the brief, after the ownership recheck', async () => {
+    const AWAY = { lines: ['Away Watch: member away until 2026-09-30. Take 3 photos of the outside of the home from the ground and note standing water.'] };
+    mockAwayWatchCardLines.mockResolvedValue(AWAY);
+    try {
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1', pre_service_brief: null, pre_service_brief_type: null } });
+      await withServer(async (base) => {
+        const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+        expect(body).toEqual({ brief: null, awayWatch: AWAY });
+        expect(mockAwayWatchCardLines).toHaveBeenCalledWith(db, 'cust-1', '2026-08-13');
+      });
+      // A served brief carries them too.
+      mockGateEnabled.mockReturnValue(true);
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1' } });
+      await withServer(async (base) => {
+        const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+        expect(body.awayWatch).toEqual(AWAY);
+        expect(body.brief).toBeTruthy();
+      });
+      // Reassigned between the fetch and the lines: the former technician never gets the away window.
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1', pre_service_brief: null, pre_service_brief_type: null } }, { ownsVisit: true, recheckOwns: false });
+      await withServer(async (base) => {
+        const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+        expect(body).not.toHaveProperty('awayWatch');
+      });
+      // A read failure omits the key, never the brief.
+      mockAwayWatchCardLines.mockRejectedValue(new Error('db down'));
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1', pre_service_brief: null, pre_service_brief_type: null } });
+      await withServer(async (base) => {
+        const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ brief: null });
+      });
+    } finally { mockAwayWatchCardLines.mockReset(); mockAwayWatchCardLines.mockResolvedValue(null); }
   });
 
   test('no stored brief → { brief: null }', async () => {

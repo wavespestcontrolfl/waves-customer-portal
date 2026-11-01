@@ -1094,8 +1094,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       wdo,
       visitBrief: wdo ? null : servedBrief,
       facts: d.brief?.facts || null,
+      awayWatch: d.brief?.awayWatch || null,
     };
   });
+  // GATE_AWAY_WATCH: the member's Away Watch lines (3 outside photos; Welcome Home sweep) are per member, the same on
+  // every service of the stop, so the first member that answered carries them.
+  const awayWatchLines = memberBits.map((m) => m.awayWatch?.lines).find((lines) => Array.isArray(lines) && lines.length) || null;
   // Property access is shared across the stop — first member that
   // answered carries it. The live deterministic facts WIN over a cached
   // brief's copy: the brief regenerates on the :19/:49 sweep, so a gate
@@ -1152,6 +1156,13 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         visitIds={stop.services.map((m) => m.id).filter(Boolean)}
         shownCodes={CODE_LABELS.map(([key]) => [PROFILE_CODE_KIND[key], access?.codes?.[key]]).filter(([, v]) => Boolean(v))}
       />
+
+      {awayWatchLines && (
+        <div data-testid="visit-brief-away-watch">
+          <SectionLabel>Away Watch</SectionLabel>
+          {awayWatchLines.map((line) => <p key={line} style={factRowStyle}>{line}</p>)}
+        </div>
+      )}
 
       <CustomerFlaggedSection
         serviceId={customerFlaggedMember?.service?.id}

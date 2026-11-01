@@ -553,7 +553,21 @@ describe('the new-sod record — staff-only sodLaidOn / sodCovers / sodArea', ()
 describe('PUT /api/admin/customers/:id/property-preferences — Away Watch dates', () => {
   const { etDateString, addETDays } = require('../utils/datetime-et');
   const day = (n) => etDateString(addETDays(new Date(), n));
-  afterEach(() => { delete process.env.GATE_AWAY_WATCH; });
+  const nonMember = mockState.customerRow;
+  // Away Watch is a member perk: these cases run for a WaveGuard member unless a test says otherwise.
+  beforeEach(() => { mockState.customerRow = { ...nonMember, waveguard_tier: 'Gold' }; });
+  afterEach(() => { delete process.env.GATE_AWAY_WATCH; mockState.customerRow = nonMember; });
+
+  test('gate on, a non-member: the dates are an unknown field, never stored or returned', async () => {
+    process.env.GATE_AWAY_WATCH = 'true';
+    mockState.customerRow = nonMember;
+    const res = await putPrefs({ awayWatchFrom: day(1), awayWatchUntil: day(40), accessNotes: 'Side gate' });
+    expect(res.status).toBe(200);
+    expect(mockState.prefsRow.access_notes).toBe('Side gate');
+    expect(mockState.prefsRow.away_watch_from).toBeUndefined();
+    expect(res.body.preferences).not.toHaveProperty('awayWatchFrom');
+    expect(res.body.preferences).not.toHaveProperty('away_watch_from');
+  });
 
   test('gate on: the pair saves and comes back as plain ET day strings', async () => {
     process.env.GATE_AWAY_WATCH = 'true';
