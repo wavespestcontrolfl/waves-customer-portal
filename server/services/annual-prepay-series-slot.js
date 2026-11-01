@@ -39,6 +39,18 @@ function hhmm(value) {
   return m ? `${m[1]}:${m[2]}` : null;
 }
 
+// The start a seed may copy: whole hours only (AGENTS.md: window_start is always HH:00:00).
+function wholeHourStart(value) {
+  const start = hhmm(value);
+  return start && start.endsWith(':00') ? start : null;
+}
+
+// A best-effort read on a transaction runs in a savepoint: a failed query rolls back only the
+// savepoint, so the caller's transaction (the seed insert, a payment activation) stays usable.
+function inSavepoint(conn, read) {
+  return conn && conn.isTransaction && typeof conn.transaction === 'function' ? conn.transaction((sp) => read(sp)) : read(conn);
+}
+
 function defaultNormalize(value) {
   return require('./annual-prepay-renewals').normalizeCoverageServiceType(value);
 }
@@ -65,7 +77,8 @@ async function assignableTechnicianId(conn, technicianId) {
 /**
  * The slot a term's seeded visits copy, or null. `{ technicianId, windowStart }`:
  * technicianId is null when the source's technician is not assignable (the
- * time may still be copied). Never throws.
+ * time may still be copied); windowStart is null when the source starts off the
+ * hour (the technician is still copied). Reads in a savepoint. Never throws.
  */
 async function coverageSeriesSlot(conn, {
   customerId, coverageServiceType, propertyId = null, today, normalize = defaultNormalize,
@@ -73,21 +86,23 @@ async function coverageSeriesSlot(conn, {
   try {
     if (!customerId || !coverageServiceType) return null;
     const wanted = normalize(coverageServiceType);
-    const rows = await conn('scheduled_services')
-      .where({ customer_id: customerId })
-      .whereNotIn('status', NOT_A_SOURCE_STATUSES)
-      .whereNotNull('technician_id')
-      .whereNotNull('window_start')
-      .select('id', 'service_type', 'property_id', 'scheduled_date', 'technician_id', 'window_start');
-    const sources = (rows || []).filter((row) => normalize(row.service_type) === wanted
-      && (!propertyId || row.property_id == null || String(row.property_id) === String(propertyId))
-      && hhmm(row.window_start));
-    const source = pickSource(sources, today);
-    if (!source) return null;
-    return {
-      technicianId: await assignableTechnicianId(conn, source.technician_id),
-      windowStart: hhmm(source.window_start),
-    };
+    return await inSavepoint(conn, async (q) => {
+      const rows = await q('scheduled_services')
+        .where({ customer_id: customerId })
+        .whereNotIn('status', NOT_A_SOURCE_STATUSES)
+        .whereNotNull('technician_id')
+        .whereNotNull('window_start')
+        .select('id', 'service_type', 'property_id', 'scheduled_date', 'technician_id', 'window_start');
+      const sources = (rows || []).filter((row) => normalize(row.service_type) === wanted
+        && (!propertyId || row.property_id == null || String(row.property_id) === String(propertyId))
+        && hhmm(row.window_start));
+      const source = pickSource(sources, today);
+      if (!source) return null;
+      return {
+        technicianId: await assignableTechnicianId(q, source.technician_id),
+        windowStart: wholeHourStart(source.window_start),
+      };
+    });
   } catch (err) {
     logger.warn(`[annual-prepay-series-slot] customer ${customerId} slot read failed (${err.message}) — seeding without a technician or time`);
     return null;
@@ -95,14 +110,14 @@ async function coverageSeriesSlot(conn, {
 }
 
 // The `${technicianId}:${date}` keys of the dates in `dates` the slot's
-// technician is marked out. Empty when the slot has no technician. Never throws.
+// technician is marked out. Empty when the slot has no technician. Reads in a savepoint. Never throws.
 async function seriesSlotAbsentDays(conn, slot, dates) {
   const sorted = (dates || []).map(ymd).filter(Boolean).sort();
   if (!slot?.technicianId || !sorted.length) return new Set();
   try {
-    return await absentTechDays(conn, {
+    return await inSavepoint(conn, (q) => absentTechDays(q, {
       dateFrom: sorted[0], dateTo: sorted[sorted.length - 1], technicianIds: [slot.technicianId],
-    });
+    }));
   } catch (err) {
     logger.warn(`[annual-prepay-series-slot] technician ${slot.technicianId} absence read failed (${err.message}) — seeding without a technician`);
     return new Set([...sorted].map((d) => `${slot.technicianId}:${d}`));
@@ -135,7 +150,7 @@ async function seriesSlotHandoff(conn, row, { cols = null, now = new Date() } = 
   if (!row?.window_start) return null;
   const planTakenHour = require('./scheduling/plan-taken-hour');
   try {
-    if (!(await planTakenHour.takenHourHandoff(conn, row, { now }))) return null;
+    if (!(await inSavepoint(conn, (q) => planTakenHour.takenHourHandoff(q, row, { now })))) return null;
     return planTakenHour.handoffFields(row.scheduled_date, cols);
   } catch (err) {
     const day = ymd(row.scheduled_date);
@@ -147,6 +162,7 @@ async function seriesSlotHandoff(conn, row, { cols = null, now = new Date() } = 
 }
 
 module.exports = {
+  inSavepoint,
   coverageSeriesSlot,
   seriesSlotAbsentDays,
   seriesSlotPatch,

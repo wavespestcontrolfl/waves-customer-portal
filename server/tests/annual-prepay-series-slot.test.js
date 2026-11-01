@@ -2,7 +2,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const logger = require('../services/logger');
 const {
-  coverageSeriesSlot, seriesSlotAbsentDays, seriesSlotPatch, seriesSlotHandoff,
+  coverageSeriesSlot, seriesSlotAbsentDays, seriesSlotPatch, seriesSlotHandoff, inSavepoint,
 } = require('../services/annual-prepay-series-slot');
 
 // A knex-shaped conn: scheduled_services resolves to `visits`, technicians to `.first()`.
@@ -38,13 +38,18 @@ describe('coverageSeriesSlot', () => {
     const { conn } = makeConn({
       visits: [
         visit({ id: 'old', scheduled_date: '2026-09-20', window_start: '08:00' }),
-        visit({ id: 'new', scheduled_date: '2026-10-20', window_start: '10:30:00' }),
+        visit({ id: 'new', scheduled_date: '2026-10-20', window_start: '10:00:00' }),
         visit({ id: 'future', scheduled_date: '2026-12-20', window_start: '13:00' }),
         visit({ id: 'other', service_type: 'Lawn Care', scheduled_date: '2026-10-25', window_start: '15:00' }),
       ],
       tech: activeTech,
     });
-    await expect(coverageSeriesSlot(conn, base)).resolves.toEqual({ technicianId: 'tech-1', windowStart: '10:30' });
+    await expect(coverageSeriesSlot(conn, base)).resolves.toEqual({ technicianId: 'tech-1', windowStart: '10:00' });
+  });
+
+  test('an off-hour start is not copied (window_start is always on the hour); the technician still is', async () => {
+    const { conn } = makeConn({ visits: [visit({ window_start: '10:30:00' })], tech: activeTech });
+    await expect(coverageSeriesSlot(conn, base)).resolves.toEqual({ technicianId: 'tech-1', windowStart: null });
   });
 
   test('with no past visit it takes the earliest future one', async () => {
@@ -181,5 +186,39 @@ describe('seriesSlotHandoff', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('seeding without a time for the night tool'));
     await expect(seriesSlotHandoff({}, { scheduled_date: '2026-11-03', window_start: '09:00' }, { cols, now })).resolves.toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('keeping the copied time'));
+  });
+});
+
+// Pre-push audit P1: a failed query inside a PostgreSQL transaction aborts it even when the error is caught, so
+// every best-effort read on the seed's transaction runs in a savepoint (knex nested transaction).
+describe('inSavepoint', () => {
+  test('on a transaction the read runs on a savepoint; on a plain connection it runs directly', async () => {
+    const savepoint = { tag: 'sp' };
+    const trx = { isTransaction: true, transaction: jest.fn(async (cb) => cb(savepoint)) };
+    await expect(inSavepoint(trx, async (q) => q.tag)).resolves.toBe('sp');
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    const plain = { tag: 'plain' };
+    await expect(inSavepoint(plain, async (q) => q.tag)).resolves.toBe('plain');
+  });
+
+  test('a slot read that fails inside the savepoint gives null and never queries the outer transaction', async () => {
+    const { conn: savepoint } = makeConn({ isTransaction: true, throwOn: 'scheduled_services' });
+    const outer = jest.fn(() => { throw new Error('outer transaction queried'); });
+    outer.isTransaction = true;
+    outer.transaction = jest.fn(async (cb) => cb(savepoint));
+    await expect(coverageSeriesSlot(outer, base)).resolves.toBeNull();
+    expect(outer.transaction).toHaveBeenCalledTimes(1);
+    expect(outer).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom scheduled_services'));
+  });
+
+  test('the taken-hour probe runs on a savepoint of the seed transaction', async () => {
+    const PlanTakenHour = require('../services/scheduling/plan-taken-hour');
+    const savepoint = { tag: 'sp' };
+    const trx = { isTransaction: true, transaction: jest.fn(async (cb) => cb(savepoint)) };
+    const spy = jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+    await expect(seriesSlotHandoff(trx, { scheduled_date: '2026-12-15', window_start: '09:00' })).resolves.toBeNull();
+    expect(spy.mock.calls[0][0]).toBe(savepoint);
+    spy.mockRestore();
   });
 });
