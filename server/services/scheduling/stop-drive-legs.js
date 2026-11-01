@@ -188,31 +188,29 @@ function planRoute(stops, legs) {
 }
 
 // Today (owner 2026-11-01, "build clock"): the day restarts from now at the
-// last stop, in day order, with a visit the tech has reached. Work still
-// ahead there (a visit driven to or being worked) keeps its planned time,
-// less the minutes since check-in; finished work takes none. The drive to
-// an en-route stop counts as done (how much is left is unknown). Then every
-// visit not reached yet runs in day order, the ones at that stop first.
-// After a leg that cannot be measured, arrivals are unknown.
+// last stop, in day order, with a visit the tech has reached. The tech is
+// there, so that stop is not flagged; everything there not finished yet is
+// worked first, as one stop's pieces (a co-visit pair shares its hour),
+// less the minutes since check-in. The drive to an en-route stop counts as
+// done (how much is left is unknown). Then every other stop's unreached
+// visits run in day order; a reached visit elsewhere counts as done. After
+// a leg that cannot be measured, arrivals are unknown.
 function clockRoute(stops, now) {
   const at = stops.map((st) => st.members.some((m) => !NOT_REACHED.has(m.status))).lastIndexOf(true);
   const here = stops[at] || null;
-  const busy = here ? here.members.filter((m) => UNDER_WAY.has(m.status)) : [];
-  const work = stopPieces(busy).reduce((sum, p) => sum + p.work, 0);
-  const checkIns = busy.filter((m) => m.checkInTime).map((m) => new Date(m.checkInTime).getTime()).filter(Number.isFinite);
+  const ahead = here ? here.members.filter((m) => NOT_REACHED.has(m.status) || UNDER_WAY.has(m.status)) : [];
+  const work = stopPieces(ahead).reduce((sum, p) => sum + p.work, 0);
+  const checkIns = ahead.filter((m) => UNDER_WAY.has(m.status) && m.checkInTime)
+    .map((m) => new Date(m.checkInTime).getTime()).filter(Number.isFinite);
   const since = checkIns.length ? Math.max(0, (now.getTime() - Math.min(...checkIns)) / 60000) : 0;
-  const order = here ? [at, ...stops.keys()].filter((i, k) => k === 0 || i !== at) : [...stops.keys()];
   const seq = [];
   const legIn = new Map();
   const piecesOf = new Map();
   let prev = here;
-  for (const i of order) {
-    const st = stops[i];
-    // Only unreached visits: a finished or under-way group member's work
-    // must not ride along in the open piece (counted once, above).
-    const open = stopPieces(st.members.filter((m) => NOT_REACHED.has(m.status)));
+  for (const [i, st] of stops.entries()) {
+    const open = i === at ? [] : stopPieces(st.members.filter((m) => NOT_REACHED.has(m.status)));
     if (!open.length) continue;
-    const leg = !prev || prev === st ? 0 : legBetween(prev, st);
+    const leg = prev ? legBetween(prev, st) : 0;
     if (leg == null) break;
     piecesOf.set(st.legs[0].id, open.map((p, j) => ({ id: `${i}:${j}`, ids: p.ids })));
     open.forEach((p, j) => {

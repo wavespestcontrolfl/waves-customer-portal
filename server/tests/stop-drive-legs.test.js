@@ -485,6 +485,23 @@ describe('attachDriveLegs on today\'s clock', () => {
     expect(onSite[2].driveLateMin).toBe(11 * 60 + 30 + 60 + leg - (10 * 60 + 120));
   });
 
+  it('keeps a co-visit pair to its one shared hour when one row is on site', () => {
+    const premise = { line1: '1 Sample St.', line2: null, city: 'Parrish', zip: '34219' };
+    const services = [
+      stop('before', '08:00', B, { windowEnd: '09:00', status: 'completed' }),
+      stop('r1', '09:00', A, { windowEnd: '10:00', customerId: 'cust-1', premise, status: 'on_site', checkInTime: et('10:30').toISOString() }),
+      stop('r2', '09:00', A, { windowEnd: '10:00', customerId: 'cust-1', premise }),
+      stop('next', '10:00', C, { windowEnd: '11:00' }),
+    ];
+    attachDriveLegs(services, { now: et('11:00') });
+    const leg = Math.max(1, driveMin(A, C));
+    // 30 minutes left of the shared hour, not 30 plus another 60.
+    expect(services[3].driveLateMin).toBe(11 * 60 + 30 + leg - (10 * 60 + 120));
+    // The tech is at the pair: its line is not flagged, though r2 is open.
+    expect(services[1].driveInShown).toBe(true);
+    expect(services[1].driveLateMin).toBeNull();
+  });
+
   it('stops predicting after a leg it cannot measure', () => {
     const services = [
       stop('done', '08:00', A, { windowEnd: '09:00', status: 'completed' }),
