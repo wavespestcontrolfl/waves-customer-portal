@@ -506,14 +506,18 @@ describe('GATE_LAWN_PROGRAM_DETAIL with a rounds visit', () => {
     // Round 3 dated Mar 20: March\'s "the barrier goes down now" would contradict the round 3 feeding line.
     expect(detailOn('2026-03-20', 3)).toEqual({ whyNow: ROUND_DETAIL_V13[3].whyNow });
     expect(detailOn('2026-03-20')).toEqual({ whyNow: PROGRAM_DETAIL_V13[3].whyNow });
-    // Rounds 1, 2, 7 and 8 have no round text (it fails a detail guard): the month's detail stays.
-    for (const [date, round, month] of [['2026-12-28', 1, 12], ['2026-02-20', 2, 2], ['2026-09-05', 7, 9], ['2026-10-14', 8, 10]]) {
+    // Round 1 dated Dec 28: December's potassium feeding would contradict the round 1 barrier line.
+    expect(detailOn('2026-12-28', 1)).toEqual({ whyNow: ROUND_DETAIL_V13[1].whyNow });
+    expect(detailOn('2026-12-28', 1).whyNow).not.toBe(PROGRAM_DETAIL_V13[12].whyNow);
+    expect(detailOn('2026-02-20', 2)).toEqual({ whyNow: ROUND_DETAIL_V13[2].whyNow });
+    // Rounds 7 and 8 have no round text: the month's detail stays.
+    for (const [date, round, month] of [['2026-09-05', 7, 9], ['2026-10-14', 8, 10]]) {
       expect(detailOn(date, round)).toEqual({ whyNow: PROGRAM_DETAIL_V13[month].whyNow });
     }
   });
 
-  test('only rounds 3, 4, 5, 6 and 9 carry round text, and each passes every guard the month detail is held to', () => {
-    expect(Object.keys(ROUND_DETAIL_V13).map(Number)).toEqual([3, 4, 5, 6, 9]);
+  test('only rounds 1, 2, 3, 4, 5, 6 and 9 carry round text, and each passes every guard the month detail is held to', () => {
+    expect(Object.keys(ROUND_DETAIL_V13).map(Number)).toEqual([1, 2, 3, 4, 5, 6, 9]);
     for (const detail of Object.values(ROUND_DETAIL_V13)) {
       expect(Object.keys(detail)).toEqual(['whyNow']);
       expect(lawnResultTimingViolation(detail.whyNow)).toBe(false);
@@ -522,8 +526,8 @@ describe('GATE_LAWN_PROGRAM_DETAIL with a rounds visit', () => {
       expect(detail.whyNow).not.toMatch(/\b(?:renew\w*|first|second|again|already|another round|next round|re-?apply\w*)\b/i);
       expect(detail.whyNow).not.toMatch(/water/i);
     }
-    // The qualifier rule: the barrier round and the insect round keep "where it fits the property"; the spring feeding keeps the fertilizer-rule one.
-    for (const round of [4, 5]) expect(ROUND_DETAIL_V13[round].whyNow).toMatch(/where it fits the property/);
+    // The qualifier rule: the barrier rounds and the insect round keep "where it fits the property"; the spring feeding keeps the fertilizer-rule one.
+    for (const round of [1, 2, 4, 5]) expect(ROUND_DETAIL_V13[round].whyNow).toMatch(/where it fits the property/);
     expect(ROUND_DETAIL_V13[3].whyNow).toMatch(/where local fertilizer rules allow/);
   });
 

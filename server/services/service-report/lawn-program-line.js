@@ -292,13 +292,21 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
   }),
 });
 
-// A rounds visit's "Why now" line: the 9-round outline's own text for that round (2026-10-31 scope), kept ONLY for the
-// rounds whose text passes every guard lawn-program-line.test.js applies to PROGRAM_DETAIL_V13 (no outcome timing, no
-// watering advice, no product or grass name, no word that assumes an earlier visit such as "first" or "another"). Rounds 1,
-// 2, 7 and 8 fail one (round 1 and 7 say "first", round 2 leans on round 1's barrier and has a timing phrase, round 8 gives
-// a watering direction), so those visits keep the month's detail. Unlike the month detail, these texts never contradict
-// the round line, which is why a round 3 visit dated Mar 20 stops reading March's "the barrier goes down now".
+// A rounds visit's "Why now" line, held to every guard lawn-program-line.test.js applies to PROGRAM_DETAIL_V13 (no outcome
+// timing, no watering advice, no product or grass name, no word that assumes an earlier visit such as "first" or "another").
+// Rounds 3, 4, 5, 6 and 9 are the 9-round outline's own text for that round (2026-10-31 scope). Rounds 1 and 2 are the month
+// details of their steps without the month name (the outline's text says "first" or leans on round 1's barrier), because the
+// calendar month contradicts the round line there: a round 1 visit dated Dec 28 would read December's potassium feeding.
+// Rounds 7 and 8 keep the month's detail (the outline's text says "first" or gives a watering direction); their window
+// months say the same thing as the round line. These texts never contradict the round line, which is why a round 3 visit
+// dated Mar 20 stops reading March's "the barrier goes down now".
 const ROUND_DETAIL_V13 = Object.freeze({
+  1: Object.freeze({
+    whyNow: 'Midwinter brings the coolest weather. Winter weeds are sprouting while the grass grows slowly, so a weed barrier goes down where it fits the property and a micronutrient feeding supports color without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
+  }),
+  2: Object.freeze({
+    whyNow: 'As daylight increases, the lawn starts to green up. A feeding supports that green-up, with a weed barrier where it fits the property ahead of crabgrass and other summer weeds, and we spot treat weeds lightly while they are small.',
+  }),
   3: Object.freeze({
     whyNow: 'The soil has warmed and the grass is growing hard, so this round carries the main spring feeding, a slow-release granular, where local fertilizer rules allow. Spring is when take-all root rot shows, so mapped take-all areas get a treatment. We spot treat what we find: weeds in March, chinch bugs in April.',
   }),
