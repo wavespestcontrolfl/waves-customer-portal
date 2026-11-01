@@ -24,7 +24,6 @@ const {
   looksLiquidProduct,
   runInventoryUnitAutofixSweep,
   _test: {
-    buildAutofixDigest,
     BATCH_CAP, CANDIDATE_PAGE_SIZE, CANONICAL_STORAGE_UNITS, OZ_FAMILY_SQL,
     UNSUPPORTED_UNIT_SQL, isAutofixCandidateUnit,
   },
@@ -740,7 +739,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     });
     const result = await runInventoryUnitAutofixSweep({ dbi });
     expect(result.applied).toBe(1);
-    expect(result.dryOz).toEqual({ applied: 0, parked: 0, stale: 0, errors: 0 });
+    expect(result.dryOz).toMatchObject({ applied: 0, parked: 0, stale: 0, errors: 0 });
     expect(state.updates).toHaveLength(1);
     expect(state.updates[0].payload.inventory_unit).toBe('gal');
     expect(state.chains.some((c) => c.called('whereRaw') && c.args('whereRaw')[0] === OZ_FAMILY_SQL)).toBe(false);
@@ -759,10 +758,12 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     const result = await runInventoryUnitAutofixSweep({ dbi });
 
     expect(result.applied).toBe(0);
-    expect(result.dryOz).toEqual({ applied: 2, parked: 2, stale: 0, errors: 0 });
-    expect(result.fixes).toEqual([
-      { kind: 'dry_oz', productId: 'w1', name: 'AAA WDG Herbicide', from: 'oz', to: 'g' },
-      { kind: 'dry_oz', productId: 'g1', name: 'BBB Granular Bait', from: 'Ounces', to: 'lb' },
+    expect(result.dryOz).toMatchObject({ applied: 2, parked: 2, stale: 0, errors: 0 });
+    // Alias fixes keep results.fixes (and the digest) to themselves; dry fixes list here.
+    expect(result.fixes).toEqual([]);
+    expect(result.dryOz.fixes).toEqual([
+      { productId: 'w1', name: 'AAA WDG Herbicide', from: 'oz', to: 'g' },
+      { productId: 'g1', name: 'BBB Granular Bait', from: 'Ounces', to: 'lb' },
     ]);
     expect(state.updates.map((u) => [u.where.id, u.payload.inventory_unit])).toEqual([['w1', 'g'], ['g1', 'lb']]);
     expect(state.updates[0].payload.inventory_on_hand).toBeCloseTo(35.4369, 3);
@@ -780,7 +781,8 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     expect(scan.args('select')).toEqual(['id', 'name', 'category', 'subcategory', 'formulation', 'unit_type', 'inventory_unit',
       'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit', 'cost_per_unit', 'cost_unit']);
     expect(scan._calls.filter(([m]) => m === 'orderBy').map(([, a]) => a[0])).toEqual(['name', 'id']);
-    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    // Deterministic fixes ring nothing: the movement rows are the audit trail.
+    expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
   it('a formulation edit between scan and lock leaves the row alone (lockedCheck)', async () => {
@@ -789,7 +791,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     edited.w1 = { ...edited.w1, formulation: 'sc' };
     const { dbi, state } = buildDryDbi({ ozRows: [OZ_ROWS[0]], products: edited });
     const result = await runInventoryUnitAutofixSweep({ dbi });
-    expect(result.dryOz).toEqual({ applied: 0, parked: 0, stale: 1, errors: 0 });
+    expect(result.dryOz).toMatchObject({ applied: 0, parked: 0, stale: 1, errors: 0 });
     expect(state.updates).toHaveLength(0);
     expect(state.movements).toHaveLength(0);
     expect(notifyAdmin).not.toHaveBeenCalled();
@@ -811,7 +813,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
     const { dbi, state } = buildDryDbi({ products: lockedRows(), failOn: 'w1' });
     const result = await runInventoryUnitAutofixSweep({ dbi });
-    expect(result.dryOz).toEqual({ applied: 1, parked: 2, stale: 0, errors: 1 });
+    expect(result.dryOz).toMatchObject({ applied: 1, parked: 2, stale: 0, errors: 1 });
     expect(state.updates.map((u) => u.where.id)).toEqual(['g1']);
   });
 
@@ -840,36 +842,22 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     expect(state.updates).toHaveLength(BATCH_CAP);
   });
 
-  it('a dry-only run sends one digest that does not say no quantities changed', async () => {
+  it('a mixed run sends the alias digest in its old words, listing alias fixes only', async () => {
     gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
-    const { dbi } = buildDryDbi({ products: lockedRows(), remaining: 1 });
-    await runInventoryUnitAutofixSweep({ dbi });
-    const [, title, body] = notifyAdmin.mock.calls[0];
-    expect(title).toBe('Inventory: 2 dry products converted from oz');
-    expect(body).toBe('AAA WDG Herbicide (oz → g), BBB Granular Bait (Ounces → lb). Dry products converted from oz to g or lb — an exact weight conversion; stock and low-stock level converted with it. Each fix left a movement audit row. 1 product still needs unit review.');
-    expect(body).not.toMatch(/no quantities changed/);
-  });
-});
-
-describe('buildAutofixDigest', () => {
-  const alias = { kind: 'alias', name: 'Talstar P', from: 'Gallons', to: 'gal' };
-  const dry = { kind: 'dry_oz', name: 'Some WDG', from: 'oz', to: 'g' };
-
-  it('alias-only keeps the alias wording', () => {
-    expect(buildAutofixDigest({ fixes: [alias] }, 4)).toEqual({
-      title: 'Inventory: 1 unit alias auto-fixed',
-      body: 'Talstar P (Gallons → gal). Pure spelling/plural renames only — no quantities changed. Each fix left a movement audit row. 4 products still need unit review.',
+    const { dbi } = buildDryDbi({
+      aliasCandidates: [{ id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons' }],
+      products: { ...lockedRows(), p1: { id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons', inventory_on_hand: '2.5', low_stock_threshold: null } },
+      remaining: 1,
     });
-  });
-
-  it('mixed run has one sentence per kind, and only the alias sentence says no quantities changed', () => {
-    const { title, body } = buildAutofixDigest({ fixes: [alias, alias, dry] }, 1);
-    expect(title).toBe('Inventory: 2 unit aliases auto-fixed, 1 dry product converted from oz');
-    expect(body).toBe('Talstar P (Gallons → gal), Talstar P (Gallons → gal). Pure spelling/plural renames only — no quantities changed. Some WDG (oz → g). Dry products converted from oz to g or lb — an exact weight conversion; stock and low-stock level converted with it. Each fix left a movement audit row. 1 product still needs unit review.');
-  });
-
-  it('truncates a long sample', () => {
-    const fixes = Array.from({ length: 7 }, (_, i) => ({ ...dry, name: `P${i}` }));
-    expect(buildAutofixDigest({ fixes }, 0).body).toMatch(/\(oz → g\) and 2 more\./);
+    const result = await runInventoryUnitAutofixSweep({ dbi });
+    expect(result.applied).toBe(1);
+    expect(result.dryOz.applied).toBe(2);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, opts] = notifyAdmin.mock.calls[0];
+    expect(category).toBe('system');
+    expect(title).toBe('Inventory: 1 unit alias auto-fixed');
+    expect(body).toBe('Talstar P (Gallons → gal). Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row. 1 product still needs unit review.');
+    expect(opts.metadata.fixes).toEqual([{ productId: 'p1', name: 'Talstar P', from: 'Gallons', to: 'gal' }]);
   });
 });
+

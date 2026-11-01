@@ -23,7 +23,9 @@
  * unit is a bare ounce are converted to g or lb (exact weight conversion,
  * stock and threshold converted with it). Its own gate,
  * GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true', read at call time via
- * inventoryUnitAutofixDryOzLive(); it also needs the sweep gate above. resolveDryOzTarget() decides, and parks everything doubtful.
+ * inventoryUnitAutofixDryOzLive(); it also needs the sweep gate above. Dry-oz
+ * fixes ring no bell: each leaves a movement audit row, and the alias digest
+ * below is worded exactly as before. resolveDryOzTarget() decides, and parks everything doubtful.
  */
 
 const db = require('../models/db');
@@ -473,7 +475,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     if (fixable.length >= BATCH_CAP || page.length < CANDIDATE_PAGE_SIZE) break;
   }
 
-  const results = { applied: 0, parked, stale: 0, errors: 0, fixes: [], dryOz: { applied: 0, parked: 0, stale: 0, errors: 0 } };
+  const results = { applied: 0, parked, stale: 0, errors: 0, fixes: [], dryOz: { applied: 0, parked: 0, stale: 0, errors: 0, fixes: [] } };
   for (const candidate of fixable) {
     const { target } = candidate;
     try {
@@ -490,7 +492,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
       });
       if (outcome === 'applied') {
         results.applied += 1;
-        results.fixes.push({ kind: 'alias', productId: candidate.id, name: candidate.name, from: candidate.inventory_unit, to: target });
+        results.fixes.push({ productId: candidate.id, name: candidate.name, from: candidate.inventory_unit, to: target });
       } else {
         results.stale += 1;
       }
@@ -504,11 +506,14 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     await runDryOzPhase({ dbi, results });
   }
 
-  if (results.applied > 0 || results.dryOz.applied > 0) {
-    await sendAutofixDigest({ dbi, results });
+  // One digest for alias renames only, worded exactly as before. Dry-oz fixes
+  // ring nothing (deterministic fixes apply with an audit trail and no bell):
+  // each leaves its movement row, and the Unit Review count drops.
+  if (results.applied > 0) {
+    await sendAliasDigest({ dbi, results });
   }
 
-  logger.info(`[inventory-unit-autofix] sweep: applied=${results.applied} parked=${results.parked} stale=${results.stale} errors=${results.errors} dryOz=${JSON.stringify(results.dryOz)}`);
+  logger.info(`[inventory-unit-autofix] sweep: applied=${results.applied} parked=${results.parked} stale=${results.stale} errors=${results.errors} dryOz applied=${results.dryOz.applied} parked=${results.dryOz.parked} stale=${results.dryOz.stale} errors=${results.dryOz.errors}`);
   return results;
 }
 
@@ -561,7 +566,7 @@ async function runDryOzPhase({ dbi, results }) {
       });
       if (outcome === 'applied') {
         dry.applied += 1;
-        results.fixes.push({ kind: 'dry_oz', productId: candidate.id, name: candidate.name, from: candidate.inventory_unit, to: target });
+        dry.fixes.push({ productId: candidate.id, name: candidate.name, from: candidate.inventory_unit, to: target });
       } else {
         dry.stale += 1;
       }
@@ -572,31 +577,8 @@ async function runDryOzPhase({ dbi, results }) {
   }
 }
 
-function digestSample(fixes) {
-  const sample = fixes.slice(0, 5).map((f) => `${f.name} (${f.from} → ${f.to})`).join(', ');
-  return `${sample}${fixes.length > 5 ? ` and ${fixes.length - 5} more` : ''}`;
-}
-
-// Digest text: one sentence per kind that happened, so "no quantities
-// changed" is only ever said about alias renames.
-function buildAutofixDigest(results, remainingCount) {
-  const aliasFixes = results.fixes.filter((f) => f.kind === 'alias');
-  const dryFixes = results.fixes.filter((f) => f.kind === 'dry_oz');
-  const titleParts = [];
-  const bodyParts = [];
-  if (aliasFixes.length) {
-    titleParts.push(`${aliasFixes.length} unit alias${aliasFixes.length === 1 ? '' : 'es'} auto-fixed`);
-    bodyParts.push(`${digestSample(aliasFixes)}. Pure spelling/plural renames only — no quantities changed.`);
-  }
-  if (dryFixes.length) {
-    titleParts.push(`${dryFixes.length} dry product${dryFixes.length === 1 ? '' : 's'} converted from oz`);
-    bodyParts.push(`${digestSample(dryFixes)}. Dry products converted from oz to g or lb — an exact weight conversion; stock and low-stock level converted with it.`);
-  }
-  bodyParts.push(`Each fix left a movement audit row. ${remainingCount} product${remainingCount === 1 ? '' : 's'} still need${remainingCount === 1 ? 's' : ''} unit review.`);
-  return { title: `Inventory: ${titleParts.join(', ')}`, body: bodyParts.join(' ') };
-}
-
-async function sendAutofixDigest({ dbi, results }) {
+// The alias digest, unchanged from before the dry-oz phase existed.
+async function sendAliasDigest({ dbi, results }) {
   try {
     // Remaining-for-review = the FULL unit-review predicate (missing unit,
     // ambiguous oz, still-unsupported), same shape as dashboard-alerts.
@@ -607,19 +589,26 @@ async function sendAutofixDigest({ dbi, results }) {
       .count('* as count')
       .first();
     const remainingCount = Number.parseInt(remaining?.count || 0, 10);
-    const { title, body } = buildAutofixDigest(results, remainingCount);
-    await require('./notification-service').notifyAdmin('system', title, body, {
-      link: '/admin/inventory?tab=unit-review',
-      metadata: {
-        applied: results.applied,
-        parked: results.parked,
-        stale: results.stale,
-        errors: results.errors,
-        dryOz: results.dryOz,
-        remainingForReview: remainingCount,
-        fixes: results.fixes,
+    const sample = results.fixes.slice(0, 5)
+      .map((f) => `${f.name} (${f.from} → ${f.to})`)
+      .join(', ');
+    const more = results.fixes.length > 5 ? ` and ${results.fixes.length - 5} more` : '';
+    await require('./notification-service').notifyAdmin(
+      'system',
+      `Inventory: ${results.applied} unit alias${results.applied === 1 ? '' : 'es'} auto-fixed`,
+      `${sample}${more}. Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row. ${remainingCount} product${remainingCount === 1 ? '' : 's'} still need${remainingCount === 1 ? 's' : ''} unit review.`,
+      {
+        link: '/admin/inventory?tab=unit-review',
+        metadata: {
+          applied: results.applied,
+          parked: results.parked,
+          stale: results.stale,
+          errors: results.errors,
+          remainingForReview: remainingCount,
+          fixes: results.fixes,
+        },
       },
-    });
+    );
   } catch (notifyErr) {
     logger.warn(`[inventory-unit-autofix] digest notify failed (non-blocking): ${notifyErr.message}`);
   }
@@ -633,7 +622,6 @@ module.exports = {
   resolveInventoryUnitAlias,
   runInventoryUnitAutofixSweep,
   _test: {
-    buildAutofixDigest,
     applyUnitReviewQueueFilter,
     BATCH_CAP,
     CANDIDATE_PAGE_SIZE,
