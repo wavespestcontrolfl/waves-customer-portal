@@ -145,22 +145,25 @@ describe('awayWatchClosePhotoCount', () => {
 describe('tech job-card lines', () => {
   const AWAY = 'Away Watch: member away until 2026-09-30. Take 3 photos of the outside of the home from the ground and note standing water.';
   const WELCOME = 'Welcome Home: last visit before the member is back. Do a lanai cobweb sweep (no product).';
-  // The window row (property_preferences joined to the customer's membership facts) answers .first();
-  // scheduled_services answers the next-visit .first().
-  const fakeDb = ({ prefs, next = null }) => {
+  // The visit row (the visit joined to its customer's membership facts and away dates, with address_diverges)
+  // answers the first .first(); the next-visit lookup answers .first('ss.scheduled_date').
+  const fakeDb = ({ prefs, next = null, visitDay = '2026-09-04' }) => {
     const reads = [];
     const dbh = (table) => {
       reads.push(table);
       const chain = {};
-      for (const m of ['join', 'where', 'whereNotIn', 'orderBy']) chain[m] = () => chain;
-      chain.first = async () => (table === 'property_preferences as pp' ? prefs : next);
+      for (const m of ['join', 'leftJoin', 'where', 'whereNotIn', 'whereRaw', 'orderBy']) chain[m] = () => chain;
+      chain.first = async (...cols) => (cols[0] === 'ss.scheduled_date'
+        ? next
+        : (prefs && { customer_id: 'c1', scheduled_date: visitDay, address_diverges: false, ...prefs }));
       return chain;
     };
+    dbh.raw = (sql) => sql;
     dbh.reads = reads;
     return dbh;
   };
   const prefs = { away_watch_from: '2026-09-01', away_watch_until: '2026-09-30', waveguard_tier: 'Gold', monthly_rate: 0 };
-  const lines = (visitDay, over = {}) => AwayWatch.awayWatchCardLines(fakeDb({ prefs, ...over }), 'c1', visitDay);
+  const lines = (visitDay, over = {}) => AwayWatch.awayWatchCardLines(fakeDb({ prefs, visitDay, ...over }), 'svc1');
 
   beforeEach(() => { process.env[GATE] = 'true'; });
 
@@ -190,15 +193,20 @@ describe('tech job-card lines', () => {
     expect(await lines('2026-09-04', { prefs: { ...prefs, waveguard_tier: null, monthly_rate: 89 }, next: { scheduled_date: '2026-09-18' } })).toEqual({ lines: [AWAY] });
   });
 
+  test('a visit stamped at another address gets nothing: the home\'s away window never follows a visit elsewhere', async () => {
+    expect(await lines('2026-09-04', { prefs: { ...prefs, address_diverges: true } })).toBeNull();
+  });
+
   test('one date missing, no row: nothing', async () => {
-    expect(await AwayWatch.awayWatchCardLines(fakeDb({ prefs: { away_watch_from: '2026-09-01', away_watch_until: null } }), 'c1', '2026-09-04')).toBeNull();
-    expect(await AwayWatch.awayWatchCardLines(fakeDb({ prefs: undefined }), 'c1', '2026-09-04')).toBeNull();
+    expect(await lines('2026-09-04', { prefs: { ...prefs, away_watch_until: null } })).toBeNull();
+    expect(await lines('2026-09-04', { prefs: undefined })).toBeNull();
   });
 
   test('gate off: nothing, and the database is not read', async () => {
     delete process.env[GATE];
     const dbh = fakeDb({ prefs });
-    expect(await AwayWatch.awayWatchCardLines(dbh, 'c1', '2026-09-04')).toBeNull();
+    expect(await AwayWatch.awayWatchCardLines(dbh, 'svc1')).toBeNull();
+    expect(await AwayWatch.visitInAwayWatchWindow(dbh, 'svc1')).toBe(false);
     expect(dbh.reads).toEqual([]);
   });
 
@@ -206,24 +214,28 @@ describe('tech job-card lines', () => {
     const factsDb = (rows) => {
       const dbh = (table) => {
         const chain = {};
-        for (const m of ['join', 'leftJoin', 'where', 'whereNotIn', 'whereIn', 'modify', 'orderBy', 'orderByRaw', 'select', 'limit', 'whereNotNull']) chain[m] = () => chain;
+        for (const m of ['join', 'leftJoin', 'where', 'whereNotIn', 'whereIn', 'whereRaw', 'modify', 'orderBy', 'orderByRaw', 'select', 'limit', 'whereNotNull']) chain[m] = () => chain;
+        // The Away Watch next-visit lookup selects 'ss.scheduled_date'; every other .first() reads the table's row.
+        chain.first = (...cols) => {
+          const value = cols[0] === 'ss.scheduled_date' ? rows.next : rows[table];
+          return Object.assign(Promise.resolve(value ?? null), { catch: async () => value ?? null });
+        };
         const value = rows[table];
-        chain.first = () => Object.assign(Promise.resolve(value ?? null), { catch: async () => value ?? null });
         chain.catch = async () => (Array.isArray(value) ? value : []);
         return Object.assign(chain, { update: () => ({ catch: async () => null }) });
       };
       dbh.raw = (sql) => sql;
       return dbh;
     };
-    const visit = (scheduled_date) => ({ id: 'svc1', customer_id: 'c1', scheduled_date, service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges: false });
+    const visit = (scheduled_date) => ({ id: 'svc1', customer_id: 'c1', scheduled_date, service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges: false, ...prefs });
     const card = (scheduledDate, rows = {}) => jobCard.buildJobCard('svc1', {
-      dbh: factsDb({ 'scheduled_services as ss': visit(scheduledDate), property_preferences: prefs, 'property_preferences as pp': prefs, ...rows }),
+      dbh: factsDb({ 'scheduled_services as ss': visit(scheduledDate), property_preferences: prefs, ...rows }),
       deps: { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } },
       now: new Date('2026-09-04T12:00:00Z'),
     });
 
     test('inside the window the card carries the lines; outside it, and with the gate off, it has no awayWatch key', async () => {
-      expect((await card('2026-09-04', { scheduled_services: { scheduled_date: '2026-09-18' } })).awayWatch).toEqual({ lines: [AWAY] });
+      expect((await card('2026-09-04', { next: { scheduled_date: '2026-09-18' } })).awayWatch).toEqual({ lines: [AWAY] });
       expect((await card('2026-09-22')).awayWatch).toEqual({ lines: [AWAY, WELCOME] });
       expect(await card('2026-10-02')).not.toHaveProperty('awayWatch');
       delete process.env[GATE];

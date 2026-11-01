@@ -1902,7 +1902,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
   // GATE_AWAY_WATCH: the tech lines for a visit inside the member's away window (null when off or outside it).
-  const awayWatch = readinessOnly ? null : await awayWatchCardLines(dbh, facts.customerId, facts.scheduledDate);
+  const awayWatch = readinessOnly ? null : await awayWatchCardLines(dbh, serviceId);
 
   // The spray-check limits are judged from the appointment start.
   const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);

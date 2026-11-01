@@ -84,15 +84,17 @@ const PHOTO = { data: 'data:image/jpeg;base64,aGVsbG8=', name: 'outside.jpg' };
 const photos = (n) => Array.from({ length: n }, (_, i) => ({ ...PHOTO, name: `outside-${i + 1}.jpg` }));
 
 // A pest visit today for a member whose Away Watch window is [from, until).
-async function seedAwayVisit({ from = day(-3), until = day(20), window = true, tier = 'Gold' } = {}) {
+async function seedAwayVisit({ from = day(-3), until = day(20), window = true, tier = 'Gold', stampedLine1 = null } = {}) {
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), serviceKey: `fixture_pest_${randomUUID().slice(0, 8)}` };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Away', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
-    email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, waveguard_tier: tier });
+    email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, waveguard_tier: tier,
+    address_line1: '100 Fixture Street', city: 'Fixture City', zip: '34201' });
   const [property] = await mockPg('customer_properties').insert({ customer_id: f.customerId, address_line1: '100 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: true }).returning('*');
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `${PEST_TYPE} ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
   await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, property_id: property.id, technician_id: f.techId, service_id: f.catalogId,
-    service_type: PEST_TYPE, scheduled_date: day(0), window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 0, estimated_duration_minutes: 45 });
+    service_type: PEST_TYPE, scheduled_date: day(0), window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 0, estimated_duration_minutes: 45,
+    ...(stampedLine1 ? { service_address_line1: stampedLine1, service_address_city: 'Fixture City', service_address_zip: '34201' } : {}) });
   if (window) await mockPg('property_preferences').insert({ customer_id: f.customerId, away_watch_from: from, away_watch_until: until });
   return f;
 }
@@ -220,6 +222,31 @@ postgres('Away Watch closeout photo minimum', () => {
     try {
       expect((await complete(f)).status).toBe(200);
       expect(await statusOf(f)).toBe('completed');
+    } finally { await cleanup(f); }
+  });
+
+  test('gate on, a member\'s visit stamped at another address: no minimum (the home\'s away window stays at home)', async () => {
+    const f = await seedAwayVisit({ stampedLine1: '200 Other Road' });
+    try {
+      expect((await complete(f)).status).toBe(200);
+      expect(await statusOf(f)).toBe('completed');
+    } finally { await cleanup(f); }
+  });
+
+  // The job card and Visit Brief read: Welcome Home goes on the last visit at home before the back day, so a later
+  // visit stamped at another address does not take it, and a later visit at home (stamped with the home address) does.
+  test('card lines: a later visit at another address keeps Welcome Home on today; a later visit at home moves it', async () => {
+    const { awayWatchCardLines } = require('../services/away-watch');
+    const welcomeHome = async () => (await awayWatchCardLines(mockPg, f.serviceId)).lines.some((line) => line.startsWith('Welcome Home:'));
+    const f = await seedAwayVisit();
+    const later = (id, line1) => mockPg('scheduled_services').insert({ id, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId,
+      service_type: PEST_TYPE, scheduled_date: day(7), window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 0,
+      estimated_duration_minutes: 45, service_address_line1: line1, service_address_city: 'Fixture City', service_address_zip: '34201' });
+    try {
+      await later(randomUUID(), '200 Other Road');
+      expect(await welcomeHome()).toBe(true);
+      await later(randomUUID(), '100 Fixture Street');
+      expect(await welcomeHome()).toBe(false);
     } finally { await cleanup(f); }
   });
 

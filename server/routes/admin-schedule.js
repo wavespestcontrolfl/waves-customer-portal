@@ -24059,25 +24059,32 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       }
     };
     // GATE_AWAY_WATCH: the Away Watch lines the job card carries for this visit (a WaveGuard member away, the visit's
-    // own day inside the window) ride every answer to the tech's Visit Brief, so the tech knows about the 3-photo
-    // closeout rule and the Welcome Home sweep before the visit. The back day says when a home stands empty, so the
-    // lines go out only after the same reassignment recheck the facts block runs, and a reassignment that recheck
-    // catches withholds the WHOLE answer like the facts block does (the payload may already hold live access codes
-    // and the cached brief). Fail-soft: an outage omits the key.
+    // own day inside the window, at home) ride every answer to the tech's Visit Brief, so the tech knows about the
+    // 3-photo closeout rule and the Welcome Home sweep before the visit. The lookup runs after the facts block's
+    // reassignment recheck, so whatever it answers (lines, nothing, an error) one more recheck covers the whole answer,
+    // and a reassignment it catches withholds everything like the facts block does (the payload may already hold live
+    // access codes and the cached brief). Gate off: no lookup and no recheck, the answer exactly as before. Fail-soft:
+    // a lookup or recheck outage omits the key.
     const withAwayWatch = async (payload) => {
+      const AwayWatch = require('../services/away-watch');
+      if (!AwayWatch.awayWatchLive()) return payload;
+      let awayWatch = null;
       try {
-        const { etCalendarDayOf: dayOf } = require('../utils/datetime-et');
-        const awayWatch = await require('../services/away-watch').awayWatchCardLines(db, svc.customer_id, dayOf(svc.scheduled_date));
-        if (!awayWatch) return payload;
+        awayWatch = await AwayWatch.awayWatchCardLines(db, svc.id);
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief Away Watch lines failed for ${svc.id}: ${err.message}`);
+      }
+      try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id })
           .modify((q) => technicianCurrentVisitFilter(req, q))
           .first('scheduled_services.id');
-        return stillOwned ? { ...payload, awayWatch } : { brief: null };
+        if (!stillOwned) return { brief: null };
       } catch (err) {
-        logger.warn(`[admin-schedule] visit-brief Away Watch lines failed for ${svc.id}: ${err.message}`);
+        logger.warn(`[admin-schedule] visit-brief Away Watch recheck failed for ${svc.id}: ${err.message}`);
         return payload;
       }
+      return awayWatch ? { ...payload, awayWatch } : payload;
     };
     const answer = async (payload) => res.json(await withAwayWatch(await withFacts(payload)));
     if (!svc.pre_service_brief) return answer({ brief: null });

@@ -4655,7 +4655,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // incomplete) and the invoice-issued closeout (no photos submitted) are exempt. Gate off: no read, no rule.
     const awayWatchPhotoGateRequired = !AwayWatch.NOT_PERFORMED_OUTCOMES.includes(visitOutcome)
       && !issuedInvoiceCloseout
-      && await AwayWatch.visitInAwayWatchWindow(db, svc.customer_id, svc.scheduled_date);
+      && await AwayWatch.visitInAwayWatchWindow(db, svc.id);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),

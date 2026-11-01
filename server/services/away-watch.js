@@ -25,6 +25,7 @@
 const gates = require('../config/feature-gates');
 const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
 const { isMembershipCustomerRow } = require('./waveguard-existing-services');
+const { stampedDivergesSql } = require('./stamped-address');
 
 const AWAY_WATCH_MIN_PHOTOS = 3;
 // The longest stretch one window may cover (about eight months: a full
@@ -76,37 +77,50 @@ function dayInWindow(window, day) {
   return Boolean(window && day && window.from <= day && day < window.until);
 }
 
-// The member's window, read with the membership facts in one row: dates a non-member saved earlier (or the office
-// set) never add a job card line, a photo minimum or a visit brief line.
-async function loadAwayWatchWindow(dbh, customerId) {
-  if (!awayWatchLive() || !customerId) return null;
-  const row = await dbh('property_preferences as pp')
-    .join('customers as c', 'c.id', 'pp.customer_id')
-    .where('pp.customer_id', customerId)
-    .first('pp.away_watch_from', 'pp.away_watch_until', 'c.waveguard_tier', 'c.monthly_rate');
-  return row && isMembershipCustomerRow(row) ? awayWatchWindow(row) : null;
+// One visit's Away Watch, in one read: the visit's own ET day, whether it is stamped at an address other than the
+// member's home (the home's preferences never follow a visit elsewhere, job-card.js alternateAddress: the same
+// stampedDivergesSql guard), the membership facts and the member's window. Answers { customerId, day, window } only
+// for a WaveGuard member's visit at home inside the window; null otherwise (gate off, no row, non-member, another
+// address, no window, outside it). Dates on a non-member's row or another home's visit never add a job card line,
+// a photo minimum or a Visit Brief line.
+async function awayWatchVisit(dbh, scheduledServiceId) {
+  if (!awayWatchLive() || !scheduledServiceId) return null;
+  const row = await dbh('scheduled_services as ss')
+    .join('customers as c', 'c.id', 'ss.customer_id')
+    .leftJoin('property_preferences as pp', 'pp.customer_id', 'ss.customer_id')
+    .where('ss.id', scheduledServiceId)
+    .first(
+      'ss.customer_id', 'ss.scheduled_date', 'pp.away_watch_from', 'pp.away_watch_until', 'c.waveguard_tier', 'c.monthly_rate',
+      dbh.raw(`COALESCE(${stampedDivergesSql('ss', 'c')}, false) as address_diverges`),
+    );
+  if (!row || row.address_diverges || !isMembershipCustomerRow(row)) return null;
+  const window = awayWatchWindow(row);
+  const day = etCalendarDayOf(row.scheduled_date);
+  return dayInWindow(window, day) ? { customerId: row.customer_id, day, window } : null;
 }
 
-// Closeout: is this visit's own scheduled day inside the member's window?
-async function visitInAwayWatchWindow(dbh, customerId, scheduledDate) {
-  const window = await loadAwayWatchWindow(dbh, customerId);
-  return dayInWindow(window, etCalendarDayOf(scheduledDate));
+// Closeout: is this visit an Away Watch visit?
+async function visitInAwayWatchWindow(dbh, scheduledServiceId) {
+  return Boolean(await awayWatchVisit(dbh, scheduledServiceId));
 }
 
-// Job card: the lines for one visit day. Welcome Home goes on the last
-// scheduled visit before the back day (no later active visit before it).
-async function awayWatchCardLines(dbh, customerId, visitDay) {
-  const window = await loadAwayWatchWindow(dbh, customerId);
-  if (!dayInWindow(window, visitDay)) return null;
-  const next = await dbh('scheduled_services')
-    .where('customer_id', customerId)
-    .where('scheduled_date', '>', visitDay)
-    .whereNotIn('status', INACTIVE_STATUSES)
-    .orderBy('scheduled_date')
-    .first('scheduled_date');
+// Job card and Visit Brief: the lines for one visit. Welcome Home goes on the last scheduled visit at home before
+// the back day (no later active visit at home before it; a visit stamped at another address does not count).
+async function awayWatchCardLines(dbh, scheduledServiceId) {
+  const visit = await awayWatchVisit(dbh, scheduledServiceId);
+  if (!visit) return null;
+  const next = await dbh('scheduled_services as ss')
+    .join('customers as c', 'c.id', 'ss.customer_id')
+    .where('ss.customer_id', visit.customerId)
+    .where('ss.scheduled_date', '>', visit.day)
+    .whereNotIn('ss.status', INACTIVE_STATUSES)
+    // COALESCE: a comparison against a missing home address reads as "at home" here exactly as in awayWatchVisit.
+    .whereRaw(`NOT COALESCE(${stampedDivergesSql('ss', 'c')}, false)`)
+    .orderBy('ss.scheduled_date')
+    .first('ss.scheduled_date');
   const nextDay = next ? etCalendarDayOf(next.scheduled_date) : null;
-  const lines = [TECH_AWAY_LINE(window.until)];
-  if (!nextDay || nextDay >= window.until) lines.push(TECH_WELCOME_HOME_LINE);
+  const lines = [TECH_AWAY_LINE(visit.window.until)];
+  if (!nextDay || nextDay >= visit.window.until) lines.push(TECH_WELCOME_HOME_LINE);
   return { lines };
 }
 
@@ -180,7 +194,7 @@ module.exports = {
   awayWatchFieldsFor,
   awayWatchWindow,
   dayInWindow,
-  loadAwayWatchWindow,
+  awayWatchVisit,
   visitInAwayWatchWindow,
   awayWatchCardLines,
   awayWatchClosePhotoCount,
