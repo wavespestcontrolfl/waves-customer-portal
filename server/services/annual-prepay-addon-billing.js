@@ -328,8 +328,9 @@ class CoveredVisitCloseout {
         title: current.service_type,
         serviceDate,
         // Backfill: due today (the backdated day would be overdue at once)
-        // and off a NET-terms payer's open statement, like the main mint.
-        dueDate: quietBackfill ? etDateString() : serviceDate,
+        // and off a NET-terms payer's open statement, like the main mint. A
+        // late form's day is backdated too (the tech's arrival day): due today.
+        dueDate: (quietBackfill || serviceDate < etDateString()) ? etDateString() : serviceDate,
         skipAccrual: quietBackfill,
         notes: 'Add-ons beyond your annual prepay coverage. The covered visit itself is already paid.',
         lineItems: extras.lines,

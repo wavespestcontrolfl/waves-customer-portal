@@ -3,8 +3,8 @@
  * owner 2026-10-09), through the real completeScheduledService transaction. The sheets post the same POST /complete as the
  * full form, with the same invoice field the full form posts for such a visit (`invoiceAlreadySent: true` when the visit
  * carries completionInvoiceAlreadySent, nothing else). This pins what the server does with it: no second invoice, no
- * pay-link text, the review ask held while the invoice is unpaid, a paid invoice left paid. Runs against a migrated,
- * private Postgres.
+ * pay-link text, the review ask held while the invoice is unpaid, a paid invoice left paid. It also pins the day a
+ * completion form sent after the tech's arrival writes (owner 2026-10-31). Runs against a migrated, private Postgres.
  *
  * Wiring copied from complete-scheduled-service-lawn-places-postgres.test.js.
  */
@@ -82,8 +82,9 @@ const PRICE = 80;
 
 // A priced visit that would mint its own completion invoice (create_invoice_on_complete) and already has an invoice
 // from the payment flow: sent and unpaid, or paid. `invoiceDay` dates the invoice to another day, as an invoice made
-// before the visit keeps the day it was minted with when the visit is moved.
-async function seedInvoicedVisit({ invoiceStatus = 'sent', invoiceDay = null } = {}) {
+// before the visit keeps the day it was minted with when the visit is moved. `invoiceStatus: null` seeds no invoice;
+// `visitDay` and `arrivedAt` place the visit and the tech's arrival stamp on an earlier day.
+async function seedInvoicedVisit({ invoiceStatus = 'sent', invoiceDay = null, visitDay = null, arrivedAt = null } = {}) {
   const today = etDateString(new Date());
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID(), serviceKey: `fixture_lawn_${randomUUID().slice(0, 8)}` };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Invoiced', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
@@ -93,8 +94,10 @@ async function seedInvoicedVisit({ invoiceStatus = 'sent', invoiceDay = null } =
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `${LAWN_TYPE} ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
   await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, property_id: property.id, technician_id: f.techId, service_id: f.catalogId,
-    service_type: LAWN_TYPE, scheduled_date: today, window_start: '09:00', window_end: '10:00', status: 'confirmed',
-    estimated_price: PRICE, estimated_duration_minutes: 60, create_invoice_on_complete: true });
+    service_type: LAWN_TYPE, scheduled_date: visitDay || today, window_start: '09:00', window_end: '10:00', status: 'confirmed',
+    estimated_price: PRICE, estimated_duration_minutes: 60, create_invoice_on_complete: true,
+    ...(arrivedAt ? { arrived_at: arrivedAt, check_in_time: arrivedAt } : {}) });
+  if (!invoiceStatus) return f;
   const paid = invoiceStatus === 'paid';
   await mockPg('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${f.invoiceId.slice(0, 8)}`,
     token: randomUUID().replace(/-/g, ''), status: invoiceStatus, total: PRICE, subtotal: PRICE, service_date: invoiceDay || today, service_type: LAWN_TYPE,
@@ -258,6 +261,56 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
       expect(invoices).toHaveLength(1);
       expect(invoices[0]).toMatchObject({ id: f.invoiceId, status: 'paid' });
       expect(await dayOf('invoices', { id: f.invoiceId })).toBe(oldDay);
+    } finally { await cleanup(f); }
+  });
+});
+
+// A completion form sent days after the tech's arrival (owner 2026-10-31): the record takes the arrival day, every
+// invoice on the visit carries that day, and an invoice minted from the backdated record is due from today.
+const daysAgo = (n) => etDateString(new Date(Date.now() - n * 24 * 60 * 60 * 1000));
+const arrivalOn = (day) => new Date(`${day}T14:00:00Z`); // 10 AM EDT or 9 AM EST: the same Eastern day
+const recordDayOf = (f) => mockPg('service_records').where({ scheduled_service_id: f.serviceId })
+  .first(mockPg.raw('service_date::text AS day')).then((row) => row.day);
+const invoiceDaysOf = (f) => mockPg('invoices').where({ customer_id: f.customerId })
+  .select(mockPg.raw('service_date::text AS day'), mockPg.raw('due_date::text AS due'));
+
+postgres('a completion form sent days after the tech arrived', () => {
+  beforeAll(async () => {
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 4 } });
+  });
+  beforeEach(() => { sendCustomerMessage.mockClear(); });
+  afterEach(() => { jest.restoreAllMocks(); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+
+  test('the record takes the arrival day; the invoice the completion mints carries it and is due today, not overdue', async () => {
+    const arrivalDay = daysAgo(3);
+    const f = await seedInvoicedVisit({ invoiceStatus: null, visitDay: arrivalDay, arrivedAt: arrivalOn(arrivalDay) });
+    try {
+      const out = await complete(f, { timeOnSite: 30 });
+      expect(out.status).toBe(200);
+      expect(await recordDayOf(f)).toBe(arrivalDay);
+      expect(await invoiceDaysOf(f)).toEqual([{ day: arrivalDay, due: etDateString(new Date()) }]);
+    } finally { await cleanup(f); }
+  });
+
+  test('an invoice made before the visit and dated earlier still takes the arrival day', async () => {
+    const arrivalDay = daysAgo(3);
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent', invoiceDay: daysAgo(8), visitDay: arrivalDay, arrivedAt: arrivalOn(arrivalDay) });
+    try {
+      const out = await complete(f, { invoiceAlreadySent: true, timeOnSite: 30 });
+      expect(out.status).toBe(200);
+      expect(await recordDayOf(f)).toBe(arrivalDay);
+      expect((await invoiceDaysOf(f)).map((row) => row.day)).toEqual([arrivalDay]);
+    } finally { await cleanup(f); }
+  });
+
+  test('control: a past visit with no arrival stamp keeps the form day', async () => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent', visitDay: daysAgo(3) });
+    try {
+      const out = await complete(f, { invoiceAlreadySent: true, timeOnSite: 30 });
+      expect(out.status).toBe(200);
+      expect(await recordDayOf(f)).toBe(etDateString(new Date()));
     } finally { await cleanup(f); }
   });
 });

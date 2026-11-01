@@ -101,6 +101,50 @@ const { sendRecap } = require('../services/service-report/recap-delivery');
 
 const TODAY = '2026-07-19';
 
+// A late form (owner 2026-10-31): the completion form came on a later day than
+// the tech's arrival, so the record takes the arrival day, and an invoice from
+// a backdated record is due from today. Times are UTC; the days are Eastern.
+describe('late form: the record takes the tech arrival day', () => {
+  const { lateFormArrivalDay, invoiceDueBaseDay } = require('../services/complete-scheduled-service');
+  const FORM_AT = new Date('2026-10-26T14:00:00Z'); // Oct 26, 10:00 AM EDT
+
+  test('a form sent days after an arrival on the scheduled day dates the record to that day', () => {
+    expect(lateFormArrivalDay({ scheduled_date: '2026-10-04', arrived_at: '2026-10-04T15:10:00Z' }, FORM_AT)).toBe('2026-10-04');
+  });
+
+  test('the arrival day is the Eastern calendar day, not the UTC one', () => {
+    // 03:30Z on Oct 5 is 11:30 PM EDT on Oct 4.
+    expect(lateFormArrivalDay({ scheduled_date: '2026-10-04', check_in_time: '2026-10-05T03:30:00Z' }, FORM_AT)).toBe('2026-10-04');
+  });
+
+  test('a form sent the same day keeps the form day', () => {
+    expect(lateFormArrivalDay({ scheduled_date: '2026-10-26', arrived_at: '2026-10-26T12:00:00Z' }, FORM_AT)).toBeNull();
+  });
+
+  test('no arrival stamp keeps the form day (a visit move clears the stamps)', () => {
+    expect(lateFormArrivalDay({ scheduled_date: '2026-10-04' }, FORM_AT)).toBeNull();
+    expect(lateFormArrivalDay({ scheduled_date: '2026-10-04', arrived_at: null, check_in_time: 'not a date' }, FORM_AT)).toBeNull();
+  });
+
+  test('a stamp before the scheduled day is a stale or early tap: the form day stays', () => {
+    expect(lateFormArrivalDay({ scheduled_date: '2026-10-10', arrived_at: '2026-10-05T14:00:00Z' }, FORM_AT)).toBeNull();
+  });
+
+  test('an arrival after the scheduled day (the visit ran late and was never moved) still dates the record to the arrival', () => {
+    expect(lateFormArrivalDay({ scheduled_date: '2026-10-04', arrived_at: '2026-10-06T14:00:00Z' }, FORM_AT)).toBe('2026-10-06');
+  });
+
+  test('a pg Date scheduled_date reads as its calendar date', () => {
+    expect(lateFormArrivalDay({ scheduled_date: new Date('2026-10-04T00:00:00Z'), arrived_at: '2026-10-04T15:00:00Z' }, FORM_AT)).toBe('2026-10-04');
+  });
+
+  test('an invoice from a backdated record is due from today, never before; a same-day record keeps its day', () => {
+    expect(invoiceDueBaseDay('2026-10-04', '2026-10-26')).toBe('2026-10-26');
+    expect(invoiceDueBaseDay(new Date('2026-10-04T00:00:00Z'), '2026-10-26')).toBe('2026-10-26');
+    expect(invoiceDueBaseDay('2026-10-26', '2026-10-26')).toBe('2026-10-26');
+  });
+});
+
 describe('backfillCompletionPlan', () => {
   test('absent/false flag → inactive, no error', () => {
     expect(backfillCompletionPlan({ scheduledDate: '2026-07-01', today: TODAY })).toEqual({ active: false });
@@ -2316,7 +2360,7 @@ describe('completion route wiring (source contracts)', () => {
   });
 
   test('completionServiceDate is backdated from the plan under backfill', () => {
-    expect(source).toMatch(/const completionServiceDate = isBackfillCompletion\s*\n\s*\? backfillPlan\.serviceDate\s*\n\s*: etDateString\(completionEndedAt\)/);
+    expect(source).toMatch(/const completionServiceDate = isBackfillCompletion\s*\n\s*\? backfillPlan\.serviceDate\s*\n\s*: \(lateFormArrivalDay\(svc, completionEndedAt\) \|\| etDateString\(completionEndedAt\)\)/);
   });
 
   test('backfill forces customer comms off, including AFTER the frozen-posture re-derivation', () => {
@@ -2354,9 +2398,9 @@ describe('completion route wiring (source contracts)', () => {
   });
 
   test('backfill invoices stay due near-term instead of minting instantly overdue', () => {
-    expect(source).toMatch(/dueDate: proposalTermsDue \|\| \(isBackfillCompletion \? etDateString\(\) : serviceDateOnly\(record\.service_date\)\)/);
+    expect(source).toMatch(/dueDate: proposalTermsDue \|\| invoiceDueBaseDay\(record\.service_date\),/);
     // An invoice-mode proposal's Net term (owner 2026-10-30) counts from today on a backfill too, never the old visit day.
-    expect(source).toMatch(/proposalTermsDueDate\(\s*db, svc\.source_estimate_id, isBackfillCompletion \? etDateString\(\) : serviceDateOnly\(record\.service_date\),\s*\)/);
+    expect(source).toMatch(/proposalTermsDueDate\(\s*db, svc\.source_estimate_id, invoiceDueBaseDay\(record\.service_date\),\s*\)/);
   });
 
   test('backfill suppresses the decline notice and the payer AP send', () => {
@@ -2453,7 +2497,7 @@ describe('completion route wiring (source contracts)', () => {
     expect(source).toMatch(/ensureCardForCompletion\(\{\s*\n\s*customerId: svc\.customer_id,\s*\n\s*serviceRecordId: record\.id,\s*\n\s*scheduledServiceId: svc\.id,\s*\n\s*suppressIssuedEmail: isBackfillCompletion,/);
     // …with the backdated first-visit instant so the public card's "First
     // visit" date shows the day the visit happened, not office-entry day.
-    expect(source).toMatch(/firstVisitAt: isBackfillCompletion \? toETNoonServiceDate\(record\.service_date\) : null,/);
+    expect(source).toMatch(/firstVisitAt: \(isBackfillCompletion \|\| serviceDateOnly\(record\.service_date\) < etDateString\(\)\)\s*\n\s*\? toETNoonServiceDate\(record\.service_date\) : null,/);
     // …and the service honors it: the email leg is gated, everything before
     // it (card row / promoter enroll / short link) still runs, and both
     // first_visit_completed_at stamp sites use the caller's instant.

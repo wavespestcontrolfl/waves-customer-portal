@@ -282,8 +282,8 @@ describe('proposalTermsDueDate', () => {
     const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
     const legacy = read('../services/complete-scheduled-service.js');
     expect(legacy).toContain("proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(");
-    expect(legacy).toContain('dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),');
-    expect(legacy).toContain('dueDate: proposalTermsDue || serviceDateOnly(record.service_date),');
+    // Never before today on either lane: a backfill or a late form backdates the record day.
+    expect(legacy.split('dueDate: proposalTermsDue || invoiceDueBaseDay(record.service_date),').length - 1).toBe(2);
     // A failed read mints nothing: the mint's catch releases the closeout for resume on every lane (pre-push Codex P1).
     expect(legacy).toContain("{ code: 'PROPOSAL_TERMS_UNREAD' }");
     const handler = legacy.slice(legacy.indexOf("if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {"));
