@@ -302,6 +302,44 @@ describeDb('late recap clips: the send and render races', () => {
         committedRecap = null;
       });
 
+      test('a removal that waits on a confirm of the same clip marks the recap with the confirmed status', async () => {
+        const scheduledServiceId = randomUUID();
+        [committedRecap] = await database('service_recaps').insert({
+          scheduled_service_id: scheduledServiceId, status: 'ready', s3_key: 'recaps/test/visit-recap-v1.mp4',
+          rendered_at: minutesAgo(3), greeting_version: pipeline.RECAP_GREETING_VERSION,
+        }).returning('*');
+        const [clip] = await database('service_media').insert({
+          scheduled_service_id: scheduledServiceId, media_type: 'video', role: 'perimeter',
+          s3_key: 'recap-media/test/clip.mp4', status: 'uploading',
+        }).returning('*');
+        const removalSaw = [];
+        let removal;
+
+        const confirmed = await recapMedia.confirmUpload(clip.id, {
+          scheduledServiceId,
+          durationMs: 5000,
+          onChange: async (row, trx) => {
+            await pipeline.markRecapClipsChanged(scheduledServiceId, row, { knex: trx });
+            // The tech removes the clip while its confirm is mid-transaction, on another connection.
+            removal = recapMedia.deleteMedia(clip.id, {
+              scheduledServiceId,
+              onChange: async (current, removalTrx) => {
+                removalSaw.push(current.status);
+                await pipeline.markRecapClipsChanged(scheduledServiceId, current, { knex: removalTrx });
+              },
+            }, database);
+            await new Promise((resolve) => { setTimeout(resolve, 150); });
+          },
+        }, database);
+
+        expect(confirmed).toMatchObject({ ok: true, row: { status: 'ready' } });
+        expect(await removal).toMatchObject({ id: clip.id, status: 'ready' });
+        expect(removalSaw).toEqual(['ready']);
+        expect(await database('service_recaps').where({ id: committedRecap.id }).first('status', 'clip_revision'))
+          .toEqual({ status: 'pending', clip_revision: 2 });
+        expect(await database('service_media').where({ id: clip.id }).first()).toBeUndefined();
+      });
+
       test('a removal holds the recap row until it commits: a render claim skips it, an approval is refused', async () => {
         const scheduledServiceId = randomUUID();
         [committedRecap] = await database('service_recaps').insert({

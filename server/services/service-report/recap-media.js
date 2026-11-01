@@ -159,24 +159,28 @@ async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = 
       realBytes = Number(head.ContentLength) || 0;
     } catch { realBytes = null; }
   }
-  if (realBytes == null) { await deleteMedia(mediaId, { scheduledServiceId }, knex); return { ok: false, reason: 'not_uploaded' }; }
+  if (realBytes == null) { await deleteMedia(mediaId, { scheduledServiceId, onlyUploading: true }, knex); return { ok: false, reason: 'not_uploaded' }; }
 
   const verdict = clipLimits(row.media_type === 'video', realBytes, durationMs);
   if (verdict.reason) {
-    await deleteMedia(mediaId, { scheduledServiceId }, knex);
+    await deleteMedia(mediaId, { scheduledServiceId, onlyUploading: true }, knex);
     return { ok: false, reason: verdict.reason };
   }
 
-  // onChange (the routes mark the recap row) runs first, in the same transaction: the recap row is
-  // locked before the clip changes, so an approval, send claim or render claim waits for, or skips,
-  // the change and never sees one half of it. A failed mark rolls the clip change back.
+  // In one transaction: lock the clip row and read it again (a concurrent confirm or removal may have
+  // won since the read above), run onChange (the routes mark the recap row, which locks it) with the
+  // clip's new status, then change the clip. An approval, send claim or render claim so waits for, or
+  // skips, the change and never sees one half of it; a failed mark rolls the clip change back. Lock
+  // order is the clip row, then the recap row, in both confirm and removal.
   const patch = { status: verdict.needsCutting ? 'processing' : 'ready', bytes: realBytes, duration_ms: durationMs };
-  const updated = await knex.transaction(async (trx) => {
-    if (onChange) await onChange({ ...row, ...patch }, trx);
+  return knex.transaction(async (trx) => {
+    const current = await trx('service_media').where({ id: row.id }).forUpdate().first();
+    if (!current) return { ok: false, reason: 'not_found' };
+    if (current.status !== 'uploading') return { ok: true, row: current };
+    if (onChange) await onChange({ ...current, ...patch }, trx);
     const [changed] = await trx('service_media').where({ id: row.id }).update({ ...patch, updated_at: new Date() }).returning('*');
-    return changed;
+    return { ok: true, row: changed };
   });
-  return { ok: true, row: updated };
 }
 
 async function listMedia(scheduledServiceId, knex = db) {
@@ -186,17 +190,21 @@ async function listMedia(scheduledServiceId, knex = db) {
     .select('id', 'media_type', 'role', 'caption', 'status', 'duration_ms', 'created_at');
 }
 
-// Returns the removed row (false when there was none). onChange runs first in the removal's
-// transaction (see confirmUpload); the S3 object goes after the commit.
-async function deleteMedia(mediaId, { scheduledServiceId = null, onChange = null } = {}, knex = db) {
-  const lookup = knex('service_media').where({ id: mediaId });
-  if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
-  const row = await lookup.first();
-  if (!row) return false;
-  await knex.transaction(async (trx) => {
-    if (onChange) await onChange(row, trx);
-    await trx('service_media').where({ id: row.id }).del();
+// Returns the removed row (false when there was none). In one transaction, like confirmUpload: lock
+// the clip row and read it again, run onChange with that current row, then remove it; the S3 object
+// goes after the commit. onlyUploading (a refused confirm): remove the row only while it is still an
+// unconfirmed upload, never a clip another confirm finished meanwhile.
+async function deleteMedia(mediaId, { scheduledServiceId = null, onChange = null, onlyUploading = false } = {}, knex = db) {
+  const row = await knex.transaction(async (trx) => {
+    const lookup = trx('service_media').where({ id: mediaId });
+    if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
+    const current = await lookup.forUpdate().first();
+    if (!current || (onlyUploading && current.status !== 'uploading')) return null;
+    if (onChange) await onChange(current, trx);
+    await trx('service_media').where({ id: current.id }).del();
+    return current;
   });
+  if (!row) return false;
   if (config.s3?.bucket && row.s3_key) {
     try { await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: row.s3_key })); }
     catch (err) { logger.warn(`[recap-media] S3 delete failed for ${row.s3_key}: ${err.message}`); }

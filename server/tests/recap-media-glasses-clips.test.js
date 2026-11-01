@@ -38,6 +38,7 @@ function mediaKnex(row) {
     const chain = {
       where: () => chain,
       andWhere: () => chain,
+      forUpdate: () => chain,
       first: async () => row,
       update: (patch) => { calls.update = patch; return { returning: async () => [{ ...row, ...patch }] }; },
       del: async () => { calls.deleted = true; },
