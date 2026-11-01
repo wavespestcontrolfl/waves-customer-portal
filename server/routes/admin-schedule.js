@@ -7164,6 +7164,8 @@ router.get('/', async (req, res, next) => {
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
         lastLineServiceNotes: previewText(lastLineService?.technician_notes),
         checkOutTime: s.check_out_time,
+        // With checkInTime/checkOutTime: the drive line finds where the tech is now.
+        enRouteAt: s.en_route_at || null,
         actualDuration: s.actual_duration_minutes,
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
@@ -7230,8 +7232,10 @@ router.get('/', async (req, res, next) => {
     }
 
     // Drive legs, the stop each leg comes from, and late risk against the
-    // 2-hour arrival window, for the day list (display only).
-    Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services));
+    // 2-hour arrival window, for the day list (display only). Today's risk
+    // runs from the clock; any other day's from the booked plan.
+    const legsToday = date === etDateString();
+    Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
 
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
