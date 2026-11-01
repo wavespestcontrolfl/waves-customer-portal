@@ -27,6 +27,8 @@
  */
 const { labelRainRuleFor } = require('../../config/label-rain-rules');
 const RESCHEDULE_RULES = require('../../config/reschedule-rules');
+const { driveSavingMinutes } = require('./move-rules');
+const { _internals: { hhmmToMin } } = require('./scoring');
 
 const DRY_WINDOWS = {
   long: { key: 'dry_long', startMin: 8 * 60, endMin: 10 * 60, label: '8:00–10:00 AM' },
@@ -186,11 +188,15 @@ async function withDryTime(prefs, conn, { customerId, serviceType, serviceKey, r
   return withWindow(out, window);
 }
 
+function windowByKey(key) {
+  return Object.values(DRY_WINDOWS).find((w) => w.key === key) || null;
+}
+
 // Shadow mode: the prefs the dry window would score with. Others: unchanged.
 function shadowPrefs(prefs) {
   const info = prefs.dry_time;
   if (!info || info.mode !== 'shadow' || info.customer_time) return prefs;
-  const window = Object.values(DRY_WINDOWS).find((w) => w.key === info.window_key) || null;
+  const window = windowByKey(info.window_key);
   const out = withWindow(prefs, window);
   // The same gain rule mode 'true' would score with.
   if (countsInGain(info.class, window, false)) out.dry_time = { ...info, counts_in_gain: true };
@@ -199,12 +205,40 @@ function shadowPrefs(prefs) {
 
 const startOf = (p) => (p ? { date: p.date, start: p.start_time } : null);
 
+const inWindow = (window, startMin) => startMin >= window.startMin && startMin < window.endMin;
+
+// Among the visit's same-date candidates that start inside its dry window, the
+// one that adds the least drive: { date, start, added_drive_min }, or null.
+function cheapestDryOnly(window, current, candidates) {
+  let best = null;
+  for (const cand of candidates || []) {
+    const startMin = hhmmToMin(cand.start_time);
+    if (String(cand.date) !== String(current.date) || startMin == null || !inWindow(window, startMin)) continue;
+    const added = 0 - driveSavingMinutes(current, cand);
+    if (!best || added < best.added_drive_min) best = { date: cand.date, start: cand.start_time, added_drive_min: added };
+  }
+  return best;
+}
+
+// Information only (never changes a ranking): for a rain-sensitive class with
+// a dry window and no customer time, whether a PLACED visit starts outside the
+// window and, if so, the cheapest same-day slot inside it.
+function dryWindowFacts(info, { current, candidates, placed }) {
+  const window = windowByKey(info.window_key);
+  if (info.class === 'proof' || info.customer_time || !window) return {};
+  const startMin = hhmmToMin(current && current.start_time);
+  const outside = !!placed && startMin != null && !inWindow(window, startMin);
+  return { outside_window: outside, dry_only: outside ? cheapestDryOnly(window, current, candidates) : null };
+}
+
 const sameSlot = (a, b) => !!a && !!b && a.date === b.date && a.start === b.start;
 
 // constraints_checked.dry_time for a decision: the visit's dry class and, in
 // shadow mode, where the dry window would have put it beside where today's
 // window put it. `live` / `shadow` are the qualifying best candidates (or null).
-function auditNote(prefs, { current, live, shadow }) {
+function auditNote(prefs, {
+  current, live, shadow, candidates = [], placed = false,
+}) {
   const info = prefs.dry_time;
   if (!info) return null;
   const shadowBest = startOf(shadow);
@@ -212,7 +246,11 @@ function auditNote(prefs, { current, live, shadow }) {
     ...info,
     current: startOf(current),
     live_best: startOf(live),
-    ...(info.mode === 'shadow' ? { shadow_best: shadowBest, would_move: !!shadowBest && !sameSlot(shadowBest, startOf(current)) } : {}),
+    ...(info.mode === 'shadow' ? {
+      shadow_best: shadowBest,
+      would_move: !!shadowBest && !sameSlot(shadowBest, startOf(current)),
+      ...dryWindowFacts(info, { current, candidates, placed }),
+    } : {}),
   };
 }
 

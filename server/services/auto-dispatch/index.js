@@ -376,7 +376,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { current }) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current }) } },
     };
   }
 
@@ -412,7 +412,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     current, currentScore, candidate: best, candidateScore: ranked.bestScore, service, prefs, lockBoundary, ctx, threshold,
   });
   Object.assign(constraints, dryTimeConstraint(prefs, {
-    current, live: ranked.qualifies ? best : null, shadow: dryTimeShadowBest({ service, prefs, current, candidates, scoreCtx, threshold, config }),
+    service, current, candidates, live: ranked.qualifies ? best : null, shadow: dryTimeShadowBest({ service, prefs, current, candidates, scoreCtx, threshold, config }),
   }));
 
   // Capped AFTER scoring (Codex r1): with the gate on, findValidCandidateSlots
@@ -436,8 +436,12 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
 
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER (owner 2026-11-01): constraints_checked.dry_time.
 // Empty when the gate is off (no dry_time on the prefs).
-function dryTimeConstraint(prefs, { current, live = null, shadow = null }) {
-  const note = dryTime.auditNote(prefs, { current, live, shadow });
+function dryTimeConstraint(prefs, {
+  service, current, candidates = [], live = null, shadow = null,
+}) {
+  const note = dryTime.auditNote(prefs, {
+    current, live, shadow, candidates, placed: !moveRules.isUnplacedDueDate(service),
+  });
   return note ? { dry_time: note } : {};
 }
 

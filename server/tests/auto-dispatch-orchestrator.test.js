@@ -2238,7 +2238,11 @@ describe('dry time audit (GATE_AUTO_DISPATCH_DRY_TIME_ORDER)', () => {
     const result = await _internals.evaluatePlacement(svc(), prefs, {}, config, '2026-06-20');
     expect(result.kind).toBe('no_change'); // the live path is unchanged
     expect(result.audit.constraints.dry_time).toMatchObject({
-      live_best: null, shadow_best: { date: CURRENT.date, start: '08:00' }, would_move: true,
+      live_best: null,
+      shadow_best: { date: CURRENT.date, start: '08:00' },
+      would_move: true,
+      outside_window: true,
+      dry_only: { date: CURRENT.date, start: '08:00', added_drive_min: 0 },
     });
   });
 

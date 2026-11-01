@@ -275,6 +275,8 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
         live_best: { date: '2026-11-03', start: '10:00' },
         shadow_best: { date: '2026-11-03', start: '08:00' },
         would_move: true,
+        outside_window: false,
+        dry_only: null,
       });
     });
     test('shadow with nothing qualifying shows nulls', () => {
@@ -289,6 +291,61 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       expect(stays.would_move).toBe(false);
       const none = dryTime.auditNote({ dry_time: info }, { current: at('2026-11-03', '08:00'), live: null, shadow: null });
       expect(none.would_move).toBe(false);
+    });
+    describe('outside_window and dry_only (information only)', () => {
+      const slot = (date, start_time, detour_minutes) => ({ date, start_time, detour_minutes, technician_id: 't1' });
+      const current = slot('2026-11-03', '14:00', 10);
+      const facts = (extra = {}, prefsInfo = info) => dryTime.auditNote(
+        { dry_time: prefsInfo },
+        { current, live: null, shadow: null, placed: true, candidates: [], ...extra },
+      );
+
+      test('a placed visit outside its window: the cheapest same-day in-window slot, with its added drive', () => {
+        const note = facts({
+          candidates: [
+            slot('2026-11-03', '09:00', 25), // in window, adds 15
+            slot('2026-11-03', '08:00', 17), // in window, adds 7: the cheapest
+            slot('2026-11-04', '08:00', 0), // another date: never
+            slot('2026-11-03', '15:00', 0), // same day, outside the window
+            slot('2026-11-03', '10:00', 12), // window end is exclusive
+          ],
+        });
+        expect(note.outside_window).toBe(true);
+        expect(note.dry_only).toEqual({ date: '2026-11-03', start: '08:00', added_drive_min: 7 });
+      });
+      test('a slot that saves drive shows a negative added drive', () => {
+        expect(facts({ candidates: [slot('2026-11-03', '08:00', 4)] }).dry_only.added_drive_min).toBe(-6);
+      });
+      test('no same-day in-window slot: dry_only is null', () => {
+        const note = facts({ candidates: [slot('2026-11-04', '08:00', 0)] });
+        expect(note.outside_window).toBe(true);
+        expect(note.dry_only).toBeNull();
+      });
+      test('an in-window visit: outside_window false, dry_only null', () => {
+        const note = dryTime.auditNote({ dry_time: info }, {
+          current: slot('2026-11-03', '08:30', 10), placed: true, candidates: [slot('2026-11-03', '09:00', 10)],
+        });
+        expect(note.outside_window).toBe(false);
+        expect(note.dry_only).toBeNull();
+      });
+      test('an unplaced visit is not outside its window', () => {
+        const note = facts({ placed: false, candidates: [slot('2026-11-03', '08:00', 0)] });
+        expect(note.outside_window).toBe(false);
+        expect(note.dry_only).toBeNull();
+      });
+      test('rain-proof, customer-timed and out-of-season visits carry neither field', () => {
+        const cands = [slot('2026-11-03', '08:00', 0)];
+        [{ ...info, class: 'proof', window_key: 'dry_proof' }, { ...info, customer_time: true }, { ...info, window_key: null }].forEach((i) => {
+          const note = facts({ candidates: cands }, i);
+          expect(note).not.toHaveProperty('outside_window');
+          expect(note).not.toHaveProperty('dry_only');
+        });
+      });
+      test('true mode carries neither field', () => {
+        const note = facts({ candidates: [slot('2026-11-03', '08:00', 0)] }, { ...info, mode: 'true' });
+        expect(note).not.toHaveProperty('outside_window');
+        expect(note).not.toHaveProperty('dry_only');
+      });
     });
     test('true mode carries no shadow_best', () => {
       const note = dryTime.auditNote({ dry_time: { ...info, mode: 'true' } }, { current: at('2026-11-03', '10:00'), live: null });
