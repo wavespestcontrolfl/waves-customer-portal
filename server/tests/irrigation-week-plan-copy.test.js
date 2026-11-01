@@ -328,6 +328,15 @@ describe('decideWeekPlan (server glue)', () => {
     expect(_private.fmtInches(0.75)).toBe('¾"');
     expect(_private.fmtInches(1.4)).toBe('1.4"');
   });
+
+  test('fmtInches keeps zero and whole numbers whole (the old strip turned 10 into 1 and 0 into nothing)', () => {
+    expect(_private.fmtInches(0)).toBe('0"');
+    expect(_private.fmtInches(2)).toBe('2"');
+    expect(_private.fmtInches(10)).toBe('10"');
+    expect(_private.fmtInches(20.0)).toBe('20"');
+    expect(_private.fmtInches(0.05)).toBe('0.05"');
+    expect(_private.fmtInches(1.404)).toBe('1.4"');
+  });
 });
 
 describe('snapshot lifecycle — exactness contract', () => {

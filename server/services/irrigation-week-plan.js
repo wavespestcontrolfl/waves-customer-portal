@@ -44,7 +44,9 @@ function fmtInches(n) {
   if (Math.abs(v - 0.5) < 0.01) return '½"';
   if (Math.abs(v - 0.75) < 0.01) return '¾"';
   if (Math.abs(v - 0.25) < 0.01) return '¼"';
-  return `${String(Math.round(v * 100) / 100).replace(/\.?0+$/, '')}"`;
+  // Two decimals at most, trailing zeros after the point dropped (1.40 -> 1.4, 2.00 -> 2).
+  // Number() keeps whole numbers whole: the old /\.?0+$/ strip turned 10 into 1 and 0 into ''.
+  return `${Number((Math.round(v * 100) / 100).toFixed(2))}"`;
 }
 
 // Under a multi-day policy a single prescribed run may land on ANY of the
