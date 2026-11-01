@@ -365,7 +365,7 @@ async function settleConflicts(run) {
 
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
-    current, candidates, drops, skipped, search,
+    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [],
   } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
 
@@ -376,7 +376,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current }) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates }) } },
     };
   }
 
@@ -411,8 +411,9 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   } = buildPlacementAudit({
     current, currentScore, candidate: best, candidateScore: ranked.bestScore, service, prefs, lockBoundary, ctx, threshold,
   });
+  const shadowPool = dryShadowCandidates.length ? candidates.concat(dryShadowCandidates) : candidates;
   Object.assign(constraints, dryTimeConstraint(prefs, {
-    service, current, candidates, live: ranked.qualifies ? best : null, shadow: dryTimeShadowBest({ service, prefs, current, candidates, scoreCtx, threshold, config }),
+    service, current, candidates: shadowPool, live: ranked.qualifies ? best : null, shadow: dryTimeShadowBest({ service, prefs, current, candidates: shadowPool, scoreCtx, threshold, config }),
   }));
 
   // Capped AFTER scoring (Codex r1): with the gate on, findValidCandidateSlots
@@ -443,6 +444,13 @@ function dryTimeConstraint(prefs, {
     current, live, shadow, candidates, placed: !moveRules.isUnplacedDueDate(service),
   });
   return note ? { dry_time: note } : {};
+}
+
+// A placement audit rebuilt around the candidate apply.js tried keeps the
+// evaluation's dry_time block, with live_best following that candidate.
+function carryDryTime(built, evaluation, candidate) {
+  const note = dryTime.noteForCandidate(evaluation.audit && evaluation.audit.constraints && evaluation.audit.constraints.dry_time, candidate);
+  return note ? { ...built, constraints: { ...built.constraints, dry_time: note } } : built;
 }
 
 // 'shadow' mode: the slot the dry window would have chosen, ranked by the
@@ -616,7 +624,7 @@ function buildAppliedPlacementAudit(fresh, service, prefs, ctx, lockBoundary, re
   // attempts (ids/numbers only): how many candidates apply.js tried before
   // this one landed — 1 when the first attempt succeeded, or when the
   // applier didn't report it (a plain mock, or a pre-lane version).
-  return { ...built, attempts: result.attempts || 1 };
+  return { ...carryDryTime(built, evaluation, appliedCandidate), attempts: result.attempts || 1 };
 }
 
 // The audit fields for a FAILED apply: the candidate apply.js tried LAST
@@ -643,7 +651,7 @@ function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
     scores: built.scores,
     prefsSnapshot: prefs.raw_snapshot,
     routeMetrics: { ...built.routeMetrics, attempts: applyErr.attemptsTried || 1 },
-    constraints: built.constraints,
+    constraints: carryDryTime(built, evaluation, applyErr.lastAttempted).constraints,
   };
 }
 

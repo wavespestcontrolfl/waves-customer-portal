@@ -52,6 +52,7 @@ const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { currentConflict } = require('./current-conflict');
 const { capacityEnabled } = require('../scheduling/policy');
+const dryTime = require('./dry-time');
 const territory = require('../territory');
 const logger = require('../logger');
 
@@ -903,6 +904,46 @@ async function conflictSameDaySlots(service, current, slots, findTimeArgs) {
     .filter((slot) => sameDayTech(slot) && slot.start_time !== current.start_time && !offered.has(slot.start_time));
 }
 
+// GATE_AUTO_DISPATCH_DRY_TIME_ORDER (dry-time.js): find-time offers only each
+// gap's earliest start, so a visit whose dry window opens later in the day (the
+// rain-proof 1-5 PM window) would never see a start inside it. When the dry
+// window applies (no customer-set time, in season) and opens after the day's
+// first hour, the SAME finder is asked once more with the window's start as the
+// floor (the preferred-time mechanism above): same checks, same road model, no
+// new paid calls. Nothing is added in capacity mode or the arrival search (they
+// already list every start), gate off (no dry_time on the prefs), or for a
+// start the first search returned.
+const DAY_OPEN_MIN = 8 * 60;
+const candidateKey = (c) => `${c.date}|${c.start_time}|${c.technician_id}`;
+const slotKey = (slot) => `${slot.date}|${slot.start_time}|${slot.technician && slot.technician.id}`;
+
+async function dryWindowSlots(prefs, findTimeArgs, ctx, slots) {
+  const info = prefs.dry_time;
+  const window = info && !info.customer_time ? dryTime.windowByKey(info.window_key) : null;
+  if (!window || window.startMin <= DAY_OPEN_MIN || capacityEnabled() || findTimeArgs.arrivalSearch === true) return [];
+  const res = await findAvailableSlots({ ...findTimeArgs, earliestStartMin: window.startMin, topN: ctx.fetchCap || FETCH_CAP });
+  const seen = new Set(slots.map(slotKey));
+  return ((res && res.slots) || []).filter((slot) => !seen.has(slotKey(slot)));
+}
+
+// The dry-window starts as candidates, through the same flex admission, HARD
+// filters and ranking as every other slot, and without any already in `scored`.
+// Mode 'true': they join the live list, after the route options (never instead
+// of them). Mode 'shadow': they are returned as `shadow_candidates` only, with
+// their own drop tally, so the live list and its audit counters stay as they were.
+async function withDryWindowCandidates(scored, { prefs, findTimeArgs, slots, flexRules, hard, geo }) {
+  const extra = await dryWindowSlots(prefs, findTimeArgs, hard.ctx, slots);
+  if (!extra.length) return { candidates: scored };
+  const live = prefs.dry_time.mode === 'true';
+  const drops = live ? hard.drops : Object.fromEntries(Object.keys(hard.drops).map((k) => [k, 0]));
+  const made = flexRules.admit(extra, drops).map((slot) => candidateFromSlot(slot, { ...hard, drops })).filter(Boolean);
+  const ranked = await rankSurvivorsForSharedModel(hard.service, geo, made, hard.ctx, drops);
+  const have = new Set(scored.map(candidateKey));
+  const fresh = ranked.filter((c) => !have.has(candidateKey(c)));
+  if (!fresh.length) return { candidates: scored };
+  return live ? { candidates: scored.concat(fresh) } : { candidates: scored, shadow_candidates: fresh };
+}
+
 // The dates a move may land on. Within ± tolerance days of the visit's
 // CURRENT date (clamped to the lock floor and lookahead horizon), so
 // optimization tightens the route without collapsing the recurring cadence;
@@ -1178,7 +1219,8 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // rankSurvivorsForSharedModel). Gate on: SLOT_TAKEN candidates dropped and
   // every survivor re-scored on the shared model.
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
-  return { current, candidates: scored, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates) };
+  const withDry = await withDryWindowCandidates(scored, { prefs, findTimeArgs, slots, flexRules, hard, geo });
+  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates) };
 }
 
 module.exports = {

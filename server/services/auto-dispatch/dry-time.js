@@ -26,7 +26,7 @@
  * read error falls back to the service rule: this feeds soft scoring only.
  */
 const { labelRainRuleFor } = require('../../config/label-rain-rules');
-const RESCHEDULE_RULES = require('../../config/reschedule-rules');
+const { rainFreeHoursFor } = require('../service-sensitivity');
 const { driveSavingMinutes } = require('./move-rules');
 const { _internals: { hhmmToMin } } = require('./scoring');
 
@@ -82,23 +82,9 @@ function productDryHours(product, serviceHours) {
   return Number(serviceHours) > 0 ? Number(serviceHours) : DEFAULT_LIQUID_HOURS;
 }
 
-// reschedule-rules.js serviceSensitivity key for a visit's name / catalog key.
-function sensitivityKeyFor(serviceType, serviceKey) {
-  const text = `${serviceKey || ''} ${serviceType || ''}`.toLowerCase().replace(/_/g, ' ');
-  if (/mosquito/.test(text)) return 'mosquito';
-  if (/\btrees?\b|shrub|\bpalms?\b/.test(text)) return 'tree_shrub_spray';
-  if (/lawn|turf|weed|fertil/.test(text)) return 'lawn_spray';
-  if (/termite/.test(text) && /bait|monitor/.test(text)) return 'termite_bait';
-  if (/rodent|\brats?\b|trap/.test(text)) return 'rodent';
-  if (/interior/.test(text) && !/exterior/.test(text)) return 'pest_interior';
-  return 'pest_exterior';
-}
-
-// Rain-free hours the service rule asks for (0 when it needs none).
-function serviceRuleHours(serviceType, serviceKey) {
-  const rule = RESCHEDULE_RULES.serviceSensitivity[sensitivityKeyFor(serviceType, serviceKey)];
-  return rule && rule.needs_rain_free ? Number(rule.rain_free_hours) || 0 : 0;
-}
+// Rain-free hours the service rule asks for (0 when it needs none): the one
+// shared classifier (service-sensitivity.js), the weather rebooker's own.
+const serviceRuleHours = rainFreeHoursFor;
 
 // A read inside a transaction runs in a savepoint, so a failed read cannot
 // abort the caller's transaction (the proofreader's locked re-read).
@@ -231,6 +217,13 @@ function dryWindowFacts(info, { current, candidates, placed }) {
   return { outside_window: outside, dry_only: outside ? cheapestDryOnly(window, current, candidates) : null };
 }
 
+// The dry_time block the evaluation wrote, for a placement built again around
+// the candidate apply.js actually tried: only live_best follows the candidate
+// (the other fields describe the visit and the candidate list it was scored on).
+function noteForCandidate(note, candidate) {
+  return note ? { ...note, live_best: startOf(candidate) } : null;
+}
+
 const sameSlot = (a, b) => !!a && !!b && a.date === b.date && a.start === b.start;
 
 // constraints_checked.dry_time for a decision: the visit's dry class and, in
@@ -255,5 +248,5 @@ function auditNote(prefs, {
 }
 
 module.exports = {
-  DRY_WINDOWS, classForHours, inSeason, productDryHours, serviceRuleHours, resolveDryHours, withDryTime, shadowPrefs, auditNote, dryTimeMode,
+  DRY_WINDOWS, classForHours, inSeason, productDryHours, serviceRuleHours, resolveDryHours, withDryTime, shadowPrefs, auditNote, noteForCandidate, windowByKey, dryTimeMode,
 };

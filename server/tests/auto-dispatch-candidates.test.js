@@ -474,3 +474,75 @@ test('find-time ignores the whole moving unit for a visit in an overlap, itself 
   expect(await movingUnitIds(SERVICE, { evalConflict: null, groupContext })).toEqual(['s1']);
   expect(await movingUnitIds(SERVICE, { evalConflict: { kind: 'closed_day', date: '2026-08-04' }, groupContext })).toEqual(['s1']);
 });
+
+// GATE_AUTO_DISPATCH_DRY_TIME_ORDER: find-time offers only each gap's earliest
+// start, so the rain-proof 1-5 PM window needs its own generation pass.
+describe('dry-window candidate generation', () => {
+  const slot = (start, end, extra = {}) => ({
+    date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: start, end_time: end, detour_minutes: 5, total_drive_minutes: 20, stops_that_day: 3, score: 5, ...extra,
+  });
+  const EARLY = slot('08:00', '09:00');
+  const AFTERNOON = slot('13:00', '14:00', { detour_minutes: 9 });
+  const dryTimeInfo = (extra = {}) => ({
+    mode: 'true', hours: 0, class: 'proof', source: 'service_rule', window_key: 'dry_proof', customer_time: false, ...extra,
+  });
+  const prefsWith = (dry_time) => ({ blackout: null, service_category: 'general', ...(dry_time ? { dry_time } : {}) });
+  // The first search returns the early start; the floored search returns the afternoon start (and the early one again).
+  const mockSearches = () => findAvailableSlots.mockImplementation(async (args) => (
+    { slots: args.earliestStartMin >= 780 ? [AFTERNOON, EARLY] : [EARLY], total_feasible: 1 }
+  ));
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('gate off: one search, no extra generation', async () => {
+    mockSearches();
+    const res = await findValidCandidateSlots(SERVICE, prefsWith(null), ctx());
+    expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+    expect(res.candidates.map((c) => c.start_time)).toEqual(['08:00']);
+    expect(res).not.toHaveProperty('shadow_candidates');
+  });
+
+  test("'true': a second search floored at the window start; its starts join the live list after the route options", async () => {
+    mockSearches();
+    const res = await findValidCandidateSlots(SERVICE, prefsWith(dryTimeInfo()), ctx());
+    expect(findAvailableSlots).toHaveBeenCalledTimes(2);
+    expect(findAvailableSlots.mock.calls[1][0].earliestStartMin).toBe(13 * 60);
+    expect(findAvailableSlots.mock.calls[1][0].excludeServiceIds).toEqual(['s1']);
+    expect(res.candidates.map((c) => c.start_time)).toEqual(['08:00', '13:00']); // the early start is not duplicated
+    expect(res).not.toHaveProperty('shadow_candidates');
+  });
+
+  test("'shadow': the live list and its drop tally are exactly the gate-off result; the extra starts ride shadow_candidates", async () => {
+    mockSearches();
+    const off = await findValidCandidateSlots(SERVICE, prefsWith(null), ctx());
+    jest.clearAllMocks();
+    mockSearches();
+    const res = await findValidCandidateSlots(SERVICE, prefsWith(dryTimeInfo({ mode: 'shadow' })), ctx());
+    expect(findAvailableSlots).toHaveBeenCalledTimes(2);
+    expect(res.candidates).toEqual(off.candidates);
+    expect(res.drops).toEqual(off.drops);
+    expect(res.feasible).toBe(off.feasible);
+    expect(res.search).toEqual(off.search);
+    expect(res.shadow_candidates.map((c) => c.start_time)).toEqual(['13:00']);
+  });
+
+  test('a window that opens with the day, a customer-set time, or the arrival search adds no search', async () => {
+    mockSearches();
+    await findValidCandidateSlots(SERVICE, prefsWith(dryTimeInfo({ window_key: 'dry_long', class: 'long' })), ctx());
+    await findValidCandidateSlots(SERVICE, prefsWith(dryTimeInfo({ customer_time: true })), ctx());
+    await findValidCandidateSlots(SERVICE, prefsWith(dryTimeInfo({ window_key: null })), ctx());
+    await findValidCandidateSlots(SERVICE, prefsWith(dryTimeInfo()), { ...ctx(), arrivalSearch: true });
+    expect(findAvailableSlots).toHaveBeenCalledTimes(4); // one each
+  });
+
+  test("the extra starts pass the same HARD filters (blackout, 17:00 close)", async () => {
+    findAvailableSlots.mockImplementation(async (args) => (
+      { slots: args.earliestStartMin >= 780 ? [slot('13:00', '14:00', { date: '2026-08-10' }), slot('17:00', '18:00'), AFTERNOON] : [EARLY], total_feasible: 1 }
+    ));
+    const prefs = { blackout: { start: '2026-08-09', end: '2026-08-12' }, service_category: 'general', dry_time: dryTimeInfo() };
+    const res = await findValidCandidateSlots(SERVICE, prefs, ctx());
+    expect(res.candidates.map((c) => `${c.date} ${c.start_time}`)).toEqual(['2026-08-05 08:00', '2026-08-05 13:00']);
+    expect(res.drops.blackout).toBe(1);
+    expect(res.drops.after_hours).toBe(1);
+  });
+});

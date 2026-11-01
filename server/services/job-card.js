@@ -754,7 +754,7 @@ function paragraphForVisit(facts) {
 function wavesRainRule(serviceTypes) {
   let strictest = null;
   for (const serviceType of serviceTypes) {
-    const key = require('./forecast-analyzer').classifyServiceType(serviceType);
+    const key = require('./service-sensitivity').classifyServiceSensitivity(serviceType);
     const sensitivity = RESCHEDULE_RULES.serviceSensitivity[key];
     if (sensitivity?.needs_rain_free && sensitivity.rain_free_hours > (strictest?.hours ?? 0)) strictest = { key, hours: sensitivity.rain_free_hours };
   }

@@ -100,21 +100,22 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
     });
   });
 
-  describe('serviceRuleHours', () => {
+  describe('serviceRuleHours (the shared service-sensitivity classifier)', () => {
     test.each([
       ['WaveGuard Mosquito Treatment', null, 2],
       ['Tree & Shrub Program', null, 3],
-      ['Palm Injection', null, 3],
+      ['Tree Injection', null, 0],
       ['Lawn Care Visit #3', null, 4],
-      ['Fertilization & Weed Control', null, 4],
+      ['Lawn Granular Fertilization', null, 0],
       ['Quarterly Pest Control', null, 2],
       ['Interior Pest Control', null, 0],
-      ['Interior and Exterior Pest', null, 2],
       ['Termite Bait Station Monitoring', null, 0],
       ['Rodent Trapping Followup', null, 0],
       ['Rat Control', null, 0],
       ['Termite Liquid Treatment', null, 2],
       ['', 'lawn_fertilization', 4],
+      ['', 'lawn_granular', 0],
+      ['Fertilization', 'tree_injection', 0],
     ])('%s (%s) -> %s h', (type, key, hours) => {
       expect(dryTime.serviceRuleHours(type, key)).toBe(hours);
     });

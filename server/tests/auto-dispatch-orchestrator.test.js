@@ -2246,6 +2246,64 @@ describe('dry time audit (GATE_AUTO_DISPATCH_DRY_TIME_ORDER)', () => {
     });
   });
 
+  test('shadow: starts only the dry-window search found (shadow_candidates) are scored for shadow_best and never for the live decision', async () => {
+    const prefs = { ...BASE, dry_time: dryTime('shadow') };
+    const unplaced = { ...CURRENT, date: '2026-08-04', start_time: null, detour_minutes: 40 };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({
+      current: unplaced, candidates: [EARLY], shadow_candidates: [LATE], drops: {},
+    });
+    const result = await _internals.evaluatePlacement(FIRST_PLACEMENT(), prefs, {}, CONFIG, '2026-06-20');
+    expect(result.best.start_time).toBe('08:00');
+    expect(result.rankedCandidates.map((c) => c.start_time)).toEqual(['08:00']);
+    expect(result.audit.constraints.dry_time).toMatchObject({
+      live_best: { start: '08:00' }, shadow_best: { date: '2026-08-04', start: '14:00' },
+    });
+  });
+
+  test('apply mode: the applied move keeps the dry_time block, with live_best the slot that moved', async () => {
+    const preferences = require('../services/auto-dispatch/preferences');
+    const prefs = { ...BASE, dry_time: { ...dryTime('shadow'), class: 'long', window_key: 'dry_long' } };
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue(prefs);
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+      await runAutoDispatch({ mode: 'apply' });
+      const changed = lastDecision('changed');
+      expect(changed.reason_code).toBe('CHANGE_APPLIED');
+      expect(changed.constraints.dry_time).toMatchObject({
+        mode: 'shadow', class: 'long', current: { date: CURRENT.date, start: CURRENT.start_time }, live_best: { date: CAND_BIG.date, start: CAND_BIG.start_time },
+      });
+      expect(changed.constraints.dry_time).toHaveProperty('shadow_best');
+      expect(changed.constraints.dry_time).toHaveProperty('outside_window');
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+      preferences.getCustomerSchedulingPreferences.mockImplementation(async () => ({
+        preferred_day_indexes: [], effective_time_window: null, preferred_time_window: null,
+        blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
+      }));
+    }
+  });
+
+  test('a SLOT_TAKEN fallback is audited with live_best the candidate apply.js landed on', async () => {
+    const preferences = require('../services/auto-dispatch/preferences');
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue({ ...BASE, dry_time: dryTime('true') });
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE] });
+      apply.applyAutoDispatchMove.mockResolvedValue({ ok: true, pre_status: 'confirmed', post_status: 'confirmed', applied: CAND_MODERATE, attempts: 2 });
+      await runAutoDispatch({ mode: 'apply' });
+      expect(lastDecision('changed').constraints.dry_time).toMatchObject({ live_best: { date: CAND_MODERATE.date, start: CAND_MODERATE.start_time } });
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+      preferences.getCustomerSchedulingPreferences.mockImplementation(async () => ({
+        preferred_day_indexes: [], effective_time_window: null, preferred_time_window: null,
+        blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
+      }));
+    }
+  });
+
   test('true: the audit carries the class and the current slot, no shadow_best', async () => {
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG], drops: {} });
     const result = await _internals.evaluatePlacement(svc(), { ...BASE, dry_time: dryTime('true') }, {}, CONFIG, '2026-06-20');
