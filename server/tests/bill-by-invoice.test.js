@@ -7,7 +7,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const {
-  billByInvoiceProposal, billByInvoiceEstimateIds, billByInvoiceVisit, billByInvoiceInvoice,
+  billByInvoiceProposal, billByInvoiceProposalAwaitingWin, billByInvoiceEstimateIds, billByInvoiceVisit, billByInvoiceInvoice,
   wonAuthoredProposal, wonProposalInvoice,
 } = require('../services/bill-by-invoice');
 const {
@@ -65,6 +65,29 @@ describe('billByInvoiceProposal', () => {
       estimateRow({ estimate_data: { recurring: { services: [] } } }), null, undefined,
     ]) {
       expect(billByInvoiceProposal(row)).toBeNull();
+    }
+  });
+});
+
+describe('billByInvoiceProposalAwaitingWin (audit fix 2, 2026-11-01)', () => {
+  test('an authored Bill-by-invoice proposal that is not accepted is awaiting its win', () => {
+    for (const status of ['sent', 'viewed', 'draft']) {
+      expect(billByInvoiceProposalAwaitingWin(estimateRow({ status }))).toBe(true);
+    }
+  });
+
+  test('a won proposal, an Auto Pay-term proposal, an ordinary quote and a missing row are not', () => {
+    expect(billByInvoiceProposalAwaitingWin(estimateRow({ status: 'accepted' }))).toBe(false);
+    expect(billByInvoiceProposalAwaitingWin(estimateRow({ status: 'sent', bill_by_invoice: false }))).toBe(false);
+    expect(billByInvoiceProposalAwaitingWin(estimateRow({ status: 'sent', estimate_data: { result: {} } }))).toBe(false);
+    expect(billByInvoiceProposalAwaitingWin(estimateRow({ status: 'sent', estimate_data: { proposal: { ...AUTHORED_PROPOSAL, enabled: false } } }))).toBe(false);
+    expect(billByInvoiceProposalAwaitingWin(null)).toBe(false);
+  });
+
+  test('it is the exact complement of billByInvoiceProposal for an authored invoice-mode proposal', () => {
+    for (const status of ['sent', 'viewed', 'accepted']) {
+      const row = estimateRow({ status });
+      expect(billByInvoiceProposalAwaitingWin(row)).toBe(billByInvoiceProposal(row) === null);
     }
   });
 });

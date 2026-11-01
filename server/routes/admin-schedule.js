@@ -110,6 +110,7 @@ const { calculateBoundedTrackingEta } = require('../services/customer-tracking-e
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { billByInvoiceDemotedPrediction } = require('../services/completion-charge-verdict');
+const { billByInvoiceProposalAwaitingWin } = require('../services/bill-by-invoice');
 const { isAlwaysFreeServiceType, isConsultationServiceType } = require('../services/no-cost-visit-types');
 const SeriesPriceGuards = require('../services/series-price-guards');
 const DiscountEngine = require('../services/discount-engine');
@@ -8737,6 +8738,14 @@ async function scheduleCreateHandler(req, res, next) {
       const BOOKABLE_ESTIMATE_STATUSES = ['accepted', 'sent', 'viewed'];
       if (!BOOKABLE_ESTIMATE_STATUSES.includes(linkedEstimate.status)) {
         return res.status(400).json({ error: `Cannot book from an estimate that is ${linkedEstimate.status}. Only accepted, sent, or viewed estimates can be linked.` });
+      }
+      // A Bill-by-invoice proposal's Net term reaches a bill only once the proposal is won, so a visit booked from it
+      // earlier would bill due on the visit day (and Auto Pay could charge it). Refuse until Mark won.
+      if (billByInvoiceProposalAwaitingWin(linkedEstimate)) {
+        return res.status(409).json({
+          error: 'Mark this proposal won before booking from it. Its Net payment terms apply only to a won proposal.',
+          code: 'proposal_not_won',
+        });
       }
       if (linkedEstimate.status !== 'accepted' && linkedEstimate.expires_at && new Date(linkedEstimate.expires_at) < new Date()) {
         return res.status(400).json({ error: 'This estimate has expired. Revive it on the Estimates page before booking from it.' });
