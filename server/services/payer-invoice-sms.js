@@ -105,6 +105,16 @@ function heldRowBody(body) {
   return `${text.slice(0, at + READY_MARKER.length)}${HELD_PAY_LINK_PLACEHOLDER}`;
 }
 
+// A held payer text previews the payer's and customer's names and the service street, and it belongs to no technician's
+// route: readers that list queued sms_log rows without a customer scope show these rows to the office only (the same
+// rule as the recruiting texts, utils/recruiting-thread-scope.js). The registered replay sends them; no technician acts.
+function hidePayerHoldsFromNonAdmin(query, req, messageTypeColumn = 'sms_log.message_type') {
+  if (req && req.techRole === 'admin') return query;
+  return query.where(function payerHoldFilter() {
+    this.whereNull(messageTypeColumn).orWhere(messageTypeColumn, '<>', MESSAGE_TYPE);
+  });
+}
+
 async function serviceAddressLine(invoice, customer) {
   try {
     const full = await require('./billing-email-details').invoicePropertyAddress(invoice, customer);
@@ -399,6 +409,7 @@ module.exports = {
   replayHeldPayerText,
   buildPayerInvoiceBody,
   heldRowBody,
+  hidePayerHoldsFromNonAdmin,
   eventKeyFor,
   MESSAGE_TYPE,
   ENTRY_POINT,
