@@ -11597,6 +11597,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const annualPrepayInvoiceAmount = annualPrepaySelected
       ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
       : null;
+    // Restamp the stored data to the selected cadence(s) ONCE, up front: the
+    // prepay quote below and the converter's invoice must read the same rows
+    // (the selected cadence's floor rides the restamped lawn row), and a
+    // present ladder lacking the requested tier refuses before anything is
+    // quoted. Only reads sit between here and the accept transaction.
+    const acceptedSelection = acceptedEstimateDataForSelection(estData, {
+      selectedFrequency, selectedCombo, serviceCadences, recurringSvcList,
+    });
+    if (acceptedSelection.refusal) return res.status(409).json(acceptedSelection.refusal);
     // annualPrepayInvoiceAmount is the UNDISCOUNTED recurring annual (the base the
     // converter needs). For post-accept customer/admin messaging AND the API
     // response we must quote the amount actually invoiced — the converter's shared
@@ -11638,7 +11647,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const resolved = converter.resolveAnnualPrepayInvoiceTotal({
           baseAnnual: annualPrepayInvoiceAmount,
           recurringServices: recurringSvcList,
-          estimateData: estData,
+          estimateData: acceptedSelection.data,
         });
         // The converter's prepay invoice carries the disclosed bait-station
         // setup as its own (never-waived, taxed) line — the quoted/
@@ -11885,49 +11894,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const acceptedServiceTierKey = selectedFrequency?.billingFrequencyKey ? selectedFrequency.key : null;
     const acceptedSchedulingFrequencyKey = acceptedServiceTierKey || acceptedFrequencyKey;
     const selectedServiceTierBillsMonthly = !!acceptedServiceTierKey && acceptedFrequencyKey === 'monthly';
-    let acceptedEstDataForPricing = selectedFrequency
-      ? applySelectedMosquitoTierToEstimateData(
-          applySelectedLawnTierToEstimateData(
-            applySelectedTreeShrubTierToEstimateData(estData, selectedFrequency),
-            selectedFrequency,
-          ),
-          selectedFrequency,
-        )
-      : estData;
-    // Per-service cadence: rewrite each independently-selected non-pest tier into
-    // the recurring rows so the converter schedules + bills each service at its
-    // chosen cadence (lawn / tree / mosquito have apply-helpers; see NON_PEST_RESULT_ROWS).
-    if (selectedCombo && serviceCadences) {
-      const rDisc = Number(estData?.result?.recurring?.discount) || 0;
-      for (const [svcKey, tierKey] of Object.entries(serviceCadences)) {
-        const svcRow = recurringSvcList.find((s) => recurringServiceKey(s) === svcKey);
-        const ladder = bundleSectionLadderForService(svcKey, acceptedEstDataForPricing, svcRow || { service: svcKey }, rDisc);
-        const tierEntry = ladder && ladder.find((e) => e.key === tierKey);
-        if (!tierEntry) {
-          // A NULL ladder is the legitimate single-tier section (the stored
-          // row already IS the only offered tier — nothing to restamp). A
-          // PRESENT ladder that lacks the requested tier means the combo
-          // axes and the restamp ladder disagree (retired/crafted tier):
-          // accepting would commit the combo's totals while the rows keep
-          // their stored cadence — billed ≠ scheduled. Refuse instead of
-          // silently skipping (estimator audit 2026-07-24 P2).
-          if (ladder) {
-            return res.status(409).json({
-              error: 'One of this estimate’s plan options is no longer offered — pick a current option, or call Waves and we’ll refresh your quote.',
-              reason: 'service_cadence_tier_unavailable',
-            });
-          }
-          continue;
-        }
-        if (svcKey === 'lawn_care') {
-          acceptedEstDataForPricing = applySelectedLawnTierToEstimateData(acceptedEstDataForPricing, tierEntry);
-        } else if (svcKey === 'tree_shrub') {
-          acceptedEstDataForPricing = applySelectedTreeShrubTierToEstimateData(acceptedEstDataForPricing, tierEntry);
-        } else if (svcKey === 'mosquito') {
-          acceptedEstDataForPricing = applySelectedMosquitoTierToEstimateData(acceptedEstDataForPricing, tierEntry);
-        }
-      }
-    }
+    // Restamped once, before the prepay quote above, from the same inputs.
+    let acceptedEstDataForPricing = acceptedSelection.data;
     // Retired lawn cadence backstop (owner directive 2026-07-09): if the
     // recurring lawn row is STILL at a retired cadence after every restamp
     // above, the converter would schedule the retired 4-visit program (only
@@ -21831,18 +21799,26 @@ function annualPrepayHasSellableIncentive(estimate = {}, estData = null, payload
   // default sits at the floor still earns a real discount on the
   // Premium/monthly cadence, and hiding prepay for the whole payload would
   // deny it. (The stored annual_total is the default-cadence candidate.)
-  const candidateAnnuals = [
-    Number(estimate.annual_total ?? estimate.annualTotal) || 0,
+  // Each offered lawn cadence is priced from the data restamped to THAT
+  // cadence (its own cost floor), the way accept quotes it. Accept reads the
+  // SUPPLEMENTED data (engine-backed saves get their recurring rows there), so
+  // the candidates do too: restamping only rewrites rows that exist.
+  const pricingData = withSupplementedRecurringServices(estData || {}) || estData || {};
+  const candidates = [
+    { baseAnnual: Number(estimate.annual_total ?? estimate.annualTotal) || 0, estimateData: pricingData },
     ...(Array.isArray(payload.frequencies)
-      ? payload.frequencies.map((f) => Number(f?.annual) || 0)
+      ? payload.frequencies.map((f) => ({
+        baseAnnual: Number(f?.annual) || 0,
+        estimateData: applySelectedLawnTierToEstimateData(pricingData, f),
+      }))
       : []),
-  ].filter((n) => n > 0);
-  if (!candidateAnnuals.length) return true;
-  return candidateAnnuals.some((baseAnnual) => {
+  ].filter((c) => c.baseAnnual > 0);
+  if (!candidates.length) return true;
+  return candidates.some(({ baseAnnual, estimateData }) => {
     const resolved = converter.resolveAnnualPrepayInvoiceTotal({
       baseAnnual,
       recurringServices: recurringSvcList || [],
-      estimateData: estData || {},
+      estimateData,
     });
     return resolved.discount > 0 && resolved.rate >= 0.001;
   });
@@ -25621,6 +25597,25 @@ function isLawnTierFrequency(frequency = {}) {
   });
 }
 
+// The selected cadence's own (ceiled) cost floor, present on the ladder entry
+// only when the floor is armed for it. The row's inherited
+// minimumCollectedAnnualPrice / costFloorAnnual stay the DEFAULT cadence's, so
+// downstream readers (shapeFromV1's lawnFloorMonthlyFor, the annual-prepay
+// protected slice) take lawnFloorMonthly first. No usable floor: row untouched.
+function withSelectedCadenceFloor(row, frequency = {}) {
+  const floorMonthly = finiteNumberOrNull(frequency.marginFloorMonthly);
+  return floorMonthly != null && floorMonthly > 0 ? { ...row, lawnFloorMonthly: floorMonthly } : row;
+}
+
+// The ladder entry's annual is the selected cadence's NET (its manual discount
+// and floor clamp already applied). An inherited manualFinalAnnual is the
+// STORED cadence's net, and readers take it as authoritative (the annual-prepay
+// protected slice, the plan-rate ledger), so it follows the selected tier.
+function withSelectedCadenceNet(row, frequency = {}) {
+  const net = finiteNumberOrNull(frequency.annual);
+  return row.manualFinalAnnual != null && net != null ? { ...row, manualFinalAnnual: net } : row;
+}
+
 function selectedLawnServiceRow(existing = {}, frequency = {}) {
   const meta = lawnTierRuntimeMeta(frequency?.key);
   if (!meta) return existing;
@@ -25642,7 +25637,7 @@ function selectedLawnServiceRow(existing = {}, frequency = {}) {
   if (annual != null) { row.ann = annual; row.annual = annual; row.annualAfterDiscount = annual; }
   if (perTreatment != null) { row.pa = perTreatment; row.perTreatment = perTreatment; row.perVisit = perTreatment; }
   if (visits != null) { row.v = visits; row.visits = visits; row.visitsPerYear = visits; row.appsPerYear = visits; }
-  return row;
+  return withSelectedCadenceFloor(withSelectedCadenceNet(row, frequency), frequency);
 }
 
 function rewriteLawnRecurringServices(services = [], frequency = {}) {
@@ -25824,6 +25819,55 @@ function applySelectedMosquitoTierToEstimateData(estData = {}, frequency = {}) {
     nextData.recurring = applyMosquitoTierToRecurring(estData.recurring, frequency);
   }
   return nextData;
+}
+
+// Plan-option refusal for a per-service cadence the section ladder no longer
+// offers (estimator audit 2026-07-24 P2). Shared by the accept route's 409.
+const SERVICE_CADENCE_TIER_UNAVAILABLE_BODY = {
+  error: 'One of this estimate’s plan options is no longer offered — pick a current option, or call Waves and we’ll refresh your quote.',
+  reason: 'service_cadence_tier_unavailable',
+};
+
+// The estimate data an accept prices, quotes and converts from: the stored
+// data restamped to the customer's selected cadence(s). Pure, so the accept
+// route computes it ONCE and both the prepay quote and the converter read the
+// same restamped rows (the selected cadence's floor rides lawnFloorMonthly).
+// Returns { data } or, when a PRESENT section ladder lacks the requested tier,
+// { refusal } (the 409 body). A NULL ladder is the legitimate single-tier
+// section: nothing to restamp, skip.
+function acceptedEstimateDataForSelection(estData, { selectedFrequency, selectedCombo, serviceCadences, recurringSvcList } = {}) {
+  let accepted = selectedFrequency
+    ? applySelectedMosquitoTierToEstimateData(
+        applySelectedLawnTierToEstimateData(
+          applySelectedTreeShrubTierToEstimateData(estData, selectedFrequency),
+          selectedFrequency,
+        ),
+        selectedFrequency,
+      )
+    : estData;
+  if (!(selectedCombo && serviceCadences)) return { data: accepted };
+  // Per-service cadence: rewrite each independently-selected non-pest tier into
+  // the recurring rows so the converter schedules + bills each service at its
+  // chosen cadence (lawn / tree / mosquito have apply-helpers; see NON_PEST_RESULT_ROWS).
+  const restampers = {
+    lawn_care: applySelectedLawnTierToEstimateData,
+    tree_shrub: applySelectedTreeShrubTierToEstimateData,
+    mosquito: applySelectedMosquitoTierToEstimateData,
+  };
+  const rDisc = Number(estData?.result?.recurring?.discount) || 0;
+  const rows = Array.isArray(recurringSvcList) ? recurringSvcList : [];
+  for (const [svcKey, tierKey] of Object.entries(serviceCadences)) {
+    const svcRow = rows.find((s) => recurringServiceKey(s) === svcKey);
+    const ladder = bundleSectionLadderForService(svcKey, accepted, svcRow || { service: svcKey }, rDisc);
+    const tierEntry = ladder && ladder.find((e) => e.key === tierKey);
+    // A PRESENT ladder that lacks the requested tier means the combo axes and
+    // the restamp ladder disagree (retired/crafted tier): accepting would
+    // commit the combo's totals while the rows keep their stored cadence —
+    // billed != scheduled. Refuse instead of silently skipping.
+    if (!tierEntry && ladder) return { refusal: SERVICE_CADENCE_TIER_UNAVAILABLE_BODY };
+    if (tierEntry && restampers[svcKey]) accepted = restampers[svcKey](accepted, tierEntry);
+  }
+  return { data: accepted };
 }
 
 function shapeServiceFrequency(frequency = {}, { allowAddOns = false } = {}) {
@@ -32523,6 +32567,7 @@ module.exports.bundleSectionLadderForService = bundleSectionLadderForService;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
+module.exports.acceptedEstimateDataForSelection = acceptedEstimateDataForSelection;
 module.exports.recurringLawnRowAtRetiredCadence = recurringLawnRowAtRetiredCadence;
 module.exports.recurringTreeShrubRowAtRetiredCadence = recurringTreeShrubRowAtRetiredCadence;
 module.exports.retiredTreeShrubRequoteNeeded = retiredTreeShrubRequoteNeeded;
