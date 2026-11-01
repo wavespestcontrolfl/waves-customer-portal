@@ -8,6 +8,7 @@ const {
   acquireScheduledInvoiceMintLock, assertScheduledInvoiceNotBilledElsewhere, TERMINAL_INVOICE_STATUSES,
 } = require('./scheduled-invoice-mint');
 const { lockStop, dateOnly } = require('./visit-groups');
+const { invoiceDueBaseDay } = require('../utils/invoice-due-base-day');
 const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane');
 const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 const { parkSetupFeeStampForOffice, isPlanApplicationRow } = require('./setup-fee-obligation');
@@ -403,9 +404,10 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
   // against the committed packet invoice.
   if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
   const deposit = sourceEstimateId ? await pendingDepositCredit(sourceEstimateId, trx) : null;
-  // An invoice-mode commercial proposal's visits are due on the agreement's Net term (owner 2026-10-30).
+  // An invoice-mode commercial proposal's visits are due on the agreement's Net term (owner 2026-10-30), counted from the
+  // visit day but never before today, as the single-visit completion does (a combined visit closed late is not born overdue).
   const proposalTermsDue = sourceEstimateId
-    ? await require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, visit.scheduled_date) : null;
+    ? await require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, invoiceDueBaseDay(visit.scheduled_date)) : null;
   const invoice = await InvoiceService.create({
     database: trx, customerId: customer.id, scheduledServiceId: billed[0].member.id,
     serviceRecordId: billed[0].member.record_id, serviceDate: visit.scheduled_date, dueDate: proposalTermsDue || dateOnly(visit.scheduled_date),

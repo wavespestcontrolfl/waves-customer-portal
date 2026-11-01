@@ -525,6 +525,34 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((day(invoices[0].due_date) - day(invoices[0].service_date)) / 86400000).toBe(30);
   });
 
+  // Audit fix 7 (2026-11-01): the single-visit completion dates a Net-term proposal bill from the day it is closed when
+  // the visit is already past (invoiceDueBaseDay); the combined-visit mint passed the raw visit date, so a combined
+  // visit closed late on Net 30 was born overdue.
+  test('a combined visit from a Net 30 proposal closed after its date is due 30 days from today, not from the visit day', async () => {
+    const estimateId = await linkFixtureEstimate();
+    await mockPg('estimates').where({ id: estimateId }).update({
+      bill_by_invoice: true,
+      estimate_data: JSON.stringify({ proposal: {
+        enabled: true, taxRate: 0, buildings: [{ name: 'Main', lineItems: [] }],
+        programs: [{ service: 'pest', label: 'Commercial pest', frequencyPerYear: 4, pricePerApplication: 300 }],
+        commercialTerms: { paymentTerms: 'net30' },
+      } }),
+    });
+    const lateDay = etDateString(addETDays(new Date(), -40));
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ scheduled_date: lateDay });
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({
+      scheduled_date: lateDay, stop_base_key: stopBaseKey({ customerId: fixture.customerId, scheduledDate: lateDay }),
+    });
+    // The office closes it late: a technician's own scope ends with the visit's day.
+    const result = await saveVisitCompletionPacket(submission({ actor: { techRole: 'admin', technicianId: fixture.techId } }));
+    expect(result).toMatchObject({ status: 202 });
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(1);
+    const day = (value) => String(value instanceof Date
+      ? etDateString(value) : value).slice(0, 10);
+    expect(day(invoices[0].due_date)).toBe(etDateString(addETDays(new Date(), 30)));
+  });
+
   test.each([
     ['inspection only', false], ['inspection only', true], ['callback', true], ['always-free follow-up', true],
   ])('nonbillable estimate members (%s) leave unrelated acceptance invoices outside packet billing (lock=%s)', async (kind, heldLock) => {
