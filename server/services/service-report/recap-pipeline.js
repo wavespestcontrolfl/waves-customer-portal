@@ -284,5 +284,6 @@ async function processDueRecaps({ now = new Date(), limit = CLAIM_LIMIT } = {}, 
 module.exports = {
   CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION, RECAP_SEND_STALE_MS,
   getRecap, enqueueRecap, markRecapClipsChanged, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender, recapNeedsClipRerender,
+  recapGlassesClipsOn: glassesClipsOn,
   claimDueRecaps, recoverStaleRecaps, processRecap, processDueRecaps,
 };

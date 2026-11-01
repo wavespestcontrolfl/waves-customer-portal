@@ -39,6 +39,32 @@ function fixedReserviceTextVisit(structuredNotes) {
     && notes.completionSmsRecapMode === require('../reservice-fixed-recap').MODE);
 }
 
+// Durable, recoverable claim: mark the send IN-FLIGHT (send_attempt_at), NOT sent_at.
+// sent_at is set only once the provider confirms, so a crash mid-send leaves the recap
+// retryable (sent_at stays null) instead of stuck "sent". Only one approval wins, and a
+// stale in-flight marker (process died) is re-claimable after the window. The claim
+// re-checks approval too: a late clip or Regenerate that re-queued the render after
+// sendRecap's read cleared it, and that recap must not be sent. With GATE_RECAP_GLASSES_CLIPS
+// on, it also needs no clip change since the render (clip_revision 0): a change that landed
+// during another send, since failed, renders again instead. 'claimed' | 'rerendering_clips' |
+// 'already_sent'.
+async function claimSend(recap, knex) {
+  const { enqueueRecap, recapNeedsClipRerender, recapGlassesClipsOn, RECAP_SEND_STALE_MS } = require('./recap-pipeline');
+  const staleBefore = new Date(Date.now() - RECAP_SEND_STALE_MS);
+  const claim = knex('service_recaps').where({ id: recap.id, status: 'approved' })
+    .whereNull('sent_at')
+    .andWhere((b) => b.whereNull('send_attempt_at').orWhere('send_attempt_at', '<', staleBefore));
+  if (recapGlassesClipsOn()) claim.andWhere('clip_revision', 0);
+  const claimed = await claim.update({ send_attempt_at: knex.fn.now(), updated_at: knex.fn.now() });
+  if (claimed) return 'claimed';
+  const current = await knex('service_recaps').where({ id: recap.id }).first();
+  if (recapNeedsClipRerender(current)) {
+    const requeued = await enqueueRecap(recap.scheduled_service_id, { force: true, knex });
+    if (requeued.queued) return 'rerendering_clips';
+  }
+  return 'already_sent';
+}
+
 async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   // A retired callback recap must never reach the customer's phone — the
   // public endpoints hide/404 the video, so the SMS would link a dead
@@ -54,7 +80,7 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   // An approved video rendered before the greeting rule would greet a no-first-name
   // customer by their surname: re-render it (back to pending, approval cleared) instead
   // of sending it (codex #5674 r1).
-  const { recapNeedsGreetingRerender, recapNeedsClipRerender, enqueueRecap, RECAP_SEND_STALE_MS } = require('./recap-pipeline');
+  const { recapNeedsGreetingRerender, recapNeedsClipRerender, enqueueRecap } = require('./recap-pipeline');
   if (await recapNeedsGreetingRerender(recap, knex)) {
     await enqueueRecap(scheduledServiceId, { force: true, knex });
     return { ok: false, reason: 'rerendering_greeting' };
@@ -94,18 +120,8 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   const token = service.report_view_token || await ensureReportToken(service.id, knex);
   if (!token) return { ok: false, reason: 'no_token' };
 
-  // Durable, recoverable claim: mark the send IN-FLIGHT (send_attempt_at), NOT sent_at.
-  // sent_at is set only once the provider confirms, so a crash mid-send leaves the recap
-  // retryable (sent_at stays null) instead of stuck "sent". Only one approval wins, and a
-  // stale in-flight marker (process died) is re-claimable after the window.
-  // The claim re-checks approval too: a late clip or Regenerate that re-queued the render
-  // after the read above cleared it, and that recap must not be sent.
-  const staleBefore = new Date(Date.now() - RECAP_SEND_STALE_MS);
-  const claimed = await knex('service_recaps').where({ id: recap.id, status: 'approved' })
-    .whereNull('sent_at')
-    .andWhere((b) => b.whereNull('send_attempt_at').orWhere('send_attempt_at', '<', staleBefore))
-    .update({ send_attempt_at: knex.fn.now(), updated_at: knex.fn.now() });
-  if (!claimed) return { ok: false, reason: 'already_sent' };
+  const claim = await claimSend(recap, knex);
+  if (claim !== 'claimed') return { ok: false, reason: claim };
 
   const releaseClaim = () => knex('service_recaps').where({ id: recap.id })
     .update({ send_attempt_at: null, updated_at: knex.fn.now() }).catch(() => {});

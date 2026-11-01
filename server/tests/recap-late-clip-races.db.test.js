@@ -60,6 +60,23 @@ async function insertRecap(fields, scheduledServiceId = randomUUID()) {
   return row;
 }
 
+// An approved recap with the rows sendRecap needs to reach its claim (customer, visit, report).
+async function insertSendableRecap(fields) {
+  const [customer] = await mockPg('customers').insert({ first_name: 'Test', phone: '+19415550100' }).returning('id');
+  const [visit] = await mockPg('scheduled_services').insert({
+    customer_id: customer.id, scheduled_date: '2026-11-01', service_type: 'Quarterly Pest Control Service', status: 'completed',
+  }).returning('id');
+  const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(1), ...fields }, visit.id);
+  await mockPg('service_records').insert({
+    scheduled_service_id: recap.scheduled_service_id,
+    customer_id: customer.id,
+    service_date: '2026-11-01',
+    service_type: 'Quarterly Pest Control Service',
+    report_view_token: null,
+  });
+  return recap;
+}
+
 describeDb('late recap clips: the send and render races', () => {
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
@@ -91,18 +108,7 @@ describeDb('late recap clips: the send and render races', () => {
   });
 
   test('a send whose recap was re-queued after its read is not claimed: no text goes out', async () => {
-    const [customer] = await mockPg('customers').insert({ first_name: 'Test', phone: '+19415550100' }).returning('id');
-    const [visit] = await mockPg('scheduled_services').insert({
-      customer_id: customer.id, scheduled_date: '2026-11-01', service_type: 'Quarterly Pest Control Service', status: 'completed',
-    }).returning('id');
-    const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(1) }, visit.id);
-    await mockPg('service_records').insert({
-      scheduled_service_id: recap.scheduled_service_id,
-      customer_id: customer.id,
-      service_date: '2026-11-01',
-      service_type: 'Quarterly Pest Control Service',
-      report_view_token: null,
-    });
+    const recap = await insertSendableRecap({});
     // The late clip lands while the sender looks up the report link, just before its claim.
     ensureReportToken.mockImplementation(async () => {
       await pipeline.enqueueRecap(recap.scheduled_service_id, { force: true });
@@ -195,6 +201,21 @@ describeDb('late recap clips: the send and render races', () => {
       await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP);
       // The send fails: recap-delivery releases its in-flight marker; the recap is still approved.
       await mockPg('service_recaps').where({ id: recap.id }).update({ send_attempt_at: null });
+
+      expect(await sendRecap(recap.scheduled_service_id)).toEqual({ ok: false, reason: 'rerendering_clips' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await row(recap.id)).toMatchObject({ status: 'pending', approved_at: null, clip_revision: 1 });
+    });
+
+    test('a retry that read a clean count while another send ran: a clip change and that send failing first stop its claim', async () => {
+      const recap = await insertSendableRecap({ send_attempt_at: minutesAgo(1) });
+      // While the retry looks up the report link: a clip changes during the other send, then that send
+      // fails and releases its in-flight marker. The retry read clip_revision 0 before both.
+      ensureReportToken.mockImplementation(async () => {
+        await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP);
+        await mockPg('service_recaps').where({ id: recap.id }).update({ send_attempt_at: null });
+        return 'test-token';
+      });
 
       expect(await sendRecap(recap.scheduled_service_id)).toEqual({ ok: false, reason: 'rerendering_clips' });
       expect(sendCustomerMessage).not.toHaveBeenCalled();
