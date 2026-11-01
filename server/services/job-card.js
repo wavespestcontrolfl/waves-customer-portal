@@ -34,6 +34,7 @@ const { detectServiceLine } = require('./service-report/service-line-configs');
 const { SEVERITY_RANK } = require('./service-report/pressure-trend');
 const { addETDays, etDateString, etCalendarDayOf, parseETDateTime, formatETTime } = require('../utils/datetime-et');
 const contextAggregator = require('./context-aggregator');
+const { awayWatchCardLines } = require('./away-watch');
 
 const { redactAccessCodes } = contextAggregator;
 const { matchServiceProtocol, monthVisit } = require('./protocol-matcher');
@@ -1900,6 +1901,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const facts = await loadJobCardFacts(serviceId, dbh, deps, { displayContext: !readinessOnly });
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
+  // GATE_AWAY_WATCH: the tech lines for a visit inside the member's away window (null when off or outside it).
+  const awayWatch = readinessOnly ? null : await awayWatchCardLines(dbh, serviceId);
 
   // The spray-check limits are judged from the appointment start.
   const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);
@@ -1983,6 +1986,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     serviceLine: facts.serviceLine,
     strip: { ...facts.strip, access: facts.access },
     paragraph,
+    ...(awayWatch ? { awayWatch } : {}),
     // Shown complete under the paragraph: the 60-word budget may trim them
     // out of the template, the rewrite need not keep them, and the grounding
     // copies are bounded.

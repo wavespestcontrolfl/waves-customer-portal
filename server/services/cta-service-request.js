@@ -44,7 +44,8 @@ function storedRevisionMatches(stored, snapshot) {
 }
 
 // Sources that share one open-request slot per (customer, requested service).
-const CTA_REQUEST_SOURCES = ['service_report', 'portal_home'];
+// portal_chat: the portal chat assistant's request_quote (GATE_PORTAL_CHAT_OPEN).
+const CTA_REQUEST_SOURCES = ['service_report', 'portal_home', 'portal_chat'];
 
 // One transaction, serialized per customer (the row lock makes
 // check-then-insert idempotent — the estimate flow's partial-unique index

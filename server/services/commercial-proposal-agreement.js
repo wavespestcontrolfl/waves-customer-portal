@@ -197,9 +197,18 @@ function agreementTermsConflict(proposal, { billByInvoice = false } = {}) {
 
 const termsNote = (conflict) => `Online signing needs the proposal terms to match the agreement: ${conflict.detail}.`;
 
+// Online signing needs the building use (owner 2026-11-01, audit fix 5). The builder requires the pick before it saves, but a
+// proposal last saved before 2026-10-28 has none, and a win with no pick leaves the customer's building use unset, so its
+// visit bills would take the account's commercial tax. It reuses the terms_conflict reason, so the customer card, the builder
+// line and the generic 404 already behave (no new customer text). Mark won is NOT gated: the first visit books before the win.
+const BUILDING_USE_NOTE = 'Online signing needs the building use: pick it in the builder and save.';
+
 function signEligibility(estimate) {
   const found = signableProposal(estimate);
   if (!found) return { ok: false, reason: 'not_signable' };
+  if (!found.proposal.buildingUse) {
+    return { ok: false, reason: 'terms_conflict', field: 'buildingUse', note: BUILDING_USE_NOTE, ...found };
+  }
   const conflict = agreementTermsConflict(found.proposal, { billByInvoice: estimate.bill_by_invoice === true });
   if (conflict) return { ok: false, reason: 'terms_conflict', field: conflict.field, note: termsNote(conflict), ...found };
   return { ok: true, ...found };

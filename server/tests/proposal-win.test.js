@@ -370,7 +370,7 @@ describe('proposalTermsDueDate', () => {
     expect(legacy.indexOf("if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {"))
       .toBeLessThan(legacy.indexOf("if (invErr?.code === 'BILLING_LANE_CHANGED' && !invoice?.id) {"));
     const sheet = read('../services/visit-completion-invoice.js');
-    expect(sheet).toContain("require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, visit.scheduled_date)");
+    expect(sheet).toContain("require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, invoiceDueBaseDay(visit.scheduled_date))");
     expect(sheet).toContain('dueDate: proposalTermsDue || dateOnly(visit.scheduled_date)');
   });
 });

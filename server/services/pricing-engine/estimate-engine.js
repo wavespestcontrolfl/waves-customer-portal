@@ -40,7 +40,47 @@ function guardedLineCost(item) {
       ? { cost, floor: Number(lawnMarginTarget(item) ?? GLOBAL.MARGIN_FLOOR) }
       : null;
   }
-  return null;
+  const reportOnlyCost = reportOnlyLineCost(item);
+  return reportOnlyCost === null ? null : { cost: reportOnlyCost, floor: Number(GLOBAL.MARGIN_FLOOR) };
+}
+
+// Annual cost basis for the recurring lines that carry a REPORT-ONLY margin
+// signal against GLOBAL.MARGIN_FLOOR (owner approval 2026-11-01, audit D5):
+// rodent bait and mosquito already return an all-in costs.annualCost
+// (admin included); termite bait returns the monitoring-program cost model
+// (service labor + cartridges + follow-up reserve, install excluded). The
+// pricers' own numbers, read as-is. Null = no cost basis (legacy pinned
+// replays, quote-required lines), so no signal is stamped.
+function reportOnlyLineCost(item) {
+  let raw;
+  if (item.service === 'rodent_bait' || item.service === 'mosquito') raw = item.costs?.annualCost;
+  else if (item.service === 'termite_bait') raw = item.costs?.annualTotal;
+  else return null;
+  const cost = Number(raw);
+  return raw != null && Number.isFinite(cost) && cost >= 0 ? cost : null;
+}
+
+// Report-only post-WaveGuard-discount margin signal for rodent bait, mosquito
+// and termite bait: same item fields and warning shape as the lawn branch.
+// Never moves annualAfterDiscount or any other price field.
+function stampReportOnlyWaveGuardMargin(item, discount, warnings) {
+  const cost = reportOnlyLineCost(item);
+  const finalAnnual = Number(item.annualAfterDiscount);
+  if (cost === null || !(finalAnnual > 0)) return;
+  const marginFloor = Number(GLOBAL.MARGIN_FLOOR);
+  const margin = (finalAnnual - cost) / finalAnnual;
+  item.finalMargin = Math.round(margin * 1000) / 1000;
+  item.belowMarginFloor = margin < marginFloor;
+  if (!item.belowMarginFloor || !((discount?.effectiveDiscount || 0) > 0)) return;
+  warnings.push({
+    service: item.service,
+    type: 'waveguard_discount_below_margin_floor',
+    margin: item.finalMargin,
+    marginFloor,
+    finalAnnual,
+    annualCost: Math.round(cost * 100) / 100,
+    message: `${item.service} WaveGuard discount drops collected margin to ${(margin * 100).toFixed(1)}% (below the ${(marginFloor * 100).toFixed(0)}% review floor) — price stands as discounted`,
+  });
 }
 
 // The collected-margin target a lawn line reports against. A cost-plus line
@@ -2581,6 +2621,7 @@ function generateEstimate(input) {
         }
       } else {
         item.annualAfterDiscount = discountedAnnual;
+        stampReportOnlyWaveGuardMargin(item, discount, waveGuardMarginWarnings);
       }
       // CEIL the monthly when the lawn floor binds: nearest-cent rounding of
       // floor/12 can rebuild an annual a cent BELOW the floor (630.85 →

@@ -6948,6 +6948,8 @@ const ACCESS_PREFS_FIELDS = {
   contactPreference: "optional",
   blackoutStart: "date",
   blackoutEnd: "date",
+  awayWatchFrom: "date",
+  awayWatchUntil: "date",
   irrigationControllerLocation: "text",
   irrigationZones: "number",
   irrigationInchesPerWeek: "number",
@@ -7149,6 +7151,8 @@ function accessPrefsValuesEqual(a, b) {
 const ACCESS_PREFS_COUPLED = {
   blackoutStart: ["blackoutEnd"],
   blackoutEnd: ["blackoutStart"],
+  awayWatchFrom: ["awayWatchUntil"],
+  awayWatchUntil: ["awayWatchFrom"],
   chemicalSensitivityDetails: ["chemicalSensitivities"],
 };
 // The sod fields are NOT coupled: the server merges the sod fields a save sends
@@ -7256,7 +7260,7 @@ function AccessPrefsSodReadBlock({ p, sodInfo }) {
   );
 }
 
-function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo }) {
+function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo, awayWatchEnabled }) {
   const code = (value) =>
     isAdmin || !value ? value : "Shown in the tech app on service day";
   const hasHoa = ACCESS_PREFS_HOA_ROWS.some(([, key]) => p[key]);
@@ -7310,6 +7314,12 @@ function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo }) {
         <AccessPrefRow
           label="Blackout Dates"
           value={`${dateInputValue(p.blackout_start) || "?"} – ${dateInputValue(p.blackout_end) || "?"}`}
+        />
+      )}
+      {awayWatchEnabled && (
+        <AccessPrefRow
+          label="Away Watch"
+          value={p.away_watch_from && p.away_watch_until ? `${dateInputValue(p.away_watch_from)} – ${dateInputValue(p.away_watch_until)}` : null}
         />
       )}
 
@@ -7484,7 +7494,7 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
   );
 }
 
-function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets, isAdmin, sodInfo, hasSavedSod, sodUnchanged }) {
+function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets, isAdmin, sodInfo, hasSavedSod, sodUnchanged, awayWatchEnabled }) {
   const f = { d, set, fieldErrors };
   // Entering sensitivity details turns the flag on — techs only see the
   // warning when the flag is set.
@@ -7526,6 +7536,17 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets,
         <AccessPrefsTextInput {...f} label="Blackout Start" field="blackoutStart" type="date" />
         <AccessPrefsTextInput {...f} label="Blackout End" field="blackoutEnd" type="date" />
       </div>
+      {awayWatchEnabled && (
+        <>
+          <div className="grid grid-cols-2 gap-2">
+            <AccessPrefsTextInput {...f} label="Away Watch: leaves" field="awayWatchFrom" type="date" />
+            <AccessPrefsTextInput {...f} label="Away Watch: back" field="awayWatchUntil" type="date" />
+          </div>
+          <div className="text-ui-caption text-ink-secondary">
+            Visits in this window get a tech note and need 3 closeout photos. Clear both dates to remove.
+          </div>
+        </>
+      )}
 
       <AccessPrefsSubheading>Lawn &amp; Irrigation</AccessPrefsSubheading>
       <AccessPrefsPills {...f} label="Irrigation System Type" field="irrigationSystemType" options={ACCESS_PREFS_IRRIGATION_TYPE_OPTIONS} />
@@ -7964,7 +7985,7 @@ export function CustomerAccessCodesBlock({ customerId }) {
   );
 }
 
-function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
+function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWatchEnabled }) {
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -8079,7 +8100,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   if (!draft) {
     return (
       <>
-        <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} sodInfo={sodInfo} />
+        <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} sodInfo={sodInfo} awayWatchEnabled={awayWatchEnabled} />
         {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
         {isAdmin && <CustomerAccessCodesBlock customerId={customerId} />}
       </>
@@ -8107,6 +8128,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
           fieldErrors={fieldErrors}
           hasStructuredPets={Array.isArray(prefs?.pets_structured) && prefs.pets_structured.length > 0}
           isAdmin={isAdmin}
+          awayWatchEnabled={awayWatchEnabled}
           sodInfo={sodInfo}
           hasSavedSod={!!prefs?.sod_laid_on}
           sodUnchanged={ACCESS_PREFS_SOD_KEYS.every((k) => (draft?.[k] ?? "") === (initialDraftRef.current?.[k] ?? ""))}
@@ -8134,6 +8156,7 @@ function CustomerProfileProperty({
   reloadCustomer,
   onCustomerMutation,
   prefs,
+  awayWatchEnabled,
 }) {
   const handlePropertyChanged = async () => {
     onCustomerMutation?.({ customerId, action: "update" });
@@ -8233,6 +8256,7 @@ function CustomerProfileProperty({
             customerId={customerId}
             isAdmin={isAdmin}
             prefs={prefs}
+            awayWatchEnabled={awayWatchEnabled}
             onSaved={handlePropertyChanged}
           />
         </div>{" "}
@@ -11763,6 +11787,7 @@ export default function Customer360ProfileV2({
         reloadCustomer={reloadCustomer}
         onCustomerMutation={onCustomerMutation}
         prefs={prefs}
+        awayWatchEnabled={!!data?.awayWatchEnabled}
       />
     ),
     compliance: (

@@ -9,12 +9,19 @@ const TermiteStations = require('../services/termite-stations');
 const { signedMapImagePathFromLiveConfig } = require('../services/signed-map-image');
 const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
 const { irrigationOwnerRatesLive } = require('../services/irrigation-rates');
+const AwayWatch = require('../services/away-watch');
 
 // GATE_IRRIGATION_OWNER_RATES: the portal's "About N inches a week" line must use the table the emails use, and the
 // client cannot read the environment, so the preferences response carries the choice. The key exists only while the
 // gate is live: off = the response is byte-identical to before.
 function irrigationRatesPayload() {
   return irrigationOwnerRatesLive() ? { irrigationOwnerRates: true } : {};
+}
+
+// GATE_AWAY_WATCH: the Property tab shows its Away Watch section only when the server says so: the gate is live and
+// the customer is a WaveGuard member (the perk is members-only). Off or a non-member = no key, byte-identical.
+function awayWatchPayload(req) {
+  return AwayWatch.awayWatchOpenFor(req.customer) ? { awayWatchEnabled: true } : {};
 }
 
 // Cap the JSON body for this route family. The global limit is generous;
@@ -147,6 +154,7 @@ router.get('/preferences', async (req, res, next) => {
         hasLawnCare,
         irrigationSuppressed: false,
         ...irrigationRatesPayload(),
+        ...awayWatchPayload(req),
       });
     }
 
@@ -165,7 +173,7 @@ router.get('/preferences', async (req, res, next) => {
       }
       if (!fields[jc]) fields[jc] = [];
     }
-    const camelFields = transformKeys(fields, snakeToCamel);
+    const camelFields = AwayWatch.awayWatchFieldsFor(req.customer, transformKeys(fields, snakeToCamel));
     // Rows written before the toggle was retired carry the old false
     // default; the portal has no toggle any more, so present ON. The stored
     // false still suppresses derivation in the report / weekly email until
@@ -175,7 +183,7 @@ router.get('/preferences', async (req, res, next) => {
     const irrigationSuppressed = fields.irrigation_system === false;
     camelFields.irrigationSystem = true;
 
-    res.json({ preferences: camelFields, hasLawnCare, irrigationSuppressed, ...irrigationRatesPayload() });
+    res.json({ preferences: camelFields, hasLawnCare, irrigationSuppressed, ...irrigationRatesPayload(), ...awayWatchPayload(req) });
   } catch (err) {
     next(err);
   }
@@ -186,8 +194,9 @@ router.get('/preferences', async (req, res, next) => {
 // =========================================================================
 router.put('/preferences', async (req, res, next) => {
   try {
-    const { value, rejected, presentCount } = validatePrefsBody(req.body);
-    if (presentCount > 0 && rejected.length === presentCount) {
+    // A non-member's Away Watch dates are an unknown field (stripped), like every writer while the gate is off.
+    const { value, rejected } = validatePrefsBody(AwayWatch.awayWatchOpenFor(req.customer) ? req.body : AwayWatch.stripAwayWatchDates(req.body));
+    if (rejected.length > 0 && Object.keys(value).length === 0) {
       // Every field in the request failed validation — nothing to save.
       // Still 400 (matches the old contract for this case), but with the
       // same per-field detail the partial-success path below carries, not
@@ -307,7 +316,7 @@ router.put('/preferences', async (req, res, next) => {
       .first();
 
     const { id, customer_id, created_at, ...fields } = prefs;
-    const camelFields = transformKeys(fields, snakeToCamel);
+    const camelFields = AwayWatch.awayWatchFieldsFor(req.customer, transformKeys(fields, snakeToCamel));
     const emailItems = propertyChangeItems(updates, existing || {});
     if (emailItems.length) {
       void AccountMembershipEmail.sendAccountUpdated({
