@@ -9591,6 +9591,11 @@ function quoteSamePersonMatchLive() {
 function bugIdExtensionLive() {
   return process.env.GATE_BUG_ID_EXTENSION === 'true';
 }
+// GATE_STAFF_EDIT_LOCK_START_ONLY read at CALL time, strict `=== 'true'`, dark. On, a staff edit that changes only a
+// plan visit's window END (same date, same start) does not set auto_dispatch_locked. Off = any window change locks. Kill = unset.
+function staffEditLockStartOnlyLive() {
+  return process.env.GATE_STAFF_EDIT_LOCK_START_ONLY === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9757,3 +9762,5 @@ module.exports.routeEngineSummaryLive = routeEngineSummaryLive;
 module.exports.inspectionReuseLeadShellLive = inspectionReuseLeadShellLive;
 // GATE_QUOTE_SAME_PERSON_MATCH reader, on its own line so gate PRs never conflict.
 module.exports.quoteSamePersonMatchLive = quoteSamePersonMatchLive;
+// GATE_STAFF_EDIT_LOCK_START_ONLY reader, on its own line so gate PRs never conflict.
+module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
