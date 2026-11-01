@@ -84,10 +84,12 @@ function RouteColumn({ loading, error, stops, nextStop, completed, onOpen, busy,
   );
 }
 
-function SideColumn({ scheduleChanges, truckCheck, timeClock, followThrough }) {
+function SideColumn({ handoffCards, scheduleChanges, truckCheck, timeClock, followThrough }) {
   return (
     <div className="tf-col">
-      {scheduleChanges && <div className="tf-area-changes">{scheduleChanges}</div>}
+      {(handoffCards || scheduleChanges) && (
+        <div className="tf-area-changes" style={handoffCards ? { display: 'grid', gap: 12 } : undefined}>{handoffCards}{scheduleChanges}</div>
+      )}
       {truckCheck && <div className="tf-area-truck">{truckCheck}</div>}
       {timeClock && <div className="tf-area-clock">{timeClock}</div>}
       <div className="tf-area-follow">{followThrough}</div>
@@ -95,7 +97,7 @@ function SideColumn({ scheduleChanges, truckCheck, timeClock, followThrough }) {
   );
 }
 
-export default function TechFieldHome({ section, truckCheck, toolGaps, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null, onboarding, heldVisits }) {
+export default function TechFieldHome({ section, truckCheck, toolGaps, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, handoffCards = null, scheduleChanges = null, timeClock = null, onboarding, heldVisits }) {
   if (section === 'tools') return (
     <div className="tf-page">
       <div className="tf-page-heading"><div><h1>Tools</h1><p className="tf-muted">Field references and reporting</p></div><Wrench aria-hidden="true" /></div>
@@ -131,7 +133,7 @@ export default function TechFieldHome({ section, truckCheck, toolGaps, stops, ne
       {!loading && !error && stops.length > 0 && <div className="tf-progress" aria-hidden="true">{stops.map((stop) => <span key={stop.key} className={stop.services.every((s) => s.status === 'completed') ? 'done' : stop.key === nextStop?.key ? 'current' : ''} />)}</div>}
       <div className="tf-today-grid">
         <RouteColumn loading={loading} error={error} stops={stops} nextStop={nextStop} completed={completed} onOpen={onOpen} busy={busy} toolGaps={toolGaps} />
-        <SideColumn scheduleChanges={scheduleChanges} truckCheck={truckCheck} timeClock={timeClock} followThrough={followThrough} />
+        <SideColumn handoffCards={handoffCards} scheduleChanges={scheduleChanges} truckCheck={truckCheck} timeClock={timeClock} followThrough={followThrough} />
       </div>
     </div>
   );

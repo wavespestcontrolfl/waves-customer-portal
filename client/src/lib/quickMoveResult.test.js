@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { summarizeQuickMoveResult } from './quickMoveResult';
+import {
+  customerFirstName, customerLastName, pickNotTextedMessage, pickSentMessage,
+  summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
+} from './quickMoveResult';
 
 const display = 'Today, 3:00 PM-4:00 PM';
 const ok = (id, extra = {}) => ({ id, ok: true, smsSent: true, ...extra });
@@ -72,5 +75,59 @@ describe('summarizeQuickMoveResult', () => {
       results: [ok('a'), { id: 'b', ok: true, coveredByVisit: 'a', smsSent: false }],
     }, { notify: true, display });
     expect(r.needsAttention).toBe(false);
+  });
+});
+
+describe('customer pick helpers', () => {
+  it('reads the first name from the options payload, then the props, then the full name', () => {
+    // The field rain-out.js getOptions actually sends wins over every fallback.
+    expect(customerFirstName({ service: { customerFirstName: 'Dee', firstName: 'Ada' } }, { customerName: 'Bo Fixture' })).toBe('Dee');
+    expect(customerFirstName({ service: { firstName: 'Ada' } }, { customerName: 'Bo Fixture' })).toBe('Ada');
+    expect(customerFirstName({}, { first_name: 'Cy', customer_name: 'Bo Fixture' })).toBe('Cy');
+    expect(customerFirstName({}, { customer_name: ' Bo  Fixture ' })).toBe('Bo');
+    expect(customerFirstName({}, {})).toBe('the customer');
+  });
+
+  it('reads the surname for a card heading and keeps a one-word name whole', () => {
+    expect(customerLastName({ customerName: 'Bo Van Fixture' })).toBe('Van Fixture');
+    expect(customerLastName({ customer_name: 'Fixture' })).toBe('Fixture');
+    expect(customerLastName({})).toBe('Customer');
+  });
+
+  it('offers the pick only when the payload says so and the reason is not custom', () => {
+    const customerPick = { available: true, pickByLabel: 'Wed 8 PM' };
+    expect(usablePick({ customerPick }, 'weather_rain')).toBe(customerPick);
+    expect(usablePick({ customerPick }, 'custom')).toBeNull();
+    expect(usablePick({ customerPick: { available: false } }, 'weather_rain')).toBeFalsy();
+    expect(usablePick({}, 'weather_rain')).toBeFalsy();
+  });
+
+  it('words the success and the not-texted messages exactly', () => {
+    expect(pickSentMessage('Ada', { offRoute: true })).toBe('Texted Ada to pick a day. Stop taken off your route.');
+    expect(pickSentMessage('Ada')).toBe('Texted Ada to pick a day.');
+    expect(pickNotTextedMessage('Ada')).toBe('Handed off, but Ada was NOT texted — call them so they can pick a time.');
+  });
+});
+
+describe('summarizeCustomerPickResult', () => {
+  it('reads a texted hand-off as clean and parent-compatible', () => {
+    const r = summarizeCustomerPickResult({ ok: true, pickBy: '2099-01-03T01:00:00Z', textSent: true }, { first: 'Ada', offRoute: true });
+    expect(r).toMatchObject({
+      summary: 'Texted Ada to pick a day. Stop taken off your route.', needsAttention: false, notTexted: false,
+      movedCount: 1, failedCount: 0, overlapCount: 0, followUps: [], pickBy: '2099-01-03T01:00:00Z',
+    });
+  });
+
+  it('keeps a hand-off whose text did not go out on screen', () => {
+    const r = summarizeCustomerPickResult({ ok: true, textSent: false }, { first: 'Ada' });
+    expect(r).toMatchObject({ needsAttention: true, notTexted: true, message: 'Handed off, but Ada was NOT texted — call them so they can pick a time.' });
+  });
+
+  it('treats any needsAttention row as follow-up and lists its lines', () => {
+    const r = summarizeCustomerPickResult({
+      ok: true, textSent: true, needsAttention: ['No phone on file', { issue: 'Template off' }, { issues: ['A', 'B'] }],
+    }, { first: 'Ada' });
+    expect(r.needsAttention).toBe(true);
+    expect(r.followUps).toEqual([{ id: 'customer-pick', name: 'Ada', issues: ['No phone on file', 'Template off', 'A', 'B'] }]);
   });
 });

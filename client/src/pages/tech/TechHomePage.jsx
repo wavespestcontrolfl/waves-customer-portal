@@ -46,7 +46,7 @@ import { io } from 'socket.io-client';
 import { Link, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import TechFieldHome from './TechFieldHome';
 import TechHeldVisits from './TechHeldVisits';
-import TechScheduleChanges from './TechScheduleChanges';
+import TechScheduleChanges, { HandoffCards } from './TechScheduleChanges';
 import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import TechNoticeFeed from '../../components/tech/TechNoticeFeed';
@@ -79,7 +79,9 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
-import { summarizeQuickMoveResult } from '../../lib/quickMoveResult';
+import {
+  PICK_KEY, customerFirstName, customerLastName, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
+} from '../../lib/quickMoveResult';
 import {
   closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, isTypedReportEligible, reportFlowFields,
   stationMapKnownOff,
@@ -372,6 +374,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
+  const [handoffs, setHandoffs] = useState([]); // stops handed to the customer to pick a day
   // The banner-clear timers (en route, on site, rain-out). Cleared on unmount,
   // so a late tick never sets state after the page is gone, a test's teardown
   // included (CI 2026-10-28: "window is not defined" from the on-site timer).
@@ -875,6 +878,7 @@ export default function TechHomePage({ section = 'today' }) {
           onRetry={refreshRoute} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards />}
+          handoffCards={handoffs.length > 0 ? <HandoffCards cards={handoffs} onDismiss={(id) => setHandoffs((prev) => prev.filter((h) => h.id !== id))} /> : null}
           scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
           heldVisits={techRole === 'admin' ? <TechHeldVisits /> : null}
           timeClock={<TechTimeTrackingCard nextStop={fieldNextStop?.primary} />}
@@ -1286,6 +1290,8 @@ export default function TechHomePage({ section = 'today' }) {
             if (result.needsAttention) return;
             setRainOutService(null);
             setRainOutResult(result.summary);
+            // A hand-off leaves a card on Today until the tech clears it.
+            if (result.handoff) setHandoffs((prev) => [...prev.filter((h) => h.id !== result.handoff.id), result.handoff]);
             clearBannerLater(() => setRainOutResult(''), 6000);
           }}
         />
@@ -1602,6 +1608,87 @@ const EXTRA_REASON_ERROR_COPY = {
   target_not_later: 'Running late needs a time after the current window — pick a later slot.',
 };
 
+// "Let {first} pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): the one MOVE TO row
+// that hands the stop to the customer instead of booking a time. Styled like
+// the day rows beside it; the muted second line says what the text offers.
+function PickRow({ first, pick, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        textAlign: 'left', padding: '11px 13px', borderRadius: 6, fontSize: 14,
+        border: `1px solid ${active ? FIELD.ink : FIELD.border}`,
+        background: active ? 'rgba(28, 25, 23, .06)' : 'transparent', color: FIELD.text,
+        cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 2,
+      }}
+    >
+      <span style={{ fontWeight: 500 }}>{`📅 Let ${first} pick a day`}</span>
+      <span style={{ color: FIELD.muted }}>{`Texts ${first} 6 route-fit times · pick by ${pick.pickByLabel}`}</span>
+    </button>
+  );
+}
+
+// The text the customer gets, shown while the pick row is selected.
+function PickPreview({ first, pick, reason }) {
+  return (
+    <>
+      <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>{`${first.toUpperCase()} GETS THIS TEXT`}</div>
+      <div style={{
+        background: '#f5f5f4', border: '0.5px solid #e7e5e4', borderRadius: 6, padding: '10px 12px',
+        fontSize: 14, color: FIELD.text, whiteSpace: 'pre-line', marginBottom: 16,
+      }}
+      >
+        {pick.previewByReason?.[reason]}
+      </div>
+    </>
+  );
+}
+
+// A small text button under MOVE TO that swaps the pick row and the day rows.
+function PickSwap({ label, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        alignSelf: 'flex-start', background: 'transparent', border: 'none', padding: 0, marginBottom: 16,
+        fontSize: 14, color: FIELD.muted, textDecoration: 'underline', cursor: 'pointer',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+// The 403 a technician without "Can move visits" gets when the pick option is
+// on: no time options, only the hand-off.
+function pickOnlyOptions(data) {
+  return {
+    customerPickOnly: true,
+    customerPick: data.customerPick,
+    extraReasonsEnabled: !!data.extraReasonsEnabled,
+    sameDay: [],
+    days: [],
+    remainingRouteCount: 0,
+  };
+}
+
+// A GET rain-out-options answer as the sheet's first state: the options and
+// the row that starts selected. Throws the server's message on a refusal.
+function readOptionsAnswer(res, data) {
+  if (res.status === 403 && data.customerPickOnly) {
+    if (!data.customerPick?.available) throw new Error(data.customerPick?.unavailableReason || data.error || 'HTTP 403');
+    return { options: pickOnlyOptions(data), selectedKey: PICK_KEY };
+  }
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  const pickOn = !!data.customerPick?.available;
+  // With the pick row on, the day rows are replaced by it.
+  const first = data.sameDay?.[0] || (pickOn ? null : data.days?.[0]);
+  if (first) return { options: data, selectedKey: `${first.kind}:${first.date}:${first.window.start}` };
+  return { options: data, selectedKey: pickOn ? PICK_KEY : null };
+}
+
 function RainOutSheet({ service, stopName, onClose, onDone }) {
   const [options, setOptions] = useState(null);
   const [error, setError] = useState('');
@@ -1610,6 +1697,8 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
   const [scope, setScope] = useState('job');
   const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
+  // The tech chose to pick a day themselves instead of handing it to the customer.
+  const [pickSwapped, setPickSwapped] = useState(false);
   // A move that COMMITTED but needs follow-up (failed stop, customer not texted,
   // advisory overlap): the result stays here until dismissed, and the Move
   // button stays locked — a retry would re-move the already-moved visit and
@@ -1626,11 +1715,10 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
           headers: { Authorization: `Bearer ${token}` },
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const loaded = readOptionsAnswer(res, data);
         if (!cancelled) {
-          setOptions(data);
-          const first = data.sameDay?.[0] || data.days?.[0];
-          setSelectedKey(first ? `${first.kind}:${first.date}:${first.window.start}` : null);
+          setOptions(loaded.options);
+          setSelectedKey(loaded.selectedKey);
         }
       } catch (err) {
         if (!cancelled) setError(err.message || 'Failed to load options');
@@ -1653,11 +1741,21 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
     const startMin = hhmmMin(opt.window?.start);
     return startMin != null && startMin > currentStartMin;
   };
-  const visibleOptions = allOptions.filter((opt) => optionVisibleFor(opt, reason));
+  // The pick row stands in for the day rows (only the same-day rows stay)
+  // unless the tech swapped back to choosing a day themselves.
+  const pickShownFor = (code) => !!usablePick(options, code) && (!pickSwapped || !!options?.customerPickOnly);
+  const optionsFor = (code) => (pickShownFor(code) ? (options?.sameDay || []) : allOptions)
+    .filter((opt) => optionVisibleFor(opt, code));
+  const visibleOptions = optionsFor(reason);
+  const pick = usablePick(options, reason);
+  const pickOnly = !!options?.customerPickOnly;
+  const pickShown = pickShownFor(reason);
+  const pickSelected = pickShown && selectedKey === PICK_KEY;
+  const first = customerFirstName(options, service);
   const selected = visibleOptions.find((opt) => keyOf(opt) === selectedKey) || null;
   // One lock for the Move button: no slot picked, a move in flight, or a move
-  // that already committed and is showing its result.
-  const moveLocked = !selected || busy || committed;
+  // that already committed and is showing its result. A hand-off needs no slot.
+  const moveLocked = pickSelected ? busy || committed : !selected || busy || committed;
 
   // Overlap disclaimer (owner ask 2026-08-12): the same-day presets are
   // pure clock offsets, so they can land on another booked stop — the
@@ -1703,16 +1801,66 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
   const pickReason = (code) => {
     setReason(code);
     if (SINGLE_STOP_REASONS.has(code)) setScope('job');
-    if (selectedKey) {
-      const stillVisible = allOptions.some((opt) => keyOf(opt) === selectedKey && optionVisibleFor(opt, code));
-      if (!stillVisible) {
-        const first = allOptions.find((opt) => optionVisibleFor(opt, code));
-        setSelectedKey(first ? keyOf(first) : null);
+    const keepPick = selectedKey === PICK_KEY && pickShownFor(code);
+    if (selectedKey && !keepPick) {
+      const next = optionsFor(code);
+      if (!next.some((opt) => keyOf(opt) === selectedKey)) {
+        setSelectedKey(next[0] ? keyOf(next[0]) : (pickShownFor(code) ? PICK_KEY : null));
       }
     }
   };
 
+  // Swap between the pick row and the day rows. Moving to the day rows leaves
+  // the pick row, so the first still-visible day row takes the selection.
+  const swapPick = () => {
+    const toDays = !pickSwapped;
+    setPickSwapped(toDays);
+    if (!toDays) { setSelectedKey(PICK_KEY); return; }
+    if (selectedKey !== PICK_KEY) return;
+    const next = allOptions.find((opt) => optionVisibleFor(opt, reason));
+    setSelectedKey(next ? keyOf(next) : null);
+  };
+
+  // Hand the stop to the customer: they get a text with route-fit days to
+  // pick from, and the server takes the stop off this route.
+  const handlePick = async () => {
+    if (busy || committed) return;
+    setBusy(true);
+    setError('');
+    try {
+      const token = getAdminAuthToken();
+      const res = await fetch(`${API}/api/tech/services/${service.id}/customer-pick`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reasonCode: reason }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const result = summarizeCustomerPickResult(data, { first, offRoute: true });
+      if (result.needsAttention) {
+        setAttention(result);
+        setBusy(false);
+      }
+      const slot = options?.service?.window;
+      onDone({
+        ...result,
+        handoff: {
+          id: String(service.id),
+          first,
+          last: customerLastName(service),
+          serviceName: options?.service?.serviceType || service.service_type || service.serviceType || '',
+          was: slot?.start && slot?.end ? `Today, ${fmtHHMM(slot.start)}-${fmtHHMM(slot.end)}` : 'Today',
+          pickByLabel: pick.pickByLabel,
+        },
+      });
+    } catch (err) {
+      setError(err.message || 'Could not text the customer');
+      setBusy(false);
+    }
+  };
+
   const handleCommit = async () => {
+    if (pickSelected) { handlePick(); return; }
     if (!selected || busy || committed) return;
     setBusy(true);
     setError('');
@@ -1845,7 +1993,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
 
             <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-              {visibleOptions.length === 0 && (
+              {visibleOptions.length === 0 && !pickShown && (
                 <div style={{ fontSize: 14, color: FIELD.muted }}>No slots available — call dispatch.</div>
               )}
               {visibleOptions.map((opt) => {
@@ -1890,7 +2038,17 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
                   </button>
                 );
               })}
+              {pickShown && (
+                <PickRow first={first} pick={pick} active={pickSelected} onClick={() => setSelectedKey(PICK_KEY)} />
+              )}
             </div>
+
+            {pickOnly && (
+              <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 16 }}>Moving this visit to a set time needs the office.</div>
+            )}
+            {!!pick && !pickOnly && (
+              <PickSwap label={pickSwapped ? `Let ${first} pick instead` : 'Pick a day myself instead'} onClick={swapPick} />
+            )}
 
             {/* Overlap disclaimer — warn-only: Move stays enabled, the
                 server's locked occupancy check rejects real overlaps. */}
@@ -1905,7 +2063,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
               </div>
             )}
 
-            {options.remainingRouteCount > 0 && !SINGLE_STOP_REASONS.has(reason) && (
+            {!pickSelected && options.remainingRouteCount > 0 && !SINGLE_STOP_REASONS.has(reason) && (
               <>
                 <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>APPLY TO</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
@@ -1919,10 +2077,14 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
               </>
             )}
 
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: FIELD.text, marginBottom: 16, cursor: 'pointer' }}>
-              <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
-              Text customer{scope === 'route' ? 's' : ''} (includes reschedule + local forecast links)
-            </label>
+            {pickSelected && <PickPreview first={first} pick={pick} reason={reason} />}
+
+            {!pickSelected && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: FIELD.text, marginBottom: 16, cursor: 'pointer' }}>
+                <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
+                Text customer{scope === 'route' ? 's' : ''} (includes reschedule + local forecast links)
+              </label>
+            )}
 
             <button
               type="button"
@@ -1934,7 +2096,9 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
                 cursor: busy ? 'wait' : 'pointer', opacity: moveLocked ? 0.6 : 1,
               }}
             >
-              {busy ? 'Moving…' : committed ? 'Moved' : `Move ${scope === 'route' ? `${options.remainingRouteCount + 1} stops` : 'this stop'}${notify ? ' & text' : ''}`}
+              {pickSelected
+                ? (busy ? 'Sending…' : committed ? 'Sent' : `Text ${first} to pick a day`)
+                : (busy ? 'Moving…' : committed ? 'Moved' : `Move ${scope === 'route' ? `${options.remainingRouteCount + 1} stops` : 'this stop'}${notify ? ' & text' : ''}`)}
             </button>
           </>
         )}

@@ -18,11 +18,14 @@ import { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
-import { summarizeQuickMoveResult } from '../../lib/quickMoveResult';
+import {
+  PICK_KEY, customerFirstName, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
+} from '../../lib/quickMoveResult';
 import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
 import { useBestTimes } from './useBestTimes';
 import AvailabilityStrip from './AvailabilityStrip';
+import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -311,6 +314,48 @@ function authHeaders() {
   };
 }
 
+// "Let {first} pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): the one MOVE TO row
+// that hands the visit to the customer instead of booking a time. Styled like
+// the preset rows above it; the muted second line names what the text offers.
+function PickRow({ first, pick, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14, fontWeight: 500,
+        border: `1px solid ${active ? '#18181B' : '#D4D4D8'}`,
+        background: active ? '#F4F4F5' : '#FFFFFF', color: '#18181B', cursor: 'pointer',
+        display: 'flex', flexDirection: 'column', gap: 2,
+      }}
+    >
+      <span>{`Let ${first} pick a day`}</span>
+      <span style={{ color: '#71717A', fontWeight: 400 }}>{`Texts ${first} 6 route-fit times · pick by ${pick.pickByLabel}`}</span>
+    </button>
+  );
+}
+
+// The text the customer gets, shown while the pick row is selected. The text
+// is fixed per reason, so there is no note box in this mode.
+function PickPreview({ first, pick, reason, labelStyle }) {
+  return (
+    <>
+      <div style={labelStyle}>{`${first.toUpperCase()} GETS THIS TEXT`}</div>
+      <div style={{
+        background: '#FAFAFA', border: '0.5px solid #D4D4D8', borderRadius: 10, padding: '10px 12px',
+        fontSize: 14, color: '#18181B', whiteSpace: 'pre-line', marginBottom: 8,
+      }}
+      >
+        {pick.previewByReason?.[reason]}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 18, fontSize: 14, color: '#71717A' }}>
+        <span>No note in this mode.</span>
+        {pick.segments && <span style={{ flexShrink: 0 }}>{`${pick.segments.remaining} left · 2-segment limit`}</span>}
+      </div>
+    </>
+  );
+}
+
 // `allowRouteScope` false (a non-admin login, which POST /rain-out refuses
 // scope 'route' for): this stop only, no whole-route chip.
 export default function RainOutSheet({ service, onClose, onDone, allowRouteScope = true }) {
@@ -352,8 +397,11 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         if (!cancelled) {
           setOptions(data);
-          const first = data.sameDay?.[0] || data.days?.[0];
-          setSelectedKey(first ? `${first.kind}:${first.date}:${first.window.start}` : null);
+          const pickOn = !!data.customerPick?.available;
+          // With the pick row on, the day rows are replaced by it.
+          const first = data.sameDay?.[0] || (pickOn ? null : data.days?.[0]);
+          if (first) setSelectedKey(`${first.kind}:${first.date}:${first.window.start}`);
+          else setSelectedKey(pickOn ? PICK_KEY : null);
         }
       } catch (err) {
         if (!cancelled) setError(err.message || 'Failed to load options');
@@ -374,7 +422,14 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     const startMin = hhmmToMin(opt.window?.start);
     return startMin != null && startMin > currentStartMin;
   };
-  const visibleOptions = allOptions.filter((opt) => optionVisibleFor(opt, reason));
+  // With the customer-pick row on, it stands in for the day rows: only the
+  // same-day rows stay.
+  const optionsFor = (reasonCode) => (usablePick(options, reasonCode) ? (options?.sameDay || []) : allOptions)
+    .filter((opt) => optionVisibleFor(opt, reasonCode));
+  const visibleOptions = optionsFor(reason);
+  const pick = usablePick(options, reason);
+  const pickSelected = !!pick && selectedKey === PICK_KEY;
+  const first = customerFirstName(options, service);
   const isCustom = selectedKey === CUSTOM_KEY;
   const customWindow = isCustom ? hourWindow(customStart) : null;
   // A same-day custom start must be a FUTURE hour. Only the date field carries a
@@ -411,11 +466,11 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
   const pickReason = (code) => {
     setReason(code);
     if (code === 'customer_noshow' || code === 'gate_locked' || code === CUSTOM_REASON) setScope('job');
-    if (selectedKey && selectedKey !== CUSTOM_KEY) {
-      const stillVisible = allOptions.some((opt) => keyOf(opt) === selectedKey && optionVisibleFor(opt, code));
-      if (!stillVisible) {
-        const first = allOptions.find((opt) => optionVisibleFor(opt, code));
-        setSelectedKey(first ? keyOf(first) : null);
+    const keepPick = selectedKey === PICK_KEY && !!usablePick(options, code);
+    if (selectedKey && selectedKey !== CUSTOM_KEY && !keepPick) {
+      const next = optionsFor(code);
+      if (!next.some((opt) => keyOf(opt) === selectedKey)) {
+        setSelectedKey(next[0] ? keyOf(next[0]) : (usablePick(options, code) ? PICK_KEY : null));
       }
     }
   };
@@ -601,7 +656,37 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     return `${who}${when}${what}`;
   };
 
+  // Hand the visit to the customer: they get a text with route-fit days to
+  // pick from, and the server takes the stop off the route.
+  const handlePick = async () => {
+    if (busy || committed) return;
+    setBusy(true);
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/customer-pick`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ reasonCode: reason }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const result = summarizeCustomerPickResult(data, { first });
+      if (result.needsAttention) {
+        setCommitted(true);
+        setError([result.message, ...result.followUps.flatMap((row) => row.issues)].join(' '));
+        setBusy(false);
+      } else {
+        showScheduleSaveNotice(result.message);
+      }
+      onDone?.(result);
+    } catch (err) {
+      setError(err.message || 'Could not text the customer');
+      setBusy(false);
+    }
+  };
+
   const handleCommit = async () => {
+    if (pickSelected) { handlePick(); return; }
     if (!selected || busy || noteBlocked || overBudget) return;
     setBusy(true);
     setError('');
@@ -645,6 +730,12 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
       setBusy(false);
     }
   };
+
+  // One lock for the main button. A hand-off needs no time, note or segment
+  // check: the server composes the whole text.
+  const moveLocked = pickSelected
+    ? busy || committed
+    : !selected || busy || committed || noteBlocked || overBudget;
 
   const chipStyle = (active) => ({
     padding: '7px 14px', borderRadius: 16, fontSize: 14, fontWeight: 500,
@@ -751,7 +842,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
 
             <div style={sectionLabel}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
-              {visibleOptions.length === 0 && (
+              {visibleOptions.length === 0 && !pick && (
                 <div style={{ fontSize: 14, color: '#71717A' }}>No preset slots — pick a custom time below.</div>
               )}
               {visibleOptions.map((opt) => {
@@ -796,6 +887,10 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                   </button>
                 );
               })}
+
+              {pick && (
+                <PickRow first={first} pick={pick} active={pickSelected} onClick={() => setSelectedKey(PICK_KEY)} />
+              )}
 
               {/* Custom on-the-hour time — for when none of the presets is the
                   time the dispatcher agreed on with the customer ("let's do
@@ -870,19 +965,21 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
             {/* sameDayOnly (GET /rain-out-options): a suggestion on another day
                 would submit a move POST /rain-out refuses this login, so only
                 today's slots are taken and the date-changing pick is off. */}
-            <AvailabilityStrip
-              availability={availability}
-              currentDate={landingDate}
-              currentStart={isCustom ? customStart : selected?.window?.start}
-              currentTechnicianId={service.technicianId || service.technician_id}
-              onPick={isCustom ? (slot) => {
-                if (options?.sameDayOnly && slot.date !== todayStr) return;
-                setCustomDate(slot.date); setCustomStart(slot.start);
-              } : undefined}
-              style={{ marginTop: -8, marginBottom: 18 }}
-              bestRows
-              showRain
-            />
+            {!pickSelected && (
+              <AvailabilityStrip
+                availability={availability}
+                currentDate={landingDate}
+                currentStart={isCustom ? customStart : selected?.window?.start}
+                currentTechnicianId={service.technicianId || service.technician_id}
+                onPick={isCustom ? (slot) => {
+                  if (options?.sameDayOnly && slot.date !== todayStr) return;
+                  setCustomDate(slot.date); setCustomStart(slot.start);
+                } : undefined}
+                style={{ marginTop: -8, marginBottom: 18 }}
+                bestRows
+                showRain
+              />
+            )}
 
             {customElapsed && (
               <div style={{ fontSize: 14, color: '#B91C1C', marginTop: -8, marginBottom: 18 }}>
@@ -906,7 +1003,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               </div>
             )}
 
-            {allowRouteScope && routeCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && !isCustomReason && (
+            {!pickSelected && allowRouteScope && routeCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && !isCustomReason && (
               <>
                 <div style={sectionLabel}>SCOPE</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
@@ -920,12 +1017,16 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               </>
             )}
 
-            <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: notify ? 10 : 18, cursor: 'pointer', fontSize: 14, color: '#18181B' }}>
-              <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} style={{ width: 18, height: 18 }} />
-              Text the customer a reply-to-adjust message
-            </label>
+            {pickSelected && <PickPreview first={first} pick={pick} reason={reason} labelStyle={sectionLabel} />}
 
-            {notify && (
+            {!pickSelected && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: notify ? 10 : 18, cursor: 'pointer', fontSize: 14, color: '#18181B' }}>
+                <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} style={{ width: 18, height: 18 }} />
+                Text the customer a reply-to-adjust message
+              </label>
+            )}
+
+            {!pickSelected && notify && (
               <div style={{ marginBottom: 18 }}>
                 <textarea
                   value={note}
@@ -979,15 +1080,17 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               <button
                 type="button"
                 onClick={handleCommit}
-                disabled={!selected || busy || committed || noteBlocked || overBudget}
+                disabled={moveLocked}
                 style={{
                   flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
                   border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
-                  cursor: !selected || busy || committed || noteBlocked || overBudget ? 'default' : 'pointer',
-                  opacity: !selected || busy || committed || noteBlocked || overBudget ? 0.5 : 1,
+                  cursor: moveLocked ? 'default' : 'pointer',
+                  opacity: moveLocked ? 0.5 : 1,
                 }}
               >
-                {busy ? 'Moving…' : committed ? 'Moved' : 'Move appointment'}
+                {pickSelected
+                  ? (busy ? 'Sending…' : committed ? 'Sent' : `Text ${first} to pick a day`)
+                  : (busy ? 'Moving…' : committed ? 'Moved' : 'Move appointment')}
               </button>
             </div>
           </>
