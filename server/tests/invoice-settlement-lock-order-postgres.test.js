@@ -196,7 +196,12 @@ postgres('settleZeroBalance re-verifies the customer after locking (Codex pre-pu
     // reaches the identical physical database as `database` above.
     Invoice = require('../services/invoice');
   });
-  afterAll(async () => { if (database) await database.destroy(); });
+  // Close the app's db singleton too: CI runs without --forceExit, and its
+  // open pool keeps Jest alive until the job times out.
+  afterAll(async () => {
+    if (database) await database.destroy();
+    await require('../models/db').destroy();
+  });
 
   beforeEach(async () => {
     customerAId = randomUUID();

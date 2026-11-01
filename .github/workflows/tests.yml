@@ -154,13 +154,30 @@ jobs:
       # run twice.
       # The third command runs 64 more suites with that same gate (46 of them
       # lawn suites), which also ran nowhere in CI until 2026-10-31.
+      # The last four commands (sweep #7246 B1, 2026-10-31) run suites whose
+      # own variable no step set. Every suite that reads REPAIR_TEST_DATABASE_URL
+      # builds its own throwaway schema, so its grep lane picks up a new one by
+      # itself. The APP_TEST suites copy the migrated tables into a private
+      # schema. The next command sets each single-suite variable, plus
+      # DATABASE_URL, which two of those suites require to match. The
+      # audit-clone suites refuse any database not named waves_audit_*: the
+      # first command copies the freshly migrated database to waves_audit_ci
+      # before any suite writes to it. Nothing else connects to this server,
+      # so the copy cannot meet a busy template.
+      # tests/ci-db-suites-reached.test.js fails when a self-skipping Postgres
+      # suite reaches no step that sets its variable; the suites that cannot
+      # run here yet are listed, with reasons, in
+      # tests/fixtures/ci-db-suites-not-run.json.
       - name: Grouped closeout and gate-code transaction tests
         id: closeout
         background: true
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+          REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
         run: |
+          node -e "const { Client } = require('pg'); const c = new Client({ connectionString: 'postgresql://waves:waves@localhost:5434/postgres' }); c.connect().then(() => c.query('CREATE DATABASE waves_audit_ci TEMPLATE waves_test')).then(() => c.end(), (e) => { console.error(e); process.exit(1); });"
           npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
           DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand tests/access-code-capture-postgres.test.js tests/admin-neighborhood-access-postgres.test.js tests/admin-schedule-neighborhood-gate-actions.pg.test.js tests/neighborhood-access-postgres.test.js tests/neighborhood-access-sweep-postgres.test.js tests/neighborhood-access-visit-actions-postgres.test.js tests/neighborhood-caller-link-passes-postgres.test.js tests/neighborhood-gate-fallback-postgres.test.js tests/neighborhood-naming-postgres.test.js
           DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand \
@@ -228,6 +245,80 @@ jobs:
             tests/sms-reply-outcomes-postgres.test.js \
             tests/supplies-consumption.test.js \
             tests/termite-renewal-bill-to-fence-postgres.test.js
+          grep -l 'process.env.REPAIR_TEST_DATABASE_URL' tests/*.test.js \
+            | grep -v termite-annual-renewal-decline-coverage-postgres \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand
+          npx jest --ci --silent --runInBand \
+            tests/billing-channel-email-authority-postgres.test.js \
+            tests/billing-channel-email-migration-postgres.test.js \
+            tests/billing-email-detail-rows-dedupe-postgres.test.js \
+            tests/billing-email-detail-rows-fill-missing-postgres.test.js \
+            tests/billing-email-detail-rows-migration-postgres.test.js \
+            tests/billing-receipt-notice-migration-postgres.test.js \
+            tests/billing-retry-email-postgres.test.js \
+            tests/estimate-email-pdf-note-fixture-copy-migration-postgres.test.js \
+            tests/estimate-email-pdf-note-migration-postgres.test.js \
+            tests/estimate-email-pdf-note-paragraph-migration-postgres.test.js \
+            tests/estimate-extension-notice-fixture-migration-postgres.test.js \
+            tests/estimate-followup-average-fixture-price-migration-postgres.test.js \
+            tests/estimate-followup-average-fixture-price-restore-migration-postgres.test.js \
+            tests/estimate-followup-average-note-migration-postgres.test.js \
+            tests/estimate-proposal-delivery-copy-migration-postgres.test.js \
+            tests/llm-cost.test.js \
+            tests/misting-layouts-migration-postgres.test.js \
+            tests/misting-layouts-service-postgres.test.js
+          U=postgresql://waves:waves@localhost:5434/waves_test
+          DATABASE_URL=$U ACTIVITY_TIMELINE_TEST_DATABASE_URL=$U ANNUAL_PLAN_DOCUMENT_TEST_DATABASE_URL=$U COPY_AUDIT_TEST_DATABASE_URL=$U DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL=$U IB_TEST_DATABASE_URL=$U LAWN_COPY_V6_TEST_DATABASE_URL=$U LAWN_GATE_TEST_DATABASE_URL=$U LAWN_VISIT_MEMORY_TEST_DATABASE_URL=$U LEAD_EMAIL_LINKS_TEST_DATABASE_URL=$U MANUAL_SMS_TEST_DATABASE_URL=$U SIBLING_RESPLIT_TEST_DATABASE_URL=$U SMS_OPERATIONS_TEST_DATABASE_URL=$U TS_FIELD_TEST_DATABASE_URL=$U UPDATE_DETAILS_DISCOUNT_TEST_DATABASE_URL=$U UPDATE_DETAILS_NEGATIVE_MONEY_TEST_DATABASE_URL=$U VOICE_RECOVERY_TEST_DATABASE_URL=$U \
+            npx jest --ci --silent --runInBand \
+            tests/annual-plan-documents-postgres.test.js \
+            tests/apply-credit-claim-fence-promotion-postgres.test.js \
+            tests/backfill-lead-email-links-postgres.test.js \
+            tests/billing-skip-events-schema-postgres.test.js \
+            tests/call-recording-relay-postgres.test.js \
+            tests/customer-billing-lock-rollout-race-postgres.test.js \
+            tests/customer-copy-audit-postgres.test.js \
+            tests/discount-stack-pricing-provenance-postgres.test.js \
+            tests/email-commitments-postgres.test.js \
+            tests/estimate-accept-multi-unit-per-unit-pricing.postgres.test.js \
+            tests/estimate-acceptance-schedule-check.test.js \
+            tests/intelligence-bar-bill-to-postgres.test.js \
+            tests/intelligence-bar-manual-sms-reservation-postgres.test.js \
+            tests/intelligence-bar-multi-card-db.test.js \
+            tests/intelligence-bar-property-access-postgres.test.js \
+            tests/invoice-settlement-lock-order-postgres.test.js \
+            tests/lawn-copy-v6.db.test.js \
+            tests/lawn-notification-deferred.db.test.js \
+            tests/lawn-report-write-gate-watering-postgres.test.js \
+            tests/lawn-visit-memory-postgres.test.js \
+            tests/newsletter-bounce-mailbox-postgres.test.js \
+            tests/newsletter-merge-deliveries-postgres.test.js \
+            tests/series-extension-own-stop-postgres.test.js \
+            tests/tree-shrub-field-guide.postgres.test.js \
+            tests/update-details-discount-preserved-no-addons-pg.test.js \
+            tests/update-details-negative-discount-clamp-db.test.js \
+            tests/voice-relay-recovery-postgres.test.js \
+            tests/voice-relay-segments-postgres.test.js
+          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_audit_ci CONSULTATION_STATS_TEST_DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_audit_ci npx jest --ci --silent --runInBand \
+            tests/admin-customers-archive-billing-winddown.test.js \
+            tests/admin-customers-churn-canonical-winddown.test.js \
+            tests/admin-dispatch-day-feed-tech-scope.pg.test.js \
+            tests/admin-ical-history-tech-authz.pg.test.js \
+            tests/admin-tax-rates-effective-date.test.js \
+            tests/audit-repro/r2-card-charge-refund-tails-2-manual-payment-ignores-claim.test.js \
+            tests/complete-scheduled-service-declined-station-checks.test.js \
+            tests/complete-scheduled-service-station-sheet-body.test.js \
+            tests/consultation-outcomes-stats-postgres.test.js \
+            tests/customer-dedupe-undo-merge-not-resweeped-2.test.js \
+            tests/customer-dedupe-undo-merge-not-resweeped.test.js \
+            tests/customer-merge-series-property-scope.test.js \
+            tests/prepay-switch-refund-setup-fee-double-bill.test.js \
+            tests/r1-customers-2-archive-leaves-visits-live.test.js \
+            tests/r2-cancel-plan-and-offboarding-2.test.js \
+            tests/r2-customer-merge-and-account-attach-2.test.js \
+            tests/referral-existing-customer-domestic-phone.test.js \
+            tests/series-extend-anchor-exception-refuter.test.js \
+            tests/series-extend-anchor-ignores-exception.test.js
       # Right after the migration, on purpose: the reconcile reads the WHOLE
       # customer/subscriber tables (its counts assume only migration seeds)
       # and its write-mode cases would import or link any row another suite
@@ -362,11 +453,6 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js tests/invoice-scheduled-readiness-postgres.test.js tests/admin-customers-payer-linked-invoices-postgres.test.js
-      - name: Historical invoice repair transaction tests
-        working-directory: server
-        env:
-          REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/link-unlinked-visit-invoices-postgres.test.js tests/execute-visit-invoice-plan-postgres.test.js
       - name: Visit summary identity transaction tests
         working-directory: server
         env:

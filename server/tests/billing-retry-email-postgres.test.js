@@ -33,10 +33,10 @@ jest.setTimeout(30000);
 postgres('billing retry Email obligation durability (private PostgreSQL)', () => {
   beforeAll(async () => {
     const target = new URL(connection);
-    if (process.env.WAVES_DATABASE_ENVIRONMENT !== 'test'
-        || !/^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname)) {
-      throw new Error('Use the labeled private Waves QA database');
-    }
+    const privateQa = process.env.WAVES_DATABASE_ENVIRONMENT === 'test'
+      && /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
+    const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
+    if (!privateQa && !ci) throw new Error('Use the labeled private Waves QA database or the isolated CI database');
     admin = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = require('knex')({

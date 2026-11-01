@@ -57,7 +57,9 @@ async function createScratchDb() {
   // decline writes: the decision columns, annual_plan_version, activity_log.
   await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), first_name text, last_name text, deleted_at timestamptz)');
   await db.raw('CREATE TABLE customer_properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL)');
-  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid)');
+  // estimate_data: the pending-window completion reconcile reads the
+  // source estimate before it settles a covered visit's invoice.
+  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid, estimate_data jsonb)');
   await db.raw(`CREATE TABLE invoices (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
@@ -67,6 +69,10 @@ async function createScratchDb() {
     stripe_charge_id text,
     -- statement-backed parent revocation read (Codex #4971 r15/r16)
     payer_statement_id uuid,
+    -- the signup-cancel preview's collected-visit-money read
+    scheduled_service_id uuid,
+    service_record_id uuid,
+    payment_recorded_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);
   await db.raw(`CREATE TABLE payments (
