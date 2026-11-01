@@ -9715,6 +9715,12 @@ function bugIdExtensionLive() {
 function staffEditLockStartOnlyLive() {
   return process.env.GATE_STAFF_EDIT_LOCK_START_ONLY === 'true';
 }
+// GATE_PREPAY_SEED_SERIES_SLOT read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01, "fix seeder"). On, the
+// visits an annual prepay seeds copy the technician and the usual start time of the customer's existing visits of
+// the same service (services/annual-prepay-series-slot.js). Off = seeds carry no technician and no time. Kill = unset.
+function prepaySeedSeriesSlotLive() {
+  return process.env.GATE_PREPAY_SEED_SERIES_SLOT === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9891,3 +9897,5 @@ module.exports.quoteSamePersonMatchLive = quoteSamePersonMatchLive;
 module.exports.routeOrderTimeFallbackLive = routeOrderTimeFallbackLive;
 // GATE_STAFF_EDIT_LOCK_START_ONLY reader, on its own line so gate PRs never conflict.
 module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
+// GATE_PREPAY_SEED_SERIES_SLOT reader, on its own line so gate PRs never conflict.
+module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;

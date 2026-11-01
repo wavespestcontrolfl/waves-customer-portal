@@ -1772,7 +1772,24 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // manual admin-schedule / admin-leads / availability bookings);
   // multi-property customers stay office-placed. Resolved once per term.
   const seedPropertyId = await coverageSeedPropertyId(term, cols, conn);
-  const buildInsert = (scheduledDate, windowStart) => {
+  // GATE_PREPAY_SEED_SERIES_SLOT (owner 2026-11-01): per seeded date, the
+  // technician / copied time / taken-hour hand-off fields buildInsert writes.
+  // Filled by prepareSeedSlot inside the insert's lock scope; EMPTY with the
+  // gate off, so buildInsert reads nothing different. The insert call sites
+  // stay as the booking insert-site contract froze them.
+  const seedSlotPatches = new Map();
+  const seedSlotFor = (scheduledDate, windowStartArg) => {
+    const patch = seedSlotPatches.get(scheduledDate);
+    if (!patch) return { windowStart: windowStartArg, technicianId: null, handoff: null };
+    return {
+      windowStart: patch.handoff ? null : (windowStartArg ?? patch.windowStart ?? null),
+      technicianId: patch.technicianId || null,
+      handoff: patch.handoff || null,
+    };
+  };
+  const buildInsert = (scheduledDate, windowStartArg) => {
+    const slotPatch = seedSlotFor(scheduledDate, windowStartArg);
+    const windowStart = slotPatch.windowStart;
     const insertData = {
       customer_id: term.customer_id,
       scheduled_date: scheduledDate,
@@ -1803,11 +1820,36 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (cols.time_window) insertData.time_window = null;
     if (cols.window_start) insertData.window_start = windowStart;
     if (cols.window_end) insertData.window_end = windowStart ? addMinutesHHMM(windowStart, baseDuration) : null;
-    if (cols.technician_id) insertData.technician_id = null;
+    if (cols.technician_id) insertData.technician_id = slotPatch.technicianId;
     if (cols.customer_notes) insertData.customer_notes = null;
     if (cols.estimated_price && seededVisitPrice != null) insertData.estimated_price = seededVisitPrice;
     if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = true;
+    Object.assign(insertData, slotPatch.handoff);
     return insertData;
+  };
+  // The series slot (resolved once per term, before the seed loop) and the
+  // dates its technician is out.
+  let seriesSlot = null;
+  let seriesAbsentDays = new Set();
+  const resolveSeriesSlot = async () => {
+    if (!datesToSeed.length || !cols.technician_id || !cols.window_start) return;
+    const SeriesSlot = require('./annual-prepay-series-slot');
+    seriesSlot = await SeriesSlot.coverageSeriesSlot(conn, {
+      customerId: term.customer_id, coverageServiceType, propertyId: seedPropertyId, today,
+    });
+    if (seriesSlot) seriesAbsentDays = await SeriesSlot.seriesSlotAbsentDays(conn, seriesSlot, datesToSeed);
+  };
+  // Right before one seed's insert, inside the SAME lock scope as the insert
+  // (after the comms lock, owner-moved and seedStillNeeded checks): the slot's
+  // technician and time for `scheduledDate`, with the taken-hour hand-off.
+  const prepareSeedSlot = async (trx, scheduledDate, { timed = false } = {}) => {
+    if (!seriesSlot) return;
+    const SeriesSlot = require('./annual-prepay-series-slot');
+    const patch = SeriesSlot.seriesSlotPatch(seriesSlot, { scheduledDate, absentDays: seriesAbsentDays, timed });
+    seedSlotPatches.set(scheduledDate, patch);
+    if (!patch.windowStart) return;
+    const handoff = await SeriesSlot.seriesSlotHandoff(trx, buildInsert(scheduledDate, null), { cols });
+    if (handoff) seedSlotPatches.set(scheduledDate, { ...patch, handoff });
   };
 
   // The promise was captured when the invoice was minted; the board may have
@@ -1967,6 +2009,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       return null;
     }
     if (await termOwnerMovedUnderFence(trx)) return null;
+    await prepareSeedSlot(trx, scheduledDate, { timed: true });
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
     // GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29): number the timed first visit
     // in its technician's day, inside this transaction (silent, never fails the
@@ -2133,6 +2176,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     logger.info(`[annual-prepay] term ${term.id}: ${scheduledDate} was filled by a concurrent refresh under the lock — not seeding a duplicate`);
   };
 
+  if (require('../config/feature-gates').prepaySeedSeriesSlotLive()) await resolveSeriesSlot();
   for (const scheduledDate of datesToSeed) {
     const wantsWindow = !!firstVisitWindowStart && scheduledDate === firstTargetDate;
     let created;
@@ -2155,6 +2199,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
         skipConcurrentSeed(scheduledDate);
         created = null;
       } else {
+        await prepareSeedSlot(conn, scheduledDate);
         [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
       }
     } else {
@@ -2167,6 +2212,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
           skipConcurrentSeed(scheduledDate);
           return [null];
         }
+        await prepareSeedSlot(trx, scheduledDate);
         return trx('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
       });
     }
@@ -11455,6 +11501,8 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
 
 module.exports = {
   createTermForAnnualPrepay,
+  // The series-slot reader (annual-prepay-series-slot.js) matches a customer's visits to a term's service by it.
+  normalizeCoverageServiceType,
   // The per-application price a gap-filled visit inherits from the prepay invoice (setup and misting install lines excluded).
   seededVisitPriceForTerm,
   termiteDeclineBlockedReason,
