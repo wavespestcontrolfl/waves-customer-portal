@@ -15,9 +15,10 @@ const WITHOUT_TAX = 'Visit bills follow the building use: this row will be bille
 const family = (taxable) => ({ taxable, inclusions: [], exclusions: [], responsibilities: [] });
 const line = (taxable, extra = {}) => ({ description: 'Monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly', taxable, ...extra });
 const program = (taxable, extra = {}) => ({ service: 'pest', label: 'Pest control', frequencyPerYear: 4, pricePerApplication: 100, taxable, ...extra });
-const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
+const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, taxExemptVerified = false, status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
   bidToolsEnabled: true,
   buildingUseTaxLive,
+  taxExemptVerified,
   suggestedTaxRate: 0.07,
   suggestedTaxSource: 'Manatee County',
   familyRegistry: { pest: family(true), lawn: family(false), tree_shrub: family(false), other: family(true) },
@@ -67,6 +68,27 @@ it('business building with the gate off still warns (that rule does not depend o
   await mount({ buildingUseTaxLive: false, buildings: [{ name: 'Office', lineItems: [line(false)] }] });
   expect(warnings()).toEqual([WITH_TAX]);
   expect(summary()).toBeInTheDocument();
+});
+
+it('a verified tax exemption is answered first: a ticked business row is warned (billed without tax), an unticked one is not', async () => {
+  await mount({ taxExemptVerified: true, buildings: [{ name: 'Office', lineItems: [line(true), line(false, { description: 'Second' })] }] });
+  expect(warnings()).toEqual([WITHOUT_TAX]);
+  expect(summary()).toHaveTextContent('on 1 row.');
+});
+
+it('a verified exemption beats the building-use gate: residential with the gate off still warns a ticked row', async () => {
+  await mount({ taxExemptVerified: true, buildingUse: 'residential', buildingUseTaxLive: false, buildings: [{ name: 'Office', lineItems: [line(true)] }] });
+  expect(warnings()).toEqual([WITHOUT_TAX]);
+});
+
+it('an exemption that could not be read (null) gives no basis: no warnings and no summary line', async () => {
+  await mount({ taxExemptVerified: null, buildings: [{ name: 'Office', lineItems: [line(false), line(true, { description: 'Second' })] }], programs: undefined });
+  expect(warnings()).toEqual([]);
+  expect(summary()).toBeNull();
+  cleanup();
+  await mount({ taxExemptVerified: null, buildingUse: 'residential', buildings: [{ name: 'Office', lineItems: [line(true)] }] });
+  expect(warnings()).toEqual([]);
+  expect(summary()).toBeNull();
 });
 
 it('residential with no taxable rows: no warning and no summary line', async () => {

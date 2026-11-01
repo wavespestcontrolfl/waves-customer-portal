@@ -91,7 +91,13 @@ function serviceTaxRule(registry, service) {
 // it off a commercial account is taxed by property type and service, so there is nothing to predict). Business building: the row's rule, which is the per-row rule GET /proposal
 // served for a saved row that names a service (kept only while the row's service is unchanged), else the family
 // registry's rule the builder restores. Undefined when there is no basis (no pick, or a service the registry lacks).
-function billedTaxableFor(buildingUse, row, registry, savedRules, buildingUseTaxLive) {
+// The calculator answers a verified exemption first (tax-calculator.js step 1): an exempt customer's self-pay bills carry no
+// tax whatever the building use or the gate, and an exemption read that failed (null) leaves no basis for any row. A payer-billed
+// bill can follow the payer's own exemption instead (calculateTax skipCustomerExemption), which the builder cannot know; the
+// warning covers the self-pay bill.
+function billedTaxableFor(buildingUse, row, registry, savedRules, { buildingUseTaxLive, taxExemptVerified } = {}) {
+  if (taxExemptVerified === null) return undefined;
+  if (taxExemptVerified === true) return false;
   if (buildingUse === 'residential') return buildingUseTaxLive ? false : undefined;
   if (buildingUse !== 'nonresidential') return undefined;
   const saved = row.id ? savedRules?.[row.id] : null;
@@ -101,8 +107,8 @@ const ROW_TAX_NOTICES = {
   true: 'Visit bills follow the building use: this row will be billed with tax.',
   false: 'Visit bills follow the building use: this row will be billed without tax.',
 };
-function rowTaxNotice(buildingUse, row, registry, savedRules, buildingUseTaxLive) {
-  const billed = billedTaxableFor(buildingUse, row, registry, savedRules, buildingUseTaxLive);
+function rowTaxNotice(buildingUse, row, registry, savedRules, taxBasis) {
+  const billed = billedTaxableFor(buildingUse, row, registry, savedRules, taxBasis);
   return billed === undefined || billed === (row.taxable === true) ? null : ROW_TAX_NOTICES[billed];
 }
 // The served per-row business rules for the saved rows that name a service, with the service each was computed for.
@@ -461,6 +467,8 @@ function CommercialProposalEditor() {
   const savedBizRulesRef = React.useRef({});
   // GET /proposal buildingUseTaxLive: whether a Residential pick means untaxed bills (GATE_BUILDING_USE_TAX).
   const [buildingUseTaxLive, setBuildingUseTaxLive] = useState(false);
+  // GET /proposal taxExemptVerified: true / false, or null when the read failed (no row warnings then).
+  const [taxExemptVerified, setTaxExemptVerified] = useState(false);
   // Family → generated inclusions/exclusions/taxability registry, served on
   // load like responsibilityRegistry — the family-change resync prunes the
   // old family's generated lines and installs the new family's stack by
@@ -504,6 +512,7 @@ function CommercialProposalEditor() {
     setBidToolsEnabled(data.bidToolsEnabled === true);
     setAutopayEnabled(data.commercialAutopayEnabled === true);
     setBuildingUseTaxLive(data.buildingUseTaxLive === true);
+    setTaxExemptVerified(data.taxExemptVerified === null ? null : data.taxExemptVerified === true);
     if (!bidToolsChosenRef.current) {
       setBidToolsOpen(
         (data.projectCosting?.rows?.length || 0) > 0
@@ -621,7 +630,7 @@ function CommercialProposalEditor() {
   const taxRate = (Number(taxRatePct) || 0) / 100;
   const programsMode = programsState.some(programRowIsPriced);
   // Staff warning on a row whose Taxable box differs from what visit bills do (billedTaxableFor); none on a locked proposal.
-  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current, buildingUseTaxLive));
+  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current, { buildingUseTaxLive, taxExemptVerified }));
   const differingTaxRows = [
     ...programsState,
     ...(programsMode ? [] : buildings.flatMap((b) => b.lineItems || [])),

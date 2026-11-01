@@ -4536,6 +4536,14 @@ router.get('/:id/proposal', async (req, res, next) => {
       suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
       suggestedTaxSource = suggestedTaxRate === null ? null : (source || null);
     } catch (_) { suggestedTaxRate = null; suggestedTaxSource = null; }
+    // Whether the customer has a verified tax exemption, from the calculator's own check (calculateTax answers it first for
+    // a self-pay bill). No linked customer = false. A failed read is null: the builder then predicts nothing for any row.
+    let taxExemptVerified = false;
+    if (estimate.customer_id) {
+      try {
+        taxExemptVerified = Boolean(await require('../services/tax-calculator').findVerifiedExemption(estimate.customer_id));
+      } catch (_) { taxExemptVerified = null; }
+    }
     const proposalGenerate = require('../services/estimate-proposal-generate');
     // Never throws: a failed read is null, and the family defaults apply.
     const taxabilityMap = await proposalGenerate.loadTaxabilityMap(db);
@@ -4557,6 +4565,9 @@ router.get('/:id/proposal', async (req, res, next) => {
       // GATE_BUILDING_USE_TAX: a residential building use means bills carry no tax only while it is on (tax-calculator.js
       // step 1b); the builder's Taxable-box warning for a Residential pick follows it.
       buildingUseTaxLive: require('../config/feature-gates').buildingUseTaxLive(),
+      // Verified exemption (true / false; null = could not be read): an exempt customer's self-pay bills carry no tax whatever the
+      // building use, so the builder's Taxable-box warning compares with not taxable (null: no warning).
+      taxExemptVerified,
       // GATE_COMMERCIAL_PROPOSAL_SIGN: where the customer's online agreement stands (none / awaiting /
       // signed) for the builder's read-only line. The key is absent with the gate off.
       ...(commercialAgreement ? { commercialAgreement } : {}),

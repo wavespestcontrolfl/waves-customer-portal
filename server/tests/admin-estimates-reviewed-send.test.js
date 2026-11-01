@@ -1843,6 +1843,36 @@ describe('building-use tax gate on the builder read', () => {
   });
 });
 
+describe('GET /:id/proposal taxExemptVerified (the Taxable-box warning compares with the calculator\'s exemption check)', () => {
+  const TaxCalculator = require('../services/tax-calculator');
+  afterEach(() => jest.restoreAllMocks());
+
+  test.each([
+    ['an exempt customer', { id: 'exemption-1' }, true],
+    ['a customer with no verified exemption', undefined, false],
+  ])('%s', async (_label, exemption, expected) => {
+    row.customer_id = 'synthetic-customer';
+    const find = jest.spyOn(TaxCalculator, 'findVerifiedExemption').mockResolvedValue(exemption);
+    expect((await invoke('/:id/proposal', 'get')).body.taxExemptVerified).toBe(expected);
+    expect(find).toHaveBeenCalledWith('synthetic-customer');
+  });
+
+  test('no linked customer: false, without an exemption lookup', async () => {
+    row.customer_id = null;
+    const find = jest.spyOn(TaxCalculator, 'findVerifiedExemption');
+    expect((await invoke('/:id/proposal', 'get')).body.taxExemptVerified).toBe(false);
+    expect(find).not.toHaveBeenCalled();
+  });
+
+  test('a failed exemption read is null (unknown), and the builder read still succeeds', async () => {
+    row.customer_id = 'synthetic-customer';
+    jest.spyOn(TaxCalculator, 'findVerifiedExemption').mockRejectedValue(new Error('synthetic lookup failure'));
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.taxExemptVerified).toBeNull();
+    expect(res.body.proposal).toBeTruthy();
+  });
+});
+
 describe('commercial Auto Pay payment term', () => {
   const recurring = (commercialTerms) => ({
     enabled: true,
