@@ -941,7 +941,7 @@ async function selectAdoptionCandidates() {
     .orderByRaw('COALESCE(i.sent_at, i.sms_sent_at, i.created_at) asc')
     .select(
       'i.id as invoice_id', 'i.invoice_number', 'i.customer_id', 'i.total', 'i.credit_applied', 'i.amount_paid',
-      'i.sent_at', 'i.sms_sent_at', 'i.created_at',
+      'i.sent_at', 'i.sms_sent_at', 'i.created_at', 'i.due_date', 'i.scheduled_service_id', 'i.service_record_id',
     );
 
   const now = new Date();
@@ -966,7 +966,17 @@ async function selectAdoptionCandidates() {
       skip(history.unavailable ? 'legacy_history_unreadable' : 'has_legacy_history');
       continue;
     }
-    if (!adoptionLanding(candidate.sent_at, now)) { skip('past_final_step'); continue; }
+    // The start scheduleForInvoice will take (newSequenceAnchor): a won proposal's Net-terms bill counts its steps from
+    // its due date, so one sent long ago can still have steps left.
+    let start;
+    try {
+      start = await newSequenceAnchor(db, { ...row, id: row.invoice_id });
+    } catch (err) {
+      logger.warn(`[invoice-followups] reminder start read failed for invoice ${candidate.invoice_id} — skipped this run: ${err.message}`);
+      skip('start_unreadable');
+      continue;
+    }
+    if (!adoptionLanding(start.anchor, now)) { skip('past_final_step'); continue; }
     // Same rule scheduleForInvoice re-checks under the ACH lock.
     let achFailures;
     try {
