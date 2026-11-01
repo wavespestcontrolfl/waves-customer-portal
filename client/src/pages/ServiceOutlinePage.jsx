@@ -243,7 +243,7 @@ function MonthsVisual({ months = [], labels = {}, limitLabel }) {
     <div className="mt-4">
       <ol className="list-none space-y-2 pl-0">
         {months.map((m) => (
-          <li key={m.month}>
+          <li key={m.month} id={`month-${m.month}`} className="scroll-mt-24">
             <details
               open={m.open || undefined}
               data-limited={m.limited ? "true" : undefined}
@@ -330,6 +330,331 @@ function TagsVisual({ items = [], note }) {
   );
 }
 
+// ---- 9-round outline visuals (GATE_LAWN_OUTLINE_VISUAL): the year bar, round cards, timeline, fact tiles and FAQ.
+// Nothing draws them until the server emits these visual types; an unknown type keeps the bullet cards.
+
+// One color per whole-lawn step, used on the year bar, the round cards and their key.
+const STEP_TONES = {
+  feeding: "text-waves-success",
+  barrier: "text-waves-blue-deeper",
+  micros: "text-waves-blue",
+  insects: "text-waves-blue-deeper",
+  inspection: "text-slate-500",
+};
+const STEP_FILLS = {
+  feeding: "bg-waves-success-bg",
+  barrier: "bg-waves-blue-light",
+  micros: "bg-waves-blue-50",
+  insects: "bg-zinc-100",
+  inspection: "bg-zinc-100",
+};
+const STEP_RAILS = {
+  feeding: "border-l-waves-success",
+  barrier: "border-l-waves-blue-deeper",
+  micros: "border-l-waves-blue",
+  insects: "border-l-zinc-400",
+  inspection: "border-l-zinc-400",
+};
+const toneOf = (step) => STEP_TONES[step] || "text-waves-blue-deeper";
+
+// A link the outline points to (a Waves blog post or a UF/IFAS page), drawn as a small card. It leaves the portal, so
+// it opens in a new tab.
+function LinkCards({ links = [] }) {
+  if (!links.length) return null;
+  return (
+    <ul className="mt-3 grid list-none gap-2 pl-0 sm:grid-cols-2">
+      {links.map((link) => (
+        <li key={link.url}>
+          <a
+            href={link.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-start gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-waves-blue-deeper no-underline hover:border-waves-blue"
+          >
+            <FileText size={16} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 flex-shrink-0 text-waves-blue" />
+            <span className="min-w-0 text-sm leading-5">
+              <span className="font-semibold">{link.label}</span>
+              {link.source && <span className="text-zinc-500"> · {link.source}</span>}
+            </span>
+          </a>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// The tick row over the bar: month letters on a desktop (positioned by day offset), the start, middle and end labels
+// on a phone.
+function YearBarTicks({ months, anchors, pct }) {
+  return (
+    <>
+      {months.length > 0 && (
+        <div className="relative hidden h-5 text-sm font-semibold text-zinc-500 sm:block print:block" aria-hidden="true">
+          {months.map((m) => (
+            <span key={m.label + m.offset} className="absolute top-0" style={{ left: pct(m.offset) }}>{m.label}</span>
+          ))}
+        </div>
+      )}
+      {anchors.length > 0 && (
+        <div className="flex justify-between text-sm font-semibold text-zinc-500 sm:hidden print:hidden" aria-hidden="true">
+          {anchors.map((a) => <span key={a}>{a}</span>)}
+        </div>
+      )}
+    </>
+  );
+}
+
+// A dense bar's job names: two rows (odd blocks lower), each two blocks wide and centered on its block; the first and
+// last stay inside the bar's edges.
+function denseJobClass(index, count) {
+  const row = index % 2 ? "sm:mt-[44px] print:mt-[44px]" : "sm:mt-1 print:mt-1";
+  if (index === 0) return `w-[145%] -mr-[45%] text-left ${row}`;
+  if (index === count - 1) return `w-[145%] -ml-[45%] text-right ${row}`;
+  return `w-[190%] -mx-[45%] text-center ${row}`;
+}
+
+// One block of the bar: its label, one colored icon per main step, and the job names under it on a desktop and in print.
+// A dense bar (twelve months) is too narrow on a phone for a month name, so a phone shows the first letter, and on a
+// desktop the job names alternate between two rows, each as wide as two blocks, so neighbors never overlap.
+function YearBarBlock({ block, anchorPrefix, labels, pct, index, count }) {
+  const main = block.main || [];
+  const dense = count > 9;
+  const jobClass = dense ? denseJobClass(index, count) : "mt-1 text-center";
+  const jobs = main.map((step) => labels[step] || step).join(" and ");
+  const ring = block.current ? "border-waves-blue ring-2 ring-waves-blue" : "border-zinc-200";
+  return (
+    <li style={{ width: pct(block.days) }} className="min-w-0">
+      <a
+        href={`#${anchorPrefix}-${block.key}`}
+        aria-label={`${block.label}${block.window ? `, ${block.window}` : ""}: ${jobs}${block.current ? " (now)" : ""}`}
+        aria-current={block.current ? "true" : undefined}
+        data-current={block.current ? "true" : undefined}
+        className={`flex h-[84px] flex-col overflow-hidden rounded-md border no-underline ${ring}`}
+      >
+        <span className="bg-white py-1 text-center text-sm font-bold leading-none tracking-tight text-waves-blue-deeper">
+          {dense && <span className="sm:hidden print:hidden">{String(block.label).slice(0, 1)}</span>}
+          <span className={dense ? "hidden sm:inline print:inline" : ""}>{block.label}</span>
+        </span>
+        {main.map((step) => (
+          <span key={step} className={`flex flex-1 items-center justify-center ${STEP_FILLS[step] || "bg-white"}`}>
+            <VisualIcon name={step} size={18} className={toneOf(step)} />
+          </span>
+        ))}
+      </a>
+      {block.short && <span className={`hidden text-sm leading-tight text-slate-600 sm:block print:block ${jobClass}`}>{block.short}</span>}
+    </li>
+  );
+}
+
+// The key under the bar: the steps it uses and the summer limit swatch.
+function YearBarKey({ keySteps, labels, limit }) {
+  return (
+    <ul className="mt-3 flex list-none flex-wrap gap-x-4 gap-y-2 pl-0 text-sm text-slate-600">
+      {keySteps.map((step) => (
+        <li key={step} className="inline-flex items-center gap-1.5">
+          <VisualIcon name={step} size={16} className={toneOf(step)} />
+          {labels[step] || step}
+        </li>
+      ))}
+      {limit && (
+        <li className="inline-flex items-center gap-1.5">
+          <span aria-hidden="true" className="h-1.5 w-5 rounded-full bg-waves-gold" />
+          {limit.label}
+        </li>
+      )}
+    </ul>
+  );
+}
+
+// The program year as one bar: a block per round (or per month) sized by its days, the step icons in their colors, the
+// block that holds today marked, and the summer nitrogen limit as a band flush under the blocks. Each block links to its
+// card or row. The bar keeps its colors when the page prints.
+function YearBarVisual({ blocks = [], anchorPrefix = "round", months = [], anchors = [], limit = null, labels = {}, keySteps = [], nowLabel = null, caption = null }) {
+  const total = blocks.reduce((sum, b) => sum + (b.days || 0), 0) || 365;
+  const pct = (days) => `${(days / total) * 100}%`;
+  return (
+    <div className="mt-4" style={{ printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}>
+      <div data-glass="soft" className="rounded-md border border-zinc-200 bg-surface-page p-3">
+        <YearBarTicks months={months} anchors={anchors} pct={pct} />
+        <ol className={`mt-1 flex list-none pl-0 ${blocks.length > 9 ? "gap-0.5" : "gap-1"}`}>
+          {blocks.map((block, index) => (
+            <YearBarBlock key={block.key} block={block} anchorPrefix={anchorPrefix} labels={labels} pct={pct} index={index} count={blocks.length} />
+          ))}
+        </ol>
+        {limit && (
+          <div className="relative mt-1 h-1.5" aria-hidden="true">
+            <span className="absolute top-0 h-1.5 rounded-full bg-waves-gold" style={{ left: pct(limit.offset), width: pct(limit.days) }} />
+          </div>
+        )}
+        <YearBarKey keySteps={keySteps} labels={labels} limit={limit} />
+        {nowLabel && (
+          <p className="mt-3 flex items-start gap-2 text-sm font-semibold text-waves-blue-deeper">
+            <span className="mt-0.5 inline-block h-3.5 w-3.5 flex-shrink-0 rounded-sm ring-2 ring-waves-blue" aria-hidden="true" />
+            {nowLabel}
+          </p>
+        )}
+        {caption && <p className="mt-2 text-sm leading-5 text-slate-600">{caption}</p>}
+      </div>
+    </div>
+  );
+}
+
+// One round card: the header line carries the dates, the body the whole-lawn steps, spot work, why now, one thing to
+// do at home and links. Only a round marked `open` starts open.
+function RoundCard({ round, labels }) {
+  const main = round.main || [];
+  const rail = STEP_RAILS[main[0]] || "";
+  return (
+    <li id={`round-${round.n}`} aria-current={round.current ? "step" : undefined} className="scroll-mt-24">
+      <details open={round.open || undefined} className={`group rounded-md border border-l-4 bg-white ${rail} ${round.current ? "border-waves-blue" : "border-zinc-200"}`}>
+        <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 [&::-webkit-details-marker]:hidden">
+          <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-waves-blue-deeper text-lg font-bold text-white" aria-hidden="true">
+            {round.n}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="text-sm font-semibold text-zinc-500">Round {round.n} · {round.window}</span>
+              {round.current && <span className="rounded-full bg-waves-blue px-2 py-0.5 text-sm font-semibold text-white">Now</span>}
+            </span>
+            <span className="mt-0.5 block text-base font-semibold text-waves-blue-deeper">{round.title}</span>
+            <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+              {main.map((step) => (
+                <span key={step} className="inline-flex items-center gap-1.5 text-sm font-semibold text-waves-blue-deeper">
+                  <VisualIcon name={step} size={16} className={STEP_TONES[step] || ""} />
+                  {labels[step] || step}
+                </span>
+              ))}
+            </span>
+          </span>
+          <ChevronDown size={18} strokeWidth={1.75} aria-hidden="true" className="mt-1 flex-shrink-0 text-slate-500 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="space-y-2 px-3 pb-3">
+          <p className="text-base leading-6 text-slate-600">{round.why}</p>
+          {round.extra && <p className="text-sm font-semibold leading-5 text-waves-success">{round.extra}</p>}
+          {round.asNeeded?.length > 0 && <p><AsNeededIcons steps={round.asNeeded} labels={labels} /></p>}
+          {round.atHome && (
+            <p className="rounded-md bg-waves-blue-light px-3 py-2 text-base leading-6 text-waves-blue-deeper">
+              <span className="font-semibold">At home: </span>
+              {round.atHome}
+            </p>
+          )}
+          <LinkCards links={round.links} />
+        </div>
+      </details>
+    </li>
+  );
+}
+
+// The nine rounds as cards. The server marks only the round that holds today with `open`.
+function RoundsVisual({ rounds = [], labels = {} }) {
+  return (
+    <ol className="mt-4 list-none space-y-2 pl-0">
+      {rounds.map((round) => <RoundCard key={round.n} round={round} labels={labels} />)}
+    </ol>
+  );
+}
+
+// After a visit, as a timeline: what to hold, when, and when to expect a change.
+function TimelineVisual({ items = [], note }) {
+  return (
+    <div className="mt-4">
+      <ol className="relative list-none space-y-3 border-l-2 border-waves-blue/40 pl-0 sm:flex sm:gap-3 sm:space-y-0 sm:border-l-0 sm:border-t-2">
+        {items.map((item) => (
+          <li key={`${item.when}-${item.title}`} className="relative ml-4 sm:ml-0 sm:flex-1 sm:pt-4">
+            <span className="absolute -left-[25px] top-1 flex h-4 w-4 items-center justify-center rounded-full border-2 border-white bg-waves-blue sm:-top-[9px] sm:left-0" aria-hidden="true" />
+            <p className="text-sm font-bold uppercase tracking-wide text-waves-blue">{item.when}</p>
+            <p className="mt-1 flex items-start gap-2 text-base font-semibold leading-6 text-waves-blue-deeper">
+              <VisualIcon name={item.icon} size={18} className="mt-0.5 flex-shrink-0" />
+              {item.title}
+            </p>
+            <p className="mt-1 text-sm leading-5 text-slate-600">{item.text}</p>
+          </li>
+        ))}
+      </ol>
+      {note && <p className="mt-3 text-sm leading-5 text-slate-500">{note}</p>}
+    </div>
+  );
+}
+
+// The picture or video under a fact tile: a video loads nothing until it is played (`preload="none"`, the picture is
+// its poster); a picture links to its larger version in a new tab; a link alone is a text link.
+function FactMedia({ item }) {
+  if (item.video) {
+    return (
+      <figure className="mt-3 overflow-hidden rounded-md border border-zinc-200 bg-white">
+        <video controls preload="none" poster={item.image} className="aspect-video w-full bg-waves-blue-deeper">
+          <source src={item.video} type="video/mp4" />
+        </video>
+        {item.linkLabel && <figcaption className="px-3 py-2 text-sm text-slate-600">{item.linkLabel}</figcaption>}
+      </figure>
+    );
+  }
+  if (item.image) {
+    return (
+      <a href={item.href} target="_blank" rel="noopener noreferrer" className={`block overflow-hidden rounded-md border border-zinc-200 bg-white no-underline ${item.wide ? "mt-3 sm:mt-0" : "mt-3"}`}>
+        <img src={item.image} alt={item.imageAlt || ""} loading="lazy" className="h-44 w-full object-cover object-top" />
+        {item.linkLabel && <span className="block px-3 py-2 text-sm font-semibold text-waves-blue">{item.linkLabel}</span>}
+      </a>
+    );
+  }
+  if (!item.href) return null;
+  return <a href={item.href} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-sm font-semibold text-waves-blue no-underline hover:underline">{item.linkLabel}</a>;
+}
+
+// Big-number tiles (watering depth, mowing height), the Monday email tile with its sample picture and the tour videos.
+function FactsVisual({ items = [] }) {
+  return (
+    <ul className="mt-4 grid list-none gap-3 pl-0 sm:grid-cols-2">
+      {items.map((item) => (
+        <li key={item.title} data-glass="soft" className={`rounded-md border border-zinc-200 bg-surface-page p-4 ${item.wide ? "sm:col-span-2 sm:grid sm:grid-cols-2 sm:items-start sm:gap-4" : ""}`}>
+          <div>
+            {item.big && <p className="text-3xl font-bold tracking-tight text-waves-blue-deeper">{item.big}</p>}
+            <p className="mt-1 flex items-center gap-2 text-base font-semibold text-waves-blue-deeper">
+              {item.icon && <VisualIcon name={item.icon} size={18} />}
+              {item.title}
+            </p>
+            <p className="mt-1 text-base leading-6 text-slate-600">{item.text}</p>
+          </div>
+          <FactMedia item={item} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// One FAQ row: a closed question, its answer one tap away, and links to read more.
+function FaqRow({ item }) {
+  return (
+    <li>
+      <details className="group rounded-md border border-zinc-200 bg-white">
+        <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 text-base font-semibold text-waves-blue-deeper [&::-webkit-details-marker]:hidden">
+          <span className="min-w-0 flex-1">{item.q}</span>
+          <ChevronDown size={18} strokeWidth={1.75} aria-hidden="true" className="mt-1 flex-shrink-0 text-slate-500 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="px-3 pb-3">
+          <p className="text-base leading-6 text-slate-600">{item.a}</p>
+          <LinkCards links={item.links || []} />
+        </div>
+      </details>
+    </li>
+  );
+}
+
+// Questions customers ask most, every one closed; the rest sit in one closed "More questions" row.
+function FaqVisual({ items = [], more = [] }) {
+  return (
+    <div className="mt-4 space-y-2">
+      <ul className="list-none space-y-2 pl-0">{items.map((item) => <FaqRow key={item.q} item={item} />)}</ul>
+      {more.length > 0 && (
+        <details className="rounded-md border border-dashed border-zinc-300 bg-surface-page">
+          <summary className="cursor-pointer px-3 py-3 text-sm font-semibold text-waves-blue">More questions</summary>
+          <ul className="list-none space-y-2 px-3 pb-3 pl-3">{more.map((item) => <FaqRow key={item.q} item={item} />)}</ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
 const SECTION_VISUALS = {
   tiles: TilesVisual,
   chips: ChipsVisual,
@@ -338,6 +663,11 @@ const SECTION_VISUALS = {
   steps: StepsVisual,
   categories: CategoriesVisual,
   tags: TagsVisual,
+  yearBar: YearBarVisual,
+  rounds: RoundsVisual,
+  timeline: TimelineVisual,
+  facts: FactsVisual,
+  faq: FaqVisual,
 };
 
 function Section({ section }) {
@@ -359,6 +689,62 @@ function Section({ section }) {
         </ul>
       )}
     </section>
+  );
+}
+
+// The side panel: where, which program, the plan, this visit's season or round, and the product language.
+function SnapshotAside({ content }) {
+  return (
+    <aside data-glass="soft" className="rounded-md border border-zinc-200 bg-surface-page p-4">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Program Snapshot</h2>
+      <dl className="mt-4 space-y-3 text-sm">
+        <div className="flex gap-3">
+          <MapPin size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
+          <div>
+            <dt className="text-zinc-500">Service area</dt>
+            <dd className="font-medium text-waves-blue-deeper">{content.property?.addressSummary || "Service property"}</dd>
+          </div>
+        </div>
+        <div className="flex gap-3">
+          <Sprout size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
+          {/* The v13 outline names its one program, not a grass (GATE_LAWN_OUTLINE_V13). */}
+          {content.property?.programLabel ? (
+            <div>
+              <dt className="text-zinc-500">Program</dt>
+              <dd className="font-medium text-waves-blue-deeper">{content.property.programLabel}</dd>
+            </div>
+          ) : (
+            <div>
+              <dt className="text-zinc-500">Turf type</dt>
+              <dd className="font-medium text-waves-blue-deeper">{content.property?.turfType || "To be confirmed"}</dd>
+            </div>
+          )}
+        </div>
+        {content.property?.planLabel && (
+          <div className="flex gap-3">
+            <ListChecks size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
+            <div>
+              <dt className="text-zinc-500">Your plan</dt>
+              <dd className="font-medium text-waves-blue-deeper">{content.property.planLabel}</dd>
+            </div>
+          </div>
+        )}
+        <div className="flex gap-3">
+          <CalendarDays size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
+          <div>
+            <dt className="text-zinc-500">{content.season?.roundLabel ? "Now" : "Season focus"}</dt>
+            <dd className="font-medium text-waves-blue-deeper">{content.season?.roundLabel || content.season?.monthName || "Current visit"}</dd>
+          </div>
+        </div>
+        <div className="flex gap-3">
+          <ShieldCheck size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
+          <div>
+            <dt className="text-zinc-500">Product language</dt>
+            <dd className="font-medium text-waves-blue-deeper">May be used, not guaranteed</dd>
+          </div>
+        </div>
+      </dl>
+    </aside>
   );
 }
 
@@ -485,47 +871,7 @@ export default function ServiceOutlinePage() {
               <h1 className="mt-4 max-w-3xl text-4xl font-semibold tracking-tight text-waves-blue-deeper">{content.title}</h1>
               <p className="mt-4 max-w-3xl text-lg leading-8 text-slate-600">{content.intro}</p>
             </div>
-            <aside data-glass="soft" className="rounded-md border border-zinc-200 bg-surface-page p-4">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Program Snapshot</h2>
-              <dl className="mt-4 space-y-3 text-sm">
-                <div className="flex gap-3">
-                  <MapPin size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
-                  <div>
-                    <dt className="text-zinc-500">Service area</dt>
-                    <dd className="font-medium text-waves-blue-deeper">{content.property?.addressSummary || "Service property"}</dd>
-                  </div>
-                </div>
-                <div className="flex gap-3">
-                  <Sprout size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
-                  {/* The v13 outline names its one program, not a grass (GATE_LAWN_OUTLINE_V13). */}
-                  {content.property?.programLabel ? (
-                    <div>
-                      <dt className="text-zinc-500">Program</dt>
-                      <dd className="font-medium text-waves-blue-deeper">{content.property.programLabel}</dd>
-                    </div>
-                  ) : (
-                    <div>
-                      <dt className="text-zinc-500">Turf type</dt>
-                      <dd className="font-medium text-waves-blue-deeper">{content.property?.turfType || "To be confirmed"}</dd>
-                    </div>
-                  )}
-                </div>
-                <div className="flex gap-3">
-                  <CalendarDays size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
-                  <div>
-                    <dt className="text-zinc-500">Season focus</dt>
-                    <dd className="font-medium text-waves-blue-deeper">{content.season?.monthName || "Current visit"}</dd>
-                  </div>
-                </div>
-                <div className="flex gap-3">
-                  <ShieldCheck size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
-                  <div>
-                    <dt className="text-zinc-500">Product language</dt>
-                    <dd className="font-medium text-waves-blue-deeper">May be used, not guaranteed</dd>
-                  </div>
-                </div>
-              </dl>
-            </aside>
+            <SnapshotAside content={content} />
           </div>
         </section>
 

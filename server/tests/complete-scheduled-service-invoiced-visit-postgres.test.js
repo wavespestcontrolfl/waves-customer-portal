@@ -81,8 +81,9 @@ const LAWN_TYPE = 'Every 6 Weeks Lawn Care Service';
 const PRICE = 80;
 
 // A priced visit that would mint its own completion invoice (create_invoice_on_complete) and already has an invoice
-// from the payment flow: sent and unpaid, or paid.
-async function seedInvoicedVisit({ invoiceStatus = 'sent' } = {}) {
+// from the payment flow: sent and unpaid, or paid. `invoiceDay` dates the invoice to another day, as an invoice made
+// before the visit keeps the day it was minted with when the visit is moved.
+async function seedInvoicedVisit({ invoiceStatus = 'sent', invoiceDay = null } = {}) {
   const today = etDateString(new Date());
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID(), serviceKey: `fixture_lawn_${randomUUID().slice(0, 8)}` };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Invoiced', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
@@ -96,8 +97,8 @@ async function seedInvoicedVisit({ invoiceStatus = 'sent' } = {}) {
     estimated_price: PRICE, estimated_duration_minutes: 60, create_invoice_on_complete: true });
   const paid = invoiceStatus === 'paid';
   await mockPg('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${f.invoiceId.slice(0, 8)}`,
-    token: randomUUID().replace(/-/g, ''), status: invoiceStatus, total: PRICE, subtotal: PRICE, service_date: today, service_type: LAWN_TYPE,
-    sent_at: new Date(), ...(paid ? { paid_at: new Date() } : {}),
+    token: randomUUID().replace(/-/g, ''), status: invoiceStatus, total: PRICE, subtotal: PRICE, service_date: invoiceDay || today, service_type: LAWN_TYPE,
+    ...(invoiceStatus === 'draft' ? {} : { sent_at: new Date() }), ...(paid ? { paid_at: new Date() } : {}),
     line_items: JSON.stringify([{ description: LAWN_TYPE, amount: PRICE, quantity: 1, unit_price: PRICE }]) });
   return f;
 }
@@ -213,6 +214,50 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
       expect(await invoicesOf(f)).toHaveLength(1);
       expect(textsWithPayLink()).toEqual([]);
       expect(out.body.invoicePaymentActionRequired).toBe(false);
+    } finally { await cleanup(f); }
+  });
+
+  // An invoice made before the visit (the estimate-accept first application) keeps the day it was minted with when the
+  // visit is moved. Completion reuses it, so without a redate the charge and the receipt read the old day.
+  const fiveDaysAgo = () => etDateString(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
+  const dayOf = async (table, where) => (await mockPg(table).where(where).first(mockPg.raw('service_date::text AS day'))).day;
+
+  test('a sent invoice still dated before the move takes the service record\'s day; still one invoice, same total and status', async () => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent', invoiceDay: fiveDaysAgo() });
+    try {
+      const out = await complete(f, { invoiceAlreadySent: true });
+      expect(out.status).toBe(200);
+      const recordDay = await dayOf('service_records', { scheduled_service_id: f.serviceId });
+      expect(recordDay).toBe(etDateString(new Date()));
+      const invoices = await invoicesOf(f);
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0]).toMatchObject({ id: f.invoiceId, status: 'sent' });
+      expect(Number(invoices[0].total)).toBe(PRICE);
+      expect(await dayOf('invoices', { id: f.invoiceId })).toBe(recordDay);
+    } finally { await cleanup(f); }
+  });
+
+  test('a draft dated before the move (an estimate-accept invoice not sent yet) takes the service record\'s day', async () => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'draft', invoiceDay: fiveDaysAgo() });
+    try {
+      const out = await complete(f, {});
+      expect(out.status).toBe(200);
+      expect(await invoicesOf(f)).toHaveLength(1);
+      expect(await dayOf('invoices', { id: f.invoiceId }))
+        .toBe(await dayOf('service_records', { scheduled_service_id: f.serviceId }));
+    } finally { await cleanup(f); }
+  });
+
+  test('a paid invoice dated before the move keeps its day: only an invoice an edit could still rewrite is redated', async () => {
+    const oldDay = fiveDaysAgo();
+    const f = await seedInvoicedVisit({ invoiceStatus: 'paid', invoiceDay: oldDay });
+    try {
+      const out = await complete(f, {});
+      expect(out.status).toBe(200);
+      const invoices = await invoicesOf(f);
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0]).toMatchObject({ id: f.invoiceId, status: 'paid' });
+      expect(await dayOf('invoices', { id: f.invoiceId })).toBe(oldDay);
     } finally { await cleanup(f); }
   });
 });

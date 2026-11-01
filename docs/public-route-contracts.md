@@ -3153,6 +3153,15 @@ fits the property". It is at most about 30 words, and never naming a product,
 an ordinance, a county, a blackout, a law, a clock time, plan tiers, a soil
 test, or watering, rain or mowing guidance, and never ordinal or sequence
 wording (first, final, again, re-check) since a customer may join mid-year.
+A visit on a 9-visit rounds series gets the sentence for its lawn round instead
+of its month: when the visit's linked scheduled row has `recurring_pattern`
+`lawn_rounds_9` (only `GATE_LAWN_9X_ROUNDS` creates such rows; nothing here reads
+that gate), the round (1 to 9) is `lawn-rounds.js` `roundOf` of that row's
+`scheduled_date`, and the line is that round's sentence from `lawn-program-line.js`
+`ROUND_PROGRAM_LINES_V13` (nine sentences held to every rule above, so none says
+"round"). Every other visit, including one with no linked scheduled row, keeps the
+month sentence. The June to September nitrogen rule below still reads the visit's
+calendar month, never the round.
 While the line is in use the snapshot also carries
 `seasonalNoteSource: "program"` (the key is absent otherwise). The line is
 null, and the old note stays, for a visit that is not a recurring lawn plan
@@ -3169,7 +3178,8 @@ the version pinned on its scheduled visit. A completion row whose version is
 empty (attribution `none`) is authoritative and gets no line, as does any visit
 with no recorded version (completed before protocol assignment existed), one
 pinned to an older version, every visit while `GATE_LAWN_V13` is off, and a
-visit whose record cannot be read: each keeps the old peak / shoulder / dormant
+visit whose record (the protocol pin, or the scheduled row that gives the round)
+cannot be read: each keeps the old peak / shoulder / dormant
 note. The retired per-grass sentences were removed, so a permanent past report
 is never rewritten with a program its visit did not run. The payload shape
 (keys, types, route, token, privacy, rate limit) is unchanged.
@@ -3179,13 +3189,15 @@ renders a program line once as a small "This time of year" card above the
 trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
 print `seasonalNote`, so its content and cache signature are unchanged.
 `GATE_LAWN_PROGRAM_DETAIL` (dark, owner 2026-10-06; strict `'true'` only, and
-effective only while `GATE_LAWN_EXPECTATIONS` supplies the month sentence above;
+effective only while `GATE_LAWN_EXPECTATIONS` supplies the program sentence above;
 only the lead layout mounts it; gate
 off leaves the lawn payload unchanged, key for key) adds one key to the lawn
 report payload: `reportV2.snapshot.seasonalDetail` = `{ whyNow }`, present only beside `seasonalNoteSource: "program"` (lawn only;
 no new route, token, privacy or rate-limit surface). The text is static copy
 for the visit month from `lawn-program-line.js` `PROGRAM_DETAIL_V13`, written
-from the same v13 month step by category: never a product, brand, active
+from the same v13 month step by category. A rounds visit (above) gets its round's
+own text from `ROUND_DETAIL_V13` for rounds 1 to 6 and 9, and the calendar month's
+`PROGRAM_DETAIL_V13` text for rounds 7 and 8. No text names a product, brand, active
 ingredient or rate, and a conditional step (the weed barrier) keeps the "where
 it fits the property" qualifier. No watering advice rides here: every lawn report already carries the Water
 This Week card and the visit's label aftercare, which own the watering

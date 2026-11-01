@@ -94,6 +94,73 @@ function v13Content() {
   };
 }
 
+// GATE_LAWN_OUTLINE_VISUAL: the year bar, round cards, timeline, fact tiles and FAQ. Shapes mirror the server's packet.
+function visualContent() {
+  const labels = { feeding: 'Fertilizer', barrier: 'Pre-emergent', micros: 'Micronutrients', insects: 'Insect control' };
+  const blocks = [
+    { key: 1, label: '1', days: 40, window: 'Dec 25 – Feb 2', main: ['barrier', 'micros'], short: 'Barrier + color', current: false },
+    { key: 2, label: '2', days: 40, window: 'Feb 3 – Mar 14', main: ['feeding', 'barrier'], short: 'Feed + barrier', current: true },
+    { key: 3, label: '3', days: 40, window: 'Mar 15 – Apr 23', main: ['feeding'], short: 'Spring feed', current: false },
+  ];
+  const round = (n, extra = {}) => ({
+    n, window: blocks[n - 1].window, title: `Round ${n} title`, main: blocks[n - 1].main, asNeeded: n === 3 ? ['insects'] : [],
+    why: `Why round ${n}.`, atHome: `Home step ${n}.`, links: [], open: false, current: false, ...extra,
+  });
+  return {
+    ...v13Content(),
+    property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One program for every lawn', planLabel: '9 visits a year, one per round' },
+    season: { monthName: 'Feb', roundLabel: 'Round 2 · Feb 3 – Mar 14' },
+    sections: [
+      {
+        key: 'year_bar', title: 'Your Year In Nine Rounds', body: 'Tap a round to jump to it.', bullets: ['Round 1: Barrier'],
+        visual: {
+          type: 'yearBar', blocks, anchorPrefix: 'round', months: [{ label: 'J', offset: 0 }, { label: 'F', offset: 40 }], anchors: ['Dec 25', 'Jul', 'Dec 24'],
+          limit: { offset: 40, days: 60, label: 'No nitrogen or phosphorus (local summer rule)' }, labels, keySteps: ['feeding', 'barrier', 'micros'],
+          nowLabel: 'You are here: round 2 (Feb 3 – Mar 14). Your visit falls inside it.', caption: 'Your rule area: Manatee County, FL.',
+        },
+      },
+      {
+        key: 'rounds', title: 'Round By Round', body: '', bullets: ['Round 1'],
+        visual: {
+          type: 'rounds', labels,
+          rounds: [
+            round(1),
+            round(2, { open: true, current: true, extra: 'Extra line.', links: [{ label: 'Read the post', url: 'https://example.test/post', source: 'Waves' }] }),
+            round(3),
+          ],
+        },
+      },
+      {
+        key: 'after_visit_timeline', title: 'After A Visit', body: '', bullets: ['Day 0'],
+        visual: { type: 'timeline', items: [{ when: 'Day 0', icon: 'reentry', title: 'Stay off', text: 'Until dry.' }, { when: 'Week 2', icon: 'report', title: 'Look', text: 'Green up.' }], note: 'Timeline note.' },
+      },
+      {
+        key: 'after_visit', title: 'Your Part: Tools', body: '', bullets: ['Email'],
+        visual: {
+          type: 'facts',
+          items: [
+            { icon: 'reminders', title: 'Monday email', text: 'Weekly note.', wide: true, image: '/outline/watering-email-sample-thumb.jpg', imageAlt: 'A sample email', href: '/outline/watering-email-sample.jpg', linkLabel: 'See a sample email' },
+            { icon: 'portal', title: 'App tour', text: 'Watch it.', image: '/app-email/videos/waves-lawn-tour-poster.jpg', video: '/app-email/videos/waves-lawn-tour.mp4', linkLabel: 'Lawn tour' },
+            { icon: 'label', title: 'Mowing', text: 'Keep it tall.', big: '3.5 to 4 in', href: 'https://example.test/mowing', linkLabel: 'A note for whoever mows' },
+          ],
+        },
+      },
+      {
+        key: 'faq', title: 'Questions', body: '', bullets: ['Q1'],
+        visual: {
+          type: 'faq',
+          items: [{ q: 'First question?', a: 'First answer.', links: [{ label: 'More reading', url: 'https://example.test/faq', source: 'UF/IFAS' }] }],
+          more: [{ q: 'Hidden question?', a: 'Hidden answer.' }],
+        },
+      },
+      {
+        key: 'future_thing', title: 'A Future Section', body: 'Body text.', bullets: ['Falls back to bullets'], visual: { type: 'hologram', items: [] },
+      },
+    ],
+    cta: { estimatePath: '/estimate/test-token' },
+  };
+}
+
 // The gate-off outline: a grass in the side panel and sections with no drawing.
 function legacyContent() {
   return {
@@ -340,5 +407,94 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(rows.map((row) => row.querySelector('summary span').textContent)).toEqual(['Winter', 'Spring', 'Summer', 'Fall']);
     expect(rows.filter((row) => row.open).map((row) => row.querySelector('summary span').textContent)).toEqual(['Fall']);
     expect(screen.getByText('Fall watch-for line.')).toBeInTheDocument();
+  });
+  // GATE_LAWN_OUTLINE_VISUAL: five new drawings; nothing emits them until the server gate is on.
+  describe('visual layout sections', () => {
+    it('draws the year bar, marks the current block, and links each block to its round card', async () => {
+      renderWith(visualContent());
+      await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
+      const bar = sectionOf('Your Year In Nine Rounds');
+      const links = within(bar).getAllByRole('link');
+      expect(links.map((a) => a.getAttribute('href'))).toEqual(['#round-1', '#round-2', '#round-3']);
+      expect(links.filter((a) => a.getAttribute('aria-current') === 'true').map((a) => a.getAttribute('href'))).toEqual(['#round-2']);
+      expect(within(bar).getByText('Feed + barrier')).toBeInTheDocument();
+      expect(within(bar).getByText('You are here: round 2 (Feb 3 – Mar 14). Your visit falls inside it.')).toBeInTheDocument();
+      expect(within(bar).getByText('Your rule area: Manatee County, FL.')).toBeInTheDocument();
+      expect(within(bar).getByText('No nitrogen or phosphorus (local summer rule)')).toBeInTheDocument();
+      // The text lines are for readers that draw nothing.
+      expect(within(bar).queryByText('Round 1: Barrier')).not.toBeInTheDocument();
+      // The side panel reads the plan and the round.
+      expect(screen.getByText('Your plan')).toBeInTheDocument();
+      expect(screen.getByText('9 visits a year, one per round')).toBeInTheDocument();
+      expect(screen.getByText('Now', { selector: 'dt' })).toBeInTheDocument();
+      expect(screen.getByText('Round 2 · Feb 3 – Mar 14', { selector: 'dd' })).toBeInTheDocument();
+      expect(screen.queryByText('Season focus')).not.toBeInTheDocument();
+    });
+
+    it('draws round cards with ids, only the open round starts open, the current one is marked, and links open in a new tab', async () => {
+      renderWith(visualContent());
+      await screen.findByRole('heading', { level: 2, name: 'Round By Round' });
+      const rounds = sectionOf('Round By Round');
+      const cards = [...rounds.querySelectorAll('li[id^="round-"]')];
+      expect(cards.map((li) => li.id)).toEqual(['round-1', 'round-2', 'round-3']);
+      expect(cards.map((li) => li.querySelector('details').open)).toEqual([false, true, false]);
+      expect(cards.filter((li) => li.getAttribute('aria-current') === 'step').map((li) => li.id)).toEqual(['round-2']);
+      expect(within(cards[1]).getByText('Round 2 · Feb 3 – Mar 14')).toBeInTheDocument();
+      expect(within(cards[1]).getByText('Home step 2.')).toBeInTheDocument();
+      expect(within(cards[1]).getByText('Extra line.')).toBeInTheDocument();
+      expect(within(cards[2]).getByText('Insect control')).toHaveClass('sr-only');
+      const link = within(cards[1]).getByRole('link', { name: /Read the post/ });
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    });
+
+    it('draws the timeline, the fact tiles (a video that loads nothing until played) and the FAQ with its More questions row', async () => {
+      renderWith(visualContent());
+      await screen.findByRole('heading', { level: 2, name: 'Questions' });
+      const timeline = sectionOf('After A Visit');
+      expect(within(timeline).getByText('Week 2')).toBeInTheDocument();
+      expect(within(timeline).getByText('Timeline note.')).toBeInTheDocument();
+
+      const facts = sectionOf('Your Part: Tools');
+      const video = facts.querySelector('video');
+      expect(video).toHaveAttribute('preload', 'none');
+      expect(video).toHaveAttribute('poster', '/app-email/videos/waves-lawn-tour-poster.jpg');
+      expect(video.querySelector('source')).toHaveAttribute('src', '/app-email/videos/waves-lawn-tour.mp4');
+      expect(within(facts).getByText('Lawn tour')).toBeInTheDocument();
+      expect(within(facts).getByText('3.5 to 4 in')).toBeInTheDocument();
+      const sample = within(facts).getByRole('link', { name: /See a sample email/ });
+      expect(sample).toHaveAttribute('href', '/outline/watering-email-sample.jpg');
+      expect(sample).toHaveAttribute('target', '_blank');
+      expect(sample).toHaveAttribute('rel', 'noopener noreferrer');
+      const mowing = within(facts).getByRole('link', { name: 'A note for whoever mows' });
+      expect(mowing).toHaveAttribute('target', '_blank');
+      expect(mowing).toHaveAttribute('rel', 'noopener noreferrer');
+
+      const faq = sectionOf('Questions');
+      const rows = [...faq.querySelectorAll('details')];
+      expect(rows.every((row) => !row.open)).toBe(true);
+      expect(within(faq).getByText('First question?')).toBeInTheDocument();
+      expect(within(faq).getByText('More questions')).toBeInTheDocument();
+      expect(within(faq).getByText('Hidden question?')).toBeInTheDocument();
+      expect(within(faq).getByRole('link', { name: /More reading/ })).toHaveAttribute('target', '_blank');
+    });
+
+    it('an unknown visual type keeps its bullet cards', async () => {
+      renderWith(visualContent());
+      await screen.findByRole('heading', { level: 2, name: 'A Future Section' });
+      const future = sectionOf('A Future Section');
+      expect(within(future).getByText('Body text.')).toBeInTheDocument();
+      expect(within(future).getByText('Falls back to bullets')).toBeInTheDocument();
+    });
+
+    it('gives each month row an id so a twelve-month bar can link to it', async () => {
+      const content = v13Content();
+      const year = content.sections.find((s) => s.key === 'program_year');
+      year.visual = { ...year.visual, type: 'months', months: year.visual.months.map((m) => ({ ...m, visit: 'v', atHome: 'h', open: false })) };
+      renderWith(content);
+      await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
+      const ids = [...sectionOf('Your Year At A Glance').querySelectorAll('li[id^="month-"]')].map((li) => li.id);
+      expect(ids).toEqual(Array.from({ length: 12 }, (_, i) => `month-${i + 1}`));
+    });
   });
 });
