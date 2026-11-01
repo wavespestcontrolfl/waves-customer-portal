@@ -227,16 +227,29 @@ function summaryWithReason(summary, reason) {
   const text = flatLine(reason, 600);
   const base = String(summary || '');
   if (!text || base.includes(text)) return base;
-  return base ? `${base}\n${ALSO_LINE} ${text}` : text;
+  return keepNewest(base ? `${base}\n${ALSO_LINE} ${text}` : text, MAX_ITEM_SUMMARY_CHARS);
 }
 
-// The customer's words on the item: every distinct message of the chat that
-// reached the team, oldest first.
+// One item holds a bounded amount of text however many messages a chat sends
+// (Codex security review on #7346): the newest text is kept, the oldest is
+// cut at a line start and marked. Every message stays in agent_messages.
+const MAX_ITEM_MESSAGE_CHARS = 6000;
+const MAX_ITEM_SUMMARY_CHARS = 3000;
+const CUT_MARK = '[earlier messages cut; the full chat is in the conversation]';
+function keepNewest(text, max) {
+  if (text.length <= max) return text;
+  const tail = text.slice(text.length - (max - CUT_MARK.length - 1));
+  const lineStart = tail.indexOf('\n');
+  return `${CUT_MARK}\n${lineStart >= 0 ? tail.slice(lineStart + 1) : tail}`;
+}
+
+// The customer's words on the item: the distinct messages of the chat that
+// reached the team, oldest first, capped to the newest MAX_ITEM_MESSAGE_CHARS.
 function messageWithMore(saved, next) {
   const base = String(saved || '');
   const more = String(next || '').trim();
   if (!more || base.includes(more)) return base;
-  return base ? `${base}\n\n${more}` : more;
+  return keepNewest(base ? `${base}\n\n${more}` : more, MAX_ITEM_MESSAGE_CHARS);
 }
 
 // The standing item for a chat, merged with what this call carries. Returns
@@ -392,6 +405,9 @@ module.exports = {
   sanitizeSay,
   moveDetails,
   mergedItem,
+  keepNewest,
+  MAX_ITEM_MESSAGE_CHARS,
+  MAX_ITEM_SUMMARY_CHARS,
   summaryWithMove,
   savedMove,
   withoutEmailRows,

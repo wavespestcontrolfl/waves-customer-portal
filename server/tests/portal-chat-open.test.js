@@ -802,3 +802,25 @@ describe('the turn path', () => {
     expect(writes(/insert into "service_requests"/)).toHaveLength(1);
   });
 });
+
+describe('one item holds a bounded amount of text', () => {
+  test('many long messages keep only the newest text, marked as cut', () => {
+    let standing = { summary: 'first reason', customer_message: '', priority: 'normal' };
+    for (let i = 0; i < 40; i += 1) {
+      const change = portalOpen.mergedItem(standing, { customerMessage: `message ${i} ${'x'.repeat(3900)}`, reason: `reason ${i} ${'y'.repeat(500)}` });
+      standing = { ...standing, ...change };
+    }
+    expect(standing.customer_message.length).toBeLessThanOrEqual(portalOpen.MAX_ITEM_MESSAGE_CHARS);
+    expect(standing.customer_message.startsWith('[earlier messages cut')).toBe(true);
+    expect(standing.customer_message).toContain('message 39 ');
+    expect(standing.customer_message).not.toContain('message 0 ');
+    expect(standing.summary.length).toBeLessThanOrEqual(portalOpen.MAX_ITEM_SUMMARY_CHARS);
+    expect(standing.summary).toContain('reason 39 ');
+  });
+
+  test('a short chat is stored in full, unchanged', () => {
+    const change = portalOpen.mergedItem({ summary: 'a', customer_message: 'hello', priority: 'normal' }, { customerMessage: 'second', reason: 'b' });
+    expect(change.customer_message).toBe('hello\n\nsecond');
+    expect(portalOpen.keepNewest('short', 100)).toBe('short');
+  });
+});
