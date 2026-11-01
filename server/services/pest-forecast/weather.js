@@ -225,4 +225,4 @@ function flags(b) {
 
 function _clearCache() { _cache.clear(); _rainMemo.clear(); _inflight.clear(); } // test hook
 
-module.exports = { getWeatherSignals, flags, _clearCache };
+module.exports = { getWeatherSignals, flags, freshUntil, _clearCache };

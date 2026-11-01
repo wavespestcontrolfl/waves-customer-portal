@@ -226,12 +226,24 @@ app.use((req, res, next) => {
   return strictHelmet(req, res, next);
 });
 
+// Public lawn watering calculator (routes/public-watering-plan.js): while
+// GATE_PUBLIC_WATERING_PLAN is dark EVERY request to the path, any method, gets
+// the generic 404 here, BEFORE the wildcard CORS handler below (which would
+// answer an OPTIONS preflight 204 with Access-Control-Allow-Origin: *), the
+// global /api/ limiter (429) and the route's own limiter, so a probe cannot
+// tell the surface exists.
+app.use('/api/public/watering-plan', (req, res, next) => {
+  if (!require('./config/feature-gates').publicWateringPlanLive()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
 // middleware terminates OPTIONS for non-allowlisted origins without an
 // Access-Control-Allow-Origin header, which would break third-party embeds.
 // (Approved public surface — see AGENTS.md.) Keep this above the global cors().
-app.use(['/api/public/pest-forecast', '/api/public/yard-calendar'], (req, res, next) => {
+app.use(['/api/public/pest-forecast', '/api/public/yard-calendar', '/api/public/watering-plan'], (req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
@@ -903,6 +915,7 @@ app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
 app.use('/api/public/yard-calendar', require('./routes/public-yard-calendar'));
+app.use('/api/public/watering-plan', require('./routes/public-watering-plan'));
 app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));

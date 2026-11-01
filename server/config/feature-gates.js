@@ -201,6 +201,7 @@
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
+ *   GATE_PUBLIC_WATERING_PLAN=true (owner 2026-10-31, backlink tools plan step 2, 'ok go, approved'): public lawn watering calculator API + embed; dark until flipped; no paid AI; weather from the existing Open-Meteo plan, MRMS and NWS. GET /api/public/watering-plan answers one JSON plan for a curated Florida location or ZIP: last 7 days of observed rain (NOAA MRMS merged with Open-Meteo), the plan-week forecast, the turf's weekly need (ET0 x crop coefficient, seasonal fallback) and the week's run/hold decision from the same engine as the Monday irrigation email. The legal ceiling is the county's restriction policy (config/irrigation-restrictions.js) and it fails closed: outside established coverage the answer is need_only (inches, no event count, no legal maximum). No customer row, no database write, nothing sent to anyone. 120 requests per 15 minutes per IP. Read at call time via publicWateringPlanLive(), strict 'true', dark by default; off = every request to /api/public/watering-plan, any method, answers the generic 404 in server/index.js before the wildcard CORS handler, the global /api/ limiter and this route's own limiter. Kill switch: unset.)
  *   GATE_AGENT_ACTIVITY=true    (Activity tab in /admin/agents — read-only feed over existing ledgers; dark in dev AND prod)
  *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
  *   GATE_CLOSEOUT_MONEY_COMMS_ALERTS=true (closeout alerts also map the comms / invoice / invoiceDelivery facts — failed completion notice, invoice owed but not minted, invoice or receipt delivery incomplete — as per-visit cards + closeout_gaps_today members; their outage holds the floor; read-only, no comms; dark in dev AND prod)
@@ -3317,6 +3318,11 @@ const gates = {
   payrollMercuryStatus: process.env.GATE_PAYROLL_MERCURY_STATUS === 'true',
   payrollMercuryPay: process.env.GATE_PAYROLL_MERCURY_PAY === 'true',
 
+  // Public lawn watering calculator API (owner 2026-10-31, backlink tools plan step 2, 'ok go, approved'): GET
+  // /api/public/watering-plan. OFF in every environment; boot-log entry only, the call-time reader is
+  // publicWateringPlanLive(). Kill switch: unset GATE_PUBLIC_WATERING_PLAN.
+  publicWateringPlan: process.env.GATE_PUBLIC_WATERING_PLAN === 'true',
+
   // Payroll layer 3a (owner 2026-10-25): the line-by-line figures for Form 941,
   // RT-6, Form 940 and W-2/W-3 in the Payroll tab. OFF in every environment;
   // read at call time via payrollFormFiguresLive(). Kill switch: unset
@@ -5598,6 +5604,11 @@ function gateEnvValue(envName) {
 // last_seen_at), so a flip or an unset kill needs no restart. Kept up here,
 // not at the end of the file, so concurrent gate PRs appending readers at the
 // bottom never conflict with it.
+// GATE_PUBLIC_WATERING_PLAN read at CALL time, strict `=== 'true'`, dark in every environment. Off = every
+// /api/public/watering-plan request answers the generic 404. Kill switch = unset.
+function publicWateringPlanLive() {
+  return process.env.GATE_PUBLIC_WATERING_PLAN === 'true';
+}
 function portalActivityLive() {
   return process.env.GATE_PORTAL_ACTIVITY === 'true';
 }
@@ -8782,6 +8793,8 @@ module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+// GATE_PUBLIC_WATERING_PLAN reader, on its own line so gate PRs never conflict.
+module.exports.publicWateringPlanLive = publicWateringPlanLive;
 // GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
 module.exports.undoManualPaymentLive = undoManualPaymentLive;
 // GATE_PARTIAL_PAYMENTS reader, on its own line so gate PRs never conflict.
