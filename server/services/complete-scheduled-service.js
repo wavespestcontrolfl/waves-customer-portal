@@ -10515,6 +10515,31 @@ async function completeScheduledService(completionInput, packetContext = null) {
           });
         }
       } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
+      // The visit's own unpaid invoice takes the record's service day, the
+      // day an invoice minted here would carry. One made before the visit
+      // (the estimate-accept first application, a pre-made draft) keeps the
+      // day it was minted with, and a reschedule never touches it, so the
+      // charge and the receipt read the old day. Only this visit's row, and
+      // only while an invoice edit could still rewrite it: the status filter
+      // is in the UPDATE, so a payment landing first keeps its day. Its own
+      // catch: a failed redate leaves the old day and changes no billing path.
+      try {
+        const { SEND_CLAIMABLE_STATUSES } = require('./invoice-helpers');
+        const recordServiceDay = record.service_date ? serviceDateOnly(record.service_date) : null;
+        if (existingCompletionInvoice && recordServiceDay
+          && String(existingCompletionInvoice.scheduled_service_id) === String(svc.id)
+          && SEND_CLAIMABLE_STATUSES.includes(existingCompletionInvoice.status)
+          && (!existingCompletionInvoice.service_date
+            || serviceDateOnly(existingCompletionInvoice.service_date) !== recordServiceDay)) {
+          const redated = await db('invoices')
+            .where({ id: existingCompletionInvoice.id, scheduled_service_id: svc.id })
+            .whereIn('status', SEND_CLAIMABLE_STATUSES)
+            .update({ service_date: recordServiceDay, updated_at: new Date() });
+          if (redated) existingCompletionInvoice.service_date = recordServiceDay;
+        }
+      } catch (e) {
+        logger.warn(`[dispatch] invoice service-day refresh failed for ${svc.id} (invoice keeps its old day): ${e.message}`);
+      }
     }
     // Own-visit refunded check right after the direct suppressors and
     // BEFORE the sibling first-application fallback (pre-push P0): that
