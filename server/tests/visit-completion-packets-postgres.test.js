@@ -4446,8 +4446,10 @@ postgres('visit completion packet records on PostgreSQL', () => {
       const first = await runVisitCompletionPacketEffects(saved.body.packetId);
       expect(first).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payer_billed', invoiceId: minted[0].id } } });
       expect(send).toHaveBeenCalledTimes(1);
-      expect(send).toHaveBeenCalledWith(minted[0].id);
-      expect(await mockPg('invoices').where({ id: minted[0].id }).first()).toMatchObject({ status: 'sent', payer_id: payerId });
+      // Sent under the invoice's own send claim, which the finalize releases.
+      expect(send).toHaveBeenCalledWith(minted[0].id, { claimToken: expect.any(String) });
+      expect(await mockPg('invoices').where({ id: minted[0].id }).first())
+        .toMatchObject({ status: 'sent', payer_id: payerId, send_claim_token: null });
       // The homeowner still gets the normal completion text, and it carries no pay link.
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(JSON.stringify(sendCustomerMessage.mock.calls[0][0])).not.toMatch(/\/pay\b|Pay your invoice/);
@@ -4519,6 +4521,32 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
         .whereRaw("payload->>'packetId' = ?", [saved.body.packetId])).toHaveLength(1);
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect((await mockPg('service_visits').where({ id: fixture.visitId }).first('billing_hold')).billing_hold).toBe(true);
+    });
+
+    test('a failed AP send persists the office handoff; a later Resume does not try delivery again', async () => {
+      const payerId = await insertPayer();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payerId });
+      const send = jest.spyOn(InvoiceEmail, 'sendInvoiceEmail').mockResolvedValue({ ok: false, error: 'Synthetic AP bounce' });
+      const saved = await saveVisitCompletionPacket(submission());
+      const invoiceId = saved.body.billing.invoiceId;
+      const openAlerts = () => mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [saved.body.packetId]);
+      expect(await runVisitCompletionPacketEffects(saved.body.packetId))
+        .toMatchObject({ body: { state: 'office_required', payment: { state: 'office_required', reason: 'payer_assigned', payerId } } });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((await mockPg('service_visits').where({ id: fixture.visitId }).first('billing_hold')).billing_hold).toBe(true);
+      expect(await openAlerts()).toHaveLength(1);
+      // The send claim was given back: nothing is left 'sending' for stale-claim recovery to park.
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', send_claim_token: null });
+      // The provider would now accept. A Resume (and the sweep) must still not deliver until the office releases it.
+      send.mockResolvedValue({ ok: true });
+      const resumed = await runVisitCompletionPacketEffects(saved.body.packetId);
+      expect(resumed.body.payment).toMatchObject({ state: 'office_required' });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(await openAlerts()).toHaveLength(1);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', email_sent_at: null });
+      expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).status).toBe('done');
     });
 
     test('an AP email already accepted is not mailed again; only the finalize repeats', async () => {
@@ -4548,31 +4576,65 @@ postgres('visit completion packet records on PostgreSQL', () => {
       const saved = await saveVisitCompletionPacket(submission());
       const invoiceId = saved.body.billing.invoiceId;
       const first = await runVisitCompletionPacketEffects(saved.body.packetId);
-      expect(first).toMatchObject({ status: 202, body: { state: 'effects_pending' } });
+      expect(first).toMatchObject({ status: 202, body: { state: 'effects_pending', payment: { state: 'payment_pending' } } });
       expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).status).toBe('processing');
-      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', payer_id: payerId });
+      // The claim is given back, so the resume can take it again to finalize.
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', payer_id: payerId, send_claim_token: null });
       expect(send).toHaveBeenCalledTimes(1);
       const second = await runVisitCompletionPacketEffects(saved.body.packetId);
       expect(second).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payer_billed' } } });
       expect(send).toHaveBeenCalledTimes(1);
       expect(finalize).toHaveBeenCalledTimes(2);
-      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', payer_id: payerId });
+      expect(finalize.mock.calls[1][1]).toMatchObject({ email: true, source: 'dispatch_completion_payer', claimToken: expect.any(String) });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', payer_id: payerId, send_claim_token: null });
       expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).status).toBe('done');
     });
 
-    test('a send another runner holds is pending, not repeated', async () => {
+    test('an office Send holding the invoice send claim keeps the packet pending; its delivery then closes it clean', async () => {
+      const InvoiceService = require('../services/invoice');
       const payerId = await insertPayer();
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payerId });
       const saved = await saveVisitCompletionPacket(submission());
       const invoiceId = saved.body.billing.invoiceId;
-      await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).update({
-        payload: mockPg.raw('payload || ?::jsonb', [JSON.stringify({ payerDelivery: { invoiceId, claimedAt: new Date().toISOString() } })]),
-      });
       const send = jest.spyOn(InvoiceEmail, 'sendInvoiceEmail').mockResolvedValue({ ok: true });
+      // The office Send (sendViaSMSAndEmail) takes this same claim before its provider calls.
+      const operator = await InvoiceService.claimInvoiceForSend(invoiceId);
+      const openAlerts = () => mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [saved.body.packetId]);
+      const held = await runVisitCompletionPacketEffects(saved.body.packetId);
+      expect(held).toMatchObject({ status: 202, body: { state: 'effects_pending', payment: { state: 'payment_pending', invoiceId } } });
+      // The delivery module itself (a runner that read the row before the claim landed) is pending too.
       expect(await require('../services/visit-completion-payer-delivery')
         .deliverPacketInvoiceToPayer(saved.body.packetId, { state: 'payer_billed', invoiceId, payerId }, mockPg))
         .toEqual({ state: 'payment_pending', invoiceId });
       expect(send).not.toHaveBeenCalled();
+      expect(await openAlerts()).toHaveLength(0);
+      expect((await mockPg('service_visits').where({ id: fixture.visitId }).first('billing_hold')).billing_hold).toBe(false);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first())
+        .toMatchObject({ status: 'sending', send_claim_token: operator.invoice.send_claim_token });
+      // The office Send delivers and finalizes under its claim, releasing it.
+      await InvoiceService.markDeliverySent(invoiceId, { email: true, source: 'invoice_delivery', claimToken: operator.invoice.send_claim_token });
+      const resumed = await runVisitCompletionPacketEffects(saved.body.packetId);
+      expect(resumed).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payer_billed', invoiceId } } });
+      expect(send).not.toHaveBeenCalled();
+      expect(await openAlerts()).toHaveLength(0);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', send_claim_token: null });
+    });
+
+    test('an office Send that gives its claim back undelivered lets the next run deliver once', async () => {
+      const InvoiceService = require('../services/invoice');
+      const payerId = await insertPayer();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payerId });
+      const saved = await saveVisitCompletionPacket(submission());
+      const invoiceId = saved.body.billing.invoiceId;
+      const send = jest.spyOn(InvoiceEmail, 'sendInvoiceEmail').mockResolvedValue({ ok: true });
+      const operator = await InvoiceService.claimInvoiceForSend(invoiceId);
+      expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.payment.state).toBe('payment_pending');
+      expect(await InvoiceService.restoreSendClaim(invoiceId, operator.previousStatus, true, [], mockPg, operator.invoice.send_claim_token)).toBe(true);
+      const resumed = await runVisitCompletionPacketEffects(saved.body.packetId);
+      expect(resumed).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payer_billed', invoiceId } } });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', send_claim_token: null });
     });
 
     test('a backfill closeout skips the automatic payer send', async () => {
