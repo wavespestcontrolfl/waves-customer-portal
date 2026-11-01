@@ -549,6 +549,50 @@ describe('weOwe and customerWaiting', () => {
     expect(out.customerWaiting).toEqual([{ id: 's-2', rev: expect.any(String), kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
   });
 
+  // Late drafts (asOf): a promise or ask that began after the draft's text is not a fact that draft could read.
+  test('asOf drops promises and asks whose source began after it, or whose row was written after it; unset keeps every row', async () => {
+    smsCommitmentsEnabled.mockReturnValue(true);
+    listOpenCommitments.mockResolvedValue([
+      callRow({ id: 'c-before', call_started_at: '2026-09-30T14:00:00Z' }),
+      callRow({ id: 'c-after', call_started_at: '2026-10-01T15:30:00Z' }),
+      callRow({ id: 'c-undated', call_started_at: null, created_at: null }),
+      // a call that spans the text: it started before, but its promise was extracted after
+      callRow({ id: 'c-spanning', call_started_at: '2026-10-01T14:50:00Z' }),
+      // an older promise a person edited after the text
+      callRow({ id: 'c-edited', call_started_at: '2026-09-29T14:00:00Z' }),
+      // no write times readable for this row (gone between the reads)
+      callRow({ id: 'c-unreadable', call_started_at: '2026-09-28T14:00:00Z' }),
+    ]);
+    listSmsCommitments.mockImplementation(async (_c, { lane }) => (lane === 'promise'
+      ? [smsRow({ id: 's-staff-reply', sms_started_at: '2026-10-01T15:45:00Z' })]
+      : [smsRow({ id: 's-the-text', kind: 'send_report', description: 'Report requested', due_at: null, sms_started_at: '2026-10-01T15:00:00Z' })]));
+    const writes = {
+      'c-before': ['2026-09-30T14:10:00Z', '2026-09-30T14:10:00Z'],
+      'c-after': ['2026-10-01T15:40:00Z', '2026-10-01T15:40:00Z'],
+      'c-undated': ['2026-09-29T09:00:00Z', '2026-09-29T09:00:00Z'],
+      'c-spanning': ['2026-10-01T15:20:00Z', '2026-10-01T15:20:00Z'],
+      'c-edited': ['2026-09-29T14:20:00Z', '2026-10-01T16:00:00Z'],
+      's-staff-reply': ['2026-10-01T15:46:00Z', '2026-10-01T15:46:00Z'],
+      's-the-text': ['2026-10-01T15:00:00Z', '2026-10-01T15:00:00Z'],
+    };
+    const writeTimes = fakeConn({ call_commitments: (ops) => {
+      const ids = (ops.find((o) => o.op === 'whereIn') || { args: [null, []] }).args[1];
+      return ids.filter((id) => writes[id]).map((id) => ({ id, created_at: writes[id][0], updated_at: writes[id][1] }));
+    } });
+    const asOf = new Date('2026-10-01T15:00:00Z');
+    const late = await loadVisitLoops({ customerId: 'c1', now: NOW, conn: writeTimes, asOf });
+    expect(late.weOwe.map((r) => r.id).sort()).toEqual(['c-before', 'c-undated']);
+    expect(late.customerWaiting.map((r) => r.id)).toEqual(['s-the-text']);
+    // a failed write-times read leaves every row out of a late draft
+    const down = fakeConn({ call_commitments: () => { throw new Error('read down'); } });
+    const lateDown = await loadVisitLoops({ customerId: 'c1', now: NOW, conn: down, asOf });
+    expect(lateDown.weOwe).toEqual([]);
+    expect(lateDown.customerWaiting).toEqual([]);
+    // unset: no write-time read and no asOf filter; the facts list the newest five (LIST_MAX)
+    const live = await loadVisitLoops({ customerId: 'c1', now: NOW, conn: ctxConn({}) });
+    expect(live.weOwe.map((r) => r.id).sort()).toEqual(['c-after', 'c-before', 'c-edited', 'c-spanning', 's-staff-reply']);
+  });
+
   test('call promises are read to the end of the canonical reader\'s pages, so a new one behind 200 older ones still shows', async () => {
     const older = Array.from({ length: 200 }, (_, i) => callRow({ id: `old-${i}`, call_started_at: '2026-09-01T14:00:00Z' }));
     const fresh = callRow({ id: 'new-1', source: 'human', created_at: '2026-10-01T13:00:00Z' });

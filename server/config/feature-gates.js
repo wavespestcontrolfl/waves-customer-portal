@@ -189,6 +189,7 @@
  *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 15s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN=true (text-back lane only: no text to a caller who failed the press-1 pre-connect screen, call_log.metadata.preconnect_screen 'failed'; settles skipped:screen_failed; the missed-call bell is unchanged; dark by default)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
+ *   GATE_SMS_MAC_DRAFTS=true (the owner's Mac drafts the silent shadow reply for a customer text a few minutes late, through the Max plan, while GATE_SMS_SHADOW_DRAFTS stays off; strict opt-in, read at call time via smsMacDraftsLive(), dark by default; refuses unless GATE_SMS_SUGGEST_MODE, GATE_SMS_AUTO_SEND and GATE_SMS_UNANSWERED_REPLY all read off in the calling process; no customer-facing effect)
  *   GATE_SMS_UNANSWERED_REPLY=true (a suggested house-voice reply nobody acted on goes out on its own after 2 open hours, ordinary questions only; strict opt-in, read at call time via smsUnansweredReplyLive(), dark by default; customer-facing)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
  *   GATE_CALL_RESEARCH_MINER=true (nightly voice-of-customer call-research mining)
@@ -5750,6 +5751,13 @@ function smsUnansweredReplyLive() {
   return process.env.GATE_SMS_UNANSWERED_REPLY === 'true';
 }
 
+// GATE_SMS_MAC_DRAFTS read at CALL time (server/services/sms-late-drafter.js):
+// strict `=== 'true'`, dark in every environment. Unset = draftPendingInbound
+// returns { skipped: 'gate_off' } before it reads anything.
+function smsMacDraftsLive() {
+  return process.env.GATE_SMS_MAC_DRAFTS === 'true';
+}
+
 // GATE_SHORTLINK_LEGACY_EXPIRE read at CALL time — strict `=== 'true'`, dark.
 // Security audit 2026-10-02: 5-char codes minted 2026-04-19..2026-08-07 (~26
 // bits) are still live and front never-expiring bearer-token URLs. On, the /l
@@ -8856,6 +8864,8 @@ module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+// GATE_SMS_MAC_DRAFTS reader, on its own line so gate PRs never conflict.
+module.exports.smsMacDraftsLive = smsMacDraftsLive;
 // GATE_PUBLIC_WATERING_PLAN reader, on its own line so gate PRs never conflict.
 module.exports.publicWateringPlanLive = publicWateringPlanLive;
 // GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
