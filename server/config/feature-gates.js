@@ -39,6 +39,7 @@
  *   GATE_QUIET_OVERDUE_LIST=true (owner 2026-10-24: one standing Billing bell listing open self-pay invoices no reminder reaches (paused with no end, stopped, finished, Auto Pay hold 7+ days, never set up); weekday 11:47 ET cron; admin only, sends nothing to a customer)
  *   GATE_LEAD_NO_RESPONSE_REASON=true (owner 2026-11-01 "go": the daily lead staleness sweep (6:35 ET, services/lead-staleness.js) writes lost_reason 'no_response' on every lead it parks as 'unresponsive' (only when the reason is blank), and also parks a lead still in estimate_sent / estimate_viewed as 'unresponsive' when its linked estimate expired with a lost-group disposition (estimate-disposition.js) and the lead passes every exemption the new-lead sweep applies, has no converted_at, no newer live estimate, and no estimate send or view inside the window; a short note "estimate <disposition>" is appended to lost_notes. It never sets status 'lost' and sends no text, email or call. With it on, GET /analytics/lost in admin-leads.js also counts 'unresponsive' leads so no_response shows as a reason. Read at call time via leadNoResponseReasonLive(), strict 'true', dark by default; off = byte-identical.)
  *   GATE_UNBILLED_VISITS_LIST=true (owner 2026-10-25, Air Jobs Plan step 3: one standing Billing bell listing visits done in the last 30 days with no invoice, read from the Billing recovery page's own list; replaces the c02 check on the owner's MacBook Air; daily 07:23 ET cron; admin only, sends nothing to a customer)
+ *   GATE_SMS_LEDGER_STALL_FEED=true (owner 2026-11-01 "go": the texting AI's learning loop also learns from the two misses its own grader finds most: the draft stalled (deferred or handed off) when the facts already held the answer, or the person who replied knew a fact the facts did not hold. The nightly 4:20 AM ET pathology job also classifies each judge-v2 judgment that is human_better with could_send no into stalled_deferred, knew_more or other (evidence type judgment_stall, same batch cap and sanitizing as the draft_unsafe feed), and the weekly proposer counts new evidence by the base prompt identity so a learned-rule letter does not reset a cell. Auto-promote may then turn a stalled_deferred proposal into a rule that states a fact the facts already hold; knew_more is never eligible and every text guard in sms-prompt-patch.js is unchanged. Strict opt-in via gateEnvValue, read at call time by smsLedgerStallFeedLive() in server/services/sms-pathology-ledger.js (auto-promote reaches it through the ledger's countedPromptVersions()); needs GATE_SMS_PATHOLOGY_LEDGER (the nightly job) and GATE_SMS_JUDGE_V2 (the judgments); off = byte-identical feed, counts, prompts and rows. Sends, holds and changes nothing on its own)
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_INVOICE_EDITS=true (the Intelligence Bar's invoice edit write tools, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan, edit-type Invoices page actions: edit_invoice (title, notes and due date only: PUT /admin/invoices/:id; line items and the tax rate stay on the Invoices page), archive_invoice and unarchive_invoice (POST /:id/archive, /:id/unarchive) and unvoid_invoice (POST /:id/unvoid), each on its own confirm card (admin only, never owner-direct) by running the Invoices page's own handler in process. None sends a message, moves money, charges a card or refunds. Needs GATE_IB_PLATFORM. Read at call time via ibInvoiceEditsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses with gate_off, changing nothing.)
  *   GATE_IB_AGENT_REVIEW_DRAFTS=true (the Intelligence Bar's Agent Review draft tools, owner ask 2026-10-28, gap 7: an admin can list the AI-suggested replies waiting in the Communications composer as Agent Review drafts (list_agent_review_drafts), and approve (approve_agent_review_draft: send the draft as written, recorded accepted), revise (revise_agent_review_draft: send edited wording, recorded corrected) or ignore (ignore_agent_review_draft: record ignored, no text) ONE of them. Approve and revise run the composer's own POST /admin/communications/sms handler in process with the draft attached (its verification, atomic claim, thread parking, provider-boundary checks, canonical sender and accepted / corrected settlement), are ALWAYS a confirm card on every login including the owner's, and show the exact text, the recipient name and masked number, the inbound text it answers and any newer-text warning; the send uses exactly the carded text and stops if the customer texts again before the provider handoff. Needs GATE_IB_PLATFORM. Read at call time via ibAgentReviewDraftsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses, changing nothing.)
@@ -1570,6 +1571,9 @@ const gates = {
   // Stricter SMS draft judge (owner 2026-10-24): the could-send question + false-promise rule. Read at call time by
   // sms-shadow-judge.js and sms-graduation.js smsJudgeV2Live() — this entry is for logGateStatus only.
   smsJudgeV2: gateEnvValue('GATE_SMS_JUDGE_V2'),
+  // Judge-v2 stall and knew-more feed for the pathology ledger (owner 2026-11-01). Read at call time by
+  // sms-pathology-ledger.js smsLedgerStallFeedLive() — this entry is for logGateStatus only.
+  smsLedgerStallFeed: gateEnvValue('GATE_SMS_LEDGER_STALL_FEED'),
   // Test answers in the customer's language (owner 2026-10-02). Read at call
   // time by server/services/sms-translation.js — this entry is for logGateStatus only.
   smsAnyLanguageTrial: gateEnvValue('GATE_SMS_ANY_LANGUAGE_TRIAL'),
@@ -7880,6 +7884,13 @@ function unbilledVisitsListLive() {
   return process.env.GATE_UNBILLED_VISITS_LIST === 'true';
 }
 
+// GATE_SMS_LEDGER_STALL_FEED read at CALL time — strict opt-in via gateEnvValue, dark. Owner 2026-11-01. Read by
+// sms-pathology-ledger.js (the nightly judge-v2 feed and the base-identity count, which sms-prompt-autopromote.js uses
+// for its proposal version match). Off = byte-identical to before. Sends, holds and changes nothing on its own.
+function smsLedgerStallFeedLive() {
+  return gateEnvValue('GATE_SMS_LEDGER_STALL_FEED');
+}
+
 // ADMIN_BODY_GUARD_ALL read at CALL time — ships LIVE: on unless set to
 // exactly 'off', 'false' or '0' (case-insensitive), so an unset env is the
 // live state and the env is a pure kill switch (owner ruling 2026-09-30, rule
@@ -8873,6 +8884,8 @@ module.exports.knownGateCatalog = knownGateCatalog;
 module.exports.leadNoResponseReasonLive = leadNoResponseReasonLive;
 // GATE_SMS_MAC_DRAFTS reader, on its own line so gate PRs never conflict.
 module.exports.smsMacDraftsLive = smsMacDraftsLive;
+// GATE_SMS_LEDGER_STALL_FEED reader, on its own line so gate PRs never conflict.
+module.exports.smsLedgerStallFeedLive = smsLedgerStallFeedLive;
 // GATE_PUBLIC_WATERING_PLAN reader, on its own line so gate PRs never conflict.
 module.exports.publicWateringPlanLive = publicWateringPlanLive;
 // GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.

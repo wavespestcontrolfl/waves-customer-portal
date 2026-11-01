@@ -29,7 +29,7 @@ const GOOD_RULE = 'When the facts do not list an arrival window, say you will co
 const SECOND_RULE = 'When the facts do not name a technician, do not say who is coming to the visit.';
 const DAY = 24 * 3600 * 1000;
 const NOW = new Date('2026-10-26T15:00:00Z');
-const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE_SMS_EDIT_LEARNING', 'GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_JUDGE_V2', 'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_OFFERS_SCHEDULER'];
+const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE_SMS_EDIT_LEARNING', 'GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_JUDGE_V2', 'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_OFFERS_SCHEDULER', 'GATE_SMS_LEDGER_STALL_FEED'];
 
 (SKIP ? describe.skip : describe)('SMS prompt auto-promote', () => {
   let database;
@@ -248,12 +248,40 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       await insertProposal({ surface: 'verifier_miss' });
       await insertProposal({ failure_mode: 'price_quote' });
       await insertProposal({ failure_mode: 'invented_billing' });
+      await insertProposal({ failure_mode: 'knew_more' }); // a facts-block gap: never a prompt rule
       await insertProposal({ failure_mode: 'invented_commitment', prompt_version: 'house_voice_v11' });
       await insertProposal({ status: 'dismissed' });
       await insertProposal({ failure_mode: 'over_completion', created_at: new Date(NOW.getTime() - 30 * DAY) });
       const distill = distillWith(GOOD_RULE);
       expect(await auto.createCandidate({ dbi: trx, now: NOW, distill })).toEqual({ skipped: 'no_eligible_proposal' });
       expect(distill).not.toHaveBeenCalled();
+    });
+
+    test('a stalled_deferred proposal is picked; one written under an older patch letter of this base only while the stall feed gate is on', async () => {
+      await insertProposal({ failure_mode: 'stalled_deferred', prompt_version: patchLib.stampPatchVersion(baseVersion(), 'A') });
+      const distill = distillWith(GOOD_RULE);
+      // Gate off: the exact live version only, so a proposal under another letter is stale.
+      expect(await auto.createCandidate({ dbi: trx, now: NOW, distill })).toEqual({ skipped: 'no_eligible_proposal' });
+      process.env.GATE_SMS_LEDGER_STALL_FEED = 'true';
+      const out = await auto.createCandidate({ dbi: trx, now: NOW, distill });
+      expect(out).toMatchObject({ created: expect.any(String) });
+      expect((await rowOf(out.created)).failure_mode).toBe('stalled_deferred');
+      // A proposal for another base identity is never picked, gate on or off.
+      await trx('sms_prompt_patches').where({ id: out.created }).update({ status: 'rejected' });
+      await insertProposal({ failure_mode: 'over_completion', prompt_version: 'house_voice_v11' });
+      expect(await auto.createCandidate({ dbi: trx, now: new Date(NOW.getTime() + 8 * DAY), distill })).toEqual({ skipped: 'no_eligible_proposal' });
+    });
+
+    test('a pending stalled_deferred proposal on the exact live version is not picked once the stall feed gate is off', async () => {
+      await insertProposal({ failure_mode: 'stalled_deferred', prompt_version: drafter.currentPromptVersion() });
+      const distill = distillWith(GOOD_RULE);
+      delete process.env.GATE_SMS_LEDGER_STALL_FEED;
+      expect(await auto.createCandidate({ dbi: trx, now: NOW, distill })).toEqual({ skipped: 'no_eligible_proposal' });
+      expect(distill).not.toHaveBeenCalled();
+      process.env.GATE_SMS_LEDGER_STALL_FEED = 'true';
+      const out = await auto.createCandidate({ dbi: trx, now: NOW, distill });
+      expect(out).toMatchObject({ created: expect.any(String) });
+      expect((await rowOf(out.created)).failure_mode).toBe('stalled_deferred');
     });
 
     test('with real answers off there is nothing to patch, even when a voice-input tag rides on the v11 identity', async () => {

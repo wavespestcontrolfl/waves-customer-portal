@@ -3954,15 +3954,20 @@ function initScheduledJobs() {
   // Runs after the 3:55am judge: every new draft_unsafe judgment is
   // classified into a fixed (harness surface × failure mode) cell so the
   // top failure cause is standing data, not a hand-run readout. Batch-capped
-  // FAST calls; idempotent anti-join.
+  // FAST calls; idempotent anti-join. GATE_SMS_LEDGER_STALL_FEED adds the
+  // judge-v2 stall / knew-more feed to the same job.
   // =========================================================================
   cron.schedule('20 4 * * *', async () => {
     if (!isEnabled('smsPathologyLedger')) return;
     logger.info('Running: SMS pathology classifier');
     try {
       const { runExclusive } = require('../utils/cron-lock');
-      const { classifyPathologies } = require('./sms-pathology-ledger');
-      await runExclusive('sms-pathology-classify', () => classifyPathologies());
+      const { classifyPathologies, classifyStallFeed } = require('./sms-pathology-ledger');
+      await runExclusive('sms-pathology-classify', async () => {
+        await classifyPathologies();
+        // GATE_SMS_LEDGER_STALL_FEED: judge-v2 stalls and knew-mores (does nothing while the gate is off).
+        await classifyStallFeed();
+      });
     } catch (err) {
       logger.error(`SMS pathology classifier failed: ${err.message}`);
     }
