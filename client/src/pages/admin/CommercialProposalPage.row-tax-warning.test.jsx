@@ -10,17 +10,18 @@ import CommercialProposalPage from './CommercialProposalPage';
 // Taxable box (a proposal win makes no invoice since #7115). A row whose box differs from the rule the builder itself
 // applies for the chosen use shows a staff warning, and one summary line sits by the building use pick. The saved
 // payload is unchanged: the warning is display only.
-const WITH_TAX = 'Visit bills follow the building use: this row will be billed with tax.';
-const WITHOUT_TAX = 'Visit bills follow the building use: this row will be billed without tax.';
+const WITH_TAX = 'Visit bills do not read this box: this service is usually billed with tax here.';
+const WITHOUT_TAX = 'Visit bills do not read this box: this service is usually billed without tax here.';
 const family = (taxable) => ({ taxable, inclusions: [], exclusions: [], responsibilities: [] });
 const line = (taxable, extra = {}) => ({ description: 'Monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly', taxable, ...extra });
 const program = (taxable, extra = {}) => ({ service: 'pest', label: 'Pest control', frequencyPerYear: 4, pricePerApplication: 100, taxable, ...extra });
-const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, taxExemptVerified = false, billToTaxBasis = 'self', accountCommercial = true, status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
+const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, taxExemptVerified = false, billToTaxBasis = 'self', accountCommercial = true, lawnSprayNoTaxLive = true, status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
   bidToolsEnabled: true,
   buildingUseTaxLive,
   taxExemptVerified,
   billToTaxBasis,
   accountCommercial,
+  lawnSprayNoTaxLive,
   suggestedTaxRate: 0.07,
   suggestedTaxSource: 'Manatee County',
   familyRegistry: { pest: family(true), lawn: family(false), tree_shrub: family(false), other: family(true) },
@@ -57,7 +58,7 @@ const summary = () => screen.queryByTestId('row-tax-summary');
 it('residential: a taxable row is warned (billed without tax); a not-taxable row is not', async () => {
   await mount({ buildingUse: 'residential', buildings: [{ name: 'Office', lineItems: [line(true), line(false, { description: 'Second' })] }] });
   expect(warnings()).toEqual([WITHOUT_TAX]);
-  expect(summary()).toHaveTextContent('Taxable differs from the building use on 1 row.');
+  expect(summary()).toHaveTextContent('Taxable differs from the usual tax rule on 1 row. Visit bills do not read the box, so they may not match the quote there.');
 });
 
 it('residential with GATE_BUILDING_USE_TAX off: bills are taxed by property type, so no warning and no summary line', async () => {
@@ -135,6 +136,11 @@ it('an account type that could not be read (null) gives no basis: no warnings an
   expect(summary()).toBeNull();
 });
 
+it('with GATE_LAWN_SPRAY_NO_TAX off, an untaxed business rule gives no basis: a taxable lawn program is not warned, an untaxed pest one is', async () => {
+  await mount({ lawnSprayNoTaxLive: false, programs: [program(true, { service: 'lawn', label: 'Lawn care' }), program(false)] });
+  expect(warnings()).toEqual([WITH_TAX]);
+});
+
 it('residential with no taxable rows: no warning and no summary line', async () => {
   await mount({ buildingUse: 'residential' });
   expect(warnings()).toEqual([]);
@@ -194,5 +200,5 @@ it('changing the Taxable box or the building use updates the warning; the saved 
   const saved = puts[0].proposal;
   expect(saved.buildingUse).toBe('nonresidential');
   expect(saved.buildings[0].lineItems[0].taxable).toBe(false);
-  expect(JSON.stringify(saved)).not.toMatch(/Visit bills follow|bizTaxable|warning/i);
+  expect(JSON.stringify(saved)).not.toMatch(/Visit bills do not read|usual tax rule|bizTaxable|warning/i);
 });

@@ -4588,6 +4588,9 @@ router.get('/:id/proposal', async (req, res, next) => {
       // GATE_BUILDING_USE_TAX: a residential building use means bills carry no tax only while it is on (tax-calculator.js
       // step 1b); the builder's Taxable-box warning for a Residential pick follows it.
       buildingUseTaxLive: require('../config/feature-gates').buildingUseTaxLive(),
+      // GATE_LAWN_SPRAY_NO_TAX: lawn and tree & shrub visits bill untaxed only while it is on (TaxCalculator
+      // serviceNotTaxable); with it off the builder's Taxable-box warning predicts nothing for an untaxed business rule.
+      lawnSprayNoTaxLive: require('../config/feature-gates').lawnSprayNoTaxLive(),
       // Verified exemption (true / false; null = could not be read): an exempt customer's self-pay bills carry no tax whatever the
       // building use, so the builder's Taxable-box warning compares with not taxable (null: no warning).
       taxExemptVerified,
