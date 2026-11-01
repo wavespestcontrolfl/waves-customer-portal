@@ -390,7 +390,7 @@ async function assertProposalTermsMatchPayer({ trx, customerId, proposal }) {
 async function proposalTermsDueDate(conn, sourceEstimateId, baseDate) {
   if (!conn || !sourceEstimateId || !baseDate) return null;
   const estimate = await conn('estimates').where({ id: sourceEstimateId })
-    .first('status', 'bill_by_invoice', 'estimate_data', 'customer_id');
+    .first('status', 'bill_by_invoice', 'estimate_data', 'customer_id', 'created_at');
   const days = await proposalTermsNetDays(conn, estimate);
   if (!(days > 0)) return null;
   // The base is already a calendar date (YYYY-MM-DD): whole days are added to its own fields, no clock or zone involved.
@@ -401,8 +401,8 @@ async function proposalTermsDueDate(conn, sourceEstimateId, baseDate) {
 // The Net days a won proposal's visit invoices carry, else 0. An invoice-mode proposal carries its own Net term: these
 // are the visits Auto Pay never collects (bill-by-invoice.js). An Auto Pay proposal whose customer has turned Auto Pay
 // off carries Net 30, as the agreement's payment paragraph says ("cancel autopay with 30 days' written notice, after
-// which invoices are due Net 30", shared/commercial-agreement-terms.cjs; owner 2026-11-01). A pause or a missing card
-// is not a turn-off: those visits keep their own due date.
+// which invoices are due Net 30", shared/commercial-agreement-terms.cjs; owner 2026-11-01). Only a real turn-off counts
+// (autopayTurnedOffSince): a pause, a missing card or a customer who never enrolled keeps the visit's own due date.
 async function proposalTermsNetDays(conn, estimate) {
   const { PAYMENT_TERM_NET_DAYS } = require('./payer');
   const BillByInvoice = require('./bill-by-invoice');
@@ -411,8 +411,27 @@ async function proposalTermsNetDays(conn, estimate) {
   const { AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
   const won = BillByInvoice.wonAuthoredProposal(estimate);
   if (won?.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS || !estimate.customer_id) return 0;
-  const customer = await conn('customers').where({ id: estimate.customer_id }).first('autopay_enabled');
-  return customer?.autopay_enabled === false ? PAYMENT_TERM_NET_DAYS[INVOICE_PAYMENT_TERMS] : 0;
+  return await autopayTurnedOffSince(conn, estimate.customer_id, estimate.created_at)
+    ? PAYMENT_TERM_NET_DAYS[INVOICE_PAYMENT_TERMS] : 0;
+}
+
+// True when the customer turned Auto Pay off after `since` (the proposal's creation) and had been enrolled before that.
+// The column alone proves nothing: never-enrolled customers default to autopay_enabled = false (migration
+// 20260815000001). The record is autopay_log's latest autopay_enabled | autopay_disabled row, which every turn-off path
+// commits with the state change (the rule recurring-card-on-file.js explicitAutopayDisable applies): it must be a
+// disable, made after `since`, with an enable before it. A pause writes no toggle row. Throws on a failed read.
+async function autopayTurnedOffSince(conn, customerId, since) {
+  const customer = await conn('customers').where({ id: customerId }).first('autopay_enabled');
+  if (!customer || customer.autopay_enabled === true) return false;
+  const [last, ...earlier] = await conn('autopay_log')
+    .where({ customer_id: customerId })
+    .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
+    .orderBy('created_at', 'desc')
+    .limit(50)
+    .select('event_type', 'created_at');
+  if (last?.event_type !== 'autopay_disabled') return false;
+  if (since && new Date(last.created_at).getTime() < new Date(since).getTime()) return false;
+  return earlier.some((row) => row.event_type === 'autopay_enabled');
 }
 
 module.exports = {
