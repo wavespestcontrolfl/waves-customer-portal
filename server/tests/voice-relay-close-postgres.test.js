@@ -32,8 +32,8 @@ postgres('atomic relay segment append and composition', () => {
     });
     await db.schema.createTable('call_commitments', (t) => {
       t.increments('id');
-      for (const key of ['call_log_id', 'commitment_key', 'party', 'kind', 'description', 'channel', 'due_basis', 'source', 'extractor_version', 'recording_sid', 'status', 'human_state']) t.text(key);
-      t.timestamp('due_at'); t.timestamp('updated_at'); t.float('confidence'); t.jsonb('evidence');
+      for (const key of ['call_log_id', 'commitment_key', 'party', 'kind', 'description', 'channel', 'due_basis', 'due_type', 'source', 'extractor_version', 'recording_sid', 'status', 'human_state']) t.text(key);
+      t.timestamp('due_at'); t.timestamp('updated_at'); t.float('confidence'); t.jsonb('evidence'); t.jsonb('subject');
       t.integer('processing_generation'); t.integer('last_seen_generation');
       t.unique(['call_log_id', 'commitment_key']);
     });

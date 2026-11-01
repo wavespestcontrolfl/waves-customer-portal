@@ -102,6 +102,11 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
       CREATE TEMP TABLE blocked_numbers (id uuid PRIMARY KEY, number text);
       CREATE TEMP TABLE inbound_sms_optout_receipts (
         message_sid text PRIMARY KEY, phone text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());
+      -- the pending search reads calls that answered an inbound text
+      CREATE TEMP TABLE call_log (id uuid PRIMARY KEY, customer_id uuid, direction text, from_phone text,
+        to_phone text, status text, answered_by text, duration_seconds integer, source text,
+        v2_extraction_status text, ai_extraction_enriched jsonb, metadata jsonb,
+        created_at timestamptz NOT NULL DEFAULT now());
     `);
   });
   afterAll(async () => {

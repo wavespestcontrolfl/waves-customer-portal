@@ -1,23 +1,8 @@
 {
-  "tests/admin-communications-log-fallback-postgres.test.js": "Builds its own tables in an empty private waves_qa_<32hex> database and refuses any other; CI has none yet (sweep #7246 B1 follow-up).",
-  "tests/aeo-measurement-db.test.js": "Its guard accepts only a private waves_qa_ database; it needs the CI branch first (sweep #7246 B1 follow-up).",
-  "tests/callback-alerts-postgres.test.js": "Runs only in the managed local QA setup (WAVES_LOCAL_DEV=1 and the worktree's waves_qa_ database); not CI-shaped yet (sweep #7246 B1 follow-up).",
-  "tests/callback-bridge-postgres.test.js": "Runs only in the managed local QA setup (WAVES_LOCAL_DEV=1 and the worktree's waves_qa_ database); not CI-shaped yet (sweep #7246 B1 follow-up).",
-  "tests/callback-ledger-postgres.test.js": "Runs only in the managed local QA setup (WAVES_LOCAL_DEV=1 and the worktree's waves_qa_ database); not CI-shaped yet (sweep #7246 B1 follow-up).",
-  "tests/codex-remediation-reconcile.test.js": "2 of 16 tests fail on a fresh CI-shaped database (\"run is not the current live pending blog for its queue claim\"); diagnose before wiring (sweep #7246 B1 follow-up).",
-  "tests/completion-read-recovery-postgres.test.js": "Its guard accepts only a private waves_qa_ database; it needs the CI branch first (sweep #7246 B1 follow-up).",
-  "tests/customer-activity-timeline-postgres.test.js": "1 of 32 tests fails on a fresh CI-shaped database (the calls section comes back empty); diagnose before wiring (sweep #7246 B1 follow-up).",
-  "tests/customer-list-search-postgres.test.js": "Its guard accepts only a private waves_qa_ database; it needs the CI branch first (sweep #7246 B1 follow-up).",
-  "tests/disclaimed-number-holds-postgres.test.js": "1 of 8 tests fails on a fresh CI-shaped database (the result now carries heldAt); diagnose before wiring (sweep #7246 B1 follow-up).",
-  "tests/inbound-sms-unread-postgres.test.js": "Builds its own tables in an empty private waves_qa_<32hex> database and refuses any other; CI has none yet (sweep #7246 B1 follow-up).",
-  "tests/intelligence-bar-workflow-baseline-db.test.js": "Needs an isolated waves_ib_platform_* or waves_ib_workflow_* database; CI has none yet (sweep #7246 B1 follow-up).",
-  "tests/pest-recap-common-products-postgres.test.js": "Its visit query fails on the migrated schema (2 tests); diagnose before wiring (sweep #7246 B1 follow-up).",
+  "tests/admin-communications-log-fallback-postgres.test.js": "3 of 16 tests fail on an empty CI-shaped database with no query error: the needs-response history after a customer's phone change, and the authoritative pending flag. The code or the test moved after 2026-10-02; diagnose before wiring (sweep #7246 B1 follow-up).",
+  "tests/callback-alerts-postgres.test.js": "Needs the managed local QA database's synthetic seed rows; on a fresh migrated copy its fixtures find no rows (sweep #7246 B1 follow-up).",
+  "tests/callback-ledger-postgres.test.js": "Needs the managed local QA database's synthetic seed rows; on a fresh migrated copy its fixtures find no rows (sweep #7246 B1 follow-up).",
   "tests/products-catalog-label-fields.test.js": "Pins prod-parity data (admin-corrected EPA registration numbers) that a fresh migration cannot hold; left out on purpose (tests.yml header).",
-  "tests/schedule-estimates-pending-postgres.test.js": "Its estimates query fails on the migrated schema (3 tests); diagnose before wiring (sweep #7246 B1 follow-up).",
-  "tests/sms-pending-conversations-postgres.test.js": "Builds its own tables in an empty private waves_qa_<32hex> database and refuses any other; CI has none yet (sweep #7246 B1 follow-up).",
-  "tests/sms-spam-block-postgres.test.js": "Builds its own tables in an empty private waves_qa_<32hex> database and refuses any other; CI has none yet (sweep #7246 B1 follow-up).",
-  "tests/staff-documents-postgres.test.js": "Runs only in the managed local QA setup (WAVES_LOCAL_DEV=1 and the worktree's waves_qa_ database); not CI-shaped yet (sweep #7246 B1 follow-up).",
-  "tests/staff-onboarding-postgres.test.js": "Runs only in the managed local QA setup (WAVES_LOCAL_DEV=1 and the worktree's waves_qa_ database); not CI-shaped yet (sweep #7246 B1 follow-up).",
-  "tests/termite-annual-renewal-decline-coverage-postgres.test.js": "Flakes under load: a module keeps the previous test's destroyed knex handle, so the anchor test misses its billing_mode stamp (2 of 6 runs at 3-way concurrency, 2026-10-31). Fix the isolation, then drop the tests.yml grep -v and this line.",
-  "tests/voice-relay-close-postgres.test.js": "5 of 26 tests fail on a fresh CI-shaped database (written 0, expected 1); diagnose before wiring (sweep #7246 B1 follow-up)."
+  "tests/staff-documents-postgres.test.js": "Needs the managed local QA database's synthetic seed rows; on a fresh migrated copy its fixtures find no rows (sweep #7246 B1 follow-up).",
+  "tests/termite-annual-renewal-decline-coverage-postgres.test.js": "Flakes under load: a module keeps the previous test's destroyed knex handle, so the anchor test misses its billing_mode stamp (2 of 6 runs at 3-way concurrency, 2026-10-31). Fix the isolation, then drop the tests.yml grep -v and this line."
 }

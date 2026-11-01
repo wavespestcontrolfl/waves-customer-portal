@@ -145,7 +145,8 @@ postgres('disclaimed_number_holds on PostgreSQL', () => {
     test('the owning pass (token + generation match) arms', async () => {
       const callLogId = await claimCall('tok-A', 3);
       const res = await Holds.armDisclaimedNumberHold({ phone: PHONE, callLogId, procToken: 'tok-A', procGeneration: 3 });
-      expect(res).toEqual({ recorded: true, phoneE164: PHONE });
+      // heldAt is the row's held_at as text (the arming instant).
+      expect(res).toEqual({ recorded: true, phoneE164: PHONE, heldAt: expect.any(String) });
       expect((await row(callLogId)).cleared_at).toBeNull();
     });
 
