@@ -83,6 +83,18 @@ describe('arrival-timing-report', () => {
     });
   });
 
+  test('a technician-day trip link could not judge is reported, never silently dropped from the numbers', async () => {
+    const leg = (id) => ({ scheduled_service_id: id, status: 'matched' });
+    const linkDay = jest.fn(async (conn, day) => (day === '2026-10-21'
+      ? { errors: 2, rows: { legs: [leg('b')] } }
+      : { errors: 0, rows: { legs: [leg('a')] } }));
+
+    const result = await report.linkedLegs(linkDay, 'conn', ['2026-10-20', '2026-10-21'], 175);
+
+    expect(linkDay).toHaveBeenCalledWith('conn', '2026-10-20', { dryRun: true, radius: 175 });
+    expect(result).toEqual({ legs: [leg('a'), leg('b')], failed: [{ day: '2026-10-21', technicianDays: 2 }] });
+  });
+
   test('the read-only guard runs only when Postgres refuses the write probe', async () => {
     const conn = (outcome) => ({ raw: jest.fn(() => outcome) });
     await expect(report.assertReadOnly(conn(Promise.reject(new Error('cannot execute UPDATE in a read-only transaction')))))

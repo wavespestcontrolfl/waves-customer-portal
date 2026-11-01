@@ -16,6 +16,8 @@
  *      (A/C) can see it at all;
  *   3. trip-end and trip-start rows in bouncie_webhook_log with and without a GPS point and an end time (each event
  *      is logged by both receivers): whether an engine-off reaches the detector with a position of its own.
+ * A technician-day trip link could not judge (it counts those and drops their rows) is named on an INCOMPLETE line
+ * (`incomplete` in --json) and the run exits 1: the numbers are evidence for a rule change, never silently partial.
  * Visit ids print as 8-character prefixes; no names, addresses, coordinates or device ids. Every connection is
  * read-only (PGOPTIONS plus a session READ ONLY pool), and a zero-row write probe must be refused before any read.
  */
@@ -231,6 +233,22 @@ async function eventShapes(conn, { fromMs, toMs }) {
   return tally;
 }
 
+/**
+ * Every day's trip-link legs, and the days where a technician-day failed: linkDay catches that, counts it in
+ * `errors` and drops its rows, so the report must say which numbers are missing instead of passing them off as
+ * complete.
+ */
+async function linkedLegs(linkDay, conn, days, radius) {
+  const legs = [];
+  const failed = [];
+  for (const day of days) {
+    const result = await linkDay(conn, day, { dryRun: true, radius });
+    legs.push(...(result.rows?.legs || []));
+    if (result.errors) failed.push({ day, technicianDays: result.errors });
+  }
+  return { legs, failed };
+}
+
 // A zero-row write that Postgres must refuse: proof the session is read-only before anything is read.
 async function assertReadOnly(conn) {
   try {
@@ -244,11 +262,14 @@ async function assertReadOnly(conn) {
 
 // ---------- output ----------
 
-function printReport({ from, to, radius, summary, idle, events }) {
+function printReport({ from, to, radius, summary, idle, events, incomplete }) {
   const t = summary.gpsVsParked;
   const pct = (n) => (t.n ? `${Math.round((n / t.n) * 100)}%` : '-');
   const v = (n) => (n == null ? '-' : n);
+  const missing = incomplete.reduce((n, day) => n + day.technicianDays, 0);
   const lines = [
+    ...(incomplete.length ? [`INCOMPLETE: trip link could not judge ${missing} technician-day(s) on`
+      + ` ${incomplete.map((day) => day.day).join(', ')}; their visits are missing from every number below.`] : []),
     `Arrival timing ${from} to ${to} (ET days), arrival radius ${radius} m`,
     `Completed visits judged: ${summary.visits} ${JSON.stringify(summary.byStatus)}`,
     `Arrivals: ${JSON.stringify(summary.arrivals)} (gps = set by the GPS detector; other = a tap or a grouped sibling)`,
@@ -296,8 +317,7 @@ async function main(argv) {
     await assertReadOnly(conn);
     await assertReadOnly(sharedDb);
     const radius = (await loadArrivalConfig()).radiusMeters;
-    const legs = [];
-    for (const day of days) legs.push(...((await linkDay(conn, day, { dryRun: true, radius })).rows?.legs || []));
+    const { legs, failed } = await linkedLegs(linkDay, conn, days, radius);
     const ids = [...new Set(legs.map((leg) => String(leg.scheduled_service_id)))];
     const visits = await loadVisits(conn, ids);
     const gpsRows = await loadGpsArrivals(conn, ids);
@@ -316,16 +336,19 @@ async function main(argv) {
       }
     }
     const events = await eventShapes(conn, { fromMs: etDayBounds(days[0]).startMs, toMs: etDayBounds(days[days.length - 1]).endMs });
-    const report = { from: opts.from, to: opts.to, radius, summary: summarize(rows), rows, idle, events };
+    const report = { from: opts.from, to: opts.to, radius, incomplete: failed, summary: summarize(rows), rows, idle, events };
     if (json) console.log(JSON.stringify(report, null, 2));
     else printReport(report);
+    if (failed.length) process.exitCode = 1;
   } finally {
     await conn.destroy();
     await sharedDb.destroy();
   }
 }
 
-module.exports = { gpsArrivalFor, visitRow, summarize, samplesOf, stillEvidence, tallyEvent, percentile, assertReadOnly };
+module.exports = {
+  gpsArrivalFor, visitRow, summarize, samplesOf, stillEvidence, tallyEvent, percentile, assertReadOnly, linkedLegs,
+};
 
 if (require.main === module) {
   main(process.argv.slice(2)).catch((err) => {
