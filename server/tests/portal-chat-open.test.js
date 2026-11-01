@@ -397,7 +397,17 @@ describe('request_move and one hand-off item per chat', () => {
     });
     const summary = portalOpen.summaryWithMove('Customer is moving and asked the portal assistant to transfer service\nNew address: old\nMove date: old', { newAddress: 'new', moveDate: '' });
     expect(summary.match(/New address:/g)).toHaveLength(1);
-    expect(summary).toMatch(/New address: new\nMove date: not given yet$/);
+    expect(summary).toMatch(/New address: new\nMove date: old$/);
+  });
+
+  test('a later call with only one field keeps the other field the first call saved', () => {
+    const first = portalOpen.summaryWithMove('', { newAddress: '12 Palm Way', moveDate: '' });
+    expect(first).toMatch(/New address: 12 Palm Way\nMove date: not given yet$/);
+    const second = portalOpen.summaryWithMove(first, { newAddress: '', moveDate: 'Nov 20' });
+    expect(second.match(/New address:/g)).toHaveLength(1);
+    expect(second).toMatch(/New address: 12 Palm Way\nMove date: Nov 20$/);
+    const third = portalOpen.summaryWithMove(second, { newAddress: '', moveDate: '' });
+    expect(third).toMatch(/New address: 12 Palm Way\nMove date: Nov 20$/);
   });
 
   test('a failed save tells the model to hand off with escalate instead', async () => {

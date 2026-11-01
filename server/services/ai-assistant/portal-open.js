@@ -182,15 +182,28 @@ function moveDetails(input = {}) {
   return { newAddress: flatLine(input.new_address, 200), moveDate: flatLine(input.move_date, 80) };
 }
 
+const NOT_GIVEN = 'not given yet';
+
+// The address or date an earlier call saved on the summary ('' when none).
+function savedMoveValue(lines, label) {
+  const line = lines.find((l) => l.startsWith(`${label}: `));
+  const value = line ? line.slice(label.length + 2).trim() : '';
+  return value === NOT_GIVEN ? '' : value;
+}
+
 // The saved summary with this move on it. A second call replaces the first
-// call's address and date lines; it never adds a second pair.
+// call's address and date lines (it never adds a second pair), and a field
+// the second call leaves empty keeps the value the first call saved.
 function summaryWithMove(summary, move) {
-  const lines = String(summary || '').split('\n').filter((line) => line && !MOVE_LINE.test(line));
+  const all = String(summary || '').split('\n').filter(Boolean);
+  const newAddress = move.newAddress || savedMoveValue(all, 'New address');
+  const moveDate = move.moveDate || savedMoveValue(all, 'Move date');
+  const lines = all.filter((line) => !MOVE_LINE.test(line));
   if (!lines.some((line) => line.includes(MOVE_MARKER))) {
     lines.push(lines.length ? `${ALSO_LINE} ${MOVE_MARKER}` : MOVE_MARKER);
   }
-  lines.push(`New address: ${move.newAddress || 'not given yet'}`);
-  lines.push(`Move date: ${move.moveDate || 'not given yet'}`);
+  lines.push(`New address: ${newAddress || NOT_GIVEN}`);
+  lines.push(`Move date: ${moveDate || NOT_GIVEN}`);
   return lines.join('\n');
 }
 
