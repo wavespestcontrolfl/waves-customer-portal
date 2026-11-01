@@ -953,6 +953,7 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 // GATE_ARRIVAL_ENGINE_OFF (owner 2026-11-01): the arrival is tied to the truck turning off.
 describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', () => {
   const FAR_LAT = 27.4386 + 0.0027; // ~300 m north of the destination
+  const MID_LAT = 27.4386 + 0.0009; // ~100 m north: inside the slow radius, outside the immediate one
   const engineOffPoint = (overrides = {}) => basePoint({
     lat: NEAR_LAT,
     ignition: false,
@@ -999,21 +1000,33 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
       .toEqual(['inside_immediate_radius', 'inside_immediate_radius', 'inside_immediate_radius']);
   });
 
-  test('gate on: a slow in-radius trip-data sample does not mark and records awaiting_engine_off once', async () => {
-    const point = basePoint({ speed_mph: 3, ignition: true });
+  test('gate on: a slow sample the slow-radius rule alone would mark does not mark and records awaiting_engine_off once', async () => {
+    const point = basePoint({ lat: MID_LAT, speed_mph: 3, ignition: true });
     const first = await run(baseService(), { point });
     await run(baseService(), { point });
 
     expect(first).toMatchObject({ ok: false, reason: 'awaiting_engine_off' });
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
     expect(notMarkedWrites()).toEqual([expect.objectContaining({
-      metadata: expect.objectContaining({ reason: 'awaiting_engine_off', distance_m: 0, speed_mph: 3 }),
+      metadata: expect.objectContaining({ reason: 'awaiting_engine_off', speed_mph: 3 }),
     })]);
+    expect(notMarkedWrites()[0].metadata.distance_m).toBeGreaterThan(55);
     expect(notMarkedWrites()[0].metadata.engine_off).toBeUndefined();
   });
 
+  test('gate on: the immediate-radius rule keeps marking (it fires within seconds of parking)', async () => {
+    const result = await run(baseService(), { point: basePoint({ speed_mph: 3, ignition: true }) });
+
+    expect(result).toMatchObject({ ok: true, arrivalMarked: true });
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', { actingTechId: 'tech-1' });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'gps_arrival.mark_on_property',
+      metadata: expect.objectContaining({ decision_reason: 'inside_immediate_radius' }),
+    }));
+  });
+
   test('gate on: a sample with ignition false is still not an engine-off event', async () => {
-    const result = await run(baseService(), { point: basePoint({ speed_mph: 0, ignition: false }) });
+    const result = await run(baseService(), { point: basePoint({ lat: MID_LAT, speed_mph: 0, ignition: false }) });
     expect(result).toMatchObject({ ok: false, reason: 'awaiting_engine_off' });
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
   });
@@ -1118,7 +1131,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
   });
 
-  test('buildArrivalDecision: gate on judges only the engine-off by radius; gate off ignores the flag', () => {
+  test('buildArrivalDecision: gate on judges the engine-off by radius and keeps the immediate rule; gate off ignores the flag', () => {
     const { buildArrivalDecision, DEFAULT_CONFIG } = detector._test;
     const on = { engineOffRule: true, config: DEFAULT_CONFIG };
     expect(buildArrivalDecision({ ...on, distance: 170, speedMph: 0, ignition: false, engineOff: true }))
@@ -1126,6 +1139,8 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(buildArrivalDecision({ ...on, distance: 176, speedMph: 0, ignition: false, engineOff: true }))
       .toEqual({ arrived: false, reason: 'engine_off_outside_radius' });
     expect(buildArrivalDecision({ ...on, distance: 40, speedMph: 3 }))
+      .toEqual({ arrived: true, reason: 'inside_immediate_radius' });
+    expect(buildArrivalDecision({ ...on, distance: 100, speedMph: 3 }))
       .toEqual({ arrived: false, reason: 'awaiting_engine_off' });
     expect(buildArrivalDecision({ ...on, distance: 210, speedMph: 3 }))
       .toEqual({ arrived: false, reason: 'outside_arrival_radius' });

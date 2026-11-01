@@ -173,9 +173,11 @@ function buildSpeedDecision({ distance, speedMph, ignition, config }) {
   return { arrived: false, reason: 'outside_arrival_radius' };
 }
 
-// Gate on: only the engine-off point (a trip-end the receiver flagged) marks,
-// inside the arrival radius. A sample the speed rules would have marked is
-// recorded as awaiting_engine_off instead, so the old rule can be compared.
+// Gate on: the engine-off point (a trip-end the receiver flagged) marks inside
+// the arrival radius, and the immediate-radius rule keeps marking: in October
+// 2026 it fired a median 12 s before the truck parked (p90 42 s), while the
+// slow-radius rule fired a median 1 min early at ~104 m (p90 3.1 min). A sample
+// only the slow rule would have marked is recorded as awaiting_engine_off.
 function buildArrivalDecision({ distance, speedMph, ignition, config, engineOffRule = false, engineOff = false }) {
   if (distance == null) return { arrived: false, reason: 'invalid_distance' };
   if (engineOffRule && engineOff) {
@@ -184,7 +186,9 @@ function buildArrivalDecision({ distance, speedMph, ignition, config, engineOffR
       : { arrived: false, reason: 'engine_off_outside_radius' };
   }
   const decision = buildSpeedDecision({ distance, speedMph, ignition, config });
-  return engineOffRule && decision.arrived ? { arrived: false, reason: 'awaiting_engine_off' } : decision;
+  return engineOffRule && decision.reason === 'inside_arrival_radius_slow'
+    ? { arrived: false, reason: 'awaiting_engine_off' }
+    : decision;
 }
 
 function isAcceptedCurrentSample({ techLat, techLng, point }) {
