@@ -19,6 +19,12 @@ const KEY_STEPS = Object.freeze(['feeding', 'barrier', 'micros', 'insects']);
 const ROUND_SHORT = Object.freeze(['Barrier + color', 'Feed + barrier', 'Spring feed', 'Insects', 'Color + barrier', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Potassium feed']);
 const MONTH_SHORT = Object.freeze(['Barrier + color', 'Feed', 'Barrier + color', 'Feed', 'Insects', 'Color + barrier', 'Inspection', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Feed', 'Potassium feed']);
 const PLAN_LABELS = Object.freeze({ rounds: '9 visits a year, one per round', months12: '12 visits a year, one a month' });
+// The month bar's words. A plan that is not known (a 6-visit plan, a 9-visit plan while GATE_LAWN_9X_ROUNDS is off, several lawn
+// lines) gets no visit count: its words are the month list's own approved line plus the 12-visit body without "One visit a month".
+const MONTH_BAR_WORDS = Object.freeze({
+  months12: { title: 'Your Year In Twelve Visits', body: 'One visit a month. Each month has one main job. Tap a month to read about it.' },
+  unknown: { title: 'Your Year, Month By Month', body: 'Each visit follows the step for the month it falls in. Each month has one main job. Tap a month to read about it.' },
+});
 const LIMIT_LABEL = 'No nitrogen or phosphorus (local summer rule)';
 const ROUNDS_INTRO = Object.freeze({ from: 'One program covers every lawn we treat.', to: 'Your plan is nine visits a year, one in each round.' });
 const BLACKOUT_POSTS = Object.freeze({
@@ -156,7 +162,8 @@ const FAQ_ROWS = Object.freeze([
     q: "How often do you come, and when is my next visit?",
     a: "Nine times a year, once in each round. Rounds have set dates, so visits fall about six weeks apart, usually on the same weekday. Your next visit date is in your customer portal, and we send a reminder before each visit.",
     links: [],
-    aMonths: "Once a month. Each visit does the step for its month. Your next visit date is in your customer portal, and we send a reminder before each visit."
+    aMonths: "Once a month. Each visit does the step for its month. Your next visit date is in your customer portal, and we send a reminder before each visit.",
+    aUnknown: "Your plan sets how often we come, and each visit follows the step for the month it falls in. Your next visit date is in your customer portal, and we send a reminder before each visit."
   },
   {
     q: "Why are there still weeds after a visit?",
@@ -252,7 +259,8 @@ const FAQ_ROWS = Object.freeze([
         source: "Waves blog"
       }
     ],
-    aMonths: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. In May, the sunny turf gets a whole-lawn insect treatment where it fits the property. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request."
+    aMonths: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. In May, the sunny turf gets a whole-lawn insect treatment where it fits the property. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request.",
+    aUnknown: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request."
   },
   {
     q: "What about fungus and mushrooms?",
@@ -508,7 +516,8 @@ function roundsBar({ rounds, programYear, current, rule, kit }) {
   }, kit);
 }
 
-function monthsBar({ trackKey, year, currentMonth, rule, kit }) {
+function monthsBar({ plan, trackKey, year, currentMonth, rule, kit }) {
+  const words = MONTH_BAR_WORDS[plan] || MONTH_BAR_WORDS.unknown;
   const barStart = ymd(year, 1, 1);
   const band = limitBand(rule, barStart, year);
   const blocks = MONTH_ABBR.map((label, index) => ({
@@ -522,7 +531,7 @@ function monthsBar({ trackKey, year, currentMonth, rule, kit }) {
   }));
   const bullets = blocks.map((b) => stepsLine(MONTH_FULL[b.key - 1], b.main, kit.stepLabels));
   if (band) bullets.push(band.caption);
-  return barSection('Your Year In Twelve Visits', 'One visit a month. Each month has one main job. Tap a month to read about it.', bullets, {
+  return barSection(words.title, words.body, bullets, {
     blocks,
     anchorPrefix: 'month',
     months: [],
@@ -610,10 +619,11 @@ function productsSection(plan, productList, kit) {
   return section && { ...section, body: 'Each visit uses only what the lawn needs, and every pesticide is applied according to its label. Your service report names every product applied, with its EPA number.' };
 }
 
+// Two answers name a cadence: a 12-visit plan reads its month wording, a plan that is not known reads one with no cadence.
 function faqSection(plan, kit) {
   const reword = (row) => {
-    const { aMonths, ...rest } = row;
-    return { ...rest, a: plan === 'rounds' || !aMonths ? row.a : aMonths, links: row.links.map((link) => ({ ...link })) };
+    const { aMonths, aUnknown, ...rest } = row;
+    return { ...rest, a: { months12: aMonths, unknown: aUnknown }[plan] || row.a, links: row.links.map((link) => ({ ...link })) };
   };
   const items = FAQ_ROWS.map(reword);
   const more = FAQ_MORE_ROWS.map(reword);
@@ -636,7 +646,7 @@ function visualSections({ plan, trackKey, jurisdictionRule, productList, now, ki
   const rounding = plan === 'rounds' ? roundsContext(now, trackKey, kit) : null;
   const head = rounding
     ? [roundsBar({ ...rounding, rule: jurisdictionRule, kit }), roundsSection(rounding.rounds, rounding.current, jurisdictionId, kit)]
-    : [monthsBar({ trackKey, year: Number(etDateString(now).slice(0, 4)), currentMonth: Number(etDateString(now).slice(5, 7)), rule: jurisdictionRule, kit }), parts.monthList()];
+    : [monthsBar({ plan, trackKey, year: Number(etDateString(now).slice(0, 4)), currentMonth: Number(etDateString(now).slice(5, 7)), rule: jurisdictionRule, kit }), parts.monthList()];
   return [
     ...head,
     parts.typicalVisit,

@@ -282,6 +282,7 @@ describe('a 9-visit rounds estimate', () => {
       expect(section(result, 'year_bar').visual.blocks).toHaveLength(12);
       expect(section(result, 'rounds')).toBeUndefined();
       expect(result.content.property.planLabel).toBeUndefined();
+      expectNoCadenceWords(result);
     });
   });
 });
@@ -291,6 +292,7 @@ describe('a 12-visit estimate', () => {
     await withGates(ROUNDS_ON, async () => {
       const result = await build({ line: MONTHLY_LINE });
       expect(keys(result)).toEqual(['year_bar', 'program_year', ...NEW_KEYS.slice(2)]);
+      expect(section(result, 'year_bar').title).toBe('Your Year In Twelve Visits');
       const bar = section(result, 'year_bar').visual;
       expect(bar.anchorPrefix).toBe('month');
       expect(bar.blocks).toHaveLength(12);
@@ -316,14 +318,27 @@ describe('a 12-visit estimate', () => {
   });
 });
 
+// A plan that is not known (a 6-visit plan, a 9-visit plan while GATE_LAWN_9X_ROUNDS is off) must not read as one visit a month:
+// the bar names no visit count, and the two cadence answers drop "Once a month." and "In May".
+function expectNoCadenceWords(result) {
+  const bar = section(result, 'year_bar');
+  expect(bar.title).toBe('Your Year, Month By Month');
+  expect(`${bar.title} ${bar.body} ${bar.bullets.join(' ')}`).not.toMatch(/twelve|one visit a month|once a month/i);
+  const faq = section(result, 'faq').visual;
+  expect(faq.items[0].a).toMatch(/^Your plan sets how often we come, and each visit follows the step for the month it falls in\./);
+  expect(faq.items[6].a).not.toMatch(/In May|round 4/);
+  expect(faq.items[6].a).toMatch(/^Yes\. We confirm chinch bugs/);
+}
+
 describe('an estimate whose plan is not known', () => {
-  test('the month view and no plan line', async () => {
+  test('the month view, no plan line and no visit count', async () => {
     await withGates(ROUNDS_ON, async () => {
       for (const line of [undefined, lawnLine(6, 'bimonthly'), { service: 'lawn_care', name: 'Lawn Care' }]) {
         const result = await build({ line });
         expect(section(result, 'year_bar').visual.blocks).toHaveLength(12);
         expect(section(result, 'program_year').visual.type).toBe('months');
         expect(result.content.property.planLabel).toBeUndefined();
+        expectNoCadenceWords(result);
         expect(result.validation.status).toBe('passed');
       }
     });
@@ -341,6 +356,7 @@ describe('a failed plan read', () => {
         const result = await build({ line: ROUNDS_LINE });
         expect(section(result, 'year_bar').visual.blocks).toHaveLength(12);
         expect(result.content.property.planLabel).toBeUndefined();
+        expectNoCadenceWords(result);
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('lawn plan unreadable'));
       });
     } finally {
@@ -358,10 +374,10 @@ describe('every word passes the customer-copy checks', () => {
     return out;
   };
 
-  test('rounds and monthly outlines, every rule area', async () => {
+  test('rounds, monthly and unknown-plan outlines, every rule area', async () => {
     await withGates(ROUNDS_ON, async () => {
       for (const jurisdictionId of Object.keys(RULES)) {
-        for (const line of [ROUNDS_LINE, MONTHLY_LINE]) {
+        for (const line of [ROUNDS_LINE, MONTHLY_LINE, lawnLine(6, 'bimonthly')]) {
           const result = await build({ line, jurisdictionId });
           expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
           for (const text of strings(result.content.sections)) {
