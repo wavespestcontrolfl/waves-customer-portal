@@ -17,6 +17,7 @@ const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
 const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-1';
 const V13_DETAIL_CONTENT_LIBRARY_VERSION = 'lawn-v13-detail-1';
+const V13_VISUAL_CONTENT_LIBRARY_VERSION = 'lawn-v13-visual-1';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
 const V13_PROTOCOL_VERSION = 'lawn-v13';
@@ -298,6 +299,12 @@ function outlineDetailLive() {
   return featureGates.lawnOutlineDetailLive?.() === true;
 }
 
+// GATE_LAWN_OUTLINE_VISUAL (live only with GATE_LAWN_OUTLINE_DETAIL): the new layout in lawn-outline-visual.js, for every lawn
+// outline. Off = the detailed v13 outline exactly.
+function outlineVisualLive() {
+  return featureGates.lawnOutlineVisualLive?.() === true;
+}
+
 // The same categories, for every line of the month's step: the 12x step and each plan-size
 // variant (the 9x April bag), so a category one plan size uses is never missing. A fertilizer
 // analysis may have one-digit parts (44-0-0); Headway, Advion and the Topchoice add-on are v13 lines too.
@@ -369,12 +376,13 @@ function protocolVersion() {
   return featureGates.lawnV13Live?.() === true ? V13_PROTOCOL_VERSION : PROTOCOL_VERSION;
 }
 
-// The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13) and its detailed
-// version (GATE_LAWN_OUTLINE_DETAIL) each stamp their own content version, so a flip shows outlines
-// built before it as updated. The Estimates list's stale check reads it, so it reads the gates and
+// The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13), its detailed
+// version (GATE_LAWN_OUTLINE_DETAIL) and the new layout (GATE_LAWN_OUTLINE_VISUAL) each stamp their own
+// content version, so a flip shows outlines built before it as updated. The Estimates list's stale check reads it, so it reads the gates and
 // the constants only.
 function contentLibraryVersion() {
   if (!outlineV13Live()) return CONTENT_LIBRARY_VERSION;
+  if (outlineVisualLive()) return V13_VISUAL_CONTENT_LIBRARY_VERSION;
   return outlineDetailLive() ? V13_DETAIL_CONTENT_LIBRARY_VERSION : V13_CONTENT_LIBRARY_VERSION;
 }
 
@@ -1126,7 +1134,7 @@ function v13ProductsSection(productList) {
 // steps, rule, safety and after-visit tiles, and the exclusions as tags. Nothing in it depends on the
 // grass: the grass only blocks a bahia lawn, which has no v13 program. Each drawn section keeps text
 // bullets for readers that draw none (the composer preview, the stored HTML).
-function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [], now = new Date() }) {
+function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [], now = new Date(), visualPlan = null }) {
   const treatments = makeSection(
     'treatment_categories',
     V13_COPY.treatmentsTitle,
@@ -1154,6 +1162,13 @@ function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [
   }
   // GATE_LAWN_OUTLINE_DETAIL: the open month in the month list replaces the Service Focus box.
   const months = v13MonthsVisual(trackKey, jurisdictionRule, month);
+  // GATE_LAWN_OUTLINE_VISUAL: the new layout (lawn-outline-visual.js) from the same pieces; it folds the rest into its own sections.
+  if (visualPlan) {
+    const monthList = () => makeSection('program_year', V13_COPY.yearTitle, V13_DETAIL_COPY.yearBody, v13MonthLines(months), months);
+    return lawnOutlineVisual().visualSections({
+      plan: visualPlan, trackKey, jurisdictionRule, productList, now, kit: visualKit(), parts: { typicalVisit, notIncluded: closing[3], monthList },
+    });
+  }
   const programTiles = V13_COPY.programTiles.map((tile) => (tile.icon === 'count' ? V13_DETAIL_COPY.confirmedTile : tile));
   return [
     tilesSection('lawn_program', V13_COPY.programTitle, V13_COPY.programBody, programTiles),
@@ -1169,6 +1184,35 @@ function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [
     tilesSection('common_questions', V13_DETAIL_COPY.questionsTitle, V13_DETAIL_COPY.questionsBody, V13_DETAIL_COPY.questionTiles),
     ...closing,
   ].filter(Boolean);
+}
+
+// The new layout lives in its own module, loaded only while GATE_LAWN_OUTLINE_VISUAL is live (it needs the converter and the
+// seeder, which must never load with the gate off). It takes the outline's helpers in `kit` instead of requiring this file back.
+const lawnOutlineVisual = () => require('./lawn-outline-visual');
+
+function visualKit() {
+  return {
+    makeSection,
+    protocolLines,
+    protocolVisitForMonth,
+    monthSteps: v13MonthSteps,
+    outlineCategory: v13OutlineCategory,
+    stepLabels: V13_STEP_LABELS,
+    notProgramLine: NOT_PROGRAM_LINE_RE,
+    productsSection: v13ProductsSection,
+    wateringTiles: v13WateringTiles,
+    detailCopy: V13_DETAIL_COPY,
+  };
+}
+
+// The estimate's lawn plan ('rounds', 'months12' or 'unknown') while the new layout is live; null = the layout is off.
+function visualPlanFor(estimateData) {
+  return outlineVisualLive() ? lawnOutlineVisual().resolveLawnPlan(estimateData) : null;
+}
+
+// The words outside the sections (plan line, rounds intro, round label); a null plan changes nothing.
+function applyVisualContent(content, visualPlan, { now, trackKey }) {
+  return visualPlan ? lawnOutlineVisual().applyVisualContent(content, visualPlan, { now, trackKey, kit: visualKit() }) : content;
 }
 
 // The two outlines, chosen once per build: the gate-off outline exactly as before, and the v13
@@ -1230,6 +1274,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
   const includeProductCards = input.includeProductCards === true;
   const productCards = await loadEligibleProductCards(db, { turfType: turf.turfType, visit, includeProductCards, productCardReason: variant.productCardReason });
   const productList = outlineDetailLive() ? await loadV13ProductList(db, trackKey) : [];
+  const visualPlan = visualPlanFor(estimateData);
   const seasonText = approvedModuleText(modules, SEASON_MODULE_KEYS[seasonBand]);
   const turfText = approvedModuleText(modules, TURF_MODULE_KEYS[turf.turfType], approvedModuleText(modules, 'unknown_turf_summary'));
   const snapshot = estimateSnapshot(estimate, estimateData);
@@ -1252,6 +1297,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
     jurisdictionRule,
     productList,
     now,
+    visualPlan,
   });
 
   const content = {
@@ -1293,6 +1339,8 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       estimatePath: estimateViewPath(snapshot),
     },
   };
+
+  applyVisualContent(content, visualPlan, { now, trackKey });
 
   const validation = validateContent(content, { turfType: turf.turfType, includeProductCards, jurisdictionRule, noProgram: variant.noProgram(turf) });
 

@@ -275,7 +275,8 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(within(list).getByText('Local summer limits on nitrogen and phosphorus')).toBeInTheDocument();
   });
 
-  it('hides a tile whose until day has passed and keeps one whose day has not', async () => {
+  // The new layout (GATE_LAWN_OUTLINE_VISUAL) draws the watering-order tile as a fact card; a stored packet keeps the tile.
+  it.each(['tiles', 'facts'])('hides a %s item whose until day has passed and keeps one whose day has not', async (type) => {
     const content = v13Content();
     content.sections.push({
       key: 'your_watering',
@@ -283,7 +284,7 @@ describe('ServiceOutlinePage drawn sections', () => {
       body: 'Watering is the biggest part of lawn care you control.',
       bullets: ['When to water: Run one full cycle.', 'Old order: Ended.', 'Current order: Still running.'],
       visual: {
-        type: 'tiles',
+        type,
         items: [
           { icon: 'dry_spots', title: 'When to water', text: 'Run one full cycle.' },
           { icon: 'calendar', title: 'Old order', text: 'Ended.', until: '2000-01-01' },

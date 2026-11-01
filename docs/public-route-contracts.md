@@ -4203,10 +4203,29 @@ limitLabel }` (`visit` is the month's report text, `atHome` one thing to do at
 home, `open` true for the build month and the next two), and it adds `tiles`
 and `categories` sections whose keys are `problems`, `products`,
 `after_treatment`, `your_watering`, `your_mowing`, `what_to_expect` and
-`common_questions`. A `tiles` item may carry `until` (`YYYY-MM-DD`): the page
+`common_questions`. A `tiles` or `facts` item may carry `until` (`YYYY-MM-DD`): the page
 hides that tile after that ET day (the watering-order tile, which a stored
 packet keeps after the order ends). Product names in `products` are public
-label names with an active ingredient; no rate, price or PII. A Tree & Shrub
+label names with an active ingredient; no rate, price or PII. A packet built
+while `GATE_LAWN_OUTLINE_VISUAL` was also live (stamped `lawn-v13-visual-1`;
+the gate needs `GATE_LAWN_OUTLINE_DETAIL`) has the sections `year_bar`, `rounds`
+(a 9-visit rounds plan; every other plan keeps the `program_year` month list),
+`typical_visit`, `after_visit_timeline`, `after_visit`, `your_watering`,
+`your_mowing`, `problems`, `products`, `not_included` and `faq`, each with its
+text `bullets`, and these `visual` types: `{ type: 'yearBar', blocks: [{ key,
+label, days, window, main: [key], short, current }], anchorPrefix: 'round' |
+'month', months: [{ label, offset }], anchors: [string], limit: { offset, days,
+label } | null, labels: { key: label }, keySteps: [key], nowLabel, caption }`,
+`{ type: 'rounds', rounds: [{ n, window, title, main: [key], asNeeded: [key],
+why, extra?, atHome, links: [{ label, url, source }], open, current }], labels }`,
+`{ type: 'timeline', items: [{ when, icon, title, text }], note }`, `{ type:
+'facts', items: [{ icon, title, text, big?, wide?, image?, imageAlt?, href?,
+linkLabel?, video?, until? }] }` (`image`, `video` and `href` are same-origin
+paths or Waves and UF/IFAS links; no PII) and `{ type: 'faq', items: [{ q, a,
+links }], more: [{ q, a, links }] }`. Its `property` adds `planLabel` and a
+rounds packet's `season` adds `roundLabel`, each only when the estimate's lawn
+plan is known. The offsets and day counts come from the jurisdiction rule and
+the program year of the build date; no rate, price or PII is added. A Tree & Shrub
 packet (`GATE_TS_OUTLINE`, stamped `ts-v1-copy-1`) has the same shape: its
 `content` adds `serviceLine: 'tree_shrub'`, which the page reads for its program
 badge and tab title (absent = lawn), `property` carries `programLabel` and
