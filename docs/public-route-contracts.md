@@ -4212,7 +4212,8 @@ CTA telemetry limit, privacy headers `no-store`/`noindex`/`no-referrer`,
 generic 404 for missing, draft, revoked, or malformed tokens; the payload's
 `content` is the packet's stored `content_json`, frozen when the packet was
 built. A packet built while `GATE_LAWN_OUTLINE_V13` was live (stamped
-`content_library_version` `lawn-v13-copy-1`) may carry a `visual` object on a
+`content_library_version` `lawn-v13-copy-2`; packets built before the
+2026-11-01 program wording carry `lawn-v13-copy-1`) may carry a `visual` object on a
 section, beside the unchanged `title`/`body`/`bullets`, which stay the text
 version of the same content: `{ type: 'tiles', items: [{ icon, title, text }] }`,
 `{ type: 'chips', items: [{ key, label, tier: 'main' | 'as_needed' }], note }`,
@@ -4228,7 +4229,7 @@ place of the grass) and `turfType: null`; the gate-off packet keeps
 renders as text. No PII is added. Unsetting the gate changes only packets built
 after it: a stored packet keeps its content until staff regenerate it. A packet
 built while `GATE_LAWN_OUTLINE_DETAIL` was also live (stamped
-`lawn-v13-detail-1`) has no `season_focus` section; its `program_year` section
+`lawn-v13-detail-2`, or `lawn-v13-detail-1` before 2026-11-01) has no `season_focus` section; its `program_year` section
 draws `{ type: 'months', months: [{ month, label, name, main: [key],
 asNeeded: [key], limited, visit, atHome, open }], labels: { key: label },
 limitLabel }` (`visit` is the month's report text, `atHome` one thing to do at
@@ -4239,24 +4240,30 @@ and `categories` sections whose keys are `problems`, `products`,
 hides that tile after that ET day (the watering-order tile, which a stored
 packet keeps after the order ends). Product names in `products` are public
 label names with an active ingredient; no rate, price or PII. A packet built
-while `GATE_LAWN_OUTLINE_VISUAL` was also live (stamped `lawn-v13-visual-1`;
+while `GATE_LAWN_OUTLINE_VISUAL` was also live (stamped `lawn-v13-visual-2`;
 the gate needs `GATE_LAWN_OUTLINE_DETAIL`) has the sections `year_bar`, `rounds`
 (a 9-visit rounds plan; every other plan keeps the `program_year` month list),
 `typical_visit`, `after_visit_timeline`, `after_visit`, `your_watering`,
 `your_mowing`, `problems`, `products`, `not_included` and `faq`, each with its
 text `bullets`, and these `visual` types: `{ type: 'yearBar', blocks: [{ key,
-label, days, window, main: [key], short, current }], anchorPrefix: 'round' |
+label, days, window, main: [key], short, from, to, now, aside }], anchorPrefix: 'round' |
 'month', months: [{ label, offset }], anchors: [string], limit: { offset, days,
-label } | null, labels: { key: label }, keySteps: [key], nowLabel, caption }`,
+label } | null, labels: { key: label }, keySteps: [key], caption }`,
 `{ type: 'rounds', rounds: [{ n, window, title, main: [key], asNeeded: [key],
-why, extra?, atHome, links: [{ label, url, source }], open, current }], labels }`,
+why, extra?, atHome, links: [{ label, url, source }] }], labels }`,
 `{ type: 'timeline', items: [{ when, icon, title, text }], note }`, `{ type:
 'facts', items: [{ icon, title, text, big?, wide?, image?, imageAlt?, href?,
-linkLabel?, video?, until? }] }` (`image`, `video` and `href` are same-origin
-paths or Waves and UF/IFAS links; no PII) and `{ type: 'faq', items: [{ q, a,
-links }], more: [{ q, a, links }] }`. Its `property` adds `planLabel` and a
-rounds packet's `season` adds `roundLabel`, each only when the estimate's lawn
-plan is known. The offsets and day counts come from the jurisdiction rule and
+linkLabel?, pictures?: [{ image, imageAlt, href, linkLabel }], until? }] }`
+(`image` and `href` are same-origin paths or Waves and UF/IFAS links; no PII; a
+packet stored before 2026-11-01 may carry `video`, an mp4 path the page still
+plays with `preload="none"`, with `image` as its poster) and
+`{ type: 'faq', items: [{ q, a, links }], more: [{ q, a, links }] }`. A block's
+`from`/`to` are `MM-DD` (round 1 wraps the year end, `12-25` to `02-02`); the
+page, not the build, finds the block that holds today's ET date, marks it, shows
+its `now` line, opens that round's card and shows its `aside` in the side panel
+(labeled Now for rounds, Season focus for months), so a stored packet stays
+right while its link lives; a block without dates marks nothing. Its `property`
+adds `planLabel` only when the estimate's lawn plan is known. The offsets and day counts come from the jurisdiction rule and
 the program year of the build date; no rate, price or PII is added. A Tree & Shrub
 packet (`GATE_TS_OUTLINE`, stamped `ts-v1-copy-1`) has the same shape: its
 `content` adds `serviceLine: 'tree_shrub'`, which the page reads for its program

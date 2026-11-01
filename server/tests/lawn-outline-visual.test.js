@@ -117,13 +117,13 @@ describe('the gate', () => {
     await withGates({ GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true', GATE_LAWN_OUTLINE_VISUAL: 'true' }, async () => {
       const result = await build({ line: ROUNDS_LINE });
       expect(section(result, 'year_bar')).toBeUndefined();
-      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-1');
+      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
     });
     for (const loose of ['1', 'on', 'TRUE']) {
       await withGates({ ...DETAIL, GATE_LAWN_OUTLINE_VISUAL: loose, GATE_LAWN_9X_ROUNDS: 'true' }, async () => {
         const result = await build({ line: ROUNDS_LINE });
         expect(section(result, 'year_bar')).toBeUndefined();
-        expect(result.meta.contentLibraryVersion).toBe('lawn-v13-detail-1');
+        expect(result.meta.contentLibraryVersion).toBe('lawn-v13-detail-2');
       });
     }
   });
@@ -137,12 +137,12 @@ describe('the gate', () => {
       ]);
       expect(off.content.property.planLabel).toBeUndefined();
       expect(off.content.season.roundLabel).toBeUndefined();
-      expect(off.content.intro).toContain('One program covers every lawn we treat.');
-      expect(off.meta.contentLibraryVersion).toBe('lawn-v13-detail-1');
+      expect(off.content.intro).toContain('The program follows the time of year.');
+      expect(off.meta.contentLibraryVersion).toBe('lawn-v13-detail-2');
     });
     await withGates(ROUNDS_ON, async () => {
-      expect((await build({ line: ROUNDS_LINE })).meta.contentLibraryVersion).toBe('lawn-v13-visual-1');
-      expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-1');
+      expect((await build({ line: ROUNDS_LINE })).meta.contentLibraryVersion).toBe('lawn-v13-visual-2');
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-2');
     });
   });
 });
@@ -161,7 +161,7 @@ describe('a 9-visit rounds estimate', () => {
     });
   });
 
-  test('nine blocks, main steps derived from the protocol, the round the visit is in', async () => {
+  test('nine blocks, main steps derived from the protocol, the round dates the page reads', async () => {
     await withGates(ROUNDS_ON, async () => {
       const bar = section(await build({ line: ROUNDS_LINE }), 'year_bar').visual;
       expect(bar.type).toBe('yearBar');
@@ -171,8 +171,12 @@ describe('a 9-visit rounds estimate', () => {
       expect(bar.blocks.map((b) => b.label)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9']);
       expect(bar.blocks[0].window).toBe('Dec 25 – Feb 2');
       expect(bar.blocks[7].window).toBe('Oct 1 – Nov 9');
-      expect(bar.blocks.filter((b) => b.current).map((b) => b.key)).toEqual([8]);
-      expect(bar.nowLabel).toBe('You are here: round 8 (Oct 1 – Nov 9). Your visit falls inside it.');
+      // The page marks today's block from from/to (MM-DD), so the stored packet never freezes a "now".
+      expect(bar.blocks[0]).toMatchObject({ from: '12-25', to: '02-02', now: 'You are here: round 1 (Dec 25 – Feb 2).', aside: 'Round 1 · Dec 25 – Feb 2' });
+      expect(bar.blocks[7]).toMatchObject({ from: '10-01', to: '11-09', now: 'You are here: round 8 (Oct 1 – Nov 9).', aside: 'Round 8 · Oct 1 – Nov 9' });
+      expect(bar.blocks.map((b) => b.from)).toEqual(['12-25', '02-03', '03-15', '04-24', '06-03', '07-13', '08-22', '10-01', '11-10']);
+      expect(bar.blocks.some((b) => 'current' in b)).toBe(false);
+      expect('nowLabel' in bar).toBe(false);
       expect(bar.anchors).toEqual(['Dec 25', 'Jul', 'Dec 24']);
       expect(bar.months).toHaveLength(12);
       expect(bar.months[0]).toEqual({ label: 'J', offset: 7 });
@@ -182,14 +186,12 @@ describe('a 9-visit rounds estimate', () => {
     });
   });
 
-  test('the round follows `now`, and a leap year makes round 2 one day longer', async () => {
+  test('a leap year makes round 2 one day longer, and the program year follows `now`', async () => {
     await withGates(ROUNDS_ON, async () => {
       const jan = section(await build({ line: ROUNDS_LINE, now: new Date('2027-01-05T15:00:00Z') }), 'year_bar').visual;
-      expect(jan.blocks.find((b) => b.current).key).toBe(1);
       expect(jan.blocks[0].window).toBe('Dec 25 – Feb 2');
       const leap = section(await build({ line: ROUNDS_LINE, now: new Date('2028-03-01T15:00:00Z') }), 'year_bar').visual;
       expect(leap.blocks.map((b) => b.days)).toEqual([40, 41, 40, 40, 40, 40, 40, 40, 45]);
-      expect(leap.blocks.find((b) => b.current).key).toBe(2);
       // 12/25 to 1/1 is 7 days, and Jan 1 to Jun 1 in a leap year is 152 more.
       expect(leap.limit.offset).toBe(159);
     });
@@ -203,7 +205,7 @@ describe('a 9-visit rounds estimate', () => {
     });
   });
 
-  test('round cards: the words, derived steps, one open card, the summer-rules post by rule area', async () => {
+  test('round cards: the words, derived steps, no frozen open card, the summer-rules post by rule area', async () => {
     await withGates(ROUNDS_ON, async () => {
       const result = await build({ line: ROUNDS_LINE });
       const { rounds, labels } = section(result, 'rounds').visual;
@@ -211,8 +213,7 @@ describe('a 9-visit rounds estimate', () => {
       expect(labels.feeding).toBe('Fertilizer');
       expect(rounds.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
       expect(rounds.map((r) => r.main)).toEqual(DERIVED_MAIN);
-      expect(rounds.filter((r) => r.open).map((r) => r.n)).toEqual([8]);
-      expect(rounds.filter((r) => r.current).map((r) => r.n)).toEqual([8]);
+      expect(rounds.some((r) => 'open' in r || 'current' in r)).toBe(false);
       expect(rounds[0].title).toBe('Winter weed barrier');
       expect(rounds[0].window).toBe('Dec 25 – Feb 2');
       expect(rounds[0].atHome).toBe('Run your normal watering day: that waters in the weed barrier.');
@@ -232,13 +233,14 @@ describe('a 9-visit rounds estimate', () => {
     });
   });
 
-  test('the plan line, the intro and the round label', async () => {
+  test('the plan line and the intro', async () => {
     await withGates(ROUNDS_ON, async () => {
       const { content } = await build({ line: ROUNDS_LINE });
       expect(content.property.planLabel).toBe('9 visits a year, one per round');
       expect(content.intro).toContain('Your plan is nine visits a year, one in each round.');
-      expect(content.intro).not.toContain('One program covers every lawn we treat.');
-      expect(content.season.roundLabel).toBe('Round 8 · Oct 1 – Nov 9');
+      expect(content.intro).not.toContain('The program follows the time of year.');
+      expect(content.intro).toContain("What each visit applies is set on site: your grass, your county's fertilizer rules");
+      expect(content.season.roundLabel).toBeUndefined();
     });
   });
 
@@ -256,9 +258,16 @@ describe('a 9-visit rounds estimate', () => {
       const result = await build({ line: ROUNDS_LINE });
       expect(section(result, 'after_visit_timeline').visual.items).toHaveLength(4);
       const afterVisit = section(result, 'after_visit').visual.items;
-      expect(afterVisit.map((i) => i.video)).toEqual(['/app-email/videos/waves-lawn-tour.mp4', '/app-email/videos/waves-app-tour.mp4']);
+      expect(afterVisit.some((i) => 'video' in i)).toBe(false);
+      expect(afterVisit[0]).toMatchObject({ image: '/outline/sample-lawn-report-thumb.jpg', imageAlt: 'A sample lawn service report', href: '/outline/sample-lawn-report.jpg', linkLabel: 'See a sample report' });
+      expect(afterVisit[1]).toMatchObject({ image: '/outline/sample-portal-home-thumb.jpg', imageAlt: 'The customer portal home screen', href: '/outline/sample-portal-home.jpg', linkLabel: 'See the customer portal' });
       const watering = section(result, 'your_watering').visual.items;
-      expect(watering[0]).toMatchObject({ wide: true, image: '/outline/watering-email-sample-thumb.jpg', href: '/outline/watering-email-sample.jpg', linkLabel: 'See a sample email' });
+      expect(watering[0].wide).toBe(true);
+      expect(watering[0].pictures).toEqual([
+        { image: '/outline/watering-email-sample-thumb.jpg', imageAlt: 'A sample Monday watering email', href: '/outline/watering-email-sample.jpg', linkLabel: 'See a sample email' },
+        { image: '/outline/sample-irrigation-thumb.jpg', imageAlt: 'The Irrigation screen in the customer portal', href: '/outline/sample-irrigation.jpg', linkLabel: 'See the Irrigation screen' },
+      ]);
+      expect(watering[0].image).toBeUndefined();
       expect(watering[1]).toMatchObject({ title: 'Your watering day', until: '2027-03-31' });
       const mowing = section(result, 'your_mowing');
       expect(mowing.body).toBe('We do not mow. If a crew mows for you, pass these along.');
@@ -272,6 +281,8 @@ describe('a 9-visit rounds estimate', () => {
       expect(faq.more).toHaveLength(7);
       expect(faq.items[0].a).toMatch(/^Nine times a year/);
       expect(faq.items[6].a).toContain('In round 4, the sunny turf');
+      expect(faq.items[3].a).toContain('On our alkaline soil, yellow St. Augustine is often short on iron, not nitrogen.');
+      expect(faq.more[1].a).toBe('Only when a lawn is not responding. Then we send one sample to the University of Florida soil lab. If the soil is too acidic or short on magnesium, we add lime or magnesium on a regular visit. Most results change nothing. Topsoil and topdressing are separate work, quoted on their own.');
       expect(faq.more.map((m) => m.q)).toEqual(expect.arrayContaining(['Why did a visit look like nothing happened?', 'Can every spot be fixed?']));
     });
   });
@@ -298,15 +309,18 @@ describe('a 12-visit estimate', () => {
       expect(bar.blocks).toHaveLength(12);
       expect(bar.blocks.map((b) => b.label)).toEqual(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
       expect(bar.blocks.map((b) => b.days)).toEqual([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]);
-      expect(bar.blocks.filter((b) => b.current).map((b) => b.label)).toEqual(['Oct']);
+      expect(bar.blocks[1]).toMatchObject({ from: '02-01', to: '02-29', now: 'You are here: February.', aside: 'February' });
+      expect(bar.blocks[9]).toMatchObject({ from: '10-01', to: '10-31', now: 'You are here: October.', aside: 'October' });
+      expect(bar.blocks.map((b) => b.to)).toEqual(['01-31', '02-29', '03-31', '04-30', '05-31', '06-30', '07-31', '08-31', '09-30', '10-31', '11-30', '12-31']);
+      expect(bar.blocks.some((b) => 'current' in b)).toBe(false);
       expect(bar.months).toEqual([]);
       expect(bar.anchors).toEqual(['Jan', 'Jul', 'Dec']);
-      expect(bar.nowLabel).toBe('You are here: October.');
+      expect('nowLabel' in bar).toBe(false);
       expect(bar.limit).toEqual({ offset: 151, days: 122, label: 'No nitrogen or phosphorus (local summer rule)' });
       expect(bar.blocks[3].main).toEqual(['feeding']);
       expect(section(result, 'program_year').visual.type).toBe('months');
       expect(result.content.property.planLabel).toBe('12 visits a year, one a month');
-      expect(result.content.intro).toContain('One program covers every lawn we treat.');
+      expect(result.content.intro).toContain('The program follows the time of year.');
       expect(result.content.season.roundLabel).toBeUndefined();
       const faq = section(result, 'faq').visual;
       expect(faq.items[0].a).toMatch(/^Once a month\./);

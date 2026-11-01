@@ -119,6 +119,18 @@ function IconBadge({ name, size = 18 }) {
 // packet is stored, and the order it describes ends.
 const tileStillShown = (tile) => !tile.until || etDateString() <= tile.until;
 
+// A block holds a day when its MM-DD window does; round 1 runs over the year end (Dec 25 to Feb 2), so its window wraps.
+const blockHoldsDay = ({ from, to }, md) => Boolean(from && to) && (from <= to ? from <= md && md <= to : md >= from || md <= to);
+
+// The year-bar block that holds today (ET), found from the stored from/to dates so a packet read weeks after it was built
+// still marks the right block. Null when the page has no year bar or a block has no dates.
+function findToday(sections) {
+  const bar = (sections || []).map((section) => section.visual).find((visual) => visual?.type === "yearBar");
+  const md = etDateString().slice(5);
+  const block = (bar?.blocks || []).find((candidate) => blockHoldsDay(candidate, md));
+  return block ? { key: block.key, block, anchorPrefix: bar.anchorPrefix } : null;
+}
+
 function TilesVisual({ items = [] }) {
   return (
     <ul className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -348,13 +360,6 @@ const STEP_FILLS = {
   insects: "bg-zinc-100",
   inspection: "bg-zinc-100",
 };
-const STEP_RAILS = {
-  feeding: "border-l-waves-success",
-  barrier: "border-l-waves-blue-deeper",
-  micros: "border-l-waves-blue",
-  insects: "border-l-zinc-400",
-  inspection: "border-l-zinc-400",
-};
 const toneOf = (step) => STEP_TONES[step] || "text-waves-blue-deeper";
 
 // A link the outline points to (a Waves blog post or a UF/IFAS page), drawn as a small card. It leaves the portal, so
@@ -404,31 +409,20 @@ function YearBarTicks({ months, anchors, pct }) {
   );
 }
 
-// A dense bar's job names: two rows (odd blocks lower), each two blocks wide and centered on its block; the first and
-// last stay inside the bar's edges.
-function denseJobClass(index, count) {
-  const row = index % 2 ? "sm:mt-[44px] print:mt-[44px]" : "sm:mt-1 print:mt-1";
-  if (index === 0) return `w-[145%] -mr-[45%] text-left ${row}`;
-  if (index === count - 1) return `w-[145%] -ml-[45%] text-right ${row}`;
-  return `w-[190%] -mx-[45%] text-center ${row}`;
-}
-
-// One block of the bar: its label, one colored icon per main step, and the job names under it on a desktop and in print.
-// A dense bar (twelve months) is too narrow on a phone for a month name, so a phone shows the first letter, and on a
-// desktop the job names alternate between two rows, each as wide as two blocks, so neighbors never overlap.
-function YearBarBlock({ block, anchorPrefix, labels, pct, index, count }) {
+// One block of the bar: its label, one colored icon per main step, and the job name under it on a desktop and in print.
+// A dense bar (twelve months) is too narrow on a phone for a month name, so a phone shows the first letter; on a desktop
+// each job name hangs diagonally from its own block, in a slot tall enough that neighbors never overlap.
+function YearBarBlock({ block, anchorPrefix, labels, pct, dense, current }) {
   const main = block.main || [];
-  const dense = count > 9;
-  const jobClass = dense ? denseJobClass(index, count) : "mt-1 text-center";
   const jobs = main.map((step) => labels[step] || step).join(" and ");
-  const ring = block.current ? "border-waves-blue ring-2 ring-waves-blue" : "border-zinc-200";
+  const ring = current ? "border-waves-blue ring-2 ring-waves-blue" : "border-zinc-200";
   return (
     <li style={{ width: pct(block.days) }} className="min-w-0">
       <a
         href={`#${anchorPrefix}-${block.key}`}
-        aria-label={`${block.label}${block.window ? `, ${block.window}` : ""}: ${jobs}${block.current ? " (now)" : ""}`}
-        aria-current={block.current ? "true" : undefined}
-        data-current={block.current ? "true" : undefined}
+        aria-label={`${block.label}${block.window ? `, ${block.window}` : ""}: ${jobs}${current ? " (now)" : ""}`}
+        aria-current={current ? "true" : undefined}
+        data-current={current ? "true" : undefined}
         className={`flex h-[84px] flex-col overflow-hidden rounded-md border no-underline ${ring}`}
       >
         <span className="bg-white py-1 text-center text-sm font-bold leading-none tracking-tight text-waves-blue-deeper">
@@ -441,7 +435,12 @@ function YearBarBlock({ block, anchorPrefix, labels, pct, index, count }) {
           </span>
         ))}
       </a>
-      {block.short && <span className={`hidden text-sm leading-tight text-slate-600 sm:block print:block ${jobClass}`}>{block.short}</span>}
+      {block.short && !dense && <span className="mt-1 hidden text-center text-sm leading-tight text-slate-600 sm:block print:block">{block.short}</span>}
+      {block.short && dense && (
+        <span data-job-slot="" className="relative hidden h-28 sm:block print:block">
+          <span className="absolute left-0 top-1 origin-top-left rotate-45 whitespace-nowrap text-sm leading-tight text-slate-600">{block.short}</span>
+        </span>
+      )}
     </li>
   );
 }
@@ -469,7 +468,7 @@ function YearBarKey({ keySteps, labels, limit }) {
 // The program year as one bar: a block per round (or per month) sized by its days, the step icons in their colors, the
 // block that holds today marked, and the summer nitrogen limit as a band flush under the blocks. Each block links to its
 // card or row. The bar keeps its colors when the page prints.
-function YearBarVisual({ blocks = [], anchorPrefix = "round", months = [], anchors = [], limit = null, labels = {}, keySteps = [], nowLabel = null, caption = null }) {
+function YearBarVisual({ blocks = [], anchorPrefix = "round", months = [], anchors = [], limit = null, labels = {}, keySteps = [], today = null, caption = null }) {
   const total = blocks.reduce((sum, b) => sum + (b.days || 0), 0) || 365;
   const pct = (days) => `${(days / total) * 100}%`;
   return (
@@ -477,8 +476,8 @@ function YearBarVisual({ blocks = [], anchorPrefix = "round", months = [], ancho
       <div data-glass="soft" className="rounded-md border border-zinc-200 bg-surface-page p-3">
         <YearBarTicks months={months} anchors={anchors} pct={pct} />
         <ol className={`mt-1 flex list-none pl-0 ${blocks.length > 9 ? "gap-0.5" : "gap-1"}`}>
-          {blocks.map((block, index) => (
-            <YearBarBlock key={block.key} block={block} anchorPrefix={anchorPrefix} labels={labels} pct={pct} index={index} count={blocks.length} />
+          {blocks.map((block) => (
+            <YearBarBlock key={block.key} block={block} anchorPrefix={anchorPrefix} labels={labels} pct={pct} dense={blocks.length > 9} current={block.key === today?.key} />
           ))}
         </ol>
         {limit && (
@@ -487,10 +486,10 @@ function YearBarVisual({ blocks = [], anchorPrefix = "round", months = [], ancho
           </div>
         )}
         <YearBarKey keySteps={keySteps} labels={labels} limit={limit} />
-        {nowLabel && (
+        {today?.block.now && (
           <p className="mt-3 flex items-start gap-2 text-sm font-semibold text-waves-blue-deeper">
             <span className="mt-0.5 inline-block h-3.5 w-3.5 flex-shrink-0 rounded-sm ring-2 ring-waves-blue" aria-hidden="true" />
-            {nowLabel}
+            {today.block.now}
           </p>
         )}
         {caption && <p className="mt-2 text-sm leading-5 text-slate-600">{caption}</p>}
@@ -500,13 +499,13 @@ function YearBarVisual({ blocks = [], anchorPrefix = "round", months = [], ancho
 }
 
 // One round card: the header line carries the dates, the body the whole-lawn steps, spot work, why now, one thing to
-// do at home and links. Only a round marked `open` starts open.
-function RoundCard({ round, labels }) {
+// do at home and links. The round that holds today starts open. The glass sits on the <li>, because glass forces its own
+// border and shadow on whatever it marks, and that would hide the current card's ring on the <details>.
+function RoundCard({ round, labels, current }) {
   const main = round.main || [];
-  const rail = STEP_RAILS[main[0]] || "";
   return (
-    <li id={`round-${round.n}`} aria-current={round.current ? "step" : undefined} className="scroll-mt-24">
-      <details open={round.open || undefined} className={`group rounded-md border border-l-4 bg-white ${rail} ${round.current ? "border-waves-blue" : "border-zinc-200"}`}>
+    <li id={`round-${round.n}`} aria-current={current ? "step" : undefined} data-glass="soft" className="scroll-mt-24 rounded-md">
+      <details open={current || undefined} className={`group rounded-md ${current ? "ring-2 ring-inset ring-waves-blue" : ""}`}>
         <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 [&::-webkit-details-marker]:hidden">
           <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-waves-blue-deeper text-lg font-bold text-white" aria-hidden="true">
             {round.n}
@@ -514,7 +513,7 @@ function RoundCard({ round, labels }) {
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="text-sm font-semibold text-zinc-500">Round {round.n} · {round.window}</span>
-              {round.current && <span className="rounded-full bg-waves-blue px-2 py-0.5 text-sm font-semibold text-white">Now</span>}
+              {current && <span className="rounded-full bg-waves-blue px-2 py-0.5 text-sm font-semibold text-white">Now</span>}
             </span>
             <span className="mt-0.5 block text-base font-semibold text-waves-blue-deeper">{round.title}</span>
             <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -545,11 +544,11 @@ function RoundCard({ round, labels }) {
   );
 }
 
-// The nine rounds as cards. The server marks only the round that holds today with `open`.
-function RoundsVisual({ rounds = [], labels = {} }) {
+// The nine rounds as cards. The page opens and marks the round that holds today.
+function RoundsVisual({ rounds = [], labels = {}, today = null }) {
   return (
     <ol className="mt-4 list-none space-y-2 pl-0">
-      {rounds.map((round) => <RoundCard key={round.n} round={round} labels={labels} />)}
+      {rounds.map((round) => <RoundCard key={round.n} round={round} labels={labels} current={round.n === today?.key} />)}
     </ol>
   );
 }
@@ -576,9 +575,20 @@ function TimelineVisual({ items = [], note }) {
   );
 }
 
-// The picture or video under a fact tile: a video loads nothing until it is played (`preload="none"`, the picture is
-// its poster); a picture links to its larger version in a new tab; a link alone is a text link.
+// One picture under a fact tile, linked to its larger version in a new tab.
+function FactPicture({ picture, className = "" }) {
+  return (
+    <a href={picture.href} target="_blank" rel="noopener noreferrer" className={`block overflow-hidden rounded-md border border-zinc-200 bg-white no-underline ${className}`}>
+      <img src={picture.image} alt={picture.imageAlt || ""} loading="lazy" className="h-44 w-full object-cover object-top" />
+      {picture.linkLabel && <span className="block px-3 py-2 text-sm font-semibold text-waves-blue">{picture.linkLabel}</span>}
+    </a>
+  );
+}
+
+// The pictures under a fact tile (two sit side by side), one picture, or a link alone as a text link.
 function FactMedia({ item }) {
+  // A packet stored before 2026-11-01 carries the tour videos, and the public route serves packets as stored: such a video
+  // still plays, loading nothing until it is played (`preload="none"`, the picture is its poster).
   if (item.video) {
     return (
       <figure className="mt-3 overflow-hidden rounded-md border border-zinc-200 bg-white">
@@ -589,19 +599,19 @@ function FactMedia({ item }) {
       </figure>
     );
   }
-  if (item.image) {
+  if (item.pictures) {
     return (
-      <a href={item.href} target="_blank" rel="noopener noreferrer" className={`block overflow-hidden rounded-md border border-zinc-200 bg-white no-underline ${item.wide ? "mt-3 sm:mt-0" : "mt-3"}`}>
-        <img src={item.image} alt={item.imageAlt || ""} loading="lazy" className="h-44 w-full object-cover object-top" />
-        {item.linkLabel && <span className="block px-3 py-2 text-sm font-semibold text-waves-blue">{item.linkLabel}</span>}
-      </a>
+      <div className={`grid grid-cols-2 gap-3 ${item.wide ? "mt-3 sm:mt-0" : "mt-3"}`}>
+        {item.pictures.map((picture) => <FactPicture key={picture.image} picture={picture} />)}
+      </div>
     );
   }
+  if (item.image) return <FactPicture picture={item} className={item.wide ? "mt-3 sm:mt-0" : "mt-3"} />;
   if (!item.href) return null;
   return <a href={item.href} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-sm font-semibold text-waves-blue no-underline hover:underline">{item.linkLabel}</a>;
 }
 
-// Big-number tiles (watering depth, mowing height), the Monday email tile with its sample picture and the tour videos.
+// Big-number tiles (watering depth, mowing height), the Monday email tile with its sample pictures and the after-visit pictures.
 // A tile with `until` (the one-day watering order) hides after that ET day, as in TilesVisual: a stored packet keeps it.
 function FactsVisual({ items = [] }) {
   return (
@@ -627,7 +637,7 @@ function FactsVisual({ items = [] }) {
 function FaqRow({ item }) {
   return (
     <li>
-      <details className="group rounded-md border border-zinc-200 bg-white">
+      <details data-glass="soft" className="group rounded-md border border-zinc-200 bg-surface-page">
         <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 text-base font-semibold text-waves-blue-deeper [&::-webkit-details-marker]:hidden">
           <span className="min-w-0 flex-1">{item.q}</span>
           <ChevronDown size={18} strokeWidth={1.75} aria-hidden="true" className="mt-1 flex-shrink-0 text-slate-500 transition-transform group-open:rotate-180" />
@@ -671,14 +681,14 @@ const SECTION_VISUALS = {
   faq: FaqVisual,
 };
 
-function Section({ section }) {
+function Section({ section, today }) {
   // A v13 outline section may carry a drawing; its bullets are the text for readers that draw none.
   const Visual = SECTION_VISUALS[section.visual?.type];
   return (
     <section className="border-b border-zinc-200 py-6 last:border-b-0">
       <h2 className="text-xl font-semibold text-waves-blue-deeper">{section.title}</h2>
       {(section.body || !Visual) && <p className="mt-2 text-base leading-7 text-slate-600">{section.body}</p>}
-      {Visual && <Visual {...section.visual} />}
+      {Visual && <Visual {...section.visual} today={today} />}
       {!Visual && Array.isArray(section.bullets) && section.bullets.length > 0 && (
         <ul className="mt-4 grid gap-2 text-base leading-6 text-slate-600 md:grid-cols-2">
           {section.bullets.map((bullet, index) => (
@@ -693,8 +703,11 @@ function Section({ section }) {
   );
 }
 
-// The side panel: where, which program, the plan, this visit's season or round, and the product language.
-function SnapshotAside({ content }) {
+// The side panel: where, which program, the plan, and today's round or month.
+function SnapshotAside({ content, today }) {
+  const date = today
+    ? { label: today.anchorPrefix === "round" ? "Now" : "Season focus", value: today.block.aside }
+    : { label: "Season focus", value: content.season?.monthName || "Current visit" };
   return (
     <aside data-glass="soft" className="rounded-md border border-zinc-200 bg-surface-page p-4">
       <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Program Snapshot</h2>
@@ -733,15 +746,8 @@ function SnapshotAside({ content }) {
         <div className="flex gap-3">
           <CalendarDays size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
           <div>
-            <dt className="text-zinc-500">{content.season?.roundLabel ? "Now" : "Season focus"}</dt>
-            <dd className="font-medium text-waves-blue-deeper">{content.season?.roundLabel || content.season?.monthName || "Current visit"}</dd>
-          </div>
-        </div>
-        <div className="flex gap-3">
-          <ShieldCheck size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
-          <div>
-            <dt className="text-zinc-500">Product language</dt>
-            <dd className="font-medium text-waves-blue-deeper">May be used, not guaranteed</dd>
+            <dt className="text-zinc-500">{date.label}</dt>
+            <dd className="font-medium text-waves-blue-deeper">{date.value}</dd>
           </div>
         </div>
       </dl>
@@ -818,6 +824,7 @@ export default function ServiceOutlinePage() {
   }
 
   const content = packet?.content || {};
+  const today = findToday(content.sections);
   const estimatePath = content.cta?.estimatePath;
   const trackCtaClick = (target) => {
     const url = `${API_BASE}/service-outlines/${encodeURIComponent(token)}/cta-click`;
@@ -872,14 +879,14 @@ export default function ServiceOutlinePage() {
               <h1 className="mt-4 max-w-3xl text-4xl font-semibold tracking-tight text-waves-blue-deeper">{content.title}</h1>
               <p className="mt-4 max-w-3xl text-lg leading-8 text-slate-600">{content.intro}</p>
             </div>
-            <SnapshotAside content={content} />
+            <SnapshotAside content={content} today={today} />
           </div>
         </section>
 
         <section className="mx-auto max-w-[760px] px-4 py-8">
           <div data-glass="card" className="rounded-md border border-zinc-200 bg-white px-5">
             {(content.sections || []).map((section) => (
-              <Section key={section.key} section={section} />
+              <Section key={section.key} section={section} today={today} />
             ))}
           </div>
         </section>

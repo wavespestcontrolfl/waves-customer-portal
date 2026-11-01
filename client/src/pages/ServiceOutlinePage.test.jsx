@@ -17,13 +17,13 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 function v13Content() {
   return {
     title: 'Your Waves Lawn Care Program Overview',
-    intro: 'Based on your estimate for Test Customer. One program covers every lawn we treat.',
-    property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One program for every lawn' },
+    intro: 'Based on your estimate for Test Customer. The program follows the time of year.',
+    property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'Year-round, set to your lawn' },
     season: { monthName: 'Oct' },
     sections: [
       {
         key: 'lawn_program',
-        title: 'One Program For Every Lawn',
+        title: 'How Your Program Works',
         body: 'Most of the lawns we treat are St. Augustine, so the program is built around it.',
         bullets: ['Threshold counts first: Chinch bugs are counted before any curative treatment'],
         visual: { type: 'tiles', items: [{ icon: 'count', title: 'Threshold counts first', text: 'Chinch bugs are counted before any curative treatment' }] },
@@ -94,38 +94,58 @@ function v13Content() {
   };
 }
 
-// GATE_LAWN_OUTLINE_VISUAL: the year bar, round cards, timeline, fact tiles and FAQ. Shapes mirror the server's packet.
-function visualContent() {
-  const labels = { feeding: 'Fertilizer', barrier: 'Pre-emergent', micros: 'Micronutrients', insects: 'Insect control' };
-  const blocks = [
-    { key: 1, label: '1', days: 40, window: 'Dec 25 – Feb 2', main: ['barrier', 'micros'], short: 'Barrier + color', current: false },
-    { key: 2, label: '2', days: 40, window: 'Feb 3 – Mar 14', main: ['feeding', 'barrier'], short: 'Feed + barrier', current: true },
-    { key: 3, label: '3', days: 40, window: 'Mar 15 – Apr 23', main: ['feeding'], short: 'Spring feed', current: false },
-  ];
+// GATE_LAWN_OUTLINE_VISUAL: the year bar, round cards, timeline, fact tiles and FAQ. Shapes mirror the server's packet: the bar's
+// blocks carry MM-DD from/to dates and the words for "now", and the page marks the block that holds today.
+const ROUND_DATES = [
+  { key: 1, window: 'Dec 25 – Feb 2', from: '12-25', to: '02-02', main: ['barrier', 'micros'], short: 'Barrier + color' },
+  { key: 2, window: 'Feb 3 – Mar 14', from: '02-03', to: '03-14', main: ['feeding', 'barrier'], short: 'Feed + barrier' },
+  { key: 3, window: 'Mar 15 – Apr 23', from: '03-15', to: '04-23', main: ['feeding'], short: 'Spring feed' },
+];
+const BAR_LABELS = { feeding: 'Fertilizer', barrier: 'Pre-emergent', micros: 'Micronutrients', insects: 'Insect control' };
+
+function roundBlocks() {
+  return ROUND_DATES.map((r) => ({
+    key: r.key, label: String(r.key), days: 40, window: r.window, main: r.main, short: r.short, from: r.from, to: r.to,
+    now: `You are here: round ${r.key} (${r.window}).`, aside: `Round ${r.key} · ${r.window}`,
+  }));
+}
+
+// Twelve month blocks, as a monthly or unknown plan draws them (February runs to 02-29, a leap-year day count).
+function monthBlocks() {
+  const last = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const full = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  return MONTHS.map((label, index) => ({
+    key: index + 1, label, days: last[index], window: label, main: ['feeding'], short: `Job ${label}`,
+    from: `${String(index + 1).padStart(2, '0')}-01`, to: `${String(index + 1).padStart(2, '0')}-${last[index]}`,
+    now: `You are here: ${full[index]}.`, aside: full[index],
+  }));
+}
+
+function visualContent({ blocks = roundBlocks(), anchorPrefix = 'round' } = {}) {
   const round = (n, extra = {}) => ({
-    n, window: blocks[n - 1].window, title: `Round ${n} title`, main: blocks[n - 1].main, asNeeded: n === 3 ? ['insects'] : [],
-    why: `Why round ${n}.`, atHome: `Home step ${n}.`, links: [], open: false, current: false, ...extra,
+    n, window: ROUND_DATES[n - 1].window, title: `Round ${n} title`, main: ROUND_DATES[n - 1].main, asNeeded: n === 3 ? ['insects'] : [],
+    why: `Why round ${n}.`, atHome: `Home step ${n}.`, links: [], ...extra,
   });
   return {
     ...v13Content(),
-    property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One program for every lawn', planLabel: '9 visits a year, one per round' },
-    season: { monthName: 'Feb', roundLabel: 'Round 2 · Feb 3 – Mar 14' },
+    property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'Year-round, set to your lawn', planLabel: '9 visits a year, one per round' },
+    season: { monthName: 'Feb' },
     sections: [
       {
         key: 'year_bar', title: 'Your Year In Nine Rounds', body: 'Tap a round to jump to it.', bullets: ['Round 1: Barrier'],
         visual: {
-          type: 'yearBar', blocks, anchorPrefix: 'round', months: [{ label: 'J', offset: 0 }, { label: 'F', offset: 40 }], anchors: ['Dec 25', 'Jul', 'Dec 24'],
-          limit: { offset: 40, days: 60, label: 'No nitrogen or phosphorus (local summer rule)' }, labels, keySteps: ['feeding', 'barrier', 'micros'],
-          nowLabel: 'You are here: round 2 (Feb 3 – Mar 14). Your visit falls inside it.', caption: 'Your rule area: Manatee County, FL.',
+          type: 'yearBar', blocks, anchorPrefix, months: [{ label: 'J', offset: 0 }, { label: 'F', offset: 40 }], anchors: ['Dec 25', 'Jul', 'Dec 24'],
+          limit: { offset: 40, days: 60, label: 'No nitrogen or phosphorus (local summer rule)' }, labels: BAR_LABELS, keySteps: ['feeding', 'barrier', 'micros'],
+          caption: 'Your rule area: Manatee County, FL.',
         },
       },
       {
         key: 'rounds', title: 'Round By Round', body: '', bullets: ['Round 1'],
         visual: {
-          type: 'rounds', labels,
+          type: 'rounds', labels: BAR_LABELS,
           rounds: [
             round(1),
-            round(2, { open: true, current: true, extra: 'Extra line.', links: [{ label: 'Read the post', url: 'https://example.test/post', source: 'Waves' }] }),
+            round(2, { extra: 'Extra line.', links: [{ label: 'Read the post', url: 'https://example.test/post', source: 'Waves' }] }),
             round(3),
           ],
         },
@@ -139,8 +159,14 @@ function visualContent() {
         visual: {
           type: 'facts',
           items: [
-            { icon: 'reminders', title: 'Monday email', text: 'Weekly note.', wide: true, image: '/outline/watering-email-sample-thumb.jpg', imageAlt: 'A sample email', href: '/outline/watering-email-sample.jpg', linkLabel: 'See a sample email' },
-            { icon: 'portal', title: 'App tour', text: 'Watch it.', image: '/app-email/videos/waves-lawn-tour-poster.jpg', video: '/app-email/videos/waves-lawn-tour.mp4', linkLabel: 'Lawn tour' },
+            {
+              icon: 'reminders', title: 'Monday email', text: 'Weekly note.', wide: true,
+              pictures: [
+                { image: '/outline/watering-email-sample-thumb.jpg', imageAlt: 'A sample email', href: '/outline/watering-email-sample.jpg', linkLabel: 'See a sample email' },
+                { image: '/outline/sample-irrigation-thumb.jpg', imageAlt: 'The Irrigation screen', href: '/outline/sample-irrigation.jpg', linkLabel: 'See the Irrigation screen' },
+              ],
+            },
+            { icon: 'portal', title: 'Your customer portal', text: 'One place.', image: '/outline/sample-portal-home-thumb.jpg', imageAlt: 'The portal home screen', href: '/outline/sample-portal-home.jpg', linkLabel: 'See the customer portal' },
             { icon: 'label', title: 'Mowing', text: 'Keep it tall.', big: '3.5 to 4 in', href: 'https://example.test/mowing', linkLabel: 'A note for whoever mows' },
           ],
         },
@@ -193,7 +219,14 @@ function renderWith(content) {
 
 const sectionOf = (title) => screen.getByRole('heading', { level: 2, name: title }).closest('section');
 
+// Only Date is faked, so the page reads a chosen day and testing-library's timers keep running.
+function setToday(iso) {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(iso));
+}
+
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.restoreAllMocks();
 });
@@ -221,7 +254,7 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(within(focus).getByText('As needed')).toBeInTheDocument();
     expect(within(focus).getByText('Pre-emergent')).toBeInTheDocument();
     expect(within(focus).queryByText(/may be relevant/)).not.toBeInTheDocument();
-    expect(within(sectionOf('One Program For Every Lawn')).getByText('Threshold counts first')).toBeInTheDocument();
+    expect(within(sectionOf('How Your Program Works')).getByText('Threshold counts first')).toBeInTheDocument();
     expect(within(sectionOf('Local Fertilizer Rules')).getByText('Sarasota County, FL')).toBeInTheDocument();
     const visit = sectionOf('What A Typical Visit Includes');
     expect(within(visit).getByText('1')).toBeInTheDocument();
@@ -238,7 +271,7 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(within(excluded).getAllByRole('listitem').map((item) => item.textContent)).toEqual(['Irrigation repairs', 'Mowing']);
     expect(within(excluded).getByText('Some lawn problems need separate work.')).toBeInTheDocument();
     expect(screen.getByText('Program')).toBeInTheDocument();
-    expect(screen.getByText('One program for every lawn')).toBeInTheDocument();
+    expect(screen.getByText('Year-round, set to your lawn')).toBeInTheDocument();
     expect(screen.queryByText('Turf type')).not.toBeInTheDocument();
   });
 
@@ -298,6 +331,28 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(within(watering).getByText('When to water')).toBeInTheDocument();
     expect(within(watering).queryByText('Old order')).not.toBeInTheDocument();
     expect(within(watering).getByText('Current order')).toBeInTheDocument();
+  });
+
+  // Packets stored before 2026-11-01 carry the tour videos; the public route serves them as stored, so they still play.
+  it('a stored packet\'s tour video still plays and loads nothing until played', async () => {
+    const content = v13Content();
+    content.sections.push({
+      key: 'after_visit',
+      title: 'After Each Visit',
+      body: '',
+      bullets: ['A service report after every visit: What we found.'],
+      visual: {
+        type: 'facts',
+        items: [{ icon: 'report', title: 'A service report after every visit', text: 'What we found.', image: '/app-email/videos/waves-lawn-tour-poster.jpg', video: '/app-email/videos/waves-lawn-tour.mp4', linkLabel: 'A 35-second tour of a lawn report (about 7 MB)' }],
+      },
+    });
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'After Each Visit' });
+    const video = sectionOf('After Each Visit').querySelector('video');
+    expect(video).toHaveAttribute('preload', 'none');
+    expect(video).toHaveAttribute('poster', '/app-email/videos/waves-lawn-tour-poster.jpg');
+    expect(video.querySelector('source')).toHaveAttribute('src', '/app-email/videos/waves-lawn-tour.mp4');
+    expect(within(sectionOf('After Each Visit')).getByText('A 35-second tour of a lawn report (about 7 MB)')).toBeInTheDocument();
   });
 
   it('a section with no drawing keeps its body and bullet cards, and the side panel keeps the grass (the gate-off outline)', async () => {
@@ -411,28 +466,96 @@ describe('ServiceOutlinePage drawn sections', () => {
   });
   // GATE_LAWN_OUTLINE_VISUAL: five new drawings; nothing emits them until the server gate is on.
   describe('visual layout sections', () => {
-    it('draws the year bar, marks the current block, and links each block to its round card', async () => {
+    it('draws the year bar, marks the block that holds today, and links each block to its round card', async () => {
+      setToday('2027-02-10T15:00:00Z');
       renderWith(visualContent());
       await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
       const bar = sectionOf('Your Year In Nine Rounds');
       const links = within(bar).getAllByRole('link');
       expect(links.map((a) => a.getAttribute('href'))).toEqual(['#round-1', '#round-2', '#round-3']);
       expect(links.filter((a) => a.getAttribute('aria-current') === 'true').map((a) => a.getAttribute('href'))).toEqual(['#round-2']);
+      expect(links.filter((a) => a.dataset.current === 'true')).toHaveLength(1);
+      expect(links[1].getAttribute('aria-label')).toMatch(/\(now\)$/);
+      expect(links[0].getAttribute('aria-label')).not.toMatch(/\(now\)/);
       expect(within(bar).getByText('Feed + barrier')).toBeInTheDocument();
-      expect(within(bar).getByText('You are here: round 2 (Feb 3 – Mar 14). Your visit falls inside it.')).toBeInTheDocument();
+      expect(within(bar).getByText('You are here: round 2 (Feb 3 – Mar 14).')).toBeInTheDocument();
       expect(within(bar).getByText('Your rule area: Manatee County, FL.')).toBeInTheDocument();
       expect(within(bar).getByText('No nitrogen or phosphorus (local summer rule)')).toBeInTheDocument();
       // The text lines are for readers that draw nothing.
       expect(within(bar).queryByText('Round 1: Barrier')).not.toBeInTheDocument();
-      // The side panel reads the plan and the round.
+      // The side panel reads the plan and today's round; the product-language row is gone.
       expect(screen.getByText('Your plan')).toBeInTheDocument();
       expect(screen.getByText('9 visits a year, one per round')).toBeInTheDocument();
       expect(screen.getByText('Now', { selector: 'dt' })).toBeInTheDocument();
       expect(screen.getByText('Round 2 · Feb 3 – Mar 14', { selector: 'dd' })).toBeInTheDocument();
       expect(screen.queryByText('Season focus')).not.toBeInTheDocument();
+      expect(screen.queryByText('Product language')).not.toBeInTheDocument();
+      expect(screen.queryByText('May be used, not guaranteed')).not.toBeInTheDocument();
     });
 
-    it('draws round cards with ids, only the open round starts open, the current one is marked, and links open in a new tab', async () => {
+    // Round 1 runs over the year end: Dec 28 and Jan 5 both fall in it, and Feb 3 starts round 2.
+    it.each([
+      ['2027-12-28T15:00:00Z', '#round-1'],
+      ['2027-01-05T15:00:00Z', '#round-1'],
+      ['2027-02-03T15:00:00Z', '#round-2'],
+    ])('on %s the bar marks %s', async (iso, expected) => {
+      setToday(iso);
+      renderWith(visualContent());
+      await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
+      const links = within(sectionOf('Your Year In Nine Rounds')).getAllByRole('link');
+      expect(links.filter((a) => a.getAttribute('aria-current') === 'true').map((a) => a.getAttribute('href'))).toEqual([expected]);
+    });
+
+    it('a months bar marks the month of today and the side panel names it as the season focus', async () => {
+      setToday('2027-10-10T15:00:00Z');
+      renderWith(visualContent({ blocks: monthBlocks(), anchorPrefix: 'month' }));
+      await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
+      const bar = sectionOf('Your Year In Nine Rounds');
+      const marked = within(bar).getAllByRole('link').filter((a) => a.getAttribute('aria-current') === 'true');
+      expect(marked.map((a) => a.getAttribute('href'))).toEqual(['#month-10']);
+      expect(within(bar).getByText('You are here: October.')).toBeInTheDocument();
+      expect(screen.getByText('Season focus', { selector: 'dt' })).toBeInTheDocument();
+      expect(screen.getByText('October', { selector: 'dd' })).toBeInTheDocument();
+      expect(screen.queryByText('Now', { selector: 'dt' })).not.toBeInTheDocument();
+    });
+
+    it('a leap day (Feb 29) falls in February', async () => {
+      setToday('2028-02-29T15:00:00Z');
+      renderWith(visualContent({ blocks: monthBlocks(), anchorPrefix: 'month' }));
+      await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
+      const marked = within(sectionOf('Your Year In Nine Rounds')).getAllByRole('link').filter((a) => a.getAttribute('aria-current') === 'true');
+      expect(marked.map((a) => a.getAttribute('href'))).toEqual(['#month-2']);
+    });
+
+    it('a bar without from/to dates marks nothing, opens no card, and the side panel keeps the season focus', async () => {
+      setToday('2027-02-10T15:00:00Z');
+      const undated = roundBlocks().map(({ from, to, now, aside, ...rest }) => rest);
+      renderWith(visualContent({ blocks: undated }));
+      await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
+      const bar = sectionOf('Your Year In Nine Rounds');
+      expect(within(bar).getAllByRole('link').some((a) => a.getAttribute('aria-current') === 'true')).toBe(false);
+      expect(within(bar).queryByText(/You are here/)).not.toBeInTheDocument();
+      expect([...sectionOf('Round By Round').querySelectorAll('details')].some((d) => d.open)).toBe(false);
+      expect(screen.getByText('Season focus', { selector: 'dt' })).toBeInTheDocument();
+      expect(screen.getByText('Feb', { selector: 'dd' })).toBeInTheDocument();
+    });
+
+    it('a dense (twelve-month) bar renders one diagonal job-name slot under each block, and a rounds bar keeps its plain labels', async () => {
+      renderWith(visualContent({ blocks: monthBlocks(), anchorPrefix: 'month' }));
+      await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
+      const slots = [...sectionOf('Your Year In Nine Rounds').querySelectorAll('[data-job-slot]')];
+      expect(slots).toHaveLength(12);
+      expect(slots.map((slot) => slot.textContent)).toEqual(MONTHS.map((m) => `Job ${m}`));
+      expect(slots.every((slot) => slot.querySelector('.rotate-45.whitespace-nowrap.text-sm'))).toBe(true);
+      cleanup();
+
+      renderWith(visualContent());
+      await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
+      expect(sectionOf('Your Year In Nine Rounds').querySelector('[data-job-slot]')).toBeNull();
+    });
+
+    it('draws round cards with ids, opens and marks the round that holds today, and links open in a new tab', async () => {
+      setToday('2027-02-10T15:00:00Z');
       renderWith(visualContent());
       await screen.findByRole('heading', { level: 2, name: 'Round By Round' });
       const rounds = sectionOf('Round By Round');
@@ -440,6 +563,11 @@ describe('ServiceOutlinePage drawn sections', () => {
       expect(cards.map((li) => li.id)).toEqual(['round-1', 'round-2', 'round-3']);
       expect(cards.map((li) => li.querySelector('details').open)).toEqual([false, true, false]);
       expect(cards.filter((li) => li.getAttribute('aria-current') === 'step').map((li) => li.id)).toEqual(['round-2']);
+      expect(within(cards[1]).getByText('Now')).toBeInTheDocument();
+      // Glass forces its own border and shadow on what it marks, so it sits on the <li> and the <details> keeps the current ring.
+      expect(cards.every((li) => li.getAttribute('data-glass') === 'soft')).toBe(true);
+      expect(cards.every((li) => !li.querySelector('details').hasAttribute('data-glass'))).toBe(true);
+      expect(cards[1].querySelector('details')).toHaveClass('ring-2', 'ring-inset', 'ring-waves-blue');
       expect(within(cards[1]).getByText('Round 2 · Feb 3 – Mar 14')).toBeInTheDocument();
       expect(within(cards[1]).getByText('Home step 2.')).toBeInTheDocument();
       expect(within(cards[1]).getByText('Extra line.')).toBeInTheDocument();
@@ -449,7 +577,7 @@ describe('ServiceOutlinePage drawn sections', () => {
       expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     });
 
-    it('draws the timeline, the fact tiles (a video that loads nothing until played) and the FAQ with its More questions row', async () => {
+    it('draws the timeline, the fact pictures (two side by side, no video) and the FAQ with its More questions row', async () => {
       renderWith(visualContent());
       await screen.findByRole('heading', { level: 2, name: 'Questions' });
       const timeline = sectionOf('After A Visit');
@@ -457,16 +585,21 @@ describe('ServiceOutlinePage drawn sections', () => {
       expect(within(timeline).getByText('Timeline note.')).toBeInTheDocument();
 
       const facts = sectionOf('Your Part: Tools');
-      const video = facts.querySelector('video');
-      expect(video).toHaveAttribute('preload', 'none');
-      expect(video).toHaveAttribute('poster', '/app-email/videos/waves-lawn-tour-poster.jpg');
-      expect(video.querySelector('source')).toHaveAttribute('src', '/app-email/videos/waves-lawn-tour.mp4');
-      expect(within(facts).getByText('Lawn tour')).toBeInTheDocument();
-      expect(within(facts).getByText('3.5 to 4 in')).toBeInTheDocument();
+      expect(document.querySelector('video')).toBeNull();
       const sample = within(facts).getByRole('link', { name: /See a sample email/ });
       expect(sample).toHaveAttribute('href', '/outline/watering-email-sample.jpg');
       expect(sample).toHaveAttribute('target', '_blank');
       expect(sample).toHaveAttribute('rel', 'noopener noreferrer');
+      const irrigation = within(facts).getByRole('link', { name: /See the Irrigation screen/ });
+      expect(irrigation).toHaveAttribute('href', '/outline/sample-irrigation.jpg');
+      expect(irrigation).toHaveAttribute('target', '_blank');
+      expect(irrigation).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(irrigation.querySelector('img')).toHaveClass('h-44', 'object-cover', 'object-top');
+      expect(sample.parentElement).toBe(irrigation.parentElement);
+      expect(sample.parentElement).toHaveClass('grid', 'grid-cols-2', 'gap-3');
+      const portal = within(facts).getByRole('link', { name: /See the customer portal/ });
+      expect(portal).toHaveAttribute('href', '/outline/sample-portal-home.jpg');
+      expect(within(facts).getByText('3.5 to 4 in')).toBeInTheDocument();
       const mowing = within(facts).getByRole('link', { name: 'A note for whoever mows' });
       expect(mowing).toHaveAttribute('target', '_blank');
       expect(mowing).toHaveAttribute('rel', 'noopener noreferrer');
@@ -474,6 +607,8 @@ describe('ServiceOutlinePage drawn sections', () => {
       const faq = sectionOf('Questions');
       const rows = [...faq.querySelectorAll('details')];
       expect(rows.every((row) => !row.open)).toBe(true);
+      // Question rows carry the glass surface (the "More questions" wrapper is a dashed box without it).
+      expect(rows.filter((row) => row.getAttribute('data-glass') === 'soft')).toHaveLength(2);
       expect(within(faq).getByText('First question?')).toBeInTheDocument();
       expect(within(faq).getByText('More questions')).toBeInTheDocument();
       expect(within(faq).getByText('Hidden question?')).toBeInTheDocument();

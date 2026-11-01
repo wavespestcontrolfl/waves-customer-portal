@@ -26,7 +26,7 @@ const MONTH_BAR_WORDS = Object.freeze({
   unknown: { title: 'Your Year, Month By Month', body: 'Each visit follows the step for the month it falls in. Each month has one main job. Tap a month to read about it.' },
 });
 const LIMIT_LABEL = 'No nitrogen or phosphorus (local summer rule)';
-const ROUNDS_INTRO = Object.freeze({ from: 'One program covers every lawn we treat.', to: 'Your plan is nine visits a year, one in each round.' });
+const ROUNDS_INTRO = Object.freeze({ from: 'The program follows the time of year.', to: 'Your plan is nine visits a year, one in each round.' });
 const BLACKOUT_POSTS = Object.freeze({
   manatee_county_fl: { label: 'Fertilizer blackout: Manatee County', url: 'https://www.wavespestcontrol.com/lawn-care/fertilizer-blackout-manatee-county/', source: 'Waves blog' },
   sarasota_county_fl: { label: 'Fertilizer blackout: Sarasota County', url: 'https://www.wavespestcontrol.com/lawn-care/fertilizer-blackout-sarasota-county/', source: 'Waves blog' },
@@ -204,7 +204,7 @@ const FAQ_ROWS = Object.freeze([
   },
   {
     q: "Why is my grass brown or yellow?",
-    a: "Brown patches in hot, sunny spots are often chinch bugs. Tan rings in the cooler months are often large patch. A spot by a sprinkler head or a downspout is often water. Yellow St. Augustine is often short on iron, not nitrogen. Text us a photo of the spot.",
+    a: "Brown patches in hot, sunny spots are often chinch bugs. Tan rings in the cooler months are often large patch. A spot by a sprinkler head or a downspout is often water. On our alkaline soil, yellow St. Augustine is often short on iron, not nitrogen. Text us a photo of the spot.",
     links: [
       {
         label: "Why is my St. Augustine turning brown?",
@@ -325,7 +325,7 @@ const FAQ_MORE_ROWS = Object.freeze([
   },
   {
     q: "Do you test my soil?",
-    a: "Only when a lawn is not responding. Then we send one sample to the University of Florida soil lab.",
+    a: "Only when a lawn is not responding. Then we send one sample to the University of Florida soil lab. If the soil is too acidic or short on magnesium, we add lime or magnesium on a regular visit. Most results change nothing. Topsoil and topdressing are separate work, quoted on their own.",
     links: []
   },
   {
@@ -366,8 +366,8 @@ const TIMELINE_ITEMS = Object.freeze([
 const TIMELINE_NOTE = 'No mowing two days before or after a weed spray. Mole cricket bait needs three days with the sprinklers off that spot; your report says when a visit had one.';
 
 const AFTER_VISIT_ITEMS = Object.freeze([
-  { icon: 'report', title: 'A service report after every visit', text: 'What we found, what we applied with EPA numbers where they apply, photos, and your next step.', image: '/app-email/videos/waves-lawn-tour-poster.jpg', video: '/app-email/videos/waves-lawn-tour.mp4', linkLabel: 'A 35-second tour of a lawn report (about 7 MB)' },
-  { icon: 'portal', title: 'Your customer portal', text: 'Your next visit date, reports, invoices and messages in one place, and a reminder before each visit.', image: '/app-email/videos/waves-app-tour-poster.jpg', video: '/app-email/videos/waves-app-tour.mp4', linkLabel: 'A 30-second tour of the customer portal (about 4 MB)' },
+  { icon: 'report', title: 'A service report after every visit', text: 'What we found, what we applied with EPA numbers where they apply, photos, and your next step.', image: '/outline/sample-lawn-report-thumb.jpg', imageAlt: 'A sample lawn service report', href: '/outline/sample-lawn-report.jpg', linkLabel: 'See a sample report' },
+  { icon: 'portal', title: 'Your customer portal', text: 'Your next visit date, reports, invoices and messages in one place, and a reminder before each visit.', image: '/outline/sample-portal-home-thumb.jpg', imageAlt: 'The customer portal home screen', href: '/outline/sample-portal-home.jpg', linkLabel: 'See the customer portal' },
 ].map((item) => Object.freeze(item)));
 
 const EMAIL_CARD = Object.freeze({
@@ -375,10 +375,10 @@ const EMAIL_CARD = Object.freeze({
   icon: 'reminders',
   title: 'Your Monday watering email',
   text: EMAIL_TEXT,
-  image: '/outline/watering-email-sample-thumb.jpg',
-  imageAlt: 'A sample Monday watering email',
-  href: '/outline/watering-email-sample.jpg',
-  linkLabel: 'See a sample email',
+  pictures: Object.freeze([
+    { image: '/outline/watering-email-sample-thumb.jpg', imageAlt: 'A sample Monday watering email', href: '/outline/watering-email-sample.jpg', linkLabel: 'See a sample email' },
+    { image: '/outline/sample-irrigation-thumb.jpg', imageAlt: 'The Irrigation screen in the customer portal', href: '/outline/sample-irrigation.jpg', linkLabel: 'See the Irrigation screen' },
+  ].map((picture) => Object.freeze(picture))),
 });
 const MOW_NOTE_LINK = Object.freeze({ href: 'https://www.wavespestcontrol.com/lawn-care/note-for-your-mowing-crew/', linkLabel: 'A note for whoever mows your lawn' });
 
@@ -388,6 +388,8 @@ const ymd = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`;
 const dateParts = (dateStr) => dateStr.split('-').map(Number);
 const dayNumber = (dateStr) => { const [y, m, d] = dateParts(dateStr); return Date.UTC(y, m - 1, d) / 86400000; };
 const dayDiff = (from, to) => Math.round(dayNumber(to) - dayNumber(from));
+// A leap year for the month windows' last day, so February runs to 02-29 and a leap day still falls in February.
+const LEAP_YEAR = 2024;
 const daysInMonth = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
 const monthDay = (dateStr) => { const [, m, d] = dateParts(dateStr); return `${MONTH_ABBR[m - 1]} ${d}`; };
 const windowText = (start, end) => `${monthDay(start)} – ${monthDay(end)}`;
@@ -497,10 +499,22 @@ function barSection(title, body, bullets, visual, kit) {
   return kit.makeSection('year_bar', title, body, bullets, { type: 'yearBar', ...visual });
 }
 
-function roundsBar({ rounds, programYear, current, rule, kit }) {
+function roundsBar({ rounds, programYear, rule, kit }) {
   const barStart = lawnRounds.roundStart(programYear, 1);
   const band = limitBand(rule, barStart, programYear);
-  const blocks = rounds.map((r) => ({ key: r.n, label: String(r.n), days: r.days, window: r.window, main: r.main, short: ROUND_SHORT[r.n - 1], current: r.n === current.n }));
+  // from/to are MM-DD, so the page can mark today's block when it draws (the stored packet is read for 45 days).
+  const blocks = rounds.map((r) => ({
+    key: r.n,
+    label: String(r.n),
+    days: r.days,
+    window: r.window,
+    main: r.main,
+    short: ROUND_SHORT[r.n - 1],
+    from: r.start.slice(5),
+    to: r.end.slice(5),
+    now: `You are here: round ${r.n} (${r.window}).`,
+    aside: `Round ${r.n} · ${r.window}`,
+  }));
   const bullets = rounds.map((r) => stepsLine(`Round ${r.n} (${r.window})`, r.main, kit.stepLabels));
   if (band) bullets.push(band.caption);
   return barSection('Your Year In Nine Rounds', 'Nine visits a year, one in each round. Each round has set dates and one main job. Tap a round to jump to it.', bullets, {
@@ -511,12 +525,11 @@ function roundsBar({ rounds, programYear, current, rule, kit }) {
     limit: band?.limit || null,
     labels: kit.stepLabels,
     keySteps: KEY_STEPS,
-    nowLabel: `You are here: round ${current.n} (${current.window}). Your visit falls inside it.`,
     caption: band?.caption || null,
   }, kit);
 }
 
-function monthsBar({ plan, trackKey, year, currentMonth, rule, kit }) {
+function monthsBar({ plan, trackKey, year, rule, kit }) {
   const words = MONTH_BAR_WORDS[plan] || MONTH_BAR_WORDS.unknown;
   const barStart = ymd(year, 1, 1);
   const band = limitBand(rule, barStart, year);
@@ -527,7 +540,10 @@ function monthsBar({ plan, trackKey, year, currentMonth, rule, kit }) {
     window: label,
     main: kit.monthSteps(kit.protocolVisitForMonth(trackKey, index + 1)).main,
     short: MONTH_SHORT[index],
-    current: index + 1 === currentMonth,
+    from: `${pad(index + 1)}-01`,
+    to: `${pad(index + 1)}-${pad(daysInMonth(LEAP_YEAR, index + 1))}`,
+    now: `You are here: ${MONTH_FULL[index]}.`,
+    aside: MONTH_FULL[index],
   }));
   const bullets = blocks.map((b) => stepsLine(MONTH_FULL[b.key - 1], b.main, kit.stepLabels));
   if (band) bullets.push(band.caption);
@@ -539,7 +555,6 @@ function monthsBar({ plan, trackKey, year, currentMonth, rule, kit }) {
     limit: band?.limit || null,
     labels: kit.stepLabels,
     keySteps: KEY_STEPS,
-    nowLabel: `You are here: ${MONTH_FULL[currentMonth - 1]}.`,
     caption: band?.caption || null,
   }, kit);
 }
@@ -551,7 +566,7 @@ function roundLinks(n, words, jurisdictionId) {
   return post ? [{ ...post }] : [];
 }
 
-function roundsSection(rounds, current, jurisdictionId, kit) {
+function roundsSection(rounds, jurisdictionId, kit) {
   const cards = rounds.map((r) => {
     const words = ROUND_WORDS[r.n - 1];
     return {
@@ -564,8 +579,6 @@ function roundsSection(rounds, current, jurisdictionId, kit) {
       ...(words.extra ? { extra: words.extra } : {}),
       atHome: words.atHome,
       links: roundLinks(r.n, words, jurisdictionId),
-      open: r.n === current.n,
-      current: r.n === current.n,
     };
   });
   const bullets = cards.map((c) => `Round ${c.n} (${c.window}), ${c.title}: ${c.why}${c.extra ? ` ${c.extra}` : ''} At home: ${c.atHome}`);
@@ -631,12 +644,10 @@ function faqSection(plan, kit) {
 }
 
 // ── entry points ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
-// The round holding `now` (ET), its program year and the nine rounds.
+// The program year holding `now` (ET) and its nine rounds.
 function roundsContext(now, trackKey, kit) {
-  const home = lawnRounds.roundOf(etDateString(now));
-  const rounds = roundFacts(home.programYear, trackKey, kit);
-  const current = rounds[home.round - 1];
-  return { programYear: home.programYear, rounds, current };
+  const { programYear } = lawnRounds.roundOf(etDateString(now));
+  return { programYear, rounds: roundFacts(programYear, trackKey, kit) };
 }
 
 // The outline's sections under the gate, in the approved order. `parts` carries what the outline builds itself: the visit steps,
@@ -645,8 +656,8 @@ function visualSections({ plan, trackKey, jurisdictionRule, productList, now, ki
   const jurisdictionId = jurisdictionRule?.jurisdiction_id;
   const rounding = plan === 'rounds' ? roundsContext(now, trackKey, kit) : null;
   const head = rounding
-    ? [roundsBar({ ...rounding, rule: jurisdictionRule, kit }), roundsSection(rounding.rounds, rounding.current, jurisdictionId, kit)]
-    : [monthsBar({ plan, trackKey, year: Number(etDateString(now).slice(0, 4)), currentMonth: Number(etDateString(now).slice(5, 7)), rule: jurisdictionRule, kit }), parts.monthList()];
+    ? [roundsBar({ ...rounding, rule: jurisdictionRule, kit }), roundsSection(rounding.rounds, jurisdictionId, kit)]
+    : [monthsBar({ plan, trackKey, year: Number(etDateString(now).slice(0, 4)), rule: jurisdictionRule, kit }), parts.monthList()];
   return [
     ...head,
     parts.typicalVisit,
@@ -661,16 +672,13 @@ function visualSections({ plan, trackKey, jurisdictionRule, productList, now, ki
   ].filter(Boolean);
 }
 
-// The words that sit outside the sections: the plan line on the property, and for a rounds plan the intro sentence and the
-// round the visit falls in. Mutates the packet content the outline just built.
-function applyVisualContent(content, plan, { now, trackKey, kit }) {
+// The words that sit outside the sections: the plan line on the property, and for a rounds plan the intro sentence. Mutates the packet content the outline just built.
+function applyVisualContent(content, plan) {
   const label = PLAN_LABELS[plan];
   if (!label) return content;
   content.property = { ...content.property, planLabel: label };
   if (plan !== 'rounds') return content;
   content.intro = String(content.intro || '').replace(ROUNDS_INTRO.from, ROUNDS_INTRO.to);
-  const { current } = roundsContext(now, trackKey, kit);
-  content.season = { ...content.season, roundLabel: `Round ${current.n} · ${current.window}` };
   return content;
 }
 

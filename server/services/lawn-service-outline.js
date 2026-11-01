@@ -15,9 +15,9 @@ const RAIN_COPY = require('../../shared/lawn-water-rain-copy.json');
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
-const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-1';
-const V13_DETAIL_CONTENT_LIBRARY_VERSION = 'lawn-v13-detail-1';
-const V13_VISUAL_CONTENT_LIBRARY_VERSION = 'lawn-v13-visual-1';
+const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-2';
+const V13_DETAIL_CONTENT_LIBRARY_VERSION = 'lawn-v13-detail-2';
+const V13_VISUAL_CONTENT_LIBRARY_VERSION = 'lawn-v13-visual-2';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
 const V13_PROTOCOL_VERSION = 'lawn-v13';
@@ -561,9 +561,9 @@ function buildTreatmentCategories({ turfType, visit, seasonBand }) {
 // we treat are st augustine"). No product name, rate, tier, visit count, date, or grass-specific line.
 const V13_COPY = Object.freeze({
   title: 'Your Waves Lawn Care Program Overview',
-  intro: (customerName) => `Based on your estimate for ${customerName}. One program covers every lawn we treat. What each visit applies is decided on site, from what the lawn shows, the weather, the product label, and local rules.`,
-  programLabel: 'One program for every lawn',
-  programTitle: 'One Program For Every Lawn',
+  intro: (customerName) => `Based on your estimate for ${customerName}. The program follows the time of year. What each visit applies is set on site: your grass, your county's fertilizer rules, sun and shade, new sod, the weather, and the spots we map for insects, disease or bermudagrass.`,
+  programLabel: 'Year-round, set to your lawn',
+  programTitle: 'How Your Program Works',
   programBody: 'Most of the lawns we treat are St. Augustine, so the program is built around it. Each visit adjusts to the lawn in front of us, and every product is applied within its label.',
   programTiles: Object.freeze([
     { icon: 'whole_lawn', title: 'One whole-lawn pass per visit', text: 'A hose spray or a spreader pass at most visits; everything else is spot work' },
@@ -1210,9 +1210,9 @@ function visualPlanFor(estimateData) {
   return outlineVisualLive() ? lawnOutlineVisual().resolveLawnPlan(estimateData) : null;
 }
 
-// The words outside the sections (plan line, rounds intro, round label); a null plan changes nothing.
-function applyVisualContent(content, visualPlan, { now, trackKey }) {
-  return visualPlan ? lawnOutlineVisual().applyVisualContent(content, visualPlan, { now, trackKey, kit: visualKit() }) : content;
+// The words outside the sections (plan line, rounds intro); a null plan changes nothing.
+function applyVisualContent(content, visualPlan) {
+  return visualPlan ? lawnOutlineVisual().applyVisualContent(content, visualPlan) : content;
 }
 
 // The two outlines, chosen once per build: the gate-off outline exactly as before, and the v13
@@ -1340,7 +1340,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
     },
   };
 
-  applyVisualContent(content, visualPlan, { now, trackKey });
+  applyVisualContent(content, visualPlan);
 
   const validation = validateContent(content, { turfType: turf.turfType, includeProductCards, jurisdictionRule, noProgram: variant.noProgram(turf) });
 
