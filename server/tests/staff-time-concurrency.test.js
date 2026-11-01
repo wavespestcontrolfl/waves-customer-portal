@@ -982,3 +982,139 @@ describe('Staff weekly overtime allocation', () => {
     expect(specs[5].whereRawArgs[0]).toMatch(/status IS DISTINCT FROM 'approved'/);
   });
 });
+
+describe('Admin adds a missed shift', () => {
+  const IN = '2026-07-07T13:00:00.000Z';
+  const OUT = '2026-07-07T21:00:00.000Z';
+  const TECH = '11111111-1111-4111-8111-111111111111';
+  const request = (overrides = {}) => ({
+    technician_id: TECH,
+    clock_in: IN,
+    clock_out: OUT,
+    notes: 'Forgot to clock in',
+    edit_reason: 'Tech worked, never tapped',
+    edited_by: 'admin-1',
+    ...overrides,
+  });
+  // Query order inside the transaction: week lock (raw), technician lock, the
+  // same day / paid check / paid line / week guards an edit runs, the overlap
+  // check, then the insert.
+  const guardSpecs = (guards = {}) => {
+    const { overlap, day, paid, line, week } = guards;
+    const technician = 'technician' in guards ? guards.technician : { id: TECH, active: true };
+    return [
+    { table: 'technicians', label: 'technicianLock', firstValue: technician },
+    { table: 'time_entry_daily_summary', label: 'approvedDay', firstValue: day },
+    { table: 'payroll_checks', label: 'paidWeek', firstValue: paid },
+    { table: 'payroll_pay_lines', label: 'paidLine', firstValue: line },
+    { table: 'time_weekly_summary', label: 'approvedWeek', firstValue: week },
+    { table: 'time_entries', label: 'overlap', firstValue: overlap },
+    ];
+  };
+
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('writes an edited completed shift, audits it and recomputes the day and week', async () => {
+    const events = [];
+    const saved = { id: 'shift-new', technician_id: TECH, status: 'edited' };
+    const daily = { id: 'daily-1', work_date: '2026-07-07', total_shift_minutes: 480, overtime_minutes: 0, status: 'pending' };
+    const specs = [
+      ...guardSpecs(),
+      { table: 'time_entries', label: 'entryInsert', returningValue: [saved] },
+      { table: 'audit_log', label: 'audit', returningValue: [{ id: 1 }] },
+      { table: 'time_entries', label: 'dailyEntries', thenValue: [saved] },
+      { table: 'time_entry_daily_summary', label: 'dailyUpsert', returningValue: [daily] },
+      { table: 'time_entry_daily_summary', label: 'weeklyDailies', thenValue: [daily] },
+      { table: 'time_weekly_summary', label: 'weeklyExisting', firstValue: undefined },
+      { table: 'time_weekly_summary', label: 'weeklyUpsert', returningValue: [{ id: 'weekly-1', status: 'pending', week_start: '2026-07-06' }] },
+      { table: 'time_weekly_summary', label: 'signoffClear', thenValue: 0 },
+    ];
+    installTransaction(specs, events);
+
+    await expect(timeTracking.adminAddEntry(request())).resolves.toBe(saved);
+
+    const insert = specs.find((spec) => spec.label === 'entryInsert').insertPayload;
+    expect(insert).toMatchObject({
+      technician_id: TECH,
+      entry_type: 'shift',
+      status: 'edited',
+      approval_status: 'pending',
+      duration_minutes: 480,
+      notes: 'Forgot to clock in',
+      source: 'admin_added',
+      edit_reason: 'Tech worked, never tapped',
+      edited_by: 'admin-1',
+    });
+    expect(insert.clock_in).toEqual(new Date(IN));
+    expect(insert.clock_out).toEqual(new Date(OUT));
+    expect(insert.edited_at).toBeInstanceOf(Date);
+    // A completed row needs no active-writer stamp; there is no original to keep.
+    expect(insert).not.toHaveProperty('original_clock_in');
+    expect(insert).not.toHaveProperty('staff_write_generation');
+    expect(specs.find((spec) => spec.label === 'audit').insertPayload).toMatchObject({
+      actor_type: 'admin',
+      actor_id: 'admin-1',
+      action: 'payroll.time_entry_added',
+      resource_type: 'time_entries',
+      resource_id: 'shift-new',
+      metadata: { technician_id: TECH, work_date: '2026-07-07', duration_minutes: 480 },
+    });
+    expectOrdered(events, [
+      'transaction.raw',
+      'technicianLock.forUpdate',
+      'approvedDay.first',
+      'paidWeek.first',
+      'approvedWeek.first',
+      'overlap.first',
+      'entryInsert.insert',
+      'audit.insert',
+      'dailyUpsert.onConflict',
+      'weeklyUpsert.onConflict',
+      'signoffClear.update',
+      'transaction.commit',
+    ]);
+  });
+
+  test.each([
+    ['clock_out is not after clock_in', { clock_out: IN }, /clock_out must be after clock_in/],
+    ['clock_out is in the future', { clock_in: '2026-07-07T13:00:00.000Z', clock_out: new Date(Date.now() + 3600000).toISOString() }, /cannot end in the future/],
+    ['the span is over 16 hours', { clock_out: '2026-07-08T05:30:00.000Z' }, /longer than 16 hours/],
+    ['a time has no zone', { clock_in: '2026-07-07T09:00' }, /clock_in must be a date and time with a time zone/],
+    ['a time is missing', { clock_out: undefined }, /clock_out must be a date and time with a time zone/],
+    ['the reason is blank', { edit_reason: '  ' }, /edit_reason is required/],
+  ])('refuses before any query when %s', async (_name, overrides, message) => {
+    jest.clearAllMocks();
+    await expect(timeTracking.adminAddEntry(request(overrides))).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringMatching(message),
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['an unknown technician', { technician: undefined }, 404, /Technician not found/],
+    ['an inactive technician', { technician: { id: TECH, active: false } }, 409, /inactive/],
+    ['an approved day', { day: { id: 1, status: 'approved' } }, 409, /Reopen the approved day/],
+    ['a finalized pay check for the week', { paid: { id: 'check-1' } }, 409, /already paid/],
+    ['a paid pay line covering the week', { line: { id: 'line-1' } }, 409, /paid pay line/],
+    ['an approved week', { week: { id: 1, status: 'approved' } }, 409, /Unlock the approved week/],
+    ['an overlapping shift', { overlap: { id: 'other-shift' } }, 409, /overlaps a shift/],
+  ])('refuses and writes nothing for %s', async (_name, guards, statusCode, message) => {
+    jest.clearAllMocks();
+    const events = [];
+    const specs = guardSpecs(guards);
+    installTransaction(specs, events);
+
+    await expect(timeTracking.adminAddEntry(request())).rejects.toMatchObject({
+      statusCode,
+      message: expect.stringMatching(message),
+    });
+    expect(events).not.toContain('entryInsert.insert');
+    expect(events).toContain('transaction.rollback');
+  });
+
+  test('refuses a technician id that is not a uuid without querying', async () => {
+    installTransaction([], []);
+    await expect(timeTracking.adminAddEntry(request({ technician_id: 'tech-1' }))).rejects.toMatchObject({ statusCode: 404 });
+  });
+});

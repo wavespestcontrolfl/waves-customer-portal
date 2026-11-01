@@ -3,6 +3,7 @@ const path = require('path');
 
 const mockStartBreak = jest.fn();
 const mockGetEntries = jest.fn();
+const mockAdminAddEntry = jest.fn();
 const mockGetPendingWeeks = jest.fn();
 
 jest.mock('../models/db', () => {
@@ -18,6 +19,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/time-tracking', () => ({
   startBreak: (...args) => mockStartBreak(...args),
   getEntries: (...args) => mockGetEntries(...args),
+  adminAddEntry: (...args) => mockAdminAddEntry(...args),
 }));
 jest.mock('../services/timesheet-approval', () => ({
   getPendingWeeks: (...args) => mockGetPendingWeeks(...args),
@@ -68,6 +70,33 @@ describe('Staff admin ET route boundaries', () => {
   afterEach(() => {
     jest.useRealTimers();
     jest.clearAllMocks();
+  });
+
+  test('POST /entries needs a reason, and passes the signed-in admin as the editor', async () => {
+    const handler = routeHandler(adminTimeTrackingRouter, 'post', '/entries');
+    const body = {
+      technician_id: 'tech-1',
+      clock_in: '2026-07-07T13:00:00.000Z',
+      clock_out: '2026-07-07T21:00:00.000Z',
+      notes: 'Forgot to clock in',
+    };
+
+    const refused = responseDouble();
+    await handler({ body, technicianId: 'admin-1' }, refused, jest.fn());
+    expect(refused.status).toHaveBeenCalledWith(400);
+    expect(mockAdminAddEntry).not.toHaveBeenCalled();
+
+    mockAdminAddEntry.mockResolvedValue({ id: 'shift-new' });
+    const created = responseDouble();
+    await handler({ body: { ...body, edit_reason: 'Never tapped', edited_by: 'spoofed' }, technicianId: 'admin-1' }, created, jest.fn());
+    expect(mockAdminAddEntry).toHaveBeenCalledWith({ ...body, edit_reason: 'Never tapped', edited_by: 'admin-1' });
+    expect(created.json).toHaveBeenCalledWith({ id: 'shift-new' });
+
+    const failure = new Error('overlap');
+    mockAdminAddEntry.mockRejectedValue(failure);
+    const next = jest.fn();
+    await handler({ body: { ...body, edit_reason: 'Never tapped' }, technicianId: 'admin-1' }, responseDouble(), next);
+    expect(next).toHaveBeenCalledWith(failure);
   });
 
   test('builds analytics defaults from the Eastern work date after 8 PM', () => {
