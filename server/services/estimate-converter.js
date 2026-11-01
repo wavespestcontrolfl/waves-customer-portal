@@ -18,7 +18,7 @@ const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
 const { withoutAssessmentVisits } = require('./assessment-booking');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
-const { estimateLawnFloorArmed } = require('./estimate-floor-signal-replay');
+const { estimateLawnFloorArmed, lawnRowsShowFloorEnforcement } = require('./estimate-floor-signal-replay');
 // Canonical service-key tier membership (aliased: this module's local
 // serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
 const { serviceCountsTowardWaveGuardTier: serviceKeyCountsTowardTier } = require('./pricing-engine/discount-engine');
@@ -3624,9 +3624,13 @@ function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
 // (minimumCollectedAnnualPrice / costFloorAnnual) ride EVERY quote for margin
 // reporting, so their presence alone is never evidence of arming.
 function lawnCostFloorArmedForPrepay(estimateData = {}) {
-  const stamped = estimateLawnFloorArmed(normalizeEstimateData(estimateData));
+  const data = normalizeEstimateData(estimateData);
+  const stamped = estimateLawnFloorArmed(data);
   if (typeof stamped === 'boolean') return stamped;
-  return LAWN_PRICING_V2.useLawnCostFloor === true;
+  // Silent legacy v1 saves: enforcement stamps on the stored results.lawn rows
+  // arm them, the same fallback the public ladder and v1 pricing paths use.
+  const v1LawnRows = data?.result?.results?.lawn ?? data?.results?.lawn;
+  return LAWN_PRICING_V2.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(v1LawnRows);
 }
 
 // The 35% collected-margin floor a stored lawn line carries (annual dollars,

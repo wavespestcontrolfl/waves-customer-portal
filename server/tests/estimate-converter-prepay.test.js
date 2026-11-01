@@ -818,6 +818,20 @@ describe('annual prepay respects the armed lawn cost floor', () => {
     expect(r.discount).toBe(0);
   });
 
+  test('a silent legacy v1 save with floor-enforcement stamps on results.lawn is armed (public-path fallback)', () => {
+    const legacy = lawnEstimate({ annual: 600, floor: 600 });
+    legacy.result.results = { lawn: [{ v: 9, ann: 600, costFloorApplied: true, recommended: true }] };
+    expect(prepay(legacy, 600).amount).toBe(600);
+    // Reporting fields alone on those rows are still not evidence.
+    const reportingOnly = lawnEstimate({ annual: 600, floor: 600 });
+    reportingOnly.result.results = { lawn: [{ v: 9, ann: 600, prov: { costFloorAnnual: 600 }, recommended: true }] };
+    expect(prepay(reportingOnly, 600).amount).toBe(570);
+    // An explicit disarm stamp still wins over the row evidence.
+    const stampedOff = lawnEstimate({ annual: 600, floor: 600, armed: false });
+    stampedOff.result.results = { lawn: [{ v: 9, ann: 600, costFloorApplied: true }] };
+    expect(prepay(stampedOff, 600).amount).toBe(570);
+  });
+
   test('a disarmed estimate is unchanged: floor fields alone never arm anything', () => {
     // Explicit disarm stamp.
     const off = lawnEstimate({ annual: 589.05, floor: 584.6, armed: false });
