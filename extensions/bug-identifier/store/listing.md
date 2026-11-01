@@ -84,6 +84,31 @@ used for creditworthiness or lending.
 **Privacy policy URL:** `https://www.wavespestcontrol.com/privacy-policy/`,
 once it carries the section in `../PRIVACY.md`.
 
+## Edge Add-ons (Partner Center)
+
+The same zip as Chrome. Text and answers are the Chrome ones above, with
+these Edge-only fields:
+
+- **Category:** Photos (Edge has no Lifestyle category).
+- **Website:** `https://www.wavespestcontrol.com/pest-identifier/`;
+  **support contact:** contact@wavespestcontrol.com.
+- **Extension logo:** 300x300, rendered from `icons/icon.svg` at that size
+  (`scripts/render-icons.mjs` renders only the manifest sizes).
+- **Search terms:** bug identifier, insect identifier, spider identifier,
+  pest identifier, identify bugs.
+- **Notes for certification:** the reviewer steps, including the 6 an hour
+  and 15 a day per-IP limits.
+
+## Firefox Add-ons (AMO)
+
+Upload `dist/bug-identifier-firefox-<version>.zip` (`package.mjs --firefox`).
+That build declares `browser_specific_settings.gecko`: the add-on ID
+`bug-identifier@wavespestcontrol.com`, Firefox 140 or later, and
+`data_collection_permissions.required: ["websiteContent"]` (the photo the
+user picks goes to the Waves API). Summary, description, privacy policy URL
+and screenshots are the Chrome ones above. Category: Photos, Music & Videos
+(it works on photos, as the Edge category does).
+
 ## Getting found in store search
 
 Store search weighs the name most, then the summary and description, then

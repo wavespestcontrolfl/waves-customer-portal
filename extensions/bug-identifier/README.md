@@ -63,6 +63,12 @@ endpoint sends no CORS headers and ordinary web pages can't use it.
    images in `store/screenshots/`, and submit for review.
 7. After approval, link the listing from the website's `/pest-identifier/`
    page.
+8. Edge Add-ons (Partner Center, free): upload the same zip; listing notes in
+   `store/listing.md`.
+9. Firefox Add-ons (needs a Mozilla account with two-step sign-in):
+   `node extensions/bug-identifier/scripts/package.mjs --firefox`, then upload
+   `dist/bug-identifier-firefox-<version>.zip`. Firefox has no side panel, so
+   that build shows the panel in the Firefox sidebar.
 
 ## Develop and test
 
@@ -80,4 +86,7 @@ endpoint sends no CORS headers and ordinary web pages can't use it.
 - Both scripts accept `CHROMIUM_PATH` to use a Chromium other than the one
   Playwright installed.
 - Release: bump `version` in `manifest.json`, run `scripts/package.mjs`, and
-  upload the zip as a new version.
+  upload the zip as a new version (and the `--firefox` zip to Firefox).
+- Firefox: build with `--firefox`, unzip it, then `about:debugging` → This
+  Firefox → Load Temporary Add-on → pick the unzipped `manifest.json`. The
+  toolbar button and both menu items open the sidebar.

@@ -19,13 +19,29 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-// The toolbar button opens the side panel.
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+// Chrome and Edge show panel.html in the side panel. Firefox has no sidePanel
+// API: its build declares panel.html as the sidebar (scripts/package.mjs), and
+// the toolbar button and the menu items open that sidebar instead.
+const firefoxSidebar = globalThis.browser?.sidebarAction;
+
+// The toolbar button opens the panel.
+if (chrome.sidePanel) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+} else if (firefoxSidebar) {
+  chrome.action.onClicked.addListener(() => {
+    firefoxSidebar.toggle().catch(() => {});
+  });
+}
+
+// Both open calls only work inside the user gesture, so call this before any await.
+function openPanel(tab) {
+  if (chrome.sidePanel) chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+  else if (firefoxSidebar) firefoxSidebar.open().catch(() => {});
+}
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (!tab || typeof tab.id !== 'number') return;
-  // sidePanel.open() only works inside the user gesture, so before any await.
-  chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+  openPanel(tab);
   if (info.menuItemId === MENU_IMAGE) identifyImage(info, tab);
   if (info.menuItemId === MENU_REGION) startRegionSelect(tab);
 });
