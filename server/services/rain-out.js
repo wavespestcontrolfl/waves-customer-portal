@@ -29,7 +29,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
-const { etParts, etDateString, deriveWindowEnd, dateOnlyString } = require('../utils/datetime-et');
+const { etParts, etDateString, deriveWindowEnd, dateOnlyString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { DAY_START_HOUR, DAY_END_HOUR } = require('./scheduling/find-time');
 const { arrivalWindowRange, formatSmsTimeRange, ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
@@ -821,6 +821,14 @@ async function loadServiceWithCustomer(serviceId) {
       'customers.latitude as customer_latitude',
       'customers.longitude as customer_longitude',
       'customers.id as cust_id',
+      // The customer-pick hand-off texts only an active, not archived customer.
+      'customers.active as customer_active',
+      'customers.deleted_at as customer_deleted_at',
+      // Auto-Dispatch's location rule (auto-dispatch/geo resolveGeo) reads the
+      // customer address under these names, as loadEligibleServices selects it.
+      'customers.address_line1 as customer_address_line1',
+      'customers.city as customer_city',
+      'customers.zip as customer_zip',
     )
     .first();
 }
@@ -1681,6 +1689,10 @@ async function getOptions(serviceId, { caller = null } = {}) {
     extraReasonsEnabled: extraReasonsEnabled(),
     customReasonEnabled: customReasonEnabled(),
     customCompose,
+    // "Let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): undefined
+    // while the gate is off, so the JSON payload carries no key and stays
+    // exactly as it was.
+    customerPick: await customerPickOffer(service),
   };
 }
 
@@ -2958,9 +2970,529 @@ function summarizeCommitResults(results) {
   };
 }
 
+// ── Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK) ──
+//
+// Owner approved 2026-11-01. Instead of a new time, the technician or the
+// office hands a recurring plan visit to its customer: the visit leaves
+// today's route (scheduled_date moves to the due date, today + 8 days ET, with
+// no window, and Auto-Dispatch's recurring_dispatch_due_date is that date),
+// and the customer gets ONE text with their /reschedule/:token link. They may
+// pick a route-fit time until customer_pick_by (8 PM ET tomorrow); until then
+// Auto-Dispatch skips the visit (migration 20261101163000). After it, the
+// 04:10 ET run books the visit in [due - 3, due + 3] from tomorrow, every day
+// of which is more than 72 hours out, so the existing 72-hour reminder still
+// tells the customer.
+//
+// Not commit(): commit() books a date AND a window, and the rebooker cannot
+// clear a window. Every check runs before anything is written, and a refusal
+// writes nothing: the visit never leaves the route unless its one text can go
+// out (opt-out and consent, the template row, the link and the 2-segment cap
+// are all judged first). A text that still fails after the write (a link
+// build or provider failure) leaves the visit handed off and says so
+// (textSent false + needsAttention), like a Quick Move whose moved-SMS did not
+// send.
+const PICK_TEMPLATE_KEY = 'rain_out_customer_pick_v1';
+const PICK_DUE_DAYS = 8;
+const PICK_BY_HOUR = 20;
+// en_route is live: it lands on 'confirmed' with its tracker lifecycle
+// rewound, as every live move does. on_site is not handed over.
+const PICK_STATUSES = new Set(['pending', 'confirmed', 'en_route']);
+// The one sentence the text drops when it is what bills a third segment.
+const PICK_OPTIONAL_TAIL = ' Questions? Reply here.';
+const PICK_LOG_REASON = 'customer_pick';
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function customerPickLive() {
+  return require('../config/feature-gates').quickMoveCustomerPickLive?.() === true;
+}
+
+// The preset reasons a hand-off may name: weather, or an extra reason while
+// GATE_QUICKMOVE_EXTRA_REASONS is on. Never 'custom' (the text has no slot for
+// the dispatcher's own words).
+function pickReasonCodes() {
+  return [...Object.keys(WEATHER_PHRASES), ...(extraReasonsEnabled() ? Object.keys(EXTRA_REASON_LEADS) : [])];
+}
+
+// dueDate: the ET date the visit is parked on; pickBy: 8 PM ET tomorrow, an instant.
+function pickDates(now = new Date()) {
+  return {
+    dueDate: etDateString(addETDays(now, PICK_DUE_DAYS)),
+    pickBy: parseETDateTime(`${etDateString(addETDays(now, 1))}T${pad2(PICK_BY_HOUR)}:00`),
+  };
+}
+
+// "Wed 8 PM": the ET short weekday and hour, built from etParts so the label
+// is plain GSM-7 whatever the runtime's Intl data puts before "PM".
+function pickByLabel(pickBy) {
+  const { dayOfWeek, hour } = etParts(pickBy);
+  return `${WEEKDAY_SHORT[dayOfWeek]} ${hour % 12 || 12} ${hour >= 12 ? 'PM' : 'AM'}`;
+}
+
+// pending and confirmed keep their status; a live visit lands on 'confirmed'.
+function pickLandedStatus(status) {
+  return status === 'en_route' ? 'confirmed' : status;
+}
+
+// The first visit rule the row fails, or null. Judged on the loaded row and
+// again on the locked row inside the write.
+function pickVisitRefusal(row, now) {
+  if (row.is_recurring !== true || !row.recurring_parent_id) return 'not_recurring_plan_visit';
+  if (row.visit_id) return 'grouped_stop';
+  if (!PICK_STATUSES.has(String(row.status))) return 'status_not_eligible';
+  if (dateOnlyString(row.scheduled_date) > etDateString(now)) return 'future_scheduled_date';
+  // The text promises Auto-Dispatch books the visit when the customer does not
+  // pick, and the hand-off keeps a staff lock or exclusion. Ask Auto-Dispatch's
+  // own hold rule about the row as the hand-off leaves it (confirmation cleared).
+  const { heldOutOfAutoDispatch } = require('./auto-dispatch/eligibility');
+  if (heldOutOfAutoDispatch({ ...row, customer_confirmed: false })) return 'auto_dispatch_held';
+  return null;
+}
+
+// The canonical send's own opt-out and consent verdict for this phone and
+// visit (send-customer-message check_suppression + check_consent_for_purpose:
+// STOP and non-mobile suppression, sms_enabled, the appointment flag and the
+// property's own toggles), read before anything moves. An unreadable verdict
+// refuses: the hand-off promises a text.
+async function pickTextRefusal(service) {
+  const { normalizeRecipient } = require('./messaging/send-customer-message');
+  const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
+  const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
+  const input = {
+    to: normalizeRecipient(service.phone),
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'appointment',
+    customerId: service.cust_id || service.customer_id,
+    appointmentId: String(service.id),
+  };
+  const policy = require('./messaging/policy').resolvePolicy(input.audience, input.purpose);
+  const state = await loadSuppressionState(input, await loadContactState(input));
+  // The send fails open on an unreadable suppression read; a check that takes
+  // the visit off the route must not (autopay-setup-link's preflight rule).
+  if (state.lookupFailed || state.suppressionLookupFailed) return 'text_check_failed';
+  for (const check of [checkSuppression, checkConsentForPurpose]) {
+    const verdict = await check(input, policy, state);
+    if (!verdict.ok) return /LOOKUP_FAILED$/.test(String(verdict.code || '')) ? 'text_check_failed' : 'customer_texts_off';
+  }
+  return null;
+}
+
+// The template row as it stands now: the one observation the pre-write
+// measurement and the send both render (customTemplateSnapshot's rule).
+// Null = absent or disabled (the ops kill switch).
+async function pickTemplateSnapshot() {
+  const row = await db('sms_templates').where({ template_key: PICK_TEMPLATE_KEY }).first('body', 'is_active');
+  return row && row.is_active !== false && row.body ? String(row.body) : null;
+}
+
+// A placeholder of the link's real length: the code of the visit's existing
+// short link (the one the send reuses) or of a fresh code's placeholder,
+// masked, so a measured body or a staff preview never carries a working link.
+function placeholderOfLength(url) {
+  return String(url).replace(/\/l\/([^/?#\s]+)$/, (_match, code) => `/l/${'x'.repeat(code.length)}`);
+}
+
+// Every check before the write except the reason's own text: the visit, the
+// customer, Auto-Dispatch's customer fallback (the fallback the text
+// promises), the office review, the text verdict, the template row and the
+// link. previewUrl is a placeholder of the link the send will use (the
+// visit's existing short code, or a fresh code's length); nothing is minted
+// here. Throws on a read failure (callers refuse).
+// The text promises Auto-Dispatch books the visit if the customer does not
+// pick. Null when its run could; else the refusal. Each check is Auto-Dispatch's
+// own rule (or the rebooker's, for the non-admin move it makes), asked about the
+// row as the hand-off leaves it: parked on the due date, with no window. The
+// staff lock and exclusion are pickVisitRefusal's (they are rechecked on the
+// locked row); the day-move guard and the person-placed check never hold a
+// windowless due-date row, and AUTO_DISPATCH_REQUIRE_PORTAL_PREFERENCES
+// already turns isCustomerRecurringDispatchEnabled() off.
+async function autoDispatchFallbackRefusal(service, now) {
+  const adConfig = require('./auto-dispatch/config');
+  if (!adConfig.isCustomerRecurringDispatchEnabled()) return 'auto_dispatch_off';
+  // No usable location: MISSING_GEO.
+  if (!require('./auto-dispatch/geo').resolveGeo(service)) return 'no_location';
+  // The parked date must be one the plan's calendar allows a non-admin mover:
+  // in season (OFF_SEASON) and inside the visit's own lawn round (OUT_OF_ROUND,
+  // measured from the date it sits on now, before the hand-off moves it).
+  const { dueDate } = pickDates(now);
+  if (require('./recurring-appointment-seeder').clampDateToSeason(service.recurring_pattern, dueDate) !== dueDate) return 'out_of_season';
+  if (SmartRebooker.leavesOwnRound(service.recurring_pattern, dateOnlyString(service.scheduled_date), dueDate, etDateString(now))) return 'out_of_round';
+  // An unresolved plan_lapsed alert: RECURRING_PLAN_INACTIVE (same read, same fail-open rule).
+  if (!(await require('./auto-dispatch/eligibility').isRecurringPlanActive(service, db)).active) return 'plan_lapsed';
+  // The automatic-move limit, counted from the durable log (fails closed).
+  const moveLimit = require('./auto-dispatch/move-limit');
+  const config = adConfig.getAutoDispatchConfig();
+  const counts = await moveLimit.loadMoveCounts(db, [service.id], config);
+  if (moveLimit.limitSkip(service, counts, config)) return counts ? 'auto_move_limit' : 'pick_check_failed';
+  return null;
+}
+
+async function pickContext(service, now) {
+  const refusal = pickVisitRefusal(service, now);
+  if (refusal) return { ok: false, reason: refusal };
+  // An active, not archived customer with a phone.
+  if (service.customer_active !== true || service.customer_deleted_at) return { ok: false, reason: 'customer_inactive' };
+  if (!service.phone) return { ok: false, reason: 'no_phone' };
+  const fallbackRefusal = await autoDispatchFallbackRefusal(service, now);
+  if (fallbackRefusal) return { ok: false, reason: fallbackRefusal };
+  // The landed row (confirmation cleared) must stay one the customer may see
+  // and move, or the link would open a refusal.
+  const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
+  if (isUnreviewedDispatchOwned({ ...service, status: pickLandedStatus(service.status), customer_confirmed: false })) {
+    return { ok: false, reason: 'office_review_pending' };
+  }
+  const textRefusal = await pickTextRefusal(service);
+  if (textRefusal) return { ok: false, reason: textRefusal };
+  const templateBody = await pickTemplateSnapshot();
+  if (!templateBody) return { ok: false, reason: 'pick_template_unavailable' };
+  const built = await buildRescheduleLink(service.id, {
+    customerId: service.cust_id || service.customer_id,
+    reuseExisting: true,
+    previewOnly: true,
+    assumeConfirmed: true,
+  });
+  if (built.failed) return { ok: false, reason: 'link_unavailable' };
+  if (!built.url) return { ok: false, reason: 'no_reschedule_link' };
+  return { ok: true, templateBody, previewUrl: placeholderOfLength(built.url) };
+}
+
+// The hand-off text for one reason, rendered from the template snapshot (base
+// row, noVariants; requiredVars from the shared map) with the given link and
+// the renderer's own GSM normalization and scheme strip. service_type is the
+// stored service name in the reminders' label form, catalog casing, never
+// lower-cased (owner ruling). The lead is the same-day wording: the weather or
+// the operational cause is today's.
+async function renderPickBody({ service, reasonCode, url, templateBody, now, pickBy }) {
+  const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
+  const { smsServiceLabelStored } = require('./appointment-reminders');
+  return renderSmsTemplate(PICK_TEMPLATE_KEY, {
+    first_name: service.first_name || 'there',
+    reason_lead: composeWeatherLead({ reasonCode, isSameDay: true, hour: etParts(now).hour }),
+    service_type: smsServiceLabelStored(service.service_type),
+    pick_url: url,
+    pick_by: pickByLabel(pickBy),
+  }, { workflow: 'tech_rain_out', entity_type: 'scheduled_service', entity_id: service.id }, {
+    noVariants: true,
+    requiredVars: REQUIRED_TEMPLATE_PLACEHOLDERS[PICK_TEMPLATE_KEY],
+    templateBody,
+  });
+}
+
+// The text held to MOVED_SMS_MAX_SEGMENTS as it sends: the rendered body, or
+// the body without its closing " Questions? Reply here." when that sentence
+// is what bills the third segment; null when neither fits.
+function fitPickBody(body) {
+  if (!body) return null;
+  if (measureAsSent(body).segmentCount <= MOVED_SMS_MAX_SEGMENTS) return body;
+  if (!body.endsWith(PICK_OPTIONAL_TAIL)) return null;
+  const shorter = body.slice(0, -PICK_OPTIONAL_TAIL.length);
+  return measureAsSent(shorter).segmentCount <= MOVED_SMS_MAX_SEGMENTS ? shorter : null;
+}
+
+// The pre-write verdict for one reason: the context checks, then the reason's
+// text, rendered with the preview link, must fit the cap and pass the send
+// guards. Never throws: a failed read refuses.
+async function preparePickText({ service, reasonCode, now, pickBy }) {
+  try {
+    const context = await pickContext(service, now);
+    if (!context.ok) return context;
+    const rendered = await renderPickBody({ service, reasonCode, url: context.previewUrl, templateBody: context.templateBody, now, pickBy });
+    const body = fitPickBody(rendered);
+    if (rendered && !body) return { ok: false, reason: 'pick_text_too_long' };
+    if (!body || customBodySendBlocked(body)) return { ok: false, reason: 'pick_text_unavailable' };
+    return { ok: true, templateBody: context.templateBody };
+  } catch (err) {
+    logger.warn(`[rain-out] customer-pick checks failed for ${service.id} — not handed off: ${err.message}`);
+    return { ok: false, reason: 'pick_check_failed' };
+  }
+}
+
+// True when the locked row is no longer the visit the checks judged: its date
+// or start moved, it left the fenced technician, it was filed under another
+// customer, or it stopped being eligible.
+function handOffStateChanged(locked, read, requireAssignedTechnicianId, now) {
+  if (!locked) return true;
+  if (dateOnlyString(locked.scheduled_date) !== dateOnlyString(read.scheduled_date)) return true;
+  if ((toHHMM(locked.window_start) || null) !== (toHHMM(read.window_start) || null)) return true;
+  if (String(locked.customer_id || '') !== String(read.customer_id || '')) return true;
+  if (requireAssignedTechnicianId && String(locked.technician_id || '') !== String(requireAssignedTechnicianId)) return true;
+  return !!pickVisitRefusal(locked, now);
+}
+
+// The move's own log row, shaped like rescheduleOnce's (slot and occurrence
+// scope frozen from the locked row). reschedule_log has no actor column; the
+// text's sms_log row carries the acting user.
+// The dispatch sheet's counter ("{remaining} left · 2-segment limit"): the
+// tightest preview wins — the segments its text costs and the room it leaves
+// under the 2-segment cap (same arithmetic as previewMovedSms).
+function tighterPickSegments(prev, body) {
+  const seg = measureAsSent(body);
+  const remaining = (seg.encoding === 'GSM_7' ? 153 : 67) * MOVED_SMS_MAX_SEGMENTS - usedCapacity(seg);
+  return prev && prev.remaining <= remaining ? prev : { count: seg.segmentCount, remaining };
+}
+
+function handOffLogRow(locked, dueDate, initiatedBy, reasonCode) {
+  return {
+    scheduled_service_id: locked.id,
+    customer_id: locked.customer_id,
+    original_date: locked.scheduled_date,
+    new_date: dueDate,
+    reason_code: PICK_LOG_REASON,
+    initiated_by: initiatedBy,
+    // The bare Quick Move reason (e.g. weather_rain): the customer's pick page
+    // reads it from here to word its "Moved for weather" / schedule heading.
+    notes: reasonCode,
+    original_window: locked.window_start ? `${locked.window_start}-${locked.window_end}` : null,
+    new_window: null,
+    occurrence_service_type: locked.service_type || null,
+    occurrence_service_id: locked.service_id || null,
+    occurrence_property_id: locked.property_id || null,
+  };
+}
+
+// The hand-off write: one transaction on the locked row. Returns
+// { ok: false, reason: 'state_changed' } with nothing written, or
+// { ok: true, locked, status, rewound }.
+async function writeHandOff({ service, dueDate, pickBy, initiatedBy, reasonCode, requireAssignedTechnicianId, now }) {
+  const { handoffFields } = require('./scheduling/plan-taken-hour');
+  const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
+  return db.transaction(async (trx) => {
+    const locked = await trx('scheduled_services').where({ id: service.id }).forUpdate().first();
+    if (handOffStateChanged(locked, service, requireAssignedTechnicianId, now)) return { ok: false, reason: 'state_changed' };
+    const status = pickLandedStatus(locked.status);
+    // Every date move rewinds a live or tracker-stamped row (rescheduleOnce's rule).
+    const rewound = SmartRebooker.needsLifecycleRewind(locked);
+    await trx('scheduled_services').where({ id: locked.id }).update({
+      ...handoffFields(dueDate),
+      scheduled_date: dueDate,
+      status,
+      // A confirmed visit is held out of Auto-Dispatch (eligibility CUSTOMER_CONFIRMED).
+      customer_confirmed: false,
+      confirmed_at: null,
+      customer_pick_by: pickBy,
+      ...(rewound ? SmartRebooker.LIVE_LIFECYCLE_RESET : {}),
+      // A this-visit-only date move of a cadence visit (see dateExceptionStamp).
+      ...SmartRebooker.dateExceptionStamp(locked, initiatedBy),
+      track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, dueDate, null),
+      updated_at: new Date(),
+    });
+    // The row just went windowless: pre-close its armed reminder in THIS
+    // transaction, or the sync trigger leaves it armed for the 08:00
+    // placeholder (the series sweep makes the same call).
+    await require('./appointment-reminders').precloseWindowlessReminderInTx(trx, locked.id);
+    if (status !== locked.status) await SmartRebooker.applyLiveMoveHistory(trx, locked);
+    await trx('reschedule_log').insert(handOffLogRow(locked, dueDate, initiatedBy, reasonCode));
+    // A flagged "not closed out" visit whose slot changes is rebooked
+    // (rescheduleOnce's rule; savepoint-confined, never blocks the write).
+    await require('./not-closed-out').resolveForService({ serviceId: locked.id, resolution: 'rebooked', resolvedBy: initiatedBy, trx });
+    return { ok: true, locked, status, rewound };
+  });
+}
+
+// What a staff move does once it commits (rescheduleOnce): release a
+// technician still pinned to a rewound visit and refresh its open tracker, and
+// tell the assigned technician the visit left the route (skipped for their own
+// hand-off). Best-effort: the hand-off already committed.
+async function afterHandOffCommit({ written, dueDate, actorUserId, initiatedBy }) {
+  const { locked, status, rewound } = written;
+  try {
+    if (rewound) {
+      await SmartRebooker.applyLiveMovePostCommitEffects(
+        { ...locked, scheduled_date: dueDate, window_start: null, window_end: null, status },
+        { toStatus: status },
+      );
+    }
+    if (locked.technician_id) {
+      void require('./tech-visit-notifications').notifyVisitRescheduled({
+        visitId: locked.id,
+        technicianId: locked.technician_id,
+        actorId: actorUserId || initiatedBy,
+        previous: { date: locked.scheduled_date, windowStart: locked.window_start, windowEnd: locked.window_end },
+        snapshot: { date: dueDate, windowStart: null, windowEnd: null },
+      });
+    }
+  } catch (err) {
+    logger.warn(`[rain-out] customer-pick follow-up effects failed for ${locked.id} (hand-off committed): ${err.message}`);
+  }
+}
+
+// The one hand-off text, sent like the moved-SMS (sendMovedSms): the visit's
+// link built on the LANDED row (reusing its short code; the dead-link guard
+// now applies), the snapshot rendered with it and held to the cap again, then
+// the canonical send. { sent: true } only for a real provider send.
+async function sendPickText({ service, reasonCode, templateBody, now, pickBy, actorUserId, operatorInitiated }) {
+  const customerId = service.cust_id || service.customer_id;
+  const built = await buildRescheduleLink(service.id, { customerId, reuseExisting: true });
+  if (!built.url) return { sent: false, reason: built.failed ? 'link_failed' : 'no_link' };
+  const body = fitPickBody(await renderPickBody({ service, reasonCode, url: built.url, templateBody, now, pickBy }));
+  if (!body) return { sent: false, reason: 'text_unavailable' };
+  const result = await sendCustomerMessage({
+    to: service.phone,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'appointment',
+    customerId,
+    appointmentId: String(service.id),
+    // A move hold another mover stamps stops this text as it stops the
+    // moved-SMS. The text quotes no slot, so there is no rendered slot to pin.
+    enforceMoveHold: true,
+    identityTrustLevel: 'phone_matches_customer',
+    // An operator's tap (sendMovedSms's send-window rule).
+    ...(operatorInitiated ? { operatorInitiated: true } : {}),
+    metadata: {
+      // The per-template kill-switch key (twilio.js) and the row that rendered.
+      original_message_type: PICK_TEMPLATE_KEY,
+      reason_code: reasonCode,
+      ...(actorUserId ? { adminUserId: actorUserId } : {}),
+      templateKey: PICK_TEMPLATE_KEY,
+    },
+  });
+  if (result?.blocked || result?.sent === false) return { sent: false, reason: result.code || result.reason || 'blocked' };
+  if (!isRealProviderSend(result)) return { sent: false, reason: result?.providerMessageId || 'send_suppressed' };
+  return { sent: true };
+}
+
+// The sheets' reading of a hand-off: Quick Move's commit summary for the one
+// moved stop (lib/quickMoveResult.js reads "customer NOT texted" from it as
+// for any Quick Move) plus the hand-off's own fields. qualityDates: both days
+// for the routes' one route-quality flush.
+function handOffResult({ locked, dueDate, pickBy, text }) {
+  const textSent = text.sent === true;
+  const smsReason = textSent ? null : text.reason;
+  return {
+    ok: true,
+    dueDate,
+    pickBy: pickBy.toISOString(),
+    pickByLabel: pickByLabel(pickBy),
+    textSent,
+    needsAttention: textSent ? [] : [{
+      id: locked.id, code: 'CUSTOMER_NOT_TEXTED', message: 'Customer not texted — follow up manually', reason: smsReason,
+    }],
+    qualityDates: [dateOnlyString(locked.scheduled_date), dueDate].filter(Boolean),
+    movedCount: 1,
+    coveredCount: 0,
+    failedCount: 0,
+    overlapCount: 0,
+    overlapWarnings: [],
+    results: [{ id: locked.id, ok: true, newDate: dueDate, newWindow: null, smsSent: textSent, smsReason }],
+  };
+}
+
+/**
+ * Hand a recurring plan visit to its customer (see the section header).
+ *
+ * @param {object} args
+ * @param {string} args.serviceId
+ * @param {string} args.reasonCode  weather_* | an extra reason while GATE_QUICKMOVE_EXTRA_REASONS is on
+ * @param {string} [args.initiatedBy='tech']  'tech' (tech app) | 'admin' (dispatch), for the audit rows
+ * @param {string} [args.actorUserId]  stamped as the text's adminUserId
+ * @param {string} [args.requireAssignedTechnicianId]  a technician caller: the write is fenced to them
+ * @param {boolean} [args.operatorInitiated=false]  send-window exemption (authenticated routes only)
+ * @returns {Promise<object>} { ok: false, reason } with nothing written, or handOffResult's shape.
+ */
+// What both customer-pick routes answer for a refused hand-off (nothing was
+// written): the sheet shows `error`; `reason` stays the machine code.
+const PICK_REFUSAL_COPY = {
+  not_found: 'Visit not found.',
+  disabled: 'disabled',
+  bad_reason: 'Pick a weather or schedule reason to hand this visit off.',
+  not_recurring_plan_visit: 'Only recurring plan visits can be handed to the customer.',
+  grouped_stop: 'This stop is grouped with another visit, so the customer cannot pick a day for it.',
+  status_not_eligible: 'This visit can no longer be handed off.',
+  future_scheduled_date: "Quick Move applies to today's route.",
+  auto_dispatch_held: 'This visit is locked or excluded from Auto-Dispatch, so nothing would book it if the customer does not pick.',
+  customer_inactive: 'This customer is not active.',
+  no_phone: 'There is no phone number to text.',
+  auto_dispatch_off: 'Auto-Dispatch is off, so nothing would book this visit if the customer does not pick.',
+  no_location: 'This visit has no map location, so Auto-Dispatch could not book it if the customer does not pick.',
+  plan_lapsed: 'This plan has lapsed, so Auto-Dispatch would not book this visit if the customer does not pick.',
+  out_of_season: 'A week from now is outside this seasonal plan, so pick a day yourself.',
+  out_of_round: 'A week from now is outside this lawn round, so pick a day yourself.',
+  auto_move_limit: 'Auto-Dispatch already moved this visit as many times as it may, so pick a day yourself.',
+  office_review_pending: 'This booking is waiting for office review.',
+  customer_texts_off: 'This customer does not get texts.',
+  text_check_failed: 'Could not check whether this customer gets texts. Try again.',
+  pick_template_unavailable: 'The pick-a-day text is turned off.',
+  pick_text_unavailable: 'The pick-a-day text could not be written for this visit.',
+  pick_text_too_long: 'The pick-a-day text is too long for this service name.',
+  no_reschedule_link: 'Could not make the pick link. Try again.',
+  link_unavailable: 'Could not make the pick link. Try again.',
+  pick_check_failed: 'Could not check this visit. Try again.',
+  state_changed: 'This visit changed. Refresh and try again.',
+};
+
+function pickRefusalResponse(reason) {
+  const status = ['not_found', 'disabled'].includes(reason) ? 404 : reason === 'bad_reason' ? 400 : 409;
+  return { status, body: { error: PICK_REFUSAL_COPY[reason] || 'This visit cannot be handed off.', reason } };
+}
+
+async function handOffToCustomer({ serviceId, reasonCode, initiatedBy = 'tech', actorUserId = null, requireAssignedTechnicianId = null, operatorInitiated = false } = {}) {
+  if (!customerPickLive()) return { ok: false, reason: 'disabled' };
+  if (!pickReasonCodes().includes(reasonCode)) return { ok: false, reason: 'bad_reason' };
+  const service = await loadServiceWithCustomer(serviceId);
+  if (!service) return { ok: false, reason: 'not_found' };
+  const now = new Date();
+  const { dueDate, pickBy } = pickDates(now);
+  const prepared = await preparePickText({ service, reasonCode, now, pickBy });
+  if (!prepared.ok) return prepared;
+  const written = await writeHandOff({ service, dueDate, pickBy, initiatedBy, reasonCode, requireAssignedTechnicianId, now });
+  if (!written.ok) return written;
+  await afterHandOffCommit({ written, dueDate, actorUserId, initiatedBy });
+  let text;
+  try {
+    text = await sendPickText({
+      service, reasonCode, templateBody: prepared.templateBody, now, pickBy, actorUserId, operatorInitiated,
+    });
+  } catch (err) {
+    logger.warn(`[rain-out] customer-pick text failed for ${service.id} (hand-off committed): ${err.message}`);
+    text = { sent: false, reason: 'send_failed' };
+  }
+  return handOffResult({ locked: written.locked, dueDate, pickBy, text });
+}
+
+// The sheets' offer (getOptions, and the options refusal of a technician
+// whose switch is off): whether this visit can be handed to its customer, the
+// deadline, and the exact text per preset reason with the link the hand-off
+// measures. undefined while the gate is off. Never throws: a failed check
+// reads as unavailable.
+async function customerPickOffer(serviceOrId, now = new Date()) {
+  if (!customerPickLive()) return undefined;
+  const { pickBy } = pickDates(now);
+  const offer = {
+    available: false, unavailableReason: null, pickBy: pickBy.toISOString(), pickByLabel: pickByLabel(pickBy),
+    previewByReason: {}, segments: null,
+  };
+  let failure = 'pick_text_unavailable';
+  try {
+    const service = serviceOrId && typeof serviceOrId === 'object' ? serviceOrId : await loadServiceWithCustomer(serviceOrId);
+    const context = service ? await pickContext(service, now) : { ok: false, reason: 'not_found' };
+    if (!context.ok) return { ...offer, unavailableReason: context.reason };
+    for (const reasonCode of pickReasonCodes()) {
+      const rendered = await renderPickBody({ service, reasonCode, url: context.previewUrl, templateBody: context.templateBody, now, pickBy });
+      // A render failure is the template row's (every reason fails alike): one audit row, not one per reason.
+      if (!rendered) break;
+      const body = fitPickBody(rendered);
+      if (!body) failure = 'pick_text_too_long';
+      if (!body || customBodySendBlocked(body)) continue;
+      offer.previewByReason[reasonCode] = body;
+      offer.segments = tighterPickSegments(offer.segments, body);
+    }
+  } catch (err) {
+    logger.warn(`[rain-out] customer-pick offer failed for ${serviceOrId?.id || serviceOrId}: ${err.message}`);
+    return { ...offer, unavailableReason: 'pick_check_failed' };
+  }
+  const available = Object.keys(offer.previewByReason).length > 0;
+  return { ...offer, available, unavailableReason: available ? null : failure };
+}
+
 module.exports = {
   getOptions,
   commit,
+  // Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK).
+  handOffToCustomer,
+  pickRefusalResponse,
+  customerPickOffer,
   previewMovedSms,
   checkTarget,
   checkSlots,
@@ -2977,5 +3509,6 @@ module.exports = {
     EXTRA_REASON_LEADS, GATE_ACCESS_CLAUSE, isValidReason, sanitizeCustomerNote,
     CUSTOM_REASON, CUSTOM_TEMPLATE_KEY, customLinkClause, renderCustomMovedBody,
     conflictsForTarget,
+    pickDates, pickByLabel,
   },
 };

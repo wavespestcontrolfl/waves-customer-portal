@@ -36,7 +36,7 @@ const multer = require('multer');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
-const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
+const { techMoveRefusal, moveRefusalBody } = require('../services/scheduling/tech-move-permission');
 const config = require('../config');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
@@ -656,10 +656,11 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
-    // why, not move choices the commit would refuse.
+    // why, not move choices the commit would refuse (plus the customer-pick
+    // offer while GATE_QUICKMOVE_CUSTOMER_PICK is on).
     {
       const refusal = await techMoveRefusal(req);
-      if (refusal) return res.status(refusal.status).json(refusal.payload);
+      if (refusal) return res.status(refusal.status).json(await moveRefusalBody(refusal, req.params.id));
     }
 
     // Stale-tap guard — same as /en-route and /on-site: a job dispatch
@@ -814,6 +815,76 @@ router.post('/:id/rain-out', async (req, res, next) => {
       `[tech-track] rain-out service=${req.params.id} tech=${req.technicianId} ` +
       `scope=${scope === 'route' ? 'route' : 'job'} moved=${result.movedCount} failed=${result.failedCount}`
     );
+    return res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/tech/services/:id/customer-pick
+// body: { reasonCode }
+// Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK, owner
+// 2026-11-01): the visit leaves today's route and the customer gets one text
+// with their reschedule link (services/rain-out.js handOffToCustomer). Same
+// ownership and stale-tap checks as POST /:id/rain-out; a technician whose
+// "Can move visits" switch is off may use this option only.
+router.post('/:id/customer-pick', async (req, res, next) => {
+  try {
+    if (require('../config/feature-gates').quickMoveCustomerPickLive?.() !== true) {
+      return res.status(404).json({ error: 'disabled' });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'technician_id', 'status', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (!ownsTrackedVisit(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    {
+      const refusal = await techMoveRefusal(req, { mode: 'customer_pick' });
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
+    }
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: 'This job has been rescheduled to a future date. Refresh your route.',
+        code: 'future_scheduled_date',
+      });
+    }
+
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.handOffToCustomer({
+      serviceId: req.params.id,
+      reasonCode: req.body?.reasonCode,
+      initiatedBy: 'tech',
+      actorUserId: req.technicianId,
+      // Fences the write itself to this technician (a reassignment after the
+      // ownership read above makes the hand-off refuse with nothing written).
+      requireAssignedTechnicianId: req.technicianId,
+      // An authenticated tap: the text is exempt from the send window.
+      operatorInitiated: true,
+    });
+    if (!result.ok) {
+      // Every refusal wrote nothing. 409 = the visit's state, not the request.
+      const refused = RainOut.pickRefusalResponse(result.reason);
+      return res.status(refused.status).json(refused.body);
+    }
+
+    // Re-render other open Dispatch Boards and refresh both days' route
+    // quality once, as the rain-out route does. Best-effort: committed.
+    const dispatchAssignment = require('../services/dispatch-assignment');
+    const qualityDates = new Set(result.qualityDates);
+    try {
+      await dispatchAssignment.emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId, qualityDates });
+    } catch (err) {
+      logger.error(`[tech-track] customer-pick board broadcast failed for ${req.params.id}: ${err.message}`);
+    }
+    try {
+      await dispatchAssignment.flushDispatchQualityDates(qualityDates);
+    } catch (err) {
+      logger.error(`[tech-track] customer-pick route quality refresh failed: ${err.message}`);
+    }
+
+    logger.info(`[tech-track] customer-pick service=${req.params.id} tech=${req.technicianId} due=${result.dueDate} texted=${result.textSent}`);
     return res.json(result);
   } catch (err) {
     next(err);

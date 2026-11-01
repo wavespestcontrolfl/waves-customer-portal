@@ -768,6 +768,18 @@ async function recordFailedSeriesMove(fields, err) {
   }
 }
 
+// Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): a
+// staff or customer move that GIVES a handed-off visit a time ends the hand-off.
+// A move that leaves it with no window (a date-only move, or a series sweep that
+// keeps a sibling windowless) chose no time: the hand-off stands, so its texted
+// link and the Auto-Dispatch wait keep working. An Auto-Dispatch placement keeps
+// the marker so the later 72-hour reminder can tell the customer the visit was
+// booked for them. Not gated: a row without the marker adds nothing.
+function customerPickEnd(row, initiatedBy, landedWindowStart) {
+  return row && row.customer_pick_by && initiatedBy !== 'auto_dispatch' && landedWindowStart
+    ? { customer_pick_by: null } : {};
+}
+
 // Tracker-lifecycle rewind applied when a live job is force-rescheduled.
 // track_state returns to 'scheduled' so En Route can fire again on the
 // new day, track_sms_sent_at clears so the en-route SMS re-sends, and
@@ -2001,6 +2013,7 @@ class SmartRebooker {
       // A this-visit-only DATE move of a cadence visit is a deliberate
       // exception to the series — see dateExceptionStamp.
       ...(!sameDayTarget ? dateExceptionStamp(service, initiatedBy) : {}),
+      ...customerPickEnd(service, initiatedBy, win.start || service.window_start),
     };
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
       updates.technician_id = options.technicianId;
@@ -3094,6 +3107,8 @@ class SmartRebooker {
           // Undo snapshot + exception handling (SERIES_MOVE_SNAPSHOT_COLUMNS).
           'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'recurring_dispatch_due_date', 'updated_at',
           'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
+          // Quick Move customer-pick hand-off marker (customerPickEnd below).
+          'customer_pick_by',
           // The size rule (datesMoveSeries) judges the anchor on this locked read.
           'recurring_pattern',
           // Feeds the duration-aware occupancy fallbacks below.
@@ -4054,6 +4069,7 @@ class SmartRebooker {
           ...(isAnchor && options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
           updated_at: trx.fn.now(),
           ...exceptionUpdate,
+          ...customerPickEnd(sib, initiatedBy, occurrenceWindow.start),
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
           // Day change invalidates the row's route sequence — clear it so the
           // destination day appends the stop (consumers sort NULLs last).

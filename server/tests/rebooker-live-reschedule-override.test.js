@@ -288,6 +288,43 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(mockIoEmit).not.toHaveBeenCalled();
   });
 
+  // Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): a staff or customer
+  // move ends the hand-off; an Auto-Dispatch placement keeps the marker (the 72-hour reminder
+  // wording needs it); a row without the marker adds no column to the write.
+  test.each([
+    ['admin', true],
+    ['customer_self_serve', true],
+    ['auto_dispatch', false],
+  ])('a %s move of a handed-off visit clears customer_pick_by: %s', async (initiatedBy, clears) => {
+    const { updateQuery } = wireRescheduleMocks({ ...liveService('confirmed'), customer_pick_by: new Date('2099-01-02T01:00:00Z') });
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', initiatedBy,
+      { allowLive: true, seriesPolicy: 'single' },
+    );
+    const payload = updateQuery.update.mock.calls[0][0];
+    if (clears) expect(payload).toHaveProperty('customer_pick_by', null);
+    else expect(payload).not.toHaveProperty('customer_pick_by');
+  });
+
+  test('a date-only move that leaves a handed-off visit with no time keeps the hand-off (codex #7368 r4)', async () => {
+    const { updateQuery } = wireRescheduleMocks({
+      ...liveService('pending'), window_start: null, window_end: null, customer_pick_by: new Date('2099-01-02T01:00:00Z'),
+    });
+    await SmartRebooker.reschedule('svc-1', TARGET, null, 'customer_request', 'admin', { allowLive: true, seriesPolicy: 'single' });
+    const payload = updateQuery.update.mock.calls[0][0];
+    expect(payload).toMatchObject({ scheduled_date: TARGET, window_start: null });
+    expect(payload).not.toHaveProperty('customer_pick_by');
+  });
+
+  test('a move of a visit with no hand-off marker writes no customer_pick_by column', async () => {
+    const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
+      { allowLive: true },
+    );
+    expect(updateQuery.update.mock.calls[0][0]).not.toHaveProperty('customer_pick_by');
+  });
+
   // Same-day elapsed-window guard (shared datetime-et.sameDayWindowElapsed).
   // A move to TODAY whose effective window already passed in ET is as
   // unreachable as a past date — it must 409 before any DB write. A move to
@@ -634,6 +671,28 @@ describe('live-status reschedule override (allowLive)', () => {
 
     return { updates, historyInsert, logInsert, siblingsQuery, escalationCount };
   }
+
+  test('a series sweep keeps the hand-off on a sibling it leaves windowless, and ends it on a timed anchor (codex #7368 r4)', async () => {
+    const marker = new Date('2099-01-02T01:00:00Z');
+    const { updates } = wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00', customer_pick_by: marker },
+      { id: 'svc-2', status: 'pending', scheduled_date: SIB1, window_start: null, window_end: null, customer_pick_by: marker },
+      { id: 'svc-3', status: 'confirmed', scheduled_date: SIB2, window_start: '09:00:00', window_end: '11:00:00' },
+    ]);
+
+    const result = await SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin', { allowLive: true },
+    );
+
+    expect(result.success).toBe(true);
+    // The anchor lands on a real time: the hand-off ends.
+    expect(updates[0].update.mock.calls[0][0]).toHaveProperty('customer_pick_by', null);
+    // The swept sibling stays windowless: still waiting for the customer's pick.
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: null });
+    expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('customer_pick_by');
+    // A sibling never handed off gets no column.
+    expect(updates[2].update.mock.calls[0][0]).not.toHaveProperty('customer_pick_by');
+  });
 
   test('collapsed weekend shifts dedupe — a daily cadence re-anchored Friday never doubles Monday (B6)', async () => {
     // Relative dates: next Friday at least 3 weeks out. A 1-day cadence

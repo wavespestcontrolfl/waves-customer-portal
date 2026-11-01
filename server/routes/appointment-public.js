@@ -54,7 +54,7 @@ const {
   ARRIVAL_WINDOW_MINUTES,
 } = require('../utils/sms-time-format');
 const { calendarIcsAvailable, groupedStopEndsAt, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
-const { visitInsideMoveNoticeWindow } = require('../services/scheduling/self-serve-notice');
+const { visitInsideMoveNoticeWindow, awaitingCustomerPick, AWAITING_PICK_REFUSAL } = require('../services/scheduling/self-serve-notice');
 const { visitTimeElapsed } = require('../services/reschedule-eligibility');
 const visitPrep = require('../services/visit-prep');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
@@ -243,7 +243,7 @@ async function loadByToken(token, conn = db) {
       's.id', 's.customer_id', 's.technician_id', 's.status', 's.scheduled_date',
       's.window_start', 's.window_end', 's.service_type', 's.is_recurring',
       's.recurring_parent_id', 's.recurring_pattern', 's.reschedule_token', 's.visit_id',
-      's.source_action', 's.customer_confirmed', 's.property_id', 's.office_move_approved_for',
+      's.source_action', 's.customer_confirmed', 's.property_id', 's.office_move_approved_for', 's.customer_pick_by',
       // c.first_name is deliberately NOT selected — see the payload comment:
       // this token is shared with whoever the notification reached, so the
       // account holder's name must not travel with it.
@@ -774,7 +774,8 @@ router.get('/:token', async (req, res, next) => {
       // the shown slot).
       // An inactive/cancelled account is read-only through this token too
       // (the POST refuses; the button must not render into that 409).
-      confirmable: svc.customer_active === true && (visitInfo.visit
+      // Never for a visit waiting for the customer's pick (no time yet).
+      confirmable: svc.customer_active === true && !awaitingCustomerPick(svc) && (visitInfo.visit
         ? (visitInfo.visit.anyConfirmable && ['pending', 'confirmed'].includes(String(svc.status).toLowerCase()) && !dispatchOwnedUnreviewed(svc))
         : (String(svc.status).toLowerCase() === 'pending' && !dispatchOwnedUnreviewed(svc))),
       tech: svc.technician_id
@@ -938,6 +939,12 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         code: 'NOT_CONFIRMABLE',
       });
     }
+    // A visit Quick Move handed to the customer has a placeholder date and no
+    // time: it is picked through the reschedule link, never confirmed (a
+    // confirmation would hold it out of the Auto-Dispatch booking its text
+    // promised). The CAS below pins the date and start it read, so a hand-off
+    // landing after this read misses there.
+    if (awaitingCustomerPick(svc)) return res.status(409).json(AWAITING_PICK_REFUSAL);
 
     // Grouped: the STOP's state (all members + the stop's window), same
     // derivation as the page; an unreadable membership is not confirmable.

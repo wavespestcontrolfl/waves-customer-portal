@@ -75,7 +75,7 @@ const { runAutoDispatch, _internals } = require('../services/auto-dispatch');
 function buildChain(result) {
   const chain = {};
   const methods = ['leftJoin', 'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
-    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy', 'update'];
+    'orWhere', 'orWhereNull', 'orWhereNotNull', 'orWhereRaw', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy', 'update'];
   methods.forEach((m) => { chain[m] = (...args) => { args.forEach((a) => { if (typeof a === 'function') a.call(chain); }); return chain; }; });
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return chain;

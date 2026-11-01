@@ -127,6 +127,13 @@ function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
       this.where('scheduled_services.auto_dispatch_excluded', false)
         .orWhereNull('scheduled_services.auto_dispatch_excluded');
     })
+    // Quick Move "let the customer pick a day": a visit handed to the customer
+    // waits until their pick-by instant passes (customer_pick_by, migration
+    // 20261101163000). NULL = never handed over, so every other row is unchanged.
+    .where(function () {
+      this.whereNull('scheduled_services.customer_pick_by')
+        .orWhereRaw('scheduled_services.customer_pick_by <= now()');
+    })
     .select(
       'scheduled_services.*',
       'customers.active as customer_active',
