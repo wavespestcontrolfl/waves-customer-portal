@@ -6183,7 +6183,8 @@ router.get('/:serviceId/series-move-preview', async (req, res, next) => {
     const newDate = validScheduleDate(req.query.newDate);
     if (!newDate) return res.status(400).json({ error: 'newDate must be a valid upcoming YYYY-MM-DD date' });
     const preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
-    res.json({ ...preview, enabled: collectiveMoveGateOn() });
+    // A lawn rounds one-off (size rule) is a single move: nothing to disclose.
+    res.json({ ...preview, enabled: collectiveMoveGateOn() && preview.oneOff !== true });
   } catch (err) {
     if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -6269,6 +6270,15 @@ function planShownStop(expectVisit, rescheduleOptions) {
 // series under the collective gate, so the request must carry the operator's
 // acknowledgement of the previewed occurrence set. Answers a refusal, or null.
 async function requireSeriesMoveAck({ serviceId, newDate, body, actor, rescheduleOptions }) {
+  const preview = await Promise.resolve().then(() => SmartRebooker.previewSeriesMove(serviceId, newDate)).catch(() => null);
+  // Size rule (lawn_rounds_9 one-off): this move shifts nothing, so no acknowledgement is owed.
+  if (preview?.oneOff) {
+    // The rebooker judges the same decision on the row it moves and refuses (SCOPE_CHANGED) if the plan changed since.
+    rescheduleOptions.expectScope = 'single';
+    return null;
+  }
+  // A REAL series move is admin-only. (A one-off above never reaches the series, so a technician's own
+  // one-off takes the ordinary technician-authorized single path.)
   // Blast-radius: under this gate, a date-changing move on an
   // ungrouped recurring anchor widens to every future occurrence
   // exactly like an explicit scope='series' request — a technician
@@ -6277,12 +6287,6 @@ async function requireSeriesMoveAck({ serviceId, newDate, body, actor, reschedul
   // was the one path this route's admin-only series check missed).
   if (actor.techRole !== 'admin') {
     return moveReply(403, { error: 'Admin access required for this action', code: 'admin_required' });
-  }
-  let preview = null;
-  try {
-    preview = await SmartRebooker.previewSeriesMove(serviceId, newDate);
-  } catch {
-    preview = null;
   }
   // Bound to the previewed OCCURRENCE SET (seriesAckIds), never a count.
   const ids = Array.isArray(body.seriesAckIds) ? body.seriesAckIds.map(String) : null;
@@ -6295,10 +6299,11 @@ async function requireSeriesMoveAck({ serviceId, newDate, body, actor, reschedul
         ? `The recurring plan changed since the preview — it now moves ${Math.max((preview?.movableCount || 1) - 1, 0)} later visit(s) (a different set). Review the refreshed preview and confirm again.`
         : `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Use Reschedule series, or confirm the series move.`,
       code: 'COLLECTIVE_MOVE_ACK_REQUIRED',
-      preview: preview || null,
+      preview,
     });
   }
   rescheduleOptions.expectOccurrenceIds = preview.occurrenceIds.map(String);
+  rescheduleOptions.expectScope = 'series';
   return null;
 }
 

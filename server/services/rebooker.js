@@ -237,7 +237,7 @@ function assertConflictSnapshot(actual, options) {
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
 // Lawn 9x rounds (owner 2026-10-28): one visit in each of nine fixed rounds a
 // year. A rescheduled round visit stays inside its own round.
-const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOf, roundOrdinal } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOf, roundOrdinal, roundsRowMoveIsOneOff, datesMoveSeries } = require('./lawn-rounds');
 const { clearOfBlackout } = require('./scheduling/blackout-nudge');
 
 // Series sibling-projection clash horizon (rescheduleSeries): a shifted
@@ -341,6 +341,29 @@ function collectiveMoveGateOn() {
   return process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true';
 }
 
+// The ONE decision "this move of this row is a series move": the collective
+// gate is on, the row is a cadence visit, and the move is not a lawn rounds
+// one-off (size rule, owner 2026-10-31: 7 days or fewer inside the round,
+// measured from the regular date). Every staff and tool surface that moves,
+// previews or acknowledges a date move asks this, so they agree by
+// construction. A row that lacks recurring_pattern is never a one-off (series,
+// as before). A same-date target is not a one-off either: the caller keeps its
+// own date-change test, and the choke point must still reach a series retry's
+// replay.
+function movesAsSeries(row, newDate) {
+  return collectiveMoveGateOn() && row?.is_recurring === true && !roundsRowMoveIsOneOff(row, newDate);
+}
+
+// options.expectScope ('single' | 'series'): the scope a caller showed or decided before it called the rebooker. The
+// rebooker judges the same decision (movesAsSeries) on the row it moves; a different answer means the plan changed
+// under the caller (a series re-anchor moved a date exception's cadence date, the gate flipped), so nothing moves.
+// Pass it only with a DATE change. Same shape as the public reschedule page's pin.
+function scopeChangedError() {
+  return Object.assign(new Error('The scheduling details for your plan just updated — please review the latest options.'), {
+    statusCode: 409, isOperational: true, code: 'SCOPE_CHANGED',
+  });
+}
+
 // GATE_SERIES_MOVE_CARRIES_VISIT (owner ruling 2026-10-01: a pest visit riding
 // a lawn visit is ONE appointment — when either moves, both move). When true
 // for this caller, a series sweep that reaches an occurrence sitting in a
@@ -418,6 +441,13 @@ function dateExceptionStamp(row, source) {
       ? dateOnly(row.date_exception_cadence_date)
       : dateOnly(row.scheduled_date),
   };
+}
+// The stamp for a this-visit-only DATE move that a caller writes itself, outside the rebooker (Edit modal, bulk move,
+// Intelligence Bar). That caller decided "single"; judged on the row it holds (locked or CAS-pinned), a move the rebooker
+// would run as a series move is refused with SCOPE_CHANGED instead of silently shifting nothing. Date-changing moves only.
+function singleMoveStamp(row, newDate, source) {
+  if (movesAsSeries(row, newDate)) throw scopeChangedError();
+  return dateExceptionStamp(row, source);
 }
 const DATE_EXCEPTION_CLEAR = {
   date_exception: false, date_exception_source: null, date_exception_at: null, date_exception_cadence_date: null,
@@ -785,8 +815,16 @@ const TRACK_CAS_TIMESTAMP_COLUMNS = [
   'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
   'track_sms_sent_at', 'arrival_sms_sent_at',
 ];
+// It also pins the size-rule inputs (pattern, date exception, its cadence date) of a row that carries them: the
+// single-versus-series decision (movesAsSeries) was made on the observed row, so a series re-anchor that changed them
+// since makes the write miss and surface the concurrent-change conflict. Every direct mover shares this CAS.
+const SIZE_RULE_CAS_COLUMNS = ['recurring_pattern', 'date_exception', 'date_exception_cadence_date'];
 function applyTrackLifecycleCas(query, row = {}) {
-  query.where({ track_state: row.track_state ?? null });
+  query.where({
+    track_state: row.track_state ?? null,
+    ...Object.fromEntries(SIZE_RULE_CAS_COLUMNS.filter((col) => col in row)
+      .map((col) => [col, col === 'date_exception_cadence_date' ? dateOnly(row[col]) : row[col] ?? null])),
+  });
   for (const col of TRACK_CAS_TIMESTAMP_COLUMNS) {
     const value = row[col];
     if (value == null) {
@@ -1768,8 +1806,9 @@ class SmartRebooker {
     // (soloVisitRecheck below); a visit that gained a member re-enters
     // through the unit mover.
     let soloVisitRecheck = false;
+    if (options.expectScope && (options.expectScope === 'series') !== movesAsSeries(service, newDate)) throw scopeChangedError();
     if (options.visitPolicy !== 'single' && service.visit_id
-      && options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
+      && options.seriesPolicy !== 'single' && movesAsSeries(service, newDate)) {
       // A retry of a series carry that already COMMITTED (the stop keeps its
       // visit) replays before the unit mover's eligibility checks — a visit
       // that froze since must not turn a committed move into a refusal and
@@ -1812,7 +1851,9 @@ class SmartRebooker {
     // an explicit single-row member move, keeps its own contract.
     const membershipFenced = options.visitPolicy !== 'single' && !service.visit_id
       && !Object.prototype.hasOwnProperty.call(options.expect || {}, 'visit_id');
-    if (options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
+    // Size rule (owner 2026-10-31, lawn_rounds_9 only): a one-off date move falls through to the
+    // single path below, which keeps the OUT_OF_ROUND guard (see movesAsSeries).
+    if (options.seriesPolicy !== 'single' && movesAsSeries(service, newDate)) {
       // A retry of a series move that already committed finds the anchor ON
       // the target (no date delta) — resolve the prior move by request
       // identity BEFORE branching on the anchor's mutable date, so the
@@ -3053,6 +3094,8 @@ class SmartRebooker {
           // Undo snapshot + exception handling (SERIES_MOVE_SNAPSHOT_COLUMNS).
           'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'recurring_dispatch_due_date', 'updated_at',
           'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
+          // The size rule (datesMoveSeries) judges the anchor on this locked read.
+          'recurring_pattern',
           // Feeds the duration-aware occupancy fallbacks below.
           'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'customer_confirmed',
           // Rewind evidence for needsLifecycleRewind below — a pending
@@ -3110,16 +3153,10 @@ class SmartRebooker {
       // caller re-reads and re-decides instead of shifting a series the
       // customer no longer qualified to shift. Judged on the LOCKED read.
       const assertAnchorPin = (anchorRow) => {
-        if (!options.expectAnchor) return;
-        const norm = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10));
+        const pin = options.expectAnchor || {};
         const hm = (t) => (t ? String(t).slice(0, 5) : null);
-        const expDate = norm(options.expectAnchor.scheduled_date);
-        const expStart = hm(options.expectAnchor.window_start);
-        const has = (col) => Object.prototype.hasOwnProperty.call(options.expectAnchor, col);
-        const expEnd = has('window_end') ? hm(options.expectAnchor.window_end) : undefined;
-        const expDuration = has('estimated_duration_minutes')
-          ? (options.expectAnchor.estimated_duration_minutes ?? null)
-          : undefined;
+        const expDate = dateOnly(pin.scheduled_date);
+        const has = (col) => Object.prototype.hasOwnProperty.call(pin, col);
         // Presence-based for the window: a pinned NULL start (windowless
         // anchor at planning time) must fail the fence if a window was
         // added meanwhile, exactly like a pinned start that changed.
@@ -3127,18 +3164,20 @@ class SmartRebooker {
         // anchor to the technician whose request it is, judged on the LOCKED
         // read — a reassignment that landed after the caller's ownership
         // check refuses the series move like any other concurrent change.
-        const expTech = has('technician_id') ? String(options.expectAnchor.technician_id || '') : undefined;
-        if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
-          || (expTech !== undefined && String(anchorRow.technician_id || '') !== expTech)
-          || (has('window_start') && hm(anchorRow.window_start) !== expStart)
-          || (expEnd !== undefined && hm(anchorRow.window_end) !== expEnd)
-          || (expDuration !== undefined && (anchorRow.estimated_duration_minutes ?? null) !== expDuration)) {
+        if ((expDate && dateOnly(anchorRow.scheduled_date) !== expDate)
+          || (has('technician_id') && String(anchorRow.technician_id || '') !== String(pin.technician_id || ''))
+          || (has('window_start') && hm(anchorRow.window_start) !== hm(pin.window_start))
+          || (has('window_end') && hm(anchorRow.window_end) !== hm(pin.window_end))
+          || (has('estimated_duration_minutes') && (anchorRow.estimated_duration_minutes ?? null) !== (pin.estimated_duration_minutes ?? null))) {
           throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
             statusCode: 409,
             isOperational: true,
             code: 'SLOT_TAKEN',
           });
         }
+        // The caller's scope decision, judged on the LOCKED anchor (see scopeChangedError). Gate-free on purpose: the
+        // direct series callers (rain-out, the public page) run under their own gates.
+        if (options.expectScope && (options.expectScope === 'series') !== datesMoveSeries(anchorRow, anchorRow.scheduled_date, newDate)) throw scopeChangedError();
       };
       const droppedIdx = assertAnchorMovable(siblings);
       const startIdx = droppedIdx;
@@ -4774,7 +4813,8 @@ class SmartRebooker {
     const closedDays = await loadSeriesClosedDays(conn, { deferred });
     for (const raw of candidateDates) {
       const seriesDateStr = dateOnly(raw);
-      if (!seriesDateStr || seriesDateStr === currentDate || byDate[seriesDateStr]) continue;
+      // No entry for a time-only date, a repeat, or a lawn rounds one-off (size rule): that date moves this visit alone.
+      if (!datesMoveSeries(service, currentDate, seriesDateStr) || byDate[seriesDateStr]) continue;
       const { cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
         service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends, closedDays,
       });
@@ -4805,8 +4845,10 @@ class SmartRebooker {
       collective: false, deltaDays: 0, movableCount: 0, skippedCount: 0,
       exceptionCount: 0, conflictCount: 0, conflicts: [], conflictSnapshot: [],
       firstAffectedDate: null, lastAffectedDate: null,
+      // Size rule: a lawn rounds one-off moves this visit alone, so there is no series to preview.
+      oneOff: roundsRowMoveIsOneOff(service, seriesDateStr),
     };
-    if (service.is_recurring !== true || !seriesDateStr || seriesDateStr === dateOnly(service.scheduled_date)) {
+    if (service.is_recurring !== true || !datesMoveSeries(service, service.scheduled_date, seriesDateStr)) {
       return empty;
     }
     const parentId = service.recurring_parent_id || service.id;
@@ -5034,9 +5076,11 @@ module.exports.makeSeriesProjector = makeSeriesProjector;
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;
 module.exports.collectiveMoveGateOn = collectiveMoveGateOn;
+module.exports.movesAsSeries = movesAsSeries;
 module.exports.assertSeriesWriteSetOwnedBy = assertSeriesWriteSetOwnedBy;
 module.exports.replaySeriesMoveCleanup = replaySeriesMoveCleanup;
 module.exports.dateExceptionStamp = dateExceptionStamp;
+module.exports.singleMoveStamp = singleMoveStamp;
 module.exports.nextRecurringDate = nextRecurringDate;
 module.exports.recurrenceOrdinalOptions = recurrenceOrdinalOptions;
 module.exports.SERIES_MOVE_SNAPSHOT_COLUMNS = SERIES_MOVE_SNAPSHOT_COLUMNS;

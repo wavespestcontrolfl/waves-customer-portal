@@ -1923,7 +1923,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         }
         const members = await t('scheduled_services').where({ visit_id: visit.id })
           .whereNotIn('status', TERMINAL_ROW_STATUSES).forUpdate()
-          .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+          .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded',
+            // The lawn rounds size rule (rebooker.movesAsSeries) is judged on these locked rows.
+            'recurring_pattern', 'date_exception', 'date_exception_cadence_date');
         const primary = members.find((m) => String(m.id) === String(serviceId));
         if (!primary) return null;
         // Frozen membership (issued link, packet, artifacts, payment attempt —
@@ -1988,9 +1990,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // series path, which moves future occurrences one row at a time and
         // detaches them from their own grouped siblings. Staff move this visit
         // only (seriesPolicy 'single') until the series-aware visit operation
-        // ships.
-        if (primary.is_recurring === true && options.seriesPolicy !== 'single'
-          && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true' && newDateStr !== dateOnly(primary.scheduled_date)) {
+        // ships. The rebooker's own decision, on the locked primary: a lawn
+        // rounds one-off (size rule) is no series move, so the whole visit
+        // moves as a unit below.
+        if (options.seriesPolicy !== 'single' && require('./rebooker').movesAsSeries(primary, newDateStr)
+          && newDateStr !== dateOnly(primary.scheduled_date)) {
           // Same carry gate as above: the choke point re-enters the series
           // writer, which takes the visit with it.
           if (options.seriesCarriesVisit === true) return null;
@@ -2089,7 +2093,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings,
           targets, memberIds: members.map((m) => m.id),
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
-          primaryRecurring: primary.is_recurring === true,
+          primary,
         };
       });
       break;
@@ -2110,7 +2114,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // (Quick Move's fallback, auto-dispatch) or a dark collective gate
     // keeps the plain no-op — re-entering would insert a second log row
     // and repeat the caller's effects, or 409 a fenced retry.
-    if (plan.primaryRecurring && options.seriesPolicy !== 'single' && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true') {
+    // A primary that carries a date exception was last moved alone (a series
+    // move clears its anchor's exception; a lawn rounds one-off moves the
+    // visit as a unit), so it has no series operation to replay.
+    if (options.seriesPolicy !== 'single' && plan.primary.date_exception !== true && require('./rebooker').movesAsSeries(plan.primary, newDateStr)) {
       const replay = await rebooker.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, visitPolicy: 'single', skipVisitSeam: true });
       return { ...replay, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String) } };
     }
@@ -2370,7 +2377,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // assignment writer (tech-day fences, unassigned_overdue resolution,
   // dispatch broadcast). Each moved sibling is re-pointed AFTER its move
   // through alignMemberTechnician → assignDispatchJob instead.
-  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, memberGuard: _guard, technicianId: _tech, ...siblingBase } = options;
+  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectScope: _expectScope, expectSchedule: _expectSched, primaryViaSeries: _pvs, memberGuard: _guard, technicianId: _tech, ...siblingBase } = options;
   // Landed state per member (date + window at the target) once its move
   // committed — the contract later member moves verify the row against.
   const landedState = {};

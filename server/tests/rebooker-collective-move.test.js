@@ -477,6 +477,330 @@ describe('single-path date exceptions', () => {
   });
 });
 
+// Size rule (owner 2026-10-31, lawn_rounds_9 only): a date move of 7 days or fewer inside the visit's
+// round, measured from its regular (cadence) date, moves only this visit. A bigger move, or one that
+// crosses into the next round, is the series move it was. Every other pattern is unchanged.
+describe('reschedule() choke point — lawn rounds size rule', () => {
+  // Round 3 of program year 2098 runs 2098-03-15 to 2098-04-23; round 4 starts 2098-04-24.
+  const R_FROM = '2098-04-01';
+  let realSeries;
+  beforeEach(() => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    realSeries = SmartRebooker.rescheduleSeries;
+    SmartRebooker.rescheduleSeries = jest.fn().mockResolvedValue({ success: true, seriesMoveId: 'sm-1', rescheduledOccurrences: [] });
+  });
+  afterEach(() => { SmartRebooker.rescheduleSeries = realSeries; });
+
+  function wire(svc) {
+    const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
+    const trx = jest.fn((table) => {
+      if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
+      if (table === 'scheduled_services') return trxScheduled;
+      if (table === 'job_status_history' || table === 'reschedule_log') return chain();
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(svc) });
+      if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
+      if (table === 'series_moves') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    return { trxScheduled };
+  }
+  const rounds = (extra = {}) => anchorRow({ id: 'svc-2', recurring_parent_id: 'svc-1', recurring_pattern: 'lawn_rounds_9', scheduled_date: R_FROM, ...extra });
+  const move = (to, opts = {}, who = 'admin') => SmartRebooker.reschedule('svc-2', to, { start: '09:00', end: '11:00' }, 'admin', who, opts);
+
+  test.each([
+    ['one day', '2098-04-02'],
+    ['seven days (the limit), either direction', '2098-04-08'],
+    ['seven days earlier', '2098-03-25'],
+  ])('%s inside the round: single path, no series move, exception stamped from the regular date', async (_l, to) => {
+    const { trxScheduled } = wire(rounds());
+    await move(to);
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+    expect(trxScheduled.update.mock.calls[0][0]).toMatchObject({ scheduled_date: to, date_exception: true, date_exception_cadence_date: R_FROM });
+  });
+
+  test('eight days is a series move, delegated exactly as before', async () => {
+    wire(rounds());
+    await move('2098-04-09');
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a short move that crosses into the next round is a series move', async () => {
+    wire(rounds({ scheduled_date: '2098-04-22' }));
+    await move('2098-04-26'); // 4 days, but round 4 starts 2098-04-24
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+  });
+
+  test('the size is measured from the regular (cadence) date, so repeated small moves cannot walk a visit', async () => {
+    // Sits on 04-06 after an earlier one-off from its regular date 04-01.
+    wire(rounds({ scheduled_date: '2098-04-06', date_exception: true, date_exception_cadence_date: R_FROM }));
+    await move('2098-04-09'); // 3 days from where it sits, 8 from the regular date
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+    SmartRebooker.rescheduleSeries.mockClear();
+    const { trxScheduled } = wire(rounds({ scheduled_date: '2098-04-06', date_exception: true, date_exception_cadence_date: R_FROM }));
+    await move('2098-04-08'); // 7 from the regular date
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+    expect(trxScheduled.update.mock.calls[0][0]).toMatchObject({ date_exception_cadence_date: R_FROM });
+  });
+
+  test('a retry of a committed rounds series move still reaches its replay (the anchor already sits on the target)', async () => {
+    const TO = '2098-04-12';
+    const priorMove = { id: 'sm-prior', new_date: TO, result: { success: true, newDate: TO, occurrencesRescheduled: 3, rescheduledOccurrences: [{ id: 'svc-2', date: TO, windowStart: '13:00', windowEnd: '15:00' }] } };
+    db.transaction = jest.fn();
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(rounds({ scheduled_date: TO, window_start: '13:00:00', window_end: '15:00:00' })) });
+      if (table === 'series_moves') return chain({ first: jest.fn().mockResolvedValue(priorMove) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    const result = await SmartRebooker.reschedule('svc-2', TO, { start: '13:00', end: '15:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(result).toMatchObject({ replayed: true, seriesMoveId: 'sm-prior', occurrencesRescheduled: 3 });
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a six-week custom series', 'custom'],
+    ['a weekly series', 'weekly'],
+    ['the legacy nine-visit pattern', 'every_6_weeks'],
+  ])('%s keeps the series move for a one-day move', async (_l, pattern) => {
+    wire(rounds({ recurring_pattern: pattern }));
+    await move('2098-04-02');
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('the explicit office series move is never narrowed: the size rule lives at the choke point and the projection, not in rescheduleSeries or the dispatch scope "series" call', () => {
+    const rebooker = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
+    expect(rebooker.match(/roundsRowMoveIsOneOff/g)).toHaveLength(3); // the import, roundsRowMoveIsOneOff's movesAsSeries use, the series preview and the projection share datesMoveSeries
+    const series = rebooker.slice(rebooker.indexOf('async rescheduleSeries('), rebooker.indexOf('async projectNextVisitDates('));
+    expect(series).not.toMatch(/roundsRowMoveIsOneOff|movesAsSeries/);
+    const dispatch = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    expect(dispatch).not.toMatch(/roundsRowMoveIsOneOff|roundsMoveIsOneOff/);
+  });
+});
+
+// options.expectScope: the scope a caller showed or decided before it called the rebooker. The rebooker judges the
+// same decision (movesAsSeries) on the row it moves, and the direct movers' CAS pins the size-rule inputs.
+describe('expectScope — the single-versus-series decision a caller made is confirmed at the choke point', () => {
+  const R_FROM = '2098-04-01';
+  let realSeries;
+  beforeEach(() => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    realSeries = SmartRebooker.rescheduleSeries;
+    SmartRebooker.rescheduleSeries = jest.fn().mockResolvedValue({ success: true, seriesMoveId: 'sm-1', rescheduledOccurrences: [] });
+  });
+  afterEach(() => { SmartRebooker.rescheduleSeries = realSeries; });
+
+  function wire(svc) {
+    const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
+    const trx = jest.fn((table) => {
+      if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
+      if (table === 'scheduled_services') return trxScheduled;
+      if (table === 'job_status_history' || table === 'reschedule_log') return chain();
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(svc) });
+      if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
+      if (table === 'series_moves') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    return { trxScheduled };
+  }
+  const rounds = (extra = {}) => anchorRow({ id: 'svc-2', recurring_parent_id: 'svc-1', recurring_pattern: 'lawn_rounds_9', scheduled_date: R_FROM, ...extra });
+  const move = (to, expectScope, extra = {}) => SmartRebooker.reschedule('svc-2', to, { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...(expectScope ? { expectScope } : {}), ...extra });
+  const SCOPE_CHANGED = { statusCode: 409, code: 'SCOPE_CHANGED' };
+
+  test('decided single, still single (a one-off): commits as a single move', async () => {
+    const { trxScheduled } = wire(rounds());
+    await move('2098-04-05', 'single');
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+    expect(trxScheduled.update.mock.calls[0][0]).toMatchObject({ scheduled_date: '2098-04-05' });
+  });
+
+  test('decided single, but a series re-anchor since made it a series move (cadence date moved the other way): SCOPE_CHANGED, nothing written', async () => {
+    const { trxScheduled } = wire(rounds({ scheduled_date: '2098-04-05', date_exception: true, date_exception_cadence_date: '2098-03-20' }));
+    await expect(move('2098-04-08', 'single')).rejects.toMatchObject(SCOPE_CHANGED);
+    expect(trxScheduled.update).not.toHaveBeenCalled();
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+  });
+
+  test('decided series, but the cadence date moved so the move is now a one-off: SCOPE_CHANGED, no series move, no single write', async () => {
+    const { trxScheduled } = wire(rounds({ scheduled_date: '2098-04-10', date_exception: true, date_exception_cadence_date: '2098-04-12' }));
+    await expect(move('2098-04-14', 'series')).rejects.toMatchObject(SCOPE_CHANGED);
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+    expect(trxScheduled.update).not.toHaveBeenCalled();
+  });
+
+  test('decided series, still series: delegates to rescheduleSeries, carrying expectScope so the LOCKED anchor is judged too', async () => {
+    wire(rounds());
+    await move('2098-04-12', 'series');
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.rescheduleSeries.mock.calls[0][5]).toMatchObject({ expectScope: 'series' });
+  });
+
+  test('a gate flipped off between the decision and the move: a series decision is refused', async () => {
+    wire(rounds());
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    await expect(move('2098-04-12', 'series')).rejects.toMatchObject(SCOPE_CHANGED);
+  });
+
+  test('a non-rounds series: series decision commits, single decision is refused; a caller without expectScope is unchanged', async () => {
+    wire(rounds({ recurring_pattern: 'custom' }));
+    await move('2098-04-02', 'series');
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+    await expect(move('2098-04-02', 'single')).rejects.toMatchObject(SCOPE_CHANGED);
+    SmartRebooker.rescheduleSeries.mockClear();
+    await move('2098-04-02');
+    expect(SmartRebooker.rescheduleSeries.mock.calls[0][5]).not.toHaveProperty('expectScope');
+  });
+
+  test('a retry of a committed series move (same date) still reaches its replay with expectScope series', async () => {
+    const TO = '2098-04-12';
+    const priorMove = { id: 'sm-prior', new_date: TO, result: { success: true, newDate: TO, occurrencesRescheduled: 3, rescheduledOccurrences: [{ id: 'svc-2', date: TO, windowStart: '13:00', windowEnd: '15:00' }] } };
+    db.transaction = jest.fn();
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(rounds({ scheduled_date: TO, window_start: '13:00:00', window_end: '15:00:00' })) });
+      if (table === 'series_moves') return chain({ first: jest.fn().mockResolvedValue(priorMove) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    const result = await SmartRebooker.reschedule('svc-2', TO, { start: '13:00', end: '15:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectScope: 'series' });
+    expect(result).toMatchObject({ replayed: true, seriesMoveId: 'sm-prior' });
+  });
+
+  test('the LOCKED anchor is judged by rescheduleSeries (direct callers such as Quick Move): the wrong scope is refused before any write', async () => {
+    SmartRebooker.rescheduleSeries = realSeries;
+    const sib = (id, date, extra = {}) => ({ id, status: 'confirmed', scheduled_date: date, window_start: '09:00:00', window_end: '11:00:00', technician_id: null, ...extra });
+    const anchor = anchorRow({ recurring_pattern: 'lawn_rounds_9', scheduled_date: R_FROM });
+    const rows = () => [sib('svc-1', R_FROM, { recurring_pattern: 'lawn_rounds_9' }), sib('svc-2', '2098-05-12', { recurring_pattern: 'lawn_rounds_9' })];
+    const wired = wireSeriesMocks(rows(), { anchor });
+    // An 11-day move is a series move, so a caller that decided "single" is refused ...
+    await expect(SmartRebooker.rescheduleSeries('svc-1', '2098-04-12', { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectScope: 'single' }))
+      .rejects.toMatchObject(SCOPE_CHANGED);
+    expect(wired.updates[0].update).not.toHaveBeenCalled();
+    // ... and one that decided "series" because a 3-day move is a one-off is refused too; the right scope commits.
+    wireSeriesMocks(rows(), { anchor });
+    await expect(SmartRebooker.rescheduleSeries('svc-1', '2098-04-04', { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectScope: 'series' }))
+      .rejects.toMatchObject(SCOPE_CHANGED);
+  });
+});
+
+describe('the direct movers share one CAS and one stamp', () => {
+  test('applyTrackLifecycleCas pins the size-rule inputs of a row that carries them, and nothing for a narrow row', () => {
+    const where = jest.fn();
+    const query = { where, whereNull: jest.fn(), whereRaw: jest.fn() };
+    SmartRebooker.applyTrackLifecycleCas(query, {
+      track_state: 'scheduled', recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: new Date('2098-04-01T00:00:00Z'),
+    });
+    expect(where).toHaveBeenCalledWith({ track_state: 'scheduled', recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: '2098-04-01' });
+    where.mockClear();
+    SmartRebooker.applyTrackLifecycleCas(query, { track_state: null, recurring_pattern: null, date_exception: null, date_exception_cadence_date: null });
+    expect(where).toHaveBeenCalledWith({ track_state: null, recurring_pattern: null, date_exception: null, date_exception_cadence_date: null });
+    where.mockClear();
+    SmartRebooker.applyTrackLifecycleCas(query, { track_state: 'scheduled' });
+    expect(where).toHaveBeenCalledWith({ track_state: 'scheduled' });
+  });
+
+  describe('singleMoveStamp (Edit modal, bulk move, Intelligence Bar)', () => {
+    const row = (extra = {}) => ({ is_recurring: true, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2098-04-01', ...extra });
+    beforeEach(() => { process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true'; });
+
+    test('a one-off stamps the exception from its regular date', () => {
+      expect(SmartRebooker.singleMoveStamp(row(), '2098-04-05', 'admin')).toMatchObject({ date_exception: true, date_exception_cadence_date: '2098-04-01' });
+    });
+    test('a move the rebooker would run as a series move is refused with SCOPE_CHANGED (the cadence date moved since the caller decided)', () => {
+      expect(() => SmartRebooker.singleMoveStamp(row({ date_exception: true, date_exception_cadence_date: '2098-03-20', scheduled_date: '2098-04-05' }), '2098-04-08', 'admin'))
+        .toThrow(expect.objectContaining({ statusCode: 409, code: 'SCOPE_CHANGED' }));
+      expect(() => SmartRebooker.singleMoveStamp(row({ recurring_pattern: 'custom' }), '2098-04-02', 'admin')).toThrow(expect.objectContaining({ statusCode: 409, code: 'SCOPE_CHANGED' }));
+    });
+    test('gate off, or a one-time visit: the plain stamp', () => {
+      expect(SmartRebooker.singleMoveStamp(row({ is_recurring: false }), '2098-04-20', 'admin')).toEqual({});
+      delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+      expect(SmartRebooker.singleMoveStamp(row(), '2098-04-20', 'admin')).toMatchObject({ date_exception: true });
+    });
+  });
+});
+
+// movesAsSeries is the ONE decision every staff and tool surface asks (choke point, series preview,
+// ack, bulk move, Edit modal, IB tools), so they agree by construction.
+describe('movesAsSeries — the shared series-move decision', () => {
+  const row = (extra = {}) => ({ is_recurring: true, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2098-04-01', ...extra });
+  beforeEach(() => { process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true'; });
+
+  test('lawn rounds: 7 days or fewer inside the round is not a series move; 8 days, the next round and another pattern are', () => {
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-02')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-08')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-09')).toBe(true);
+    expect(SmartRebooker.movesAsSeries(row({ scheduled_date: '2098-04-22' }), '2098-04-26')).toBe(true);
+    expect(SmartRebooker.movesAsSeries(row({ recurring_pattern: 'custom' }), '2098-04-02')).toBe(true);
+  });
+
+  test('measures from the regular date of a date exception', () => {
+    const moved = row({ scheduled_date: '2098-04-06', date_exception: true, date_exception_cadence_date: '2098-04-01' });
+    expect(SmartRebooker.movesAsSeries(moved, '2098-04-08')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(moved, '2098-04-09')).toBe(true);
+  });
+
+  test('a row without recurring_pattern falls back to the series move, never to single', () => {
+    const { recurring_pattern: _p, ...bare } = row();
+    expect(SmartRebooker.movesAsSeries(bare, '2098-04-02')).toBe(true);
+    expect(SmartRebooker.movesAsSeries(row({ recurring_pattern: undefined }), '2098-04-02')).toBe(true);
+  });
+
+  test('gate off, a one-time visit, a booster and a missing row are never a series move; a same-date target stays in (the retry replay)', () => {
+    expect(SmartRebooker.movesAsSeries(row({ is_recurring: false }), '2098-04-20')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(row({ is_recurring: null }), '2098-04-20')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(null, '2098-04-20')).toBe(false);
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-01')).toBe(true);
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    expect(SmartRebooker.movesAsSeries(row(), '2098-04-20')).toBe(false);
+  });
+});
+
+describe('previewSeriesMove — lawn rounds size rule', () => {
+  const wirePreview = (anchor, siblings) => {
+    const dbQueries = [
+      chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ select: jest.fn().mockResolvedValue(siblings) }),
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'property_preferences') return chain({ first: jest.fn().mockResolvedValue(null) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    return dbQueries;
+  };
+  const sib = (id, date) => ({ id, status: 'confirmed', scheduled_date: date, window_start: '09:00:00', window_end: '11:00:00' });
+  const rounds = (extra = {}) => anchorRow({ recurring_pattern: 'lawn_rounds_9', scheduled_date: '2098-04-01', ...extra });
+
+  test('a one-off returns the non-collective shape (no siblings read) so every preview consumer shows a single move', async () => {
+    const queries = wirePreview(rounds(), []);
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', '2098-04-08');
+    expect(preview).toMatchObject({ collective: false, oneOff: true, movableCount: 0, conflictCount: 0, firstAffectedDate: null });
+    expect(preview).not.toHaveProperty('occurrenceIds');
+    expect(queries).toHaveLength(2); // only the first service read ran
+  });
+
+  test('8 days still previews the series; so does a one-day move of another pattern', async () => {
+    wirePreview(rounds(), [sib('svc-1', '2098-04-01'), sib('svc-2', '2098-05-12')]);
+    const far = await SmartRebooker.previewSeriesMove('svc-1', '2098-04-09');
+    expect(far).toMatchObject({ collective: true, occurrenceIds: ['svc-1', 'svc-2'] });
+    expect(far).not.toHaveProperty('oneOff');
+    wirePreview(rounds({ recurring_pattern: 'custom' }), [sib('svc-1', '2098-04-01'), sib('svc-2', '2098-05-12')]);
+    expect(await SmartRebooker.previewSeriesMove('svc-1', '2098-04-02')).toMatchObject({ collective: true });
+  });
+});
+
 describe('rescheduleSeries — date-only sweep', () => {
   const sib = (id, date, extra = {}) => ({
     id, status: 'confirmed', scheduled_date: date, window_start: '09:00:00', window_end: '11:00:00', technician_id: null, ...extra,
@@ -1756,7 +2080,7 @@ describe('caller wiring (source)', () => {
     const write = src.indexOf('scheduled_date: dateStr,', fn);
     expect(refuse).toBeGreaterThan(fn);
     expect(refuse).toBeLessThan(write);
-    expect(src.slice(fn, refuse)).toContain('collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr');
+    expect(src.slice(fn, refuse)).toContain('movesAsSeries(appt, dateStr) && dateStr !== oldDateStr');
   });
 
   test('rain-out fallback and the customer web single branch opt out; the edit modal intercepts BEFORE its per-row edit', () => {

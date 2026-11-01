@@ -53,6 +53,13 @@ function normalizeAppointmentPin(row) {
     // executor — the proposal refuses first, and a row that becomes
     // recurring during the pending window is drift.
     is_recurring: row.is_recurring === true,
+    // The lawn rounds size rule's inputs (rebooker movesAsSeries): read by the proposal's series
+    // check only, NOT hashed — the executor re-decides on its own read, and refuses a series move.
+    recurring_pattern: row.recurring_pattern || null,
+    date_exception: row.date_exception === true,
+    date_exception_cadence_date: row.date_exception_cadence_date instanceof Date
+      ? row.date_exception_cadence_date.toISOString().slice(0, 10)
+      : (row.date_exception_cadence_date ? String(row.date_exception_cadence_date).slice(0, 10) : null),
     // Tracker-lifecycle evidence, DERIVED (GH r8 on #3648): a date move of a
     // row with live status/track_state or leftover lifecycle stamps rewinds
     // the tracker (rebooker needsLifecycleRewind) — an effect the card must

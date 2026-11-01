@@ -22,7 +22,7 @@ const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFi
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
-const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
+const { collectiveMoveGateOn, movesAsSeries, singleMoveStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
@@ -607,7 +607,7 @@ const { lawn9xRoundsLive } = require('../config/feature-gates');
 const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
 // Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
 // The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
-const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows, roundsRowMoveIsOneOff } = require('../services/lawn-rounds');
 const { newSeriesAreaAnchor } = require('../services/lawn-area-days');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
@@ -1005,8 +1005,11 @@ function shouldRewritePendingRecurringRows(before, after) {
   if (!before || !after) return false;
   const prev = recurringRewriteSignature(before);
   const next = recurringRewriteSignature(after);
-  return ['date', 'pattern', 'nth', 'weekday', 'intervalDays', 'skipWeekends', 'weekendShift']
-    .some((key) => prev[key] !== next[key]);
+  // Size rule (lawn_rounds_9, owner 2026-10-31): moving the parent by 7 days or fewer inside its round moves only
+  // that visit. Its date is then no cadence change, so the series keeps its round anchor and its pending children
+  // (the planner, the probe excludes and the write all ask this one function). A pattern or interval change still rewrites.
+  const keys = ['date', 'pattern', 'nth', 'weekday', 'intervalDays', 'skipWeekends', 'weekendShift'];
+  return (roundsRowMoveIsOneOff(before, after.scheduled_date) ? keys.slice(1) : keys).some((key) => prev[key] !== next[key]);
 }
 
 // ADMIN_OCCUPANCY_EXCLUDE_STATUSES (which statuses do NOT occupy a slot
@@ -11162,7 +11165,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // so with the gate on a DATE move of a cadence visit is refused
               // rather than silently applied per-visit (refuse-don't-drop,
               // same as the IB tool); the bulk series path is a follow-up.
-              if (collectiveMoveGateOn() && svc.is_recurring === true && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
+              if (movesAsSeries(svc, bulkTargetDate) && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
                 throw Object.assign(
                   new Error('part of a recurring plan — with collective moves on, move it from Dispatch or the Edit appointment modal so its future visits follow'),
                   { isValidation: true },
@@ -11224,7 +11227,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 scheduled_date: bulkTargetDate,
                 // Bulk board move of a cadence row = a this-visit-only date
                 // exception (rebooker.dateExceptionStamp) when the date changes.
-                ...(dateOnly(svc.scheduled_date) !== bulkTargetDate ? dateExceptionStamp(svc, 'admin_bulk') : {}),
+                ...(dateOnly(svc.scheduled_date) !== bulkTargetDate ? singleMoveStamp(svc, bulkTargetDate, 'admin_bulk') : {}),
               };
               // Same validate-then-persist-the-normalized-value rule as the
               // date above: an unnormalized time Postgres happens to accept
@@ -12295,8 +12298,10 @@ async function planCollectiveEditDateMove(req) {
   const target = validScheduleDate(scheduledDate);
   if (!target) return null;
   const row = await db('scheduled_services').where({ id: req.params.id })
-    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');
-  if (!row || row.is_recurring !== true) return null;
+    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id',
+      'recurring_pattern', 'date_exception', 'date_exception_cadence_date');
+  // Not a series move (a one-time visit, or a lawn rounds one-off under the size rule): the edit saves as an ordinary date edit.
+  if (!row || !movesAsSeries(row, target)) return null;
   if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
   if (target === dateOnly(row.scheduled_date)) return null;
   // Grouped row (local gate r28): the handler's own grouped slot guard runs
@@ -12422,6 +12427,8 @@ async function planCollectiveEditDateMove(req) {
         notifyRequested: notifyCustomer === true,
         // The acknowledged occurrence set, enforced against the locked sweep.
         expectOccurrenceIds: ackedIds,
+        // The scope the operator acknowledged; the rebooker judges it again on the row it moves.
+        expectScope: 'series',
         ...(operationKey ? { operationKey } : {}),
         // An explicit two-bound clear rides IN the series transaction with
         // the date move — never persisted ahead of it by the per-row edit.
@@ -15972,7 +15979,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           // runs while the collective gate is dark, or for rows the planner
           // left to it), so the first collective move shifts it instead of
           // regenerating it from cadence.
-          Object.assign(updates, dateExceptionStamp(preTupleRow, 'admin'));
+          Object.assign(updates, singleMoveStamp(preTupleRow, updates.scheduled_date, 'admin'));
           liveEditWasLive = ['en_route', 'on_site'].includes(String(preTupleRow.status));
           if (liveEditWasLive) {
             Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
@@ -18149,8 +18156,8 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       const collectiveMoveTarget = validScheduleDate(scheduledDate);
       if (collectiveMoveTarget) {
         const moveRow = await db('scheduled_services').where({ id })
-          .first('is_recurring', 'scheduled_date', 'status');
-        if (moveRow && moveRow.is_recurring === true
+          .first('is_recurring', 'scheduled_date', 'status', 'recurring_pattern', 'date_exception', 'date_exception_cadence_date');
+        if (moveRow && movesAsSeries(moveRow, collectiveMoveTarget)
           && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(moveRow.status))
           && collectiveMoveTarget !== dateOnly(moveRow.scheduled_date)) {
           scheduledDate = undefined;
@@ -29655,6 +29662,8 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+// The Edit modal's cadence-rewrite decision (tests pin the lawn rounds size rule on it).
+module.exports.shouldRewritePendingRecurringRows = shouldRewritePendingRecurringRows;
 module.exports.findCompletingCardRequestVisitId = findCompletingCardRequestVisitId;
 module.exports.findEstimateScopedCommitment = findEstimateScopedCommitment;
 // The billable-amount booking gate — also consumed lazily by the IB

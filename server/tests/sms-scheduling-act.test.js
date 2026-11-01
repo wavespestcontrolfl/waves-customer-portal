@@ -183,15 +183,18 @@ describe('gate on', () => {
 describe('buildMoveGuard: move notice on the locked row', () => {
   const lockedRow = (over) => ({
     scheduled_date: '2026-10-02', window_start: '18:00:00', window_end: '19:00:00', status: 'confirmed',
-    customer_id: 'cust-1', visit_id: null, source_action: null, customer_confirmed: true, ...over,
+    customer_id: 'cust-1', visit_id: null, source_action: null, customer_confirmed: true,
+    recurring_pattern: 'lawn_rounds_9', date_exception: false, date_exception_cadence_date: null, ...over,
   });
   const fakeTrx = (row) => jest.fn(() => {
     const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => row) };
     return q;
   });
+  // The visit as the decide step read it: a lawn rounds visit whose date is its regular date.
+  const decided = { recurring_pattern: 'lawn_rounds_9', date_exception: false, date_exception_cadence_date: null };
   const guardFor = (row, noticeApplies) => act.buildMoveGuard({
     decisionId: 'dec-1', offer: OFFER, visitId: VISIT_ID, customerId: 'cust-1', now: NOW, target: {},
-    expected: { date: '2026-10-02', start: '18:00', end: '19:00', status: 'confirmed' }, noticeApplies,
+    expected: { date: '2026-10-02', start: '18:00', end: '19:00', status: 'confirmed', rule: act.sizeRuleKey(decided) }, noticeApplies,
   })({ trx: fakeTrx(row) });
 
   test('a visit inside the window without a current approval is refused', async () => {
@@ -200,5 +203,31 @@ describe('buildMoveGuard: move notice on the locked row', () => {
 
   test('a missed visit (noticeApplies false) skips the rule', async () => {
     await expect(guardFor(lockedRow({ office_move_approved_for: null }), false)).rejects.not.toMatchObject({ refusal: 'self_serve_notice' });
+  });
+
+  // Size rule (owner 2026-10-31): the decide step chose single or series from the visit's pattern, date exception and
+  // regular date. An office edit between the decision and the move that changes them must stop the move (visit_changed),
+  // or a one-off lands alone while the series now should shift.
+  test.each([
+    ['the pattern changed to another cadence', { recurring_pattern: 'custom' }],
+    ['a date exception appeared (a series re-anchor moved the regular date)', { date_exception: true, date_exception_cadence_date: '2026-09-28' }],
+    ['the regular date of the exception changed', { date_exception: true, date_exception_cadence_date: '2026-09-25' }],
+  ])('%s: the locked guard refuses with visit_changed', async (_label, over) => {
+    await expect(guardFor(lockedRow(over), false)).rejects.toMatchObject({ refusal: 'visit_changed' });
+  });
+
+  test('the same inputs (and a visit with no rounds pattern, read the same way) pass the scope fence', async () => {
+    await expect(guardFor(lockedRow(), false)).rejects.not.toMatchObject({ refusal: 'visit_changed' });
+    const custom = { recurring_pattern: 'custom', date_exception: false, date_exception_cadence_date: null };
+    await expect(act.buildMoveGuard({
+      decisionId: 'dec-1', offer: OFFER, visitId: VISIT_ID, customerId: 'cust-1', now: NOW, target: {},
+      expected: { date: '2026-10-02', start: '18:00', end: '19:00', status: 'confirmed', rule: act.sizeRuleKey(custom) }, noticeApplies: false,
+    })({ trx: fakeTrx(lockedRow(custom)) })).rejects.not.toMatchObject({ refusal: 'visit_changed' });
+  });
+
+  test('the executor reads the decision inputs off the visit it decided on', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/sms-scheduling-act.js'), 'utf8');
+    expect(src).toContain('rule: sizeRuleKey(svc)');
+    expect(src).toContain("'recurring_pattern', 'date_exception', 'date_exception_cadence_date'");
   });
 });
