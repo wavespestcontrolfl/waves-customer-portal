@@ -502,6 +502,33 @@ describe('attachDriveLegs on today\'s clock', () => {
     expect(services[1].driveLateMin).toBeNull();
   });
 
+  it('keeps the unstarted part of a visit group when time on site runs long', () => {
+    const services = [
+      stop('before', '08:00', B, { windowEnd: '09:00', status: 'completed' }),
+      stop('g-here', '09:00', A, { visitId: 'v4', windowEnd: '10:00', status: 'on_site', checkInTime: et('09:00').toISOString() }),
+      stop('g-open', '09:00', A, { visitId: 'v4', windowEnd: '10:00' }),
+      stop('next', '10:00', C, { windowEnd: '11:00' }),
+    ];
+    attachDriveLegs(services, { now: et('11:00') });
+    const leg = Math.max(1, driveMin(A, C));
+    // Two hours on site use up g-here's hour only: g-open's 60 minutes remain.
+    expect(services[3].driveLateMin).toBe(11 * 60 + 60 + leg - (10 * 60 + 120));
+  });
+
+  it('keeps the unstarted part of a co-visit pair with real estimates', () => {
+    const same = { customerId: 'cust-1', premise: { line1: '1 Sample St', line2: null, city: 'Parrish', zip: '34219' } };
+    const services = [
+      stop('before', '08:00', B, { windowEnd: '09:00', status: 'completed' }),
+      stop('r1', '09:00', A, { estimatedDuration: 90, ...same, status: 'on_site', checkInTime: et('09:00').toISOString() }),
+      stop('r2', '09:00', A, { estimatedDuration: 90, ...same }),
+      stop('next', '10:00', C, { windowEnd: '11:00' }),
+    ];
+    attachDriveLegs(services, { now: et('11:00') });
+    const leg = Math.max(1, driveMin(A, C));
+    // Two hours on site use up r1's 90 minutes only: r2's 90 remain.
+    expect(services[3].driveLateMin).toBe(11 * 60 + 90 + leg - (10 * 60 + 120));
+  });
+
   it("waits at the tech's stop for a later member's own window", () => {
     const services = [
       stop('before', '08:00', B, { windowEnd: '09:00', status: 'completed', displayOrder: 0 }),
@@ -525,6 +552,32 @@ describe('attachDriveLegs on today\'s clock', () => {
     const leg = Math.max(1, driveMin(A, C));
     // Checked in at 15:40, ahead of 16:00: 50 minutes left from now, no wait.
     expect(services[2].driveLateMin).toBe(15 * 60 + 50 + 50 + leg - (14 * 60 + 120));
+  });
+
+  it('finds the tech at the stop touched last, not the last one in day order', () => {
+    const services = [
+      stop('before', '08:00', B, { windowEnd: '09:00', status: 'completed', checkOutTime: et('09:00').toISOString() }),
+      stop('here', '10:00', A, { windowEnd: '12:00', status: 'on_site', checkInTime: et('10:30').toISOString() }),
+      stop('next', '10:30', C, { windowEnd: '11:30' }),
+      // Worked first thing, ahead of its 15:00 slot.
+      stop('early', '15:00', B, { windowEnd: '16:00', status: 'completed', checkOutTime: et('08:30').toISOString() }),
+    ];
+    attachDriveLegs(services, { now: et('11:00') });
+    const leg = Math.max(1, driveMin(A, C));
+    // 90 of here's 120 minutes left, then the drive from here to next.
+    expect(services[2].driveLateMin).toBe(11 * 60 + 90 + leg - (10 * 60 + 30 + 120));
+  });
+
+  it('ignores a stale on-site mark the tech has moved past', () => {
+    const services = [
+      stop('stale', '09:00', B, { windowEnd: '10:00', status: 'on_site', checkInTime: et('09:00').toISOString(), displayOrder: 0 }),
+      stop('done', '13:00', A, { windowEnd: '14:00', status: 'completed', checkInTime: et('13:10').toISOString(), checkOutTime: et('14:00').toISOString(), displayOrder: 1 }),
+      stop('next', '13:00', C, { windowEnd: '14:00', displayOrder: 2 }),
+    ];
+    attachDriveLegs(services, { now: et('15:00') });
+    const leg = Math.max(1, driveMin(A, C));
+    // The tech left 'done' last: the drive to next starts there at 15:00.
+    expect(services[2].driveLateMin).toBe(15 * 60 + leg - (13 * 60 + 120));
   });
 
   it('stops predicting after a leg it cannot measure', () => {

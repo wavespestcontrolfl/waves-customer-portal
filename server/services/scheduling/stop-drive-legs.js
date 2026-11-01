@@ -78,6 +78,12 @@ function coVisitPair(a, b) {
 // (arrival-route.js groupRouteStops); a run of co-visit rows is one piece
 // (startCoVisitChain/advanceCoVisit, so two span-only rows sharing an hour
 // stay one hour); every other row is its own piece.
+// The planned work of a visit under way (driven to or being worked): time
+// on site can use it up, never the work of a visit not started.
+function workUnderWay(row) {
+  return UNDER_WAY.has(row.status) ? workDuration(row) : 0;
+}
+
 function stopPieces(members) {
   const pieces = [];
   const byVisit = new Map();
@@ -95,19 +101,18 @@ function stopPieces(members) {
       }
       byVisit.get(m.visitId).rows.push(row);
       if (NOT_REACHED.has(m.status)) { byVisit.get(m.visitId).open = true; byVisit.get(m.visitId).ids.push(m.id); }
-      if (UNDER_WAY.has(m.status)) byVisit.get(m.visitId).started = true;
       continue;
     }
     if (chain && coVisitPair(prevLoose, m)) {
       chain.state = advanceCoVisit(chain.state, row);
       chain.work = chain.state.coMerged;
       if (NOT_REACHED.has(m.status)) { chain.open = true; chain.ids.push(m.id); }
-      if (UNDER_WAY.has(m.status)) chain.started = true;
+      chain.startedWork += workUnderWay(row);
     } else {
       const state = { ...startCoVisitChain(row), arrivalMin: 0 };
       state.clock = state.coMerged;
       const open = NOT_REACHED.has(m.status);
-      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state, open, ids: open ? [m.id] : [], started: UNDER_WAY.has(m.status) };
+      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state, open, ids: open ? [m.id] : [], startedWork: workUnderWay(row) };
       pieces.push(chain);
     }
     prevLoose = m;
@@ -120,6 +125,7 @@ function stopPieces(members) {
     const rows = [...piece.rows].sort((x, y) => minutesOf(x.window_start) - minutesOf(y.window_start));
     const shared = rows.every((r) => String(r.window_start) === String(rows[0].window_start));
     let work = 0;
+    let startedWork = 0;
     let startMin = -Infinity;
     let endMin = Infinity;
     for (const r of rows) {
@@ -128,9 +134,11 @@ function stopPieces(members) {
       startMin = Math.max(startMin, range.startMin - offset);
       endMin = Math.min(endMin, range.endMin - offset);
       work += workDuration(r);
+      startedWork += workUnderWay(r);
     }
     piece.start = minutesOf(rows[0].window_start);
     piece.work = work;
+    piece.startedWork = startedWork;
     piece.range = endMin >= startMin ? { startMin, endMin } : null;
     // No single arrival keeps every promise (09:00 and 13:00 members): run
     // each member as its own zero-drive piece, so the tech waits for 13:00.
@@ -138,7 +146,7 @@ function stopPieces(members) {
       piece.split = rows.map((r) => ({
         id: r.id, start: minutesOf(r.window_start), work: workDuration(r), range: null,
         open: NOT_REACHED.has(r.status), ids: NOT_REACHED.has(r.status) ? [r.id] : [],
-        started: UNDER_WAY.has(r.status),
+        startedWork: workUnderWay(r),
       }));
     }
   }
@@ -190,17 +198,38 @@ function planRoute(stops, legs) {
   return { seq, legIn, piecesOf, startMin: minutesOf(seq[0].window_start) };
 }
 
+// The last time a visit was touched: en route, check-in or check-out.
+function touchedAt(m) {
+  return Math.max(-Infinity, ...[m.enRouteAt, m.checkInTime, m.checkOutTime]
+    .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite));
+}
+
+// Where the tech is now: the stop with a reached visit touched last. A
+// stale on-site mark (an old check-in) never wins over later work, and a
+// later stop worked early does not pull the tech forward. Without any time
+// stamp, the last stop in day order with a reached visit.
+function currentStop(stops) {
+  let at = -1;
+  let latest = -Infinity;
+  stops.forEach((st, i) => {
+    const reached = st.members.filter((m) => !NOT_REACHED.has(m.status));
+    const t = Math.max(-Infinity, ...reached.map(touchedAt));
+    if (reached.length && t >= latest) { at = i; latest = t; }
+  });
+  return at;
+}
+
 // Today (owner 2026-11-01, "build clock"): the day restarts from now at the
-// last stop, in day order, with a visit the tech has reached. Everything
-// there not finished yet runs first, as one stop's pieces (a co-visit pair
-// shares its hour): work under way starts at once, less the minutes since
-// check-in, and a later piece there still waits for its own window. The
-// tech is at that stop, so it is not flagged. The drive to an en-route stop
-// counts as done (how much is left is unknown). Then every other stop's
-// unreached visits run in day order; a reached visit elsewhere counts as
-// done. After a leg that cannot be measured, arrivals are unknown.
+// stop where the tech is (currentStop). Everything there not finished yet
+// runs first, as one stop's pieces (a co-visit pair shares its hour): work
+// under way starts at once, less the minutes since check-in, and a later
+// piece there still waits for its own window. The tech is at that stop, so
+// it is not flagged. The drive to an en-route stop counts as done (how much
+// is left is unknown). Then every other stop's unreached visits run in day
+// order; a reached visit elsewhere counts as done. After a leg that cannot
+// be measured, arrivals are unknown.
 function clockRoute(stops, now) {
-  const at = stops.map((st) => st.members.some((m) => !NOT_REACHED.has(m.status))).lastIndexOf(true);
+  const at = currentStop(stops);
   const here = stops[at] || null;
   const ahead = here ? here.members.filter((m) => NOT_REACHED.has(m.status) || UNDER_WAY.has(m.status)) : [];
   const checkIns = ahead.filter((m) => UNDER_WAY.has(m.status) && m.checkInTime)
@@ -210,11 +239,11 @@ function clockRoute(stops, now) {
   const legIn = new Map();
   const piecesOf = new Map();
   stopPieces(ahead).forEach((p, j) => {
-    const done = p.started ? Math.min(p.work, worked) : 0;
+    const done = Math.min(p.startedWork, p.work, worked);
     worked -= done;
     if (p.work - done <= 0) return;
     const row = seqRow(`${at}:${j}`, { ...p, work: p.work - done }, here);
-    seq.push(p.started ? { ...row, arrivalRange: NO_WAIT } : row);
+    seq.push(p.startedWork > 0 ? { ...row, arrivalRange: NO_WAIT } : row);
   });
   let prev = here;
   for (const [i, st] of stops.entries()) {

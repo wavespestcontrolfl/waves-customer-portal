@@ -7164,6 +7164,8 @@ router.get('/', async (req, res, next) => {
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
         lastLineServiceNotes: previewText(lastLineService?.technician_notes),
         checkOutTime: s.check_out_time,
+        // With checkInTime/checkOutTime: the drive line finds where the tech is now.
+        enRouteAt: s.en_route_at || null,
         actualDuration: s.actual_duration_minutes,
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
