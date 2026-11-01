@@ -1859,13 +1859,12 @@ const SPECIALTY = {
     floor: r(150),
     marginDivisor: 0.40,
     materialPer1K: 2.10,
-    baseCompatibilityPrices: {
-      1500: 150,
-      3000: 150,
-      4500: 166,
-      6000: 205,
-      10000: 315,
-    },
+    // Machine cost per job, priced as if the Classen TR-20H (LAWN-001) were bought (owner
+    // 2026-11-01: "assume we bought the machine at siteone's listed price and price
+    // accordingly"). SiteOne does not list the TR-20H; $2,453.99 is the lowest orderable dealer
+    // price read 2026-11-01 (Russo Power Equipment, special order). Straight line over the
+    // LAWN-001 record's 7-year life and $500 salvage, spread over an assumed 10 jobs a year.
+    equipCost: Math.round(((2453.99 - 500) / (7 * 10)) * 100) / 100, // $27.91
     timeModel: {
       primaryPassSqFtPerMin: 100,
       crossPassSqFtPerMin: 200,
@@ -1928,7 +1927,9 @@ const SPECIALTY = {
         activeIngredient: 'fipronil',
         chemistryType: 'non_repellent',
         positioning: 'premium_non_repellent',
-        containerCost: 375.00,
+        // SiteOne member price, 78 oz, read 2026-11-01 (Lakewood Ranch #238; owner 2026-11-01,
+        // audit D1). Was an unsourced $375 seed. Migration 20261101090000 moves the live row.
+        containerCost: 174.72,
         containerOz: 78,
         productOzPerFinishedGallonAtStandardRate: 0.8,
         productOzPerFinishedGallonAtHighRate: 1.6,
@@ -1946,7 +1947,8 @@ const SPECIALTY = {
         activeIngredient: 'fipronil',
         chemistryType: 'non_repellent',
         positioning: 'standard_non_repellent',
-        containerCost: 85.00,
+        // SiteOne member price, 78 oz, read 2026-11-01 (same source as termidor_sc). Was $85.
+        containerCost: 95.00,
         containerOz: 78,
         productOzPerFinishedGallonAtStandardRate: 0.8,
         productOzPerFinishedGallonAtHighRate: 1.6,

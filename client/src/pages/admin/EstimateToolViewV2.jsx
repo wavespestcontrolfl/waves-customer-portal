@@ -91,11 +91,11 @@ const TRENCHING_PRODUCT_OPTIONS = [
 const TRENCHING_PRODUCT_META = {
   termidor_sc: {
     warning: "Premium fipronil non-repellent trench treatment. Eligible for longer warranty tiers with product premium surcharge.",
-    config: "78 oz @ $375 | 0.8 oz / finished gal standard",
+    config: "78 oz @ $174.72 | 0.8 oz / finished gal standard",
   },
   taurus_sc: {
     warning: "Default fipronil non-repellent trench treatment. Existing LF pricing includes Taurus standard-rate chemistry.",
-    config: "78 oz @ $85 | 0.8 oz / finished gal standard",
+    config: "78 oz @ $95 | 0.8 oz / finished gal standard",
   },
   bifen_it: {
     warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",

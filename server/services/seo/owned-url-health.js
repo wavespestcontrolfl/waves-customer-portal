@@ -237,6 +237,8 @@ function mapSharedResultToVerdict(shared) {
     }
     // redirect_ok specifically means a 301/308 (permanent) chain landing
     // clean — a temporary redirect (302/307) landing clean is still just ok.
+    // checkOwnedUrlHealth also gives it to a moved-page refresh stub whose
+    // target lands clean (refreshStubTarget).
     const permanentRedirect = !!shared.redirect_target_url && (httpStatusNum === 301 || httpStatusNum === 308);
     return { verdict: permanentRedirect ? 'redirect_ok' : 'ok', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: detailBase };
   }
@@ -244,6 +246,23 @@ function mapSharedResultToVerdict(shared) {
   // Defensive fallback — an unrecognized shared live_status must never be
   // mistaken for a confirmed-healthy page.
   return { verdict: 'fetch_blocked', httpStatus: shared.http_status || null, finalUrl: shared.final_url || null, detail: { ...detailBase, reason: `unmapped_live_status_${shared.live_status}` } };
+}
+
+// A moved-page stub: an instant meta refresh to an owned HTTPS page that the
+// stub also names as its canonical (the spoke sites serve these, noindexed,
+// for pages that moved to the hub — spoke rewrite 2026-11-01). Answer-engine
+// visitors land on the target, so the citation is judged by the target. The
+// refresh must match the canonical: a lone refresh is not a declared move.
+const STUB_VERDICTS = new Set(['noindex', 'canonical_elsewhere']);
+
+function refreshStubTarget(shared, mapped) {
+  if (!STUB_VERDICTS.has(mapped.verdict) || shared.truncated) return '';
+  const target = shared.refresh_target_url;
+  if (!target || !/^https:\/\//i.test(target) || !isOwnedFleetUrl(target)) return '';
+  const normalizedTarget = registry.normalizeContentUrl(target);
+  if (!normalizedTarget || normalizedTarget !== registry.normalizeContentUrl(shared.canonical_target_url)) return '';
+  if (normalizedTarget === registry.normalizeContentUrl(shared.final_url)) return '';
+  return target;
 }
 
 /** Fetches + classifies one owned URL via the shared checker. Never throws. */
@@ -254,7 +273,21 @@ async function checkOwnedUrlHealth(url, {
   const requestedUrl = normalizeOwnedUrl(url) || url;
   try {
     const shared = await liveStatus.checkUrlLiveStatus(requestedUrl, { fetchImpl, timeoutMs });
-    return { url: requestedUrl, ...mapSharedResultToVerdict(shared) };
+    const mapped = mapSharedResultToVerdict(shared);
+    const stubTarget = refreshStubTarget(shared, mapped);
+    if (!stubTarget) return { url: requestedUrl, ...mapped };
+    // One hop only: a refresh on the target page is not followed again, so
+    // a stub pointing at another stub stays noindex.
+    const landed = mapSharedResultToVerdict(await liveStatus.checkUrlLiveStatus(stubTarget, { fetchImpl, timeoutMs }));
+    const detail = { ...mapped.detail, ...landed.detail, requestedUrl: mapped.detail.requestedUrl, refreshTargetUrl: stubTarget, stubVerdict: mapped.verdict };
+    const clean = landed.verdict === 'ok' || landed.verdict === 'redirect_ok';
+    return {
+      url: requestedUrl,
+      verdict: clean ? 'redirect_ok' : landed.verdict,
+      httpStatus: shared.http_status,
+      finalUrl: landed.finalUrl,
+      detail: clean ? { ...detail, reason: 'instant_refresh_stub' } : detail,
+    };
   } catch (err) {
     return { url: requestedUrl, verdict: 'fetch_blocked', httpStatus: null, finalUrl: null, detail: { reason: err.message || 'check_failed' } };
   }

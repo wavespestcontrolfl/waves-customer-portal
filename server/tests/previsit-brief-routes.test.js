@@ -69,6 +69,13 @@ jest.mock('../services/previsit-brief', () => ({
   VISIT_BRIEF_TYPE: 'visit_brief_v1',
 }));
 
+// GATE_AWAY_WATCH: the window reader is unit-tested in away-watch.test.js; here only its answer for this visit.
+const mockAwayWatchCardLines = jest.fn(async () => null);
+jest.mock('../services/away-watch', () => ({
+  ...jest.requireActual('../services/away-watch'),
+  awayWatchCardLines: (...args) => mockAwayWatchCardLines(...args),
+}));
+
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
@@ -261,6 +268,95 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
       expect(res.status).toBe(200);
       expect((await res.json()).brief).toEqual({ risk_score: 'High' });
     });
+  });
+
+  test('Away Watch: a member away on the visit day gets the job card lines on the brief, after the ownership recheck', async () => {
+    const AWAY = { lines: ['Away Watch: member away until 2026-09-30. Take 3 photos of the outside of the home from the ground and note standing water.'] };
+    mockAwayWatchCardLines.mockResolvedValue(AWAY);
+    process.env.GATE_AWAY_WATCH = 'true';
+    try {
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1', pre_service_brief: null, pre_service_brief_type: null } });
+      await withServer(async (base) => {
+        const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+        expect(body).toEqual({ brief: null, awayWatch: AWAY });
+        expect(mockAwayWatchCardLines).toHaveBeenCalledWith(db, 'svc-1');
+      });
+      // A served brief carries them too.
+      mockGateEnabled.mockReturnValue(true);
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1' } });
+      await withServer(async (base) => {
+        const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+        expect(body.awayWatch).toEqual(AWAY);
+        expect(body.brief).toBeTruthy();
+      });
+      // Reassigned between the fetch and the lines: the former technician gets nothing at all, not the away window
+      // and not the served brief either (the same withhold-everything rule as the facts block).
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1' } }, { ownsVisit: true, recheckOwns: false });
+      await withServer(async (base) => {
+        const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+        expect(body).toEqual({ brief: null });
+      });
+      // A read failure omits the key, never the brief.
+      mockAwayWatchCardLines.mockRejectedValue(new Error('db down'));
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1', pre_service_brief: null, pre_service_brief_type: null } });
+      await withServer(async (base) => {
+        const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ brief: null });
+      });
+    } finally { delete process.env.GATE_AWAY_WATCH; mockAwayWatchCardLines.mockReset(); mockAwayWatchCardLines.mockResolvedValue(null); }
+  });
+
+  // Most visits have no away window: the lookup answering nothing (or failing) still ran after the facts block's
+  // recheck, so a reassignment during it withholds the served brief and its facts too (Codex r3 P2 on #7321).
+  test.each([
+    ['no lines', () => mockAwayWatchCardLines.mockResolvedValue(null)],
+    ['a lookup failure', () => mockAwayWatchCardLines.mockRejectedValue(new Error('db down'))],
+  ])('Away Watch gate on, %s, reassigned during the lookup: nothing at all', async (_label, arrange) => {
+    arrange();
+    process.env.GATE_AWAY_WATCH = 'true';
+    mockGateEnabled.mockReturnValue(true);
+    mockFactsGateEnabled.mockReturnValue(true);
+    try {
+      // The facts block's recheck still owns the visit; the reassignment lands during the Away Watch lookup.
+      let probes = 0;
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1' } });
+      const plain = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const q = plain(table);
+        const first = q.first;
+        q.first = jest.fn(async (...cols) => {
+          if (cols[0] === 'scheduled_services.id') { probes += 1; return probes === 1 ? { id: 'svc-1' } : undefined; }
+          return first(...cols);
+        });
+        return q;
+      });
+      await withServer(async (base) => {
+        expect(await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json()).toEqual({ brief: null });
+      });
+      expect(probes).toBe(2);
+      // Still owned: the served brief and its facts, and no awayWatch key.
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1' } });
+      await withServer(async (base) => {
+        const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+        expect(body.brief).toBeTruthy();
+        expect(body.facts).toBeTruthy();
+        expect(body).not.toHaveProperty('awayWatch');
+      });
+    } finally { delete process.env.GATE_AWAY_WATCH; mockAwayWatchCardLines.mockReset(); mockAwayWatchCardLines.mockResolvedValue(null); }
+  });
+
+  test('Away Watch gate off: no lookup and no extra recheck, the answer exactly as before', async () => {
+    delete process.env.GATE_AWAY_WATCH;
+    stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1' } }, { ownsVisit: true, recheckOwns: false });
+    await withServer(async (base) => {
+      // Facts gate off and no Away Watch: nothing runs a recheck, so the served brief goes out as it always has.
+      mockGateEnabled.mockReturnValue(true);
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body.brief).toBeTruthy();
+      expect(body).not.toHaveProperty('awayWatch');
+    });
+    expect(mockAwayWatchCardLines).not.toHaveBeenCalled();
   });
 
   test('no stored brief → { brief: null }', async () => {

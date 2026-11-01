@@ -174,8 +174,9 @@ describe('termite measurement overrides and safeguards', () => {
     // Pin depth to 1 ft so the documented per-LF chemical costs are independent
     // of the 0.5 ft default (chemical volume scales linearly with trench depth).
     const base = { measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 }, concreteVolumePadPct: 0, trenchDepthFt: 1 };
-    expect(priceTrenching({}, { ...base, productKey: 'termidor_sc' }).chemicalCostPerLF).toBeCloseTo(1.54, 2);
-    expect(priceTrenching({}, { ...base, productKey: 'taurus_sc' }).chemicalCostPerLF).toBeCloseTo(0.35, 2);
+    // SiteOne member prices read 2026-11-01: Termidor SC $174.72 and Taurus SC $95 per 78 oz, x 0.32 oz per LF.
+    expect(priceTrenching({}, { ...base, productKey: 'termidor_sc' }).chemicalCostPerLF).toBeCloseTo(0.72, 2);
+    expect(priceTrenching({}, { ...base, productKey: 'taurus_sc' }).chemicalCostPerLF).toBeCloseTo(0.39, 2);
     // bifen_it is the same Talak bottle as talstar_p (owner 2026-10-25).
     expect(priceTrenching({}, { ...base, productKey: 'bifen_it' }).chemicalCostPerLF).toBeCloseTo(0.17, 2);
     // talstar_p is the Talak 7.9 F bottle: $41.57 / 96 fl oz x 0.4 oz per LF = $0.17.
@@ -191,10 +192,10 @@ describe('termite measurement overrides and safeguards', () => {
     // Chemical figures reflect the 0.5 ft baseline default (half the retired 1.0 ft).
     expect(termidor.finishedGallons).toBe(51.84);
     expect(termidor.productOz).toBeCloseTo(41.47, 2);
-    expect(termidor.allocatedChemicalCost).toBeCloseTo(199.38, 2);
-    expect(termidor.includedChemicalCost).toBeCloseTo(45.19, 2);
-    expect(termidor.chemicalPremiumCost).toBeCloseTo(154.19, 2);
-    expect(termidor.productSurcharge).toBe(224);
+    expect(termidor.allocatedChemicalCost).toBeCloseTo(92.9, 2);
+    expect(termidor.includedChemicalCost).toBeCloseTo(50.51, 2);
+    expect(termidor.chemicalPremiumCost).toBeCloseTo(42.39, 2);
+    expect(termidor.productSurcharge).toBe(61);
     expect(termidor.price).toBe(termidor.baseInstallPrice + termidor.productSurcharge);
 
     const bifen = priceTrenching({}, {

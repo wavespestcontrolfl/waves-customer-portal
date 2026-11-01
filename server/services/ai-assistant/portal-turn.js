@@ -564,7 +564,27 @@ async function waitForClaim({ row, attemptId, workDeadlineAt, workSignal, root }
   return claim;
 }
 
-async function runPortalTurn({ requestId, customerId, propertyId = null, channelIdentifier, message, processTurn, budgetMs = TURN_BUDGET_MS }) {
+// The failed-turn hand-off (see runPortalTurn's rescueTurn): never throws.
+async function rescueFailedTurn(rescueTurn, turn, { row, attemptId, hardDeadlineAt, hardSignal }) {
+  if (typeof rescueTurn !== 'function') return null;
+  try {
+    const rescue = createTurnContext({
+      row, attemptId, workDeadlineAt: hardDeadlineAt, hardDeadlineAt, workSignal: hardSignal, hardSignal,
+    });
+    rescue.registerFallbackExtras(() => turn.fallbackExtras());
+    const result = await rescueTurn(rescue);
+    return result ? { ...result, requestId: turn.requestId } : null;
+  } catch (err) {
+    logUnexpectedFailure(err, '[portal-chat] failed-turn hand-off failed', { requestId: turn.requestId });
+    return null;
+  }
+}
+
+// `rescueTurn(turn)` (optional): called when the turn failed or timed out
+// with no committed response. It runs on a turn context whose work deadline is
+// the hard deadline (the finalize reserve), files a hand-off, and returns the
+// committed result, or null. It never replaces a committed response.
+async function runPortalTurn({ requestId, customerId, propertyId = null, channelIdentifier, message, processTurn, rescueTurn = null, budgetMs = TURN_BUDGET_MS }) {
   const startedAt = Date.now();
   const hardDeadlineAt = startedAt + budgetMs;
   const workDeadlineAt = hardDeadlineAt - Math.min(FINALIZE_RESERVE_MS, Math.floor(budgetMs / 4));
@@ -646,6 +666,7 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
     } catch (err) {
       logUnexpectedFailure(err, '[portal-chat] turn failed', { customerId, requestId });
       result = await recoverCommittedResult(turn)
+        || await rescueFailedTurn(rescueTurn, turn, { row, attemptId, hardDeadlineAt, hardSignal: hardController.signal })
         || fallbackResult(requestId, TIMEOUT_REPLY, turn.fallbackExtras());
     }
     await checkpointResult(turn, result);

@@ -13,6 +13,7 @@ import ProposalProjectCosting from '../../components/estimates/ProposalProjectCo
 import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
 import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, NET60_PAYMENT_TERMS, normalizeTermText } from '@commercial-agreement-terms';
 import { formatETDateTime } from '../../lib/timezone';
+import { PROGRAM_TEMPLATES } from '../../lib/commercialProgramTemplates';
 import useIsMobile from '../../hooks/useIsMobile';
 
 // Commercial proposal builder — the full-page surface for authoring the
@@ -134,20 +135,6 @@ function buildingSubtotals(b) {
 const PROGRAM_FAMILY_OPTIONS = [
   ['pest', 'Pest'], ['lawn', 'Lawn'], ['tree_shrub', 'Tree & shrub'], ['mosquito', 'Mosquito'],
   ['termite', 'Termite'], ['rodent', 'Rodent'], ['other', 'Other'],
-];
-
-// Starting points for "Add program" (owner 2026-10-29 "yes do phase 2"). The visit counts are the pricing engine's
-// standard cadences (server/services/pricing-engine/constants.js: PEST.frequencies quarterly 4, RODENT.baitVisitsPerYear 4,
-// TERMITE.monitoringVisitsPerYear 4, MOSQUITO.tierVisits monthly12, lawn and tree & shrub standard 6). There is no
-// template price: the engine returns a manual quote for commercial programs (pricing-engine/commercial-helpers.js
-// buildCommercialManualQuoteResult, price null), so the operator types the price.
-const PROGRAM_TEMPLATES = [
-  { service: 'pest', label: 'Pest control', frequencyPerYear: 4 },
-  { service: 'rodent', label: 'Rodent control', frequencyPerYear: 4 },
-  { service: 'termite', label: 'Termite monitoring', frequencyPerYear: 4 },
-  { service: 'mosquito', label: 'Mosquito control', frequencyPerYear: 12 },
-  { service: 'lawn', label: 'Lawn care', frequencyPerYear: 6 },
-  { service: 'tree_shrub', label: 'Tree & shrub care', frequencyPerYear: 6 },
 ];
 
 // A builder program row counts (totals, payload) once it is actually
@@ -1150,7 +1137,7 @@ function CommercialProposalEditor() {
     <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Choose a program to add">
       {PROGRAM_TEMPLATES.map((t) => (
         <Button key={t.service} variant="secondary" size="sm" onClick={() => addProgramFromTemplate(t)}>
-          {t.label} · {PROGRAM_FREQUENCY_PRESETS.find((f) => f.perYear === t.frequencyPerYear)?.label}
+          {t.label} · {PROGRAM_FREQUENCY_PRESETS.find((f) => f.perYear === t.frequencyPerYear)?.label || `${t.frequencyPerYear} visits a year`}
         </Button>
       ))}
       <Button variant="ghost" size="sm" onClick={addProgram}>Blank program</Button>

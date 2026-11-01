@@ -118,6 +118,23 @@ function isNoindex(html) {
   return /\bnoindex\b/i.test(extractRobots(html));
 }
 
+// An instant (0-second) <meta http-equiv="refresh"> is a client-side
+// redirect: browsers and search engines follow it like a permanent one. The
+// spoke sites serve these stubs for pages that moved to the hub (spoke
+// rewrite 2026-11-01). Returns the absolute target, or null when the page
+// has no refresh or its delay is not 0. Reported only — never followed here.
+function extractInstantRefresh(html, baseUrl) {
+  const text = String(html || '');
+  for (const match of text.matchAll(/<meta\b[^>]*>/gi)) {
+    const attrs = parseTagAttributes(match[0]);
+    if (String(attrs['http-equiv'] || '').toLowerCase() !== 'refresh') continue;
+    const m = /^\s*(\d+(?:\.\d+)?)\s*[;,]\s*(?:url\s*=\s*)?['"]?([^'"]*?)['"]?\s*$/i.exec(attrs.content || '');
+    if (!m || Number(m[1]) !== 0 || !m[2]) return null;
+    return absoluteFromLocation(m[2], baseUrl) || null;
+  }
+  return null;
+}
+
 // A response can noindex via the X-Robots-Tag header instead of (or as well
 // as) a meta tag — the documented health contract covers both. `headers`
 // is the fetch-Response-shaped object fetchText hands back (`.get(name)`).
@@ -500,6 +517,8 @@ async function checkUrlLiveStatus(requestedUrl, {
       live_status: liveStatus,
       redirect_target_url: redirectTargetUrl || null,
       canonical_target_url: canonicalTargetUrl || null,
+      // After a failed redirect follow finalBody is the 3xx's empty body, so this reads null.
+      refresh_target_url: extractInstantRefresh(finalBody, finalUrl),
       noindex_detected: noindex,
       sitemap_present: sitemap.present,
       sitemap_status: sitemap.status,
@@ -519,6 +538,7 @@ async function checkUrlLiveStatus(requestedUrl, {
       live_status: 'error',
       redirect_target_url: null,
       canonical_target_url: null,
+      refresh_target_url: null,
       noindex_detected: Boolean(fallbackNoindex),
       sitemap_present: sitemap.present,
       sitemap_status: sitemap.status,
@@ -814,6 +834,7 @@ module.exports = {
   extractRobots,
   isNoindex,
   isNoindexHeader,
+  extractInstantRefresh,
   extractTitle,
   visibleText,
   computeBodySignals,

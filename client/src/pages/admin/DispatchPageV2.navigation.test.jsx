@@ -376,7 +376,7 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
   const offHour = { ...held, call_log_id: 'call-off-hour', minutes: 870, time_label: '2:30 PM', customer_id: null };
   vi.mocked(adminFetch).mockImplementation(async (url) => {
     if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [held, offHour] };
-    if (url === '/admin/customers/cust-1') return { customer: { id: 'cust-1', firstName: 'Pat', lastName: 'Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' } } };
+    if (url === '/admin/customers/cust-1?view=booking') return { customer: { id: 'cust-1', firstName: 'Pat', lastName: 'Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' } } };
     return { services: [], technicians: [], products: [], types: [] };
   });
   render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
@@ -411,8 +411,8 @@ it('only the newest Book it click opens the form when an earlier customer lookup
   const slow = new Promise((resolve) => { releaseSlow = resolve; });
   vi.mocked(adminFetch).mockImplementation(async (url) => {
     if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [row('first', 'cust-slow'), row('second', 'cust-fast')] };
-    if (url === '/admin/customers/cust-slow') { await slow; return { customer: { id: 'cust-slow', firstName: 'Slow', lastName: 'Sample' } }; }
-    if (url === '/admin/customers/cust-fast') return { customer: { id: 'cust-fast', firstName: 'Fast', lastName: 'Sample' } };
+    if (url === '/admin/customers/cust-slow?view=booking') { await slow; return { customer: { id: 'cust-slow', firstName: 'Slow', lastName: 'Sample' } }; }
+    if (url === '/admin/customers/cust-fast?view=booking') return { customer: { id: 'cust-fast', firstName: 'Fast', lastName: 'Sample' } };
     return { services: [], technicians: [], products: [], types: [] };
   });
   render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
@@ -438,7 +438,7 @@ it('a Book it lookup still pending when the day changes does not open the form',
   vi.mocked(adminFetch).mockImplementation(async (url) => {
     if (url === '/admin/schedule/held-visits?date=2026-10-14') return { heldVisits: [held] };
     if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [] };
-    if (url === '/admin/customers/cust-slow') { await slow; return { customer: { id: 'cust-slow', firstName: 'Slow', lastName: 'Sample' } }; }
+    if (url === '/admin/customers/cust-slow?view=booking') { await slow; return { customer: { id: 'cust-slow', firstName: 'Slow', lastName: 'Sample' } }; }
     return { services: [], technicians: [], products: [], types: [] };
   });
   render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
@@ -447,6 +447,26 @@ it('a Book it lookup still pending when the day changes does not open the form',
   await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-15'));
   await act(async () => { releaseSlow(); await slow; });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+// Owner 2026-11-01: Dismiss means the office will not book the row.
+it('Dismiss on a held row tells the server and the row leaves the strip', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+  const held = {
+    call_log_id: 'call-dismiss', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: 'Pat Sample',
+    phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
+    call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-1', notes: null,
+  };
+  vi.mocked(adminFetch).mockImplementation(async (url) => {
+    if (url.startsWith('/admin/schedule/held-visits?')) return { heldVisits: [held] };
+    if (url === '/admin/schedule/held-visits/call-dismiss/dismiss') return { success: true, closedBells: 1 };
+    return { services: [], technicians: [], products: [], types: [] };
+  });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Dismiss' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Yes, dismiss' }));
+  await waitFor(() => expect(screen.queryByText('From calls, not on the calendar')).not.toBeInTheDocument());
+  expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits/call-dismiss/dismiss', { method: 'POST' });
 });
 
 // Dispatch audit 2026-10-29 (Codex pre-push P1): a week grid's onChange after a

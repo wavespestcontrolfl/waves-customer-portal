@@ -110,6 +110,7 @@ const { calculateBoundedTrackingEta } = require('../services/customer-tracking-e
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { billByInvoiceDemotedPrediction } = require('../services/completion-charge-verdict');
+const { billByInvoiceProposalAwaitingWin } = require('../services/bill-by-invoice');
 const { isAlwaysFreeServiceType, isConsultationServiceType } = require('../services/no-cost-visit-types');
 const SeriesPriceGuards = require('../services/series-price-guards');
 const DiscountEngine = require('../services/discount-engine');
@@ -6539,6 +6540,25 @@ router.get('/held-visits', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/admin/schedule/held-visits/:callLogId/dismiss — Dismiss on a held row (owner
+// 2026-11-01): the office will not book it. The call stops showing on the strip and its open
+// booking-miss bells close as this person's Done. No visit, card or message changes.
+router.post('/held-visits/:callLogId/dismiss', requireAdmin, async (req, res) => {
+  const callLogId = String(req.params.callLogId || '');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callLogId)) {
+    return res.status(400).json({ error: 'callLogId must be a call id' });
+  }
+  if (!isEnabled('callHeldVisit')) return res.status(409).json({ error: 'Held visits are not enabled.' });
+  try {
+    const result = await require('../services/call-held-visits').dismissHeldVisit(callLogId, { by: req.technicianId });
+    if (!result.found) return res.status(404).json({ error: 'Call not found' });
+    return res.json({ success: true, closedBells: result.closedBells });
+  } catch (err) {
+    logger.error(`[held-visits] dismiss failed for call ${callLogId}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not dismiss. Try again.' });
+  }
+});
+
 // GET /api/admin/schedule — day view (board + dispatch)
 // GATE_NEW_CALLER_BOOKING: a visit booked by address before its customer
 // exists reads "New caller" and offers Link customer on the visit sheet (PUT
@@ -8718,6 +8738,14 @@ async function scheduleCreateHandler(req, res, next) {
       const BOOKABLE_ESTIMATE_STATUSES = ['accepted', 'sent', 'viewed'];
       if (!BOOKABLE_ESTIMATE_STATUSES.includes(linkedEstimate.status)) {
         return res.status(400).json({ error: `Cannot book from an estimate that is ${linkedEstimate.status}. Only accepted, sent, or viewed estimates can be linked.` });
+      }
+      // A Bill-by-invoice proposal's Net term reaches a bill only once the proposal is won, so a visit booked from it
+      // earlier would bill due on the visit day (and Auto Pay could charge it). Refuse until Mark won.
+      if (billByInvoiceProposalAwaitingWin(linkedEstimate)) {
+        return res.status(409).json({
+          error: 'Mark this proposal won before booking from it. Its Net payment terms apply only to a won proposal.',
+          code: 'proposal_not_won',
+        });
       }
       if (linkedEstimate.status !== 'accepted' && linkedEstimate.expires_at && new Date(linkedEstimate.expires_at) < new Date()) {
         return res.status(400).json({ error: 'This estimate has expired. Revive it on the Estimates page before booking from it.' });
@@ -24058,7 +24086,36 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return payload;
       }
     };
-    if (!svc.pre_service_brief) return res.json(await withFacts({ brief: null }));
+    // GATE_AWAY_WATCH: the Away Watch lines the job card carries for this visit (a WaveGuard member away, the visit's
+    // own day inside the window, at home) ride every answer to the tech's Visit Brief, so the tech knows about the
+    // 3-photo closeout rule and the Welcome Home sweep before the visit. The lookup runs after the facts block's
+    // reassignment recheck, so whatever it answers (lines, nothing, an error) one more recheck covers the whole answer,
+    // and a reassignment it catches withholds everything like the facts block does (the payload may already hold live
+    // access codes and the cached brief). Gate off: no lookup and no recheck, the answer exactly as before. Fail-soft:
+    // a lookup or recheck outage omits the key.
+    const withAwayWatch = async (payload) => {
+      const AwayWatch = require('../services/away-watch');
+      if (!AwayWatch.awayWatchLive()) return payload;
+      let awayWatch = null;
+      try {
+        awayWatch = await AwayWatch.awayWatchCardLines(db, svc.id);
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief Away Watch lines failed for ${svc.id}: ${err.message}`);
+      }
+      try {
+        const stillOwned = await db('scheduled_services')
+          .where({ 'scheduled_services.id': svc.id })
+          .modify((q) => technicianCurrentVisitFilter(req, q))
+          .first('scheduled_services.id');
+        if (!stillOwned) return { brief: null };
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief Away Watch recheck failed for ${svc.id}: ${err.message}`);
+        return payload;
+      }
+      return awayWatch ? { ...payload, awayWatch } : payload;
+    };
+    const answer = async (payload) => res.json(await withAwayWatch(await withFacts(payload)));
+    if (!svc.pre_service_brief) return answer({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
     // from the read path (regeneration is already gated, and a rollback
@@ -24068,7 +24125,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const parsedBrief = typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief;
     if (String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE) {
       if (!PrevisitBrief.briefGateEnabled()) {
-        return res.json(await withFacts({ brief: null }));
+        return answer({ brief: null });
       }
       // A reschedule or a direct service_type rewrite (edit modal,
       // estimate acceptance, call flows) leaves the stored brief behind —
@@ -24077,7 +24134,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       // grounding-hash mismatch, both stamps being hashed facts).
       const staleReason = PrevisitBrief.briefStaleReason(parsedBrief, svc);
       if (staleReason) {
-        return res.json(await withFacts({ brief: null, stale: staleReason }));
+        return answer({ brief: null, stale: staleReason });
       }
     }
     const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
@@ -24086,7 +24143,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // visit brief's access block is a snapshot from the :19/:49 sweep —
     // a gate code changed since generation must reach the tech from the
     // live facts, not the cached copy.
-    res.json(await withFacts(served));
+    await answer(served);
   } catch (err) { next(err); }
 });
 

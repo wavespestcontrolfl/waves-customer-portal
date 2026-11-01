@@ -16,6 +16,8 @@
 
 const Joi = require('joi');
 const { hasLawnServiceEvidence, hasIrrigationEmailOptIn } = require('./irrigation-weekly-email');
+const { validCalendarDate } = require('../utils/datetime-et');
+const AwayWatch = require('./away-watch');
 
 // Default free-text cap for fields with no real column-width constraint
 // (the DB-enforced enum columns — preferredDay/preferredTime/
@@ -48,6 +50,15 @@ function enumOrNull(values) {
 function dateOrNull() {
   return Joi.date().iso().allow(null).empty('').default(null);
 }
+// Away Watch day (GATE_AWAY_WATCH): a plain YYYY-MM-DD ET calendar day, never a
+// Joi date (a Date would bind to the date column as a local timestamp). '' or
+// null clears. The pair rules (both or neither, order, span) need both values,
+// so validatePrefsBody applies them after the per-field pass.
+function awayWatchDay() {
+  return Joi.string().trim().allow(null).empty('').default(null).custom((value, helpers) => (
+    validCalendarDate(value) ? value : helpers.message(AwayWatch.MESSAGES.badDay)
+  ));
+}
 const petSchema = Joi.object({
   name: Joi.string().trim().allow('', null).max(60),
   species: Joi.string().trim().allow('', null).max(40),
@@ -78,6 +89,11 @@ const PREFS_FIELD_SCHEMAS = {
   contactPreference: enumOrNull(['call', 'text', 'email']),
   blackoutStart: dateOrNull(),
   blackoutEnd: dateOrNull(),
+  // Away Watch + Welcome Home (GATE_AWAY_WATCH): the day the member leaves and
+  // the day they are back. Accepted only while the gate is live, see
+  // validatePrefsBody; the cancel-flow away_mode_until is a different column.
+  awayWatchFrom: awayWatchDay(),
+  awayWatchUntil: awayWatchDay(),
   // 20260401000005_property_preferences.js — varchar(200).
   irrigationControllerLocation: shortTextMax(200),
   irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
@@ -145,6 +161,7 @@ const ALLOWED_FIELDS = [
   'pet_count', 'pet_details', 'pets_secured_plan', 'pets_structured',
   'preferred_day', 'preferred_time', 'contact_preference',
   'blackout_start', 'blackout_end',
+  'away_watch_from', 'away_watch_until',
   'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
   'irrigation_inches_per_week', 'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
   'rain_sensor', 'irrigation_water_source', 'irrigation_issues',
@@ -189,6 +206,8 @@ function validatePrefsBody(schemas, body) {
       ? schemas[key]
       : null;
     if (!fieldSchema) continue; // unknown field — stripped, not reported
+    // Gate off: the Away Watch dates are an unknown field to every writer.
+    if (AwayWatch.AWAY_WATCH_FIELDS.includes(key) && !AwayWatch.awayWatchLive()) continue;
     presentCount += 1;
     const { value: fieldValue, error: fieldError } = fieldSchema.label(key).validate(raw);
     if (fieldError) {
@@ -197,7 +216,27 @@ function validatePrefsBody(schemas, body) {
       value[key] = fieldValue;
     }
   }
+  settleAwayWatchPair(value, rejected);
   return { value, rejected, presentCount };
+}
+
+// The Away Watch pair saves whole or not at all: one rejected date, a lone
+// date, or a pair that breaks the order/span/past rules drops both, and BOTH
+// are reported, so a client that re-queues the fields a 400 did not name never
+// keeps one date queued alone (pre-push audit P1).
+function settleAwayWatchPair(value, rejected) {
+  const fields = AwayWatch.AWAY_WATCH_FIELDS;
+  const sent = fields.filter((k) => k in value);
+  const fieldRejection = rejected.find((r) => fields.includes(r.field));
+  if (!sent.length && !fieldRejection) return;
+  const message = fieldRejection
+    ? fieldRejection.message
+    : AwayWatch.awayWatchPairError(value.awayWatchFrom ?? null, value.awayWatchUntil ?? null, sent.length);
+  if (!message) return;
+  for (const field of fields) {
+    delete value[field];
+    if (!rejected.some((r) => r.field === field)) rejected.push({ field, message });
+  }
 }
 
 function camelToSnake(str) {
