@@ -270,6 +270,31 @@ describe('live-webhook gratitude drafter boundary', () => {
     expectNoWebhookDelivery(result);
   });
 
+  test('a late Mac draft of a thanks takes the gratitude path but is stamped mac_late, which the send sweep refuses', async () => {
+    const result = await runDraft({
+      reply: 'Our pleasure, Casey!',
+      intended_actions: [{ type: 'none' }],
+      missing_info: null,
+    }, { source: 'mac_late' });
+
+    const stored = result.insertedRows[0];
+    expect(stored.intent).toBe(result.GRATITUDE_INTENT);
+    expect(JSON.parse(stored.intended_actions).gratitude).toEqual({
+      source: 'mac_late',
+      policy_version: result.GRATITUDE_POLICY_VERSION,
+      actions_verified_safe: true,
+      verifier_enabled: true,
+    });
+    expectNoWebhookDelivery(result);
+    // The send sweep's provenance rule: only a live-webhook gratitude draft may ever be sent.
+    const { validateGratitudeDraftContract } = jest.requireActual('../services/sms-gratitude-context');
+    const reason = validateGratitudeDraftContract({ ...stored, intended_actions: stored.intended_actions }, {
+      expectedReply: 'Our pleasure, Casey!',
+      expectedPromptVersion: stored.prompt_version,
+    });
+    expect(reason).toBe('invalid_gratitude_provenance');
+  });
+
   test.each([
     ['a non-live source', { source: 'historical_replay' }],
     ['an inbound attachment', { hasMedia: true }],

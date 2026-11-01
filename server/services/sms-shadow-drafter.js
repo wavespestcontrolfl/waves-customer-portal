@@ -27,6 +27,8 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
+// Sources whose gratitude-only texts take the gratitude path. Only 'live_webhook' drafts are send-eligible.
+const GRATITUDE_CLASSIFY_SOURCES = new Set(['live_webhook', 'mac_late']);
 const { gateEnvValue, multiTechTextTimesLive, smsVoiceProfilePinVersion, smsEditLearningLive, smsPromptB1Live } = require('../config/feature-gates');
 const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
@@ -6550,7 +6552,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
   const startedAt = Date.now();
   try {
     const classifiedIntent = intent;
-    let gratitudeCandidate = source === 'live_webhook' && !hasMedia && !schedulingIntent
+    // A late Mac draft (source 'mac_late') takes the same gratitude classification and prompt as a live
+    // one, so its cohort matches; its stamp below keeps source 'mac_late', which the gratitude send sweep
+    // refuses (sms-gratitude-context.js: provenance must be 'live_webhook'), so it can never be sent.
+    let gratitudeCandidate = GRATITUDE_CLASSIFY_SOURCES.has(source) && !hasMedia && !schedulingIntent
       && customer?.id && smsLogId && isGratitudeOnly(inboundMessage);
     if (gratitudeCandidate) {
       intent = { intent: GRATITUDE_INTENT, confidence: 1, approvedReply: buildGratitudeReply(customer.first_name) };
@@ -6732,7 +6737,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
           ...(gratitudeCandidate ? {
             gratitude: {
-              source: 'live_webhook',
+              source,
               policy_version: GRATITUDE_POLICY_VERSION,
               actions_verified_safe: parsed.auto_send_safe === true,
               verifier_enabled: VERIFY_ENABLED,
