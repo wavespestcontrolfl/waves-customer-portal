@@ -319,7 +319,9 @@ export default function TimeTrackingPage() {
           onOpenApprovals={() => setTab("approvals")}
         />
       )}
-      {tab === "approvals" && <ApprovalsTab showToast={showToast} />}
+      {tab === "approvals" && (
+        <ApprovalsTab showToast={showToast} weekStartParam={searchParams.get("weekStart")} />
+      )}
       {tab === "entries" && <EntriesTab showToast={showToast} />}
       {tab === "analytics" && <AnalyticsTab />}
       {tab === "team" && <TeamTab showToast={showToast} />}
@@ -6033,11 +6035,24 @@ function DocumentsTab({ showToast }) {
 // ===========================================================================
 // ApprovalsTab — weekly timesheet approval workflow
 // ===========================================================================
-export function ApprovalsTab({ showToast }) {
+// The weekStart a bell link carries: used only when it is a real YYYY-MM-DD Monday.
+function mondayFromParam(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCDay() === 1 && addDays(value, 0) === value ? value : null;
+}
+
+export function ApprovalsTab({ showToast, weekStartParam = null }) {
   const lastMonday = useMemo(() => {
     return addDays(getMonday(new Date()), -7);
   }, []);
-  const [weekStart, setWeekStart] = useState(lastMonday);
+  const linkedWeek = mondayFromParam(weekStartParam);
+  const [weekStart, setWeekStart] = useState(linkedWeek || lastMonday);
+  // A bell clicked while this page is open changes the parameter: follow it.
+  useEffect(() => {
+    if (linkedWeek) setWeekStart(linkedWeek);
+  }, [linkedWeek]);
   const [techs, setTechs] = useState([]);
   // The week the cards in `techs` were read for. Cards and their actions show
   // only while it is the week on screen and the last read did not fail, so a
