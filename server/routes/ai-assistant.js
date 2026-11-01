@@ -161,6 +161,11 @@ router.post('/chat', authenticate, async (req, res, next) => {
           turn,
         });
       },
+      // GATE_PORTAL_CHAT_OPEN: a turn that fails or times out files the
+      // customer's message as a hand-off item (null with the gate off).
+      rescueTurn: (rescue) => WavesAssistant.rescueFailedTurn({
+        message, channel: 'portal_chat', channelIdentifier, customerId, customerPhone, turn: rescue,
+      }),
     });
 
     // Only true model output is reportable — canned fallbacks and the

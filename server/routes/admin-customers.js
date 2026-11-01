@@ -33,6 +33,7 @@ const { excludeUnresolvedSendReservations } = require('../services/messaging/rev
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
 const CustomerCredit = require('../services/customer-credit');
+const AwayWatch = require('../services/away-watch');
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -283,6 +284,10 @@ function techSafe360Payload(payload) {
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
   for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) delete out.customer[field];
+  // Away Watch (GATE_AWAY_WATCH): the leave and back days say when a home stands empty. The assigned visit's job card
+  // carries what the tech needs ("member away until ..."), so the 360 view never shows the window to a technician.
+  delete out.awayWatchEnabled;
+  if (payload.preferences) out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
   out.services = (payload.services || []).map(techSafeServiceRecord);
   out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
   out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
@@ -3517,6 +3522,18 @@ router.get('/:id', async (req, res, next) => {
     }
     const c = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!c) return res.status(404).json({ error: 'Customer not found' });
+    // ?view=booking: only the fields the New appointment form's customer box takes (Dispatch
+    // "Book it", owner 2026-11-01). The full profile below reads ~28 sources; on a real tap it
+    // took 4.5 s, and the form waits for it. Same values the full profile returns for them.
+    if (req.query.view === 'booking') {
+      return res.json({
+        customer: {
+          id: c.id, firstName: c.first_name, lastName: c.last_name, phone: c.phone,
+          address: { line1: c.address_line1, line2: c.address_line2, city: c.city, state: c.state, zip: c.zip },
+          tier: c.waveguard_tier,
+        },
+      });
+    }
 
     const currentYear = Number(etDateString().slice(0, 4));
     const focusServiceId = typeof req.query.focusServiceId === 'string' && req.query.focusServiceId.trim() ? req.query.focusServiceId.trim() : null;
@@ -3815,7 +3832,9 @@ router.get('/:id', async (req, res, next) => {
         address: { line1: n.address_line1, line2: n.address_line2, city: n.city, state: n.state, zip: n.zip },
       })),
       tags: tags.map(t => t.tag),
-      interactions, preferences: prefs, services, payments, scheduled, upcomingScheduled, smsLog,
+      // GATE_AWAY_WATCH: Customer 360 shows the Away Watch dates only for a WaveGuard member while the gate is live.
+      ...(AwayWatch.awayWatchOpenFor(c) ? { awayWatchEnabled: true } : {}),
+      interactions, preferences: AwayWatch.awayWatchFieldsFor(c, prefs), services, payments, scheduled, upcomingScheduled, smsLog,
       visitStats: visitStatsRow ? {
         count: Number(visitStatsRow.count || 0),
         firstDate: dateOnlyForApi(visitStatsRow.first_date),
@@ -5354,9 +5373,15 @@ async function writeAdminPreferences(customerId, updates, outcome = {}, { render
 router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => {
   try {
     const customerId = req.params.id;
+    // Away Watch is members-only (GATE_AWAY_WATCH): read the membership facts once while the gate is on, so a
+    // non-member's dates are an unknown field and a member's saved dates still come back on every save.
+    const awayWatchCustomer = AwayWatch.awayWatchLive()
+      ? await db('customers').where({ id: customerId }).first('waveguard_tier', 'monthly_rate')
+      : null;
+    const prefsBody = AwayWatch.awayWatchOpenFor(awayWatchCustomer) ? req.body : AwayWatch.stripAwayWatchDates(req.body);
     // A mixed batch saves the valid fields and 200s with `rejected` (the
     // portal's per-field contract); nothing valid left is a 400 below.
-    const { value, rejected } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, req.body);
+    const { value, rejected } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, prefsBody);
     const snakeBody = prefsTransformKeys(value, prefsCamelToSnake);
     const updates = {};
     for (const field of ADMIN_PREFS_ALLOWED_FIELDS) {
@@ -5443,7 +5468,7 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     }).catch((err) => logger.warn(`[customers:${customerId}] property_preferences audit failed: ${err.message}`));
     logger.info(`[customers] property_preferences updated for ${customerId}: ${JSON.stringify({ fields: loggedFields })}`);
 
-    res.json({ success: true, preferences, saved: true, ...(rejected.length ? { rejected } : {}) });
+    res.json({ success: true, preferences: AwayWatch.awayWatchFieldsFor(awayWatchCustomer, preferences), saved: true, ...(rejected.length ? { rejected } : {}) });
   } catch (err) { next(err); }
 });
 

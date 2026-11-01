@@ -44,6 +44,50 @@ describe('staffEditLocksVisit', () => {
   });
 });
 
+describe('GATE_STAFF_EDIT_LOCK_START_ONLY (end-only edits keep the slot)', () => {
+  const { staffEditLockPatch } = require('../services/auto-dispatch/staff-edit-lock');
+  const prev = process.env.GATE_STAFF_EDIT_LOCK_START_ONLY;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.GATE_STAFF_EDIT_LOCK_START_ONLY;
+    else process.env.GATE_STAFF_EDIT_LOCK_START_ONLY = prev;
+  });
+  const twelve = () => before({ window_start: '12:00:00', window_end: '14:00:00' });
+
+  test('gate off: an end-only change still locks (today)', () => {
+    delete process.env.GATE_STAFF_EDIT_LOCK_START_ONLY;
+    expect(staffEditLocksVisit(twelve(), { window_start: '12:00', window_end: '13:00' })).toBe(true);
+    process.env.GATE_STAFF_EDIT_LOCK_START_ONLY = '1';
+    expect(staffEditLocksVisit(twelve(), { window_end: '13:00' })).toBe(true);
+  });
+
+  test('gate on: an end-only change does not lock, with or without the unchanged start in the update', () => {
+    process.env.GATE_STAFF_EDIT_LOCK_START_ONLY = 'true';
+    expect(staffEditLocksVisit(twelve(), { window_start: '12:00', window_end: '13:00' })).toBe(false);
+    expect(staffEditLocksVisit(twelve(), { window_end: '13:00' })).toBe(false);
+    expect(staffEditLocksVisit(twelve(), { scheduled_date: '2026-10-18', window_start: '12:00:00', window_end: '15:00' })).toBe(false);
+    expect(staffEditLockPatch(twelve(), { window_start: '12:00', window_end: '13:00' })).toEqual({});
+  });
+
+  test('gate on: a date change or a start change still locks', () => {
+    process.env.GATE_STAFF_EDIT_LOCK_START_ONLY = 'true';
+    expect(staffEditLocksVisit(twelve(), { scheduled_date: '2026-10-20', window_end: '13:00' })).toBe(true);
+    expect(staffEditLocksVisit(twelve(), { window_start: '13:00', window_end: '14:00' })).toBe(true);
+    expect(staffEditLocksVisit(twelve(), { window_start: '11:00', window_end: '14:00' })).toBe(true);
+    expect(staffEditLockPatch(twelve(), { window_start: '13:00', window_end: '15:00' })).toEqual({ auto_dispatch_locked: true });
+  });
+
+  test('gate on: clearing the window (unplacing) still does not lock', () => {
+    process.env.GATE_STAFF_EDIT_LOCK_START_ONLY = 'true';
+    expect(staffEditLocksVisit(twelve(), { window_start: null, window_end: null })).toBe(false);
+  });
+
+  test('gate on: an explicit box flip still wins', () => {
+    process.env.GATE_STAFF_EDIT_LOCK_START_ONLY = 'true';
+    expect(staffEditLockPatch(twelve(), { window_start: '13:00', auto_dispatch_locked: false })).toEqual({});
+    expect(staffEditLockPatch(twelve(), { window_end: '13:00', auto_dispatch_locked: true })).toEqual({});
+  });
+});
+
 describe('staffEditLockPatch (merged by the edit route next to recurringDispatchDuePatch)', () => {
   const { staffEditLockPatch } = require('../services/auto-dispatch/staff-edit-lock');
   test('a slot change returns the lock column; anything else returns nothing', () => {
