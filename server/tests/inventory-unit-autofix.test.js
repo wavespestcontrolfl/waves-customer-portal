@@ -9,9 +9,12 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => false),
+  inventoryUnitAutofixDryOzLive: jest.fn(() => false),
+}));
 
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, inventoryUnitAutofixDryOzLive } = require('../config/feature-gates');
 const { notifyAdmin } = require('../services/notification-service');
 const { convertInventoryQuantity } = require('../services/inventory-units');
 const {
@@ -45,6 +48,7 @@ function makeChain(table, route) {
 beforeEach(() => {
   jest.clearAllMocks();
   isEnabled.mockReturnValue(false);
+  inventoryUnitAutofixDryOzLive.mockReturnValue(false);
 });
 
 // ---------------------------------------------------------------------------
@@ -581,6 +585,24 @@ describe('applyInventoryUnitFix lockedCheck / movementReason', () => {
     expect(state.movements[0].metadata.reason).toBe('Inventory unit normalization');
   });
 
+  it('a row counted down to 0 converts to 0 instead of refusing (zero is zero in every weight unit)', async () => {
+    const { dbi, state } = buildDbi({ product: { ...dryProduct, inventory_on_hand: '0', low_stock_threshold: '0' } });
+    const { outcome } = await applyInventoryUnitFix({ dbi, ...buildArgs() });
+    expect(outcome).toBe('applied');
+    expect(state.updated.inventory_unit).toBe('g');
+    expect(state.updated.inventory_on_hand).toBe(0);
+    expect(state.updated.low_stock_threshold).toBe(0);
+    expect(state.movements).toHaveLength(1);
+    expect(state.movements[0]).toMatchObject({ quantity: 0, stock_before: 0, stock_after: 0, unit: 'g' });
+  });
+
+  it('zero still refuses a unit that cannot convert (oz -> each stays a 400)', async () => {
+    const { dbi, state } = buildDbi({ product: { ...dryProduct, inventory_on_hand: '0', low_stock_threshold: null } });
+    await expect(applyInventoryUnitFix({ dbi, ...buildArgs({ nextUnit: 'each' }) }))
+      .rejects.toMatchObject({ statusCode: 400 });
+    expect(state.updated).toBe(null);
+  });
+
   it('movementReason replaces the alias text on the zero-quantity row of a dry product with no stock', async () => {
     const { dbi, state } = buildDbi({ product: { ...dryProduct, inventory_on_hand: null, low_stock_threshold: null } });
     await applyInventoryUnitFix({ dbi, ...buildArgs({ movementReason: 'Dry product: weight ounces converted to g' }) });
@@ -634,7 +656,11 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
   }
 
   const lockedRows = () => Object.fromEntries(OZ_ROWS.map((r) => [r.id, { ...r, low_stock_threshold: null }]));
-  const gates = (...on) => isEnabled.mockImplementation((gate) => on.includes(gate));
+  // The sweep gate is a boot-time isEnabled read; the dry-oz gate is its call-time reader.
+  const gates = (...on) => {
+    isEnabled.mockImplementation((gate) => on.includes(gate));
+    inventoryUnitAutofixDryOzLive.mockReturnValue(on.includes('inventoryUnitAutofixDryOz'));
+  };
 
   it('gate off: no dry-oz scan and no dry-oz writes; alias behavior unchanged', async () => {
     gates('inventoryUnitAutofix');

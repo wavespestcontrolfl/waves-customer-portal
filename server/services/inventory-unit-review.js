@@ -21,14 +21,14 @@
  *
  * Second phase (owner 2026-11-01, Action inbox agents A): DRY products whose
  * unit is a bare ounce are converted to g or lb (exact weight conversion,
- * stock and threshold converted with it). Its own gate, inventoryUnitAutofixDryOz
- * (GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true'); it also needs the sweep
- * gate above. resolveDryOzTarget() decides, and parks everything doubtful.
+ * stock and threshold converted with it). Its own gate,
+ * GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true', read at call time via
+ * inventoryUnitAutofixDryOzLive(); it also needs the sweep gate above. resolveDryOzTarget() decides, and parks everything doubtful.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, inventoryUnitAutofixDryOzLive } = require('../config/feature-gates');
 const {
   convertInventoryQuantity,
   normalizeInventoryUnit,
@@ -212,6 +212,15 @@ function resolveDryOzTarget(product = {}) {
   return Number(product.inventory_on_hand) >= DRY_OZ_POUND_THRESHOLD_OZ ? 'lb' : 'g';
 }
 
+// Zero is zero in every unit of the same dimension. convertInventoryQuantity
+// refuses a non-positive amount, so a row counted down to 0 could never be
+// fixed: the Unit Review Fix answered 400 and the dry-oz sweep would retry it
+// every night. Units that cannot convert still return null (refused).
+function convertStockAmount(amount, fromUnit, toUnit) {
+  if (amount === 0) return convertInventoryQuantity(1, fromUnit, toUnit) == null ? null : 0;
+  return convertInventoryQuantity(amount, fromUnit, toUnit);
+}
+
 // True when the locked row no longer matches what the caller decided on.
 function isStaleLock(product, { expectedCurrentUnit, lockedCheck }) {
   if (expectedCurrentUnit !== undefined
@@ -288,8 +297,8 @@ async function applyInventoryUnitFix({
     let conversion = null;
 
     if (convertExistingStock && currentUnit && normalizeInventoryUnit(currentUnit) !== normalizeInventoryUnit(targetUnit)) {
-      stockAfter = stockBefore != null ? convertInventoryQuantity(stockBefore, currentUnit, targetUnit) : null;
-      thresholdAfter = thresholdBefore != null ? convertInventoryQuantity(thresholdBefore, currentUnit, targetUnit) : null;
+      stockAfter = stockBefore != null ? convertStockAmount(stockBefore, currentUnit, targetUnit) : null;
+      thresholdAfter = thresholdBefore != null ? convertStockAmount(thresholdBefore, currentUnit, targetUnit) : null;
       if ((stockBefore != null && stockAfter == null) || (thresholdBefore != null && thresholdAfter == null)) {
         const err = new Error(`Cannot convert existing inventory from ${currentUnit} to ${targetUnit}`);
         err.statusCode = 400;
@@ -313,7 +322,7 @@ async function applyInventoryUnitFix({
     });
 
     if (conversion && stockBefore != null) {
-      const stockBeforeInNextUnit = convertInventoryQuantity(stockBefore, currentUnit, targetUnit);
+      const stockBeforeInNextUnit = convertStockAmount(stockBefore, currentUnit, targetUnit);
       await trx('product_inventory_movements').insert({
         product_id: product.id,
         movement_type: 'correction',
@@ -413,7 +422,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     }
   }
 
-  if (isEnabled('inventoryUnitAutofixDryOz')) {
+  if (inventoryUnitAutofixDryOzLive()) {
     await runDryOzPhase({ dbi, results });
   }
 
