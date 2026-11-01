@@ -2,8 +2,8 @@
 // 20261101200000, owner 2026-11-01, through PostgreSQL. Synthetic data only. Skips without DATABASE_URL; CI runs it.
 //
 // Pinned: the rows are stored as the spec says (jsonb gates and counter, linked to the template row's catalog id, spot rows never in
-// the plan by default); they are appended (no existing row changes); the treatment guide picks the February Velista row as the fungus
-// offer and leaves May's first fungicide row first; down is all or nothing: a full no-op when any v13 protocol is referenced or any
+// the plan by default); they are appended (no existing row changes); the treatment guide never offers the February spring pass as its
+// fungus card and leaves May's first fungicide row first; down is all or nothing: a full no-op when any v13 protocol is referenced or any
 // inserted row was edited or removed, an exact restore otherwise.
 const SKIP = !process.env.DATABASE_URL;
 const describeDb = SKIP ? describe.skip : describe;
@@ -154,8 +154,8 @@ describeDb('v13 fungus prevention migration through PostgreSQL', () => {
       expect(after.products.length).toBe(before.products.length + 2 * KEYS.length);
     });
 
-    test('the treatment guide offers the February Velista row as the fungus card, and May\'s first fungicide row stays Velista', async () => {
-      expect((await offerIn(W.FEB)).fungus.raw.product.name).toBe(N.VEL);
+    test('the treatment guide never offers the February spring pass as its fungus card, and May\'s first fungicide row stays Velista', async () => {
+      expect((await offerIn(W.FEB)).fungus).toBeNull();
       // May: Velista was first and stays first; the appended Artavia row is not the offer.
       expect((await offerIn(W.MAY)).fungus.raw.product.name).toBe(N.VEL);
     });

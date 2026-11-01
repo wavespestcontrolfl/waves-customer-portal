@@ -3,14 +3,14 @@
 // lawn-v13-spot-lines.test.js).
 //
 // Pinned: the recipe lines and notes on all three tracks; the staged rows copy the June Artavia row and the November Velista row;
-// the treatment guide offers Velista as February's fungus card and leaves May's first fungicide row alone; the new triggers are not
+// the treatment guide never offers either prevention row as its fungus card (they stay add-ons) and leaves May's first fungicide row alone; the new triggers are not
 // take-all triggers (treatment guide, approval engine); the rounds spot month serves the February row to St. Augustine round 2 in
 // March; the migration appends (no row moves), writes one audit row per protocol and rolls back all or nothing.
 const engine = require('../services/waveguard-plan-engine');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
 const migration = require('../models/migrations/20261101200000_lawn_v13_fungus_prevention');
 const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
-const { pickAddOns, takeAllAddOns } = require('../services/lawn-treatment-guide');
+const { pickAddOns, takeAllAddOns, PREVENTION_ONLY_TRIGGERS } = require('../services/lawn-treatment-guide');
 const { rowNamesTakeAll } = require('../services/waveguard-approval-engine');
 const { roundSpotMonth } = require('../services/lawn-rounds');
 const { V13_TROUBLE_PRODUCT_SWAPS } = require('../config/lawn-v13-trouble-product-swaps');
@@ -116,11 +116,19 @@ describe('fungus prevention: the readers', () => {
     return pickAddOns(candidates, rows, options);
   };
 
-  test('February: the new Velista row is the fungus card offer (the month had no fungicide row), also on a lawn with take-all mapped', () => {
+  test('February: the spring pass is never the fungus card offer (prevention on a mapped lawn is the tech\'s choice), take-all mapped or not', () => {
     const rows = new Map([[P.CEL, { role: 'post_emergent_spot', gates: {} }], [P.VEL, row('fungicide_spot', migration.LARGE_PATCH_SPRING_TRIGGER)]]);
-    expect(offer(rows).fungus.raw.product.id).toBe(P.VEL);
-    // Velista is not azoxystrobin: the Group 11 hold for a take-all lawn does not pass it over.
-    expect(offer(rows, { takeAllMapped: true }).fungus.raw.product.id).toBe(P.VEL);
+    expect(offer(rows).fungus).toBeNull();
+    expect(offer(rows, { takeAllMapped: true }).fungus).toBeNull();
+    // The row is still a February add-on candidate: only the card's automatic offer leaves it out.
+    expect([...rows.keys()]).toContain(P.VEL);
+  });
+
+  test('the May gray leaf spot prevention row is never the fungus card offer, even when it is the only or the first fungicide row', () => {
+    expect(offer(new Map([[P.ART, row('fungicide_spot', migration.GRAY_LEAF_SPOT_TRIGGER)]])).fungus).toBeNull();
+    const first = new Map([[P.ART, row('fungicide_spot', migration.GRAY_LEAF_SPOT_TRIGGER)], [P.GRV, row('fungicide_spot', 'dollar_spot_rust')]]);
+    expect(offer(first).fungus.raw.product.id).toBe(P.GRV);
+    expect(PREVENTION_ONLY_TRIGGERS).toEqual([migration.LARGE_PATCH_SPRING_TRIGGER, migration.GRAY_LEAF_SPOT_TRIGGER]);
   });
 
   test('May: the new Artavia row is appended last, so the month\'s first fungicide row stays the first fungicide row', () => {
