@@ -120,6 +120,11 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // without either would take the visit off the route and tell the customer
   // nothing they can act on; rain-out.js renders with this same list.
   rain_out_customer_pick_v1: Object.freeze(['pick_url', 'pick_by']),
+  // The 72-hour reminder for a visit Auto-Dispatch booked after the customer
+  // did not pick a day: the booked date and arrival window ARE the text.
+  // appointment-reminders.js renders with this same list and falls back to
+  // the base reminder_72h row when this one fails.
+  reminder_72h_no_reply_v1: Object.freeze(['date', 'window']),
   // Outbound voicemail text-back: the callback number and the STOP footer
   // for unlinked prospects are promises the lane makes (codex #4195 r1 P2).
   outbound_voicemail_missed_you: Object.freeze(['first_name', 'callback_clause', 'optout_clause']),
