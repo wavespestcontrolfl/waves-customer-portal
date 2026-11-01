@@ -359,6 +359,94 @@ describe('checkOwnedUrlHealth (shared checker, injected fetchImpl)', () => {
   });
 });
 
+// Spoke rewrite 2026-11-01: pages that moved to the hub became noindexed
+// stubs with an instant refresh + canonical to the hub copy. The cited URL
+// still lands visitors on the page, so it is judged by the hub copy.
+describe('checkOwnedUrlHealth — moved-page refresh stubs', () => {
+  const HUB = 'https://www.wavespestcontrol.com/inspections/';
+  const SPOKE = 'https://www.sarasotaflpestcontrol.com/inspections/';
+  const HUB_PAGE = '<html><head><title>Inspections</title><link rel="canonical" href="https://www.wavespestcontrol.com/inspections/"></head><body>Real content here, plenty of it, well past the minimum visible length this module enforces for a clean page.</body></html>';
+  const stub = (target, canonical = target, delay = '0') => `<!doctype html><html><head><meta charset="utf-8"><title>Redirecting</title><meta name="robots" content="noindex,follow"><link rel="canonical" href="${canonical}"><meta http-equiv="refresh" content="${delay}; url=${target}"></head><body></body></html>`;
+
+  test('a stub whose refresh and canonical name a live hub page is redirect_ok', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      [SPOKE]: response(200, stub(HUB), { 'content-type': 'text/html' }),
+      [HUB]: response(200, HUB_PAGE, { 'content-type': 'text/html' }),
+    }));
+    const result = await checkOwnedUrlHealth(SPOKE, { fetchImpl });
+    expect(result).toMatchObject({
+      url: SPOKE,
+      verdict: 'redirect_ok',
+      finalUrl: HUB,
+      detail: { reason: 'instant_refresh_stub', refreshTargetUrl: HUB, stubVerdict: 'noindex', requestedUrl: SPOKE },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  test('a 301 that lands on a stub is judged by the stub target too', async () => {
+    const OLD = 'https://sarasotaflexterminator.com/top-10-pests-in-sarasota/';
+    const STUB = 'https://www.sarasotaflexterminator.com/pest-library/';
+    const TARGET = 'https://www.wavespestcontrol.com/pest-library/';
+    const fetchImpl = jest.fn(fetchMap({
+      [OLD]: response(301, '', { location: STUB }),
+      [STUB]: response(200, stub(TARGET), { 'content-type': 'text/html' }),
+      [TARGET]: response(200, HUB_PAGE.replace(HUB, TARGET), { 'content-type': 'text/html' }),
+    }));
+    const result = await checkOwnedUrlHealth(OLD, { fetchImpl });
+    expect(result).toMatchObject({ verdict: 'redirect_ok', finalUrl: TARGET, detail: { refreshTargetUrl: TARGET } });
+  });
+
+  test('a stub whose target is broken reports the target verdict', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      [SPOKE]: response(200, stub(HUB), { 'content-type': 'text/html' }),
+      [HUB]: response(404, 'Not found'),
+    }));
+    const result = await checkOwnedUrlHealth(SPOKE, { fetchImpl });
+    expect(result).toMatchObject({ verdict: 'not_found', finalUrl: HUB, detail: { refreshTargetUrl: HUB, stubVerdict: 'noindex' } });
+    expect(result.detail.reason).toBeUndefined();
+  });
+
+  test('a stub pointing at another stub stays noindex (one hop only)', async () => {
+    const SECOND = 'https://www.wavespestcontrol.com/old-inspections/';
+    const fetchImpl = jest.fn(fetchMap({
+      [SPOKE]: response(200, stub(SECOND), { 'content-type': 'text/html' }),
+      [SECOND]: response(200, stub(HUB), { 'content-type': 'text/html' }),
+    }));
+    const result = await checkOwnedUrlHealth(SPOKE, { fetchImpl });
+    expect(result.verdict).toBe('noindex');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  test('a refresh that does not match the canonical is not a declared move', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      [SPOKE]: response(200, stub(HUB, 'https://www.wavespestcontrol.com/other/'), { 'content-type': 'text/html' }),
+    }));
+    const result = await checkOwnedUrlHealth(SPOKE, { fetchImpl });
+    expect(result.verdict).toBe('noindex');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test('a delayed refresh is not a stub', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      [SPOKE]: response(200, stub(HUB, HUB, '5'), { 'content-type': 'text/html' }),
+    }));
+    const result = await checkOwnedUrlHealth(SPOKE, { fetchImpl });
+    expect(result.verdict).toBe('noindex');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test('a stub that points off the owned fleet or to http:// is never followed', async () => {
+    for (const target of ['https://attacker.example/inspections/', 'http://www.wavespestcontrol.com/inspections/']) {
+      const fetchImpl = jest.fn(fetchMap({
+        [SPOKE]: response(200, stub(target), { 'content-type': 'text/html' }),
+      }));
+      const result = await checkOwnedUrlHealth(SPOKE, { fetchImpl });
+      expect(result.verdict).toBe('noindex');
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
 describe('collectCitedOwnedUrls', () => {
   function fakeDb(rows) {
     const builder = {

@@ -573,6 +573,33 @@ describe('content registry live status helpers', () => {
   });
 });
 
+describe('instant meta refresh (reported, never followed)', () => {
+  const { extractInstantRefresh, checkUrlLiveStatus } = liveStatus;
+  test('reads a 0-second refresh target, absolute or relative', () => {
+    expect(extractInstantRefresh('<meta http-equiv="refresh" content="0; url=https://www.wavespestcontrol.com/inspections/">', 'https://www.parrishpestcontrol.com/inspections/'))
+      .toBe('https://www.wavespestcontrol.com/inspections/');
+    expect(extractInstantRefresh("<META HTTP-EQUIV='Refresh' CONTENT='0;URL=/new/'>", 'https://www.wavespestcontrol.com/old/'))
+      .toBe('https://www.wavespestcontrol.com/new/');
+    expect(extractInstantRefresh('<meta http-equiv="refresh" content="0, \'https://www.wavespestcontrol.com/a/\'">', 'https://www.wavespestcontrol.com/'))
+      .toBe('https://www.wavespestcontrol.com/a/');
+  });
+
+  test('a delayed refresh, a bare reload or no refresh reads as none', () => {
+    expect(extractInstantRefresh('<meta http-equiv="refresh" content="5; url=/new/">', 'https://www.wavespestcontrol.com/')).toBeNull();
+    expect(extractInstantRefresh('<meta http-equiv="refresh" content="0">', 'https://www.wavespestcontrol.com/')).toBeNull();
+    expect(extractInstantRefresh('<meta name="robots" content="noindex">', 'https://www.wavespestcontrol.com/')).toBeNull();
+  });
+
+  test('checkUrlLiveStatus reports the target without changing the verdict', async () => {
+    const url = 'https://www.parrishpestcontrol.com/inspections/';
+    const body = '<html><head><meta name="robots" content="noindex,follow"><link rel="canonical" href="https://www.wavespestcontrol.com/inspections/"><meta http-equiv="refresh" content="0; url=https://www.wavespestcontrol.com/inspections/"></head><body></body></html>';
+    const fetchImpl = jest.fn(fetchMap({ [url]: response(200, body, { 'content-type': 'text/html' }) }));
+    const result = await checkUrlLiveStatus(url, { fetchImpl });
+    expect(result).toMatchObject({ live_status: 'noindex', refresh_target_url: 'https://www.wavespestcontrol.com/inspections/' });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('soft-404 heading detector (shared with the citation auditor)', () => {
   const { notFoundHeading, computeBodySignals } = liveStatus;
   test('reads <title>/<h1> only, decoded, ignoring markup that never renders', () => {
