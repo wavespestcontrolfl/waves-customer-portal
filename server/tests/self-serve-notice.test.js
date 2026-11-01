@@ -329,3 +329,25 @@ describe('visitInsideMoveNoticeWindow — a visit handed to the customer to pick
     expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-09', window_start: null, customer_pick_by: handedAt }, now)).toBe(false);
   });
 });
+
+describe('awaitingCustomerPick (Quick Move hand-off with no time yet)', () => {
+  const { awaitingCustomerPick, AWAITING_PICK_REFUSAL } = require('../services/scheduling/self-serve-notice');
+  const marker = new Date('2026-11-04T01:00:00Z');
+
+  test('a handed-off visit with no window is waiting for the pick', () => {
+    expect(awaitingCustomerPick({ customer_pick_by: marker, scheduled_date: '2026-11-11', window_start: null })).toBe(true);
+  });
+
+  test('once Auto-Dispatch or a person gives it a time it is an ordinary visit', () => {
+    expect(awaitingCustomerPick({ customer_pick_by: marker, scheduled_date: '2026-11-09', window_start: '09:00:00' })).toBe(false);
+  });
+
+  test('a windowless visit that was never handed off is not', () => {
+    expect(awaitingCustomerPick({ customer_pick_by: null, scheduled_date: '2026-11-11', window_start: null })).toBe(false);
+    expect(awaitingCustomerPick(null)).toBe(false);
+  });
+
+  test('the confirm routes answer one 409 body, in words, with a machine code', () => {
+    expect(AWAITING_PICK_REFUSAL).toEqual({ error: expect.stringContaining('pick one'), code: 'PICK_A_TIME' });
+  });
+});

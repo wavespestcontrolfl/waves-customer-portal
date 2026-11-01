@@ -139,6 +139,23 @@ function visitInsideMoveNoticeWindow(row, now = new Date()) {
   return startsAt.getTime() < earliestSelfServeMoveStart(now).getTime();
 }
 
+// A visit handed to the customer and not yet given a time (customer_pick_by
+// set, no start). Its date is a placeholder: the customer picks a time through
+// the reschedule link, and nothing may CONFIRM it, because a customer
+// confirmation holds a visit out of Auto-Dispatch (CUSTOMER_CONFIRMED) and the
+// hand-off text promised that Auto-Dispatch books it when the customer does not
+// pick. Once Auto-Dispatch or a person gives it a time it is an ordinary visit.
+// Not behind the gate, like the exemption above.
+function awaitingCustomerPick(row) {
+  return !!(row && row.customer_pick_by) && !visitStartInstant(row);
+}
+
+// What a customer confirm route answers for such a visit (HTTP 409).
+const AWAITING_PICK_REFUSAL = Object.freeze({
+  error: "This visit doesn't have a time yet. Please pick one with the link we texted you.",
+  code: 'PICK_A_TIME',
+});
+
 // The ET instant a scheduled_services row starts (scheduled_date +
 // window_start), or null when either part is missing or unparsable.
 function visitStartInstant(row) {
@@ -169,4 +186,6 @@ module.exports = {
   visitInsideMoveNoticeWindow,
   visitStartInstant,
   officeApprovedMove,
+  awaitingCustomerPick,
+  AWAITING_PICK_REFUSAL,
 };

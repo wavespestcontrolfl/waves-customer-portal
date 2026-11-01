@@ -33,6 +33,7 @@ const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcs
 // portal can never advertise a link that 404s or hide one the route serves
 // (codex r3 P1).
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL } = require('../services/call-booking-source-actions');
+const { awaitingCustomerPick, AWAITING_PICK_REFUSAL } = require('../services/scheduling/self-serve-notice');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 // Contact session (GATE_CONTACT_LOGIN): a contact is view-only, so its
 // schedule payloads carry no action bearer (reschedule / calendar tokens,
@@ -414,6 +415,12 @@ router.post('/:id/confirm', async (req, res, next) => {
       return res.status(404).json({ error: 'Appointment not found or already confirmed' });
     }
 
+    // A visit Quick Move handed to the customer has a placeholder date and no
+    // time: it is picked through the reschedule link, never confirmed (a
+    // confirmation would hold it out of the Auto-Dispatch booking its text
+    // promised).
+    if (awaitingCustomerPick(service)) return res.status(409).json(AWAITING_PICK_REFUSAL);
+
     // The staff board can move this visit after the read above. Gate the write
     // on the customer and status we actually observed so a stale portal click
     // cannot revive a cancelled/completed visit (or overwrite an in-progress
@@ -440,6 +447,9 @@ router.post('/:id/confirm', async (req, res, next) => {
         // not land on the newly assigned property.
         property_id: service.property_id || null,
       })
+      // A hand-off landing after the read keeps the status, so the CAS above
+      // would still match: never confirm a row now waiting for the pick.
+      .where((q) => q.whereNull('customer_pick_by').orWhereNotNull('window_start'))
       .update({
         status: 'confirmed',
         customer_confirmed: true,

@@ -1011,6 +1011,18 @@ For a row with `customer_pick_by` set:
   commit moves only this visit (no series re-anchor). A page that disclosed
   series anchoring for the visit (loaded before the hand-off) gets
   `409 SCOPE_CHANGED` and reloads.
+- **Never confirmable while it has no time.** A customer confirmation would
+  hold the visit out of Auto-Dispatch (`CUSTOMER_CONFIRMED`), the booking the
+  text promised. While the row has the column and no window
+  (`self-serve-notice.js awaitingCustomerPick`): `GET
+  /api/public/appointment/:token` sends `confirmable: false`, and both
+  `POST /api/public/appointment/:token/confirm` and the portal's
+  `POST /api/schedule/:id/confirm` answer `409 { error: "This visit doesn't
+  have a time yet. Please pick one with the link we texted you.", code:
+  'PICK_A_TIME' }` and write nothing. The portal confirm's write also requires
+  `customer_pick_by IS NULL OR window_start IS NOT NULL`, since a hand-off
+  keeps the status its CAS pins; the token confirm's CAS already pins the
+  date and start it read. Once a time is set, both confirm as before.
 - **The marker ends on a person's move.** A customer pick, a staff move and
   any other `SmartRebooker.reschedule` caller clear `customer_pick_by` in the
   move's own write. An Auto-Dispatch placement keeps it (it is how the page
