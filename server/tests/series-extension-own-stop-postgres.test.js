@@ -33,7 +33,10 @@ let mockPg;
 jest.setTimeout(60000);
 
 const addDays = (d, n) => etDateString(addETDays(parseETDateTime(`${d}T12:00`), n));
-const dateOf = (v) => (v instanceof Date ? etDateString(v) : String(v).slice(0, 10));
+// A pg DATE arrives as a Date at local midnight; read it with the shared
+// helper so the check holds in a UTC process (CI) as well as an Eastern one.
+const { dateOnlyString } = require('../utils/date-only');
+const dateOf = (v) => dateOnlyString(v);
 
 postgres('series extension and the customer\'s own stop', () => {
   let Admin;
