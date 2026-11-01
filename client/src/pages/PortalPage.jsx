@@ -8566,6 +8566,16 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
+          // A pair the member withdrew while this save was in flight saved anyway: show the window the server now
+          // holds, so the summary (and the inputs, when the section reopens) never hide an active Away Watch.
+          if (result?.preferences && awayWatchPairRevision.current !== savingAwayWatchRevision
+            && AWAY_WATCH_PAIR_FIELDS.some((field) => field in toSave)) {
+            setPrefs((prev) => ({
+              ...prev,
+              awayWatchFrom: result.preferences.awayWatchFrom ?? null,
+              awayWatchUntil: result.preferences.awayWatchUntil ?? null,
+            }));
+          }
           const rejectedFields = Array.isArray(result?.rejected) ? result.rejected : [];
           // A field the server validated and saved THIS round clears any
           // stale message from an earlier rejection of the same field; a

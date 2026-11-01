@@ -132,13 +132,18 @@ function awayWatchPairError(from, until, sent, today = etDateString()) {
   return null;
 }
 
-// Gate off: the two fields are not part of any response.
-function withoutAwayWatch(obj) {
-  if (awayWatchLive() || !obj) return obj;
+// The two days, gone from a copy of obj (camel and snake keys): they say when a home stands empty.
+function stripAwayWatchDates(obj) {
+  if (!obj) return obj;
   const copy = { ...obj };
   AWAY_WATCH_FIELDS.forEach((k) => delete copy[k]);
   AWAY_WATCH_COLUMNS.forEach((k) => delete copy[k]);
   return copy;
+}
+
+// Gate off: the two fields are not part of any response.
+function withoutAwayWatch(obj) {
+  return awayWatchLive() ? obj : stripAwayWatchDates(obj);
 }
 
 // Gate on: the two days as plain ET day strings (a pg date can arrive as a Date).
@@ -165,6 +170,7 @@ module.exports = {
   awayWatchCardLines,
   awayWatchClosePhotoCount,
   awayWatchPairError,
+  stripAwayWatchDates,
   withoutAwayWatch,
   withAwayWatchDays,
   MESSAGES,

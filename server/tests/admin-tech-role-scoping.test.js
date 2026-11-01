@@ -449,6 +449,18 @@ describe('customer profile address writes (admin role)', () => {
   });
 });
 
+describe('techSafe360Payload: Away Watch', () => {
+  test('a technician never gets the member\'s away window or the Away Watch flag; other preferences stay', () => {
+    const out = techSafe360Payload({
+      customer: { id: 'c1' },
+      awayWatchEnabled: true,
+      preferences: { gate_code: '1234', away_watch_from: '2027-05-01', away_watch_until: '2027-10-15', awayWatchFrom: '2027-05-01', awayWatchUntil: '2027-10-15' },
+    });
+    expect(out).not.toHaveProperty('awayWatchEnabled');
+    expect(out.preferences).toEqual({ gate_code: '1234' });
+  });
+});
+
 describe('techSafe360Payload', () => {
   test('strips billing/comms/CRM keys and customer financial fields, keeps service context', () => {
     const payload = {

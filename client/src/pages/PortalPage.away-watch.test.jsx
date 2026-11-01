@@ -140,6 +140,23 @@ describe('Away Watch section on the Property tab', () => {
     expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
   });
 
+  it('a pair withdrawn while its save was in flight, and that save succeeds: the summary shows the window the server holds', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: {}, hasLawnCare: false, awayWatchEnabled: true });
+    let finishFirst;
+    api.updatePropertyPreferences
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValue({ preferences: {}, saved: true });
+    render(<PropertyTab customer={customer} />);
+    const section = await sectionOf();
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.fromLabel), { target: { value: '2026-06-01' } });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '2026-09-15' } });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '' } });
+    expect(within(section).getByText(AWAY_WATCH_COPY.summaryOff)).toBeInTheDocument();
+    finishFirst({ preferences: { awayWatchFrom: '2026-06-01', awayWatchUntil: '2026-09-15' }, saved: true });
+    expect(await within(section).findByText('Away Jun 1 to Sep 15')).toBeInTheDocument();
+  });
+
   it('a saved pair shows its summary; Remove sends two nulls and empties the inputs', async () => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { awayWatchFrom: '2026-06-01', awayWatchUntil: '2026-09-15' }, hasLawnCare: false, awayWatchEnabled: true });
     render(<PropertyTab customer={customer} />);

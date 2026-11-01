@@ -284,6 +284,10 @@ function techSafe360Payload(payload) {
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
   for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) delete out.customer[field];
+  // Away Watch (GATE_AWAY_WATCH): the leave and back days say when a home stands empty. The assigned visit's job card
+  // carries what the tech needs ("member away until ..."), so the 360 view never shows the window to a technician.
+  delete out.awayWatchEnabled;
+  if (payload.preferences) out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
   out.services = (payload.services || []).map(techSafeServiceRecord);
   out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
   out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
