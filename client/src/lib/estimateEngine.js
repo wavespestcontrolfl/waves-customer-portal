@@ -1046,13 +1046,8 @@ const DETHATCHING_CONFIG = {
   floor: 150,
   marginDivisor: 0.40,
   materialPer1K: 2.10,
-  baseCompatibilityPrices: {
-    1500: 150,
-    3000: 150,
-    4500: 166,
-    6000: 205,
-    10000: 315,
-  },
+  // Mirrors SPECIALTY.dethatching.equipCost: Classen TR-20H at $2,453.99, $500 salvage, 7 years, 10 jobs a year.
+  equipCost: Math.round(((2453.99 - 500) / (7 * 10)) * 100) / 100,
   timeModel: {
     primaryPassSqFtPerMin: 100,
     crossPassSqFtPerMin: 200,
@@ -1219,14 +1214,9 @@ function priceDethatchingClient(lawnSqFt, options = {}) {
   const laborCost = 35 * timeMin / 60;
   const materialCost = (lawnEst / 1000) * cfg.materialPer1K;
   const cleanupPriceAdder = (lawnEst / 1000) * cleanup.pricePer1K;
-  const rawCost = laborCost + materialCost;
-  const formulaBasePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
-  const compatibilityBasePrice = cleanupLevel === 'none' && accessChoice.key === 'easy'
-    ? cfg.baseCompatibilityPrices?.[String(Math.round(lawnEst))]
-    : undefined;
-  const basePrice = Number.isFinite(Number(compatibilityBasePrice))
-    ? Number(compatibilityBasePrice)
-    : formulaBasePrice;
+  const equipmentCost = cfg.equipCost;
+  const rawCost = laborCost + materialCost + equipmentCost;
+  const basePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
   const calculatedPrice = Math.round(basePrice + cleanupPriceAdder);
   const debrisRemovalIncluded = debrisRemovalRequested || cleanupLevel !== 'none';
   const managerApproved = clientBooleanTrue(options.managerApproved);
@@ -1307,6 +1297,7 @@ function priceDethatchingClient(lawnSqFt, options = {}) {
     timeMin: roundClientMoney(timeMin),
     laborCost: roundClientMoney(laborCost),
     materialCost: roundClientMoney(materialCost),
+    equipmentCost: roundClientMoney(equipmentCost),
     cleanupLevel,
     requestedCleanupLevel: cleanupChoice.key,
     cleanupLabel: cleanup.label,
@@ -1462,7 +1453,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     activeIngredient: 'fipronil',
     chemistryType: 'non_repellent',
     positioning: 'premium_non_repellent',
-    containerCost: 375.00,
+    containerCost: 174.72, // mirrors SPECIALTY.trenching (SiteOne member price, read 2026-11-01)
     containerOz: 78,
     standardOzPerGal: 0.8,
     highOzPerGal: 1.6,
@@ -1474,7 +1465,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     activeIngredient: 'fipronil',
     chemistryType: 'non_repellent',
     positioning: 'standard_non_repellent',
-    containerCost: 85.00,
+    containerCost: 95.00, // mirrors SPECIALTY.trenching (SiteOne member price, read 2026-11-01)
     containerOz: 78,
     standardOzPerGal: 0.8,
     highOzPerGal: 1.6,
