@@ -217,13 +217,16 @@ function touchOrder(stops) {
 
 // The drive still ahead to an en-route stop: the leg from the stop touched
 // before it, less the minutes since the tech set off (all of it without an
-// en-route time; none without a stop to come from, or once checked in).
+// en-route time; none once checked in). Null when that leg is unknown (no
+// stop to come from, or a stop without a pin): arrivals are then unknown.
 function driveLeft(here, from, now) {
   const enRoute = here?.members.find((m) => m.status === 'en_route');
-  if (!enRoute || !from || here.members.some((m) => m.checkInTime && UNDER_WAY.has(m.status))) return 0;
+  if (!enRoute || here.members.some((m) => m.checkInTime && UNDER_WAY.has(m.status))) return 0;
+  const leg = from ? legBetween(from, here) : null;
+  if (leg == null) return null;
   const setOff = enRoute.enRouteAt ? new Date(enRoute.enRouteAt).getTime() : NaN;
   const gone = Number.isFinite(setOff) ? Math.max(0, Math.floor((now.getTime() - setOff) / 60000)) : 0;
-  return Math.max(0, (legBetween(from, here) || 0) - gone);
+  return Math.max(0, leg - gone);
 }
 
 // A visit group part-way through at the tech's stop: the work under way
@@ -250,6 +253,8 @@ function remainingPieces(p) {
 function clockRoute(stops, now) {
   const [at = -1, before = -1] = touchOrder(stops);
   const here = stops[at] || null;
+  const drive = driveLeft(here, stops[before], now);
+  if (drive == null) return null;
   const ahead = here ? here.members.filter((m) => NOT_REACHED.has(m.status) || UNDER_WAY.has(m.status)) : [];
   const checkIns = ahead.filter((m) => UNDER_WAY.has(m.status) && m.checkInTime)
     .map((m) => new Date(m.checkInTime).getTime()).filter(Number.isFinite);
@@ -282,7 +287,7 @@ function clockRoute(stops, now) {
   }
   if (!seq.length) return null;
   const { hour, minute } = etParts(now);
-  return { seq, legIn, piecesOf, startMin: hour * 60 + minute + driveLeft(here, stops[before], now) };
+  return { seq, legIn, piecesOf, startMin: hour * 60 + minute + drive };
 }
 
 // Minutes past each stop's 2-hour arrival window, from the shared route

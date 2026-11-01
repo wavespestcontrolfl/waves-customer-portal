@@ -617,6 +617,24 @@ describe('attachDriveLegs on today\'s clock', () => {
     expect(services[3].driveLateMin).toBeNull();
   });
 
+  it('predicts nothing while the drive to an en-route stop is unknown', () => {
+    // The stop the tech left has no pin.
+    const unpinned = [
+      stop('nopin', '15:00', null, { windowEnd: '16:00', status: 'completed', checkOutTime: et('17:20').toISOString(), displayOrder: 0 }),
+      stop('driving', '16:30', B, { windowEnd: '17:30', status: 'en_route', enRouteAt: et('17:25').toISOString(), displayOrder: 1 }),
+      stop('next', '16:00', C, { windowEnd: '17:00', displayOrder: 2 }),
+    ];
+    attachDriveLegs(unpinned, { now: et('17:33') });
+    expect(unpinned[2].driveLateMin).toBeNull();
+    // The day's first stop: no stop to come from.
+    const first = [
+      stop('driving', '08:00', B, { windowEnd: '09:00', status: 'en_route', enRouteAt: et('07:50').toISOString() }),
+      stop('next', '08:30', C, { windowEnd: '09:30' }),
+    ];
+    attachDriveLegs(first, { now: et('09:40') });
+    expect(first[1].driveLateMin).toBeNull();
+  });
+
   it('stops predicting after a leg it cannot measure', () => {
     const services = [
       stop('done', '08:00', A, { windowEnd: '09:00', status: 'completed' }),
