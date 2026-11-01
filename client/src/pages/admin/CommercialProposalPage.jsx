@@ -137,6 +137,7 @@ const FIRST_VISIT_OFFICE_REASONS = {
   address: "The customer's address on file differs from the proposal's address.",
   tax: 'The tax on a visit bill would not match the quote, or could not be checked.',
   changed_since_signing: 'The proposal changed after the customer signed.',
+  closed: 'Online booking needs an open proposal: this one is won, declined, expired or archived.',
 };
 const readinessDate = (value) => formatETDateTime(value, { month: 'short', day: 'numeric', year: 'numeric' });
 function signingLine(agreement) {

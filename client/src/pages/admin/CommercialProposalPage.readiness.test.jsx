@@ -50,6 +50,7 @@ it.each([
   ['tax', 'The tax on a visit bill would not match the quote, or could not be checked.'],
   ['no_customer', 'Link a customer account first.'],
   ['changed_since_signing', 'The proposal changed after the customer signed.'],
+  ['closed', 'Online booking needs an open proposal: this one is won, declined, expired or archived.'],
 ])('office (%s): the line says the office books it, and why', async (reason, why) => {
   await mount({ firstVisit: { state: 'office', reason } });
   expect(firstVisitLine()).toHaveTextContent(`The office books it. ${why}`);

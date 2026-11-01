@@ -553,13 +553,14 @@ describe('the signed premises are the customer\'s address', () => {
 });
 
 describe('firstVisitReadiness (the builder Readiness card, owner 2026-11-01)', () => {
+  const OPEN = { closedFor: () => false };
   test('an eligible plan and customer: the signer books the first visit online', async () => {
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'online' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'online' });
   });
 
   test('a live linked visit: booked, with its day, whatever the plan says', async () => {
     rows.scheduled_services = { id: VISIT_ID, scheduled_date: '2026-11-12', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed' };
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ bill_by_invoice: true })))
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ bill_by_invoice: true }), OPEN))
       .toEqual({ state: 'booked', visit: { date: '2026-11-12', windowStart: '09:00', windowEnd: '10:00' } });
   });
 
@@ -572,36 +573,49 @@ describe('firstVisitReadiness (the builder Readiness card, owner 2026-11-01)', (
     ['two schedules', { programs: [pestProgram(12, 81.67), pestProgram(4, 100)] }, 'cadence'],
     ['a visit over 90 minutes', { engineMinutes: 200 }, 'too_long'],
   ])('%s: the office books it, and the reason says why', async (_label, options, reason) => {
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate(options))).toEqual({ state: 'office', reason });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(options), OPEN)).toEqual({ state: 'office', reason });
   });
 
   test('no linked customer, or a customer row that is gone: no_customer', async () => {
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ customer_id: null }))).toEqual({ state: 'office', reason: 'no_customer' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ customer_id: null }), OPEN)).toEqual({ state: 'office', reason: 'no_customer' });
     rows.customers = undefined;
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'no_customer' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'office', reason: 'no_customer' });
   });
 
   test('the proposal names other premises than the customer address: address', async () => {
     const estimate = proposalEstimate({ proposal: { propertyAddress: '200 Harbor Way, Sarasota, FL 34236' } });
-    expect(await firstVisit.firstVisitReadiness(estimate)).toEqual({ state: 'office', reason: 'address' });
+    expect(await firstVisit.firstVisitReadiness(estimate, OPEN)).toEqual({ state: 'office', reason: 'address' });
   });
 
   test('the completion bill would carry other tax than the quote: tax', async () => {
     mockPreview.mockResolvedValue({ tax_amount: 0 });
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'tax' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'office', reason: 'tax' });
   });
 
   test('signed, then the proposal changed: the customer page serves no picker, so the office books it', async () => {
     mockSignedQuoteMatches.mockResolvedValue(false);
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'changed_since_signing' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'office', reason: 'changed_since_signing' });
     // Not signed yet: no signed quote to compare, so the signer books online once they sign.
     mockAgreementState.mockResolvedValue({ state: 'none' });
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'online' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'online' });
+  });
+
+  test('a closed estimate (won, declined, expired, archived): the office books it; without the verdict it fails closed', async () => {
+    const closedFor = jest.fn(() => true);
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ status: 'accepted' }), { closedFor })).toEqual({ state: 'office', reason: 'closed' });
+    expect(closedFor).toHaveBeenCalledWith(expect.objectContaining({ status: 'accepted' }));
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'closed' });
+  });
+
+  test('a booked visit still reads booked on a closed estimate', async () => {
+    rows.scheduled_services = { id: VISIT_ID, scheduled_date: '2026-11-12', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed' };
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ status: 'accepted' }), { closedFor: () => true }))
+      .toMatchObject({ state: 'booked' });
   });
 
   test('a failed read: unknown, never a throw', async () => {
     rows.scheduled_services = () => { throw new Error('synthetic read failure'); };
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'unknown' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'unknown' });
   });
 
   test('firstVisitPlan keeps its plan-or-null contract for the customer path', () => {

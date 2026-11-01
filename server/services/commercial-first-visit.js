@@ -253,12 +253,14 @@ async function firstVisitOnlineFor(estimateId, conn = db) {
 // linked to the estimate, { state: 'online' } when the signer will book the first visit online, else
 // { state: 'office', reason }. The checks are firstVisitCtaFor's and firstVisitOnlineFor's (the plan, the customer at the
 // signed premises, the completion tax, and for a signed agreement the quote as signed), which the customer page and the
-// signed-agreement alert keep calling. The route asks only with GATE_COMMERCIAL_FIRST_VISIT on. Never throws: a failed
-// read is { state: 'unknown' }.
-async function firstVisitReadiness(estimate, conn = db) {
+// signed-agreement alert keep calling. `closedFor(row)` is the route's verdict that a published estimate is closed (won,
+// declined, expired, archived; estimate-public.js firstVisitClosedFor); without it the answer fails closed. The route
+// asks only with GATE_COMMERCIAL_FIRST_VISIT on. Never throws: a failed read is { state: 'unknown' }.
+async function firstVisitReadiness(estimate, { conn = db, closedFor } = {}) {
   try {
     const visit = await linkedFirstVisit(estimate.id, conn);
     if (visit) return { state: 'booked', visit: publicVisit(visit) };
+    if (typeof closedFor !== 'function' || closedFor(estimate)) return { state: 'office', reason: 'closed' };
     const check = firstVisitPlanCheck(estimate);
     if (!check.plan) return { state: 'office', reason: check.reason };
     const customer = await loadCustomer(estimate.customer_id, conn);

@@ -4,6 +4,7 @@ const {
   adminDraftPreviewEligible,
   isEstimateExtensionRequestEligible,
   estimateOffCustomerSurface,
+  firstVisitClosedFor,
 } = require('../routes/estimate-public');
 
 const FUTURE = new Date(Date.now() + 86400000).toISOString();
@@ -273,3 +274,19 @@ describe('isEstimateExtensionRequestEligible (expired-page "Request an extension
     expect(isEstimateExtensionRequestEligible({ status: 'sending', sent_at: PAST, expires_at: null })).toBe(false);
   });
 });
+
+describe('firstVisitClosedFor (the builder Readiness card)', () => {
+  test.each([
+    ['a draft', { status: 'draft', expires_at: null }, false],
+    ['a scheduled send', { status: 'scheduled', expires_at: FUTURE }, false],
+    ['an open sent proposal', { status: 'sent', expires_at: FUTURE }, false],
+    ['a viewed proposal past its expiry', { status: 'viewed', expires_at: PAST }, true],
+    ['a won proposal', { status: 'accepted', expires_at: FUTURE }, true],
+    ['a declined proposal', { status: 'declined', expires_at: FUTURE }, true],
+    ['an expired proposal', { status: 'expired', expires_at: PAST }, true],
+    ['an archived proposal', { status: 'sent', expires_at: FUTURE, archived_at: PAST }, true],
+  ])('%s: closed = %s', (_label, row, closed) => {
+    expect(firstVisitClosedFor(row)).toBe(closed);
+  });
+});
+

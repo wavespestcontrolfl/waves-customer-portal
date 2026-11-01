@@ -76,6 +76,7 @@ const {
   bookingServiceFor,
   isEstimateAcceptActive,
   isEstimateCustomerViewable,
+  firstVisitClosedFor,
   sentSnapshotServesAsIs,
 } = require('./estimate-public');
 const {
@@ -4594,7 +4595,7 @@ router.get('/:id/proposal', async (req, res, next) => {
     // GATE_COMMERCIAL_FIRST_VISIT: whether the signer will book the first visit online, and if not why, for the
     // builder's Readiness card (owner 2026-11-01). Never throws; the key is absent with the gate off.
     const firstVisit = require('../config/feature-gates').commercialFirstVisitLive()
-      ? await require('../services/commercial-first-visit').firstVisitReadiness(estimate, db)
+      ? await require('../services/commercial-first-visit').firstVisitReadiness(estimate, { conn: db, closedFor: firstVisitClosedFor })
       : null;
     res.json({
       proposal,
