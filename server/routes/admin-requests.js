@@ -69,10 +69,11 @@ function validateUpdate(body) {
 
 // Does this status change email the customer "Your Waves request was updated"? measurement_review rows
 // are office-only (below). GATE_PORTAL_ITEM_CLOSE: a quiet change (the Portal tab's Mark handled, which can
-// close an item nobody answered) tells the customer nothing; only an explicit `true` counts.
-function shouldEmailRequestUpdate(updated, statusChanged, value) {
+// close an item nobody answered) tells the customer nothing; only an explicit `true` from an admin counts
+// (a technician's quiet is ignored, so the customer still hears).
+function shouldEmailRequestUpdate(updated, statusChanged, value, role) {
   const lifecycleEmail = statusChanged && updated.category !== 'measurement_review';
-  return lifecycleEmail && !(value.quiet === true && portalItemCloseLive());
+  return lifecycleEmail && !(value.quiet === true && role === 'admin' && portalItemCloseLive());
 }
 
 // GET /api/admin/requests — list service requests for staff triage.
@@ -225,7 +226,7 @@ router.patch('/:id', async (req, res, next) => {
     // answers a challenge with a revised estimate, not a lifecycle email). A
     // staff "Mark handled" must not leak an automated status email (codex
     // #3376 r2 P1).
-    if (shouldEmailRequestUpdate(updated, statusChanged, value)) {
+    if (shouldEmailRequestUpdate(updated, statusChanged, value, req.techRole)) {
       // Notify the customer their request moved forward. Fire-and-forget like
       // the request-received path — an email hiccup must not fail the staff
       // action. Idempotency on the sender keys to updated_at, so each distinct

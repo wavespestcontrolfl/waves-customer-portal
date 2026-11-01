@@ -31,10 +31,11 @@ const mockMarkAdminDone = jest.fn(async (ids) => [].concat(ids).length);
 jest.mock('../services/notification-service', () => ({
   markAdminDone: (...args) => mockMarkAdminDone(...args),
 }));
+let mockTechRole = 'admin';
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     req.technicianId = 'tech-admin-1';
-    req.techRole = 'admin';
+    req.techRole = mockTechRole;
     next();
   },
   requireTechOrAdmin: (req, res, next) => next(),
@@ -242,6 +243,20 @@ describe('PATCH /requests/:id', () => {
       });
     }
     expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(2);
+  });
+
+  test('GATE_PORTAL_ITEM_CLOSE on + quiet from a technician: quiet is ignored and the email goes (admins only)', async () => {
+    process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+    mockTechRole = 'technician';
+    try {
+      setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
+      await withServer(async (baseUrl) => {
+        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved', quiet: true })).status).toBe(200);
+      });
+      expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(1);
+    } finally {
+      mockTechRole = 'admin';
+    }
   });
 
   test('gate off: quiet is ignored and the email goes exactly as before', async () => {
