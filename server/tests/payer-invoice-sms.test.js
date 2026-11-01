@@ -225,9 +225,10 @@ describe('never throws, never repeats', () => {
     expect(smsLogUpdate).not.toHaveBeenCalled();
   });
 
-  test('a quiet-hours hold is reported as deferred', async () => {
+  // An automatic send's hold is queued for the window open: payer-invoice-sms-window-hold.test.js.
+  test('a quiet-hours hold on an office send is reported as deferred, not queued', async () => {
     sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', reason: 'Automated SMS is limited', deferred: true, nextAllowedAt: '2026-11-04T12:00:00.000Z' });
-    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1' }))
+    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1', operatorInitiated: true }))
       .resolves.toMatchObject({ sent: false, code: 'QUIET_HOURS_HOLD', deferred: true });
   });
 

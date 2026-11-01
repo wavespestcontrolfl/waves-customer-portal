@@ -214,7 +214,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   return emailResult;
 }
 
-// Best effort and silent to the caller: a refused, deferred or failed text is logged by the sender, and nothing here throws.
+// Best effort and silent to the caller: a refused or failed text is logged by the sender (a window-held automatic text is
+// queued by the sender for the window open), and nothing here throws.
 // A one-off recipient (recipientOverride: an operator naming a bookkeeper or realtor) did not receive the payer's email, so no
 // payer text follows it. The text's episode is the persisted email row (emailMessageId), the same value on a send and on its
 // provider-deduped replay. The SMTP fallback has no row or replay, so its episode is the acceptance time. A deduped replay with
