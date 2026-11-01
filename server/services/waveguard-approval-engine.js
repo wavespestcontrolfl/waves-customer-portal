@@ -515,4 +515,5 @@ module.exports = {
   latestComparableGroupApplication,
   productGroups,
   priorProtocolRow,
+  rowNamesTakeAll,
 };

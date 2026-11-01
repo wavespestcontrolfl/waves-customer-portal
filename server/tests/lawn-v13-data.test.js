@@ -27,6 +27,7 @@ const finalPassMigration = require('../models/migrations/20261009150000_lawn_v13
 const advionMigration = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
 const moleCricketRows = require('../models/migrations/20261023141000_lawn_v13_mole_cricket_bait_staged_rows');
 const spotLinesMigration = require('../models/migrations/20261101170000_lawn_v13_spot_lines');
+const fungusPreventionMigration = require('../models/migrations/20261101200000_lawn_v13_fungus_prevention');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 // Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
@@ -347,6 +348,8 @@ describe('staged migration 20261005120000', () => {
       // 20261101170000 (spot lines): caterpillar rows in October and November, dry spot rows March to October, Celsius alone June to September.
       const spotLinesAdded = ((spotLinesMigration.PLACEMENTS.find(([key]) => key === windowKey) || [null, []])[1]).map((spec) => spec.name).filter((n) => !spots.includes(n));
       spots.push(...spotLinesAdded);
+      // 20261101200000 (fungus prevention): the Velista large patch spring pass in February and the Artavia gray leaf spot prevention pass in May.
+      spots.push(...((fungusPreventionMigration.PLACEMENTS.find(([key]) => key === windowKey) || [null, []])[1]).map((spec) => spec.name).filter((n) => !spots.includes(n)));
       // 20261029170000 adds the liquid potassium row (a whole-lawn tool) to the August and September windows.
       const potassiumRows = potassiumMigration.WINDOWS.filter((w) => w.key === windowKey).map(() => potassiumMigration.NAME);
       whole.push(...potassiumRows);

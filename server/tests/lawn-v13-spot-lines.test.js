@@ -73,7 +73,9 @@ describe('spot lines: the recipe', () => {
     // The other months keep the weed lines they had: January, March, October, November and December carry the full mix.
     for (const month of ['Jan', 'Mar', 'May', 'Oct', 'Nov', 'Dec']) expect(lineOf(grass, month, 'Certainty Turf Herbicide')).toBeDefined();
     expect(lineOf(grass, 'Apr', 'Celsius WG')).toBeUndefined();
-    expect(lines(grass, 'Feb')).toEqual(['Celsius WG — light weed spots only during green-up, 0.085 oz per 1,000 sq ft, alone: no Certainty and no surfactant this month']);
+    // February: Celsius alone for weeds (the Velista large patch spring pass of 20261101200000 follows it; see lawn-v13-fungus-prevention.test.js).
+    expect(lines(grass, 'Feb')[0]).toBe('Celsius WG — light weed spots only during green-up, 0.085 oz per 1,000 sq ft, alone: no Certainty and no surfactant this month');
+    expect(lines(grass, 'Feb').filter((l) => /^(Certainty|Blindside|LESCO 90\/10 Nonionic)/.test(l))).toEqual([]);
   });
 
   test.each(TRACKS)('%s: the track notes say where each line applies', (grass) => {

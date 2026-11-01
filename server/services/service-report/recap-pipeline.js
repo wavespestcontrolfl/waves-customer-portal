@@ -7,6 +7,7 @@ const logger = require('../logger');
 const { buildRecapPayload } = require('./recap-payload');
 const { renderRecapToFile, cleanupRecapFile } = require('./recap-render');
 const { putRecapFromFile } = require('./recap-storage');
+const gates = require('../../config/feature-gates');
 
 const CLAIM_LIMIT = 3;
 const STALE_CLAIM_MS = 20 * 60 * 1000;
@@ -14,7 +15,11 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const RETRY_DELAYS_MINUTES = [5, 30, 240];
 const RECAP_DURATION_MS = 28000; // composition is fixed at 840f / 30fps
 
+// recap-delivery's in-flight window: a send_attempt_at newer than this is a send in progress.
+const RECAP_SEND_STALE_MS = 5 * 60 * 1000;
+
 const isMissingTable = (err) => err?.code === '42P01' || err?.code === '42703';
+const glassesClipsOn = () => typeof gates.recapGlassesClipsLive === 'function' && gates.recapGlassesClipsLive();
 const nextAttemptAt = (now, attempts) => new Date(now.getTime() + RETRY_DELAYS_MINUTES[Math.min(Math.max(attempts, 0), RETRY_DELAYS_MINUTES.length - 1)] * 60 * 1000);
 
 async function getRecap(scheduledServiceId, knex = db) {
@@ -66,6 +71,13 @@ async function recapNeedsGreetingRerender(recap) {
   return !!recap && !recap.sent_at && Number(recap.greeting_version || 0) < RECAP_GREETING_VERSION;
 }
 
+// GATE_RECAP_GLASSES_CLIPS: true when an unsent recap has clip changes since its render (clip_revision,
+// reset when a render publishes). Only a change during a send in progress leaves an approved recap
+// like that; when that send did not go out, the recap renders again instead of sending the old video.
+function recapNeedsClipRerender(recap) {
+  return glassesClipsOn() && !!recap && !recap.sent_at && Number(recap.clip_revision || 0) > 0;
+}
+
 // Queue (or re-queue) a recap render. force=true regenerates a ready/failed one.
 async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {}) {
   if (!scheduledServiceId) throw new Error('scheduledServiceId is required');
@@ -80,10 +92,17 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
       // Never regenerate a recap already SENT to the customer — keep the approved
       // asset + link live. force only re-renders ready/failed/approved-but-unsent.
       if (!force || existing.sent_at) return { ok: true, queued: false, recap: existing };
-      const [updated] = await knex('service_recaps').where({ id: existing.id }).update({
-        status: 'pending', attempts: 0, next_attempt_at: now, locked_at: null, last_error: null,
-        approved_at: null, approved_by: null, updated_at: now,
-      }).returning('*');
+      // Never pull a recap out from under a send in progress (send_attempt_at inside the
+      // sender's window): the customer's link would point at a video no longer approved.
+      const sendStaleBefore = new Date(now.getTime() - RECAP_SEND_STALE_MS);
+      const [updated] = await knex('service_recaps').where({ id: existing.id })
+        .whereNull('sent_at')
+        .andWhere((b) => b.whereNull('send_attempt_at').orWhere('send_attempt_at', '<', sendStaleBefore))
+        .update({
+          status: 'pending', attempts: 0, next_attempt_at: now, locked_at: null, last_error: null,
+          approved_at: null, approved_by: null, updated_at: now,
+        }).returning('*');
+      if (!updated) return { ok: true, queued: false, recap: existing };
       return { ok: true, queued: true, recap: updated };
     }
     const [inserted] = await knex('service_recaps').insert({
@@ -99,6 +118,39 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
     }
     throw err;
   }
+}
+
+// GATE_RECAP_GLASSES_CLIPS: a clip confirmed, or removed, before the recap was sent must be in (or out
+// of) the video the customer gets. One UPDATE on the recap row, so it orders against a render's finish,
+// an approval and a send claim: clip_revision counts the changes since the last published render (the
+// finish resets it to 0), and a built recap (not pending or rendering) with no send in progress goes
+// back to pending, approval cleared; a pending one renders the new clip set anyway, and a rendering one
+// renders again at its finish (processRecap compares clip_revision). A sent recap keeps its video; one
+// being sent keeps its approval, and if that send fails, sendRecap sees the count and renders again
+// instead of sending the old video. Only a clip the renderer uses (`ready`) counts; a `processing` clip
+// counts when it is cut. The routes run it first inside the clip change's transaction (recap-media
+// onChange), so a database error throws and rolls the clip change back with it.
+async function markRecapClipsChanged(scheduledServiceId, media, { knex = db, now = new Date() } = {}) {
+  if (!glassesClipsOn()) return { marked: false };
+  if (media?.status !== 'ready') return { marked: false };
+  if (await callbackRecapRetired(scheduledServiceId, knex)) return { marked: false };
+  const requeue = "(status NOT IN ('pending', 'rendering') AND (send_attempt_at IS NULL OR send_attempt_at < :sendStaleBefore))";
+  const result = await knex.raw(`
+    UPDATE service_recaps SET
+      clip_revision = clip_revision + 1,
+      status = CASE WHEN ${requeue} THEN 'pending' ELSE status END,
+      attempts = CASE WHEN ${requeue} THEN 0 ELSE attempts END,
+      next_attempt_at = CASE WHEN ${requeue} THEN :now ELSE next_attempt_at END,
+      locked_at = CASE WHEN ${requeue} THEN NULL ELSE locked_at END,
+      last_error = CASE WHEN ${requeue} THEN NULL ELSE last_error END,
+      approved_at = CASE WHEN ${requeue} THEN NULL ELSE approved_at END,
+      approved_by = CASE WHEN ${requeue} THEN NULL ELSE approved_by END,
+      updated_at = :now
+    WHERE scheduled_service_id = :id AND sent_at IS NULL
+    RETURNING status
+  `, { id: scheduledServiceId, now, sendStaleBefore: new Date(now.getTime() - RECAP_SEND_STALE_MS) });
+  const row = (result.rows || [])[0];
+  return { marked: Boolean(row), status: row ? row.status : null };
 }
 
 async function approveRecap(scheduledServiceId, { approvedBy = null, knex = db } = {}) {
@@ -118,9 +170,13 @@ async function approveRecap(scheduledServiceId, { approvedBy = null, knex = db }
   // retry sendRecap (which re-claims sent_at).
   if (recap.status === 'approved' && !recap.sent_at) return { ok: true, recap };
   if (recap.status !== 'ready') return { ok: false, error: `not_ready (${recap.status})` };
-  const [updated] = await knex('service_recaps').where({ id: recap.id }).update({
-    status: 'approved', approved_at: new Date(), approved_by: approvedBy, updated_at: new Date(),
-  }).returning('*');
+  // Approve only the render read above: a late clip or Regenerate that re-queued it since
+  // (or a newer render that replaced it) must not be approved and sent unseen.
+  const [updated] = await knex('service_recaps')
+    .where({ id: recap.id, status: 'ready', rendered_at: recap.rendered_at })
+    .update({ status: 'approved', approved_at: new Date(), approved_by: approvedBy, updated_at: new Date() })
+    .returning('*');
+  if (!updated) return { ok: false, error: 'not_ready (re-rendering)' };
   return { ok: true, recap: updated };
 }
 
@@ -173,15 +229,27 @@ async function processRecap(recap, knex = db) {
     }
     outFile = await renderRecapToFile(payload);
     const key = await putRecapFromFile(recap.scheduled_service_id, outFile);
-    await knex('service_recaps').where({ id: recap.id }).update({
+    const finish = {
       // Persist only non-secret media metadata — payload.media carries 2h presigned
       // S3 URLs (src) that must not be retained in the DB.
       status: 'ready', s3_key: key, duration_ms: RECAP_DURATION_MS,
       media: JSON.stringify((payload.media || []).map((m) => ({ role: m.role, caption: m.caption, type: m.type }))),
       rendered_at: new Date(), locked_at: null, last_error: null, updated_at: new Date(),
       greeting_version: RECAP_GREETING_VERSION,
-    });
-    return { status: 'ready', key };
+    };
+    if (glassesClipsOn() && recap.clip_revision != null) {
+      // GATE_RECAP_GLASSES_CLIPS: a clip counted after this claim may be missing from the video, so
+      // render again instead of publishing. Decided in the UPDATE that publishes, on the recap row:
+      // no clip, approval or send claim can fall between the check and the publish. A publish resets
+      // the count: it counts changes since the published video.
+      const late = Number(recap.clip_revision);
+      finish.status = knex.raw("CASE WHEN clip_revision <> ? THEN 'pending' ELSE 'ready' END", [late]);
+      finish.clip_revision = knex.raw('CASE WHEN clip_revision <> ? THEN clip_revision ELSE 0 END', [late]);
+      finish.attempts = knex.raw('CASE WHEN clip_revision <> ? THEN 0 ELSE attempts END', [late]);
+      finish.next_attempt_at = knex.raw('CASE WHEN clip_revision <> ? THEN ? ELSE next_attempt_at END', [late, new Date()]);
+    }
+    const [done] = await knex('service_recaps').where({ id: recap.id }).update(finish).returning('status');
+    return { status: done?.status || 'ready', key };
   } catch (err) {
     const now = new Date();
     const attempts = Number(recap.attempts || 0);
@@ -214,7 +282,8 @@ async function processDueRecaps({ now = new Date(), limit = CLAIM_LIMIT } = {}, 
 }
 
 module.exports = {
-  CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION,
-  getRecap, enqueueRecap, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender,
+  CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION, RECAP_SEND_STALE_MS,
+  getRecap, enqueueRecap, markRecapClipsChanged, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender, recapNeedsClipRerender,
+  recapGlassesClipsOn: glassesClipsOn,
   claimDueRecaps, recoverStaleRecaps, processRecap, processDueRecaps,
 };

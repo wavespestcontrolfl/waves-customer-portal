@@ -1584,6 +1584,7 @@ async function findVisitPhotoByKey(scheduledServiceId, s3Key) {
 // tech's OWN assigned job. Keyed on the scheduled-service id (:id), same as the rest
 // of the recap lane. Direct browser→S3 via presigned PUT (reuses recap-media service).
 const recapMedia = require('../services/service-report/recap-media');
+const recapPipeline = require('../services/service-report/recap-pipeline');
 
 async function loadOwnedServiceOr403(req, res) {
   const svc = await db('scheduled_services').where({ id: req.params.id }).first('id', 'technician_id', 'status', 'scheduled_date');
@@ -1614,12 +1615,15 @@ router.post('/:id/recap-media/presign', async (req, res, next) => {
 router.post('/:id/recap-media/:mediaId/confirm', async (req, res, next) => {
   try {
     if (!(await loadOwnedServiceOr403(req, res))) return undefined;
-    const result = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.id, durationMs: req.body?.durationMs });
+    // The recap's late-clip mark commits with the clip (GATE_RECAP_GLASSES_CLIPS; a no-op when off).
+    const result = await recapMedia.confirmUpload(req.params.mediaId, {
+      scheduledServiceId: req.params.id,
+      durationMs: req.body?.durationMs,
+      onChange: (row, trx) => recapPipeline.markRecapClipsChanged(req.params.id, row, { knex: trx }),
+    });
     if (!result.ok) {
-      if (result.reason === 'too_large') return res.status(413).json({ error: 'Clip too large — keep it under ~20 seconds.' });
-      if (result.reason === 'bad_duration') return res.status(422).json({ error: 'Couldn’t read the clip length — re-record a short clip and try again.' });
-      if (result.reason === 'not_uploaded') return res.status(409).json({ error: 'Upload not found — try again.' });
-      return res.status(404).json({ error: 'media not found' });
+      const failure = recapMedia.confirmFailure(result.reason);
+      return res.status(failure.status).json({ error: failure.error });
     }
     return res.json({ ok: true, id: result.row.id, status: result.row.status });
   } catch (err) { return next(err); }
@@ -1636,7 +1640,10 @@ router.get('/:id/recap-media', async (req, res, next) => {
 router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
   try {
     if (!(await loadOwnedServiceOr403(req, res))) return undefined;
-    await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.id });
+    await recapMedia.deleteMedia(req.params.mediaId, {
+      scheduledServiceId: req.params.id,
+      onChange: (row, trx) => recapPipeline.markRecapClipsChanged(req.params.id, row, { knex: trx }),
+    });
     return res.json({ ok: true });
   } catch (err) { return next(err); }
 });
