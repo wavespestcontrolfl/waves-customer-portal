@@ -8377,6 +8377,11 @@ const IRRIGATION_EDIT_FIELDS = new Set([
 // carries both); clearing both, or Remove, sends two nulls. A draft that loses a day before its autosave leaves
 // withdraws the queued pair (withdrawPair), so a pair the screen no longer shows never saves.
 const AWAY_WATCH_PAIR_FIELDS = ['awayWatchFrom', 'awayWatchUntil'];
+function withoutAwayWatchPair(fields) {
+  const copy = { ...fields };
+  AWAY_WATCH_PAIR_FIELDS.forEach((field) => { delete copy[field]; });
+  return copy;
+}
 function AwayWatchFields({ prefs, updateField, withdrawPair, error, styles }) {
   const { labelStyle, inputStyle, fieldGrid, muted, focusBorder, blurBorder } = styles;
   const [from, setFrom] = useState(prefs.awayWatchFrom || '');
@@ -8484,6 +8489,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // GATE_AWAY_WATCH: the server says whether the Away Watch section shows (key present only while the gate is live).
   const [awayWatchEnabled, setAwayWatchEnabled] = useState(false);
   const irrigationEditRevision = useRef(0);
+  // Bumped each time the member withdraws an Away Watch pair: a save that left before the withdrawal and then fails
+  // never re-queues that pair.
+  const awayWatchPairRevision = useRef(0);
   const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
   const [savedWateringRevision, setSavedWateringRevision] = useState(0);
 
@@ -8554,6 +8562,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // (load + every save response).
         toSave.confirmed_as_of = lastSavedRef.current?.irrigationHomeChangedAt ?? null;
         const savingIrrigationRevision = irrigationEditRevision.current;
+        const savingAwayWatchRevision = awayWatchPairRevision.current;
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
@@ -8611,6 +8620,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           // before. A genuine transport/5xx failure (no per-field detail)
           // still re-queues the whole batch, unchanged.
           const rejectedFields = Array.isArray(err?.rejected) ? err.rejected : [];
+          const requeueable = (fields) => (awayWatchPairRevision.current === savingAwayWatchRevision ? fields : withoutAwayWatchPair(fields));
           if (rejectedFields.length) {
             setFieldErrors(prev => {
               const next = { ...prev };
@@ -8624,9 +8634,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             // metadata-only request that the server 400s with no `rejected`
             // list — which re-queues it again, forever, and every
             // property-switch flush keeps failing on it.
-            const retryable = Object.fromEntries(
+            const retryable = requeueable(Object.fromEntries(
               Object.entries(toSave).filter(([k]) => k !== 'confirmed_as_of' && !rejectedSet.has(k)),
-            );
+            ));
             if (Object.keys(retryable).length) {
               pendingRef.current = { ...retryable, ...pendingRef.current };
             }
@@ -8635,7 +8645,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             // left wins) so the next flush retries these without clobbering
             // fresher input. The UI is not reverted, so queue and screen
             // agree.
-            pendingRef.current = { ...toSave, ...pendingRef.current };
+            pendingRef.current = { ...requeueable(toSave), ...pendingRef.current };
           }
           throw err;
         }
@@ -8697,9 +8707,8 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // Away Watch: drop both dates from the queued autosave (other queued edits stay), put them back to the server's
   // latest view, and clear their stale messages: the incomplete draft on screen saves nothing.
   const withdrawAwayWatchPair = useCallback(() => {
-    const queued = { ...pendingRef.current };
-    AWAY_WATCH_PAIR_FIELDS.forEach((field) => { delete queued[field]; });
-    pendingRef.current = queued;
+    awayWatchPairRevision.current += 1;
+    pendingRef.current = withoutAwayWatchPair(pendingRef.current);
     const saved = lastSavedRef.current || {};
     setPrefs((prev) => ({ ...prev, awayWatchFrom: saved.awayWatchFrom ?? null, awayWatchUntil: saved.awayWatchUntil ?? null }));
     setFieldErrors((prev) => Object.fromEntries(Object.entries(prev).filter(([field]) => !AWAY_WATCH_PAIR_FIELDS.includes(field))));

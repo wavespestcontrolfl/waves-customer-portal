@@ -97,6 +97,29 @@ describe('Away Watch section on the Property tab', () => {
     expect(sent).not.toHaveProperty('awayWatchUntil');
   });
 
+  it('a pair already being saved when a day is cleared: if that save fails, the pair is not re-queued', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: {}, hasLawnCare: false, awayWatchEnabled: true });
+    let failFirst;
+    api.updatePropertyPreferences
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirst = reject; }))
+      .mockResolvedValue({ preferences: {}, saved: true });
+    render(<PropertyTab customer={customer} />);
+    await sectionOf();
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.fromLabel), { target: { value: '2026-06-01' } });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '2026-09-15' } });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    // The pair's save is in flight; the member clears the back day, then the save fails (network).
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '' } });
+    failFirst(new Error('network down'));
+    // A later edit flushes the queue: the withdrawn pair must not ride it.
+    fireEvent.change(screen.getByLabelText('Community Gate'), { target: { value: '#1234' } });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    const sent = api.updatePropertyPreferences.mock.calls[1][0];
+    expect(sent).toMatchObject({ neighborhoodGateCode: '#1234' });
+    expect(sent).not.toHaveProperty('awayWatchFrom');
+    expect(sent).not.toHaveProperty('awayWatchUntil');
+  });
+
   it('a saved pair shows its summary; Remove sends two nulls and empties the inputs', async () => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { awayWatchFrom: '2026-06-01', awayWatchUntil: '2026-09-15' }, hasLawnCare: false, awayWatchEnabled: true });
     render(<PropertyTab customer={customer} />);
