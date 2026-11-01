@@ -15963,9 +15963,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // resolver stops the sequence with no_contact/opted_out when neither
     // channel is available.
     if (effectiveRequestReview && (svc.cust_phone || reviewCadenceEnabled) && !bundledReviewUrl) {
+      let reviewEnrollment = null;
       try {
         const ReviewService = require('../services/review-request');
-        await ReviewService.enrollPostService({
+        reviewEnrollment = await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           // GATE_REVIEW_ASK_AFTER_REPORT: what became of the report text (re-read
@@ -15984,7 +15985,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
           legacyDelayMinutes: ReviewService.LEGACY_REVIEW_DELAY_MINUTES,
           customerRequested: customerRequestedReview,
         });
-      } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
+      } catch (e) {
+        logger.error(`[dispatch] Review request schedule failed: ${e.message}`);
+        reviewEnrollment = { started: false, reason: 'error' };
+      }
+      // GATE_REVIEW_ASK_AT_VISIT: an unpaid visit's ask that failed for a passing reason (the two a
+      // combined visit retries) turns the marker off, so the payment stays its recovery, as before.
+      if (invoiceUnpaidAtCompletion && !invoiceBlocksReview && reviewEnrollment?.started === false
+        && ['plan_resolution_failed', 'error'].includes(reviewEnrollment.reason)) {
+        await mergeRecordNotesKeys(record.id, { reviewAskAtVisit: false }).catch((markErr) => {
+          logger.error(`[dispatch] Review ask-at-visit fallback for record ${record.id} not stored: ${markErr.message}`);
+        });
+      }
     }
 
     // The first complete transition wakes any already-open customer

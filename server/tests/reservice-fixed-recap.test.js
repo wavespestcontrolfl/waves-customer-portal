@@ -239,7 +239,7 @@ describe('complete-scheduled-service wiring', () => {
     expect(src).toContain(': requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),');
     // ... and it is never bundled into the fixed text: it follows as its own message (enrollPostService).
     expect(src).toMatch(/!serviceReportV1Delivery &&\s*(?:\/\/[^\n]*\n\s*)+!reserviceFixedRecap &&/);
-    expect(src).toMatch(/if \(effectiveRequestReview && \(svc\.cust_phone \|\| reviewCadenceEnabled\) && !bundledReviewUrl\) \{\s*try \{\s*const ReviewService = require\('\.\.\/services\/review-request'\);\s*await ReviewService\.enrollPostService\(/);
+    expect(src).toMatch(/if \(effectiveRequestReview && \(svc\.cust_phone \|\| reviewCadenceEnabled\) && !bundledReviewUrl\) \{\s*let reviewEnrollment = null;\s*try \{\s*const ReviewService = require\('\.\.\/services\/review-request'\);\s*reviewEnrollment = await ReviewService\.enrollPostService\(/);
   });
 
   test('the response carries the text outcome only when the sheet asked', () => {

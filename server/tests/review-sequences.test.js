@@ -4549,6 +4549,16 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(enrolled).not.toHaveBeenCalled();
     expect(mock.__state.rows.review_sequences).toHaveLength(0);
     enrolled.mockRestore();
+
+    // The completion turned the marker off after a passing enrollment failure: the payment is the recovery.
+    const mock2 = makeMock({
+      customers: [{ id: 'av-2', first_name: 'Bo', last_name: 'V', phone: '+19410000082', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-av2', customer_id: 'av-2', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', reviewAskAtVisit: false }) }],
+    });
+    db.mockImplementation(mock2);
+    const out2 = await ReviewService.enrollForPaidInvoice({ id: 'inv-av2', customer_id: 'av-2', service_record_id: 'sr-av2', invoice_number: 'WPC-AV2' }, { source: 'stripe_webhook' });
+    expect(out2.enrolled).toBe(true);
+    expect(mock2.__state.rows.review_sequences).toHaveLength(1);
   });
 
   test('a cadence touch recovers technician_id + service_date from the service record (rate-page context)', async () => {

@@ -199,6 +199,21 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
   });
 
+  test.each([
+    ['a passing failure (plan_resolution_failed) turns the marker off: the payment stays the recovery', { started: false, reason: 'plan_resolution_failed' }, false],
+    ['a final skip (recently asked) keeps the marker: the payment asks nothing', { started: false, reason: 'manual_ask_recent' }, true],
+  ])('GATE_REVIEW_ASK_AT_VISIT on, the visit-time enrollment does not start: %s', async (_label, outcome, marker) => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
+    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+    ReviewService.enrollPostService.mockResolvedValueOnce(outcome);
+    try {
+      expect((await complete(f, {})).status).toBe(200);
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(record.structured_notes.reviewAskAtVisit).toBe(marker);
+    } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
+  });
+
   test('a paid invoice (a charge taken at the door, no invoice field posted): it stays paid, no second invoice, no pay-link text', async () => {
     const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
     try {
