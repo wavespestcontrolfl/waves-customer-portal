@@ -47,7 +47,7 @@ const read = (name) => fs.readFileSync(path.join(FIXTURES, name), 'utf8');
 const OTHER_GATES = [
   'GATE_PORTAL_CHAT_FACTS', 'GATE_PORTAL_CHAT_VISIT_FACTS', 'GATE_PORTAL_CHAT_RESERVICE', 'GATE_PORTAL_CHAT_RESERVICE_LAWN',
   'GATE_PORTAL_CHAT_EMAIL_CHANGE', 'GATE_RESERVICE_SELF_SERVE', 'GATE_RESERVICE_STREAMLINE', 'GATE_RESERVICE_PHOTOS',
-  'GATE_RESERVICE_DETAILS_REQUIRED', 'GATE_AI_CONTENT_REPORT',
+  'GATE_RESERVICE_DETAILS_REQUIRED', 'GATE_AI_CONTENT_REPORT', 'GATE_CANCEL_FLOW_V2',
 ];
 const OPEN = 'GATE_PORTAL_CHAT_OPEN';
 const conversation = {
@@ -80,7 +80,10 @@ beforeEach(() => {
       return standing && !(q.sql.includes('NOT LIKE') && isEmailRow) ? [standing] : [];
     }
     if (q.sql.includes('insert into "ai_escalations"')) return [{ id: 'esc-1', ...rowFromInsert(q) }];
-    if (q.sql.includes('from "service_requests"')) return openRequest ? [openRequest] : [];
+    if (q.sql.includes('from "service_requests"')) {
+      // Open rows; a lookup by requested_service sees only the rows of that service.
+      return [].concat(openRequest || []).filter((r) => !q.sql.includes('"requested_service"') || q.bindings.includes(r.requested_service));
+    }
     if (q.sql.includes('insert into "service_requests"')) return [{ id: 'req-1' }];
     return [];
   };
@@ -160,6 +163,25 @@ describe('gate on: the prompt and the tools', () => {
     expect(prompt).toContain('shown the re-service button twice');
     expect(prompt).toContain('with topic billing');
     expect(prompt).not.toContain('Any request to cancel, pause, or downgrade service');
+  });
+
+  test('without GATE_CANCEL_FLOW_V2 the prompt promises no one-service cancel, Away Mode or hold, and hands off a pause', async () => {
+    const live = read('live-prompt.txt');
+    const off = portalOpen.withOpen(live, { cancelFlow: false });
+    expect(off).not.toMatch(/Away Mode|one service, when they have more|hold of up to six months/);
+    expect(off).toContain('call escalate: the My Plan page cannot do that');
+    expect(off).toContain('Account Options on the My Plan page lets them cancel the whole plan');
+    expect(off).toContain('Never offer a discount, a pause, a hold or any option the page does not show.');
+    expect(off.replace(/If the customer wants to cancel or pause[^\n]*\n/, '')).toBe(
+      portalOpen.withOpen(live).replace(/If the customer wants to cancel or pause[^\n]*\n/, ''),
+    );
+    // The live lane follows the gate, with its own prompt-cache key.
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    const lane = await firstCall();
+    expect(lane.system[0].text).toBe(off);
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    mockCreate.mockClear();
+    expect((await firstCall()).system[0].text).toBe(read('opened-v4-prompt.txt'));
   });
 
   test('with no other gate live the same sections and facts are still there', () => {
@@ -307,6 +329,66 @@ describe('request_quote', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
     expect(source).not.toContain("['service_report', 'portal_home']");
     expect(source.match(/whereIn\('source', require\('..\/services\/cta-service-request'\)\.CTA_REQUEST_SOURCES\)/g)).toHaveLength(2);
+  });
+
+  test('a saved note is read from the chat snapshot even on a row another surface created', async () => {
+    openRequest = { ...openMosquito('Back yard only'), source: 'portal_home' };
+    mockCreate.mockResolvedValueOnce(quote('mosquito', '')).mockResolvedValueOnce(text('Done.'));
+
+    await say('Yes please');
+
+    expect(writes(/update "service_requests"/)).toHaveLength(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('naming the service after a "not stated" request promotes that row: one inquiry, the saved words kept', async () => {
+    openRequest = {
+      id: 'req-0', customer_id: 'cust-1', requested_service: 'not_stated', source: 'portal_chat', status: 'new',
+      subject: 'Quote requested in portal chat: Service not stated', description: 'x',
+      pricing_revision: { source: 'portal_chat', service: 'not_stated', note: 'I want another service' },
+    };
+    const rows = db.__rows;
+    db.__rows = (q) => {
+      // The promotion renames the row; later reads see it.
+      if (/^update "service_requests" set "requested_service"/.test(q.sql)) openRequest.requested_service = q.bindings[0];
+      return rows(q);
+    };
+    mockCreate.mockResolvedValueOnce(quote('lawn_care', '')).mockResolvedValueOnce(text('Done.'));
+
+    await say('Lawn care');
+
+    expect(writes(/update "service_requests" set "requested_service"/)[0].bindings[0]).toBe('lawn_care');
+    expect(writes(/insert into "service_requests"/)).toHaveLength(0);
+    const refresh = writes(/update "service_requests" set "subject"/)[0];
+    expect(refresh.bindings.join('|')).toContain('Quote requested in portal chat: Lawn Care');
+    expect(refresh.bindings.join('|')).toContain('I want another service');
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test('naming the service when that service is already open resolves the unnamed row with a pointer', async () => {
+    openRequest = [
+      {
+        id: 'req-0', customer_id: 'cust-1', requested_service: 'not_stated', source: 'portal_chat', status: 'new',
+        description: 'Customer asked.', pricing_revision: { source: 'portal_chat', service: 'not_stated', note: '' },
+      },
+      openMosquito('Back yard only'),
+    ];
+    mockCreate.mockResolvedValueOnce(quote('mosquito', 'Back yard only')).mockResolvedValueOnce(text('Done.'));
+
+    await say('Mosquito');
+
+    const resolved = writes(/update "service_requests" set "status"/)[0];
+    expect(resolved.bindings).toEqual(expect.arrayContaining(['resolved', 'Customer asked. Resolved: the customer named the service; see request req-0.'.replace('req-0.', 'req-0.')]));
+    expect(writes(/insert into "service_requests"/)).toHaveLength(0);
+  });
+
+  test('a named request with no unnamed one open does no settling write', async () => {
+    mockCreate.mockResolvedValueOnce(quote('mosquito')).mockResolvedValueOnce(text('Done.'));
+
+    await say('Mosquito');
+
+    expect(writes(/update "service_requests"/)).toHaveLength(0);
+    expect(writes(/insert into "service_requests"/)).toHaveLength(1);
   });
 
   test('a service not named is saved as such, and the model is told to ask which', async () => {

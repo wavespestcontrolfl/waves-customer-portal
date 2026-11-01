@@ -49,10 +49,16 @@ const PRICE_RULE = '- Never state a price, a percentage or a discount, even if a
 const PESTS_SENTENCE_ANCHOR = 'or reports damage, escalate instead. ';
 const PESTS_OPEN_SENTENCE = 'If you have shown the re-service button twice in this chat and the customer still writes about the pests, says they are scared or cannot sleep, or asks for a person, call escalate (the button stays). ';
 
+// The cancel paragraph needs GATE_CANCEL_FLOW_V2: the one-service cancel, Away Mode
+// and hold options exist only in that flow. Without it the page cancels the
+// whole plan only, and a pause or an away request is handed off.
+const CANCEL_PARAGRAPH_V2 = `If the customer wants to cancel or pause their plan or one service because of chemicals, health or damage, escalate. Otherwise ask in one short sentence what is behind it, unless they already said. If pests are back, follow PESTS BACK BETWEEN VISITS. If they are moving, follow MOVING. For anything else, call get_upcoming_services first: if it returns no visits, escalate. If it returns visits, call open_portal_section with section plan and tell them that Account Options on the My Plan page walks them through it before anything changes: they can cancel the whole plan (or one service, when they have more than one), and if they will be away it offers Away Mode, which keeps the outside of the house treated for pest, or a hold of up to six months for lawn and mosquito with no charge for the skipped visits. Never offer a discount or any option the page does not show.`;
+const CANCEL_PARAGRAPH_LEGACY = `If the customer wants to cancel or pause their plan or one service because of chemicals, health or damage, escalate. If the customer wants to pause the plan or one service, cancel just one service, or says they will be away, call escalate: the My Plan page cannot do that. Otherwise ask in one short sentence what is behind it, unless they already said. If pests are back, follow PESTS BACK BETWEEN VISITS. If they are moving, follow MOVING. For anything else, call get_upcoming_services first: if it returns no visits, escalate. If it returns visits, call open_portal_section with section plan and tell them that Account Options on the My Plan page lets them cancel the whole plan. Never offer a discount, a pause, a hold or any option the page does not show.`;
 const ESCALATE_HEADER = 'WHAT YOU MUST ESCALATE (use the escalate tool):';
-const OPEN_SECTIONS = `CANCEL OR PAUSE:
+// The sections block, with the cancel paragraph for the flow that is live.
+const openSections = (cancelFlow) => `CANCEL OR PAUSE:
 If the customer names one visit to cancel (today, tomorrow, or a date), or says to cancel today's service, call escalate at once with topic schedule_change. Do not ask the reason, and do not offer Reschedule for a visit within 48 hours.
-If the customer wants to cancel or pause their plan or one service because of chemicals, health or damage, escalate. Otherwise ask in one short sentence what is behind it, unless they already said. If pests are back, follow PESTS BACK BETWEEN VISITS. If they are moving, follow MOVING. For anything else, call get_upcoming_services first: if it returns no visits, escalate. If it returns visits, call open_portal_section with section plan and tell them that Account Options on the My Plan page walks them through it before anything changes: they can cancel the whole plan (or one service, when they have more than one), and if they will be away it offers Away Mode, which keeps the outside of the house treated for pest, or a hold of up to six months for lawn and mosquito with no charge for the skipped visits. Never offer a discount or any option the page does not show.
+${cancelFlow ? CANCEL_PARAGRAPH_V2 : CANCEL_PARAGRAPH_LEGACY}
 
 ADDING A SERVICE:
 When the customer asks to add a service, asks what a service they do not have includes or costs, wants an estimate, or wants to sign up, say in a sentence or two what the program includes (from COMPANY FACTS), and call request_quote in the same turn. If they did not name the service, call request_quote with service not_stated and their words as the note, and ask which service in the same reply. Never state a price: the written estimate shows it.
@@ -99,14 +105,15 @@ function withOpenEscalateList(prompt) {
 }
 
 // GATE_PORTAL_CHAT_OPEN on top of any portal prompt.
-function withOpen(prompt) {
+// `cancelFlow`: GATE_CANCEL_FLOW_V2 is live (default true: the all-gates-live prompt).
+function withOpen(prompt, { cancelFlow = true } = {}) {
   const sections = insertBefore(
     insertBefore(prompt, '- Hand the conversation to the Waves team (escalate)', OPEN_CAN_DO)
       .replace(CHARGES_ESCALATE_SENTENCE, (kept) => `${kept}${CHARGES_OPEN_SENTENCE}`)
       .replace(PESTS_SENTENCE_ANCHOR, (kept) => `${kept}${PESTS_OPEN_SENTENCE}`)
       .replace(PRICE_RULE_ANCHOR, (kept) => `${kept}${PRICE_RULE}`),
     ESCALATE_HEADER,
-    OPEN_SECTIONS,
+    openSections(cancelFlow),
   );
   return withOpenEscalateList(withOpenFacts(sections));
 }
@@ -326,11 +333,40 @@ async function standingQuoteNote({ customerId, requestedService, sources, turn }
     .whereIn('source', sources)
     .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
     .orderBy('created_at', 'desc')
-    .first('source', 'pricing_revision');
+    .first('pricing_revision');
   const row = await (turn ? turn.query(query, 'quote request standing note') : query);
   let revision = row?.pricing_revision;
   if (typeof revision === 'string') { try { revision = JSON.parse(revision); } catch { revision = null; } }
-  return row?.source === 'portal_chat' && typeof revision?.note === 'string' ? revision.note : '';
+  // The chat snapshot, whatever source created the row (a row from portal home
+  // or the service report keeps its source when chat refreshes it).
+  return revision?.source === 'portal_chat' && typeof revision.note === 'string' ? revision.note : '';
+}
+
+// When the customer names the service after a "not stated" quote request, the
+// customer has ONE inquiry: the open unnamed row becomes the named request
+// (the writer then refreshes it), or, when a named request is already open,
+// it is resolved with a note pointing at that one. Runs first in the named
+// write's own transaction.
+async function settleUnnamedQuote(trx, { customerId, requestedService, sources }) {
+  const { OPEN_REQUEST_TERMINAL_STATUSES } = require('../estimate-add-service-request');
+  await trx('customers').where({ id: customerId }).forUpdate().first('id');
+  const open = () => trx('service_requests').where({ customer_id: customerId, source: 'portal_chat' })
+    .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES);
+  const placeholder = await open().where({ requested_service: 'not_stated' }).orderBy('created_at', 'desc').forUpdate().first();
+  if (!placeholder) return;
+  const named = await trx('service_requests')
+    .where({ customer_id: customerId, requested_service: requestedService })
+    .whereIn('source', sources).whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
+    .orderBy('created_at', 'desc').first('id');
+  if (!named) {
+    await trx('service_requests').where({ id: placeholder.id }).update({ requested_service: requestedService, updated_at: new Date() });
+    return;
+  }
+  await trx('service_requests').where({ id: placeholder.id }).update({
+    status: 'resolved',
+    description: `${placeholder.description || ''} Resolved: the customer named the service; see request ${named.id}.`.trim(),
+    updated_at: new Date(),
+  });
 }
 
 // request_quote: one open add-service request per (customer, service), and
@@ -347,9 +383,16 @@ async function requestQuote(customerId, input, { open = false } = {}, turn = nul
   // A changed note refreshes the open row (the writer's refresh path, which
   // rings the bell as "updated", as a portal home refresh does); the same note,
   // or none, is a plain repeat that writes and rings nothing.
+  const named = service !== 'not_stated' && service !== 'other';
+  const standing = (key) => standingQuoteNote({ customerId, requestedService: key, sources: CTA_REQUEST_SOURCES, turn });
   const note = flatLine(input.note, QUOTE_NOTE_MAX)
-    || await standingQuoteNote({ customerId, requestedService, sources: CTA_REQUEST_SOURCES, turn });
-  const writer = turn ? { transaction: (work) => turn.transaction('quote request', work) } : db;
+    || await standing(requestedService)
+    || (named ? await standing('not_stated') : '');
+  // The unnamed request is settled in the same transaction as the named write.
+  const settle = named ? (trx) => settleUnnamedQuote(trx, { customerId, requestedService, sources: CTA_REQUEST_SOURCES }) : async () => {};
+  const inTransaction = (work) => (turn ? turn.transaction('quote request', async (trx) => { await settle(trx); return work(trx); })
+    : db.transaction(async (trx) => { await settle(trx); return work(trx); }));
+  const writer = { transaction: inTransaction };
   const outcome = await writeOrRefreshCtaRequest(writer, {
     customerId,
     requestedService,

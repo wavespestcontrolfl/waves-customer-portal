@@ -218,6 +218,10 @@ const PORTAL_CHAT = 'portal_chat';
 const portalSelfServe = (channel) => channel === PORTAL_CHAT
   && require('../../config/feature-gates').portalChatSelfServeLive();
 // The opened-up portal chat (GATE_PORTAL_CHAT_OPEN, default off).
+// GATE_CANCEL_FLOW_V2, read at call time as the cancel-resolution endpoints do.
+const cancelFlowLive = () => {
+  try { return require('../cancellation-resolution').cancelFlowV2Enabled(); } catch { return false; }
+};
 const portalOpenFor = (channel) => portalSelfServe(channel)
   && require('../../config/feature-gates').portalChatOpenLive();
 // Prompt, tools and the reply extras a channel gets. Portal chat gets its
@@ -283,8 +287,10 @@ function portalLane(channel, { secondaryProperty = true, replay = false } = {}) 
   const emailChange = !replay && gates.portalChatEmailChangeLive();
   // The opened-up chat: its own gate, on top of the self-serve switch.
   const open = gates.portalChatOpenLive();
+  // The open prompt's cancel options exist only in the GATE_CANCEL_FLOW_V2 flow.
+  const cancelFlow = open && cancelFlowLive();
   return {
-    prompt: portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange, open }),
+    prompt: portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange, open, cancelFlow }),
     tools: portalToolsFor({ payments, visits, reservice, reserviceLawn, emailChange, open }),
     actions: [],
     cards: payments || visits ? [] : null,
@@ -496,15 +502,15 @@ WHAT YOU MUST ESCALATE (use the escalate tool):`);
 // model for a combination never varies between requests (it carries the
 // cache breakpoint).
 const PORTAL_PROMPTS = new Map();
-function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange, open }) {
-  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}${reserviceLawn ? '+lawn' : ''}${emailChange ? '+email' : ''}${open ? '+open' : ''}`;
+function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange, open, cancelFlow = true }) {
+  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}${reserviceLawn ? '+lawn' : ''}${emailChange ? '+email' : ''}${open ? `+open${cancelFlow ? '' : '-legacycancel'}` : ''}`;
   if (!PORTAL_PROMPTS.has(key)) {
     let prompt = payments ? PORTAL_FACTS_PROMPT : PORTAL_SYSTEM_PROMPT;
     if (visits) prompt = withVisitFacts(prompt);
     if (reservice) prompt = withReservice(prompt);
     if (reserviceLawn) prompt = withReserviceLawn(prompt);
     if (emailChange) prompt = withEmailChange(prompt);
-    if (open) prompt = portalOpen.withOpen(prompt);
+    if (open) prompt = portalOpen.withOpen(prompt, { cancelFlow });
     PORTAL_PROMPTS.set(key, prompt);
   }
   return PORTAL_PROMPTS.get(key);
