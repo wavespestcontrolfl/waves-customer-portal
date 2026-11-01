@@ -81,10 +81,15 @@ function densityOrClusterScore(p, stops) {
 // credit that came from the service-type DEFAULT window, not from a time the
 // customer set: move-rules.js leaves it out of a day move's gain (owner
 // 2026-10-09).
+//
+// GATE_AUTO_DISPATCH_DRY_TIME_ORDER (dry-time.js): with dry_time.counts_in_gain
+// the default-window credit is reported as `dryTimeScore` instead, so
+// total_without_default_time keeps it (a same-day re-time gains from it) and
+// total_without_dry_time leaves it out (move-rules.js uses that for a day move).
 function timeCreditFor(p, prefs, timeW, reasons) {
   const win = prefs.effective_time_window;
   const startMin = hhmmToMin(p.start_time);
-  if (!win || startMin == null) return { timeScore: timeW, defaultTimeScore: 0 }; // no usable window → neutral
+  if (!win || startMin == null) return { timeScore: timeW, defaultTimeScore: 0, dryTimeScore: 0 }; // no usable window → neutral
   let timeScore = timeW;
   if (startMin >= win.startMin && startMin < win.endMin) {
     reasons.push(prefs.preferred_time_window ? 'MATCHES_PREFERRED_TIME' : 'MATCHES_SERVICE_TIME_DEFAULT');
@@ -92,7 +97,16 @@ function timeCreditFor(p, prefs, timeW, reasons) {
     const dist = Math.min(Math.abs(startMin - win.startMin), Math.abs(startMin - win.endMin));
     timeScore = timeW * clamp(1 - dist / TIME_PROXIMITY_MIN, 0, 1);
   }
-  return { timeScore, defaultTimeScore: prefs.preferred_time_window ? 0 : timeScore };
+  const defaultCredit = prefs.preferred_time_window ? 0 : timeScore;
+  return prefs.dry_time?.counts_in_gain
+    ? { timeScore, defaultTimeScore: 0, dryTimeScore: defaultCredit }
+    : { timeScore, defaultTimeScore: defaultCredit, dryTimeScore: 0 };
+}
+
+// Score fields that exist only when the dry-time credit counts in the gain.
+function dryTimeFields(prefs, raw, dryTimeScore) {
+  if (!prefs.dry_time?.counts_in_gain) return {};
+  return { dry_time_score: round2(dryTimeScore), total_without_dry_time: round2(clamp(raw - dryTimeScore, 0, 100)) };
 }
 
 /**
@@ -124,7 +138,7 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
     }
   }
 
-  const { timeScore, defaultTimeScore } = timeCreditFor(p, prefs, timeW, reasons);
+  const { timeScore, defaultTimeScore, dryTimeScore } = timeCreditFor(p, prefs, timeW, reasons);
   prefScore += timeScore;
 
   // --- technician skill ---
@@ -170,6 +184,7 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
     continuity_score: round2(continuityScore),
     stability_penalty: round2(stabilityPenalty),
     reason_codes: reasons,
+    ...dryTimeFields(prefs, raw, dryTimeScore),
   };
 }
 
