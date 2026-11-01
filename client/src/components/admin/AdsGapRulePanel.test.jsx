@@ -51,6 +51,15 @@ function route(handlers) {
   });
 }
 
+// The settings form is filled from the loaded settings in an effect that runs after the first render with data.
+// Until it runs, every field reads as changed (Save is on), and a value typed before it is overwritten by the fill.
+// On a loaded runner that effect can still be pending when the inputs appear (main 10-31), so wait for the fill.
+async function filledForm() {
+  const weekday = await screen.findByLabelText('Weekday limit');
+  await waitFor(() => expect(weekday).toHaveValue(8));
+  return weekday;
+}
+
 describe('AdsGapRulePanel', () => {
   beforeEach(() => {
     localStorage.setItem('waves_admin_token', 'test-token');
@@ -103,7 +112,7 @@ describe('AdsGapRulePanel', () => {
       'PUT /admin/ads/gap-rule/settings': () => json({ error: 'weekday_limit must be 1 to 30' }, 400),
     });
     render(<AdsGapRulePanel />);
-    const input = await screen.findByLabelText('Weekday limit');
+    const input = await filledForm();
     expect(screen.getByRole('button', { name: 'Save settings' })).toBeDisabled();
     fireEvent.change(input, { target: { value: '99' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
@@ -118,7 +127,8 @@ describe('AdsGapRulePanel', () => {
       'PUT /admin/ads/gap-rule/settings': () => json({ settings: {} }),
     });
     render(<AdsGapRulePanel />);
-    fireEvent.change(await screen.findByLabelText('Sunday limit'), { target: { value: '3' } });
+    await filledForm();
+    fireEvent.change(screen.getByLabelText('Sunday limit'), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     await waitFor(() => expect(calls.filter((c) => c.method === 'GET')).toHaveLength(2));
     expect(calls.find((c) => c.method === 'PUT').body).toEqual({ sunday_limit: 3 });
@@ -145,7 +155,7 @@ describe('AdsGapRulePanel', () => {
       'POST /admin/ads/campaigns/camp-1/hold': () => json({ hold: {} }),
     });
     render(<AdsGapRulePanel />);
-    fireEvent.change(await screen.findByLabelText('Weekday limit'), { target: { value: '11' } });
+    fireEvent.change(await filledForm(), { target: { value: '11' } });
     fireEvent.click(screen.getByRole('button', { name: 'Keep ads off until this date' }));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(calls.filter((c) => c.method === 'GET')).toHaveLength(2));
