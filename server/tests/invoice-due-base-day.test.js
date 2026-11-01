@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const { invoiceDueBaseDay, serviceDateOnly } = require('../utils/invoice-due-base-day');
+const { etDateString } = require('../utils/datetime-et');
 const { proposalTermsDueDate } = require('../services/proposal-win');
 
 describe('invoiceDueBaseDay', () => {
@@ -19,7 +20,8 @@ describe('invoiceDueBaseDay', () => {
   test('a Date and a timestamp string read as their calendar day; no value reads as today', () => {
     expect(serviceDateOnly(new Date('2026-10-04T00:00:00Z'))).toBe('2026-10-04');
     expect(serviceDateOnly('2026-10-04T13:00:00.000Z')).toBe('2026-10-04');
-    expect(invoiceDueBaseDay(null, '2026-11-01')).toBe('2026-11-01');
+    expect(serviceDateOnly(null)).toBe(etDateString());
+    expect(invoiceDueBaseDay(null)).toBe(etDateString());
   });
 });
 
