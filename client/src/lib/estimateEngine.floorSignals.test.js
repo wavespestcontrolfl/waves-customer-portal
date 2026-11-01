@@ -233,6 +233,20 @@ describe("fallback lawn margin visibility — report-only WaveGuard breach warni
     expect(notes.some((n) => n.includes("Lawn Care") && n.includes("35%"))).toBe(true);
   });
 
+  it("names rodent bait in the review note for a server-emitted WaveGuard margin warning (audit D5)", () => {
+    const notes = collectMarginReviewNotes({
+      marginWarnings: [{
+        service: "rodent_bait",
+        type: "waveguard_discount_below_margin_floor",
+        margin: 0.301,
+        marginFloor: 0.35,
+        finalAnnual: 320.4,
+        annualCost: 224,
+      }],
+    });
+    expect(notes.some((n) => n.startsWith("Rodent Bait: WaveGuard discount drops collected margin to 30.1%"))).toBe(true);
+  });
+
   it("stays silent without a WaveGuard discount (single-service lawn quote)", () => {
     const est = calculateEstimate(lawnInput({ measuredTurfSf: 3000 }));
     const warning = (est.recurring?.marginWarnings || []).find(

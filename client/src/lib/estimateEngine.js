@@ -869,6 +869,7 @@ export function collectMarginReviewNotes(E) {
     tree_shrub: "Tree & Shrub",
     mosquito: "Mosquito Control",
     termite_bait: "Termite Bait",
+    rodent_bait: "Rodent Bait",
   };
   const label = (service) => SERVICE_LABELS[service] || service || "Service";
 
