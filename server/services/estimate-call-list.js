@@ -11,6 +11,7 @@
  */
 
 const { toE164 } = require('../utils/phone');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 // Only a call the customer ANSWERED counts. call_log.status and bridged_at describe the STAFF
 // leg (bridged_at = staff pressed 1, before the customer leg is dialed; status can read
@@ -51,7 +52,8 @@ async function lastCalledAtByEstimateId(database, estimates, nowMs = Date.now())
   }
   if (!phoneByEstimate.size) return out;
   const phones = [...new Set(phoneByEstimate.values())];
-  const rows = await database('call_log')
+  // A voice-agent sandbox call is a test, never a call to the customer.
+  const rows = await whereNotSandboxCall(database('call_log'))
     .where({ direction: 'outbound' })
     .whereIn('to_phone', phones)
     .whereRaw(CUSTOMER_ANSWERED_SQL)
