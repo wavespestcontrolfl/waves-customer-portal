@@ -11,12 +11,13 @@
  *   buildYardWrapped({ customerId, year, scope }) -> the card payload, or
  *     { enabled: false } when the year holds fewer than 3 performed visits.
  *
- * A visit is one service day with a completed service record that was
+ * A visit is a service line's day with a completed service record that was
  * performed: the closeout outcome is not inspection_only / customer_declined
- * (visit-outcomes.js, the completion route's own list) or incomplete, and the
- * record is not a backfill closeout (a stale-visit cleanup; whether the visit
- * happened is not known). One day is one visit however many records it holds,
- * the rule GET /api/services/stats/summary already counts by.
+ * (visit-outcomes.js, the completion route's own list) or incomplete. A
+ * backfill closeout counts: it is the office's late, quiet closeout of work
+ * that happened (complete-scheduled-service.js backfillCompletionPlan). Two
+ * records of one line on one day are one visit; a pest and a lawn visit on one
+ * day are two, so the line counts always add up to the total the card shows.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -38,6 +39,9 @@ const SHOWN_LINES = ['pest', 'lawn', 'mosquito', 'tree_shrub', 'termite', 'roden
 // A pest or weed name: letters and a few joiners, no digits (a time, a code or a
 // phone number never passes), short enough to be a label rather than a sentence.
 const TREATED_LABEL_RE = /^[A-Za-z][A-Za-z '’&/().,-]{1,39}$/;
+// What a fertilizer is logged for ("Deep green color", "Root strength & stress
+// tolerance") is a goal, not something we treated for.
+const GOAL_LABEL_RE = /\b(colou?r|strength|tolerance)\b/i;
 const FIRST_NAME_RE = /^[A-Za-z][A-Za-z'’-]{0,29}$/;
 const NOT_PERFORMED = new Set([...NON_PERFORMED_VISIT_OUTCOMES, 'incomplete']);
 
@@ -65,8 +69,7 @@ async function safely(label, fn, fallback) {
 }
 
 function performedRecord(row) {
-  const notes = parseJsonObject(row.structured_notes);
-  return !NOT_PERFORMED.has(String(notes.visitOutcome || '')) && String(notes.backfill || '') !== 'true';
+  return !NOT_PERFORMED.has(String(parseJsonObject(row.structured_notes).visitOutcome || ''));
 }
 
 async function readYearRecords(database, customerId, year, scope) {
@@ -89,35 +92,38 @@ async function readYearRecords(database, customerId, year, scope) {
   return (await query).filter(performedRecord);
 }
 
-// Distinct service days, per service line and per technician. A day with two
-// lines counts once in the total and once in each line.
+// Visits per service line (distinct days that line has a record) and per
+// technician (distinct days). The total adds the lines up, plus one for a day
+// whose records are all of a line the card does not name.
 function summarizeVisits(records) {
-  const days = new Set();
-  const lineDays = new Map();
+  const dayLines = new Map();
   const techDays = new Map();
   const techNames = new Map();
   for (const row of records) {
-    days.add(row.day);
     const line = String(row.service_line || '').trim() || detectServiceLine(row.service_type);
-    if (SHOWN_LINES.includes(line)) {
-      if (!lineDays.has(line)) lineDays.set(line, new Set());
-      lineDays.get(line).add(row.day);
-    }
+    if (!dayLines.has(row.day)) dayLines.set(row.day, new Set());
+    if (SHOWN_LINES.includes(line)) dayLines.get(row.day).add(line);
     if (row.technician_id != null) {
       if (!techDays.has(row.technician_id)) techDays.set(row.technician_id, new Set());
       techDays.get(row.technician_id).add(row.day);
       techNames.set(row.technician_id, row.technician_name);
     }
   }
+  const lineCounts = new Map();
+  let total = 0;
+  for (const lines of dayLines.values()) {
+    total += Math.max(1, lines.size);
+    for (const line of lines) lineCounts.set(line, (lineCounts.get(line) || 0) + 1);
+  }
   const byLine = SHOWN_LINES
-    .filter((line) => lineDays.has(line))
-    .map((line) => ({ line, count: lineDays.get(line).size }))
+    .filter((line) => lineCounts.has(line))
+    .map((line) => ({ line, count: lineCounts.get(line) }))
     .sort((a, b) => b.count - a.count);
   const topTech = [...techDays.entries()]
     .map(([id, set]) => ({ name: String(techNames.get(id) || '').trim(), count: set.size }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))[0];
   const first = topTech ? topTech.name.split(/\s+/)[0] : '';
-  return { total: days.size, byLine, technicianFirstName: FIRST_NAME_RE.test(first) ? first : null };
+  return { total, byLine, technicianFirstName: FIRST_NAME_RE.test(first) ? first : null };
 }
 
 // What the year's applied products were logged for. service_products.targets is a
@@ -132,8 +138,9 @@ async function readTreatedFor(database, records) {
   for (const row of rows) {
     for (const raw of Array.isArray(row.targets) ? row.targets : []) {
       const label = String(raw || '').replace(/\s+/g, ' ').trim();
-      if (!TREATED_LABEL_RE.test(label) || customerCopyViolations(label).length) continue;
-      const key = label.toLowerCase();
+      if (!TREATED_LABEL_RE.test(label) || GOAL_LABEL_RE.test(label) || customerCopyViolations(label).length) continue;
+      // "Orb-weaver spiders", "Orb weaver spiders" and "orb weaver spiders" are one pest.
+      const key = label.toLowerCase().replace(/[-\s]+/g, ' ');
       const seen = tally.get(key);
       if (seen) seen.count += 1;
       else tally.set(key, { label: label[0].toUpperCase() + label.slice(1), count: 1 });

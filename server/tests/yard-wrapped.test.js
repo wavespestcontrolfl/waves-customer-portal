@@ -92,14 +92,14 @@ describe('yardWrappedYearFor', () => {
 });
 
 describe('performedRecord', () => {
-  test('closeouts that perform nothing, and backfills, are not visits', () => {
+  test('closeouts that perform nothing are not visits; a backfill closeout (late, quiet closeout of real work) is', () => {
     const p = (notes) => _test.performedRecord({ structured_notes: notes });
     expect(p({})).toBe(true);
     expect(p({ visitOutcome: 'completed' })).toBe(true);
     expect(p(JSON.stringify({ visitOutcome: 'customer_declined' }))).toBe(false);
     expect(p({ visitOutcome: 'inspection_only' })).toBe(false);
     expect(p({ visitOutcome: 'incomplete' })).toBe(false);
-    expect(p({ backfill: true })).toBe(false);
+    expect(p({ backfill: true })).toBe(true);
     expect(p(null)).toBe(true);
   });
 });
@@ -122,6 +122,8 @@ describe('buildYardWrapped', () => {
       { targets: ['Ghost ants', 'ghost ants', 'Roaches'] },
       { targets: ['Ghost ants', 'Crabgrass'] },
       { targets: ['This area is safe for pets', '3 minute re-entry', 'Chinch bugs', 'Dollarweed', 'Spiders', 'Fire ants'] },
+      { targets: ['Deep green color', 'Root strength & stress tolerance', 'Orb-weaver spiders'] },
+      { targets: ['Orb weaver spiders', 'orb weaver spiders'] },
       { targets: null },
     ],
     lawn_assessments: [
@@ -140,13 +142,15 @@ describe('buildYardWrapped', () => {
     const out = await buildYardWrapped({ customerId: 'c1', year: 2026, database: fakeDb({ tables: baseTables() }) });
     expect(out.enabled).toBe(true);
     expect(out.year).toBe(2026);
-    // 4 pest days + Sep 1 mosquito = 5 distinct days; Apr 7 and Jun 9 hold a pest and a lawn record.
-    expect(out.visits.total).toBe(5);
+    // Pest on 4 days plus the Oct 22 backfill = 5; lawn on Apr 7 and Jun 9 (same days as pest) = 2; mosquito 1.
+    // The total adds the lines up: 5 + 2 + 1.
+    expect(out.visits.total).toBe(8);
     expect(out.visits.byLine).toEqual([
-      { line: 'pest', count: 5 - 1 },
+      { line: 'pest', count: 5 },
       { line: 'lawn', count: 2 },
       { line: 'mosquito', count: 1 },
     ]);
+    expect(out.visits.byLine.reduce((sum, l) => sum + l.count, 0)).toBe(out.visits.total);
     expect(out.technicianFirstName).toBe('Jordan');
     expect(out.businessName).toBe(WAVES_BUSINESS_NAME);
     expect(out.businessName).toBe('Waves Pest Control, LLC');
@@ -165,10 +169,13 @@ describe('buildYardWrapped', () => {
     expect(out).not.toHaveProperty('lawnScore');
   });
 
-  test('treatedFor drops banned wording and digits, merges case, ranks by count and caps at 5', async () => {
+  test('treatedFor drops banned wording, digits and fertilizer goals, merges case and spelling, ranks by count and caps at 5', async () => {
     const out = await buildYardWrapped({ customerId: 'c1', year: 2026, database: fakeDb({ tables: baseTables() }) });
     expect(out.treatedFor).toHaveLength(5);
     expect(out.treatedFor[0]).toBe('Ghost ants');
+    // Three spellings of one spider are one entry, ranked by all three.
+    expect(out.treatedFor[1]).toBe('Orb-weaver spiders');
+    expect(out.treatedFor.join('|')).not.toMatch(/color|strength/i);
     expect(out.treatedFor.join('|')).not.toMatch(/safe|minute|3/i);
     expect(new Set(out.treatedFor.map((t) => t.toLowerCase())).size).toBe(5);
   });
@@ -190,10 +197,17 @@ describe('buildYardWrapped', () => {
 
   test('fewer than 3 performed visits is { enabled: false } and reads nothing else', async () => {
     const tables = baseTables();
-    tables.service_records = [record('2026-02-03'), record('2026-04-07'), record('2026-04-07', { id: 'x', service_line: 'lawn' }), record('2026-05-01', { structured_notes: { visitOutcome: 'customer_declined' } })];
+    tables.service_records = [record('2026-02-03'), record('2026-04-07'), record('2026-04-07', { id: 'x' }), record('2026-05-01', { structured_notes: { visitOutcome: 'customer_declined' } })];
     const database = fakeDb({ tables });
     expect(await buildYardWrapped({ customerId: 'c1', year: 2026, database })).toEqual({ enabled: false });
     expect(database.reads).toEqual(['service_records']);
+  });
+
+  test('a pest and a lawn visit on one day are two visits, so two such days reach the 3-visit card', async () => {
+    const tables = baseTables();
+    tables.service_records = [record('2026-02-03'), record('2026-04-07'), record('2026-04-07', { id: 'x', service_line: 'lawn' })];
+    const out = await buildYardWrapped({ customerId: 'c1', year: 2026, database: fakeDb({ tables }) });
+    expect(out.visits).toEqual({ total: 3, byLine: [{ line: 'pest', count: 2 }, { line: 'lawn', count: 1 }] });
   });
 
   test('a failed read drops that field and never throws', async () => {
@@ -202,7 +216,7 @@ describe('buildYardWrapped', () => {
       customerId: 'c1', year: 2026, database: fakeDb({ tables, failing: { service_products: 1, lawn_assessments: 1 } }),
     });
     expect(out.enabled).toBe(true);
-    expect(out.visits.total).toBe(5);
+    expect(out.visits.total).toBe(8);
     expect(out.treatedFor).toEqual([]);
     expect(out).not.toHaveProperty('lawnScore');
     expect(out).not.toHaveProperty('photoUrl');

@@ -4,8 +4,6 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../utils/api', () => ({ default: { getYardWrapped: vi.fn() } }));
-import api from '../../utils/api';
 import YardWrappedCard from './YardWrappedCard';
 import { LINE_LABELS, YARD_WRAPPED_COPY as COPY } from './yardWrappedCopy';
 import { buildShare, drawPicture } from './yardWrappedShare';
@@ -34,28 +32,18 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('YardWrappedCard render rules', () => {
-  it('renders nothing for { enabled: false }, a failed read, or a missing client method', async () => {
-    api.getYardWrapped.mockResolvedValueOnce({ enabled: false });
-    const { container, rerender } = render(<YardWrappedCard />);
-    await waitFor(() => expect(api.getYardWrapped).toHaveBeenCalledTimes(1));
+  it('renders nothing for { enabled: false }, no read yet (null) or a read the Home tab withheld', () => {
+    const { container, rerender } = render(<YardWrappedCard data={{ enabled: false }} />);
     expect(container).toBeEmptyDOMElement();
-
-    api.getYardWrapped.mockRejectedValueOnce(new Error('down'));
-    rerender(<YardWrappedCard propertyKey="b" />);
-    await waitFor(() => expect(api.getYardWrapped).toHaveBeenCalledTimes(2));
+    rerender(<YardWrappedCard data={null} />);
     expect(container).toBeEmptyDOMElement();
-
-    api.getYardWrapped.mockImplementationOnce(() => { throw new TypeError('nope'); });
-    rerender(<YardWrappedCard propertyKey="c" />);
-    await waitFor(() => expect(api.getYardWrapped).toHaveBeenCalledTimes(3));
+    rerender(<YardWrappedCard />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('reads once on mount and shows the counts, the registered name and the approved words', async () => {
-    api.getYardWrapped.mockResolvedValue(FULL);
-    render(<YardWrappedCard />);
+  it('shows the counts, the registered name and the approved words', async () => {
+    render(<YardWrappedCard data={FULL} />);
     expect(await screen.findByTestId('yard-wrapped-card')).toBeInTheDocument();
-    expect(api.getYardWrapped).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Yard Wrapped')).toBeInTheDocument();
     expect(screen.getByText('Your 2026 with Waves')).toBeInTheDocument();
     expect(screen.getByTestId('yard-wrapped-visits')).toHaveTextContent('9 visits');
@@ -72,8 +60,7 @@ describe('YardWrappedCard render rules', () => {
   });
 
   it('leaves out the lawn score, treated-for, technician and photo when the server sends none', async () => {
-    api.getYardWrapped.mockResolvedValue(MIN);
-    render(<YardWrappedCard />);
+    render(<YardWrappedCard data={MIN} />);
     expect(await screen.findByTestId('yard-wrapped-visits')).toHaveTextContent('3 visits');
     expect(screen.queryByText('Lawn score')).not.toBeInTheDocument();
     expect(screen.queryByText('What we treated for')).not.toBeInTheDocument();
@@ -113,8 +100,7 @@ describe('sharing', () => {
   it('Share opens the phone share sheet with the text and the website', async () => {
     const share = vi.fn().mockResolvedValue(undefined);
     setNavigator({ share });
-    api.getYardWrapped.mockResolvedValue(FULL);
-    render(<YardWrappedCard />);
+    render(<YardWrappedCard data={FULL} />);
     fireEvent.click(await screen.findByTestId('yard-wrapped-share'));
     await waitFor(() => expect(share).toHaveBeenCalledTimes(1));
     expect(screen.getByTestId('yard-wrapped-share')).toHaveTextContent('Share');
@@ -129,8 +115,7 @@ describe('sharing', () => {
     HTMLCanvasElement.prototype.getContext = () => ctx;
     HTMLCanvasElement.prototype.toBlob = (cb) => cb(new Blob(['png'], { type: 'image/png' }));
     setNavigator({ share, canShare: ({ files }) => Array.isArray(files) && files.length === 1 });
-    api.getYardWrapped.mockResolvedValue(FULL);
-    render(<YardWrappedCard />);
+    render(<YardWrappedCard data={FULL} />);
     const button = await screen.findByTestId('yard-wrapped-share');
     // Give the picture time to draw before the tap.
     await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
@@ -145,8 +130,7 @@ describe('sharing', () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const share = vi.fn().mockRejectedValueOnce(Object.assign(new Error('x'), { name: 'AbortError' })).mockRejectedValueOnce(new Error('boom'));
     setNavigator({ share, clipboard: { writeText } });
-    api.getYardWrapped.mockResolvedValue(FULL);
-    render(<YardWrappedCard />);
+    render(<YardWrappedCard data={FULL} />);
     const button = await screen.findByTestId('yard-wrapped-share');
     fireEvent.click(button);
     await waitFor(() => expect(share).toHaveBeenCalledTimes(1));
@@ -160,8 +144,7 @@ describe('sharing', () => {
   it('without share support the button is Copy; with neither it is hidden', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     setNavigator({ clipboard: { writeText } });
-    api.getYardWrapped.mockResolvedValue(FULL);
-    const first = render(<YardWrappedCard />);
+    const first = render(<YardWrappedCard data={FULL} />);
     const button = await screen.findByTestId('yard-wrapped-share');
     expect(button).toHaveTextContent('Copy');
     fireEvent.click(button);
@@ -169,7 +152,7 @@ describe('sharing', () => {
     first.unmount();
 
     setNavigator({});
-    render(<YardWrappedCard />);
+    render(<YardWrappedCard data={FULL} />);
     expect(await screen.findByTestId('yard-wrapped-card')).toBeInTheDocument();
     expect(screen.queryByTestId('yard-wrapped-share')).not.toBeInTheDocument();
   });

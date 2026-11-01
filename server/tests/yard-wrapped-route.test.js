@@ -73,12 +73,22 @@ describe('GET /api/yard-wrapped', () => {
     expect(buildYardWrapped).not.toHaveBeenCalled();
   });
 
-  test('an eligible member: the card for the logged-in customer, read under the resolved scope', async () => {
+  test('an eligible member: the card for the logged-in customer, read under the resolved scope, with its scope echo', async () => {
     const res = await get();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual(PAYLOAD);
+    // The echo Home's scopeEchoMismatch reads, like /api/misting-system (resolvedScopePayload of the read's scope).
+    expect(await res.json()).toEqual({ ...PAYLOAD, propertyScope: { enabled: false, propertyId: null, closed: false } });
     expect(yardWrappedYearFor).toHaveBeenCalledWith({ customer: { id: 'cust-1', active: true, waveguard_tier: 'Gold' } });
     expect(buildYardWrapped).toHaveBeenCalledWith({ customerId: 'cust-1', year: 2026, scope: SCOPE });
+  });
+
+  test('a house-scoped card echoes the house it was read for; no card carries no echo', async () => {
+    global.__SCOPE__ = { ...SCOPE, enabled: true, scoped: true, property: { id: 'prop-2' } };
+    try {
+      expect((await (await get()).json()).propertyScope).toEqual({ enabled: true, propertyId: 'prop-2', closed: false });
+      buildYardWrapped.mockResolvedValue({ enabled: false });
+      expect(await (await get()).json()).toEqual({ enabled: false });
+    } finally { global.__SCOPE__ = SCOPE; }
   });
 
   test('a builder failure answers { enabled: false }, never a 500', async () => {

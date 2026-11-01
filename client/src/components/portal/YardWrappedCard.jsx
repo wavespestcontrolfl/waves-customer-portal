@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import api from '../../utils/api';
 import Icon from '../Icon';
 import { BUTTON_BASE, COLORS as B, CUSTOMER_SECTION_LABEL } from '../../theme-brand';
 import { CUSTOMER_SURFACE as SHELL } from '../../theme-customer';
@@ -12,29 +11,15 @@ import {
 // Yard Wrapped: a WaveGuard member's year-in-review card on the Home tab.
 // Dark behind GATE_YARD_WRAPPED on the server: GET /api/yard-wrapped answers
 // { enabled: false } (gate off, outside Dec 1 - Jan 31 ET, not a member, under
-// 3 visits) and any failure renders nothing, so the Home tab is unchanged.
+// 3 visits). DashboardTab owns the read and its propertyScope echo check (like
+// the misting card); anything but an enabled card renders nothing, so the
+// Home tab is unchanged.
 //
 // The server owns every figure; this file only lays them out. All words live
 // in yardWrappedCopy.js. Share: yardWrappedShare.js.
 // =========================================================================
 
 const DEFAULT_CARD = { background: '#FFFFFF', border: '1px solid #E7E2D7', borderRadius: 16, position: 'relative' };
-
-// One read per mount (and per selected saved property, which the server scopes to).
-export function useYardWrapped(propertyKey) {
-  const [data, setData] = useState(null);
-  useEffect(() => {
-    let live = true;
-    setData(null);
-    // Promise.resolve().then so a missing or throwing client method reads as "off".
-    Promise.resolve()
-      .then(() => api.getYardWrapped())
-      .then((d) => { if (live && d?.enabled === true) setData(d); })
-      .catch(() => {});
-    return () => { live = false; };
-  }, [propertyKey]);
-  return data;
-}
 
 const rowStyle = { display: 'grid', gap: 4, borderTop: `1px solid ${SHELL.border}`, paddingTop: 12 };
 const labelStyle = { fontSize: 14, fontWeight: 600, color: SHELL.muted };
@@ -133,8 +118,7 @@ export function YardWrappedBody({ data, cardStyle = DEFAULT_CARD }) {
   );
 }
 
-export default function YardWrappedCard({ propertyKey = null, cardStyle }) {
-  const data = useYardWrapped(propertyKey);
-  if (!data) return null;
+export default function YardWrappedCard({ data = null, cardStyle }) {
+  if (data?.enabled !== true) return null;
   return <YardWrappedBody data={data} cardStyle={cardStyle} />;
 }
