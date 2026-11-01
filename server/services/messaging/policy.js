@@ -27,6 +27,7 @@
  *   'payment_failure'     |   // failed charge / retry / bank-verification action required
  *   'autopay'             |   // autopay pre-charge / card state notices
  *   'payment_link'        |   // tap-to-pay link
+ *   'payer_payment_link'  |   // the pay link texted to a third-party Bill-To payer's AP phone (GATE_PAYER_INVOICE_SMS)
  *   'card_request'        |   // secure-appointment card-on-file capture link
  *   'document_request'    |   // e-sign document request / reminder
  *   'estimate_followup'   |   // estimate sent / viewed / nudge
@@ -93,6 +94,7 @@ const MESSAGE_PURPOSES = [
   'payment_failure',
   'autopay',
   'payment_link',
+  'payer_payment_link',
   'card_request',
   'document_request',
   'estimate_followup',
@@ -168,6 +170,9 @@ const TRUST_RANK = {
  *                             email equivalent.
  *   - minIdentityTrust        Minimum identityTrustLevel required to send.
  *   - requireIds              Field names on the input that must be present.
+ *   - requirePayerPhoneMatch  Optional. true makes the recipient number prove
+ *                             itself as the invoice's ACTIVE payer AP phone
+ *                             (validators/payer-recipient.js).
  *
  * NOTE: review_request is intentionally treated like a normal customer SMS
  * (no eligibility-result gate). Per-customer cooldowns and complaint-state
@@ -343,6 +348,32 @@ const PURPOSE_POLICY = {
     prefsColumn: null,
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId', 'invoiceId'],
+  },
+  // The invoice pay link texted to a third-party Bill-To payer's AP phone
+  // (GATE_PAYER_INVOICE_SMS, owner 2026-11-01). The recipient is NOT the
+  // customer, so three things differ from payment_link:
+  //  - requirePayerPhoneMatch: the recipient number must equal the ACTIVE
+  //    payer's ap_phone for the invoice's payer_id, read from the DB at the
+  //    pipeline step and again at the provider boundary (validators/
+  //    payer-recipient.js). The customer's own phone never qualifies.
+  //  - requireConsent 'none': consent here would read the HOMEOWNER's
+  //    notification_prefs (customerId is the invoice's customer, so the text
+  //    shows on that timeline), and a homeowner's STOP or toggle says nothing
+  //    about the payer's phone. The payer's own STOP is still honored: the
+  //    phone-keyed messaging_suppression check and the send window run for
+  //    every customer-audience SMS.
+  //  - no billing-channel fan-out: the purpose is not in
+  //    BILLING_MESSAGE_CATEGORIES or the push policy, so it is a plain SMS and
+  //    never copied to the homeowner's app or email.
+  payer_payment_link: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'none',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId', 'invoiceId'],
+    requirePayerPhoneMatch: true,
   },
   // Card-on-file capture link for a booked visit (appointment-card-request
   // funnel). No invoice exists yet — nothing is charged from this message —

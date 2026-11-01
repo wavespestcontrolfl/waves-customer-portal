@@ -446,4 +446,13 @@ describe('Twilio messaging provider adapter', () => {
       expect.objectContaining({ withheldLinkPolicy: undefined }),
     );
   });
+
+  test('payer_payment_link logs as the payer_invoice message type (sms_log.message_type)', async () => {
+    await sendViaTwilio(baseInput({ audience: 'customer', purpose: 'payer_payment_link' }));
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ messageType: 'payer_invoice' }),
+    );
+  });
 });

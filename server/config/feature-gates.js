@@ -7602,6 +7602,14 @@ function billingEmailDetailsLive() {
   return process.env.GATE_BILLING_EMAIL_DETAILS === 'true';
 }
 
+// GATE_PAYER_INVOICE_SMS read at CALL time — ships DARK, off unless exactly 'true' (owner
+// 2026-11-01). On, a payer-billed invoice whose email the provider accepted for the payer's
+// AP inbox also texts the same pay link to that payer's ap_phone (services/payer-invoice-sms.js,
+// purpose payer_payment_link). Off, no payer text is ever built or sent.
+function payerInvoiceSmsLive() {
+  return process.env.GATE_PAYER_INVOICE_SMS === 'true';
+}
+
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The one canonical reader for both
 // entry points that need to know whether the Intelligence Bar may
@@ -8878,6 +8886,8 @@ module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
 // GATE_LAWN_NO_SEASON_BOOST reader (kept off the end-of-file append point, where gate PRs keep colliding).
 module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
+// GATE_PAYER_INVOICE_SMS reader, on its own line so gate PRs never conflict.
+module.exports.payerInvoiceSmsLive = payerInvoiceSmsLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;

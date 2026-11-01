@@ -9435,6 +9435,8 @@ const InvoiceService = {
           claimToken: claim.invoice.send_claim_token,
           holdExempt,
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
+          // An office send: the payer text that follows an accepted payer email (payer-invoice-sms.js) may go outside the send window.
+          ...(operatorInitiated ? { operatorInitiated: true } : {}),
         });
         if (r?.ok) email.ok = true;
         if (r?.deduped) email.deduped = true;
