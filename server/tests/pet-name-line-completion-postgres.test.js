@@ -78,19 +78,19 @@ jest.setTimeout(90000);
 
 const LAWN_TYPE = 'Every 6 Weeks Lawn Care Service';
 
-async function seedLawnVisit(pets, { tier = 'Gold', stampedLine1 = null } = {}) {
+async function seedLawnVisit(pets, { tier = 'Gold', stampedLine1 = null, stampedLine2 = null, homeLine2 = null } = {}) {
   const today = etDateString(new Date());
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), serviceKey: `fixture_lawn_${randomUUID().slice(0, 8)}` };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Petline', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
     email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, waveguard_tier: tier,
-    address_line1: '100 Fixture Street', city: 'Fixture City', zip: '34201' });
+    address_line1: '100 Fixture Street', address_line2: homeLine2, city: 'Fixture City', zip: '34201' });
   const [property] = await mockPg('customer_properties').insert({ customer_id: f.customerId, address_line1: '100 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: true }).returning('*');
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `${LAWN_TYPE} ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
   await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, property_id: property.id, technician_id: f.techId, service_id: f.catalogId,
     service_type: LAWN_TYPE, scheduled_date: today, window_start: '09:00', window_end: '10:00', status: 'confirmed',
     estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false,
-    ...(stampedLine1 ? { service_address_line1: stampedLine1, service_address_city: 'Fixture City', service_address_zip: '34201' } : {}) });
+    ...(stampedLine1 ? { service_address_line1: stampedLine1, service_address_line2: stampedLine2, service_address_city: 'Fixture City', service_address_zip: '34201' } : {}) });
   if (pets) await mockPg('property_preferences').insert({ customer_id: f.customerId, pet_count: pets.length, pets_structured: JSON.stringify(pets) });
   f.celsius = await mockPg('products_catalog').where({ name: 'Celsius WG' }).first();
   return f;
@@ -172,6 +172,13 @@ postgres('closeout: the pet-named line in the completion text', () => {
       expect((await complete(elsewhere, [spray(elsewhere)])).status).toBe(200);
       expect(completionText().body).not.toMatch(/Biscuit/);
     } finally { await cleanup(elsewhere); }
+    sendCustomerMessage.mockClear();
+    // Another unit at the same street is elsewhere.
+    const unit = await seedLawnVisit([{ name: 'Biscuit', type: 'Dog' }], { homeLine2: 'Apt 3', stampedLine1: '100 Fixture Street', stampedLine2: 'Apt 4' });
+    try {
+      expect((await complete(unit, [spray(unit)])).status).toBe(200);
+      expect(completionText().body).not.toMatch(/Biscuit/);
+    } finally { await cleanup(unit); }
     sendCustomerMessage.mockClear();
     // The same address typed on the visit is still the home.
     const home = await seedLawnVisit([{ name: 'Biscuit', type: 'Dog' }], { stampedLine1: '100 Fixture Street' });

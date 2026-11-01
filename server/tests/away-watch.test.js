@@ -147,54 +147,72 @@ describe('tech job-card lines', () => {
   const WELCOME = 'Welcome Home: last visit before the member is back. Do a lanai cobweb sweep (no product).';
   // The visit row (the visit joined to its customer's membership facts and away dates, with address_diverges)
   // answers the first .first(); the next-visit lookup answers .first('ss.scheduled_date').
-  const fakeDb = ({ prefs, next = null, visitDay = '2026-09-04' }) => {
+  // The visit row (the visit joined to its customer: membership facts, home address, away dates; no stamp = at home)
+  // answers .first(); the Welcome Home lookup answers .select() with the later visits inside its date bounds.
+  const { etCalendarDayOf } = require('../utils/datetime-et');
+  const fakeDb = ({ prefs, later = [], visitDay = '2026-09-04' }) => {
     const reads = [];
     const dbh = (table) => {
       reads.push(table);
+      const bounds = [];
       const chain = {};
-      for (const m of ['join', 'leftJoin', 'where', 'whereNotIn', 'whereRaw', 'orderBy']) chain[m] = () => chain;
-      chain.first = async (...cols) => (cols[0] === 'ss.scheduled_date'
-        ? next
-        : (prefs && { customer_id: 'c1', scheduled_date: visitDay, address_diverges: false, ...prefs }));
+      for (const m of ['join', 'leftJoin', 'whereNotIn', 'orderBy']) chain[m] = () => chain;
+      chain.where = (col, op, val) => { if (col === 'ss.scheduled_date') bounds.push([op, val]); return chain; };
+      chain.first = async () => (prefs && { customer_id: 'c1', scheduled_date: visitDay, ...prefs });
+      chain.select = async () => later.filter((row) => bounds.every(([op, val]) => {
+        const day = etCalendarDayOf(row.scheduled_date);
+        return op === '>' ? day > val : day < val;
+      }));
       return chain;
     };
-    dbh.raw = (sql) => sql;
     dbh.reads = reads;
     return dbh;
   };
-  const prefs = { away_watch_from: '2026-09-01', away_watch_until: '2026-09-30', waveguard_tier: 'Gold', monthly_rate: 0 };
+  const HOME = { address_line1: '100 Fixture Street', address_line2: 'Apt 3', city: 'Fixture City', zip: '34201' };
+  const prefs = { away_watch_from: '2026-09-01', away_watch_until: '2026-09-30', waveguard_tier: 'Gold', monthly_rate: 0, ...HOME };
   const lines = (visitDay, over = {}) => AwayWatch.awayWatchCardLines(fakeDb({ prefs, visitDay, ...over }), 'svc1');
+  const visitOn = (scheduled_date, stamp = {}) => ({ scheduled_date, ...HOME, ...stamp });
 
   beforeEach(() => { process.env[GATE] = 'true'; });
 
   test('inside the window: the Away Watch line names the back day', async () => {
-    expect(await lines('2026-09-04', { next: { scheduled_date: '2026-09-18' } })).toEqual({ lines: [AWAY] });
+    expect(await lines('2026-09-04', { later: [visitOn('2026-09-18')] })).toEqual({ lines: [AWAY] });
   });
 
   test('the leave day is inside, the back day is not', async () => {
-    expect(await lines('2026-09-01', { next: { scheduled_date: '2026-09-18' } })).toEqual({ lines: [AWAY] });
+    expect(await lines('2026-09-01', { later: [visitOn('2026-09-18')] })).toEqual({ lines: [AWAY] });
     expect(await lines('2026-09-30')).toBeNull();
     expect(await lines('2026-08-31')).toBeNull();
   });
 
   test('the last visit before the back day also gets Welcome Home: no later visit, or the next one is on or after the back day', async () => {
     expect(await lines('2026-09-20')).toEqual({ lines: [AWAY, WELCOME] });
-    expect(await lines('2026-09-20', { next: { scheduled_date: '2026-09-30' } })).toEqual({ lines: [AWAY, WELCOME] });
-    expect(await lines('2026-09-20', { next: { scheduled_date: new Date('2026-10-14T00:00:00Z') } })).toEqual({ lines: [AWAY, WELCOME] });
+    expect(await lines('2026-09-20', { later: [visitOn('2026-09-30')] })).toEqual({ lines: [AWAY, WELCOME] });
+    expect(await lines('2026-09-20', { later: [visitOn(new Date('2026-10-14T00:00:00Z'))] })).toEqual({ lines: [AWAY, WELCOME] });
   });
 
   test('a visit with another one still before the back day does not get Welcome Home', async () => {
-    expect((await lines('2026-09-20', { next: { scheduled_date: '2026-09-29' } })).lines).toEqual([AWAY]);
+    expect((await lines('2026-09-20', { later: [visitOn('2026-09-29')] })).lines).toEqual([AWAY]);
+  });
+
+  test('a later visit at another address or another unit does not take Welcome Home; one at home (unit omitted) does', async () => {
+    const elsewhere = [visitOn('2026-09-25', { service_address_line1: '200 Other Road' }),
+      visitOn('2026-09-27', { service_address_line1: '100 Fixture Street', service_address_line2: 'Apt 4' })];
+    expect(await lines('2026-09-20', { later: elsewhere })).toEqual({ lines: [AWAY, WELCOME] });
+    expect((await lines('2026-09-20', { later: [...elsewhere, visitOn('2026-09-28', { service_address_line1: '100 Fixture St' })] })).lines).toEqual([AWAY]);
   });
 
   test('Away Watch is a member perk: dates on a non-member\'s row add nothing; a legacy member with a monthly rate counts', async () => {
     expect(await lines('2026-09-04', { prefs: { ...prefs, waveguard_tier: null, monthly_rate: 0 } })).toBeNull();
     expect(await lines('2026-09-04', { prefs: { ...prefs, waveguard_tier: 'none', monthly_rate: 0 } })).toBeNull();
-    expect(await lines('2026-09-04', { prefs: { ...prefs, waveguard_tier: null, monthly_rate: 89 }, next: { scheduled_date: '2026-09-18' } })).toEqual({ lines: [AWAY] });
+    expect(await lines('2026-09-04', { prefs: { ...prefs, waveguard_tier: null, monthly_rate: 89 }, later: [visitOn('2026-09-18')] })).toEqual({ lines: [AWAY] });
   });
 
-  test('a visit stamped at another address gets nothing: the home\'s away window never follows a visit elsewhere', async () => {
-    expect(await lines('2026-09-04', { prefs: { ...prefs, address_diverges: true } })).toBeNull();
+  test('a visit stamped at another address or another unit gets nothing: the home\'s away window never follows a visit elsewhere', async () => {
+    expect(await lines('2026-09-04', { prefs: { ...prefs, service_address_line1: '200 Other Road' } })).toBeNull();
+    expect(await lines('2026-09-04', { prefs: { ...prefs, service_address_line1: '100 Fixture Street Apt 4' } })).toBeNull();
+    expect(await AwayWatch.visitInAwayWatchWindow(fakeDb({ prefs: { ...prefs, service_address_line1: '100 Fixture Street', service_address_line2: 'Apt 4' } }), 'svc1')).toBe(false);
+    expect(await AwayWatch.visitInAwayWatchWindow(fakeDb({ prefs: { ...prefs, service_address_line1: '100 Fixture Street' } }), 'svc1')).toBe(true);
   });
 
   test('one date missing, no row: nothing', async () => {
@@ -214,10 +232,14 @@ describe('tech job-card lines', () => {
     const factsDb = (rows) => {
       const dbh = (table) => {
         const chain = {};
-        for (const m of ['join', 'leftJoin', 'where', 'whereNotIn', 'whereIn', 'whereRaw', 'modify', 'orderBy', 'orderByRaw', 'select', 'limit', 'whereNotNull']) chain[m] = () => chain;
-        // The Away Watch next-visit lookup selects 'ss.scheduled_date'; every other .first() reads the table's row.
-        chain.first = (...cols) => {
-          const value = cols[0] === 'ss.scheduled_date' ? rows.next : rows[table];
+        for (const m of ['join', 'leftJoin', 'where', 'whereNotIn', 'whereIn', 'whereRaw', 'modify', 'orderBy', 'orderByRaw', 'limit', 'whereNotNull']) chain[m] = () => chain;
+        // The Away Watch Welcome Home lookup selects 'ss.scheduled_date' with the stamped address and is awaited as rows;
+        // every other select chains on, and every .first() reads the table's row.
+        chain.select = (...cols) => (cols[0] === 'ss.scheduled_date' && cols.includes('ss.service_address_line1')
+          ? Promise.resolve(rows.later || [])
+          : chain);
+        chain.first = () => {
+          const value = rows[table];
           return Object.assign(Promise.resolve(value ?? null), { catch: async () => value ?? null });
         };
         const value = rows[table];
@@ -235,7 +257,7 @@ describe('tech job-card lines', () => {
     });
 
     test('inside the window the card carries the lines; outside it, and with the gate off, it has no awayWatch key', async () => {
-      expect((await card('2026-09-04', { next: { scheduled_date: '2026-09-18' } })).awayWatch).toEqual({ lines: [AWAY] });
+      expect((await card('2026-09-04', { later: [{ scheduled_date: '2026-09-18' }] })).awayWatch).toEqual({ lines: [AWAY] });
       expect((await card('2026-09-22')).awayWatch).toEqual({ lines: [AWAY, WELCOME] });
       expect(await card('2026-10-02')).not.toHaveProperty('awayWatch');
       delete process.env[GATE];
