@@ -71,8 +71,8 @@ function validateUpdate(body) {
 // are office-only (below). GATE_PORTAL_ITEM_CLOSE: a quiet change (the Portal tab's Mark handled, which can
 // close an item nobody answered) tells the customer nothing; only an explicit `true` counts.
 function shouldEmailRequestUpdate(updated, statusChanged, value) {
-  if (!statusChanged || updated.category === 'measurement_review') return false;
-  return !(value.quiet === true && portalItemCloseLive());
+  const lifecycleEmail = statusChanged && updated.category !== 'measurement_review';
+  return lifecycleEmail && !(value.quiet === true && portalItemCloseLive());
 }
 
 // GET /api/admin/requests — list service requests for staff triage.
