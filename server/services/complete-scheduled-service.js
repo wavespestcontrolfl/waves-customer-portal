@@ -7305,6 +7305,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // review ask days after the visit (or from the later payment)
             // must never fire from a quiet backlog closeout.
             requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
+            // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): frozen with the record, so the review decision
+            // below, a resumed completion, a combined visit's summary and a later payment all read the one
+            // answer: an unpaid invoice does not hold this visit's ask, and the payment starts none.
+            // Absent with the switch off.
+            ...(require('../config/feature-gates').reviewAskAtVisitLive() ? { reviewAskAtVisit: true } : {}),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             // GATE_REVIEW_FIRST_ASK_LOCK audit: a never-asked customer's "no ask" was kept on (forcedOn) or
@@ -13935,7 +13940,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Immediate/legacy review requests can be bundled into the completion SMS.
     // Explicit delayed timing skips the bundle and schedules a separate review
     // request below.
-    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
+    const invoiceUnpaidAtCompletion = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
+    // GATE_REVIEW_ASK_AT_VISIT: a record completed with the switch on asks after its report text even
+    // while the invoice is unpaid (enrollPostService below). The link still never rides inside the
+    // pay-link text: shouldBundleReview keeps refusing an unpaid invoice.
+    const invoiceBlocksReview = invoiceUnpaidAtCompletion
+      && parseJsonObject(record.structured_notes).reviewAskAtVisit !== true;
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms
@@ -14059,6 +14069,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       !completionSmsAlreadyHandled &&
       !recapSmsAlreadySentForVisit &&
       effectiveRequestReview &&
+      // An unpaid invoice's completion text carries its pay link: a review link never rides in it,
+      // the switch on or off (with GATE_REVIEW_ASK_AT_VISIT on, the ask follows as its own text).
+      !invoiceUnpaidAtCompletion &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
       // The fixed re-service text is final as built: a review ask never rides

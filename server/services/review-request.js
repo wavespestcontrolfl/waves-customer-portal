@@ -2069,9 +2069,11 @@ const ReviewService = {
       // Webhooks pass a narrow projection. Resolve omitted ownership before
       // considering the representative service record's review preferences.
       const Packets = require('./visit-completion-packets');
+      // trigger 'payment': a combined visit closed with GATE_REVIEW_ASK_AT_VISIT on asked at its
+      // summary, so the payment starts nothing there.
       const packetResult = invoice?.id && invoice.visit_completion_packet_id === undefined
-        ? await Packets.enrollVisitCompletionReviewForInvoice(invoice.id)
-        : (invoice?.visit_completion_packet_id ? await Packets.enrollVisitCompletionReview(invoice.visit_completion_packet_id) : null);
+        ? await Packets.enrollVisitCompletionReviewForInvoice(invoice.id, db, { trigger: "payment" })
+        : (invoice?.visit_completion_packet_id ? await Packets.enrollVisitCompletionReview(invoice.visit_completion_packet_id, db, { trigger: "payment" }) : null);
       if (packetResult) return packetResult;
       if (!invoice?.customer_id || !invoice?.service_record_id) {
         return { enrolled: false, reason: "not_completion_invoice" };
@@ -2084,6 +2086,13 @@ const ReviewService = {
       let notes = serviceRecord?.structured_notes || {};
       if (typeof notes === "string") {
         try { notes = JSON.parse(notes); } catch { notes = {}; }
+      }
+      // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): a visit completed with the switch on asked after
+      // its report text, paid or not. A payment never starts a review text for it, whatever the
+      // completion decided. Visits completed before the switch keep this deferred ask.
+      if (notes.reviewAskAtVisit === true) {
+        logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): asked at the visit`);
+        return { enrolled: false, reason: "asked_at_visit" };
       }
       if (notes.requestReview === false) {
         logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): completion opted out`);

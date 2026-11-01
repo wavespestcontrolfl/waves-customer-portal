@@ -1611,7 +1611,8 @@ async function liveThirdPartyPayerForPacket(packetId, database = db) {
 // The paid signal carries only the invoice; resolving its packet is part of
 // the same one-shot boundary, so a failed lookup reopens the packet through
 // the invoice link in one statement instead of losing the review.
-async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
+// `options.trigger` 'payment' marks the paid signal (GATE_REVIEW_ASK_AT_VISIT reads it).
+async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db, options = {}) {
   let packetId;
   try {
     packetId = (await database('invoices').where({ id: invoiceId }).first('visit_completion_packet_id'))?.visit_completion_packet_id;
@@ -1653,7 +1654,7 @@ async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
     if (owner && !['done', 'processing'].includes(owner.status)) return { enrolled: false, reason: 'packet_owned', packetId, packetStatus: owner.status };
   }
   if (!packetId) return null;
-  return enrollVisitCompletionReview(packetId, database);
+  return enrollVisitCompletionReview(packetId, database, options);
 }
 
 // A paid webhook or manual settlement reaches this once for a packet that
@@ -1683,9 +1684,22 @@ async function enrollVisitCompletionReview(packetId, database = db, options = {}
   }
 }
 
-async function enrollVisitCompletionReviewOnce(packetId, database = db, { deliverySettled = false } = {}) {
+// GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): every member record carries the reviewAskAtVisit marker
+// its completion froze. A packet with an unmarked member keeps the unpaid-invoice hold.
+async function packetAsksAtVisit(packetId, database) {
+  const members = await database('visit_completion_packet_items as i')
+    .join('service_records as r', 'r.id', 'i.service_record_id')
+    .where('i.packet_id', packetId).select('r.structured_notes');
+  return members.length > 0 && members.every((row) => parseJsonObject(row.structured_notes).reviewAskAtVisit === true);
+}
+
+async function enrollVisitCompletionReviewOnce(packetId, database = db, { deliverySettled = false, trigger } = {}) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   if (!packet) return { enrolled: false, reason: 'packet_missing' };
+  // A visit closed with the switch on asks after its summary text, paid or not: the payment
+  // starts nothing for it, and an unpaid invoice does not hold it (below).
+  const askAtVisit = await packetAsksAtVisit(packet.id, database);
+  if (askAtVisit && trigger === 'payment') return { enrolled: false, reason: 'asked_at_visit' };
   const payload = packetPayload(packet);
   const formAsks = ({ body }) => body.requestReview !== false
     && (!body.reviewSuppression || body.reviewSuppression === 'invoice_created');
@@ -1704,7 +1718,7 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   if (!requested || visit.billing_hold) return { enrolled: false, reason: 'visit_review_suppressed' };
   const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
-  if (invoice && !['paid', 'prepaid'].includes(invoice.status)) return { enrolled: false, reason: 'invoice_unpaid' };
+  if (invoice && !askAtVisit && !['paid', 'prepaid'].includes(invoice.status)) return { enrolled: false, reason: 'invoice_unpaid' };
   // A paid signal can arrive while the summary is still being delivered or
   // after an uncertain handoff: the ask never goes out ahead of the summary
   // it follows, and an uncertain delivery stays with the office.
