@@ -841,6 +841,10 @@ export class ApiClient {
     return this.request('/property/preferences');
   }
 
+  getPetNameAsk() {
+    return this.request('/property/pet-name-ask');
+  }
+
   getWateringPlan() {
     return this.request('/property/watering-plan');
   }

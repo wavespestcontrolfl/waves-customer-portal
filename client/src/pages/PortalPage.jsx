@@ -29,6 +29,7 @@ import CancelFlow from '../components/portal/CancelFlow';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
 import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
+import PetNameAskCard from '../components/portal/PetNameAskCard';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
@@ -2711,7 +2712,20 @@ function rememberReviewCardDone(serviceRecordId) {
   } catch { /* storage unavailable — the card just shows again next visit to Home */ }
 }
 
-function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
+// The pet-name ask's "Not now", per customer, on this device (a convenience: lost storage just asks again).
+const PET_NAME_ASK_DONE_KEY = 'waves.petNameAskDone';
+function petNameAskDone(customerId) {
+  try { return JSON.parse(localStorage.getItem(PET_NAME_ASK_DONE_KEY) || '[]').includes(customerId); } catch { return false; }
+}
+function rememberPetNameAskDone(customerId) {
+  if (!customerId) return;
+  try {
+    const ids = JSON.parse(localStorage.getItem(PET_NAME_ASK_DONE_KEY) || '[]').filter((id) => id !== customerId);
+    localStorage.setItem(PET_NAME_ASK_DONE_KEY, JSON.stringify([...ids, customerId].slice(-20)));
+  } catch { /* storage unavailable: the card hides for this visit to Home only */ }
+}
+
+function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
   const dashboardSavedScope = properties.some((p) => p.key);
@@ -2802,6 +2816,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const yardWrappedScopeStale = scopeEchoMismatch(yardWrappedRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (yardWrappedScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [yardWrappedScopeStale, onSavedScopeUnavailable]);
   const yardWrapped = yardWrappedScopeStale ? null : (yardWrappedRead.data || null);
+  // Pet-name ask (dark behind GATE_PET_NAME_TEXT: the server answers { ask: false } unless the pet-named visit text
+  // is live for a member with no usable name on file). Pets are the profile's, so a secondary house shows no ask.
+  const petNameAskRead = usePortalRead('pet-name-ask', () => api.getPetNameAsk());
+  const [petNameAskHidden, setPetNameAskHidden] = useState(() => petNameAskDone(customer?.id));
+  const showPetNameAsk = petNameAskRead.data?.ask === true && !petNameAskHidden && !dashboardSecondarySelection;
   // The server works out the next mist when it is read. Re-read just after that time passes, so a
   // Home left open never keeps showing a mist that already ran (the card shows "—" meanwhile).
   const mistingNextAt = mistingSystem?.nextMistAt || null;
@@ -3293,6 +3312,14 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
 
       {/* Yard Wrapped (dark behind GATE_YARD_WRAPPED: the card renders nothing until the server says enabled). */}
       <YardWrappedCard data={yardWrapped} cardStyle={card} />
+
+      {showPetNameAsk && (
+        <PetNameAskCard
+          cardStyle={card}
+          onAdd={() => onOpenPets?.()}
+          onNotNow={() => { rememberPetNameAskDone(customer?.id); setPetNameAskHidden(true); }}
+        />
+      )}
 
       {dashboardSecondarySelection ? (
         <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
@@ -9252,7 +9279,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         </div>
       </PropertySection>
 
-      <PropertySection title="Pets" icon="paw" summary={petSummary}>
+      <PropertySection id="pets" title="Pets" icon="paw" summary={petSummary}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', marginBottom: 14 }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Pets at this property</div>
@@ -18132,7 +18159,7 @@ export default function PortalPage() {
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && !contactSession && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
-        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
