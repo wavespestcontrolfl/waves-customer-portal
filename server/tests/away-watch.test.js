@@ -105,6 +105,36 @@ describe('responses', () => {
   });
 });
 
+
+describe('awayWatchClosePhotoCount', () => {
+  const fakeKnex = (count, seen = []) => (table) => {
+    seen.push(table);
+    const builder = { where: () => builder, whereNotNull: () => builder, whereNot: () => builder, count: () => builder, first: async () => ({ n: String(count) }) };
+    return builder;
+  };
+
+  test('body photos (the upload\'s unique count) plus staged photos the upload did not dedupe onto', async () => {
+    const seen = [];
+    // The body uploaded 2 unique photos; one of them deduped onto staged photo p2, so p2 is not counted twice.
+    const n = await AwayWatch.awayWatchClosePhotoCount(fakeKnex(0, seen), {
+      promotedIds: ['p1', 'p2'],
+      uploadResult: { uniqueUploaded: 2, photos: [{ id: 'p2' }, { id: 'u1' }, null] },
+    });
+    expect(n).toBe(3);
+    expect(seen).toEqual([]);
+    expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(0), { promotedIds: ['p1', 'p2', 'p3'] })).toBe(3);
+    expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(0), { uploadResult: { uploaded: 1 } })).toBe(1);
+  });
+
+  test('a linked lawn assessment adds its uploaded photos', async () => {
+    const seen = [];
+    expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(4, seen), { lawnAssessmentId: 'la1' })).toBe(4);
+    expect(seen).toEqual(['lawn_assessment_photos']);
+    expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(2), { promotedIds: ['p1'], lawnAssessmentId: 'la1' })).toBe(3);
+    expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(1), { uploadResult: { uniqueUploaded: 2 }, lawnAssessmentId: 'la1' })).toBe(3);
+  });
+});
+
 describe('tech job-card lines', () => {
   const AWAY = 'Away Watch: member away until 2026-09-30. Take 3 photos of the outside of the home from the ground and note standing water.';
   const WELCOME = 'Welcome Home: last visit before the member is back. Do a lanai cobweb sweep (no product).';

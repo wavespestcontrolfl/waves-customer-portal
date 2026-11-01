@@ -50,7 +50,9 @@ const MESSAGES = {
   badDay: 'Use a real calendar day, like 2026-06-01.',
 };
 
-const CLOSEOUT_PHOTO_MESSAGE = `Away Watch visit: at least ${AWAY_WATCH_MIN_PHOTOS} photos of the outside of the home must upload before closeout.`;
+// Tech-facing. A sheet with no photo field of its own closes with photos added to the visit (Tech Home), so the
+// message names the visit, not the form.
+const CLOSEOUT_PHOTO_MESSAGE = `Away Watch visit: add at least ${AWAY_WATCH_MIN_PHOTOS} photos of the outside of the home to this visit before closeout.`;
 
 function awayWatchLive() {
   return typeof gates.awayWatchLive === 'function' && gates.awayWatchLive();
@@ -96,6 +98,27 @@ async function awayWatchCardLines(dbh, customerId, visitDay) {
   return { lines };
 }
 
+// Closeout: every photo this closeout puts on the visit counts once. The body's completion photos (the full form, the
+// Tree & Shrub sheet), the visit photos the tech staged from Tech Home or the pest sheet (promoted to the record in the
+// same transaction, before this count), and the photos of the lawn assessment the lawn sheet linked (its front, back
+// and side shots are photos of the outside from the ground). A Fast Complete sheet that sends no photo of its own is
+// covered by the visit photos staged from Tech Home.
+// The body's count is the upload's own unique count; a staged photo the upload deduped onto (same bytes, same
+// row) is counted there, not again.
+async function awayWatchClosePhotoCount(dbh, { promotedIds = [], uploadResult = {}, lawnAssessmentId = null } = {}) {
+  const uploadedIds = new Set((uploadResult.photos || []).map((row) => row && row.id).filter(Boolean).map(String));
+  const staged = promotedIds.map(String).filter((id) => !uploadedIds.has(id)).length;
+  const body = Number(uploadResult.uniqueUploaded ?? uploadResult.uploaded ?? 0) || 0;
+  if (!lawnAssessmentId) return body + staged;
+  const lawn = await dbh('lawn_assessment_photos')
+    .where({ assessment_id: lawnAssessmentId })
+    .whereNotNull('s3_key')
+    .whereNot('s3_key', 'like', 'pending/%')
+    .count({ n: '*' })
+    .first();
+  return body + staged + Number(lawn?.n || 0);
+}
+
 // Writer rule for the pair, given the values that validated alone. `sent` is
 // how many of the two keys the request carried. Returns a message or null.
 function awayWatchPairError(from, until, sent, today = etDateString()) {
@@ -138,6 +161,7 @@ module.exports = {
   loadAwayWatchWindow,
   visitInAwayWatchWindow,
   awayWatchCardLines,
+  awayWatchClosePhotoCount,
   awayWatchPairError,
   withoutAwayWatch,
   withAwayWatchDays,

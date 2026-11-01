@@ -154,6 +154,48 @@ postgres('Away Watch closeout photo minimum', () => {
     } finally { await cleanup(f); }
   });
 
+  // Fast Complete sheets with no photo field (pest, lawn re-service) close an away visit with the visit photos the
+  // tech staged from Tech Home; the closeout promotes them to the record before it counts.
+  async function stagePhotos(f, n) {
+    const { randomBytes } = require('crypto');
+    for (let i = 0; i < n; i += 1) {
+      await mockPg('scheduled_service_photo_staging').insert({
+        scheduled_service_id: f.serviceId, technician_id: f.techId, photo_type: 'after',
+        s3_key: `staged/${randomUUID()}.jpg`, image_sha256: randomBytes(32).toString('hex'), sort_order: i,
+      });
+    }
+  }
+
+  test('gate on, 3 visit photos staged from Tech Home and none in the body: closes, all 3 on the record', async () => {
+    const f = await seedAwayVisit();
+    try {
+      await stagePhotos(f, 3);
+      expect((await complete(f)).status).toBe(200);
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(await mockPg('service_photos').where({ service_record_id: record.id })).toHaveLength(3);
+    } finally {
+      await mockPg('scheduled_service_photo_staging').where({ scheduled_service_id: f.serviceId }).del().catch(() => {});
+      const ids = await mockPg('service_records').where({ customer_id: f.customerId }).pluck('id').catch(() => []);
+      await mockPg('service_photos').whereIn('service_record_id', ids).del().catch(() => {});
+      await cleanup(f);
+    }
+  });
+
+  test('gate on, 2 staged photos plus 1 in the body: closes; 2 staged alone is refused and the photos stay staged', async () => {
+    const short = await seedAwayVisit();
+    try {
+      await stagePhotos(short, 2);
+      await expect(complete(short)).rejects.toMatchObject(REFUSED);
+      expect(await mockPg('scheduled_service_photo_staging').where({ scheduled_service_id: short.serviceId })).toHaveLength(2);
+      expect((await complete(short, { completionPhotos: photos(1) })).status).toBe(200);
+    } finally {
+      await mockPg('scheduled_service_photo_staging').where({ scheduled_service_id: short.serviceId }).del().catch(() => {});
+      const ids = await mockPg('service_records').where({ customer_id: short.customerId }).pluck('id').catch(() => []);
+      await mockPg('service_photos').whereIn('service_record_id', ids).del().catch(() => {});
+      await cleanup(short);
+    }
+  });
+
   test.each([
     ['customer_declined', { visitOutcome: 'customer_declined' }],
     ['inspection_only', { visitOutcome: 'inspection_only' }],

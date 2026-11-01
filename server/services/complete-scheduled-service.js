@@ -8869,7 +8869,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
               TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
             );
           }
-          if (awayWatchPhotoGateRequired && uniqueCompletionPhotosUploaded < AwayWatch.AWAY_WATCH_MIN_PHOTOS) {
+          // Away Watch counts every photo this closeout attaches, not only the body's: the visit photos staged
+          // from Tech Home or the pest sheet (promoted above) and the linked lawn assessment's photos count too,
+          // so a Fast Complete sheet with no photo field of its own can still close an away visit.
+          if (awayWatchPhotoGateRequired && await AwayWatch.awayWatchClosePhotoCount(trx, {
+            promotedIds: [...promotedPhotoIds],
+            uploadResult: completionPhotoUploadResult,
+            lawnAssessmentId: linkedLawnAssessmentId,
+          }) < AwayWatch.AWAY_WATCH_MIN_PHOTOS) {
             throw awayWatchPhotoUploadRequiredError(completionPhotoUploadResult);
           }
           if (packetRecords && completionPhotoUploadResult.failed > 0) {
