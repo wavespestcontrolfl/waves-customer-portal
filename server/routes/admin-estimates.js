@@ -4556,6 +4556,17 @@ router.get('/:id/proposal', async (req, res, next) => {
         if (payer?.payerId) billToTaxBasis = payer.taxExempt === true ? 'payer_exempt' : 'payer_taxed';
       } catch (_) { billToTaxBasis = null; }
     }
+    // Whether the account bills as commercial. Visit close and InvoiceService.create give a residential account no tax
+    // (customers.property_type), and a win makes the account commercial only when the proposal has a taxable amount
+    // (proposal-win.js flagProposalCustomerCommercialIfTaxable); the builder applies that rule to its own rows. No linked
+    // customer = true: the win creates a new commercial customer. A failed read, or no customer row, is null: no warnings.
+    let accountCommercial = true;
+    if (estimate.customer_id) {
+      try {
+        const customer = await db('customers').where({ id: estimate.customer_id }).first('property_type');
+        accountCommercial = customer ? ['commercial', 'business'].includes(customer.property_type) : null;
+      } catch (_) { accountCommercial = null; }
+    }
     const proposalGenerate = require('../services/estimate-proposal-generate');
     // Never throws: a failed read is null, and the family defaults apply.
     const taxabilityMap = await proposalGenerate.loadTaxabilityMap(db);
@@ -4583,6 +4594,9 @@ router.get('/:id/proposal', async (req, res, next) => {
       // Bill-To tax basis ('self' / 'payer_exempt' / 'payer_taxed'; null = could not be read): a payer-billed visit bill
       // follows the payer's tax status, not the customer's exemption, so the Taxable-box warning follows it too.
       billToTaxBasis,
+      // Account type (true = commercial or business; null = could not be read): a residential account's bills carry no
+      // tax unless the proposal's win makes it commercial, so the Taxable-box warning follows it too.
+      accountCommercial,
       // GATE_COMMERCIAL_PROPOSAL_SIGN: where the customer's online agreement stands (none / awaiting /
       // signed) for the builder's read-only line. The key is absent with the gate off.
       ...(commercialAgreement ? { commercialAgreement } : {}),

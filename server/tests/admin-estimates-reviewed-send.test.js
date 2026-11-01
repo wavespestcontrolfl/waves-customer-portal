@@ -1904,6 +1904,45 @@ describe('GET /:id/proposal billToTaxBasis (a payer-billed visit bill follows th
   });
 });
 
+describe('GET /:id/proposal accountCommercial (a residential account\'s bills carry no tax until a taxable win)', () => {
+  // The default fake answers every table; only the customer row read changes here.
+  const withCustomer = (customer, { fail = false } = {}) => (table) => {
+    const builder = estimateDatabase(table);
+    if (table === 'customers') {
+      builder.first = jest.fn(async () => {
+        if (fail) throw new Error('synthetic lookup failure');
+        return customer && structuredClone(customer);
+      });
+    }
+    return builder;
+  };
+
+  test.each([
+    ['a commercial account', { property_type: 'commercial' }, true],
+    ['a business account', { property_type: 'business' }, true],
+    ['a residential account', { property_type: 'residential' }, false],
+    ['an account with no type', { property_type: null }, false],
+    ['no customer row', null, null],
+  ])('%s', async (_label, customer, expected) => {
+    row.customer_id = 'synthetic-customer';
+    db.mockImplementation(withCustomer(customer));
+    expect((await invoke('/:id/proposal', 'get')).body.accountCommercial).toBe(expected);
+  });
+
+  test('no linked customer: true (the win creates a new commercial customer)', async () => {
+    row.customer_id = null;
+    expect((await invoke('/:id/proposal', 'get')).body.accountCommercial).toBe(true);
+  });
+
+  test('a failed read is null (unknown), and the builder read still succeeds', async () => {
+    row.customer_id = 'synthetic-customer';
+    db.mockImplementation(withCustomer(null, { fail: true }));
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.accountCommercial).toBeNull();
+    expect(res.body.proposal).toBeTruthy();
+  });
+});
+
 describe('commercial Auto Pay payment term', () => {
   const recurring = (commercialTerms) => ({
     enabled: true,

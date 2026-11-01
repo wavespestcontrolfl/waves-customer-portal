@@ -93,13 +93,18 @@ function serviceTaxRule(registry, service) {
 // served for a saved row that names a service (kept only while the row's service is unchanged), else the family
 // registry's rule the builder restores. Undefined when there is no basis (no pick, or a service the registry lacks).
 // Visit close answers the Bill-To payer first (payer.resolveForInvoice; GET /proposal serves the account's payer as
-// billToTaxBasis): an exempt payer's bills carry no tax, and a taxed payer's bills skip the customer's own exemption
-// (calculateTax skipCustomerExemption). A self-pay bill answers a verified exemption first (tax-calculator.js step 1): an
-// exempt customer's bills carry no tax whatever the building use or the gate. A read that failed (null) leaves no basis
-// for any row.
-function billedTaxableFor(buildingUse, row, registry, savedRules, { buildingUseTaxLive, taxExemptVerified, billToTaxBasis } = {}) {
-  if (billToTaxBasis === null) return undefined;
+// billToTaxBasis): an exempt payer's bills carry no tax. A residential account's bills carry no tax either
+// (customers.property_type; GET /proposal serves accountCommercial), unless the proposal has a taxable amount: its win then
+// makes the account commercial (proposal-win.js flagProposalCustomerCommercialIfTaxable). A taxed payer's bills skip the
+// customer's own exemption (calculateTax skipCustomerExemption); a self-pay bill answers a verified exemption first
+// (tax-calculator.js step 1): an exempt customer's bills carry no tax whatever the building use or the gate. A read that
+// failed (null) leaves no basis for any row.
+function billedTaxableFor(buildingUse, row, registry, savedRules, {
+  buildingUseTaxLive, taxExemptVerified, billToTaxBasis, accountCommercial = true, proposalTaxable,
+} = {}) {
+  if (billToTaxBasis === null || accountCommercial === null) return undefined;
   if (billToTaxBasis === 'payer_exempt') return false;
+  if (accountCommercial === false && !proposalTaxable) return false;
   if (billToTaxBasis !== 'payer_taxed') {
     if (taxExemptVerified === null) return undefined;
     if (taxExemptVerified === true) return false;
@@ -463,6 +468,8 @@ function CommercialProposalEditor() {
   const [taxExemptVerified, setTaxExemptVerified] = useState(false);
   // GET /proposal billToTaxBasis: 'self', 'payer_exempt' or 'payer_taxed'; null when the read failed (no row warnings then).
   const [billToTaxBasis, setBillToTaxBasis] = useState('self');
+  // GET /proposal accountCommercial: false for a residential account; null when the read failed (no row warnings then).
+  const [accountCommercial, setAccountCommercial] = useState(true);
   // Family → generated inclusions/exclusions/taxability registry, served on
   // load like responsibilityRegistry — the family-change resync prunes the
   // old family's generated lines and installs the new family's stack by
@@ -509,6 +516,7 @@ function CommercialProposalEditor() {
     setTaxExemptVerified(data.taxExemptVerified === null ? null : data.taxExemptVerified === true);
     setBillToTaxBasis(data.billToTaxBasis === null ? null
       : ['payer_exempt', 'payer_taxed'].includes(data.billToTaxBasis) ? data.billToTaxBasis : 'self');
+    setAccountCommercial(data.accountCommercial === null ? null : data.accountCommercial !== false);
     if (!bidToolsChosenRef.current) {
       setBidToolsOpen(
         (data.projectCosting?.rows?.length || 0) > 0
@@ -625,8 +633,14 @@ function CommercialProposalEditor() {
 
   const taxRate = (Number(taxRatePct) || 0) / 100;
   const programsMode = programsState.some(programRowIsPriced);
+  // Whether the saved proposal has a taxable amount, the condition for a win to make a residential account commercial
+  // (buildProposalFirstInvoice taxableSubtotal > 0): a taxable row priced above $0, counting the rows computeTotals counts.
+  const proposalTaxable = (programsMode ? [] : buildings).some((b) => (b.lineItems || []).some((li) => li.taxable === true && roundMoney(lineAmount(li)) > 0))
+    || programsState.filter(programRowIsPriced).some((pr) => pr.taxable === true && roundMoney(pr.pricePerApplication) > 0)
+    || correctiveWork.filter((w) => String(w.label || '').trim()).some((w) => w.taxable === true && roundMoney(w.amount) > 0);
   // Staff warning on a row whose Taxable box differs from what visit bills do (billedTaxableFor); none on a locked proposal.
-  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current, { buildingUseTaxLive, taxExemptVerified, billToTaxBasis }));
+  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current,
+    { buildingUseTaxLive, taxExemptVerified, billToTaxBasis, accountCommercial, proposalTaxable }));
   const differingTaxRows = [
     ...programsState,
     ...(programsMode ? [] : buildings.flatMap((b) => b.lineItems || [])),

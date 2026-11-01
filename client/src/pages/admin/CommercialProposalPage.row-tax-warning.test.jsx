@@ -15,11 +15,12 @@ const WITHOUT_TAX = 'Visit bills follow the building use: this row will be bille
 const family = (taxable) => ({ taxable, inclusions: [], exclusions: [], responsibilities: [] });
 const line = (taxable, extra = {}) => ({ description: 'Monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly', taxable, ...extra });
 const program = (taxable, extra = {}) => ({ service: 'pest', label: 'Pest control', frequencyPerYear: 4, pricePerApplication: 100, taxable, ...extra });
-const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, taxExemptVerified = false, billToTaxBasis = 'self', status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
+const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, taxExemptVerified = false, billToTaxBasis = 'self', accountCommercial = true, status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
   bidToolsEnabled: true,
   buildingUseTaxLive,
   taxExemptVerified,
   billToTaxBasis,
+  accountCommercial,
   suggestedTaxRate: 0.07,
   suggestedTaxSource: 'Manatee County',
   familyRegistry: { pest: family(true), lawn: family(false), tree_shrub: family(false), other: family(true) },
@@ -109,6 +110,27 @@ it('a taxed Bill-To payer skips the customer\'s own exemption: an unticked busin
 
 it('a Bill-To payer that could not be read (null) gives no basis: no warnings and no summary line', async () => {
   await mount({ billToTaxBasis: null, buildings: [{ name: 'Office', lineItems: [line(false), line(true, { description: 'Second' })] }] });
+  expect(warnings()).toEqual([]);
+  expect(summary()).toBeNull();
+});
+
+it('a residential account with no taxable row stays residential at the win, so its bills carry no tax: no warnings', async () => {
+  await mount({ accountCommercial: false, buildings: [{ name: 'Office', lineItems: [line(false), line(false, { description: 'Second' })] }] });
+  expect(warnings()).toEqual([]);
+  expect(summary()).toBeNull();
+});
+
+it('a residential account with a taxable row turns commercial at the win: an unticked business row is warned (billed with tax)', async () => {
+  await mount({ accountCommercial: false, buildings: [{ name: 'Office', lineItems: [line(false), line(true, { description: 'Second' })] }] });
+  expect(warnings()).toEqual([WITH_TAX]);
+  cleanup();
+  // A taxable row priced at $0 is no taxable amount: the account stays residential.
+  await mount({ accountCommercial: false, buildings: [{ name: 'Office', lineItems: [line(false), line(true, { description: 'Second', unitPrice: 0 })] }] });
+  expect(warnings()).toEqual([WITHOUT_TAX]);
+});
+
+it('an account type that could not be read (null) gives no basis: no warnings and no summary line', async () => {
+  await mount({ accountCommercial: null, buildings: [{ name: 'Office', lineItems: [line(false), line(true, { description: 'Second' })] }] });
   expect(warnings()).toEqual([]);
   expect(summary()).toBeNull();
 });
