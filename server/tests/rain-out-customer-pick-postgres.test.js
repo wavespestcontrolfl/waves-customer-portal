@@ -78,7 +78,7 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     today = etDateString();
     customerId = randomUUID();
     serviceId = randomUUID();
-    await trx('customers').insert({ id: customerId, first_name: 'Maria', last_name: 'Sample', phone: PHONE, active: true });
+    await trx('customers').insert({ id: customerId, first_name: 'Maria', last_name: 'Sample', phone: PHONE, active: true, latitude: 27.49, longitude: -82.57 });
     await trx('sms_templates').insert({
       id: randomUUID(), template_key: 'rain_out_customer_pick_v1', name: 'Quick Move - Customer Picks a Day',
       category: 'service', body: BODY, is_active: true, created_at: new Date(), updated_at: new Date(),

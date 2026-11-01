@@ -88,6 +88,8 @@ const VISIT = {
 const CUSTOMER = {
   first_name: 'Maria', phone: '+19415550100', zip: '34202', cust_id: 'cust-1',
   customer_active: true, customer_deleted_at: null,
+  // Auto-Dispatch's location rule (resolveGeo) needs a usable point.
+  customer_latitude: '27.4900', customer_longitude: '-82.5700',
 };
 
 // Recording fake: reads come from `state`, every write is kept in order.
@@ -233,6 +235,10 @@ describe('handOffToCustomer refusals write nothing', () => {
     ['a visit with no customer row', { customer_active: null }, 'customer_inactive'],
     ['a customer with no phone', { phone: null }, 'no_phone'],
     ['an unreviewed voice-agent booking', { source_action: 'voice_agent' }, 'office_review_pending'],
+    // Auto-Dispatch could never book these if the customer does not pick.
+    ['a visit staff locked from Auto-Dispatch', { auto_dispatch_locked: true }, 'auto_dispatch_held'],
+    ['a visit excluded from Auto-Dispatch', { auto_dispatch_excluded: true }, 'auto_dispatch_held'],
+    ['a visit with no usable location', { customer_latitude: null, customer_longitude: null }, 'no_location'],
   ])('%s: %s', async (_label, patch, reason) => {
     state.service = { ...state.service, ...patch };
     expect(await handOff()).toEqual({ ok: false, reason });
@@ -319,6 +325,7 @@ describe('handOffToCustomer refusals write nothing', () => {
     ['it went on site', { status: 'on_site' }],
     ['it was grouped into a stop', { visit_id: 'visit-9' }],
     ['it was re-filed to another customer', { customer_id: 'cust-2' }],
+    ['staff locked it from Auto-Dispatch', { auto_dispatch_locked: true }],
   ])('the locked row changed after the checks (%s): state_changed, nothing written or sent', async (_label, patch) => {
     state.locked = { ...state.locked, ...patch };
     expect(await handOff()).toEqual({ ok: false, reason: 'state_changed' });

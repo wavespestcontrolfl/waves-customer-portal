@@ -865,10 +865,8 @@ router.post('/:id/customer-pick', async (req, res, next) => {
     });
     if (!result.ok) {
       // Every refusal wrote nothing. 409 = the visit's state, not the request.
-      const code = ['not_found', 'disabled'].includes(result.reason) ? 404
-        : result.reason === 'bad_reason' ? 400
-          : 409;
-      return res.status(code).json({ error: result.reason });
+      const refused = RainOut.pickRefusalResponse(result.reason);
+      return res.status(refused.status).json(refused.body);
     }
 
     // Re-render other open Dispatch Boards and refresh both days' route

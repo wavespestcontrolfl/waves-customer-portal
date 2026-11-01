@@ -824,6 +824,11 @@ async function loadServiceWithCustomer(serviceId) {
       // The customer-pick hand-off texts only an active, not archived customer.
       'customers.active as customer_active',
       'customers.deleted_at as customer_deleted_at',
+      // Auto-Dispatch's location rule (auto-dispatch/geo resolveGeo) reads the
+      // customer address under these names, as loadEligibleServices selects it.
+      'customers.address_line1 as customer_address_line1',
+      'customers.city as customer_city',
+      'customers.zip as customer_zip',
     )
     .first();
 }
@@ -3035,6 +3040,11 @@ function pickVisitRefusal(row, now) {
   if (row.visit_id) return 'grouped_stop';
   if (!PICK_STATUSES.has(String(row.status))) return 'status_not_eligible';
   if (dateOnlyString(row.scheduled_date) > etDateString(now)) return 'future_scheduled_date';
+  // The text promises Auto-Dispatch books the visit when the customer does not
+  // pick, and the hand-off keeps a staff lock or exclusion. Ask Auto-Dispatch's
+  // own hold rule about the row as the hand-off leaves it (confirmation cleared).
+  const { heldOutOfAutoDispatch } = require('./auto-dispatch/eligibility');
+  if (heldOutOfAutoDispatch({ ...row, customer_confirmed: false })) return 'auto_dispatch_held';
   return null;
 }
 
@@ -3095,6 +3105,9 @@ async function pickContext(service, now) {
   if (service.customer_active !== true || service.customer_deleted_at) return { ok: false, reason: 'customer_inactive' };
   if (!service.phone) return { ok: false, reason: 'no_phone' };
   if (!require('./auto-dispatch/config').isCustomerRecurringDispatchEnabled()) return { ok: false, reason: 'auto_dispatch_off' };
+  // Auto-Dispatch skips a visit with no usable location (MISSING_GEO), so it
+  // could never book one the customer leaves alone.
+  if (!require('./auto-dispatch/geo').resolveGeo(service)) return { ok: false, reason: 'no_location' };
   // The landed row (confirmation cleared) must stay one the customer may see
   // and move, or the link would open a refusal.
   const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
@@ -3351,6 +3364,38 @@ function handOffResult({ locked, dueDate, pickBy, text }) {
  * @param {boolean} [args.operatorInitiated=false]  send-window exemption (authenticated routes only)
  * @returns {Promise<object>} { ok: false, reason } with nothing written, or handOffResult's shape.
  */
+// What both customer-pick routes answer for a refused hand-off (nothing was
+// written): the sheet shows `error`; `reason` stays the machine code.
+const PICK_REFUSAL_COPY = {
+  not_found: 'Visit not found.',
+  disabled: 'disabled',
+  bad_reason: 'Pick a weather or schedule reason to hand this visit off.',
+  not_recurring_plan_visit: 'Only recurring plan visits can be handed to the customer.',
+  grouped_stop: 'This stop is grouped with another visit, so the customer cannot pick a day for it.',
+  status_not_eligible: 'This visit can no longer be handed off.',
+  future_scheduled_date: "Quick Move applies to today's route.",
+  auto_dispatch_held: 'This visit is locked or excluded from Auto-Dispatch, so nothing would book it if the customer does not pick.',
+  customer_inactive: 'This customer is not active.',
+  no_phone: 'There is no phone number to text.',
+  auto_dispatch_off: 'Auto-Dispatch is off, so nothing would book this visit if the customer does not pick.',
+  no_location: 'This visit has no map location, so Auto-Dispatch could not book it if the customer does not pick.',
+  office_review_pending: 'This booking is waiting for office review.',
+  customer_texts_off: 'This customer does not get texts.',
+  text_check_failed: 'Could not check whether this customer gets texts. Try again.',
+  pick_template_unavailable: 'The pick-a-day text is turned off.',
+  pick_text_unavailable: 'The pick-a-day text could not be written for this visit.',
+  pick_text_too_long: 'The pick-a-day text is too long for this service name.',
+  no_reschedule_link: 'Could not make the pick link. Try again.',
+  link_unavailable: 'Could not make the pick link. Try again.',
+  pick_check_failed: 'Could not check this visit. Try again.',
+  state_changed: 'This visit changed. Refresh and try again.',
+};
+
+function pickRefusalResponse(reason) {
+  const status = ['not_found', 'disabled'].includes(reason) ? 404 : reason === 'bad_reason' ? 400 : 409;
+  return { status, body: { error: PICK_REFUSAL_COPY[reason] || 'This visit cannot be handed off.', reason } };
+}
+
 async function handOffToCustomer({ serviceId, reasonCode, initiatedBy = 'tech', actorUserId = null, requireAssignedTechnicianId = null, operatorInitiated = false } = {}) {
   if (!customerPickLive()) return { ok: false, reason: 'disabled' };
   if (!pickReasonCodes().includes(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -3415,6 +3460,7 @@ module.exports = {
   commit,
   // Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK).
   handOffToCustomer,
+  pickRefusalResponse,
   customerPickOffer,
   previewMovedSms,
   checkTarget,

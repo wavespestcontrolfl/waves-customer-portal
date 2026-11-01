@@ -993,6 +993,37 @@ loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
 page reloads. A page loaded before the gate was set sends no field and gets
 the same reload when a date would be named.
 
+Visits handed to the customer by Quick Move (owner 2026-11-01; the hand-off is
+behind `GATE_QUICKMOVE_CUSTOMER_PICK`, but everything below is keyed on the
+column and is NOT gated). Quick Move's "let the customer pick a day" parks a
+recurring plan visit with no window at a placeholder date about a week out and
+sets `scheduled_services.customer_pick_by` (timestamptz: 8 PM ET the next day).
+For a row with `customer_pick_by` set:
+- **Not refused for having no time.** The self-serve notice rule
+  (`services/scheduling/self-serve-notice.js visitInsideMoveNoticeWindow`)
+  treats a windowless row WITH the column as outside the notice window, so
+  `GET /api/public/reschedule/:token` answers a movable visit (not
+  `not_reschedulable`) and the commit accepts a pick. A windowless row
+  without it is refused exactly as before.
+- **Single-visit move.** The date is a placeholder, so a pick never shifts
+  the plan's later visits: the GET sends `reanchorPullForwardDays: null`,
+  `collectiveAnchor: false` and `roundsOneOff: null`, omits `nextVisit`, and the
+  commit moves only this visit (no series re-anchor). A page that disclosed
+  series anchoring for the visit (loaded before the hand-off) gets
+  `409 SCOPE_CHANGED` and reloads.
+- **The marker ends on a person's move.** A customer pick, a staff move and
+  any other `SmartRebooker.reschedule` caller clear `customer_pick_by` in the
+  move's own write. An Auto-Dispatch placement keeps it (it is how the page
+  knows the visit was booked for the customer).
+- **Auto-Dispatch waits.** `loadEligibleServices` and the unplaced-visit
+  alert skip the row until `customer_pick_by` passes; the page still accepts
+  a pick after the deadline, until a run books it.
+- **After a kill.** Turning `GATE_QUICKMOVE_CUSTOMER_PICK` off stops new
+  hand-offs only (the Quick Move option disappears and both
+  `POST .../customer-pick` routes answer `404 { error: 'disabled' }`). A link
+  already sent keeps working, and Auto-Dispatch still books an unpicked visit
+  after its deadline.
+
 Lawn rounds on the public reschedule link (owner 2026-10-28, `lawn_rounds_9`;
 no gate, inert until a visit carries that pattern; every other pattern is
 byte-identical). A `lawn_rounds_9` visit has one visit in each of nine fixed

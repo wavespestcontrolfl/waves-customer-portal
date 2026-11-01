@@ -31,6 +31,8 @@ jest.mock('../services/rain-out', () => ({
   commit: (...a) => mockCommit(...a),
   getOptions: jest.fn(async () => ({ ok: true, sameDay: [], days: [] })),
   customerPickOffer: jest.fn(async () => undefined),
+  // Pure: the real status, words and code both routes answer with.
+  pickRefusalResponse: jest.requireActual('../services/rain-out').pickRefusalResponse,
 }));
 jest.mock('../services/dispatch-assignment', () => ({
   ...jest.requireActual('../services/dispatch-assignment'),
@@ -194,10 +196,14 @@ describe.each([
     ['pick_text_too_long', 409],
     ['customer_texts_off', 409],
     ['auto_dispatch_off', 409],
+    ['auto_dispatch_held', 409],
+    ['no_location', 409],
   ])('a %s refusal answers %i with the reason and broadcasts nothing', async (reason, status) => {
     mockHandOff.mockResolvedValue({ ok: false, reason });
     const r = await post(`${base}/svc-own/customer-pick`);
-    expect(r).toEqual({ status, body: { error: reason } });
+    // The sheet shows `error` (words, never the bare code); `reason` is the code.
+    expect(r).toEqual({ status, body: { error: expect.any(String), reason } });
+    if (reason !== 'disabled') expect(r.body.error).not.toBe(reason);
     expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
     expect(flushDispatchQualityDates).not.toHaveBeenCalled();
   });
