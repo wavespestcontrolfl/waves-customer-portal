@@ -74,7 +74,11 @@ beforeEach(() => {
     if (q.sql.includes('from "agent_sessions"')) return [conversation];
     if (q.sql.includes('from "agent_messages"')) return [...chat];
     if (q.sql.includes('from "customers"')) return [customer];
-    if (q.sql.includes('from "ai_escalations"')) return standing ? [standing] : [];
+    if (q.sql.includes('from "ai_escalations"')) {
+      // The standing-row lookup carries the email-row exclusion; honor it like the database would.
+      const isEmailRow = /Email on file:|asked to change their email/.test(standing?.summary || '');
+      return standing && !(q.sql.includes('NOT LIKE') && isEmailRow) ? [standing] : [];
+    }
     if (q.sql.includes('insert into "ai_escalations"')) return [{ id: 'esc-1', ...rowFromInsert(q) }];
     if (q.sql.includes('from "service_requests"')) return openRequest ? [openRequest] : [];
     if (q.sql.includes('insert into "service_requests"')) return [{ id: 'req-1' }];
@@ -410,6 +414,39 @@ describe('request_move and one hand-off item per chat', () => {
     expect(third).toMatch(/New address: 12 Palm Way\nMove date: Nov 20$/);
   });
 
+  test('missing parts are judged from the merged saved item, not this call alone', async () => {
+    standing = {
+      id: 'esc-1', conversation_id: 'conv-1', status: 'pending', priority: 'normal', reason: 'account_change',
+      summary: 'Customer is moving and asked the portal assistant to transfer service\nNew address: 12 Palm Way\nMove date: Nov 20',
+      customer_message: 'We move to 12 Palm Way on Nov 20',
+    };
+    mockCreate.mockResolvedValueOnce(calls(move({}))).mockResolvedValueOnce(text('Got it.'));
+
+    await say('Same as before');
+
+    expect(resultsOfSecondCall()[0]).toEqual(expect.objectContaining({ sent: true, missing: [] }));
+    const half = await portalOpen.requestMove({ move_date: 'Nov 20' }, { open: true, recordMove: async () => ({ newAddress: '', moveDate: 'Nov 20' }) });
+    expect(half.missing).toEqual(['new_address']);
+    const unchanged = await portalOpen.requestMove({}, { open: true, recordMove: async () => undefined });
+    expect(unchanged.missing).toEqual(['new_address', 'move_date']);
+  });
+
+  test('a confirmed email-change row is never merged into: a move makes its own item and bell', async () => {
+    standing = {
+      id: 'esc-email', conversation_id: 'conv-1', status: 'pending', priority: 'normal', reason: 'account_change',
+      summary: 'Customer confirmed a new email address in portal chat. Email on file: pat@example.com. New email, confirmed by the customer in portal chat: new@example.com',
+      customer_message: 'Yes',
+    };
+    mockCreate.mockResolvedValueOnce(calls(move({ new_address: '12 Palm Way' }))).mockResolvedValueOnce(text('Thanks.'));
+
+    await say('We are moving to 12 Palm Way');
+
+    expect(writes(/update "ai_escalations"/)).toHaveLength(0);
+    expect(writes(/insert into "ai_escalations"/)).toHaveLength(1);
+    expect(writes(/from "ai_escalations"/)[0].sql).toMatch(/NOT LIKE/);
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('portal-chat-escalation:esc-1');
+  });
+
   test('a failed save tells the model to hand off with escalate instead', async () => {
     const failing = await portalOpen.requestMove({ new_address: 'x' }, { open: true, recordMove: async () => { throw new Error('db down'); } });
     expect(failing.sent).toBe(false);
@@ -502,6 +539,21 @@ describe('escalate under the gate', () => {
     await say('I want a refund now');
 
     expect(writes(/update "ai_escalations"/)[0].bindings).toContain('urgent');
+  });
+
+  test('a later hand-off does not merge into a confirmed email-change row either', async () => {
+    standing = {
+      id: 'esc-email', conversation_id: 'conv-1', status: 'pending', priority: 'normal', reason: 'account_change',
+      summary: 'Customer confirmed a new email address in portal chat. The customer also asked to change their email, and the chat could not take the new address: it is in the message below',
+      customer_message: 'change my email',
+    };
+    mockCreate.mockResolvedValueOnce(handOff({ reason: 'Wants a call', topic: 'other' }));
+
+    const result = await say('Please call me');
+
+    expect(writes(/update "ai_escalations"/)).toHaveLength(0);
+    expect(writes(/insert into "ai_escalations"/)).toHaveLength(1);
+    expect(result.escalationId).toBe('esc-1');
   });
 
   test('a keyword hand-off joins the chat\'s pending item too', async () => {
@@ -700,7 +752,8 @@ describe('the turn path', () => {
     expect(result.escalated).toBe(false);
     expect(turn.transaction).toHaveBeenCalledWith('move hand-off', expect.any(Function));
     expect(turn.persistCommittedResult).toHaveBeenCalledTimes(1);
-    expect(rowFromInsert(writes(/insert into "ai_escalations"/)[0]).portal_chat_request_id).toBe('req-row-1');
+    // A move item leaves the turn's row key free for a hand-off later in the turn.
+    expect(rowFromInsert(writes(/insert into "ai_escalations"/)[0]).portal_chat_request_id).toBeUndefined();
   });
 
   test('a quote request in a turn is written through the turn\'s transaction', async () => {

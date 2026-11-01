@@ -194,6 +194,20 @@ function savedMoveValue(lines, label) {
 // The saved summary with this move on it. A second call replaces the first
 // call's address and date lines (it never adds a second pair), and a field
 // the second call leaves empty keeps the value the first call saved.
+// The address and date a saved item holds, from its summary lines.
+function savedMove(summary) {
+  const lines = String(summary || '').split('\n');
+  return { newAddress: savedMoveValue(lines, 'New address'), moveDate: savedMoveValue(lines, 'Move date') };
+}
+
+// The standing-item lookup skips confirmed email-change rows (their summary
+// carries the email lines): those keep their own row and bell.
+function withoutEmailRows(query) {
+  return query
+    .whereRaw("COALESCE(summary, '') NOT LIKE ?", ['%Email on file:%'])
+    .whereRaw("COALESCE(summary, '') NOT LIKE ?", ['%asked to change their email%']);
+}
+
 function summaryWithMove(summary, move) {
   const all = String(summary || '').split('\n').filter(Boolean);
   const newAddress = move.newAddress || savedMoveValue(all, 'New address');
@@ -328,16 +342,20 @@ const MOVE_FAILED_INSTRUCTION = 'The move could not be saved. Call escalate with
 async function requestMove(input, { open = false, recordMove = null } = {}) {
   if (open !== true || typeof recordMove !== 'function') return { error: 'Unknown tool: request_move' };
   const move = moveDetails(input);
+  let saved;
   try {
-    await recordMove(move);
+    saved = await recordMove(move);
   } catch (err) {
     if (isCancellation(err)) throw err;
     logger.error(`[portal-chat-open] move item failed: ${err.message}`);
     return { sent: false, instruction: MOVE_FAILED_INSTRUCTION };
   }
+  // What is missing is judged from the saved item (it may already hold what
+  // an earlier call gave), not from this call's input alone.
+  const held = saved || move;
   return {
     sent: true,
-    missing: [...(move.newAddress ? [] : ['new_address']), ...(move.moveDate ? [] : ['move_date'])],
+    missing: [...(held.newAddress ? [] : ['new_address']), ...(held.moveDate ? [] : ['move_date'])],
     instruction: MOVE_INSTRUCTION,
   };
 }
@@ -353,6 +371,8 @@ module.exports = {
   moveDetails,
   mergedItem,
   summaryWithMove,
+  savedMove,
+  withoutEmailRows,
   itemBellDetail,
   requestQuote,
   requestMove,

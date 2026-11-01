@@ -1253,9 +1253,10 @@ class WavesAssistant {
     await executor('agent_sessions').where('id', conversation.id).forUpdate().first('id');
     const customer = await escalationCustomer(conversation.customer_id, executor);
     // This turn's own row first (a replayed turn finds what it wrote).
-    const own = turn ? await executor('ai_escalations').where({ portal_chat_request_id: turn.requestRowId }).first() : null;
-    const standing = own || await executor('ai_escalations')
-      .where({ conversation_id: conversation.id, status: 'pending' })
+    // A confirmed email change is never merged into: it keeps its own row.
+    const own = turn ? await portalOpen.withoutEmailRows(executor('ai_escalations').where({ portal_chat_request_id: turn.requestRowId })).first() : null;
+    const standing = own || await portalOpen.withoutEmailRows(executor('ai_escalations')
+      .where({ conversation_id: conversation.id, status: 'pending' }))
       .orderBy('created_at', 'desc')
       .first();
     if (standing) {
@@ -1272,7 +1273,9 @@ class WavesAssistant {
       ai_draft_response: null,
       priority,
       status: 'pending',
-      ...(turn ? { portal_chat_request_id: turn.requestRowId } : {}),
+      // A move item does not take the turn's row key: the turn goes on and may
+      // still hand off (or confirm an email change) on a row of its own.
+      ...(turn && !move ? { portal_chat_request_id: turn.requestRowId } : {}),
     }).returning('*');
     return { customer, escalation, created: true };
   }
@@ -1371,15 +1374,16 @@ class WavesAssistant {
       escalation: stored.escalation, topic: 'account_change', conversation, customer: stored.customer, move, trx,
     });
     if (turn) {
-      await turn.transaction('move hand-off', async (trx) => {
+      return turn.transaction('move hand-off', async (trx) => {
         turn.assertActive('move hand-off');
         const stored = await this.upsertOpenItem(trx, { ...item, turn });
         await trx.transaction((bellTrx) => ring(stored, bellTrx)).catch(() => false);
+        return portalOpen.savedMove(stored.escalation.summary);
       });
-      return;
     }
     const stored = await db.transaction((trx) => this.upsertOpenItem(trx, item));
     await ring(stored, null);
+    return portalOpen.savedMove(stored.escalation.summary);
   }
 
   /**
