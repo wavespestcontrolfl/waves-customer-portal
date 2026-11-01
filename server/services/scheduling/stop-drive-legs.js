@@ -95,17 +95,19 @@ function stopPieces(members) {
       }
       byVisit.get(m.visitId).rows.push(row);
       if (NOT_REACHED.has(m.status)) { byVisit.get(m.visitId).open = true; byVisit.get(m.visitId).ids.push(m.id); }
+      if (UNDER_WAY.has(m.status)) byVisit.get(m.visitId).started = true;
       continue;
     }
     if (chain && coVisitPair(prevLoose, m)) {
       chain.state = advanceCoVisit(chain.state, row);
       chain.work = chain.state.coMerged;
       if (NOT_REACHED.has(m.status)) { chain.open = true; chain.ids.push(m.id); }
+      if (UNDER_WAY.has(m.status)) chain.started = true;
     } else {
       const state = { ...startCoVisitChain(row), arrivalMin: 0 };
       state.clock = state.coMerged;
       const open = NOT_REACHED.has(m.status);
-      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state, open, ids: open ? [m.id] : [] };
+      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state, open, ids: open ? [m.id] : [], started: UNDER_WAY.has(m.status) };
       pieces.push(chain);
     }
     prevLoose = m;
@@ -136,6 +138,7 @@ function stopPieces(members) {
       piece.split = rows.map((r) => ({
         id: r.id, start: minutesOf(r.window_start), work: workDuration(r), range: null,
         open: NOT_REACHED.has(r.status), ids: NOT_REACHED.has(r.status) ? [r.id] : [],
+        started: UNDER_WAY.has(r.status),
       }));
     }
   }
@@ -188,24 +191,31 @@ function planRoute(stops, legs) {
 }
 
 // Today (owner 2026-11-01, "build clock"): the day restarts from now at the
-// last stop, in day order, with a visit the tech has reached. The tech is
-// there, so that stop is not flagged; everything there not finished yet is
-// worked first, as one stop's pieces (a co-visit pair shares its hour),
-// less the minutes since check-in. The drive to an en-route stop counts as
-// done (how much is left is unknown). Then every other stop's unreached
-// visits run in day order; a reached visit elsewhere counts as done. After
-// a leg that cannot be measured, arrivals are unknown.
+// last stop, in day order, with a visit the tech has reached. Everything
+// there not finished yet runs first, as one stop's pieces (a co-visit pair
+// shares its hour): work under way starts at once, less the minutes since
+// check-in, and a later piece there still waits for its own window. The
+// tech is at that stop, so it is not flagged. The drive to an en-route stop
+// counts as done (how much is left is unknown). Then every other stop's
+// unreached visits run in day order; a reached visit elsewhere counts as
+// done. After a leg that cannot be measured, arrivals are unknown.
 function clockRoute(stops, now) {
   const at = stops.map((st) => st.members.some((m) => !NOT_REACHED.has(m.status))).lastIndexOf(true);
   const here = stops[at] || null;
   const ahead = here ? here.members.filter((m) => NOT_REACHED.has(m.status) || UNDER_WAY.has(m.status)) : [];
-  const work = stopPieces(ahead).reduce((sum, p) => sum + p.work, 0);
   const checkIns = ahead.filter((m) => UNDER_WAY.has(m.status) && m.checkInTime)
     .map((m) => new Date(m.checkInTime).getTime()).filter(Number.isFinite);
-  const since = checkIns.length ? Math.max(0, (now.getTime() - Math.min(...checkIns)) / 60000) : 0;
+  let worked = checkIns.length ? Math.max(0, Math.floor((now.getTime() - Math.min(...checkIns)) / 60000)) : 0;
   const seq = [];
   const legIn = new Map();
   const piecesOf = new Map();
+  stopPieces(ahead).forEach((p, j) => {
+    const done = p.started ? Math.min(p.work, worked) : 0;
+    worked -= done;
+    if (p.work - done <= 0) return;
+    const row = seqRow(`${at}:${j}`, { ...p, work: p.work - done }, here);
+    seq.push(p.started ? { ...row, arrivalRange: NO_WAIT } : row);
+  });
   let prev = here;
   for (const [i, st] of stops.entries()) {
     const open = i === at ? [] : stopPieces(st.members.filter((m) => NOT_REACHED.has(m.status)));
@@ -221,7 +231,7 @@ function clockRoute(stops, now) {
   }
   if (!seq.length) return null;
   const { hour, minute } = etParts(now);
-  return { seq, legIn, piecesOf, startMin: hour * 60 + minute + Math.max(0, work - since) };
+  return { seq, legIn, piecesOf, startMin: hour * 60 + minute };
 }
 
 // Minutes past each stop's 2-hour arrival window, from the shared route
@@ -263,6 +273,9 @@ const NOT_REACHED = new Set(['pending', 'confirmed', 'rescheduled']);
 
 // Visits the tech is driving to or working now: their work is still ahead.
 const UNDER_WAY = new Set(['en_route', 'on_site', 'in_progress']);
+
+// Work already started waits for no window and is never late.
+const NO_WAIT = { startMin: -Infinity, endMin: Infinity };
 
 function samePlace(a, b) {
   return hasGeo(a) && hasGeo(b) && a.lat === b.lat && a.lng === b.lng;
