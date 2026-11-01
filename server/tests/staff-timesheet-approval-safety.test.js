@@ -16,7 +16,10 @@ jest.mock('../services/time-tracking', () => ({
   lockStaffWeek: jest.fn(),
 }));
 
+jest.mock('../services/timesheet-approval-bells', () => ({ settleWeekBell: jest.fn() }));
+
 const db = require('../models/db');
+const timesheetBells = require('../services/timesheet-approval-bells');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const approval = require('../services/timesheet-approval');
@@ -124,6 +127,7 @@ describe('weekly timesheet approval safety', () => {
     db.mockReset();
     db.transaction.mockReset();
     logger.info.mockReset();
+    timesheetBells.settleWeekBell.mockReset();
     timeTracking.computeWeeklySummary.mockReset();
     timeTracking.computeDailySummaryInTransaction.mockReset();
     timeTracking.computeWeeklySummaryInTransaction.mockReset();
@@ -743,6 +747,9 @@ describe('weekly timesheet approval safety', () => {
       { lock: false },
     );
     expect(detail.weekly).toMatchObject(approvedWeekly);
+    // The "timesheets wait" bell is judged after the commit, for the approved week.
+    expect(timesheetBells.settleWeekBell).toHaveBeenCalledTimes(1);
+    expect(timesheetBells.settleWeekBell).toHaveBeenCalledWith('2020-01-06');
   });
 
   test('treats a fully consistent approved week as idempotent', async () => {

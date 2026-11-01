@@ -2,6 +2,7 @@ const cron = require('../utils/scheduled-cron');
 const db = require('../models/db');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');
+const timesheetBells = require('./timesheet-approval-bells');
 const TwilioService = require('./twilio');
 const {
   STAFF_WORK_DATE_SQL,
@@ -128,10 +129,10 @@ function initTimeTrackingCrons() {
   }, { timezone: 'America/New_York' });
 
   // -------------------------------------------------------------------------
-  // 2. Monday 5 AM ET — compute weekly summaries + SMS Virginia for approval
+  // 2. Monday 5 AM ET — compute weekly summaries + raise the approval bell
   // -------------------------------------------------------------------------
   cron.schedule('0 5 * * 1', async () => {
-    logger.info('[time-tracking-cron] Running weekly summary + approval SMS');
+    logger.info('[time-tracking-cron] Running weekly summary + approval bell');
     try {
       // Previous week's Monday (ET calendar)
       const previousWeekDate = addStaffWorkDays(staffWorkDate(new Date()), -7);
@@ -162,22 +163,11 @@ function initTimeTrackingCrons() {
 
       logger.info(`[time-tracking-cron] Weekly summaries computed: ${computed} techs for week of ${weekStartStr}`);
 
-      // SMS Virginia if there are weeks awaiting approval
+      // One admin bell while any week waits for approval; none (and an open one closes) when none does.
       if (pendingCount > 0) {
-        // Must be a real cell, never one of our own Twilio numbers (an SMS
-        // from the HQ line to itself fails with Twilio error 21266).
-        const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
-        const portalBase = process.env.PORTAL_BASE_URL || 'https://portal.wavespestcontrol.com';
-        const link = `${portalBase}/admin/timetracking?tab=approvals&weekStart=${weekStartStr}`;
-        try {
-          await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-            `📋 ${pendingCount} tech timesheet${pendingCount === 1 ? '' : 's'} ready to approve for week of ${weekStartStr}. Review: ${link}`,
-            { messageType: 'internal_alert', link: '/admin/timetracking' },
-          );
-          logger.info(`[time-tracking-cron] Approval SMS sent to the owner (${pendingCount} pending)`);
-        } catch (smsErr) {
-          logger.error('[time-tracking-cron] Approval SMS failed', { error: smsErr.message });
-        }
+        await timesheetBells.raiseWeekBell(weekStartStr, pendingCount);
+      } else {
+        await timesheetBells.closeWeekBell(weekStartStr);
       }
     } catch (err) {
       logger.error('[time-tracking-cron] Weekly summary job failed', { error: err.message });

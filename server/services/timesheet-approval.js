@@ -10,6 +10,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');
+const timesheetBells = require('./timesheet-approval-bells');
 const { paidLineCoveringWeeks } = require('./payroll-paid-line-weeks');
 const {
   STAFF_WORK_DATE_SQL,
@@ -668,6 +669,7 @@ async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToke
   });
 
   logger.info(`[timesheet-approval] Week ${start} approved for tech ${technicianId} by ${adminId}`);
+  await timesheetBells.settleWeekBell(start);
   return getWeekDetail(technicianId, weekStart);
 }
 
