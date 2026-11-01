@@ -43,6 +43,8 @@
  *    coming back after an expired or declined estimate is a fresh inquiry;
  *  - exactly one such R exists (two open roots that both fit would be a
  *    household or business line: a human decides).
+ * A lead the sweep filed once is never filed again: back in the waiting queue,
+ * it was reopened by a person (the documented undo), and that decision stands.
  * Anything else stays waiting. Nothing here texts, calls, books or charges;
  * no first-response time is stamped (nobody responded). Every write re-reads
  * the lead and its root under row locks (taken in id order, held to commit),
@@ -72,6 +74,10 @@ const WRITE_CAP = 50;
 // shared line: the lead stays waiting rather than being judged on a partial read.
 const EARLIER_LIMIT = 25;
 const PERFORMED_BY = 'Lead repeat sweep';
+// The history mark of a sweep filing. A lead that carries one and is back in the
+// waiting queue was reopened by a person (the documented undo), and the sweep
+// never files it again.
+const SWEEP_SOURCE = 'lead_repeat_sweep';
 const phoneLast10Sql = (column) => `right(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10)`;
 const PHONE_LAST10_SQL = phoneLast10Sql('phone');
 // The identity a filing decision read. The locked re-read must match it, so a
@@ -200,6 +206,12 @@ async function resolveRepeatRoot(database, lead) {
   return { root: [...roots.values()][0] };
 }
 
+async function filedBefore(database, leadId) {
+  const row = await database('lead_activities').where('lead_id', leadId)
+    .whereRaw("metadata->>'source' = ?", [SWEEP_SOURCE]).first('id');
+  return Boolean(row);
+}
+
 function sameAsRead(current, read) {
   return PINNED_COLUMNS.every((key) => String(current[key] ?? '') === String(read[key] ?? ''));
 }
@@ -220,6 +232,7 @@ async function fileRepeat(database, { lead, root }) {
     const currentRoot = locked.find((row) => String(row.id) === String(root.id));
     if (!current || current.deleted_at || !sameAsRead(current, lead)) return { filed: false, reason: 'lead_changed' };
     if (!mergeableExtractedData(current.extracted_data)) return { filed: false, reason: 'extracted_data_shape' };
+    if (await filedBefore(trx, lead.id)) return { filed: false, reason: 'reopened_by_staff' };
     if (!currentRoot || currentRoot.deleted_at || !OPEN_LEAD_STATUSES.includes(currentRoot.status)
       || !isSamePersonRoot(current, currentRoot) || !(await hasLiveCourtship(trx, currentRoot.id))) {
       return { filed: false, reason: 'root_changed' };
@@ -244,7 +257,7 @@ async function fileRepeat(database, { lead, root }) {
         status: 'duplicate',
         previous_status: 'new',
         duplicate_of_lead_id: String(root.id),
-        source: 'lead_repeat_sweep',
+        source: SWEEP_SOURCE,
         reason: `Same phone and name as an open lead from the ${REPEAT_WINDOW_DAYS} days before`,
       }),
     });
@@ -272,6 +285,11 @@ function bump(counts, key) {
 function repeatCandidatesQuery(dbi) {
   return applyLeadsAwaitingContactFilter(dbi('leads'), dbi)
     .whereRaw(`length(${PHONE_LAST10_SQL}) = 10`)
+    .whereNotExists(function filedBefore() {
+      this.select(dbi.raw('1')).from('lead_activities as filed')
+        .whereRaw('filed.lead_id = leads.id')
+        .whereRaw("filed.metadata->>'source' = ?", [SWEEP_SOURCE]);
+    })
     .whereExists(function earlierSamePhone() {
       this.select(dbi.raw('1')).from('leads as earlier')
         .whereNull('earlier.deleted_at')

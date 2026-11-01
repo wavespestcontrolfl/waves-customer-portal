@@ -298,6 +298,24 @@ jest.setTimeout(30000);
     expect((await read(deleted.id)).status).toBe('new');
   });
 
+  test('a filing a person undid on the Leads page is never filed again (pre-push P1)', async () => {
+    await lead({ status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5 });
+    const repeat = await lead({ first_contact_at: OCT(21) });
+    expect((await runLeadRepeatSweep({ dbi: database })).filed).toBe(1);
+
+    // The documented undo: staff sets it back to new (PUT /admin/leads/:id writes the history row).
+    await database('leads').where({ id: repeat.id }).update({ status: 'new' });
+    await database('lead_activities').insert({ lead_id: repeat.id, activity_type: 'status_change', description: 'Status: duplicate → new', performed_by: 'Office' });
+
+    const second = await runLeadRepeatSweep({ dbi: database });
+    expect(second.scanned).toBe(0);
+    expect(second.filed).toBe(0);
+    expect((await read(repeat.id)).status).toBe('new');
+    // fileRepeat itself refuses it too, under the lock.
+    const root = await database('leads').where({ status: 'contacted' }).first();
+    expect(await fileRepeat(database, { lead: await read(repeat.id), root })).toEqual({ filed: false, reason: 'reopened_by_staff' });
+  });
+
   test('a lead staff edited after the read is left as they left it (row-locked identity check)', async () => {
     const root = await lead({ status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5 });
     const waiting = await lead({ first_contact_at: OCT(21) });
