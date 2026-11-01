@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], customers: [], open: [], updates: [], inserts: [], failClose: false };
+const mockState = { calls: [], booked: [], customers: [], open: [], updates: [], inserts: [], failClose: false, notificationFilters: [] };
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -22,7 +22,7 @@ jest.mock('../models/db', () => {
     };
     const b = {
       where: () => b,
-      whereRaw: () => b,
+      whereRaw: (sql, args) => { if (table === 'notifications') mockState.notificationFilters.push([sql, args]); return b; },
       whereNotNull: () => b,
       whereNull: () => { ctx.probe = true; return b; },
       whereIn: (col, ids) => {
@@ -34,6 +34,7 @@ jest.mock('../models/db', () => {
       orderBy: () => b,
       select: () => b,
       first: () => Promise.resolve(undefined),
+      pluck: (col) => Promise.resolve(rows().map((r) => r[col])),
       insert: (payload) => { mockState.inserts.push({ table, payload }); return Promise.resolve([]); },
       update: (payload) => {
         if (mockState.failClose) return Promise.reject(new Error('db down'));
@@ -51,6 +52,7 @@ jest.mock('../models/db', () => {
 
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(),
+  markAdminDone: jest.fn(async (ids) => ids.length),
   normalizeAdminText: ({ title, body, detail }) => ({ title, body, detail }),
   _private: {
     openToCloser: (query, by) => { query.closedBy = by; return query; },
@@ -241,6 +243,20 @@ describe('classifyOpenBookingMiss', () => {
     const plan = classify([visit({ sched_date: '2026-10-28' })], []);
     expect(plan).toMatchObject({ verdict: 'booked_other_day', closes: [], keep: null, ring: null });
   });
+
+  // Owner 2026-11-01: Dismiss on the Dispatch held row means the office will not book it.
+  test('dismissed: a call whose held row was dismissed closes every bell, with nothing booked', () => {
+    const plan = classify([], [bell('n1', '10'), bell('n2', '20')], { call: { held_visit_dismissed_at: '2026-10-21T13:00:00.000Z' } });
+    expect(plan).toMatchObject({ verdict: 'dismissed', keep: null, ring: null });
+    expect(plan.closes).toEqual([{ ids: ['n2', 'n1'], resolution: 'Dismissed on Dispatch: not booking' }]);
+  });
+
+  test('a dismissed call that was booked anyway closes as booked, and a later visit on another day as dismissed', () => {
+    const dismissed = { call: { held_visit_dismissed_at: '2026-10-21T13:00:00.000Z' } };
+    expect(classify([visit({ sched_date: '2026-11-04' })], [bell('n1', '10')], dismissed).verdict).toBe('booked');
+    const elsewhere = classify([visit({ sched_date: '2026-10-28' })], [bell('n1', '10')], dismissed);
+    expect(elsewhere).toMatchObject({ verdict: 'dismissed', ring: null });
+  });
 });
 
 describe('close pass', () => {
@@ -263,6 +279,15 @@ describe('close pass', () => {
   });
   const tick = () => runCallBookingMissWatchdog({ now: NOW });
   const open = (id, minute, over = {}) => ({ ...bell(id, minute, over), call_log_id: CALL_ID, ...stamp });
+
+  test('a dismissed call: its bells close as dismissed and nothing rings', async () => {
+    mockState.calls = [call({ held_visit_dismissed_at: '2026-10-21T13:00:00.000Z' })];
+    mockState.open = [open('n1', '10')];
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 1, raised: 0, alerted: 0 });
+    expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['n1'], payload: { done_by: 'call-booking-miss', resolution: 'Dismissed on Dispatch: not booking' } }]);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
 
   test('closes a booked call\'s bells even when nothing new rings', async () => {
     mockState.calls = [call({ created_at: '2026-07-01T14:00:00Z' })];
@@ -447,5 +472,32 @@ describe('close pass', () => {
       expect(mockState.updates).toEqual([]);
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     });
+  });
+});
+
+// Dismiss on the Dispatch held row (owner 2026-11-01) closes the call's open bells at once, as
+// the person's Done, through the one person-Done writer (markAdminDone).
+describe('closeBookingMissBellsForCall', () => {
+  const NotificationService = require('../services/notification-service');
+  const { closeBookingMissBellsForCall } = require('../services/call-booking-miss-watchdog');
+  beforeEach(() => {
+    mockState.open = [];
+    mockState.notificationFilters = [];
+    NotificationService.markAdminDone.mockClear();
+  });
+
+  test("closes this call's open booking-miss bells as the admin's Done", async () => {
+    mockState.open = [{ id: 'n1' }, { id: 'n2' }];
+    await expect(closeBookingMissBellsForCall(CALL_ID, { by: 'tech-1' })).resolves.toBe(2);
+    expect(mockState.notificationFilters).toEqual([
+      ["metadata->>'call_log_id' = ?", [CALL_ID]],
+      ["metadata->>'dedupeKey' LIKE ?", ['call-booking-miss%']],
+    ]);
+    expect(NotificationService.markAdminDone).toHaveBeenCalledWith(['n1', 'n2'], { by: 'tech-1', resolution: 'Dismissed on Dispatch: not booking', role: 'admin' });
+  });
+
+  test('with no open bell it writes nothing', async () => {
+    await expect(closeBookingMissBellsForCall(CALL_ID, { by: 'tech-1' })).resolves.toBe(0);
+    expect(NotificationService.markAdminDone).not.toHaveBeenCalled();
   });
 });

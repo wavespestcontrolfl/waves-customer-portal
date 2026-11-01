@@ -892,14 +892,15 @@ export default function DispatchPageV2({
   }, [searchParams, setSearchParams]);
 
   // Book it: open the New appointment modal on the held day and time. The
-  // customer is preloaded only when the call is linked to one; if that lookup
-  // fails the modal still opens and the person picks the customer.
+  // customer is preloaded only when the call is linked to one (the short
+  // booking view, not the full profile); if that lookup fails the modal still
+  // opens and the person picks the customer.
   const bookHeldVisit = useCallback(async (row) => {
     const seq = ++bookHeldSeq.current;
     let customer;
     if (row.customer_id) {
       try {
-        const res = await adminFetch(`/admin/customers/${row.customer_id}`);
+        const res = await adminFetch(`/admin/customers/${row.customer_id}?view=booking`);
         if (res?.customer?.id) customer = modalCustomerFrom(res.customer);
       } catch (err) {
         console.error("Failed to preload held-visit customer:", err);
@@ -909,6 +910,14 @@ export default function DispatchPageV2({
     // What the form opens on is decided by the row alone (heldVisitFormDefaults).
     setNewApptDefaults({ ...heldVisitFormDefaults(row), customer });
     setShowNewAppt(true);
+  }, []);
+
+  // Dismiss: the office will not book this held row. The server stamps the call
+  // and closes its booking-miss bells; the row leaves the strip at once. A
+  // failure throws to the strip, which says so on the row.
+  const dismissHeldVisit = useCallback(async (row) => {
+    await adminFetch(`/admin/schedule/held-visits/${encodeURIComponent(row.call_log_id)}/dismiss`, { method: "POST" });
+    setHeldVisits((rows) => rows.filter((r) => r.call_log_id !== row.call_log_id));
   }, []);
 
   // Mobile only exposes Day + Week. Snap back if user loaded with 5day/month.
@@ -1983,7 +1992,7 @@ export default function DispatchPageV2({
               </div>
             );
           })()}
-          <HeldVisitsStrip heldVisits={heldVisits} onBook={bookHeldVisit} />
+          <HeldVisitsStrip heldVisits={heldVisits} onBook={bookHeldVisit} onDismiss={dismissHeldVisit} />
           {/* Day view keeps the per-technician swimlane layout (TimeGridDay)
               so dispatchers can drag jobs between tech lanes and create a
               slot pre-bound to a specific tech — the core same-day

@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import HeldVisitsStrip, { heldVisitFormDefaults, billingChoiceText } from './HeldVisitsStrip';
+import { callViaBridge } from '../../components/admin/CallBridgeLink';
+
+vi.mock('../../components/admin/CallBridgeLink', () => ({ callViaBridge: vi.fn() }));
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
@@ -57,9 +60,10 @@ describe('HeldVisitsStrip', () => {
     expect(screen.getByText('Visits start on the hour. Agree a whole-hour time with the caller; the form does not take 2:30 PM and opens with no time selected.')).toBeInTheDocument();
   });
 
-  it('links Open call to the call in Communications', () => {
+  it('links the recording and transcript to the call in Communications', () => {
     render(<HeldVisitsStrip heldVisits={[timed]} onBook={() => {}} />);
-    expect(screen.getByRole('link', { name: 'Open call' })).toHaveAttribute('href', '/admin/communications#tab=calls&call=call-1');
+    expect(screen.getByRole('link', { name: 'Recording & transcript' })).toHaveAttribute('href', '/admin/communications#tab=calls&call=call-1');
+    expect(screen.queryByText('Open call')).not.toBeInTheDocument();
   });
 
   it('renders nothing for an empty or missing list', () => {
@@ -74,6 +78,83 @@ describe('HeldVisitsStrip', () => {
     render(<HeldVisitsStrip heldVisits={[timed, dayOnly]} onBook={onBook} />);
     fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[1]);
     expect(onBook).toHaveBeenCalledWith(dayOnly);
+  });
+
+  // Owner 2026-11-01: a tap waited 4.5 s with no sign of life before the form opened.
+  it('Book it reads "Opening…" until the page has opened the form, and only on the pressed row', async () => {
+    let finish;
+    const onBook = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    render(<HeldVisitsStrip heldVisits={[timed, dayOnly]} onBook={onBook} />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[0]);
+    expect(screen.getByRole('button', { name: 'Opening…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Book it' })).toBeEnabled();
+    await act(async () => { finish(); });
+    expect(screen.getAllByRole('button', { name: 'Book it' })).toHaveLength(2);
+  });
+
+  it('a newer Book it press takes over: the older press finishing does not clear it', async () => {
+    const finishes = [];
+    const onBook = vi.fn(() => new Promise((resolve) => { finishes.push(resolve); }));
+    render(<HeldVisitsStrip heldVisits={[timed, dayOnly]} onBook={onBook} />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[0]);
+    expect(onBook.mock.calls.map(([row]) => row.call_log_id)).toEqual(['call-1', 'call-2']);
+    await act(async () => { finishes[0](); });
+    expect(screen.getByRole('button', { name: 'Opening…' })).toBeInTheDocument();
+    await act(async () => { finishes[1](); });
+    expect(screen.queryByRole('button', { name: 'Opening…' })).not.toBeInTheDocument();
+  });
+});
+
+describe('Call, Text and Dismiss (owner 2026-11-01)', () => {
+  it('Call rings the staff phone through the bridge with the caller\'s number, name and customer', () => {
+    render(<HeldVisitsStrip heldVisits={[timed]} onBook={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Call' }));
+    expect(callViaBridge).toHaveBeenCalledWith('+19415550100', 'Pat Sample', undefined, 'cust-1');
+  });
+
+  it('Text opens the text box with the caller\'s number; it sends nothing itself', () => {
+    render(<HeldVisitsStrip heldVisits={[timed]} onBook={() => {}} />);
+    expect(screen.getByRole('link', { name: 'Text' })).toHaveAttribute('href', '/admin/communications?phone=%2B19415550100&action=sms#tab=sms');
+  });
+
+  it('a row with no phone offers neither Call nor Text', () => {
+    render(<HeldVisitsStrip heldVisits={[{ ...timed, phone: null }]} onBook={() => {}} />);
+    expect(screen.queryByRole('button', { name: 'Call' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Text' })).not.toBeInTheDocument();
+  });
+
+  it('Dismiss asks once, naming the promise on a confirmed row; Keep backs out without a call', () => {
+    const onDismiss = vi.fn();
+    render(<HeldVisitsStrip heldVisits={[timed]} onBook={() => {}} onDismiss={onDismiss} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.getByText('Not booking it? The caller expects this visit.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
+    expect(onDismiss).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();
+  });
+
+  it('Yes, dismiss hands the row to the page', async () => {
+    const onDismiss = vi.fn(async () => {});
+    render(<HeldVisitsStrip heldVisits={[dayOnly]} onBook={() => {}} onDismiss={onDismiss} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.getByText('Not booking it?')).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Yes, dismiss' })); });
+    expect(onDismiss).toHaveBeenCalledWith(dayOnly);
+  });
+
+  it('a failed dismiss says why on the row and keeps the question open', async () => {
+    const onDismiss = vi.fn(async () => { throw new Error('Could not dismiss. Try again.'); });
+    render(<HeldVisitsStrip heldVisits={[timed]} onBook={() => {}} onDismiss={onDismiss} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Yes, dismiss' })); });
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not dismiss. Try again.');
+    expect(screen.getByRole('button', { name: 'Yes, dismiss' })).toBeEnabled();
+  });
+
+  it('no Dismiss when the page offers none', () => {
+    render(<HeldVisitsStrip heldVisits={[timed]} onBook={() => {}} />);
+    expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
   });
 });
 

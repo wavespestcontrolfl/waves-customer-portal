@@ -121,6 +121,8 @@ const BELL_DEDUPE_PREFIX = 'call-booking-miss';
 const REPLACED = 'Replaced by a newer alert for this call';
 const REPLACED_BY_DATE_CHECK = 'Replaced by a date check';
 const REPLACED_VISIT_GONE = 'The booked visit is gone; replaced by a new alert to book it';
+// Dismiss on the Dispatch held-visit strip (owner 2026-11-01): the office will not book it.
+const DISMISSED_ON_DISPATCH = 'Dismissed on Dispatch: not booking';
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
@@ -320,6 +322,8 @@ const newestFirst = (a, b) => (new Date(b.created_at) - new Date(a.created_at)) 
 //   booked           the visit is on the agreed slot -> close every bell
 //   ("later visit" = created after the call, within OTHER_DAY_MATCH_DAYS of the
 //   agreed day, and for the service the call agreed: sameService)
+//   dismissed        not booked, and the office pressed Dismiss on the call's
+//                    Dispatch held row (call.held_visit_dismissed_at) -> close every bell
 //   done_other_day   the call's own customer had a later visit completed on
 //                    another day -> close every bell (a namesake may be another
 //                    person, so a namesake's completed visit never closes)
@@ -354,6 +358,8 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows, { now, namesa
     const cancelled = cleared.status === 'cancelled' ? ', later cancelled' : '';
     return result('booked', cleared, { closes: closeAll(`Visit booked${on}${cancelled}`) });
   }
+  // The office dismissed the call's held row on Dispatch: it will not book it, so no bell stands.
+  if (call.held_visit_dismissed_at) return result('dismissed', null, { closes: closeAll(DISMISSED_ON_DISPATCH) });
 
   // A later visit answers the call only when it is for the service the call agreed (a
   // routine lawn visit must never close or relabel a pest booking miss), on the call's
@@ -649,7 +655,8 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
 
   const calls = await db('call_log')
     .whereIn('id', [...byCall.keys()])
-    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched');
+    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
+      db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // The slot comes from the call's extraction. When a reprocessed extraction no
   // longer confirms one, the newest stamped bell stands in: its date and time,
   // and the service it stamps (confirmed_service survives a date check's title;
@@ -671,6 +678,22 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
   const { namesakes } = await loadNamesakeAccounts(entries);
   const bookedRows = await loadBookingRows(entries, namesakes);
   return entries.map(({ call, slot, rows }) => ({ call, slot, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
+}
+
+// Dismiss on the Dispatch held-visit strip (owner 2026-11-01): a person decided not to book the
+// call's visit, so its open booking-miss bells close now as that person's Done (the close pass
+// would close them on its next tick through the 'dismissed' verdict). `by` is the admin's id.
+// Returns the number of bells closed.
+async function closeBookingMissBellsForCall(callId, { by }) {
+  const ids = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereNull('done_at')
+    .whereRaw("metadata->>'call_log_id' = ?", [callId])
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${BELL_DEDUPE_PREFIX}%`])
+    .pluck('id');
+  if (!ids.length) return 0;
+  const NotificationService = require('./notification-service');
+  return NotificationService.markAdminDone(ids, { by: String(by), resolution: DISMISSED_ON_DISPATCH, role: 'admin' });
 }
 
 // The close pass (owner 2026-10-24) applies the plan on every tick: each call's
@@ -762,8 +785,11 @@ async function runInner({ now }) {
     .where({ v2_extraction_status: 'valid' })
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
-    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched');
-  const calls = scanned.filter((c) => new Date(c.created_at) >= windowStart || slotInRepeatRange(extractConfirmedSlot(c.ai_extraction_enriched), now));
+    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
+      db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
+  // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).
+  const calls = scanned.filter((c) => !c.held_visit_dismissed_at
+    && (new Date(c.created_at) >= windowStart || slotInRepeatRange(extractConfirmedSlot(c.ai_extraction_enriched), now)));
 
   // One pass to find the confirmed slots, then one bulk booking lookup.
   const provisional = computeBookingMisses(calls, [], { now });
@@ -952,6 +978,7 @@ module.exports = {
   classifyOpenBookingMiss,
   planOpenBookingMissBells,
   closeResolvedBookingMissBells,
+  closeBookingMissBellsForCall,
   dateCheckAlert,
   extractConfirmedSlot,
   confirmedWallClockET,
