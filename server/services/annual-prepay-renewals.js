@@ -1832,6 +1832,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   let seriesSlot = null;
   let seriesAbsentDays = new Set();
   const resolveSeriesSlot = async () => {
+    // Read at call time; typeof-guarded so a whole-module feature-gates mock without the reader reads as off.
+    const gates = require('../config/feature-gates');
+    if (typeof gates.prepaySeedSeriesSlotLive !== 'function' || !gates.prepaySeedSeriesSlotLive()) return;
     if (!datesToSeed.length || !cols.technician_id || !cols.window_start) return;
     const SeriesSlot = require('./annual-prepay-series-slot');
     seriesSlot = await SeriesSlot.coverageSeriesSlot(conn, {
@@ -2176,7 +2179,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     logger.info(`[annual-prepay] term ${term.id}: ${scheduledDate} was filled by a concurrent refresh under the lock — not seeding a duplicate`);
   };
 
-  if (require('../config/feature-gates').prepaySeedSeriesSlotLive()) await resolveSeriesSlot();
+  await resolveSeriesSlot();
   for (const scheduledDate of datesToSeed) {
     const wantsWindow = !!firstVisitWindowStart && scheduledDate === firstTargetDate;
     let created;

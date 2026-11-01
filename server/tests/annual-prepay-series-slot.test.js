@@ -167,11 +167,19 @@ describe('seriesSlotHandoff', () => {
     expect(fields).toEqual({ window_start: null, window_end: null, recurring_dispatch_due_date: '2026-12-15' });
   });
 
-  test('a free hour returns null; a failed probe returns null and warns', async () => {
-    const spy = jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValueOnce(false);
+  test('a free hour returns null', async () => {
+    jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValueOnce(false);
     await expect(seriesSlotHandoff({}, { scheduled_date: '2026-12-15', window_start: '09:00' })).resolves.toBeNull();
-    spy.mockRejectedValueOnce(new Error('probe boom'));
-    await expect(seriesSlotHandoff({}, { scheduled_date: '2026-12-15', window_start: '09:00' })).resolves.toBeNull();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('probe boom'));
+  });
+
+  test('a failed probe counts as a taken hour: handed off from 4 days out, the copied hour kept nearer', async () => {
+    const now = new Date('2026-11-01T15:00:00Z');
+    const cols = { window_start: {}, window_end: {}, recurring_dispatch_due_date: {} };
+    jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockRejectedValue(new Error('probe boom'));
+    await expect(seriesSlotHandoff({}, { scheduled_date: '2026-12-15', window_start: '09:00' }, { cols, now }))
+      .resolves.toEqual({ window_start: null, window_end: null, recurring_dispatch_due_date: '2026-12-15' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('seeding without a time for the night tool'));
+    await expect(seriesSlotHandoff({}, { scheduled_date: '2026-11-03', window_start: '09:00' }, { cols, now })).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('keeping the copied time'));
   });
 });

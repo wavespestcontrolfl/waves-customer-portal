@@ -125,8 +125,11 @@ function seriesSlotPatch(slot, { scheduledDate, absentDays = new Set(), timed = 
 
 /**
  * The hand-off fields for a seed row that has a copied time (null when the
- * hour is free, the gate is off or the probe fails): the row goes windowless
- * with its date as recurring_dispatch_due_date, as the follow-up seeder does.
+ * hour is free or the gate is off): the row goes windowless with its date as
+ * recurring_dispatch_due_date, as the follow-up seeder does. A probe that
+ * cannot answer counts as a taken hour: from the hand-off date (4 days out)
+ * the row is handed off, nearer it keeps the copied hour, as every plan
+ * writer keeps a nearer hour (the night tool's double-booking notice).
  */
 async function seriesSlotHandoff(conn, row, { cols = null, now = new Date() } = {}) {
   if (!row?.window_start) return null;
@@ -135,8 +138,11 @@ async function seriesSlotHandoff(conn, row, { cols = null, now = new Date() } = 
     if (!(await planTakenHour.takenHourHandoff(conn, row, { now }))) return null;
     return planTakenHour.handoffFields(row.scheduled_date, cols);
   } catch (err) {
-    logger.warn(`[annual-prepay-series-slot] taken-hour probe failed for ${ymd(row.scheduled_date)} (${err.message}) — seeding with the copied time`);
-    return null;
+    const day = ymd(row.scheduled_date);
+    const handOff = !!day && day >= planTakenHour.firstHandoffDate(now);
+    logger.warn(`[annual-prepay-series-slot] taken-hour probe failed for ${day} (${err.message}) — ${handOff
+      ? 'seeding without a time for the night tool' : 'keeping the copied time (inside the hand-off window)'}`);
+    return handOff ? planTakenHour.handoffFields(row.scheduled_date, cols) : null;
   }
 }
 
