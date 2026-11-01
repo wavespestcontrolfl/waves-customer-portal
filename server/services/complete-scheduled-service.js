@@ -682,6 +682,15 @@ function serviceDateOnly(value) {
   return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : etDateString();
 }
 
+// The day a completion's invoice is due from: the record's service day, never
+// before today. A backdated record (a backfill, or a late form dated to the
+// tech's arrival day) would otherwise mint its invoice instantly overdue and
+// light up the dunning and overdue surfaces.
+function invoiceDueBaseDay(recordServiceDate, today = etDateString()) {
+  const day = serviceDateOnly(recordServiceDate);
+  return day < today ? today : day;
+}
+
 // Backdated quiet completion (stale-visit backlog closeout). `backfill: true`
 // on POST /:serviceId/complete stamps the completion's date fields from the
 // row's own scheduled_date instead of today, and forces every customer-facing
@@ -769,6 +778,20 @@ function realArrivalInstant(service = {}) {
   return BACKFILL_INFERRED_START_FIELDS
     .map((field) => finiteDate(service?.[field]))
     .find(Boolean) || null;
+}
+
+// A late form (owner 2026-10-31): the completion form came on a later ET day
+// than the tech's arrival, so the record takes the arrival day, the day of the
+// work that the receipt, the report and the application history show. Only the
+// row's own arrival stamp counts (a visit move clears it: rebooker
+// LIVE_LIFECYCLE_RESET), and only on or after the scheduled day; an earlier
+// stamp is a stale or early tap, so the form day stays. Null = the form day.
+function lateFormArrivalDay(service, now = new Date()) {
+  const arrival = realArrivalInstant(service);
+  if (!arrival || !service?.scheduled_date) return null;
+  const arrivalDay = etDateString(arrival);
+  if (arrivalDay < serviceDateOnly(service.scheduled_date)) return null;
+  return arrivalDay < etDateString(now) ? arrivalDay : null;
 }
 
 // The end fields the completion path stamps with the closeout instant: on the
@@ -7134,9 +7157,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Backfill: the service happened on its scheduled day — stamp the
           // record (and everything keyed off it: activity-score dates, the
           // completion invoice's service linkage) with that date, not today.
+          // A late form takes the tech's arrival day (lateFormArrivalDay).
           const completionServiceDate = isBackfillCompletion
             ? backfillPlan.serviceDate
-            : etDateString(completionEndedAt);
+            : (lateFormArrivalDay(svc, completionEndedAt) || etDateString(completionEndedAt));
           // …and the end INSTANTS the closeout keeps carry that day too
           // (Codex P2, PR #2897 fix round 4): a wall-clock end stamp made
           // termite bonds start their term on the closeout date and let
@@ -8740,8 +8764,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // completion re-derive the stale assigned system from the plan.
             calibrationCleared: waveguardCalibrationCleared,
             // Backfilled closeouts recheck from the recorded application day,
-            // not the office-entry day (recheck_due_date derives from this).
-            serviceDate: isBackfillCompletion
+            // not the office-entry day (recheck_due_date derives from this);
+            // so does a late form, whose record day is the arrival day.
+            serviceDate: (isBackfillCompletion || completionServiceDate !== etDateString(completionEndedAt))
               ? toETNoonServiceDate(completionServiceDate)
               : completionEndedAt,
           });
@@ -12478,13 +12503,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Same shape gate as every other sibling-coverage check (pre-push P1
         // on 645ccccaee): a callback or always-free visit is never refused.
         // A visit from an invoice-mode commercial proposal is due on the agreement's Net term (owner 2026-10-30): the
-        // win makes no invoice, so this one carries the terms. Counted from the visit date (today for a backfill, so a
-        // backlog closeout is never minted overdue). A failed read mints nothing: the catch below releases the
+        // win makes no invoice, so this one carries the terms. Counted from the visit date, never before today (a backfill or a
+        // late form carries a backdated day, and its invoice is never minted overdue). A failed read mints nothing: the catch below releases the
         // closeout for resume, so no invoice is ever created due on the wrong date.
         let proposalTermsDue = null;
         try {
           proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(
-            db, svc.source_estimate_id, isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+            db, svc.source_estimate_id, invoiceDueBaseDay(record.service_date),
           );
         } catch (termsErr) {
           throw Object.assign(new Error(`The proposal payment terms could not be read: ${termsErr.message}`), { code: 'PROPOSAL_TERMS_UNREAD' });
@@ -12581,11 +12606,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Frozen-money lanes bypass replay entirely and keep their
           // provable frozen figure.
           scheduledPriceBasis: svc.estimated_price,
-          // Backfill: record.service_date is the backdated visit day — using
+          // A backfill or a late form backdates record.service_date — using
           // it here would mint the invoice instantly overdue and light up the
-          // dunning/overdue surfaces for a quiet backlog closeout. Due today
-          // instead: the exact net terms a normal same-day completion gets.
-          dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),
+          // dunning/overdue surfaces. Due today instead: the exact net terms
+          // a normal same-day completion gets (invoiceDueBaseDay).
+          dueDate: proposalTermsDue || invoiceDueBaseDay(record.service_date),
           // Claimed plan-choice setup fee rides the SAME mint (one invoice,
           // one auto-charge) — the claim above is the idempotency authority.
           extraLineItems: secureSetupFee
@@ -12701,7 +12726,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               taxRate: mintInvoiceTaxRate,
               frozenTaxAuthority: true,
               frozenPayerId: mintInvoicePayerId,
-              dueDate: proposalTermsDue || serviceDateOnly(record.service_date),
+              dueDate: proposalTermsDue || invoiceDueBaseDay(record.service_date),
               trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
             }),
           });
@@ -14132,9 +14157,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           scheduledServiceId: svc.id,
           suppressIssuedEmail: isBackfillCompletion,
           // The card's public "First visit" date must show the day the visit
-          // happened — for a backfill that's the backdated service day the
-          // record already carries, not the office closeout instant.
-          firstVisitAt: isBackfillCompletion ? toETNoonServiceDate(record.service_date) : null,
+          // happened — for a backfill or a late form that's the backdated
+          // service day the record already carries, not the closeout instant.
+          firstVisitAt: (isBackfillCompletion || serviceDateOnly(record.service_date) < etDateString())
+            ? toETNoonServiceDate(record.service_date) : null,
         }).catch((e) => logger.warn(`[dispatch] card mint failed (customerId=${svc.customer_id}): ${e.message}`));
       } catch (e) {
         logger.warn(`[dispatch] card mint dispatch failed: ${e.message}`);
@@ -16371,6 +16397,8 @@ module.exports = {
   preflightLawnAssessmentCompletion,
   ensureSmsContainsReportLink,
   serviceDateOnly,
+  invoiceDueBaseDay,
+  lateFormArrivalDay,
   backfillCompletionPlan,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   backfillTimeOnSiteMinutes,
