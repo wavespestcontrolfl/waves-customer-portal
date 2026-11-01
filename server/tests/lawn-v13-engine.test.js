@@ -1018,7 +1018,8 @@ describe('chinch bug trigger wording (owner 2026-10-08: the edge of a damaged pa
 describe('chinch count line and sugarcane mosaic virus line (owner 2026-10-22)', () => {
   const COUNT = require('../config/lawn-chinch-count').chinchCountNote();
   const LITERAL_COUNT = 'Chinch bugs: always count before treating. Push a bottomless can 3 in into the soil at 4 spots on the edge of the damage, fill with water, count for 5 minutes, and write the count in the visit notes. Big-eyed bugs (wide head, bulging eyes) are predators: do not count them. Recheck a treated area at 5 and 12 days.';
-  const VIRUS = 'Sugarcane mosaic virus (lethal viral necrosis) is confirmed in Sarasota, Manatee and Charlotte. Yellow streaks between the veins on Floratam or ProVista, mostly September to January, with no chinch bugs and healthy roots: photo, note and call the office; Waves sends a sample to the UF Plant Diagnostic Center at its own cost. Do not sell a fungicide or insecticide for it (UF: pesticides do not work). Mow or walk suspect lawns last. For new sod, recommend Palmetto or CitraBlue, never Floratam or ProVista.';
+  // Owner 2026-11-01 (YouTube lawn-problems read, change 3): the sample is taken in any month, with roots.
+  const VIRUS = 'Sugarcane mosaic virus (lethal viral necrosis) is confirmed in Sarasota, Manatee and Charlotte. Yellow streaks between the veins on Floratam or ProVista, in any month (most often September to January), with no chinch bugs: photo, note and call the office; Waves sends live streaked leaves with their roots to the UF Plant Diagnostic Center at its own cost (roots too, because take-all can come with the virus). Do not sell a fungicide or insecticide for it (UF: pesticides do not work). Mow or walk suspect lawns last. For new sod, recommend Palmetto or CitraBlue, never Floratam or ProVista.';
   test('the shared constant builds the owner\'s count line word for word, and the Fast Complete card text from the same facts', () => {
     expect(COUNT).toBe(LITERAL_COUNT);
     expect(require('../config/lawn-chinch-count').chinchCardCheck()).toBe('Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.');
@@ -1037,6 +1038,28 @@ describe('chinch count line and sugarcane mosaic virus line (owner 2026-10-22)',
     expect(chinch[0]).toContain('Florida 2(ee) recommendation for southern chinch bug');
     expect(notes.filter((n) => n === VIRUS)).toHaveLength(1);
     expect(notes.indexOf(VIRUS)).toBe(notes.indexOf(chinch[0]) + 1);
+  });
+});
+
+describe('nematode lab note (owner 2026-11-01, YouTube lawn-problems read, change 3)', () => {
+  const NEMATODE = 'Plant-parasitic nematodes: when a lawn keeps thinning, with short, stubby roots and no chinch bugs, and its soil test (above) found nothing to act on, the office sends one soil-and-root sample to the UF/IFAS Nematode Assay Lab at Waves\' own cost, taken the way the lab\'s turf form says. One sample per lawn, once. Nothing is sold for nematodes (UF/IFAS: home lawns have no reliable nematode control). Lab reports are not sent to customers unless the owner says so.';
+
+  test.each(V13_GRASSES)('%s: one nematode note, right after the soil-test note it waits on', (grass) => {
+    const notes = v13[grass].notes;
+    expect(notes.filter((n) => n.startsWith('Plant-parasitic nematodes'))).toEqual([NEMATODE]);
+    const soil = notes.findIndex((n) => n.startsWith('Soil tests: triggers only'));
+    expect(soil).toBeGreaterThan(-1);
+    expect(notes.indexOf(NEMATODE)).toBe(soil + 1);
+    // The soil-test rule (owner 2026-10-31) still orders the labs: soil test first, one lab sample at a time.
+    expect(notes[soil]).toContain('A soil test comes before a UF plant lab sample, never both at once.');
+  });
+
+  test('no program line or visit note sends a nematode sample or sells a nematode product', () => {
+    for (const grass of V13_GRASSES) {
+      for (const visit of v13[grass].visits) {
+        expect(`${visit.primary}\n${visit.secondary}\n${visit.notes}`).not.toMatch(/nematod/i);
+      }
+    }
   });
 });
 

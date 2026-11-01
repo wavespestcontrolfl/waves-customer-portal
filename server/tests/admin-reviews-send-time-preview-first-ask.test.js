@@ -90,3 +90,20 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_FIRST_ASK_LOCK',
     expect(ReviewService.customerNeverAskedForReview).not.toHaveBeenCalled();
   });
 });
+
+// GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): the preview names the switch, so the completion panel stops saying
+// that an unpaid invoice's review text waits for the payment. Gate off: the key is absent.
+describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ASK_AT_VISIT', () => {
+  const askAtVisitWas = process.env.GATE_REVIEW_ASK_AT_VISIT;
+  afterEach(() => { if (askAtVisitWas === undefined) delete process.env.GATE_REVIEW_ASK_AT_VISIT; else process.env.GATE_REVIEW_ASK_AT_VISIT = askAtVisitWas; });
+
+  test('gate off: no askAtVisit key', async () => {
+    delete process.env.GATE_REVIEW_ASK_AT_VISIT;
+    expect(await preview({ serviceType: 'Pest' })).not.toHaveProperty('askAtVisit');
+  });
+
+  test('gate on: askAtVisit true', async () => {
+    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+    expect((await preview({ serviceType: 'Pest' })).askAtVisit).toBe(true);
+  });
+});

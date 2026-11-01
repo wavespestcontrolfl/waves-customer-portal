@@ -40,8 +40,9 @@ describe('recipe text', () => {
     const wait = 'delay watering (irrigation) or mowing for 24 hours after application';
     expect(track.notes.find((line) => line.startsWith('Caterpillars:'))).toContain(wait);
     const acelepryn = track.visits.flatMap((v) => lines(v.secondary)).filter((line) => line.startsWith('Acelepryn'));
-    // Three lines (July, August, September), all the caterpillar use: Acelepryn is not a mole cricket product (owner 2026-10-23).
-    expect(acelepryn).toHaveLength(3);
+    // Five lines (July through November), all the caterpillar use: Acelepryn is not a mole cricket product (owner 2026-10-23; October and
+    // November added by owner 2026-11-01).
+    expect(acelepryn).toHaveLength(5);
     for (const line of acelepryn) expect(line).toContain(wait);
   });
 
