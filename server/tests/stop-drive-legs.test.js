@@ -399,3 +399,80 @@ describe('attachDriveLegs', () => {
     expect(services[1].driveLateServiceIds).toEqual(['open']);
   });
 });
+
+describe('attachDriveLegs on today\'s clock', () => {
+  // Oct 31 2026 is EDT (UTC-4).
+  const et = (hhmm) => new Date(`2026-10-31T${hhmm}:00-04:00`);
+
+  it('drops the booked delay of finished work and runs from the clock', () => {
+    const day = () => [
+      stop('long', '08:00', B, { windowEnd: '17:30', status: 'completed' }),
+      stop('done', '15:00', A, { windowEnd: '16:00', status: 'completed' }),
+      stop('next', '16:00', C, { windowEnd: '17:00' }),
+    ];
+    // The booked plan carries the 9.5-hour job forward: next reads late.
+    const plan = day();
+    attachDriveLegs(plan);
+    expect(plan[2].driveLateMin).toBeGreaterThan(0);
+    // At 16:30 the tech leaves the finished stop and still makes 16:00-18:00.
+    const today = day();
+    attachDriveLegs(today, { now: et('16:30') });
+    expect(16 * 60 + 30 + driveMin(A, C)).toBeLessThan(18 * 60);
+    expect(today[2].driveLateMin).toBeNull();
+  });
+
+  it('finishes the stop the tech is driving to before an open one it passed', () => {
+    const services = [
+      stop('done', '15:00', A, { windowEnd: '16:00', status: 'completed' }),
+      stop('passed', '16:00', C, { windowEnd: '17:00' }),
+      stop('driving', '17:00', B, { windowEnd: '18:00', status: 'en_route' }),
+    ];
+    attachDriveLegs(services, { now: et('17:33') });
+    const leg = Math.max(1, driveMin(B, C));
+    // 60 planned minutes at the en-route stop, then the drive back.
+    expect(services[1].driveLateMin).toBe(17 * 60 + 33 + 60 + leg - (16 * 60 + 120));
+    expect([services[1].driveLateWindowStart, services[1].driveLateWindowEnd]).toEqual(['16:00', '18:00']);
+    expect(services[2].driveLateMin).toBeNull();
+  });
+
+  it('counts the planned work left on site from the check-in time', () => {
+    const services = [
+      stop('here', '16:00', A, { windowEnd: '18:00', status: 'on_site', checkInTime: et('17:00').toISOString() }),
+      stop('next', '17:00', C, { windowEnd: '18:00' }),
+    ];
+    attachDriveLegs(services, { now: et('17:40') });
+    const leg = Math.max(1, driveMin(A, C));
+    // 120 planned minutes, 40 already worked: the tech leaves at 19:00.
+    expect(services[1].driveLateMin).toBe(19 * 60 + leg - (17 * 60 + 120));
+  });
+
+  it('starts at the first open visit when nothing is reached yet', () => {
+    const day = () => [
+      stop('first', '08:00', A, { windowEnd: '11:30' }),
+      stop('second', '09:00', C, { windowEnd: '10:00' }),
+    ];
+    const leg = Math.max(1, driveMin(A, C));
+    // Before the day starts the clock waits for 08:00, as the plan does.
+    const plan = day();
+    attachDriveLegs(plan);
+    const early = day();
+    attachDriveLegs(early, { now: et('06:00') });
+    expect(plan[1].driveLateMin).toBe(11 * 60 + 30 + leg - (9 * 60 + 120));
+    expect(early[1].driveLateMin).toBe(plan[1].driveLateMin);
+    // Nothing tapped by 10:00: the first visit starts now.
+    const late = day();
+    attachDriveLegs(late, { now: et('10:00') });
+    expect(late[1].driveLateMin).toBe(10 * 60 + 210 + leg - (9 * 60 + 120));
+  });
+
+  it('stops predicting after a leg it cannot measure', () => {
+    const services = [
+      stop('done', '08:00', A, { windowEnd: '09:00', status: 'completed' }),
+      stop('nopin', '08:30', null),
+      stop('after', '09:00', C, { windowEnd: '10:00' }),
+    ];
+    attachDriveLegs(services, { now: et('15:00') });
+    expect(services[1].driveLateMin).toBeNull();
+    expect(services[2].driveLateMin).toBeNull();
+  });
+});

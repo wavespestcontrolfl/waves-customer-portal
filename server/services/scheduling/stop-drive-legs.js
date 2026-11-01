@@ -11,6 +11,7 @@
 // read as "next door".
 
 const { driveMin } = require('../auto-dispatch/geo');
+const { etParts } = require('../../utils/datetime-et');
 const { premiseStampConflicts } = require('../stamped-address');
 const RouteOptimizer = require('../route-optimizer');
 const {
@@ -146,16 +147,28 @@ function stopPieces(members) {
     .map(({ p }) => p);
 }
 
-// Minutes past each stop's 2-hour arrival window, from the shared route
-// simulator (simulateArrivalRoute, reportLate): the clock carries every
-// earlier delay forward, waits for each window to open, and uses the same
-// legs the lines show (0 between pieces of one stop). The day starts at
-// the first stop at its booked time. After a leg that cannot be measured,
-// arrivals are unknown: no lateness from there on.
-function lateByStop(stops, legs) {
+// One simulator row per piece of work, at its stop's pin.
+function seqRow(id, p, st) {
+  return {
+    id,
+    arrivalRange: p.range || null,
+    window_start: hhmmOf(p.start),
+    estimated_duration_minutes: p.work,
+    memberIds: [p.id],
+    lat: st.anchor.lat,
+    lng: st.anchor.lng,
+  };
+}
+
+// The booked plan (any day but today): the day starts at the first stop at
+// its booked time and every piece, reached or not, takes its planned work.
+// The legs are the ones the lines show (0 between pieces of one stop).
+// After a leg that cannot be measured, arrivals are unknown: no lateness
+// from there on.
+function planRoute(stops, legs) {
   const unknown = legs.findIndex((l) => l == null);
   const upTo = unknown === -1 ? stops.length : unknown + 1;
-  if (upTo < 2) return new Map();
+  if (upTo < 2) return null;
   const seq = [];
   const legIn = new Map();
   // Every piece of a stop answers for its card: a later piece that misses
@@ -168,20 +181,60 @@ function lateByStop(stops, legs) {
       // Only work the tech has not reached can still run late.
       if (p.open) piecesOf.get(st.legs[0].id).push({ id, ids: p.ids });
       if (j === 0 && i > 0) legIn.set(id, legs[i - 1]);
-      seq.push({
-        id,
-        arrivalRange: p.range || null,
-        window_start: hhmmOf(p.start),
-        estimated_duration_minutes: p.work,
-        memberIds: [p.id],
-        lat: st.anchor.lat,
-        lng: st.anchor.lng,
-      });
+      seq.push(seqRow(id, p, st));
     });
   });
+  return { seq, legIn, piecesOf, startMin: minutesOf(seq[0].window_start) };
+}
+
+// Today (owner 2026-11-01, "build clock"): the day restarts from now at the
+// last stop, in day order, with a visit the tech has reached. Work still
+// ahead there (a visit driven to or being worked) keeps its planned time,
+// less the minutes since check-in; finished work takes none. The drive to
+// an en-route stop counts as done (how much is left is unknown). Then every
+// visit not reached yet runs in day order, the ones at that stop first.
+// After a leg that cannot be measured, arrivals are unknown.
+function clockRoute(stops, now) {
+  const at = stops.map((st) => st.members.some((m) => !NOT_REACHED.has(m.status))).lastIndexOf(true);
+  const here = stops[at] || null;
+  const busy = here ? here.members.filter((m) => UNDER_WAY.has(m.status)) : [];
+  const work = stopPieces(busy).reduce((sum, p) => sum + p.work, 0);
+  const checkIns = busy.filter((m) => m.checkInTime).map((m) => new Date(m.checkInTime).getTime()).filter(Number.isFinite);
+  const since = checkIns.length ? Math.max(0, (now.getTime() - Math.min(...checkIns)) / 60000) : 0;
+  const order = here ? [at, ...stops.keys()].filter((i, k) => k === 0 || i !== at) : [...stops.keys()];
+  const seq = [];
+  const legIn = new Map();
+  const piecesOf = new Map();
+  let prev = here;
+  for (const i of order) {
+    const st = stops[i];
+    const open = stopPieces(st.members).filter((p) => p.open);
+    if (!open.length) continue;
+    const leg = !prev || prev === st ? 0 : legBetween(prev, st);
+    if (leg == null) break;
+    piecesOf.set(st.legs[0].id, open.map((p, j) => ({ id: `${i}:${j}`, ids: p.ids })));
+    open.forEach((p, j) => {
+      if (j === 0) legIn.set(`${i}:${j}`, leg);
+      seq.push(seqRow(`${i}:${j}`, p, st));
+    });
+    prev = st;
+  }
+  if (!seq.length) return null;
+  const { hour, minute } = etParts(now);
+  return { seq, legIn, piecesOf, startMin: hour * 60 + minute + Math.max(0, work - since) };
+}
+
+// Minutes past each stop's 2-hour arrival window, from the shared route
+// simulator (simulateArrivalRoute, reportLate): the clock carries every
+// earlier delay forward and waits for each window to open. `now` (today
+// only) runs the day from the clock instead of the booked plan.
+function lateByStop(stops, legs, now) {
+  const route = now ? clockRoute(stops, now) : planRoute(stops, legs);
+  if (!route) return new Map();
+  const { seq, legIn, piecesOf } = route;
   const rangeFor = (row) => row.arrivalRange || effectiveWindowRange(row);
   const sim = simulateArrivalRoute(RouteOptimizer, rangeFor, seq, {
-    startMin: minutesOf(seq[0].window_start),
+    startMin: route.startMin,
     origin: { lat: Number(seq[0].lat), lng: Number(seq[0].lng) },
     reportLate: true,
     legMinutes: (_prev, stop) => legIn.get(stop.id) ?? 0,
@@ -208,8 +261,18 @@ function lateByStop(stops, legs) {
 // Visits the tech has not reached yet: only these can still run late.
 const NOT_REACHED = new Set(['pending', 'confirmed', 'rescheduled']);
 
+// Visits the tech is driving to or working now: their work is still ahead.
+const UNDER_WAY = new Set(['en_route', 'on_site', 'in_progress']);
+
 function samePlace(a, b) {
   return hasGeo(a) && hasGeo(b) && a.lat === b.lat && a.lng === b.lng;
+}
+
+// The drive between two stops, or null when either has no pin. Distinct
+// pins are never "0 min" apart: the estimator rounds a very short hop to 0,
+// so it floors at one minute.
+function legBetween(a, b) {
+  return hasGeo(a.anchor) && hasGeo(b.anchor) ? Math.max(1, driveMin(a.anchor, b.anchor)) : null;
 }
 
 function stopOrder(a, b) {
@@ -227,10 +290,12 @@ function stopOrder(a, b) {
  * the stop it comes from (`drivePrevName`) and `driveLateMin`: the minutes
  * past the customer's 2-hour arrival window (start + 120) the tech lands if
  * the previous stop ends as planned, else null, with that window as
- * `driveLateWindowStart` / `driveLateWindowEnd` ("HH:MM"). A leg that
- * cannot be measured marks its stop's first card `driveLegUnknown`.
+ * `driveLateWindowStart` / `driveLateWindowEnd` ("HH:MM"). Pass `now` for
+ * today's list: lateness then runs from the clock and the tech's progress,
+ * not the booked plan. A leg that cannot be measured marks its stop's first
+ * card `driveLegUnknown`.
  */
-function attachDriveLegs(services) {
+function attachDriveLegs(services, { now = null } = {}) {
   // A stop with no start time (the grid's all-day strip) has no place in
   // the timed route: it gets no legs and is skipped between its neighbours.
   const rows = (services || []).filter((s) => !NOT_A_STOP.has(s.status) && Number.isFinite(minutesOf(s.windowStart)));
@@ -283,9 +348,7 @@ function attachDriveLegs(services) {
   for (let i = 1; i < stops.length; i += 1) {
     const prev = stops[i - 1];
     const cur = stops[i];
-    // Distinct pins are never "~0 min" apart: the estimator rounds a very
-    // short hop to 0, so it floors at one minute.
-    const leg = hasGeo(prev.anchor) && hasGeo(cur.anchor) ? Math.max(1, driveMin(prev.anchor, cur.anchor)) : null;
+    const leg = legBetween(prev, cur);
     legs.push(leg);
     prev.legs.forEach((s) => { s.driveToNextMin = leg; });
     cur.legs.forEach((s) => { s.driveFromPrevMin = leg; });
@@ -296,7 +359,8 @@ function attachDriveLegs(services) {
     const lastWorked = prev.members[prev.members.length - 1];
     cur.legs[0].drivePrevName = String(lastWorked.customerName || '').trim() || null;
   }
-  const late = stops.length > 1 && hasGeo(stops[0].anchor) ? lateByStop(stops, legs) : new Map();
+  // A first stop without a pin leaves legs[0] null: the plan predicts nothing.
+  const late = stops.length > 1 ? lateByStop(stops, legs, now) : new Map();
   for (const st of stops.slice(1)) {
     const first = st.legs[0];
     // The line sits on the stop's first card; any unreached piece of the
