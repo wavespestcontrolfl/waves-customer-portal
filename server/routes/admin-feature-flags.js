@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
-const { bidDeskLive, bidKitLive } = require('../config/feature-gates');
+const { bidDeskLive, bidKitLive, estimateCallListLive } = require('../config/feature-gates');
 const { soldByLive: commissionSoldByLive } = require('../services/estimate-sold-by');
 const {
   VISUAL_SERVICE_NOTES_FLAG,
@@ -34,6 +34,9 @@ router.get('/', async (req, res, next) => {
     // Neighbor flag in the tech app (GATE_COMMISSION_SOLD_BY), the same way.
     if (commissionSoldByLive()) flags.commission_sold_by = true;
     else delete flags.commission_sold_by;
+    // Call today / Pick reason on the estimates page (GATE_ESTIMATE_CALL_LIST), the same way.
+    if (estimateCallListLive?.()) flags.estimate_call_list = true;
+    else delete flags.estimate_call_list;
     res.json({ flags });
   } catch (err) {
     next(err);

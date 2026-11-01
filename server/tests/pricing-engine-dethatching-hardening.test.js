@@ -4,12 +4,19 @@ const path = require('path');
 const { generateEstimate, priceDethatching } = require('../services/pricing-engine');
 
 describe('dethatching pricing hardening', () => {
-  test('preserves base residential dethatching prices', () => {
-    expect(priceDethatching(1500).estimatedPrice ?? priceDethatching(1500).price).toBe(150);
-    expect(priceDethatching(3000).estimatedPrice ?? priceDethatching(3000).price).toBe(150);
-    expect(priceDethatching(4500).estimatedPrice ?? priceDethatching(4500).price).toBe(166);
-    expect(priceDethatching(6000).estimatedPrice ?? priceDethatching(6000).price).toBe(205);
-    expect(priceDethatching(10000).estimatedPrice ?? priceDethatching(10000).price).toBe(315);
+  // Owner 2026-11-01: price as if the Classen TR-20H were bought. The machine's $27.91 a job
+  // ((2,453.99 - 500 salvage) / (7 years x 10 jobs)) joins labor + material before the 0.40 divisor.
+  test('base residential dethatching prices include the machine cost', () => {
+    expect(priceDethatching(1500).estimatedPrice ?? priceDethatching(1500).price).toBe(154);
+    expect(priceDethatching(3000).estimatedPrice ?? priceDethatching(3000).price).toBe(195);
+    expect(priceDethatching(4500).estimatedPrice ?? priceDethatching(4500).price).toBe(236);
+    expect(priceDethatching(6000).estimatedPrice ?? priceDethatching(6000).price).toBe(276);
+    expect(priceDethatching(10000).estimatedPrice ?? priceDethatching(10000).price).toBe(385);
+    // The $150 floor still holds on the smallest lawns.
+    expect(priceDethatching(1000).estimatedPrice).toBe(150);
+    const quote = priceDethatching(4500);
+    expect(quote.equipmentCost).toBe(27.91);
+    expect(quote.rawCost).toBeCloseTo(quote.laborCost + quote.materialCost + quote.equipmentCost, 1);
   });
 
   test('adds cleanup pricing and metadata in increasing order', () => {
@@ -34,7 +41,7 @@ describe('dethatching pricing hardening', () => {
       thatchDepthInches: 0.75,
     });
 
-    expect(base.price).toBe(166);
+    expect(base.price).toBe(236);
     expect(light.price).toBeGreaterThan(base.price);
     expect(moderate.price).toBeGreaterThan(light.price);
     expect(heavy.price).toBeGreaterThan(moderate.price);
@@ -54,7 +61,7 @@ describe('dethatching pricing hardening', () => {
       thatchDepthInches: 0.75,
     });
 
-    expect(result.price).toBeGreaterThan(166);
+    expect(result.price).toBeGreaterThan(236);
     expect(result.cleanupLevel).toBe('light');
     expect(result.requestedCleanupLevel).toBe('none');
     expect(result.cleanupPriceAdder).toBeGreaterThan(0);
@@ -87,7 +94,7 @@ describe('dethatching pricing hardening', () => {
     });
 
     expect(result.price).toBeNull();
-    expect(result.estimatedPrice).toBe(150);
+    expect(result.estimatedPrice).toBe(195);
     expect(result.requiresManagerApproval).toBe(true);
     expect(result.managerApprovalReason).toBe('st_augustine_dethatching');
     expect(result.managerApprovalSatisfied).toBe(false);
@@ -135,7 +142,7 @@ describe('dethatching pricing hardening', () => {
     });
 
     expect(large.price).toBeNull();
-    expect(large.estimatedPrice).toBe(315);
+    expect(large.estimatedPrice).toBe(385);
     expect(large.manualReviewReasons).toContain('large_lawn_dethatching_manual_review');
     expect(heavy.manualReviewReasons).toContain('heavy_cleanup_required');
   });

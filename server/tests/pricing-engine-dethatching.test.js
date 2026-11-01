@@ -1,14 +1,16 @@
 const { generateEstimate, priceDethatching } = require('../services/pricing-engine');
 const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 
-function legacyDethatchingPrice(lawnSqFt) {
+// Labor (double pass + setup at $35/h) + $2.10/1,000 sf material + the Classen TR-20H's
+// $27.91 a job (owner 2026-11-01: (2,453.99 - 500 salvage) / (7 years x 10 jobs)), at a 60% margin.
+function formulaDethatchingPrice(lawnSqFt) {
   const timeMin = lawnSqFt / 100 + lawnSqFt / 200 + 30;
-  const cost = 35 * (timeMin / 60) + (lawnSqFt / 1000) * 2.10;
+  const cost = 35 * (timeMin / 60) + (lawnSqFt / 1000) * 2.10 + 27.91;
   return Math.max(150, Math.round(cost / 0.40));
 }
 
 describe('dethatching pricing hardening', () => {
-  test('keeps default no-cleanup/easy-access price compatible with the legacy formula', () => {
+  test('default no-cleanup/easy-access price is the labor + material + machine formula', () => {
     const result = priceDethatching(4500, {
       cleanupLevel: 'none',
       access: 'easy',
@@ -16,7 +18,7 @@ describe('dethatching pricing hardening', () => {
       thatchDepthInches: 0.75,
     });
 
-    expect(result.price).toBe(legacyDethatchingPrice(4500));
+    expect(result.price).toBe(formulaDethatchingPrice(4500));
     expect(result.cleanupLevel).toBe('none');
     expect(result.access).toBe('easy');
     expect(result.basePrice).toBe(result.price);

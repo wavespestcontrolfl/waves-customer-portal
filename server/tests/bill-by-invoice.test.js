@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const {
   billByInvoiceProposal, billByInvoiceEstimateIds, billByInvoiceVisit, billByInvoiceInvoice,
+  wonAuthoredProposal, wonProposalInvoice,
 } = require('../services/bill-by-invoice');
 const {
   resolveExtendedLane, resolvePerApplicationCharge, billByInvoiceDemotedPrediction,
@@ -106,6 +107,43 @@ describe('billByInvoiceVisit / billByInvoiceInvoice / billByInvoiceEstimateIds',
 
   test('a failed read throws (each caller picks its own direction)', async () => {
     await expect(billByInvoiceVisit(fakeConn(tables, { fail: 'estimates' }), { id: 'ss-bbi', source_estimate_id: 'est-bbi' }))
+      .rejects.toThrow('estimates read failed');
+  });
+});
+
+describe('wonAuthoredProposal / wonProposalInvoice: a won proposal in any billing mode', () => {
+  const tables = {
+    invoices: [{ id: 'inv-bare', scheduled_service_id: 'ss-card', service_record_id: null }],
+    service_records: [{ id: 'rec-1', scheduled_service_id: 'ss-bbi' }],
+    scheduled_services: [
+      { id: 'ss-bbi', source_estimate_id: 'est-bbi' }, { id: 'ss-card', source_estimate_id: 'est-card' },
+      { id: 'ss-open', source_estimate_id: 'est-open' }, { id: 'ss-none', source_estimate_id: null },
+    ],
+    estimates: [
+      estimateRow(), estimateRow({ id: 'est-card', bill_by_invoice: false }), estimateRow({ id: 'est-open', status: 'sent' }),
+    ],
+  };
+
+  test('accepted and authored, whatever the billing mode; never an open quote, a synthesized or a non-proposal estimate', () => {
+    expect(wonAuthoredProposal(estimateRow())).toMatchObject({ enabled: true });
+    expect(wonAuthoredProposal(estimateRow({ bill_by_invoice: false }))).toMatchObject({ enabled: true });
+    expect(wonAuthoredProposal(estimateRow({ status: 'viewed' }))).toBeNull();
+    expect(wonAuthoredProposal(estimateRow({ estimate_data: { proposal: { ...AUTHORED_PROPOSAL, synthesized: true } } }))).toBeNull();
+    expect(wonAuthoredProposal(estimateRow({ estimate_data: { services: [] } }))).toBeNull();
+    expect(wonAuthoredProposal(null)).toBeNull();
+  });
+
+  test('an invoice bills such a visit through its own visit, its service record, or a bare id read first', async () => {
+    expect(await wonProposalInvoice(fakeConn(tables), { id: 'i', scheduled_service_id: 'ss-card', service_record_id: null })).toBe(true);
+    expect(await wonProposalInvoice(fakeConn(tables), { id: 'i', scheduled_service_id: null, service_record_id: 'rec-1' })).toBe(true);
+    expect(await wonProposalInvoice(fakeConn(tables), { id: 'inv-bare' })).toBe(true);
+    expect(await wonProposalInvoice(fakeConn(tables), { id: 'i', scheduled_service_id: 'ss-open', service_record_id: null })).toBe(false);
+    expect(await wonProposalInvoice(fakeConn(tables), { id: 'i', scheduled_service_id: 'ss-none', service_record_id: null })).toBe(false);
+    expect(await wonProposalInvoice(fakeConn(tables), { id: 'i', scheduled_service_id: null, service_record_id: null })).toBe(false);
+  });
+
+  test('a failed read throws', async () => {
+    await expect(wonProposalInvoice(fakeConn(tables, { fail: 'estimates' }), { id: 'i', scheduled_service_id: 'ss-bbi', service_record_id: null }))
       .rejects.toThrow('estimates read failed');
   });
 });

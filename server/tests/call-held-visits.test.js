@@ -9,7 +9,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
-const { computeHeldVisits, listHeldVisits } = require('../services/call-held-visits');
+const { computeHeldVisits, listHeldVisits, dismissHeldVisit } = require('../services/call-held-visits');
 
 const NOW = new Date('2026-10-12T16:00:00Z');
 const CALL_AT = '2026-10-12T14:30:00Z'; // Oct 12, 10:30 AM ET
@@ -239,6 +239,12 @@ describe('clearing rules', () => {
     expect(run([call()], [], [...closed, { call_log_id: 'call-1', status: 'open', resolution_source: null }])).toHaveLength(1);
     expect(run([call()], [], [{ call_log_id: 'call-1', status: 'resolved', resolution_source: 'auto' }])).toHaveLength(1);
     expect(run([call()], [], [{ call_log_id: 'call-2', status: 'dismissed', resolution_source: 'human' }])).toHaveLength(1);
+  });
+
+  // Owner 2026-11-01: Dismiss on the row means the office will not book it.
+  it('clears for good when the office dismissed the row on Dispatch', () => {
+    expect(run([call({ held_visit_dismissed_at: '2026-10-12T15:30:00.000Z' })])).toEqual([]);
+    expect(run([call({ held_visit_dismissed_at: null })])).toHaveLength(1);
   });
 });
 
@@ -554,8 +560,46 @@ describe('listHeldVisits reads the old day of a move', () => {
     expect(rows[0]).toMatchObject({ kind: 'move_day_only', from_date_et: FROM, from_visit_id: 'visit-old', caller_name: 'Pat Sample' });
     // The sandbox-call filter stays on the call read.
     expect(logs.call_log.some(([m, sql]) => m === 'whereRaw' && /<> \?/.test(sql) && /COALESCE/.test(sql))).toBe(true);
+    // The call read carries the Dismiss stamp that computeHeldVisits filters on.
+    expect(logs.call_log.some(([m, ...cols]) => m === 'select' && cols.includes("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"))).toBe(true);
     const sched = logs.scheduled_services;
     expect(sched.find(([m, col]) => m === 'select' && col === 'id')).toBeTruthy();
     expect(sched.some(([m, sql, binds]) => m === 'whereRaw' && /= ANY\(\?\)/.test(sql) && JSON.stringify(binds) === JSON.stringify([[FROM]]))).toBe(true);
+  });
+});
+
+describe('dismissHeldVisit (Dismiss on Dispatch, owner 2026-11-01)', () => {
+  const watchdog = require('../services/call-booking-miss-watchdog');
+  afterEach(() => { db.mockReset(); jest.restoreAllMocks(); });
+
+  function updater(returned, log) {
+    const qb = {
+      where: jest.fn((...args) => { log.push(['where', ...args]); return qb; }),
+      update: jest.fn((...args) => { log.push(['update', ...args]); return Promise.resolve(returned); }),
+    };
+    return qb;
+  }
+
+  it('stamps the call once, keeping a first stamp, and closes its booking-miss bells as the admin', async () => {
+    const log = [];
+    db.mockImplementation(() => updater([{ id: 'call-1' }], log));
+    db.raw = jest.fn((sql, binds) => ({ sql, binds }));
+    const close = jest.spyOn(watchdog, 'closeBookingMissBellsForCall').mockResolvedValue(2);
+    await expect(dismissHeldVisit('call-1', { by: 'tech-1', now: NOW })).resolves.toEqual({ found: true, closedBells: 2 });
+    expect(db).toHaveBeenCalledWith('call_log');
+    expect(log[0]).toEqual(['where', { id: 'call-1' }]);
+    const [, payload, returning] = log[1];
+    expect(returning).toEqual(['id']);
+    expect(payload.metadata.sql).toMatch(/COALESCE\(metadata->'held_visit_dismissed', \?::jsonb\)/);
+    expect(JSON.parse(payload.metadata.binds[0])).toEqual({ at: NOW.toISOString(), by: 'tech-1' });
+    expect(close).toHaveBeenCalledWith('call-1', { by: 'tech-1' });
+  });
+
+  it('an unknown call is not found and closes nothing', async () => {
+    db.mockImplementation(() => updater([], []));
+    db.raw = jest.fn((sql, binds) => ({ sql, binds }));
+    const close = jest.spyOn(watchdog, 'closeBookingMissBellsForCall');
+    await expect(dismissHeldVisit('call-x', { by: 'tech-1', now: NOW })).resolves.toEqual({ found: false, closedBells: 0 });
+    expect(close).not.toHaveBeenCalled();
   });
 });

@@ -12,6 +12,7 @@ const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
 const { listPortalPayments } = require('../portal-payment-history');
 const { listPortalServiceHistory } = require('../portal-service-history');
+const portalOpen = require('./portal-open');
 const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
 
 // Tool definitions in Anthropic format
@@ -199,19 +200,22 @@ const REQUEST_EMAIL_CHANGE_TOOL = {
 };
 // The portal tool set for the gates that are live: the four base tools, the
 // fact and action tools, then escalate last.
-function portalToolsFor({ payments = false, visits = false, reservice = false, reserviceLawn = false, emailChange = false } = {}) {
+// GATE_PORTAL_CHAT_OPEN adds request_quote and request_move, and gives
+// escalate its optional `say` field.
+function portalToolsFor({ payments = false, visits = false, reservice = false, reserviceLawn = false, emailChange = false, open = false } = {}) {
   return [
     ...PORTAL_TOOLS.slice(0, 4),
     ...(payments ? [SHOW_RECENT_PAYMENTS_TOOL] : []),
     ...(visits ? [GET_RECENT_VISITS_TOOL] : []),
     ...(reservice ? [reserviceLawn ? OFFER_RESERVICE_LAWN_TOOL : OFFER_RESERVICE_TOOL] : []),
     ...(emailChange ? [REQUEST_EMAIL_CHANGE_TOOL] : []),
-    PORTAL_TOOLS[4],
+    ...(open ? [portalOpen.REQUEST_QUOTE_TOOL, portalOpen.REQUEST_MOVE_TOOL] : []),
+    open ? portalOpen.escalateToolWithSay(PORTAL_TOOLS[4]) : PORTAL_TOOLS[4],
   ];
 }
 const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
 
-const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice', 'request_email_change']);
+const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice', 'request_email_change', 'request_quote', 'request_move']);
 const TOOL_CANCELLATION_CODES = new Set(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014']);
 const TOOL_CANCELLATION_NAMES = new Set(['AbortError', 'KnexTimeoutError']);
 
@@ -228,6 +232,8 @@ const TOOL_EXECUTORS = new Map([
   ['get_recent_visits', ({ customerId, actions, cards, turn }) => getRecentVisits(customerId, actions, cards, turn)],
   ['offer_reservice', ({ customerId, input, actions, context, turn }) => offerReservice(customerId, input, actions, context, turn)],
   ['request_email_change', ({ customerId, input, context, turn }) => requestEmailChange(customerId, input, context, turn)],
+  ['request_quote', ({ customerId, input, context, turn }) => portalOpen.requestQuote(customerId, input, context, turn)],
+  ['request_move', ({ input, context }) => portalOpen.requestMove(input, context)],
   // Handled in assistant.js before reaching here.
   ['escalate', ({ input }) => ({ escalated: true, reason: input.reason })],
 ]);
@@ -248,7 +254,9 @@ function addAction(actions, action) {
 // scoped to a non-primary saved property (or its scope could not be read);
 // `context.customerMessage`: the customer's message this turn;
 // `context.emailChange` / `context.conversationId`: the email-change lane is
-// live, and the chat whose messages it checks.
+// live, and the chat whose messages it checks. `context.open` /
+// `context.recordMove`: GATE_PORTAL_CHAT_OPEN is live, and the writer of the
+// chat's moving hand-off item.
 // `turn` belongs to authenticated portal chat. SMS uses this same dispatcher
 // without the portal coordinator and keeps its existing execution policy.
 // The portal caller is wired in the separate coordinator activation slice.

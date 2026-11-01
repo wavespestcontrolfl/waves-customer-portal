@@ -1,0 +1,173 @@
+[
+  {
+    "name": "get_upcoming_services",
+    "description": "Get the authenticated customer's next scheduled services. Shows dates, service types, and arrival windows.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_pest_advice",
+    "description": "Get SWFL-specific pest or lawn care advice from the knowledge base. Ask about any pest, treatment, or lawn issue.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "description": "The pest, lawn issue, or treatment to look up"
+        }
+      },
+      "required": [
+        "topic"
+      ]
+    }
+  },
+  {
+    "name": "offer_reschedule_link",
+    "description": "Show the customer a Reschedule button for each of their upcoming visits that can be moved online. The button opens the self-serve page with the real open times. Use for any request to reschedule, move, postpone, or bring forward a visit.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "open_portal_section",
+    "description": "Show the customer a button that opens a page of their portal. billing: every payment with its receipt, saved cards, Auto Pay. upcoming_visits: scheduled visits. service_reports: completed visits and their reports. plan: what their plan includes. documents: agreements and paperwork. referrals: referral code and rewards.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "section": {
+          "type": "string",
+          "enum": [
+            "billing",
+            "upcoming_visits",
+            "service_reports",
+            "plan",
+            "documents",
+            "referrals"
+          ]
+        }
+      },
+      "required": [
+        "section"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "show_recent_payments",
+    "description": "Show the customer a card with their most recent payments: date, amount, what it was for, the card or bank used, status, and a receipt link, plus an Open Billing button. Use for any question about a charge, a payment, a receipt, or whether a payment went through. You will be told only that the card was shown and how many payments it lists; the figures are on the card, not in your reply.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_recent_visits",
+    "description": "Get the customer's most recent completed visits (date, service, the technician's first name, the kinds of product applied) and show the customer a card with each visit's reviewed summary and report link. Use for any question about what was done at a visit, when the last visit was, or where a service report is.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "offer_reservice",
+    "description": "For a customer reporting household pests, or a lawn problem, back between scheduled visits: checks whether their plan covers a free re-service for that service line and, when it does, shows a button that opens its booking page. If one is already booked, shows a button to move it instead. You are told which case applies.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "service_line": {
+          "type": "string",
+          "enum": [
+            "pest",
+            "lawn"
+          ],
+          "description": "pest: household insects and spiders (the server checks the customer's own words). lawn: weeds, turf insects, brown, thin or dying grass. Rodents, termites, mosquitoes and tree or shrub problems are separate services and are never a free re-service."
+        },
+        "current_problem": {
+          "type": "boolean",
+          "description": "lawn only. true ONLY when the customer says, in this message, that the lawn problem is happening now. false for a question about lawn care, a what-if, a problem in the past, or one they say is fixed."
+        },
+        "customer_quote": {
+          "type": "string",
+          "description": "lawn only. The customer's exact words from this message that describe the lawn problem, copied word for word."
+        }
+      },
+      "required": [
+        "service_line"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "request_email_change",
+    "description": "For a customer who wants the email on their account changed. Call it first with customer_confirmed false: you are told to read the address back. Call it again with customer_confirmed true only after the customer confirms that address in their next message: the confirmed address then goes to the team, who make the change. You cannot change the email yourself.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "new_email": {
+          "type": "string",
+          "description": "The new email address, copied exactly as the customer typed it in this chat. Never guess, complete or correct one."
+        },
+        "customer_confirmed": {
+          "type": "boolean",
+          "description": "true ONLY when the customer's message this turn confirms the address you read back in your last reply. false when they have only just given it, corrected it, or are unsure."
+        }
+      },
+      "required": [
+        "new_email",
+        "customer_confirmed"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "escalate",
+    "description": "Hand the conversation to a human team member. Use for: cancellations, complaints, billing disputes, a visit that cannot be moved online, account changes, or anything uncertain.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Why this needs human attention"
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "urgent",
+            "normal",
+            "low"
+          ]
+        },
+        "not_supported": {
+          "type": "boolean",
+          "description": "true ONLY when the customer asked for something you have no way to do or answer. Leave it out for cancellations, schedule changes, complaints, billing, pricing, or anything the team handles by design."
+        },
+        "topic": {
+          "type": "string",
+          "enum": [
+            "cancellation",
+            "schedule_change",
+            "billing",
+            "complaint",
+            "account_change",
+            "add_service",
+            "pest_problem",
+            "manager",
+            "other"
+          ],
+          "description": "What the customer needs. account_change: email, phone, address, gate code, pets. add_service: adding or quoting a service. pest_problem: pests or a lawn problem back between visits. other: none of the rest."
+        }
+      },
+      "required": [
+        "reason",
+        "topic"
+      ]
+    }
+  }
+]
