@@ -25,6 +25,7 @@ jest.mock('../config/feature-gates', () => ({
   commercialProposalSignLive: () => false,
   commercialAutopayLive: jest.fn(() => false),
   buildingUseTaxLive: jest.fn(() => false),
+  commercialFirstVisitLive: jest.fn(() => false),
   lawnSprayNoTaxLive: jest.fn(() => true),
   satellitePalmCountTypedLive: jest.fn(() => false),
 }));
@@ -1949,6 +1950,27 @@ describe('GET /:id/proposal accountCommercial (a residential account\'s bills ca
     const res = await invoke('/:id/proposal', 'get');
     expect(res.body.accountCommercial).toBeNull();
     expect(res.body.proposal).toBeTruthy();
+  });
+});
+
+describe('GET /:id/proposal firstVisit (the builder Readiness card)', () => {
+  const firstVisitModule = require('../services/commercial-first-visit');
+  const { commercialFirstVisitLive } = require('../config/feature-gates');
+  afterEach(() => jest.restoreAllMocks());
+
+  test('GATE_COMMERCIAL_FIRST_VISIT on: serves the readiness of this estimate', async () => {
+    commercialFirstVisitLive.mockReturnValueOnce(true);
+    const readiness = jest.spyOn(firstVisitModule, 'firstVisitReadiness').mockResolvedValue({ state: 'office', reason: 'itemization' });
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.firstVisit).toEqual({ state: 'office', reason: 'itemization' });
+    expect(readiness).toHaveBeenCalledWith(expect.objectContaining({ id: row.id }), expect.anything());
+  });
+
+  test('gate off: no firstVisit key and no read', async () => {
+    const readiness = jest.spyOn(firstVisitModule, 'firstVisitReadiness');
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body).not.toHaveProperty('firstVisit');
+    expect(readiness).not.toHaveBeenCalled();
   });
 });
 

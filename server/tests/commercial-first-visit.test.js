@@ -552,6 +552,56 @@ describe('the signed premises are the customer\'s address', () => {
   });
 });
 
+describe('firstVisitReadiness (the builder Readiness card, owner 2026-11-01)', () => {
+  test('an eligible plan and customer: the signer books the first visit online', async () => {
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'online' });
+  });
+
+  test('a live linked visit: booked, with its day, whatever the plan says', async () => {
+    rows.scheduled_services = { id: VISIT_ID, scheduled_date: '2026-11-12', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed' };
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ bill_by_invoice: true })))
+      .toEqual({ state: 'booked', visit: { date: '2026-11-12', windowStart: '09:00', windowEnd: '10:00' } });
+  });
+
+  const pestProgram = (frequencyPerYear, pricePerApplication) => ({ service: 'pest', label: 'Pest control', frequencyPerYear, pricePerApplication, taxable: true });
+  test.each([
+    ['a Bill-by-invoice proposal', { bill_by_invoice: true }, 'bill_by_invoice'],
+    ['Net 30 payment terms', { proposal: { commercialTerms: { paymentTerms: 'net30' } } }, 'payment_terms'],
+    ['corrective work beside the program', { proposal: { correctiveWork: [{ label: 'Seal entry gaps', amount: 250, taxable: true }] } }, 'itemization'],
+    ['a lawn program', { programs: [{ service: 'lawn', label: 'Lawn care', frequencyPerYear: 12, pricePerApplication: 81.67, taxable: false }] }, 'not_pest'],
+    ['two schedules', { programs: [pestProgram(12, 81.67), pestProgram(4, 100)] }, 'cadence'],
+    ['a visit over 90 minutes', { engineMinutes: 200 }, 'too_long'],
+  ])('%s: the office books it, and the reason says why', async (_label, options, reason) => {
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(options))).toEqual({ state: 'office', reason });
+  });
+
+  test('no linked customer, or a customer row that is gone: no_customer', async () => {
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ customer_id: null }))).toEqual({ state: 'office', reason: 'no_customer' });
+    rows.customers = undefined;
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'no_customer' });
+  });
+
+  test('the proposal names other premises than the customer address: address', async () => {
+    const estimate = proposalEstimate({ proposal: { propertyAddress: '200 Harbor Way, Sarasota, FL 34236' } });
+    expect(await firstVisit.firstVisitReadiness(estimate)).toEqual({ state: 'office', reason: 'address' });
+  });
+
+  test('the completion bill would carry other tax than the quote: tax', async () => {
+    mockPreview.mockResolvedValue({ tax_amount: 0 });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'tax' });
+  });
+
+  test('a failed read: unknown, never a throw', async () => {
+    rows.scheduled_services = () => { throw new Error('synthetic read failure'); };
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'unknown' });
+  });
+
+  test('firstVisitPlan keeps its plan-or-null contract for the customer path', () => {
+    expect(firstVisit.firstVisitPlan(proposalEstimate({ bill_by_invoice: true }))).toBeNull();
+    expect(firstVisit.firstVisitPlan(proposalEstimate())).toMatchObject({ visitsPerYear: 12, pattern: 'monthly' });
+  });
+});
+
 describe('firstVisitOnlineFor (the signed-agreement alert copy)', () => {
   test('true for an eligible estimate with no visit; false with the gate off or a visit booked', async () => {
     expect(await firstVisit.firstVisitOnlineFor(ESTIMATE_ID)).toBe(true);

@@ -12,7 +12,7 @@ import { EstimateSendProvider, useEstimateSend } from '../../components/admin/Es
 import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
 import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
 import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, NET60_PAYMENT_TERMS, normalizeTermText } from '@commercial-agreement-terms';
-import { formatETDateTime } from '../../lib/timezone';
+import { formatETDateOnly, formatETDateTime } from '../../lib/timezone';
 import { PROGRAM_TEMPLATES } from '../../lib/commercialProgramTemplates';
 import useIsMobile from '../../hooks/useIsMobile';
 
@@ -122,6 +122,36 @@ const ROW_TAX_NOTICES = {
   true: 'Visit bills do not read this box: this service is usually billed with tax here.',
   false: 'Visit bills do not read this box: this service is usually billed without tax here.',
 };
+// The Readiness card (owner 2026-11-01, proposal readiness): what online signing and the first visit will do for this
+// proposal, and why not, from GET /proposal (commercialAgreement, firstVisit). Staff copy; the customer page is unchanged.
+const FIRST_VISIT_OFFICE_REASONS = {
+  bill_by_invoice: 'Bill by invoice proposals are booked by the office.',
+  not_authored: 'Save the proposal first.',
+  payment_terms: 'Online booking needs Auto Pay or no payment terms.',
+  itemization: 'Online booking needs service programs only, with no building line items or one-time work.',
+  not_pest: 'Online booking is for pest programs only.',
+  cadence: 'Every program needs the same schedule: 12, 6, 4, 3, 2 or 1 visits a year.',
+  price: 'A year of visits must equal the quoted annual price.',
+  too_long: 'The visit is over 90 minutes.',
+  no_customer: 'Link a customer account first.',
+  address: "The customer's address on file differs from the proposal's address.",
+  tax: 'The tax on a visit bill would not match the quote, or could not be checked.',
+};
+const readinessDate = (value) => formatETDateTime(value, { month: 'short', day: 'numeric', year: 'numeric' });
+function signingLine(agreement) {
+  if (agreement.state === 'signed') return `Agreement signed ${readinessDate(agreement.signedAt)}`;
+  if (agreement.signingBlocked) return agreement.note;
+  if (agreement.state === 'awaiting') return `Agreement awaiting signature since ${readinessDate(agreement.since)}`;
+  return 'Ready: the customer can sign on the proposal page. Agreement not started';
+}
+function firstVisitLine(firstVisit) {
+  if (firstVisit.state === 'online') return 'The customer books it online after signing.';
+  if (firstVisit.state === 'booked') {
+    return `Booked for ${formatETDateOnly(firstVisit.visit?.date, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}`;
+  }
+  if (firstVisit.state === 'office') return `The office books it. ${FIRST_VISIT_OFFICE_REASONS[firstVisit.reason] || ''}`.trim();
+  return 'Could not check right now.';
+}
 function rowTaxNotice(buildingUse, row, registry, savedRules, taxBasis) {
   const billed = billedTaxableFor(buildingUse, row, registry, savedRules, taxBasis);
   return billed === undefined || billed === (row.taxable === true) ? null : ROW_TAX_NOTICES[billed];
@@ -430,6 +460,8 @@ function CommercialProposalEditor() {
   const [prospectBrief, setProspectBrief] = useState(null);
   // GATE_COMMERCIAL_PROPOSAL_SIGN: { state: 'none' | 'awaiting' | 'signed', since?, signedAt?, signingBlocked? }; null with the gate off.
   const [commercialAgreement, setCommercialAgreement] = useState(null);
+  // GATE_COMMERCIAL_FIRST_VISIT: { state: 'online' | 'booked' | 'office' | 'unknown', reason?, visit? }; null with the gate off.
+  const [firstVisit, setFirstVisit] = useState(null);
   const [briefOpen, setBriefOpen] = useState(true);
 
   const locked = lockReason(estimate);
@@ -609,6 +641,7 @@ function CommercialProposalEditor() {
     setTermChoices(termChoicesOf(loadedTerms));
     setProspectBrief(data.prospectBrief || null);
     setCommercialAgreement(data.commercialAgreement || null);
+    setFirstVisit(data.firstVisit || null);
     // An already-authored proposal means download/send are meaningful now.
     setSavedOnce(p.enabled === true);
     setLoadedAuthored(p.enabled === true && p.synthesized !== true);
@@ -2307,6 +2340,27 @@ function CommercialProposalEditor() {
 
         {/* Sidebar: totals + actions */}
         <div className="w-full lg:w-80 shrink-0 lg:sticky lg:top-4 space-y-4">
+          {(commercialAgreement || firstVisit) && (
+            <Card data-testid="proposal-readiness">
+              <CardHeader>
+                <CardTitle>Readiness</CardTitle>
+              </CardHeader>
+              <CardBody className="space-y-3 text-14">
+                {commercialAgreement && (
+                  <div>
+                    <div className="font-medium text-zinc-500">Online signing</div>
+                    <div data-testid="proposal-agreement-status" className="text-zinc-900">{signingLine(commercialAgreement)}</div>
+                  </div>
+                )}
+                {firstVisit && (
+                  <div>
+                    <div className="font-medium text-zinc-500">First visit</div>
+                    <div data-testid="proposal-first-visit" className="text-zinc-900">{firstVisitLine(firstVisit)}</div>
+                  </div>
+                )}
+              </CardBody>
+            </Card>
+          )}
           <Card>
             <CardHeader>
               <CardTitle>Totals</CardTitle>
@@ -2369,23 +2423,12 @@ function CommercialProposalEditor() {
             </CardBody>
           </Card>
 
-          {(estimate?.sentAt || estimate?.viewedAt || commercialAgreement) && (
+          {(estimate?.sentAt || estimate?.viewedAt) && (
             <Card>
               <CardBody className="space-y-1 text-12 text-zinc-500">
                 {estimate?.sentAt && <div>Sent {new Date(estimate.sentAt).toLocaleString()}</div>}
                 {estimate?.viewedAt && <div>Viewed {new Date(estimate.viewedAt).toLocaleString()}</div>}
                 {estimate?.acceptedAt && <div>Won {new Date(estimate.acceptedAt).toLocaleString()}</div>}
-                {commercialAgreement && (
-                  <div data-testid="proposal-agreement-status">
-                    {commercialAgreement.signingBlocked === 'terms_conflict'
-                      ? commercialAgreement.note
-                      : commercialAgreement.state === 'signed'
-                      ? `Agreement signed ${formatETDateTime(commercialAgreement.signedAt, { month: 'short', day: 'numeric', year: 'numeric' })}`
-                      : commercialAgreement.state === 'awaiting'
-                        ? `Agreement awaiting signature since ${formatETDateTime(commercialAgreement.since, { month: 'short', day: 'numeric', year: 'numeric' })}`
-                        : 'Agreement not started'}
-                  </div>
-                )}
               </CardBody>
             </Card>
           )}
