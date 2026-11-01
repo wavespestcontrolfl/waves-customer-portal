@@ -27,11 +27,16 @@ jest.mock('../middleware/admin-auth', () => {
 });
 const mockCommit = jest.fn(async () => ({ ok: true, results: [], qualityDates: [] }));
 const mockGetOptions = jest.fn(async () => ({ ok: true, sameDay: [{ kind: 'same_day' }], days: [{ kind: 'day' }] }));
+const MOCK_PICK_OFFER = { available: true, unavailableReason: null, pickBy: '2099-01-03T01:00:00.000Z', pickByLabel: 'Fri 8 PM', previewByReason: { weather_rain: 'Hi there - rain' }, segments: 2 };
+const mockCustomerPickOffer = jest.fn(async () => MOCK_PICK_OFFER);
+const mockHandOff = jest.fn(async () => ({ ok: true, textSent: true, needsAttention: [], qualityDates: [], results: [] }));
 jest.mock('../services/rain-out', () => ({
   commit: (...a) => mockCommit(...a),
   getOptions: (...a) => mockGetOptions(...a),
   previewMovedSms: jest.fn(async () => ({ ok: true })),
   checkTarget: jest.fn(async () => ({ ok: true })),
+  customerPickOffer: (...a) => mockCustomerPickOffer(...a),
+  handOffToCustomer: (...a) => mockHandOff(...a),
 }));
 const mockApplyProposal = jest.fn(async () => ({ ok: true }));
 const mockPreviewProposal = jest.fn(async () => ({}));
@@ -118,6 +123,8 @@ beforeEach(() => {
   mockFindRescheduleOptions.mockClear();
   mockApplyProposal.mockClear();
   mockPreviewProposal.mockClear();
+  mockCustomerPickOffer.mockClear();
+  mockHandOff.mockClear();
 });
 afterAll(() => {
   if (prevGate === undefined) delete process.env.GATE_TECH_MOVE_SWITCH;
@@ -197,6 +204,46 @@ describe('every move route refuses a technician whose switch is off', () => {
     expect(mockFindRescheduleOptions).not.toHaveBeenCalled();
     expect(mockPreviewProposal).not.toHaveBeenCalled();
     expect(mockApplyProposal).not.toHaveBeenCalled();
+    // GATE_QUICKMOVE_CUSTOMER_PICK unset: no offer is built.
+    expect(mockCustomerPickOffer).not.toHaveBeenCalled();
+  });
+
+  // GATE_QUICKMOVE_CUSTOMER_PICK on (owner 2026-11-01): the two options refusals keep their exact status and
+  // { error, code } and offer the one option a switch-off technician may use; every other move route is unchanged.
+  describe('with GATE_QUICKMOVE_CUSTOMER_PICK on', () => {
+    beforeEach(() => { process.env.GATE_QUICKMOVE_CUSTOMER_PICK = 'true'; });
+    afterEach(() => { delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK; });
+
+    test.each(routes.filter(([method, path]) => method === 'GET' && path.endsWith('/rain-out-options')))(
+      '%s %s: the same 403 and { error, code }, plus customerPickOnly and the offer',
+      async (method, path) => {
+        const r = await call(method, path);
+        expect(r.status).toBe(403);
+        expect(r.body).toEqual({
+          error: 'Ask the office to move this visit.', code: 'move_not_allowed', customerPickOnly: true, customerPick: MOCK_PICK_OFFER,
+        });
+        expect(mockCustomerPickOffer).toHaveBeenCalledWith('svc-1');
+        expect(mockGetOptions).not.toHaveBeenCalled();
+      },
+    );
+
+    test.each(routes.filter(([, path]) => !path.endsWith('/rain-out-options')))('%s %s: still refused exactly', async (method, path, body) => {
+      const r = await call(method, path, body);
+      expect(r.status).toBe(403);
+      expect(r.body).toEqual({ error: 'Ask the office to move this visit.', code: 'move_not_allowed' });
+      expect(mockCommit).not.toHaveBeenCalled();
+      expect(mockCustomerPickOffer).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['/api/tech/services/svc-1/customer-pick'],
+      ['/api/admin/dispatch/svc-1/customer-pick'],
+    ])('POST %s: the hand-off is allowed', async (path) => {
+      const r = await call('POST', path, { reasonCode: 'weather_rain' });
+      expect(r.status).toBe(200);
+      expect(mockHandOff).toHaveBeenCalledTimes(1);
+      expect(mockCommit).not.toHaveBeenCalled();
+    });
   });
 });
 
