@@ -24061,7 +24061,9 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // GATE_AWAY_WATCH: the Away Watch lines the job card carries for this visit (a WaveGuard member away, the visit's
     // own day inside the window) ride every answer to the tech's Visit Brief, so the tech knows about the 3-photo
     // closeout rule and the Welcome Home sweep before the visit. The back day says when a home stands empty, so the
-    // lines go out only after the same reassignment recheck the facts block runs. Fail-soft: an outage omits the key.
+    // lines go out only after the same reassignment recheck the facts block runs, and a reassignment that recheck
+    // catches withholds the WHOLE answer like the facts block does (the payload may already hold live access codes
+    // and the cached brief). Fail-soft: an outage omits the key.
     const withAwayWatch = async (payload) => {
       try {
         const { etCalendarDayOf: dayOf } = require('../utils/datetime-et');
@@ -24071,7 +24073,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
           .where({ 'scheduled_services.id': svc.id })
           .modify((q) => technicianCurrentVisitFilter(req, q))
           .first('scheduled_services.id');
-        return stillOwned ? { ...payload, awayWatch } : payload;
+        return stillOwned ? { ...payload, awayWatch } : { brief: null };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief Away Watch lines failed for ${svc.id}: ${err.message}`);
         return payload;

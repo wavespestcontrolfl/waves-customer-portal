@@ -288,11 +288,12 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
         expect(body.awayWatch).toEqual(AWAY);
         expect(body.brief).toBeTruthy();
       });
-      // Reassigned between the fetch and the lines: the former technician never gets the away window.
-      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1', pre_service_brief: null, pre_service_brief_type: null } }, { ownsVisit: true, recheckOwns: false });
+      // Reassigned between the fetch and the lines: the former technician gets nothing at all, not the away window
+      // and not the served brief either (the same withhold-everything rule as the facts block).
+      stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, customer_id: 'cust-1' } }, { ownsVisit: true, recheckOwns: false });
       await withServer(async (base) => {
         const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
-        expect(body).not.toHaveProperty('awayWatch');
+        expect(body).toEqual({ brief: null });
       });
       // A read failure omits the key, never the brief.
       mockAwayWatchCardLines.mockRejectedValue(new Error('db down'));
