@@ -104,6 +104,7 @@ function builder(table, inTrx) {
         const row = inTrx ? state.locked : state.service;
         return row ? { ...row } : undefined;
       }
+      if (table === 'recurring_plan_alerts') return state.lapsedAlert ? { ...state.lapsedAlert } : undefined;
       if (table === 'sms_templates') {
         if (state.templateError) throw state.templateError;
         return state.template ? { ...state.template } : undefined;
@@ -242,6 +243,12 @@ describe('handOffToCustomer refusals write nothing', () => {
   ])('%s: %s', async (_label, patch, reason) => {
     state.service = { ...state.service, ...patch };
     expect(await handOff()).toEqual({ ok: false, reason });
+    expectNothingWritten();
+  });
+
+  test('a plan with an unresolved plan_lapsed alert: plan_lapsed (Auto-Dispatch skips it)', async () => {
+    state.lapsedAlert = { id: 7, alert_type: 'plan_lapsed' };
+    expect(await handOff()).toEqual({ ok: false, reason: 'plan_lapsed' });
     expectNothingWritten();
   });
 

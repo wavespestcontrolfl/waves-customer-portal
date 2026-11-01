@@ -232,6 +232,14 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     ['the template row disabled (the ops kill switch)', async () => {
       await trx('sms_templates').update({ is_active: false });
     }, 'pick_template_unavailable'],
+    // Auto-Dispatch could never book these if the customer does not pick.
+    ['an active customer whose plan carries an unresolved plan_lapsed alert', async () => {
+      const { recurring_parent_id: parentId } = await trx('scheduled_services').where({ id: serviceId }).first('recurring_parent_id');
+      await trx('recurring_plan_alerts').insert({ recurring_parent_id: parentId, customer_id: customerId, alert_type: 'plan_lapsed' });
+    }, 'plan_lapsed'],
+    ['a visit staff locked from Auto-Dispatch', async () => {
+      await trx('scheduled_services').where({ id: serviceId }).update({ auto_dispatch_locked: true });
+    }, 'auto_dispatch_held'],
   ])('%s: refused before any write', async (_label, arrange, reason) => {
     await insertVisit();
     await arrange();

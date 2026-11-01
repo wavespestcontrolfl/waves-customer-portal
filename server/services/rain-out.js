@@ -3108,6 +3108,10 @@ async function pickContext(service, now) {
   // Auto-Dispatch skips a visit with no usable location (MISSING_GEO), so it
   // could never book one the customer leaves alone.
   if (!require('./auto-dispatch/geo').resolveGeo(service)) return { ok: false, reason: 'no_location' };
+  // Nor one whose plan carries an unresolved plan_lapsed alert (its own
+  // plan-active gate, same read and same fail-open rule).
+  const plan = await require('./auto-dispatch/eligibility').isRecurringPlanActive(service, db);
+  if (!plan.active) return { ok: false, reason: 'plan_lapsed' };
   // The landed row (confirmation cleared) must stay one the customer may see
   // and move, or the link would open a refusal.
   const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
@@ -3379,6 +3383,7 @@ const PICK_REFUSAL_COPY = {
   no_phone: 'There is no phone number to text.',
   auto_dispatch_off: 'Auto-Dispatch is off, so nothing would book this visit if the customer does not pick.',
   no_location: 'This visit has no map location, so Auto-Dispatch could not book it if the customer does not pick.',
+  plan_lapsed: 'This plan has lapsed, so Auto-Dispatch would not book this visit if the customer does not pick.',
   office_review_pending: 'This booking is waiting for office review.',
   customer_texts_off: 'This customer does not get texts.',
   text_check_failed: 'Could not check whether this customer gets texts. Try again.',
