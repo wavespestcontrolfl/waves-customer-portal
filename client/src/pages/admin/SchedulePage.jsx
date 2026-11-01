@@ -11919,8 +11919,8 @@ export function StationMarkingStep({
   );
 }
 
-// onAdded: the host card reads the recap again after a clip lands (a late clip re-renders the recap).
-function RecapCapture({ serviceId, onAdded }) {
+// onChange: the host card reads the recap again after a clip is added or removed (either re-renders it).
+function RecapCapture({ serviceId, onChange }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
   const rolePickerRef = useModalFocus(!!pendingFile, () => setPendingFile(null));
@@ -11960,7 +11960,7 @@ function RecapCapture({ serviceId, onAdded }) {
         method: "POST", body: JSON.stringify({ bytes: file.size, durationMs }),
       });
       await refresh();
-      if (onAdded) onAdded();
+      if (onChange) onChange();
     } catch (e) {
       // Surface the server reason (e.g. unsupported iPhone HEVC/MOV or HEIC) instead of
       // silently dropping the clip; closeout stays unblocked either way.
@@ -11969,7 +11969,7 @@ function RecapCapture({ serviceId, onAdded }) {
   };
 
   const remove = async (id) => {
-    try { await adminFetch(`/admin/dispatch/${serviceId}/recap-media/${id}`, { method: "DELETE" }); await refresh(); } catch { /* ignore */ }
+    try { await adminFetch(`/admin/dispatch/${serviceId}/recap-media/${id}`, { method: "DELETE" }); await refresh(); if (onChange) onChange(); } catch { /* ignore */ }
   };
 
   const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
@@ -12152,10 +12152,10 @@ export function PestRecapCard({ serviceId }) {
           <button style={btn("#111", "#fff")} disabled={busy} onClick={regenerate}>Try again</button>
         </>
       )}
-      {/* Late clips: until the recap is approved or sent, a clip added here re-renders it (server gate GATE_RECAP_GLASSES_CLIPS). */}
-      {glassesClips && ((s === "ready" && !state.approved) || s === "failed") && (
+      {/* Late clips: until the recap is approved or sent, a clip added or removed here re-renders it — only while the server says so (lateClips = GATE_RECAP_GLASSES_CLIPS). */}
+      {glassesClips && state.lateClips && ((s === "ready" && !state.approved) || s === "failed") && (
         <div style={{ marginTop: 12 }}>
-          <RecapCapture serviceId={serviceId} onAdded={refresh} />
+          <RecapCapture serviceId={serviceId} onChange={refresh} />
         </div>
       )}
       {s === "error" && <div style={{ fontSize: 12.5, color: D.muted }}>Couldn’t load recap status.</div>}

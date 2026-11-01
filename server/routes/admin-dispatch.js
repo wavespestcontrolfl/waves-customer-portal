@@ -7529,6 +7529,7 @@ router.get('/:serviceId/recap-video', async (req, res, next) => {
     }
     const recap = await recapPipeline.getRecap(req.params.serviceId);
     if (!recap) return res.json({ exists: false, status: 'none' });
+    const gates = require('../config/feature-gates');
     return res.json({
       exists: true,
       status: recap.status,
@@ -7537,6 +7538,9 @@ router.get('/:serviceId/recap-video', async (req, res, next) => {
       sent: Boolean(recap.sent_at),
       durationMs: recap.duration_ms || null,
       error: recap.last_error || null,
+      // GATE_RECAP_GLASSES_CLIPS: the card offers late clips (an add or a removal re-renders the
+      // recap) only while the server re-renders for them.
+      lateClips: typeof gates.recapGlassesClipsLive === 'function' && gates.recapGlassesClipsLive(),
     });
   } catch (err) { return next(err); }
 });
@@ -7630,7 +7634,7 @@ router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) =
       const failure = recapMedia.confirmFailure(result.reason);
       return res.status(failure.status).json({ error: failure.error });
     }
-    await recapPipeline.rebuildRecapForLateClip(req.params.serviceId, result.row);
+    await recapPipeline.markRecapClipsChanged(req.params.serviceId, result.row);
     return res.json({ ok: true, id: result.row.id, status: result.row.status });
   } catch (err) { return next(err); }
 });
@@ -7646,8 +7650,9 @@ router.get('/:serviceId/recap-media', async (req, res, next) => {
 router.delete('/:serviceId/recap-media/:mediaId', async (req, res, next) => {
   try {
     if (!(await recapOwnerOk(req, res))) return undefined;
-    const ok = await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.serviceId });
-    return res.json({ ok });
+    const removed = await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.serviceId });
+    if (removed) await recapPipeline.markRecapClipsChanged(req.params.serviceId, removed);
+    return res.json({ ok: Boolean(removed) });
   } catch (err) { return next(err); }
 });
 

@@ -177,6 +177,7 @@ async function listMedia(scheduledServiceId, knex = db) {
     .select('id', 'media_type', 'role', 'caption', 'status', 'duration_ms', 'created_at');
 }
 
+// Returns the removed row (false when there was none), so a caller can tell whether a rendered clip went.
 async function deleteMedia(mediaId, { scheduledServiceId = null } = {}, knex = db) {
   const lookup = knex('service_media').where({ id: mediaId });
   if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
@@ -187,7 +188,7 @@ async function deleteMedia(mediaId, { scheduledServiceId = null } = {}, knex = d
     try { await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: row.s3_key })); }
     catch (err) { logger.warn(`[recap-media] S3 delete failed for ${row.s3_key}: ${err.message}`); }
   }
-  return true;
+  return row;
 }
 
 // Ready media → the composition's media[] (presigned GET srcs, beat role, caption).

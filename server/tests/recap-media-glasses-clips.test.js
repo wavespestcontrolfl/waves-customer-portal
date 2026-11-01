@@ -137,11 +137,11 @@ function markKnex({ fail = false } = {}) {
 }
 const READY = { status: 'ready' };
 
-describe('rebuildRecapForLateClip', () => {
+describe('markRecapClipsChanged', () => {
   test('gate off: nothing is touched', async () => {
     delete process.env.GATE_RECAP_GLASSES_CLIPS;
     const { knex, calls } = markKnex();
-    expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ marked: false });
+    expect(await pipeline.markRecapClipsChanged('v1', READY, { knex })).toEqual({ marked: false });
     expect(calls.raw).toBe(0);
   });
 
@@ -150,19 +150,19 @@ describe('rebuildRecapForLateClip', () => {
 
     test('a ready clip marks the recap row', async () => {
       const { knex, calls } = markKnex();
-      expect(await pipeline.rebuildRecapForLateClip('v1', READY, { knex })).toEqual({ marked: true, status: 'pending' });
+      expect(await pipeline.markRecapClipsChanged('v1', READY, { knex })).toEqual({ marked: true, status: 'pending' });
       expect(calls.raw).toBe(1);
     });
 
     test('a processing clip does not count yet', async () => {
       const { knex, calls } = markKnex();
-      expect(await pipeline.rebuildRecapForLateClip('v1', { status: 'processing' }, { knex })).toEqual({ marked: false });
+      expect(await pipeline.markRecapClipsChanged('v1', { status: 'processing' }, { knex })).toEqual({ marked: false });
       expect(calls.raw).toBe(0);
     });
 
     test('a failed mark is swallowed', async () => {
       const { knex } = markKnex({ fail: true });
-      await expect(pipeline.rebuildRecapForLateClip('v1', READY, { knex })).resolves.toEqual({ marked: false });
+      await expect(pipeline.markRecapClipsChanged('v1', READY, { knex })).resolves.toEqual({ marked: false });
     });
   });
 });

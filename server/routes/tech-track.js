@@ -1620,7 +1620,7 @@ router.post('/:id/recap-media/:mediaId/confirm', async (req, res, next) => {
       const failure = recapMedia.confirmFailure(result.reason);
       return res.status(failure.status).json({ error: failure.error });
     }
-    await recapPipeline.rebuildRecapForLateClip(req.params.id, result.row);
+    await recapPipeline.markRecapClipsChanged(req.params.id, result.row);
     return res.json({ ok: true, id: result.row.id, status: result.row.status });
   } catch (err) { return next(err); }
 });
@@ -1636,7 +1636,8 @@ router.get('/:id/recap-media', async (req, res, next) => {
 router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
   try {
     if (!(await loadOwnedServiceOr403(req, res))) return undefined;
-    await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.id });
+    const removed = await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.id });
+    if (removed) await recapPipeline.markRecapClipsChanged(req.params.id, removed);
     return res.json({ ok: true });
   } catch (err) { return next(err); }
 });

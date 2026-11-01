@@ -161,32 +161,32 @@ describeDb('late recap clips: the send and render races', () => {
 
     test('a built, unsent recap goes back to pending with its approval cleared', async () => {
       const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(1), approved_by: 'tech', attempts: 3 });
-      expect(await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: true, status: 'pending' });
+      expect(await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: true, status: 'pending' });
       expect(await row(recap.id)).toEqual({ status: 'pending', approved_at: null, clip_revision: 1, attempts: 0 });
     });
 
     test('a rendering recap keeps rendering; only the count moves', async () => {
       const recap = await insertRecap({ status: 'rendering', locked_at: minutesAgo(1), attempts: 1 });
-      expect(await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: true, status: 'rendering' });
+      expect(await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: true, status: 'rendering' });
       expect(await row(recap.id)).toMatchObject({ status: 'rendering', clip_revision: 1, attempts: 1 });
     });
 
     test('a recap being sent keeps its approval', async () => {
       const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(1), send_attempt_at: minutesAgo(1) });
-      await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP);
+      await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP);
       expect(await row(recap.id)).toMatchObject({ status: 'approved', approved_at: expect.any(Date) });
     });
 
     test('a sent recap is not touched', async () => {
       const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(9), sent_at: minutesAgo(8) });
-      expect(await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: false, status: null });
+      expect(await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: false, status: null });
       expect(await row(recap.id)).toMatchObject({ status: 'approved', clip_revision: 0 });
     });
 
     test('gate off: nothing is touched', async () => {
       delete process.env.GATE_RECAP_GLASSES_CLIPS;
       const recap = await insertRecap({ status: 'ready' });
-      expect(await pipeline.rebuildRecapForLateClip(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: false });
+      expect(await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: false });
       expect(await row(recap.id)).toMatchObject({ status: 'ready', clip_revision: 0 });
     });
   });
@@ -206,7 +206,7 @@ describeDb('late recap clips: the send and render races', () => {
     test('gate on: a clip counted during the render queues one more render, and nothing can be approved or sent', async () => {
       process.env.GATE_RECAP_GLASSES_CLIPS = 'true';
       const claimed = await claimedRecap();
-      await pipeline.rebuildRecapForLateClip(claimed.scheduled_service_id, { status: 'ready' });
+      await pipeline.markRecapClipsChanged(claimed.scheduled_service_id, { status: 'ready' });
 
       expect(await pipeline.processRecap(claimed)).toMatchObject({ status: 'pending' });
       expect(await pipeline.approveRecap(claimed.scheduled_service_id, { approvedBy: 'tech' }))

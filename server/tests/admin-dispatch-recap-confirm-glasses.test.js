@@ -1,7 +1,7 @@
 /**
- * POST /admin/dispatch/:serviceId/recap-media/:mediaId/confirm with GATE_RECAP_GLASSES_CLIPS:
- * the refusal copy follows the gate, and a confirmed clip asks the pipeline to rebuild an unsent
- * recap (the pipeline decides; its own tests are in recap-media-glasses-clips.test.js).
+ * Recap clip routes with GATE_RECAP_GLASSES_CLIPS: the confirm's refusal copy follows the gate; a
+ * confirmed or removed clip asks the pipeline to mark the recap (the pipeline decides; its SQL runs in
+ * recap-late-clip-races.db.test.js); GET /recap-video tells the card whether late clips are live.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -27,10 +27,13 @@ jest.mock('../services/time-tracking', () => ({ adminEditEntry: jest.fn(async ()
 jest.mock('../services/service-report/recap-media', () => ({
   ...jest.requireActual('../services/service-report/recap-media'),
   confirmUpload: jest.fn(),
+  deleteMedia: jest.fn(),
 }));
 jest.mock('../services/service-report/recap-pipeline', () => ({
   ...jest.requireActual('../services/service-report/recap-pipeline'),
-  rebuildRecapForLateClip: jest.fn(async () => ({ marked: true, status: 'pending' })),
+  markRecapClipsChanged: jest.fn(async () => ({ marked: true, status: 'pending' })),
+  getRecap: jest.fn(),
+  callbackRecapRetired: jest.fn(async () => false),
 }));
 
 const router = require('../routes/admin-dispatch');
@@ -39,8 +42,8 @@ const recapPipeline = require('../services/service-report/recap-pipeline');
 
 const CONFIRM_PATH = '/:serviceId/recap-media/:mediaId/confirm';
 
-function invoke(params, body) {
-  const layer = router.stack.find((l) => l.route && l.route.path === CONFIRM_PATH && l.route.methods.post);
+function invoke(params, body, { path = CONFIRM_PATH, method = 'post' } = {}) {
+  const layer = router.stack.find((l) => l.route && l.route.path === path && l.route.methods[method]);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = {
     statusCode: 200,
@@ -67,7 +70,7 @@ test('a confirmed clip asks the pipeline to rebuild, then answers with the clip 
   const res = await invoke(params, { durationMs: 45000 });
   expect(res.statusCode).toBe(200);
   expect(res.body).toEqual({ ok: true, id: 'm1', status: 'processing' });
-  expect(recapPipeline.rebuildRecapForLateClip).toHaveBeenCalledWith('visit-1', { id: 'm1', status: 'processing' });
+  expect(recapPipeline.markRecapClipsChanged).toHaveBeenCalledWith('visit-1', { id: 'm1', status: 'processing' });
 });
 
 test('a refused clip never reaches the rebuild', async () => {
@@ -76,7 +79,7 @@ test('a refused clip never reaches the rebuild', async () => {
   const res = await invoke(params, { durationMs: 70000 });
   expect(res.statusCode).toBe(413);
   expect(res.body.error).toBe('Clip too long — keep glasses clips under 60 seconds.');
-  expect(recapPipeline.rebuildRecapForLateClip).not.toHaveBeenCalled();
+  expect(recapPipeline.markRecapClipsChanged).not.toHaveBeenCalled();
 });
 
 test('gate off: a too-large clip keeps the 20-second copy', async () => {
@@ -85,4 +88,31 @@ test('gate off: a too-large clip keeps the 20-second copy', async () => {
   const res = await invoke(params, { durationMs: 5000 });
   expect(res.statusCode).toBe(413);
   expect(res.body.error).toBe('Clip too large — keep it under ~20 seconds.');
+});
+
+describe('removing a clip', () => {
+  const DELETE = { path: '/:serviceId/recap-media/:mediaId', method: 'delete' };
+
+  test('a removed clip asks the pipeline to mark the recap with the removed row', async () => {
+    recapMedia.deleteMedia.mockResolvedValue({ id: 'm1', status: 'ready' });
+    const res = await invoke(params, {}, DELETE);
+    expect(res.body).toEqual({ ok: true });
+    expect(recapPipeline.markRecapClipsChanged).toHaveBeenCalledWith('visit-1', { id: 'm1', status: 'ready' });
+  });
+
+  test('a clip that was not there marks nothing', async () => {
+    recapMedia.deleteMedia.mockResolvedValue(false);
+    const res = await invoke(params, {}, DELETE);
+    expect(res.body).toEqual({ ok: false });
+    expect(recapPipeline.markRecapClipsChanged).not.toHaveBeenCalled();
+  });
+});
+
+test('GET /recap-video says whether late clips are live, by the gate', async () => {
+  const GET = { path: '/:serviceId/recap-video', method: 'get' };
+  recapPipeline.getRecap.mockResolvedValue({ status: 'ready', sent_at: null });
+  process.env.GATE_RECAP_GLASSES_CLIPS = 'true';
+  expect((await invoke({ serviceId: 'visit-1' }, {}, GET)).body).toMatchObject({ status: 'ready', lateClips: true });
+  delete process.env.GATE_RECAP_GLASSES_CLIPS;
+  expect((await invoke({ serviceId: 'visit-1' }, {}, GET)).body).toMatchObject({ status: 'ready', lateClips: false });
 });

@@ -113,14 +113,14 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
   }
 }
 
-// GATE_RECAP_GLASSES_CLIPS: a clip confirmed before the recap was sent must be in the video the
-// customer gets. One UPDATE on the recap row, so it orders against a render's finish, an approval and
-// a send claim: clip_revision counts the clip; a built recap (not pending or rendering) with no send
-// in progress goes back to pending, approval cleared; a pending one renders with the clip anyway, and
-// a rendering one renders again at its finish (processRecap compares clip_revision). A sent recap, or
-// one being sent, keeps its video. Only a clip the renderer uses (`ready`) counts; a `processing` clip
-// counts when it is cut. Never throws: the confirm that called it has already succeeded.
-async function rebuildRecapForLateClip(scheduledServiceId, media, { knex = db, now = new Date() } = {}) {
+// GATE_RECAP_GLASSES_CLIPS: a clip confirmed, or removed, before the recap was sent must be in (or out
+// of) the video the customer gets. One UPDATE on the recap row, so it orders against a render's finish,
+// an approval and a send claim: clip_revision counts the change; a built recap (not pending or rendering)
+// with no send in progress goes back to pending, approval cleared; a pending one renders the new clip set
+// anyway, and a rendering one renders again at its finish (processRecap compares clip_revision). A sent
+// recap, or one being sent, keeps its video. Only a clip the renderer uses (`ready`) counts; a
+// `processing` clip counts when it is cut. Never throws: the confirm or removal has already happened.
+async function markRecapClipsChanged(scheduledServiceId, media, { knex = db, now = new Date() } = {}) {
   if (!glassesClipsOn()) return { marked: false };
   if (media?.status !== 'ready') return { marked: false };
   try {
@@ -276,6 +276,6 @@ async function processDueRecaps({ now = new Date(), limit = CLAIM_LIMIT } = {}, 
 
 module.exports = {
   CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION, RECAP_SEND_STALE_MS,
-  getRecap, enqueueRecap, rebuildRecapForLateClip, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender,
+  getRecap, enqueueRecap, markRecapClipsChanged, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender,
   claimDueRecaps, recoverStaleRecaps, processRecap, processDueRecaps,
 };

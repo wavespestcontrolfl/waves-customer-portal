@@ -11,8 +11,8 @@ vi.mock('../../hooks/useFeatureFlag', () => ({
 
 const json = (body, ok = true) => ({ ok, status: ok ? 200 : 500, json: async () => body });
 
-// recapState is what GET /recap-video answers; confirming a clip re-queues the recap (the server does the same).
-function stubServer(recapState) {
+// recapState is what GET /recap-video answers; confirming or removing a clip re-queues the recap (the server does the same).
+function stubServer(recapState, items = []) {
   const calls = [];
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url).replace(/^.*\/api/, '');
@@ -21,7 +21,8 @@ function stubServer(recapState) {
     if (path.endsWith('/recap-video')) return json(recapState.current);
     if (path.endsWith('/recap-media/presign')) return json({ mediaId: 'media-1', uploadUrl: 'https://upload.test/media-1' });
     if (path.endsWith('/recap-media/media-1/confirm')) { recapState.current = { exists: true, status: 'pending' }; return json({ ok: true, id: 'media-1', status: 'ready' }); }
-    if (path.endsWith('/recap-media')) return json({ items: [] });
+    if (path.endsWith('/recap-media/media-9') && options.method === 'DELETE') { recapState.current = { exists: true, status: 'pending' }; return json({ ok: true }); }
+    if (path.endsWith('/recap-media')) return json({ items });
     if (String(url).startsWith('https://upload.test')) return json({});
     throw new Error(`Unexpected request: ${url}`);
   });
@@ -47,7 +48,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const READY = { exists: true, status: 'ready', ready: true, approved: false, sent: false };
+const READY = { exists: true, status: 'ready', ready: true, approved: false, sent: false, lateClips: true };
 
 describe('PestRecapCard late clips (recap-glasses-v1)', () => {
   it('offers no capture without the flag', async () => {
@@ -56,6 +57,25 @@ describe('PestRecapCard late clips (recap-glasses-v1)', () => {
     await screen.findByText('Approve & send');
     expect(screen.queryByRole('button', { name: 'From Photos' })).not.toBeInTheDocument();
     expect(screen.queryByText('Recap clips')).not.toBeInTheDocument();
+  });
+
+  it('offers no capture while the server gate is off, even with the flag', async () => {
+    glassesFlag = true;
+    stubServer({ current: { ...READY, lateClips: false } });
+    render(<PestRecapCard serviceId="visit-1" />);
+    await screen.findByText('Approve & send');
+    expect(screen.queryByRole('button', { name: 'From Photos' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Recap clips')).not.toBeInTheDocument();
+  });
+
+  it('removing a clip from an unapproved recap shows the re-render', async () => {
+    glassesFlag = true;
+    const calls = stubServer({ current: READY }, [{ id: 'media-9', role: 'perimeter', media_type: 'video', status: 'ready' }]);
+    render(<PestRecapCard serviceId="visit-1" />);
+    fireEvent.click(await screen.findByRole('button', { name: '×' }));
+
+    expect(await screen.findByText(/Rendering the recap/)).toBeInTheDocument();
+    expect(calls.some((c) => c.method === 'DELETE' && c.path.endsWith('/recap-media/media-9'))).toBe(true);
   });
 
   it('does not offer a late clip once the recap is approved', async () => {
