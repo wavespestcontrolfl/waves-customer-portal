@@ -78,13 +78,18 @@ async function assignableTechnicianId(conn, technicianId) {
  * The slot a term's seeded visits copy, or null. `{ technicianId, windowStart }`:
  * technicianId is null when the source's technician is not assignable (the
  * time may still be copied); windowStart is null when the source starts off the
- * hour (the technician is still copied). Reads in a savepoint. Never throws.
+ * hour (the technician is still copied). Null when the seed's property is not
+ * resolved: coverageSeedPropertyId gives null for a customer with several active
+ * properties (or a deactivated primary), and those seeds stay office-placed;
+ * another property's visit must never supply their technician or time. A
+ * customer with no property row gets its primary backfilled by
+ * soleActivePropertyId, so it resolves. Reads in a savepoint. Never throws.
  */
 async function coverageSeriesSlot(conn, {
   customerId, coverageServiceType, propertyId = null, today, normalize = defaultNormalize,
 } = {}) {
   try {
-    if (!customerId || !coverageServiceType) return null;
+    if (!customerId || !coverageServiceType || !propertyId) return null;
     const wanted = normalize(coverageServiceType);
     return await inSavepoint(conn, async (q) => {
       const rows = await q('scheduled_services')
@@ -94,7 +99,7 @@ async function coverageSeriesSlot(conn, {
         .whereNotNull('window_start')
         .select('id', 'service_type', 'property_id', 'scheduled_date', 'technician_id', 'window_start');
       const sources = (rows || []).filter((row) => normalize(row.service_type) === wanted
-        && (!propertyId || row.property_id == null || String(row.property_id) === String(propertyId))
+        && (row.property_id == null || String(row.property_id) === String(propertyId))
         && hhmm(row.window_start));
       const source = pickSource(sources, today);
       if (!source) return null;

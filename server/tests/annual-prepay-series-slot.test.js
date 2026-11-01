@@ -25,7 +25,7 @@ function makeConn({ visits = [], tech = undefined, absences = [], isTransaction 
 
 const normalize = (v) => String(v || '').trim().replace(/\s+/g, ' ') || null;
 const activeTech = { id: 'tech-1', employment_status: 'active', field_dispatchable: true };
-const base = { customerId: 'cust-1', coverageServiceType: 'Monthly Pest Control', propertyId: null, today: '2026-11-01', normalize };
+const base = { customerId: 'cust-1', coverageServiceType: 'Monthly Pest Control', propertyId: 'prop-1', today: '2026-11-01', normalize };
 const visit = (over) => ({
   id: 'v1', service_type: 'Monthly Pest Control', property_id: null, scheduled_date: '2026-10-20',
   technician_id: 'tech-1', window_start: '09:00:00', ...over,
@@ -75,6 +75,27 @@ describe('coverageSeriesSlot', () => {
     });
     await expect(coverageSeriesSlot(conn, { ...base, propertyId: 'prop-1' })).resolves.toEqual({ technicianId: 'tech-1', windowStart: '14:00' });
     expect(calls.whereNotIn).toEqual(['status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']]);
+  });
+
+  // Pre-push audit P1: coverageSeedPropertyId gives null for a customer with several active properties; those seeds
+  // stay office-placed, so no slot is read at all.
+  test('an unresolved seed property (several active properties) gives null and reads nothing', async () => {
+    const { conn } = makeConn({ visits: [visit({ property_id: 'prop-2' })], tech: activeTech });
+    await expect(coverageSeriesSlot(conn, { ...base, propertyId: null })).resolves.toBeNull();
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('two properties: the seed for property A never takes property B\'s technician or time', async () => {
+    const { conn } = makeConn({
+      visits: [
+        visit({ id: 'b-new', property_id: 'prop-2', technician_id: 'tech-2', scheduled_date: '2026-10-30', window_start: '15:00' }),
+        visit({ id: 'a-old', property_id: 'prop-1', technician_id: 'tech-1', scheduled_date: '2026-09-01', window_start: '08:00' }),
+      ],
+      tech: activeTech,
+    });
+    await expect(coverageSeriesSlot(conn, { ...base, propertyId: 'prop-1' })).resolves.toEqual({ technicianId: 'tech-1', windowStart: '08:00' });
+    const { conn: onlyB } = makeConn({ visits: [visit({ property_id: 'prop-2', technician_id: 'tech-2' })], tech: activeTech });
+    await expect(coverageSeriesSlot(onlyB, { ...base, propertyId: 'prop-1' })).resolves.toBeNull();
   });
 
   test('a visit with no property matches a known property', async () => {
