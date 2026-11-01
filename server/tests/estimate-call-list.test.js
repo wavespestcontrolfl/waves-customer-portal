@@ -293,6 +293,8 @@ describe('lastCalledAt (one batched read)', () => {
     // Only a call the CUSTOMER answered counts: status and bridged_at describe the staff leg, so the
     // read requires the bell's answered-leg proof (customer_leg completed with seconds, or a recording).
     expect(q.whereRaw).toHaveBeenCalledWith(CUSTOMER_ANSWERED_SQL);
+    // A voice-agent sandbox (test) call never counts as calling the customer.
+    expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(??, '') <> ?", ['source', 'voice_relay_sandbox']);
     expect(CUSTOMER_ANSWERED_SQL).toContain('bridged_at IS NOT NULL');
     expect(CUSTOMER_ANSWERED_SQL).toContain("metadata->'customer_leg'->>'status' = 'completed'");
     expect(CUSTOMER_ANSWERED_SQL).toContain('recording_duration_seconds > 0');
