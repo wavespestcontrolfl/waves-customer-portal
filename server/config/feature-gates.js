@@ -9766,6 +9766,14 @@ function prepaySeedSeriesSlotLive() {
 function payerPacketAutosendLive() {
   return process.env.GATE_PAYER_PACKET_AUTOSEND === 'true';
 }
+// GATE_RECAP_GLASSES_CLIPS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the visit recap accepts
+// clips from the phone's photo library (camera glasses): a video may run up to 60 s and 200 MB, a clip over 20 s is
+// stored as `processing` (the renderer skips it until it is cut), and a clip added after the recap rendered, but
+// before it is sent, re-renders it (services/service-report/recap-media.js, recap-pipeline.js). Off = 20 s and 80 MB,
+// every clip `ready`, no rebuild on a late clip. Kill = unset.
+function recapGlassesClipsLive() {
+  return process.env.GATE_RECAP_GLASSES_CLIPS === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9946,3 +9954,5 @@ module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
 module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;
 // GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
 module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
+// GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
+module.exports.recapGlassesClipsLive = recapGlassesClipsLive;

@@ -5,6 +5,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TechRecapCapture from './TechRecapCapture';
 
+let glassesFlag = false;
+vi.mock('../../hooks/useFeatureFlag', () => ({
+  useFeatureFlag: (key) => key === 'recap-glasses-v1' && glassesFlag,
+}));
+
 const SERVICE_ONE = { id: 'service-one' };
 const SERVICE_TWO = { id: 'service-two' };
 
@@ -25,6 +30,7 @@ async function tagPerimeter(name) {
 }
 
 beforeEach(() => {
+  glassesFlag = false;
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200 }));
 });
 
@@ -479,5 +485,51 @@ describe('TechRecapCapture upload recovery', () => {
 
     await waitFor(() => expect(pathsMatching(request, '/service-one/recap-media/unmounted-media/confirm')).toHaveLength(1));
     expect(request.mock.calls.filter(([path, options]) => isListRequest(path, options))).toHaveLength(1);
+  });
+});
+
+describe('TechRecapCapture From Photos (recap-glasses-v1)', () => {
+  const noItems = vi.fn(async () => ({ items: [] }));
+
+  it('shows no From Photos picker without the flag', async () => {
+    render(<TechRecapCapture service={SERVICE_ONE} request={noItems} />);
+    expect(screen.queryByRole('button', { name: 'From Photos' })).not.toBeInTheDocument();
+    expect(document.querySelectorAll('input[type="file"]')).toHaveLength(1);
+    expect(document.querySelector('input[type="file"]')).toHaveAttribute('capture', 'environment');
+    await waitFor(() => expect(noItems).toHaveBeenCalled());
+  });
+
+  it('adds a photo-library video picker with no capture attribute, and its pick uploads like a camera clip', async () => {
+    glassesFlag = true;
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() }));
+    const realCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation((tag, options) => {
+      if (tag !== 'video') return realCreate(tag, options);
+      const video = { preload: '', duration: 45 };
+      Object.defineProperty(video, 'src', { set() { setTimeout(() => video.onloadedmetadata(), 0); } });
+      return video;
+    });
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      if (path.endsWith('/presign')) return { mediaId: 'media-glasses', uploadUrl: 'https://upload.test/media-glasses' };
+      if (path.endsWith('/media-glasses/confirm')) return { ok: true, id: 'media-glasses', status: 'processing' };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    expect(screen.getByRole('button', { name: 'From Photos' })).toBeInTheDocument();
+    const inputs = document.querySelectorAll('input[type="file"]');
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]).toHaveAttribute('capture', 'environment');
+    expect(inputs[1]).not.toHaveAttribute('capture');
+    expect(inputs[1]).toHaveAttribute('accept', 'video/*');
+
+    fireEvent.change(inputs[1], { target: { files: [new File(['clip'], 'glasses.mp4', { type: 'video/mp4' })] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Spray — perimeter' }));
+
+    await waitFor(() => expect(pathsMatching(request, '/media-glasses/confirm')).toHaveLength(1));
+    expect(JSON.parse(pathsMatching(request, '/media-glasses/confirm')[0][1].body)).toEqual({ durationMs: 45000 });
+    expect(JSON.parse(pathsMatching(request, '/presign')[0][1].body)).toMatchObject({ role: 'perimeter', mediaType: 'video', contentType: 'video/mp4' });
+    expect(fetch).toHaveBeenCalledWith('https://upload.test/media-glasses', expect.objectContaining({ method: 'PUT' }));
   });
 });
