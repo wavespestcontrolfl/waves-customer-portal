@@ -6,8 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PipelineAnalytics, {
   aggregateServiceLineRows,
   classifyEstimateServiceLine,
+  isCallTodayEstimate,
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
+  isPickReasonEstimate,
   withinDateRange,
 } from "./PipelineAnalytics";
 
@@ -822,5 +824,126 @@ describe("PipelineAnalytics drafts tile", () => {
       estimate({ id: "failed-no-link", status: "send_failed", token: null, monthlyTotal: 100 }),
     ] });
     expect(screen.getByText("1 ready to send · 1 need pricing")).toBeInTheDocument();
+  });
+});
+
+
+describe("isCallTodayEstimate (GATE_ESTIMATE_CALL_LIST)", () => {
+  const NOW_MS = NOW.getTime();
+  const viewedOffer = (hours, extra = {}) =>
+    estimate({
+      status: "viewed",
+      customerPhone: "+19415550101",
+      viewedAt: hoursAgo(hours),
+      lastViewedAt: hoursAgo(hours),
+      ...extra,
+    });
+  const minutesAgo = (minutes) =>
+    new Date(NOW_MS - minutes * 60000).toISOString();
+
+  it("covers 2h through 48h of the last engagement, edges included", () => {
+    const at = (minutes) =>
+      isCallTodayEstimate(
+        viewedOffer(0, { viewedAt: minutesAgo(minutes), lastViewedAt: minutesAgo(minutes) }),
+        NOW_MS,
+      );
+    expect(at(119)).toBe(false); // 1h59m
+    expect(at(120)).toBe(true); // 2h
+    expect(at(48 * 60)).toBe(true); // 48h
+    expect(at(48 * 60 + 1)).toBe(false); // 48h01m
+  });
+
+  it("keys off the latest touch, not the first view", () => {
+    const reopened = viewedOffer(60, { lastViewedAt: hoursAgo(5) });
+    expect(isCallTodayEstimate(reopened, NOW_MS)).toBe(true);
+    const freshClick = viewedOffer(30, { lastClickedAt: hoursAgo(1) });
+    expect(isCallTodayEstimate(freshClick, NOW_MS)).toBe(false);
+  });
+
+  it("drops the offer once someone called or followed up after the last engagement", () => {
+    expect(isCallTodayEstimate(viewedOffer(10, { lastCalledAt: hoursAgo(3) }), NOW_MS)).toBe(false);
+    expect(isCallTodayEstimate(viewedOffer(10, { lastFollowUpAt: hoursAgo(3) }), NOW_MS)).toBe(false);
+    // Contact BEFORE the customer's last touch does not count.
+    expect(isCallTodayEstimate(viewedOffer(10, { lastCalledAt: hoursAgo(20), lastFollowUpAt: hoursAgo(30) }), NOW_MS)).toBe(true);
+    expect(isCallTodayEstimate(viewedOffer(10, { lastCalledAt: null }), NOW_MS)).toBe(true);
+  });
+
+  it("needs a viewed, unarchived offer with a phone", () => {
+    expect(isCallTodayEstimate(viewedOffer(10, { customerPhone: "" }), NOW_MS)).toBe(false);
+    expect(isCallTodayEstimate(viewedOffer(10, { customerPhone: undefined }), NOW_MS)).toBe(false);
+    expect(isCallTodayEstimate(viewedOffer(10, { archivedAt: hoursAgo(1) }), NOW_MS)).toBe(false);
+    expect(isCallTodayEstimate(viewedOffer(10, { status: "sent" }), NOW_MS)).toBe(false);
+    expect(isCallTodayEstimate(estimate({ status: "viewed", customerPhone: "+19415550101" }), NOW_MS)).toBe(false);
+  });
+
+  it("never shares an offer with Going cold or Follow-up overdue", () => {
+    for (let minutes = 0; minutes <= 9 * 24 * 60; minutes += 37) {
+      const offer = viewedOffer(0, { viewedAt: minutesAgo(minutes), lastViewedAt: minutesAgo(minutes) });
+      const buckets = [
+        isCallTodayEstimate(offer, NOW_MS),
+        isGoingColdEstimate(offer, NOW_MS),
+        isFollowUpOverdueEstimate(offer, NOW_MS),
+      ].filter(Boolean);
+      expect(buckets.length).toBeLessThanOrEqual(1);
+    }
+    const edge = viewedOffer(48);
+    expect(isCallTodayEstimate(edge, NOW_MS)).toBe(true);
+    expect(isGoingColdEstimate(edge, NOW_MS)).toBe(false);
+  });
+});
+
+describe("isPickReasonEstimate (GATE_ESTIMATE_CALL_LIST)", () => {
+  const NOW_MS = NOW.getTime();
+  const expired = (extra = {}) =>
+    estimate({
+      status: "expired",
+      disposition: "expired_viewed",
+      dispositionSource: "system",
+      expiresAt: daysAgo(3),
+      ...extra,
+    });
+
+  it("lists an opened offer the sweep expired in the last 30 days", () => {
+    expect(isPickReasonEstimate(expired(), NOW_MS)).toBe(true);
+    expect(isPickReasonEstimate(expired({ expiresAt: daysAgo(30) }), NOW_MS)).toBe(true);
+    expect(isPickReasonEstimate(expired({ expiresAt: daysAgo(31) }), NOW_MS)).toBe(false);
+  });
+
+  it("leaves out a staff reason, other dispositions, archived and non-expired rows", () => {
+    expect(isPickReasonEstimate(expired({ dispositionSource: "staff", disposition: "declined_price" }), NOW_MS)).toBe(false);
+    expect(isPickReasonEstimate(expired({ disposition: "expired_unviewed" }), NOW_MS)).toBe(false);
+    expect(isPickReasonEstimate(expired({ archivedAt: daysAgo(1) }), NOW_MS)).toBe(false);
+    expect(isPickReasonEstimate(expired({ status: "viewed" }), NOW_MS)).toBe(false);
+  });
+});
+
+describe("PipelineAnalytics call-list cards", () => {
+  const callable = estimate({
+    id: "callable",
+    status: "viewed",
+    customerPhone: "+19415550101",
+    viewedAt: hoursAgo(5),
+  });
+
+  it("gate off: no Call today or Pick reason card", () => {
+    renderAnalytics({ estimates: [callable] });
+    expect(screen.queryByText("Call today")).not.toBeInTheDocument();
+    expect(screen.queryByText("Pick reason")).not.toBeInTheDocument();
+  });
+
+  it("gate on: the Call today card shows its count and applies the filter", () => {
+    const onFilterChange = vi.fn();
+    render(
+      <PipelineAnalytics
+        estimates={[callable]}
+        activeFilter="all"
+        onFilterChange={onFilterChange}
+        callListEnabled
+      />,
+    );
+    const card = screen.getByText("Call today").closest("button");
+    expect(card).toHaveTextContent("1");
+    fireEvent.click(card);
+    expect(onFilterChange).toHaveBeenCalledWith("call_today");
   });
 });

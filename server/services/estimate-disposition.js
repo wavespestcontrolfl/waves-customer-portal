@@ -221,6 +221,28 @@ function staffDispositionUpdates(body = {}) {
   return { updates };
 }
 
+// A staff-stamped loss reason (decline modal, or the reason pick on an expired offer). Only
+// reads the row's own two columns; the sweep's system codes and customer reasons are not this.
+function isStaffLossRow(row) {
+  return row?.disposition_source === 'staff' && isStaffDispositionCode(row?.disposition);
+}
+
+// What a REVIVED offer sheds when it carried a staff loss reason: the offer is live again, so
+// the reason (and the legacy decline_reason label the staff path wrote beside it) must not
+// survive into the next expiry/decline COALESCE.
+const STAFF_LOSS_CLEARED_UPDATES = Object.freeze({
+  disposition: null,
+  disposition_source: null,
+  disposition_at: null,
+  disposition_note: null,
+  competitor_name: null,
+  competitor_price: null,
+  decline_reason: null,
+});
+
+// SQL twin of isStaffLossRow for set-based revives (siblings): true on the pre-update row.
+const STAFF_LOSS_ROW_SQL = "disposition_source = 'staff'";
+
 // Customer-facing soft-exit reasons (GATE_ESTIMATE_SOFT_EXIT). The chip keys
 // are the public API contract; each maps onto the SAME normalized codes the
 // staff decline modal writes, so win/loss analytics read one vocabulary
@@ -288,6 +310,9 @@ module.exports = {
   EXPIRED_DISPOSITION_SQL,
   isDispositionCode,
   isStaffDispositionCode,
+  isStaffLossRow,
+  STAFF_LOSS_CLEARED_UPDATES,
+  STAFF_LOSS_ROW_SQL,
   dispositionGroup,
   dispositionLabel,
   dispositionFromDeclineReason,

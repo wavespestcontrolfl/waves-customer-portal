@@ -278,6 +278,89 @@ describe('proposalTermsDueDate', () => {
     expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net30')), null, '2026-11-03')).toBeNull();
   });
 
+  // The agreement's Auto Pay paragraph: "cancel autopay with 30 days' written notice, after which invoices are due
+  // Net 30" (owner 2026-11-01, commercial audit fix 3). A real turn-off is autopay_log's latest toggle being a disable,
+  // after the proposal was made, with an enrollment before it; the column alone proves nothing (never-enrolled
+  // customers default to autopay_enabled = false).
+  describe('a won Auto Pay proposal after the customer turned Auto Pay off', () => {
+    const PROPOSAL_MADE = '2026-10-20T15:00:00Z';
+    const autopayRow = (extra = {}) => ({
+      status: 'accepted', bill_by_invoice: false, customer_id: 'cust-1', created_at: PROPOSAL_MADE,
+      estimate_data: { proposal: { ...SIESTA_PROPOSAL, enabled: true, commercialTerms: { paymentTerms: 'autopay' } } },
+      ...extra,
+    });
+    const enabled = (at) => ({ event_type: 'autopay_enabled', created_at: at });
+    const disabled = (at) => ({ event_type: 'autopay_disabled', created_at: at });
+    // Answers each table's read; autopay_log rows are given newest first, as the query orders them. `fail` names a
+    // table whose read rejects. `tables` lists the tables read.
+    const tablesConn = ({ estimate, customer = { autopay_enabled: false }, toggles = [], fail = null }) => {
+      const conn = jest.fn((table) => {
+        const answer = (value) => (fail === table ? Promise.reject(new Error(`${table} read failed`)) : Promise.resolve(value));
+        const q = {
+          where() { return q; }, whereIn() { return q; }, orderBy() { return q; }, limit() { return q; },
+          first: () => answer(table === 'estimates' ? estimate : customer),
+          select: () => answer(toggles),
+        };
+        return q;
+      });
+      conn.tables = () => conn.mock.calls.map(([table]) => table);
+      return conn;
+    };
+    const due = (conn) => proposalTermsDueDate(conn, 'est-1', '2026-11-03');
+
+    test('a turn-off after the proposal, following an enrollment, is due Net 30 from the base date', async () => {
+      expect(await due(tablesConn({ estimate: autopayRow(), toggles: [disabled('2026-11-01T12:00:00Z'), enabled('2026-10-22T12:00:00Z')] })))
+        .toBe('2026-12-03');
+      // An enrollment from before the proposal counts: the customer was on Auto Pay when the agreement took effect.
+      expect(await due(tablesConn({ estimate: autopayRow(), toggles: [disabled('2026-11-01T12:00:00Z'), enabled('2025-05-01T12:00:00Z')] })))
+        .toBe('2026-12-03');
+    });
+
+    test('every recorded turn-off counts, whatever its source (a detached card, an unchargeable replacement, a cancelled contract)', async () => {
+      for (const details of [{ source: 'payment_method_detached' }, { source: 'set_default_card' }, { reason: 'contract_cancelled' }]) {
+        const toggles = [{ ...disabled('2026-11-01T12:00:00Z'), details }, enabled('2026-10-22T12:00:00Z')];
+        expect(await due(tablesConn({ estimate: autopayRow(), toggles }))).toBe('2026-12-03');
+      }
+    });
+
+    test('never enrolled: the default false flag with no toggle, or a disable with no enrollment before it, keeps the caller\'s date', async () => {
+      expect(await due(tablesConn({ estimate: autopayRow(), toggles: [] }))).toBeNull();
+      expect(await due(tablesConn({ estimate: autopayRow(), toggles: [disabled('2026-11-01T12:00:00Z')] }))).toBeNull();
+    });
+
+    test('Auto Pay on, re-enabled since, or turned off before the proposal existed keeps the caller\'s date', async () => {
+      const toggles = [disabled('2026-11-01T12:00:00Z'), enabled('2026-10-22T12:00:00Z')];
+      expect(await due(tablesConn({ estimate: autopayRow(), customer: { autopay_enabled: true }, toggles }))).toBeNull();
+      expect(await due(tablesConn({ estimate: autopayRow(), customer: null, toggles }))).toBeNull();
+      expect(await due(tablesConn({ estimate: autopayRow(), toggles: [enabled('2026-11-02T12:00:00Z'), ...toggles] }))).toBeNull();
+      expect(await due(tablesConn({ estimate: autopayRow(), toggles: [disabled('2025-06-01T12:00:00Z'), enabled('2025-05-01T12:00:00Z')] })))
+        .toBeNull();
+    });
+
+    test('never for a proposal that is not won, not on Auto Pay, or has no customer; Auto Pay is not read then', async () => {
+      for (const estimate of [
+        autopayRow({ status: 'sent' }),
+        autopayRow({ estimate_data: { proposal: { ...SIESTA_PROPOSAL, enabled: true, commercialTerms: { paymentTerms: null } } } }),
+        autopayRow({ customer_id: null }),
+      ]) {
+        const conn = tablesConn({ estimate, toggles: [disabled('2026-11-01T12:00:00Z'), enabled('2026-10-22T12:00:00Z')] });
+        expect(await due(conn)).toBeNull();
+        expect(conn.tables()).toEqual(['estimates']);
+      }
+    });
+
+    test('an invoice-mode proposal keeps its own Net term and reads only the estimate', async () => {
+      const conn = tablesConn({ estimate: invoiceModeRow('net60', { customer_id: 'cust-1' }) });
+      expect(await due(conn)).toBe('2027-01-02');
+      expect(conn.tables()).toEqual(['estimates']);
+    });
+
+    test('a failed customer or Auto Pay log read throws, so the completion lane mints nothing (PROPOSAL_TERMS_UNREAD)', async () => {
+      await expect(due(tablesConn({ estimate: autopayRow(), fail: 'customers' }))).rejects.toThrow('customers read failed');
+      await expect(due(tablesConn({ estimate: autopayRow(), fail: 'autopay_log' }))).rejects.toThrow('autopay_log read failed');
+    });
+  });
+
   test('both completion lanes use it for the visit invoice due date (source pins)', () => {
     const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
     const legacy = read('../services/complete-scheduled-service.js');
@@ -294,7 +377,7 @@ describe('proposalTermsDueDate', () => {
     expect(legacy.indexOf("if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {"))
       .toBeLessThan(legacy.indexOf("if (invErr?.code === 'BILLING_LANE_CHANGED' && !invoice?.id) {"));
     const sheet = read('../services/visit-completion-invoice.js');
-    expect(sheet).toContain("require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, visit.scheduled_date)");
+    expect(sheet).toContain("require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, invoiceDueBaseDay(visit.scheduled_date))");
     expect(sheet).toContain('dueDate: proposalTermsDue || dateOnly(visit.scheduled_date)');
   });
 });

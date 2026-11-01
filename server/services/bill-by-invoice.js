@@ -18,11 +18,30 @@
 
 const ESTIMATE_COLUMNS = ['id', 'status', 'bill_by_invoice', 'estimate_data'];
 
-// The normalized proposal of an accepted, authored commercial proposal billed by invoice, else null. Pure.
-function billByInvoiceProposal(estimate) {
-  if (!estimate || estimate.status !== 'accepted' || estimate.bill_by_invoice !== true) return null;
+// The normalized proposal of an authored commercial proposal (enabled, not synthesized), whatever its status or billing
+// mode, else null. Pure.
+function authoredProposal(estimate) {
+  if (!estimate) return null;
   const proposal = require('./estimate-proposal').normalizeProposal(estimate);
   return proposal.enabled === true && proposal.synthesized !== true ? proposal : null;
+}
+
+// The normalized proposal of an accepted, authored commercial proposal in any billing mode, else null. Pure.
+function wonAuthoredProposal(estimate) {
+  return estimate?.status === 'accepted' ? authoredProposal(estimate) : null;
+}
+
+// The normalized proposal of an accepted, authored commercial proposal billed by invoice, else null. Pure.
+function billByInvoiceProposal(estimate) {
+  return estimate?.bill_by_invoice === true ? wonAuthoredProposal(estimate) : null;
+}
+
+// True for an authored commercial proposal billed by invoice that is not won yet. Its Net term reaches a bill only
+// once the proposal is accepted (proposalTermsDueDate), so a visit booked from it before the win bills due on the
+// visit day. Staff booking refuses it until the win. Pure.
+function billByInvoiceProposalAwaitingWin(estimate) {
+  if (!estimate || estimate.status === 'accepted' || estimate.bill_by_invoice !== true) return false;
+  return authoredProposal(estimate) !== null;
 }
 
 // The ids among `estimateIds` that are such proposals, as strings (one read).
@@ -49,22 +68,43 @@ async function billByInvoiceVisit(conn, svc) {
 // True when the invoice bills such a visit: its own visit, else its service record's visit. An invoice object
 // without either column is read by id.
 async function billByInvoiceInvoice(conn, invoice) {
+  const visitId = await invoiceVisitId(conn, invoice);
+  return visitId ? billByInvoiceVisit(conn, { id: visitId }) : false;
+}
+
+// The id of the visit an invoice bills: its own visit, else its service record's visit, else null. An invoice object
+// without either column is read by id.
+async function invoiceVisitId(conn, invoice) {
   let doc = invoice;
   if (doc && doc.scheduled_service_id === undefined && doc.service_record_id === undefined) {
-    if (!doc.id) return false;
+    if (!doc.id) return null;
     doc = await conn('invoices').where({ id: doc.id }).first('scheduled_service_id', 'service_record_id');
   }
-  let visitId = doc?.scheduled_service_id || null;
-  if (!visitId && doc?.service_record_id) {
-    const record = await conn('service_records').where({ id: doc.service_record_id }).first('scheduled_service_id');
-    visitId = record?.scheduled_service_id || null;
-  }
-  return visitId ? billByInvoiceVisit(conn, { id: visitId }) : false;
+  if (doc?.scheduled_service_id) return doc.scheduled_service_id;
+  if (!doc?.service_record_id) return null;
+  const record = await conn('service_records').where({ id: doc.service_record_id }).first('scheduled_service_id');
+  return record?.scheduled_service_id || null;
+}
+
+// True when the invoice bills a visit booked from a won, authored commercial proposal in any billing mode: the bills
+// whose due date the agreement's payment terms set (proposal-win.js proposalTermsDueDate), which the reminder ladder
+// starts from that due date (invoice-followups.js newSequenceAnchor).
+async function wonProposalInvoice(conn, invoice) {
+  const visitId = await invoiceVisitId(conn, invoice);
+  if (!visitId) return false;
+  const visit = await conn('scheduled_services').where({ id: visitId }).first('source_estimate_id');
+  if (!visit?.source_estimate_id) return false;
+  const estimate = await conn('estimates').where({ id: visit.source_estimate_id }).first(ESTIMATE_COLUMNS);
+  return wonAuthoredProposal(estimate) !== null;
 }
 
 module.exports = {
   billByInvoiceProposal,
+  billByInvoiceProposalAwaitingWin,
   billByInvoiceEstimateIds,
   billByInvoiceVisit,
   billByInvoiceInvoice,
+  invoiceVisitId,
+  wonAuthoredProposal,
+  wonProposalInvoice,
 };

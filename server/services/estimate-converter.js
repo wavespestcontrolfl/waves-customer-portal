@@ -18,6 +18,7 @@ const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
 const { withoutAssessmentVisits } = require('./assessment-booking');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
+const { estimateLawnFloorArmed, lawnRowsShowFloorEnforcement } = require('./estimate-floor-signal-replay');
 // Canonical service-key tier membership (aliased: this module's local
 // serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
 const { serviceCountsTowardWaveGuardTier: serviceKeyCountsTowardTier } = require('./pricing-engine/discount-engine');
@@ -2661,13 +2662,27 @@ function recurringLinesFromEngineResult(data = {}) {
     });
 }
 
-function recurringServicesFromEstimateData(estimateData = {}) {
-  const data = normalizeEstimateData(estimateData);
-  return mergeRecurringServiceLists(
+// The recurring rows a save persisted as recurring services (the mapped /
+// accepted shape), WITHOUT the engine lineItems folded in. Rows here carry the
+// SELECTED cadence's own annual and floor, which the engine-line coalesce
+// below would overwrite with the default cadence's figures.
+function storedRecurringServiceLists(data = {}) {
+  return [
     data.recurring?.services,
     data.result?.recurring?.services,
     data.result?.results?.recurring?.services,
     Array.isArray(data.services) ? data.services.filter((svc) => svc.recurring || svc.frequency || svc.visitsPerYear || svc.visits) : [],
+  ];
+}
+
+function storedRecurringServicesFromEstimateData(estimateData = {}) {
+  return mergeRecurringServiceLists(...storedRecurringServiceLists(normalizeEstimateData(estimateData)));
+}
+
+function recurringServicesFromEstimateData(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  return mergeRecurringServiceLists(
+    ...storedRecurringServiceLists(data),
     // Deduped by recurringServiceKey, so this coalesces with (never duplicates)
     // any matching recurring.services row from the admin/mapped save shape.
     recurringLinesFromEngineResult(data),
@@ -3602,7 +3617,98 @@ function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
   return resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData);
 }
 
-function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
+// Cost-floor arm state for the prepay slice. Same signal estimate-public's
+// ladder/v1 paths use: the engine's resolved pricingMetadata.lawnCostFloorArmed
+// stamp first (plus the other per-estimate evidence estimateLawnFloorArmed
+// reads), then the live global when the estimate is silent. The floor fields
+// (minimumCollectedAnnualPrice / costFloorAnnual) ride EVERY quote for margin
+// reporting, so their presence alone is never evidence of arming.
+function lawnCostFloorArmedForPrepay(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  const stamped = estimateLawnFloorArmed(data);
+  if (typeof stamped === 'boolean') return stamped;
+  // Silent legacy v1 saves: enforcement stamps on the stored results.lawn rows
+  // arm them, the same fallback the public ladder and v1 pricing paths use.
+  const v1LawnRows = data?.result?.results?.lawn ?? data?.results?.lawn;
+  return LAWN_PRICING_V2.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(v1LawnRows);
+}
+
+// The 35% collected-margin floor a stored lawn line carries (annual dollars,
+// 0 when absent). Mirrors estimate-public's reader exactly: a row switched to
+// another cadence carries THAT cadence's floor as lawnFloorMonthly (the
+// default-cadence minimumCollectedAnnualPrice / costFloorAnnual on the same
+// row go stale), so it wins; then lawnRowFloorMonthly's field order.
+function lawnLineCostFloorAnnual(item = {}) {
+  const raw = item.lawnFloorMonthly != null
+    ? Number(item.lawnFloorMonthly) * 12
+    : Number(
+      item.marginFloorAnnual
+      ?? item.prov?.minimumCollectedAnnualPrice
+      ?? item.prov?.costFloorAnnual
+      ?? item.minimumCollectedAnnualPrice
+      ?? item.costFloorAnnual,
+    );
+  return Number.isFinite(raw) && raw > 0 ? Math.round(raw * 100) / 100 : 0;
+}
+
+// Slice P of a lawn line's annual A that the prepay % must NOT touch so the
+// prepaid amount is min(A, max(A * (1 - r), F)): the prepay still takes up to
+// r off the line but never lands below its cost floor F. Solving
+// P + (A - P)(1 - r) = F gives P = (F - A(1 - r)) / r, clamped to [0, A]. A
+// line far above F gets P = 0 (full rate); a line at or below F gets P = A
+// (no cut). Rounded UP to the cent so cent rounding never lands under F.
+function lawnCostFloorPrepaySlice(annual, floor, rate) {
+  if (!(annual > 0) || !(floor > 0) || !(rate > 0)) return 0;
+  const raw = (floor - annual * (1 - rate)) / rate;
+  if (!(raw > 0)) return 0;
+  const cents = Math.ceil(raw * 100 - 1e-6) / 100;
+  return Math.max(0, Math.min(annual, cents));
+}
+
+// A lawn line's NET annual for the cost slice: the engine stamps
+// manualFinalAnnual (post operator manual discount) on top of
+// annualAfterDiscount (post WaveGuard), and the customer is billed that net.
+// recurringLineAnnualAmount (shared) does not read it, so a manually
+// discounted line would look like it still sits above its floor.
+function lawnLineNetAnnual(item = {}) {
+  if (item.manualFinalAnnual != null && item.manualFinalAnnual !== '') {
+    const manual = Number(item.manualFinalAnnual);
+    if (Number.isFinite(manual) && manual >= 0) return manual;
+  }
+  return recurringLineAnnualAmount(item);
+}
+
+// One lawn line's protected slice: the larger of the program-minimum floor
+// and (when this source decides the cost slice) the armed cost-floor slice.
+function lawnPrepayLineProtected(item, { floorAnnual, discountRate, withCostSlice }) {
+  const listAnnual = recurringLineAnnualAmount(item);
+  if (!(listAnnual > 0)) return 0;
+  // Protect the FULL program floor per line, not min(annual, floor): the
+  // floor is what the customer is actually billed — public render/accept
+  // clamp every recurring lawn line up to the program minimum, so a stale
+  // pre-floor stored annual (e.g. $408 on an outstanding link whose bundle
+  // re-clamps to $600) must not leave the clamped-up slice discountable, or
+  // the prepay % lands the invoice below the minimum. Over-protection is
+  // the safe direction: the caller's Math.min(base, floor) cap means it can
+  // only shrink the prepay discount, never raise the invoice above base.
+  const costSlice = withCostSlice
+    ? lawnCostFloorPrepaySlice(lawnLineNetAnnual(item), lawnLineCostFloorAnnual(item), discountRate)
+    : 0;
+  return Math.max(floorAnnual, costSlice);
+}
+
+// Annual-prepay protected slice for recurring lawn lines: per line, the larger
+// of (a) the program-minimum floor and (b) the armed cost-floor slice. A max,
+// not a sum: both protect the same line. discountRate 0 (or a disarmed cost
+// floor) leaves only the program-minimum leg, exactly as before.
+//
+// The program leg is cadence-independent, so it keeps the max-of-sources rule.
+// The cost slice depends on each row's own annual and cadence floor: when the
+// stored recurring.services lawn rows carry a floor they (the accepted,
+// selected-cadence rows) decide it; the engine lineItems decide it only when
+// no stored row carries one. Otherwise a tier switch would over-protect from
+// the stale default-cadence lineItem.
+function lawnProgramMinimumProtectedAnnual(estimateData = {}, { discountRate = 0 } = {}) {
   // Deliberately IGNORES an acknowledged floor breach (codex P2 on #2947
   // round 4): the breach disarm exists so render/accept never clamp the
   // authorized sub-floor price back UP — but this protection only ever CAPS
@@ -3610,29 +3716,33 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
   // Dropping it on a breached estimate would let a customer-selected prepay
   // % stack a further cut below the number the confirmation card authorized.
   const minMonthly = resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData);
-  if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
-  const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
-  const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
-    const annual = recurringLineAnnualAmount(item);
-    // Protect the FULL floor per line, not min(annual, floor): the floor is
-    // what the customer is actually billed — public render/accept clamp every
-    // recurring lawn line up to the program minimum, so a stale pre-floor
-    // stored annual (e.g. $408 on an outstanding link whose bundle re-clamps
-    // to $600) must not leave the clamped-up slice discountable, or the
-    // prepay % lands the invoice below the minimum. Over-protection is the
-    // safe direction: the caller's Math.min(base, floor) cap means it can
-    // only shrink the prepay discount, never raise the invoice above base.
-    return annual > 0 ? sum + floorAnnual : sum;
-  }, 0) * 100) / 100;
+  const floorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
+    ? Math.round(minMonthly * 12 * 100) / 100
+    : 0;
+  const costFloorArmed = discountRate > 0 && lawnCostFloorArmedForPrepay(estimateData);
+  if (!(floorAnnual > 0) && !costFloorArmed) return 0;
+  const isLawn = (row) => recurringServiceKey(row) === 'lawn_care';
+  const storedLawn = costFloorArmed
+    ? storedRecurringServicesFromEstimateData(estimateData).filter(isLawn)
+    : [];
+  const storedDecides = storedLawn.some((row) => lawnLineCostFloorAnnual(row) > 0);
+  const protectedSum = (rows, withCostSlice) => Math.round(rows.reduce(
+    (sum, item) => sum + lawnPrepayLineProtected(item, { floorAnnual, discountRate, withCostSlice }),
+    0,
+  ) * 100) / 100;
   // Acceptance restamps recurring.services (NOT engine lineItems), so a
   // stale source must never shrink the protection below what the accepted
   // rows warrant — take the larger of the two sources. Both protect exactly
   // the floor per line, so a source disagreement (differing line counts) can
   // only over-protect (shrinking the prepay discount), never under-protect.
-  const fromLineItems = protectedSum(estimateLineItemsFromData(estimateData)
-    .filter((i) => recurringServiceKey(i) === 'lawn_care'));
-  const fromRecurringRows = protectedSum(recurringServicesFromEstimateData(estimateData)
-    .filter((svc) => recurringServiceKey(svc) === 'lawn_care'));
+  const fromLineItems = protectedSum(
+    estimateLineItemsFromData(estimateData).filter(isLawn),
+    costFloorArmed && !storedDecides,
+  );
+  const fromRecurringRows = protectedSum(
+    storedDecides ? storedLawn : recurringServicesFromEstimateData(estimateData).filter(isLawn),
+    storedDecides,
+  );
   return Math.max(fromLineItems, fromRecurringRows);
 }
 
@@ -3661,7 +3771,7 @@ function annualPrepayDiscountComponents({ recurringServices = [], estimateData =
     : ANNUAL_PREPAY_DISCOUNT_PCT;
   const protectedFloor = Math.round((
     nonDiscountableRecurringAnnualFloor(estimateData)
-    + lawnProgramMinimumProtectedAnnual(estimateData)
+    + lawnProgramMinimumProtectedAnnual(estimateData, { discountRate })
   ) * 100) / 100;
   return { discountRate, protectedFloor };
 }

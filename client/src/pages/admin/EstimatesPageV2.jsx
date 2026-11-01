@@ -49,8 +49,11 @@ import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineCo
 import WinLossSlicesCard from "./WinLossSlicesCard";
 import SourcePerformanceCard from "./SourcePerformanceCard";
 import PipelineAnalytics, {
+  isCallTodayEstimate,
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
+  isPickReasonEstimate,
+  lastEngagementMs,
 } from "./PipelineAnalytics";
 import {
   FollowUpModalV2,
@@ -268,8 +271,83 @@ const V3_CHIPS = [
     label: "Archived",
   },
 ];
+// GATE_ESTIMATE_CALL_LIST: the two extra filters, added to whichever chip set is showing (V3_CHIPS
+// when estimates_v2_status_pills is on, PIPELINE_AND_RISK_FILTERS otherwise) only while the gate is on.
+const CALL_LIST_CHIPS = [
+  { key: "call_today", label: "Call today" },
+  { key: "pick_reason", label: "Pick reason" },
+];
+const CALL_LIST_MATCHERS = {
+  call_today: (e) => isCallTodayEstimate(e),
+  pick_reason: (e) => isPickReasonEstimate(e),
+};
+function withCallListChips(chips, afterKey, callListOn) {
+  if (!callListOn) return chips;
+  const at = chips.findIndex((c) => c.key === afterKey);
+  if (at < 0) return [...chips, ...CALL_LIST_CHIPS];
+  return [...chips.slice(0, at + 1), ...CALL_LIST_CHIPS, ...chips.slice(at + 1)];
+}
+function v3Chips(callListOn) {
+  return withCallListChips(V3_CHIPS, "action", callListOn);
+}
+function pipelineChips(callListOn) {
+  return withCallListChips(PIPELINE_AND_RISK_FILTERS, "follow_up", callListOn);
+}
+// Call today list order: the offer opened longest ago comes first.
+function sortOldestEngagementFirst(rows) {
+  const at = (e) => lastEngagementMs(e) ?? Infinity;
+  return [...rows].sort((a, b) => at(a) - at(b));
+}
+// A click-to-call answers once the STAFF leg starts, before the customer picks up, so the
+// answered-call proof that takes an offer off Call today (lastCalledAt) lands only after the
+// call ends. While a call placed from Call today is pending, re-read the list quietly once a
+// minute, for at most 15 minutes, and stop as soon as that offer has left Call today.
+export const CALL_WATCH_INTERVAL_MS = 60 * 1000;
+export const CALL_WATCH_MAX_MS = 15 * 60 * 1000;
+export function useCallListWatch({ enabled, estimates, refresh }) {
+  const [pending, setPending] = useState(() => new Map());
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const watch = useCallback(
+    (id) => {
+      if (enabled && id) setPending((prev) => new Map(prev).set(id, Date.now()));
+    },
+    [enabled],
+  );
+  // Every re-read: an offer that left Call today, or whose window ran out, stops its watch.
+  useEffect(() => {
+    if (!pending.size) return;
+    const now = Date.now();
+    const byId = new Map((estimates || []).map((e) => [e.id, e]));
+    const next = new Map(
+      [...pending].filter(
+        ([id, startedAt]) =>
+          now - startedAt < CALL_WATCH_MAX_MS &&
+          byId.has(id) &&
+          isCallTodayEstimate(byId.get(id), now),
+      ),
+    );
+    if (next.size !== pending.size) setPending(next);
+  }, [estimates, pending]);
+  useEffect(() => {
+    if (!enabled || !pending.size) return undefined;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      setPending((prev) => {
+        const next = new Map(
+          [...prev].filter(([, startedAt]) => now - startedAt < CALL_WATCH_MAX_MS),
+        );
+        return next.size === prev.size ? prev : next;
+      });
+      refreshRef.current({ silent: true });
+    }, CALL_WATCH_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [enabled, pending.size]);
+  return watch;
+}
 function v3ChipMatches(e, chip) {
   if (chip === "all") return true;
+  if (Object.hasOwn(CALL_LIST_MATCHERS, chip)) return CALL_LIST_MATCHERS[chip](e);
   if (chip === "pricing_risk") return !!e.pricingRisk?.hasRisk;
   if (chip === "missing_cogs")
     return (e.pricingRisk?.missingCogsCount || 0) > 0;
@@ -328,6 +406,7 @@ function estimateMatchesFilter(e, filter) {
     );
   if (filter === "follow_up_overdue") return isFollowUpOverdueEstimate(e);
   if (filter === "going_cold") return isGoingColdEstimate(e);
+  if (Object.hasOwn(CALL_LIST_MATCHERS, filter)) return CALL_LIST_MATCHERS[filter](e);
   if (filter === "pricing_risk") return !!e.pricingRisk?.hasRisk;
   if (filter === "missing_cogs")
     return (e.pricingRisk?.missingCogsCount || 0) > 0;
@@ -340,6 +419,8 @@ function estimateFilterLabel(filter) {
   if (filter === "sent_group") return "Sent";
   if (filter === "follow_up_overdue") return "Follow-up overdue";
   if (filter === "going_cold") return "Going cold";
+  if (filter === "call_today") return "Call today";
+  if (filter === "pick_reason") return "Pick reason";
   if (filter === "pricing_warning") return "Pricing warnings";
   return PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label;
 }
@@ -484,9 +565,9 @@ function LawnOutlineStatusBadge({ outline }) {
     </Badge>
   );
 }
-function v3ChipCounts(estimates) {
+function v3ChipCounts(estimates, chips = V3_CHIPS) {
   const out = {};
-  for (const c of V3_CHIPS) {
+  for (const c of chips) {
     out[c.key] = estimates.filter((e) => v3ChipMatches(e, c.key)).length;
   }
   return out;
@@ -1963,6 +2044,7 @@ function EstimatePipelineViewV2({
   const openMessages = useCustomerSms();
   const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
+  const callListOn = useFeatureFlag("estimate_call_list");
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
@@ -1975,6 +2057,7 @@ function EstimatePipelineViewV2({
   const [sort, setSort] = useState("newest");
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
+  const [reasonTarget, setReasonTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
   const [acceptanceTarget, setAcceptanceTarget] = useState(null);
   const [viewErrors, setViewErrors] = useState({});
@@ -2044,6 +2127,11 @@ function EstimatePipelineViewV2({
         }
       });
   }, []);
+  const watchCall = useCallListWatch({
+    enabled: callListOn,
+    estimates,
+    refresh: refreshEstimates,
+  });
   useEffect(() => {
     refreshEstimates();
     return () => {
@@ -2254,9 +2342,14 @@ function EstimatePipelineViewV2({
   const sorted = [...classified].sort(
     estimateTableSortFn(sort, tableControlsEnabled),
   );
-  const filtered = sorted
+  const filteredRows = sorted
     .filter((e) => estimateMatchesFilter(e, filter))
     .filter((e) => estimateMatchesTableSearch(e, search));
+  // GATE_ESTIMATE_CALL_LIST: the Call today list runs oldest open first, whatever the table sort.
+  const filtered =
+    callListOn && filter === "call_today"
+      ? sortOldestEngagementFirst(filteredRows)
+      : filteredRows;
   const paging = useEstimateTablePaging(
     filtered,
     tableControlsEnabled,
@@ -2315,6 +2408,17 @@ function EstimatePipelineViewV2({
           onClose={() => setDeclineTarget(null)}
           onSaved={() => {
             setDeclineTarget(null);
+            refreshEstimates();
+          }}
+        />
+      )}
+      {reasonTarget && (
+        <DeclineModalV2
+          estimate={reasonTarget}
+          reasonOnly
+          onClose={() => setReasonTarget(null)}
+          onSaved={() => {
+            setReasonTarget(null);
             refreshEstimates();
           }}
         />
@@ -2393,6 +2497,7 @@ function EstimatePipelineViewV2({
             }}
             dateRange={dateRange}
             onDateRangeChange={setDateRange}
+            callListEnabled={callListOn}
           />
           <WinLossSlicesCard />
           <SourcePerformanceCard />
@@ -2648,6 +2753,8 @@ function EstimatePipelineViewV2({
                                     "Call failed: " +
                                       (r?.error || "unknown error"),
                                   );
+                                else if (callListOn && isCallTodayEstimate(e))
+                                  watchCall(e.id);
                               } catch (err) {
                                 alert("Call failed: " + err.message);
                               }
@@ -2790,6 +2897,9 @@ function EstimatePipelineViewV2({
                       {e.followUpCount > 0 && (
                         <div>Follow-ups: {e.followUpCount}</div>
                       )}
+                      {callListOn && e.lastCalledAt && (
+                        <div>Called {timeAgo(e.lastCalledAt)}</div>
+                      )}
                     </div>
                     {/* Actions — flag toggle + primary status action(s) +
                      overflow menu. Secondary tools (toggles, audit, preview,
@@ -2834,6 +2944,17 @@ function EstimatePipelineViewV2({
                             }}
                           >
                             {sendActionVerb(e.status)}
+                          </Button>
+                        )}
+
+                        {callListOn && isPickReasonEstimate(e) && (
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            className="w-full sm:w-auto whitespace-nowrap"
+                            onClick={() => setReasonTarget(e)}
+                          >
+                            Pick reason
                           </Button>
                         )}
 
@@ -3326,8 +3447,8 @@ function mobileMatchesSearch(estimate, search, tableControlsEnabled) {
     shortEstimateRef(estimate.id).toLowerCase().includes(query)
   );
 }
-function mobileFilterOptions(v3Flag, filterCounts) {
-  return (v3Flag ? V3_CHIPS : PIPELINE_AND_RISK_FILTERS).map((item) => ({
+function mobileFilterOptions(v3Flag, filterCounts, callListOn = false) {
+  return (v3Flag ? v3Chips(callListOn) : pipelineChips(callListOn)).map((item) => ({
     ...item,
     label:
       item.key === "all"
@@ -3528,6 +3649,9 @@ export function MobileEstimateRow({
   onViewAcceptance,
   v3Flag = false,
   highlighted = false,
+  callListOn = false,
+  onPickReason,
+  onCalled,
 }) {
   const navigate = useNavigate();
   const sendEstimateFromPipeline = useEstimateSend();
@@ -3779,6 +3903,7 @@ export function MobileEstimateRow({
                 });
                 if (!r?.success)
                   alert("Call failed: " + (r?.error || "unknown error"));
+                else if (callListOn) onCalled?.(estimate);
               } catch (err) {
                 alert("Call failed: " + err.message);
               }
@@ -3861,6 +3986,13 @@ export function MobileEstimateRow({
               icon: <CalendarCheck size={16} strokeWidth={1.75} />,
               onClick: () => onExtend?.(estimate),
             },
+            callListOn &&
+              isPickReasonEstimate(estimate) && {
+                key: "pick-reason",
+                label: "Pick reason",
+                icon: <Flag size={16} strokeWidth={1.75} />,
+                onClick: () => onPickReason?.(estimate),
+              },
             canMarkEstimateWon(estimate) && {
               key: "mark-won",
               label: "Mark won (verbal yes)",
@@ -3987,6 +4119,8 @@ function EstimatesMobileListView({
 }) {
   const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
+  const callListOn = useFeatureFlag("estimate_call_list");
+  const [reasonTarget, setReasonTarget] = useState(null);
   const [estimates, setEstimates] = useState([]);
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -4024,6 +4158,11 @@ function EstimatesMobileListView({
         if (requestId === estimatesRequestRef.current) setLoading(false);
       });
   }, []);
+  const watchCall = useCallListWatch({
+    enabled: callListOn,
+    estimates,
+    refresh: refreshEstimates,
+  });
   useEffect(() => {
     setLoading(true);
     refreshEstimates();
@@ -4207,6 +4346,10 @@ function EstimatesMobileListView({
     list = list.filter((e) =>
       mobileMatchesSearch(e, search, tableControlsEnabled),
     );
+    // GATE_ESTIMATE_CALL_LIST: the Call today list runs oldest open first, ungrouped.
+    if (callListOn && filter === "call_today") {
+      return [[0, sortOldestEngagementFirst(list)]];
+    }
     const useV3Sort = v3Flag && sort === "v3";
     list = useV3Sort
       ? [...list].sort(v3SortFn)
@@ -4239,13 +4382,14 @@ function EstimatesMobileListView({
     sort,
     tableControlsEnabled,
     v3Flag,
+    callListOn,
   ]);
   const filterCounts = useMemo(() => {
-    if (v3Flag) return v3ChipCounts(estimates);
+    if (v3Flag) return v3ChipCounts(estimates, v3Chips(callListOn));
     const counts = {
       all: estimates.length,
     };
-    for (const f of PIPELINE_AND_RISK_FILTERS) {
+    for (const f of pipelineChips(callListOn)) {
       if (f.key === "all") continue;
       counts[f.key] = estimates
         .map((e) => ({
@@ -4255,13 +4399,13 @@ function EstimatesMobileListView({
         .filter((e) => estimateMatchesFilter(e, f.key)).length;
     }
     return counts;
-  }, [estimates, v3Flag]);
-  const filterOptions = mobileFilterOptions(v3Flag, filterCounts);
+  }, [estimates, v3Flag, callListOn]);
+  const filterOptions = mobileFilterOptions(v3Flag, filterCounts, callListOn);
 
   // Reset filter when the v3 flag flips; keep chronological ordering stable.
   useEffect(() => {
     setFilter("all");
-  }, [v3Flag]);
+  }, [v3Flag, callListOn]);
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
   const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
@@ -4457,6 +4601,11 @@ function EstimatesMobileListView({
               onEngineReview={setEngineReviewTarget}
               onViewAcceptance={setAcceptanceTarget}
               v3Flag={v3Flag}
+              callListOn={callListOn}
+              onPickReason={setReasonTarget}
+              onCalled={(row) => {
+                if (isCallTodayEstimate(row)) watchCall(row.id);
+              }}
             />
           ))}
         </div>
@@ -4508,6 +4657,17 @@ function EstimatesMobileListView({
           onClose={() => setExtendTarget(null)}
           onExtended={() => {
             setExtendTarget(null);
+            refreshEstimates();
+          }}
+        />
+      )}
+      {reasonTarget && (
+        <DeclineModalV2
+          estimate={reasonTarget}
+          reasonOnly
+          onClose={() => setReasonTarget(null)}
+          onSaved={() => {
+            setReasonTarget(null);
             refreshEstimates();
           }}
         />

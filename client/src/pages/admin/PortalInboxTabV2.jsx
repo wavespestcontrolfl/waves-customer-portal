@@ -42,7 +42,8 @@ function handledStatus(item, res) {
 }
 
 // Mark handled uses the existing update routes: chat -> the escalation PUT,
-// request -> the request PATCH (which keeps its own customer email).
+// request -> the request PATCH. `quiet` asks that PATCH not to email the customer "Resolved"
+// (the server honors it only while GATE_PORTAL_ITEM_CLOSE is on; Customer 360 keeps its email).
 function markHandled(item) {
   if (item.kind === "chat") {
     return adminFetch(`/ai/admin/escalations/${item.id}`, {
@@ -52,7 +53,7 @@ function markHandled(item) {
   }
   return adminFetch(`/admin/requests/${item.id}`, {
     method: "PATCH",
-    body: JSON.stringify({ status: "resolved" }),
+    body: JSON.stringify({ status: "resolved", quiet: true }),
   });
 }
 

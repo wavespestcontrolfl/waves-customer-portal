@@ -8,6 +8,8 @@
  * The cron runs Tue–Fri at 10:00 AM America/New_York (no weekend nags, DST-safe).
  * A step is eligible to fire when:
  *    now >= sent_at + daysAfterSend
+ * except a won commercial proposal's bill that is due after the day it went out (Net
+ * terms): its steps count from its due date (invoice-followups.js newSequenceAnchor).
  */
 
 module.exports = {
@@ -25,7 +27,8 @@ module.exports = {
 
   // The touches. Order matters; step_index maps to this array.
   // Cadence is anchored to invoice.sent_at so labels match operator intuition:
-  // "3-day friendly nudge" = 3 days after the invoice went out.
+  // "3-day friendly nudge" = 3 days after the invoice went out (a Net-terms bill
+  // from a won commercial proposal: 3 days after its due date).
   steps: [
     { id: 'd3_friendly',  template_key: 'invoice_followup_3day',  daysAfterSend: 3,  label: '3-day friendly nudge' },
     { id: 'd7_reminder',  template_key: 'invoice_followup_7day',  daysAfterSend: 7,  label: '7-day reminder' },

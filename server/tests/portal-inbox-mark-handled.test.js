@@ -31,10 +31,11 @@ const mockMarkAdminDone = jest.fn(async (ids) => [].concat(ids).length);
 jest.mock('../services/notification-service', () => ({
   markAdminDone: (...args) => mockMarkAdminDone(...args),
 }));
+let mockTechRole = 'admin';
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     req.technicianId = 'tech-admin-1';
-    req.techRole = 'admin';
+    req.techRole = mockTechRole;
     next();
   },
   requireTechOrAdmin: (req, res, next) => next(),
@@ -156,8 +157,8 @@ describe('PUT /ai/admin/escalations/:id', () => {
 });
 
 describe('PATCH /requests/:id', () => {
-  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_INBOX; });
-  afterAll(() => { delete process.env.GATE_PORTAL_INBOX; });
+  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_INBOX; delete process.env.GATE_PORTAL_ITEM_CLOSE; });
+  afterAll(() => { delete process.env.GATE_PORTAL_INBOX; delete process.env.GATE_PORTAL_ITEM_CLOSE; });
 
   const existing = { id: REQ_ID, status: 'new', customer_id: 'cust-1', category: 'general', resolved_at: null };
   const resolved = { ...existing, status: 'resolved' };
@@ -215,5 +216,65 @@ describe('PATCH /requests/:id', () => {
       const res = await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved' });
       expect(res.status).toBe(200);
     });
+  });
+
+  // GATE_PORTAL_ITEM_CLOSE: the Portal tab's Mark handled says `quiet: true` and the customer gets no
+  // "Your Waves request was updated" email. Customer 360 sends no `quiet`, so its email is unchanged.
+  test('GATE_PORTAL_ITEM_CLOSE on + quiet: the request resolves, its alerts still close, and no customer email goes', async () => {
+    process.env.GATE_PORTAL_INBOX = 'true';
+    process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+    const alerts = chain({ pluck: ['alert-9'] });
+    setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })], notifications: [alerts] });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved', quiet: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).request.status).toBe('resolved');
+    });
+    expect(mockMarkAdminDone).toHaveBeenCalledWith(['alert-9'], expect.objectContaining({ by: 'tech-admin-1' }), db);
+    expect(AccountMembershipEmail.sendRequestUpdated).not.toHaveBeenCalled();
+  });
+
+  test('GATE_PORTAL_ITEM_CLOSE on, no quiet (Customer 360) or quiet:false: the email still goes', async () => {
+    process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+    for (const body of [{ status: 'resolved' }, { status: 'resolved', quiet: false }]) {
+      setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
+      await withServer(async (baseUrl) => {
+        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, body)).status).toBe(200);
+      });
+    }
+    expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(2);
+  });
+
+  test('GATE_PORTAL_ITEM_CLOSE on + quiet from a technician: quiet is ignored and the email goes (admins only)', async () => {
+    process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+    mockTechRole = 'technician';
+    try {
+      setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
+      await withServer(async (baseUrl) => {
+        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved', quiet: true })).status).toBe(200);
+      });
+      expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(1);
+    } finally {
+      mockTechRole = 'admin';
+    }
+  });
+
+  test('gate off: quiet is ignored and the email goes exactly as before', async () => {
+    setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
+    await withServer(async (baseUrl) => {
+      expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved', quiet: true })).status).toBe(200);
+    });
+    expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(1);
+  });
+
+  test('quiet only changes nothing: the answer an empty body always got (400), gate on or off', async () => {
+    for (const gateOn of [false, true]) {
+      if (gateOn) process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+      await withServer(async (baseUrl) => {
+        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { quiet: true })).status).toBe(400);
+        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, {})).status).toBe(400);
+      });
+    }
+    expect(db).not.toHaveBeenCalled();
   });
 });

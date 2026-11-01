@@ -7592,6 +7592,12 @@ module.exports = {
   // Public quote wizard: 2..10 phone matches that are one person at one address
   // resolve to the sweep's winner row, else null.
   resolveSamePersonCluster,
+  // The person and street rules the nightly lead repeat sweep
+  // (lead-repeat-sweep.js) reuses, so a lead and a customer are
+  // "one person" by the same test.
+  namesCompatible,
+  normName,
+  normalizeStreetKey,
   REPOINT_EXCLUDED_TABLES,
   executeMerge,
   lockSeriesCreateForMerge,
