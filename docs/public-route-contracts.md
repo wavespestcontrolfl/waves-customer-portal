@@ -4254,7 +4254,9 @@ why, extra?, atHome, links: [{ label, url, source }] }], labels }`,
 `{ type: 'timeline', items: [{ when, icon, title, text }], note }`, `{ type:
 'facts', items: [{ icon, title, text, big?, wide?, image?, imageAlt?, href?,
 linkLabel?, pictures?: [{ image, imageAlt, href, linkLabel }], until? }] }`
-(`image` and `href` are same-origin paths or Waves and UF/IFAS links; no PII) and
+(`image` and `href` are same-origin paths or Waves and UF/IFAS links; no PII; a
+packet stored before 2026-11-01 may carry `video`, an mp4 path the page still
+plays with `preload="none"`, with `image` as its poster) and
 `{ type: 'faq', items: [{ q, a, links }], more: [{ q, a, links }] }`. A block's
 `from`/`to` are `MM-DD` (round 1 wraps the year end, `12-25` to `02-02`); the
 page, not the build, finds the block that holds today's ET date, marks it, shows

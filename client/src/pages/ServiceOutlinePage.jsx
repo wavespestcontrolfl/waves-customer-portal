@@ -587,6 +587,18 @@ function FactPicture({ picture, className = "" }) {
 
 // The pictures under a fact tile (two sit side by side), one picture, or a link alone as a text link.
 function FactMedia({ item }) {
+  // A packet stored before 2026-11-01 carries the tour videos, and the public route serves packets as stored: such a video
+  // still plays, loading nothing until it is played (`preload="none"`, the picture is its poster).
+  if (item.video) {
+    return (
+      <figure className="mt-3 overflow-hidden rounded-md border border-zinc-200 bg-white">
+        <video controls preload="none" poster={item.image} className="aspect-video w-full bg-waves-blue-deeper">
+          <source src={item.video} type="video/mp4" />
+        </video>
+        {item.linkLabel && <figcaption className="px-3 py-2 text-sm text-slate-600">{item.linkLabel}</figcaption>}
+      </figure>
+    );
+  }
   if (item.pictures) {
     return (
       <div className={`grid grid-cols-2 gap-3 ${item.wide ? "mt-3 sm:mt-0" : "mt-3"}`}>

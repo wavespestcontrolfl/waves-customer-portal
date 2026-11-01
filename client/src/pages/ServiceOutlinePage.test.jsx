@@ -333,6 +333,28 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(within(watering).getByText('Current order')).toBeInTheDocument();
   });
 
+  // Packets stored before 2026-11-01 carry the tour videos; the public route serves them as stored, so they still play.
+  it('a stored packet\'s tour video still plays and loads nothing until played', async () => {
+    const content = v13Content();
+    content.sections.push({
+      key: 'after_visit',
+      title: 'After Each Visit',
+      body: '',
+      bullets: ['A service report after every visit: What we found.'],
+      visual: {
+        type: 'facts',
+        items: [{ icon: 'report', title: 'A service report after every visit', text: 'What we found.', image: '/app-email/videos/waves-lawn-tour-poster.jpg', video: '/app-email/videos/waves-lawn-tour.mp4', linkLabel: 'A 35-second tour of a lawn report (about 7 MB)' }],
+      },
+    });
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'After Each Visit' });
+    const video = sectionOf('After Each Visit').querySelector('video');
+    expect(video).toHaveAttribute('preload', 'none');
+    expect(video).toHaveAttribute('poster', '/app-email/videos/waves-lawn-tour-poster.jpg');
+    expect(video.querySelector('source')).toHaveAttribute('src', '/app-email/videos/waves-lawn-tour.mp4');
+    expect(within(sectionOf('After Each Visit')).getByText('A 35-second tour of a lawn report (about 7 MB)')).toBeInTheDocument();
+  });
+
   it('a section with no drawing keeps its body and bullet cards, and the side panel keeps the grass (the gate-off outline)', async () => {
     renderWith(legacyContent());
     await screen.findByRole('heading', { level: 2, name: 'Local Fertilizer-Rule Note' });
@@ -471,16 +493,17 @@ describe('ServiceOutlinePage drawn sections', () => {
       expect(screen.queryByText('May be used, not guaranteed')).not.toBeInTheDocument();
     });
 
-    it('a day inside round 1 after the year end (Dec 28) and after it (Jan 5) marks round 1, and Feb 3 starts round 2', async () => {
-      for (const [iso, expected] of [['2027-12-28T15:00:00Z', '#round-1'], ['2027-01-05T15:00:00Z', '#round-1'], ['2027-02-03T15:00:00Z', '#round-2']]) {
-        setToday(iso);
-        renderWith(visualContent());
-        await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
-        const links = within(sectionOf('Your Year In Nine Rounds')).getAllByRole('link');
-        expect(links.filter((a) => a.getAttribute('aria-current') === 'true').map((a) => a.getAttribute('href'))).toEqual([expected]);
-        cleanup();
-        vi.useRealTimers();
-      }
+    // Round 1 runs over the year end: Dec 28 and Jan 5 both fall in it, and Feb 3 starts round 2.
+    it.each([
+      ['2027-12-28T15:00:00Z', '#round-1'],
+      ['2027-01-05T15:00:00Z', '#round-1'],
+      ['2027-02-03T15:00:00Z', '#round-2'],
+    ])('on %s the bar marks %s', async (iso, expected) => {
+      setToday(iso);
+      renderWith(visualContent());
+      await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
+      const links = within(sectionOf('Your Year In Nine Rounds')).getAllByRole('link');
+      expect(links.filter((a) => a.getAttribute('aria-current') === 'true').map((a) => a.getAttribute('href'))).toEqual([expected]);
     });
 
     it('a months bar marks the month of today and the side panel names it as the season focus', async () => {
@@ -496,14 +519,15 @@ describe('ServiceOutlinePage drawn sections', () => {
       expect(screen.queryByText('Now', { selector: 'dt' })).not.toBeInTheDocument();
     });
 
-    it('a leap day (Feb 29) falls in February, and a bar without from/to dates marks nothing', async () => {
+    it('a leap day (Feb 29) falls in February', async () => {
       setToday('2028-02-29T15:00:00Z');
       renderWith(visualContent({ blocks: monthBlocks(), anchorPrefix: 'month' }));
       await screen.findByRole('heading', { level: 2, name: 'Your Year In Nine Rounds' });
       const marked = within(sectionOf('Your Year In Nine Rounds')).getAllByRole('link').filter((a) => a.getAttribute('aria-current') === 'true');
       expect(marked.map((a) => a.getAttribute('href'))).toEqual(['#month-2']);
-      cleanup();
+    });
 
+    it('a bar without from/to dates marks nothing, opens no card, and the side panel keeps the season focus', async () => {
       setToday('2027-02-10T15:00:00Z');
       const undated = roundBlocks().map(({ from, to, now, aside, ...rest }) => rest);
       renderWith(visualContent({ blocks: undated }));
