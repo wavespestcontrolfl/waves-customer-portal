@@ -1478,6 +1478,8 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               // Distinguishes "the terms on an open request just changed"
               // from a first-time inquiry (codex #3367 PR r12).
               refreshed: !!outcome.refreshed,
+              // GATE_PORTAL_ITEM_CLOSE: the request row this bell is about.
+              ...(outcome.request?.id && require('../config/feature-gates').portalItemCloseLive?.() ? { requestId: outcome.request.id } : {}),
             }).catch((err) => {
               logger.warn(`[reports-public] cross-sell bell failed (request ${outcome.request?.id} stands): ${err.message}`);
             });

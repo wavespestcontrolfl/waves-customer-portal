@@ -7,7 +7,7 @@ jest.mock('../models/db', () => {
 });
 // Default OFF so the existing limiter test still sees the dark-gate 400;
 // the cross-sell click tests turn it on for themselves.
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), portalItemCloseLive: jest.fn(() => false) }));
 jest.mock('../services/service-report/cross-sell', () => ({ buildReportCrossSell: jest.fn() }));
 jest.mock('../services/service-report/click-estimate-mint', () => ({ mintReportClickEstimate: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn().mockResolvedValue(null) }));
@@ -320,6 +320,26 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
     expect(triggerNotification).toHaveBeenCalledWith('bundle_quote_requested', expect.objectContaining({
       refreshed: false,
     }));
+  });
+
+  test('GATE_PORTAL_ITEM_CLOSE: the bell payload carries the request row\'s id (new or refreshed); gate off, the payload is exactly as before', async () => {
+    const { portalItemCloseLive } = require('../config/feature-gates');
+    const { q } = clickDb({ openRequest: null });
+    db.mockImplementation(q);
+    expect(await click('a1a1a1a1a1a1a1a10123456789abcdef')).toBe(200);
+    expect(triggerNotification.mock.calls.pop()[1]).not.toHaveProperty('requestId');
+
+    portalItemCloseLive.mockReturnValue(true);
+    try {
+      expect(await click('b2b2b2b2b2b2b2b20123456789abcdef')).toBe(200);
+      expect(triggerNotification).toHaveBeenLastCalledWith('bundle_quote_requested', expect.objectContaining({ requestId: 'req-new', customerId: 'cust-1', refreshed: false }));
+      const stale = { source: 'service_report', serviceRecordId: 'sr-old', crossSell: { ...CROSS_SELL, fingerprint: 'OLD' } };
+      db.mockImplementation(clickDb({ openRequest: { id: 'req-open', subject: 'Add Lawn Care — requested from service report', pricing_revision: stale } }).q);
+      expect(await click('c3c3c3c3c3c3c3c30123456789abcdef')).toBe(200);
+      expect(triggerNotification).toHaveBeenLastCalledWith('bundle_quote_requested', expect.objectContaining({ requestId: 'req-open', refreshed: true }));
+    } finally {
+      portalItemCloseLive.mockReturnValue(false);
+    }
   });
 });
 

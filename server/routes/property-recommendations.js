@@ -182,6 +182,8 @@ async function ringBell(customerId, suggestedService, relationship, outcome) {
     suggestedService,
     relationship,
     refreshed: !!outcome.refreshed,
+    // GATE_PORTAL_ITEM_CLOSE: the request row this bell is about (the writer returns it on every outcome).
+    ...(outcome.request?.id && require('../config/feature-gates').portalItemCloseLive?.() ? { requestId: outcome.request.id } : {}),
   }).catch((err) => {
     logger.warn(`[property-recommendations] bell failed (request ${outcome.request?.id} stands): ${err.message}`);
   });
