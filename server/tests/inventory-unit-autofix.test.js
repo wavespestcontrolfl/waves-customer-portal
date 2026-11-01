@@ -510,6 +510,21 @@ describe('resolveDryOzTarget', () => {
     }
   });
 
+  it('parks count evidence found outside the formulation (pre-push audit P1)', () => {
+    // A granular formulation does not make a station product weighable.
+    expect(resolveDryOzTarget(dry({ name: 'Granular Bait Station', formulation: 'granular', default_unit: 'each/station' }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ name: 'Granular Bait Station', formulation: 'granular' }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ formulation: 'granular', default_unit: 'each/station' }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ formulation: 'bait block', rate_unit: 'each/placement' }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ formulation: 'bait block', category: 'Rodent Bait Stations' }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ formulation: 'wdg', subcategory: 'Trap supplies' }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ formulation: 'wdg', unit_type: 'each' }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ formulation: 'tablet' }))).toBe(null);
+    // Weight-sold bait stays convertible when nothing says it is counted.
+    expect(resolveDryOzTarget(dry({ name: 'Rodent Bait Blocks', formulation: 'bait block', category: 'Rodenticide' }))).toBe('g');
+    expect(resolveDryOzTarget(dry({ name: 'Beach Grass Granules', formulation: 'granular' }))).toBe('g');
+  });
+
   it('parks a dry formulation whose name or fields look liquid (Unit Review heuristic)', () => {
     expect(resolveDryOzTarget(dry({ name: 'Talstar Granules' }))).toBe(null);
     expect(resolveDryOzTarget(dry({ name: 'Liquid Fertilizer Mix' }))).toBe(null);

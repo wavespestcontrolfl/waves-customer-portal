@@ -172,9 +172,12 @@ function looksLiquidProduct(product = {}) {
 // WEIGHT ounces, so oz -> g / lb is an exact conversion. Anything else stays
 // parked for a human.
 const DRY_FORMULATION_RE = /\b(wdg|wg|wsg|wp|sp|df|sg)\b|granul|powder|dust|\bpaste\b|\bgel\b|pellet|\bmeal\b|\bdry\b|bait block|bait chunk/;
-// Count stock lives in 'each' (inventory-units.js refuses oz <-> each). A
-// bare "bait" word is deliberately NOT dry evidence.
-const COUNT_FORMULATION_RE = /cartridge|briquet|station|tablet|\btrap|supply|live plug|foam/;
+// Count stock lives in 'each' (inventory-units.js refuses oz <-> each). Count
+// words are read across EVERY catalog text field, not only the formulation: a
+// "Granular Bait Station" (formulation granular) is counted by the station. A
+// bare "bait" word is deliberately NOT dry evidence and NOT a count sign.
+const COUNT_WORD_RE = /cartridge|briquet|station|tablet|\btrap|supply|live plug|foam|\beach\b|\bcount\b|\bpieces?\b/;
+const COUNT_BASE_UNITS = new Set(['each', 'ea', 'count', 'ct', 'piece', 'pc', 'station', 'placement']);
 const LIQUID_FORMULATION_RE = /\b(sc|se|ec|ew|cs|me|mec|sl|aq|flowable|liquid|concentrate|suspension|emulsion|emulsifiable|microemulsion|oil|solution)\b/;
 const VOLUME_BASE_UNITS = new Set(['fl_oz', 'floz', 'gal', 'gallon', 'qt', 'quart', 'pt', 'pint', 'ml', 'l', 'liter', 'litre']);
 // A pound or more of weight ounces.
@@ -185,16 +188,31 @@ function isOzFamilyUnit(rawUnit) {
   return squashed === 'oz' || squashed === 'ounce';
 }
 
-function isVolumeBaseUnit(rawUnit) {
-  const base = String(rawUnit == null ? '' : rawUnit).split('/')[0]
+// The quantity part of a rate/default unit ("fl_oz/1000sf" -> fl_oz,
+// "each/station" -> each), spelling-normalized.
+function baseUnitOf(rawUnit) {
+  return String(rawUnit == null ? '' : rawUnit).split('/')[0]
     .trim().toLowerCase().replace(/\./g, '').replace(/\s+/g, '_').replace(/s$/, '');
-  return VOLUME_BASE_UNITS.has(base);
+}
+
+function isVolumeBaseUnit(rawUnit) {
+  return VOLUME_BASE_UNITS.has(baseUnitOf(rawUnit));
 }
 
 function hasDryEvidence(formulation) {
   if (!formulation || formulation === 'unspecified') return false;
   if (!DRY_FORMULATION_RE.test(formulation)) return false;
-  return !COUNT_FORMULATION_RE.test(formulation) && !LIQUID_FORMULATION_RE.test(formulation);
+  return !LIQUID_FORMULATION_RE.test(formulation);
+}
+
+// Any sign the product is stocked by the piece: a count word in the name,
+// category, subcategory, formulation or unit type, or a rate/default unit
+// counted per item ("each/station").
+function hasCountEvidence(product) {
+  const text = [product.name, product.category, product.subcategory, product.formulation, product.unit_type]
+    .map((value) => String(value == null ? '' : value)).join(' ').toLowerCase();
+  if (COUNT_WORD_RE.test(text)) return true;
+  return [product.rate_unit, product.default_unit].some((unit) => COUNT_BASE_UNITS.has(baseUnitOf(unit)));
 }
 
 /**
@@ -207,6 +225,7 @@ function resolveDryOzTarget(product = {}) {
   if (!isOzFamilyUnit(product.inventory_unit)) return null;
   const formulation = String(product.formulation == null ? '' : product.formulation).trim().toLowerCase();
   if (!hasDryEvidence(formulation)) return null;
+  if (hasCountEvidence(product)) return null;
   if (looksLiquidProduct(product)) return null;
   if (isVolumeBaseUnit(product.rate_unit) || isVolumeBaseUnit(product.default_unit)) return null;
   return Number(product.inventory_on_hand) >= DRY_OZ_POUND_THRESHOLD_OZ ? 'lb' : 'g';
