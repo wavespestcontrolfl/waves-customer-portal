@@ -1081,6 +1081,19 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     })]);
   });
 
+  test.each([
+    ['older than the 10-minute sample limit', minutesAgo(20)],
+    ['before the visit went en route (it went en route 5 minutes ago)', minutesAgo(8)],
+  ])('gate on: a position-less engine-off %s is from an earlier trip and writes nothing', async (_label, endedAt) => {
+    const point = basePoint({
+      lat: undefined, lng: undefined, ignition: false, speed_mph: 0, engine_off: true, position_source: null, reported_at: endedAt,
+    });
+    const result = await run(baseService(), { point, techStatus: baseTechStatus() });
+
+    expect(result).toEqual({ ok: false, reason: 'engine_off_no_position' });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
   test('gate on: an engine-off with no position for a job that is not en route writes nothing', async () => {
     const point = basePoint({ lat: undefined, lng: undefined, engine_off: true, position_source: null });
     const result = await run(baseService({ track_state: 'on_property', status: 'on_site' }), { point, techStatus: baseTechStatus() });

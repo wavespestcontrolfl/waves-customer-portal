@@ -204,18 +204,25 @@ function timestampMs(value) {
 function validateSampleTiming({ techStatus, point, service, now = Date.now() }) {
   const pointMs = timestampMs(point?.reported_at);
   const techMs = timestampMs(techStatus?.location_updated_at);
-  const enRouteMs = timestampMs(service?.en_route_at);
 
   if (pointMs == null || techMs == null) {
     return { ok: false, reason: 'missing_location_timestamp' };
   }
+  return validateEventTiming({ pointMs, techMs, service, now });
+}
+
+// The event's own time against the visit: fresh, close to the stored location's
+// time when there is one (techMs null = a position-less engine-off, nothing to
+// match), and not before the visit went en route.
+function validateEventTiming({ pointMs, techMs = null, service, now = Date.now() }) {
+  const enRouteMs = timestampMs(service?.en_route_at);
   if (enRouteMs == null) {
     return { ok: false, reason: 'missing_en_route_timestamp' };
   }
   if (now - pointMs > MAX_SAMPLE_AGE_MS) {
     return { ok: false, reason: 'stale_location_sample' };
   }
-  if (Math.abs(pointMs - techMs) > SAMPLE_TIMESTAMP_TOLERANCE_MS) {
+  if (techMs != null && Math.abs(pointMs - techMs) > SAMPLE_TIMESTAMP_TOLERANCE_MS) {
     return { ok: false, reason: 'stale_location_sample' };
   }
   if (pointMs < enRouteMs - EN_ROUTE_TIMESTAMP_TOLERANCE_MS) {
@@ -534,11 +541,15 @@ async function recordSupersededSample({ techStatus, point, config }) {
 
 // A trip-end with no usable engine-off position (no GPS of its own and no fresh
 // last location): nothing to judge, so the visit gets the not-marked row only.
+// The trip-end's own time must be fresh and not before this visit went en route,
+// so a delayed trip-end from an earlier trip never claims this visit's row.
 async function recordEngineOffNoPosition({ techStatus, point, config }) {
   try {
     const service = await loadCurrentService(techStatus.current_job_id);
     if (!service || !isEnRouteService(service)) return;
     if (service.technician_id && techStatus.tech_id && service.technician_id !== techStatus.tech_id) return;
+    const pointMs = timestampMs(point?.reported_at);
+    if (pointMs == null || !validateEventTiming({ pointMs, service }).ok) return;
     await recordNotMarked({ service, techStatus, point, config, reason: 'engine_off_no_position', ignoreRadius: true });
   } catch (err) {
     logger.warn(`[gps-arrival] engine-off no-position diagnostic failed: ${err.message}`);
