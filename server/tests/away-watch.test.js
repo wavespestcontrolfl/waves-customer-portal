@@ -1,0 +1,197 @@
+/**
+ * Away Watch + Welcome Home (GATE_AWAY_WATCH, owner approved 2026-10-31): the shared writer rules, the gate-off
+ * silence of both responses, and the tech job-card lines. The closeout photo minimum runs through the real
+ * completeScheduledService in away-watch-closeout-postgres.test.js.
+ */
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+jest.mock('../models/db', () => {
+  const fn = () => ({});
+  fn.raw = () => ({});
+  fn.schema = { hasTable: async () => true };
+  return fn;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
+
+const { validatePrefsBody, PREFS_FIELD_SCHEMAS } = require('../services/property-preferences-schema');
+const AwayWatch = require('../services/away-watch');
+const jobCard = require('../services/job-card');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
+const day = (offset) => etDateString(addETDays(new Date(), offset));
+const GATE = 'GATE_AWAY_WATCH';
+
+afterEach(() => { delete process.env[GATE]; });
+
+describe('writer rules (shared by the customer and the admin writer)', () => {
+  const run = (body) => validatePrefsBody(PREFS_FIELD_SCHEMAS, body);
+  beforeEach(() => { process.env[GATE] = 'true'; });
+
+  test('a valid pair saves as plain ET day strings', () => {
+    const out = run({ awayWatchFrom: day(1), awayWatchUntil: day(30) });
+    expect(out.rejected).toEqual([]);
+    expect(out.value).toEqual({ awayWatchFrom: day(1), awayWatchUntil: day(30) });
+  });
+
+  test('a pair of nulls (or empty strings) clears both', () => {
+    expect(run({ awayWatchFrom: null, awayWatchUntil: null }).value).toEqual({ awayWatchFrom: null, awayWatchUntil: null });
+    expect(run({ awayWatchFrom: '', awayWatchUntil: '' }).value).toEqual({ awayWatchFrom: null, awayWatchUntil: null });
+  });
+
+  test.each([
+    ['one date only', { awayWatchFrom: day(1) }],
+    ['one date set, one cleared', { awayWatchFrom: day(1), awayWatchUntil: null }],
+  ])('both or neither: %s is refused and nothing is saved', (_label, body) => {
+    const out = run({ ...body, parkingNotes: 'Driveway' });
+    expect(out.value).toEqual({ parkingNotes: 'Driveway' });
+    expect(out.rejected).toEqual([{ field: 'awayWatchUntil', message: AwayWatch.MESSAGES.together }]);
+  });
+
+  test('the leave day cannot be after the back day; the same day is allowed', () => {
+    expect(run({ awayWatchFrom: day(10), awayWatchUntil: day(5) }).rejected).toEqual([{ field: 'awayWatchUntil', message: AwayWatch.MESSAGES.order }]);
+    expect(run({ awayWatchFrom: day(10), awayWatchUntil: day(10) }).rejected).toEqual([]);
+  });
+
+  test('the window is at most 240 days (240 passes, 241 is refused)', () => {
+    expect(run({ awayWatchFrom: day(0), awayWatchUntil: day(240) }).rejected).toEqual([]);
+    expect(run({ awayWatchFrom: day(0), awayWatchUntil: day(241) }).rejected).toEqual([{ field: 'awayWatchUntil', message: AwayWatch.MESSAGES.tooLong }]);
+  });
+
+  test('the back day cannot be before today in ET; leaving in the past is fine while the member is still away', () => {
+    expect(run({ awayWatchFrom: day(-20), awayWatchUntil: day(-1) }).rejected).toEqual([{ field: 'awayWatchUntil', message: AwayWatch.MESSAGES.past }]);
+    expect(run({ awayWatchFrom: day(-20), awayWatchUntil: day(0) }).rejected).toEqual([]);
+  });
+
+  test.each(['2026-02-31', 'next week', '2026-6-1', 20260601])('%p is not a calendar day: both dates are dropped and one message names it', (bad) => {
+    const out = run({ awayWatchFrom: bad, awayWatchUntil: day(20) });
+    expect(out.value).toEqual({});
+    expect(out.rejected).toHaveLength(1);
+    expect(out.rejected[0].field).toBe('awayWatchFrom');
+  });
+
+  test('the cancel-flow Away Mode column is not a field here', () => {
+    expect(run({ awayModeUntil: day(5) })).toMatchObject({ value: {}, presentCount: 0 });
+  });
+
+  test('gate off: both keys are unknown fields, stripped without a message, like any other unknown key', () => {
+    delete process.env[GATE];
+    const out = run({ awayWatchFrom: day(1), awayWatchUntil: day(30), parkingNotes: 'Driveway' });
+    expect(out).toMatchObject({ value: { parkingNotes: 'Driveway' }, rejected: [], presentCount: 1 });
+    process.env[GATE] = 'TRUE';
+    expect(run({ awayWatchFrom: day(1), awayWatchUntil: day(30) })).toMatchObject({ value: {}, rejected: [], presentCount: 0 });
+  });
+});
+
+describe('responses', () => {
+  const row = { id: 'p1', away_watch_from: new Date('2026-06-01T00:00:00Z'), away_watch_until: '2026-09-15', parking_notes: 'x' };
+
+  test('gate off: the two fields are removed from a row (snake or camel)', () => {
+    expect(AwayWatch.withoutAwayWatch(row)).toEqual({ id: 'p1', parking_notes: 'x' });
+    expect(AwayWatch.withoutAwayWatch({ awayWatchFrom: null, awayWatchUntil: null, a: 1 })).toEqual({ a: 1 });
+    expect(AwayWatch.withoutAwayWatch(null)).toBeNull();
+  });
+
+  test('gate on: the fields stay and come back as plain ET day strings', () => {
+    process.env[GATE] = 'true';
+    expect(AwayWatch.withoutAwayWatch(row)).toBe(row);
+    expect(AwayWatch.withAwayWatchDays(row)).toMatchObject({ away_watch_from: '2026-06-01', away_watch_until: '2026-09-15' });
+  });
+
+  test('gate off: withAwayWatchDays leaves the row alone', () => {
+    expect(AwayWatch.withAwayWatchDays(row)).toBe(row);
+  });
+});
+
+describe('tech job-card lines', () => {
+  const AWAY = 'Away Watch: member away until 2026-09-30. Take 3 photos of the outside of the home from the ground and note standing water.';
+  const WELCOME = 'Welcome Home: last visit before the member is back. Do a lanai cobweb sweep (no product).';
+  // property_preferences answers .first(); scheduled_services answers the next-visit .first().
+  const fakeDb = ({ prefs, next = null }) => {
+    const reads = [];
+    const dbh = (table) => {
+      reads.push(table);
+      const chain = {};
+      for (const m of ['where', 'whereNotIn', 'orderBy']) chain[m] = () => chain;
+      chain.first = async () => (table === 'property_preferences' ? prefs : next);
+      return chain;
+    };
+    dbh.reads = reads;
+    return dbh;
+  };
+  const prefs = { away_watch_from: '2026-09-01', away_watch_until: '2026-09-30' };
+  const lines = (visitDay, over = {}) => AwayWatch.awayWatchCardLines(fakeDb({ prefs, ...over }), 'c1', visitDay);
+
+  beforeEach(() => { process.env[GATE] = 'true'; });
+
+  test('inside the window: the Away Watch line names the back day', async () => {
+    expect(await lines('2026-09-04', { next: { scheduled_date: '2026-09-18' } })).toEqual({ lines: [AWAY] });
+  });
+
+  test('the leave day is inside, the back day is not', async () => {
+    expect(await lines('2026-09-01', { next: { scheduled_date: '2026-09-18' } })).toEqual({ lines: [AWAY] });
+    expect(await lines('2026-09-30')).toBeNull();
+    expect(await lines('2026-08-31')).toBeNull();
+  });
+
+  test('the last visit before the back day also gets Welcome Home: no later visit, or the next one is on or after the back day', async () => {
+    expect(await lines('2026-09-20')).toEqual({ lines: [AWAY, WELCOME] });
+    expect(await lines('2026-09-20', { next: { scheduled_date: '2026-09-30' } })).toEqual({ lines: [AWAY, WELCOME] });
+    expect(await lines('2026-09-20', { next: { scheduled_date: new Date('2026-10-14T00:00:00Z') } })).toEqual({ lines: [AWAY, WELCOME] });
+  });
+
+  test('a visit with another one still before the back day does not get Welcome Home', async () => {
+    expect((await lines('2026-09-20', { next: { scheduled_date: '2026-09-29' } })).lines).toEqual([AWAY]);
+  });
+
+  test('one date missing, no row: nothing', async () => {
+    expect(await AwayWatch.awayWatchCardLines(fakeDb({ prefs: { away_watch_from: '2026-09-01', away_watch_until: null } }), 'c1', '2026-09-04')).toBeNull();
+    expect(await AwayWatch.awayWatchCardLines(fakeDb({ prefs: undefined }), 'c1', '2026-09-04')).toBeNull();
+  });
+
+  test('gate off: nothing, and the database is not read', async () => {
+    delete process.env[GATE];
+    const dbh = fakeDb({ prefs });
+    expect(await AwayWatch.awayWatchCardLines(dbh, 'c1', '2026-09-04')).toBeNull();
+    expect(dbh.reads).toEqual([]);
+  });
+
+  describe('on the full card', () => {
+    const factsDb = (rows) => {
+      const dbh = (table) => {
+        const chain = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereNotIn', 'whereIn', 'modify', 'orderBy', 'orderByRaw', 'select', 'limit', 'whereNotNull']) chain[m] = () => chain;
+        const value = rows[table];
+        chain.first = () => Object.assign(Promise.resolve(value ?? null), { catch: async () => value ?? null });
+        chain.catch = async () => (Array.isArray(value) ? value : []);
+        return Object.assign(chain, { update: () => ({ catch: async () => null }) });
+      };
+      dbh.raw = (sql) => sql;
+      return dbh;
+    };
+    const visit = (scheduled_date) => ({ id: 'svc1', customer_id: 'c1', scheduled_date, service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges: false });
+    const card = (scheduledDate, rows = {}) => jobCard.buildJobCard('svc1', {
+      dbh: factsDb({ 'scheduled_services as ss': visit(scheduledDate), property_preferences: prefs, ...rows }),
+      deps: { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } },
+      now: new Date('2026-09-04T12:00:00Z'),
+    });
+
+    test('inside the window the card carries the lines; outside it, and with the gate off, it has no awayWatch key', async () => {
+      expect((await card('2026-09-04', { scheduled_services: { scheduled_date: '2026-09-18' } })).awayWatch).toEqual({ lines: [AWAY] });
+      expect((await card('2026-09-22')).awayWatch).toEqual({ lines: [AWAY, WELCOME] });
+      expect(await card('2026-10-02')).not.toHaveProperty('awayWatch');
+      delete process.env[GATE];
+      expect(await card('2026-09-04')).not.toHaveProperty('awayWatch');
+    });
+
+    test('the dispatch readiness poll never reads it', async () => {
+      const ready = await jobCard.buildJobCard('svc1', {
+        dbh: factsDb({ 'scheduled_services as ss': visit('2026-09-04'), property_preferences: prefs }),
+        readinessOnly: true,
+        deps: { getRecentCalls: async () => [], getHourly: async () => null, protocols: {} },
+        now: new Date('2026-09-04T12:00:00Z'),
+      });
+      expect(ready).not.toHaveProperty('awayWatch');
+    });
+  });
+});

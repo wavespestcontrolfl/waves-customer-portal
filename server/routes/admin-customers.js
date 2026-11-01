@@ -33,6 +33,7 @@ const { excludeUnresolvedSendReservations } = require('../services/messaging/rev
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
 const CustomerCredit = require('../services/customer-credit');
+const AwayWatch = require('../services/away-watch');
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -3815,7 +3816,9 @@ router.get('/:id', async (req, res, next) => {
         address: { line1: n.address_line1, line2: n.address_line2, city: n.city, state: n.state, zip: n.zip },
       })),
       tags: tags.map(t => t.tag),
-      interactions, preferences: prefs, services, payments, scheduled, upcomingScheduled, smsLog,
+      // GATE_AWAY_WATCH: Customer 360 shows the Away Watch dates only while the server says the gate is live.
+      ...(AwayWatch.awayWatchLive() ? { awayWatchEnabled: true } : {}),
+      interactions, preferences: AwayWatch.withoutAwayWatch(AwayWatch.withAwayWatchDays(prefs)), services, payments, scheduled, upcomingScheduled, smsLog,
       visitStats: visitStatsRow ? {
         count: Number(visitStatsRow.count || 0),
         firstDate: dateOnlyForApi(visitStatsRow.first_date),
@@ -5443,7 +5446,7 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     }).catch((err) => logger.warn(`[customers:${customerId}] property_preferences audit failed: ${err.message}`));
     logger.info(`[customers] property_preferences updated for ${customerId}: ${JSON.stringify({ fields: loggedFields })}`);
 
-    res.json({ success: true, preferences, saved: true, ...(rejected.length ? { rejected } : {}) });
+    res.json({ success: true, preferences: AwayWatch.withoutAwayWatch(AwayWatch.withAwayWatchDays(preferences)), saved: true, ...(rejected.length ? { rejected } : {}) });
   } catch (err) { next(err); }
 });
 

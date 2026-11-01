@@ -21,6 +21,7 @@ import { cardBrandLabel } from '../lib/cardBrand';
 import { microdepositSavedPhrases } from '../lib/microdeposit';
 import AutopayCard from '../components/billing/AutopayCard';
 import { annualPrepayRenewalLine } from '../lib/annualPrepayRenewal';
+import { AWAY_WATCH_COPY, awayWatchSummary } from '../lib/awayWatchCopy';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
@@ -8372,6 +8373,73 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationWaterSource', 'irrigationIssues',
 ]);
 
+// Away Watch dates. The pair saves whole or not at all, so nothing is sent until both days are chosen (one autosave
+// carries both); clearing both, or Remove, sends two nulls.
+function AwayWatchFields({ prefs, updateField, error, styles }) {
+  const { labelStyle, inputStyle, fieldGrid, muted, focusBorder, blurBorder } = styles;
+  const [from, setFrom] = useState(prefs.awayWatchFrom || '');
+  const [until, setUntil] = useState(prefs.awayWatchUntil || '');
+  const change = (nextFrom, nextUntil) => {
+    setFrom(nextFrom);
+    setUntil(nextUntil);
+    if (nextFrom && nextUntil) {
+      updateField('awayWatchFrom', nextFrom);
+      updateField('awayWatchUntil', nextUntil);
+    } else if (!nextFrom && !nextUntil) {
+      updateField('awayWatchFrom', null);
+      updateField('awayWatchUntil', null);
+    }
+  };
+  const dateInput = (value, label, onChange, min) => (
+    <div>
+      <label style={labelStyle}>{label}</label>
+      <input
+        type="date"
+        value={value}
+        min={min || undefined}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={label}
+        aria-invalid={error ? true : undefined}
+        className="waves-focus-ring"
+        style={error ? { ...inputStyle, borderColor: B.red } : inputStyle}
+        onFocus={focusBorder}
+        onBlur={blurBorder}
+      />
+    </div>
+  );
+  return (
+    <div>
+      <p style={{ margin: '0 0 14px', fontSize: 14, lineHeight: 1.5, color: muted }}>{AWAY_WATCH_COPY.description}</p>
+      <div style={fieldGrid}>
+        {dateInput(from, AWAY_WATCH_COPY.fromLabel, (v) => change(v, until))}
+        {dateInput(until, AWAY_WATCH_COPY.untilLabel, (v) => change(from, v), from)}
+      </div>
+      {error && <div role="alert" style={{ marginTop: 8, fontSize: 14, color: B.red }}>{error}</div>}
+      {(from || until) && !(from && until) && <div style={{ marginTop: 8, fontSize: 14, color: muted }}>{AWAY_WATCH_COPY.bothDays}</div>}
+      {(from || until) && (
+        <button
+          type="button"
+          onClick={() => change('', '')}
+          className="waves-focus-ring"
+          style={{ ...inputStyle, width: 'auto', marginTop: 12, cursor: 'pointer', fontWeight: 700, color: B.glassNavy }}
+        >
+          {AWAY_WATCH_COPY.remove}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// The Property tab section, after Pets. Shown only when the server says GATE_AWAY_WATCH is live.
+function AwayWatchSection({ enabled, prefs, updateField, error, styles }) {
+  if (!enabled) return null;
+  return (
+    <PropertySection title={AWAY_WATCH_COPY.title} icon="camera" summary={awayWatchSummary(prefs)}>
+      <AwayWatchFields prefs={prefs} updateField={updateField} error={error} styles={styles} />
+    </PropertySection>
+  );
+}
+
 function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -8409,6 +8477,8 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // GATE_IRRIGATION_OWNER_RATES: the server says which head rate table its emails use (key present only while the gate
   // is live), so the line under Minutes per Zone shows the number the server would use.
   const [ownerRates, setOwnerRates] = useState(false);
+  // GATE_AWAY_WATCH: the server says whether the Away Watch section shows (key present only while the gate is live).
+  const [awayWatchEnabled, setAwayWatchEnabled] = useState(false);
   const irrigationEditRevision = useRef(0);
   const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
   const [savedWateringRevision, setSavedWateringRevision] = useState(0);
@@ -8426,6 +8496,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
         setIrrigationSuppressed(d.irrigationSuppressed === true);
         setOwnerRates(d.irrigationOwnerRates === true);
+        setAwayWatchEnabled(d.awayWatchEnabled === true);
         setLoading(false);
       })
       .catch(err => {
@@ -9225,6 +9296,14 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           </>
         )}
       </PropertySection>
+
+      <AwayWatchSection
+        enabled={awayWatchEnabled}
+        prefs={prefs}
+        updateField={updateField}
+        error={fieldErrors.awayWatchUntil || fieldErrors.awayWatchFrom}
+        styles={{ labelStyle, inputStyle, fieldGrid, muted, focusBorder, blurBorder }}
+      />
 
       <PropertySection title="Scheduling" icon="calendar" summary={scheduleSummary}>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
