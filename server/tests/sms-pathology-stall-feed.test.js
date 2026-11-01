@@ -268,19 +268,43 @@ describe('countedPromptVersions — base identity', () => {
 });
 
 describe('auto-promote side', () => {
-  test('stalled_deferred is eligible; knew_more is not', () => {
-    expect(auto.ELIGIBLE_FAILURE_MODES).toContain('stalled_deferred');
-    expect(auto.ELIGIBLE_FAILURE_MODES).not.toContain('knew_more');
+  test('stalled_deferred is eligible only while the stall feed gate is on; knew_more never is', () => {
+    const prior = process.env.GATE_SMS_LEDGER_STALL_FEED;
+    try {
+      delete process.env.GATE_SMS_LEDGER_STALL_FEED;
+      expect(auto.eligibleFailureModes()).not.toContain('stalled_deferred');
+      expect(auto.eligibleFailureModes()).toEqual([...auto.ELIGIBLE_FAILURE_MODES]);
+      process.env.GATE_SMS_LEDGER_STALL_FEED = 'true';
+      expect(auto.eligibleFailureModes()).toContain('stalled_deferred');
+      expect(auto.eligibleFailureModes()).not.toContain('knew_more');
+      expect(auto.ELIGIBLE_FAILURE_MODES).not.toContain('stalled_deferred');
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SMS_LEDGER_STALL_FEED;
+      else process.env.GATE_SMS_LEDGER_STALL_FEED = prior;
+    }
   });
 
-  test('the distill prompt keeps the restraint wording and adds the state-it-plainly wording', () => {
-    const prompt = auto._test.buildDistillPrompt('The assistant deferred although the facts listed the next visit date.');
-    expect(prompt).toMatch(/what NOT to state or when to stay with the facts/);
-    expect(prompt).toMatch(/state that answer plainly/);
-    expect(prompt).toMatch(/instead of deferring/);
-    // The hard rules the distiller is told are unchanged.
-    expect(prompt).toMatch(/no prices, discounts or dollar amounts; no promised visits, refunds or credits/);
-    expect(prompt).toMatch(/nothing about complaints, billing disputes, chemicals, health or legal matters/);
+  test('the distill prompt adds the state-it-plainly wording only while the gate is on', () => {
+    const prior = process.env.GATE_SMS_LEDGER_STALL_FEED;
+    const text = 'The assistant deferred although the facts listed the next visit date.';
+    try {
+      process.env.GATE_SMS_LEDGER_STALL_FEED = 'true';
+      const on = auto._test.buildDistillPrompt(text);
+      expect(on).toMatch(/what NOT to state or when to stay with the facts/);
+      expect(on).toMatch(/state that answer plainly/);
+      expect(on).toMatch(/instead of deferring/);
+      // The hard rules the distiller is told are unchanged.
+      expect(on).toMatch(/no prices, discounts or dollar amounts; no promised visits, refunds or credits/);
+      expect(on).toMatch(/nothing about complaints, billing disputes, chemicals, health or legal matters/);
+      delete process.env.GATE_SMS_LEDGER_STALL_FEED;
+      const off = auto._test.buildDistillPrompt(text);
+      // Gate off: the restraint-only sentence exactly as it was before the stall feed.
+      expect(off).toContain('characters, plain ASCII, one sentence, telling the assistant what NOT to state or when to stay with the facts it was given. HARD RULES: no prices');
+      expect(off).not.toMatch(/plainly|instead of deferring/);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SMS_LEDGER_STALL_FEED;
+      else process.env.GATE_SMS_LEDGER_STALL_FEED = prior;
+    }
   });
 
   test('a stall rule that states a fact passes the guards', () => {

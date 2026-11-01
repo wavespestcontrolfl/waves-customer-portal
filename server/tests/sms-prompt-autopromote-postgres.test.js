@@ -272,6 +272,18 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(await auto.createCandidate({ dbi: trx, now: new Date(NOW.getTime() + 8 * DAY), distill })).toEqual({ skipped: 'no_eligible_proposal' });
     });
 
+    test('a pending stalled_deferred proposal on the exact live version is not picked once the stall feed gate is off', async () => {
+      await insertProposal({ failure_mode: 'stalled_deferred', prompt_version: drafter.currentPromptVersion() });
+      const distill = distillWith(GOOD_RULE);
+      delete process.env.GATE_SMS_LEDGER_STALL_FEED;
+      expect(await auto.createCandidate({ dbi: trx, now: NOW, distill })).toEqual({ skipped: 'no_eligible_proposal' });
+      expect(distill).not.toHaveBeenCalled();
+      process.env.GATE_SMS_LEDGER_STALL_FEED = 'true';
+      const out = await auto.createCandidate({ dbi: trx, now: NOW, distill });
+      expect(out).toMatchObject({ created: expect.any(String) });
+      expect((await rowOf(out.created)).failure_mode).toBe('stalled_deferred');
+    });
+
     test('with real answers off there is nothing to patch, even when a voice-input tag rides on the v11 identity', async () => {
       delete process.env.GATE_SMS_REAL_ANSWERS;
       await insertProposal({ prompt_version: drafter.PROMPT_VERSION });
