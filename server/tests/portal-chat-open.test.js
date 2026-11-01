@@ -261,7 +261,7 @@ describe('request_quote', () => {
   test('a second ask for the same service while one is open writes nothing and rings nothing', async () => {
     openRequest = {
       id: 'req-0', customer_id: 'cust-1', requested_service: 'mosquito', source: 'portal_chat', status: 'new',
-      subject: 'Quote requested in portal chat: Mosquito', pricing_revision: { source: 'portal_chat', service: 'mosquito' },
+      subject: 'Quote requested in portal chat: Mosquito', pricing_revision: { source: 'portal_chat', service: 'mosquito', note: 'I want it' },
     };
     mockCreate.mockResolvedValueOnce(quote('mosquito')).mockResolvedValueOnce(text('Done.'));
 
@@ -271,6 +271,42 @@ describe('request_quote', () => {
     expect(writes(/update "service_requests"/)).toHaveLength(0);
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(resultsOfSecondCall()[0].instruction).toContain('A quote request is now with the team.');
+  });
+
+  const openMosquito = (note) => ({
+    id: 'req-0', customer_id: 'cust-1', requested_service: 'mosquito', source: 'portal_chat', status: 'new',
+    subject: 'Quote requested in portal chat: Mosquito', pricing_revision: { source: 'portal_chat', service: 'mosquito', note },
+  });
+
+  test('a repeat ask with a changed note refreshes the open row and rings the bell as updated', async () => {
+    openRequest = openMosquito('I want it');
+    mockCreate.mockResolvedValueOnce(quote('mosquito', 'Only the back yard, please')).mockResolvedValueOnce(text('Done.'));
+
+    await say('Only the back yard');
+
+    expect(writes(/insert into "service_requests"/)).toHaveLength(0);
+    const [update] = writes(/update "service_requests"/);
+    expect(update.bindings.join('|')).toContain('Only the back yard, please');
+    expect(update.bindings.join('|')).toContain('"note":"Only the back yard, please"');
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect(triggerNotification.mock.calls[0][1]).toEqual(expect.objectContaining({ refreshed: true, requestId: 'req-0' }));
+  });
+
+  test('a repeat ask with no note of its own keeps the saved note and writes nothing', async () => {
+    openRequest = openMosquito('Only the back yard, please');
+    mockCreate.mockResolvedValueOnce(quote('mosquito', '')).mockResolvedValueOnce(text('Done.'));
+
+    await say('Yes please add it');
+
+    expect(writes(/update "service_requests"/)).toHaveLength(0);
+    expect(writes(/insert into "service_requests"/)).toHaveLength(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('every add-service source resolves with the estimate: the cleanup reads the shared source list', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    expect(source).not.toContain("['service_report', 'portal_home']");
+    expect(source.match(/whereIn\('source', require\('..\/services\/cta-service-request'\)\.CTA_REQUEST_SOURCES\)/g)).toHaveLength(2);
   });
 
   test('a service not named is saved as such, and the model is told to ask which', async () => {

@@ -302,18 +302,40 @@ async function ringQuoteBell({ customerId, label, outcome, requestId, turn }) {
   }
 }
 
+// The note the open add-service request of this customer and service already
+// holds (portal chat rows keep it in their revision snapshot), or ''. A repeat
+// ask with no note of its own keeps it, so it never reads as a change.
+async function standingQuoteNote({ customerId, requestedService, sources, turn }) {
+  const db = require('../../models/db');
+  const { OPEN_REQUEST_TERMINAL_STATUSES } = require('../estimate-add-service-request');
+  const query = db('service_requests')
+    .where({ customer_id: customerId, requested_service: requestedService })
+    .whereIn('source', sources)
+    .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first('source', 'pricing_revision');
+  const row = await (turn ? turn.query(query, 'quote request standing note') : query);
+  let revision = row?.pricing_revision;
+  if (typeof revision === 'string') { try { revision = JSON.parse(revision); } catch { revision = null; } }
+  return row?.source === 'portal_chat' && typeof revision?.note === 'string' ? revision.note : '';
+}
+
 // request_quote: one open add-service request per (customer, service), and
 // one bell for it. The writer is the same one the portal home card and the
 // service report use, so a second ask refreshes the standing row.
 async function requestQuote(customerId, input, { open = false } = {}, turn = null) {
   if (open !== true) return { error: 'Unknown tool: request_quote' };
   const db = require('../../models/db');
-  const { writeOrRefreshCtaRequest } = require('../cta-service-request');
+  const { writeOrRefreshCtaRequest, CTA_REQUEST_SOURCES } = require('../cta-service-request');
   const { normalizeRequestedServiceKey } = require('../estimate-add-service-request');
   const service = QUOTE_SERVICES.includes(input.service) ? input.service : 'not_stated';
   const label = QUOTE_LABELS[service];
-  const note = flatLine(input.note, QUOTE_NOTE_MAX);
   const requestedService = quoteServiceKey(service, normalizeRequestedServiceKey);
+  // A changed note refreshes the open row (the writer's refresh path, which
+  // rings the bell as "updated", as a portal home refresh does); the same note,
+  // or none, is a plain repeat that writes and rings nothing.
+  const note = flatLine(input.note, QUOTE_NOTE_MAX)
+    || await standingQuoteNote({ customerId, requestedService, sources: CTA_REQUEST_SOURCES, turn });
   const writer = turn ? { transaction: (work) => turn.transaction('quote request', work) } : db;
   const outcome = await writeOrRefreshCtaRequest(writer, {
     customerId,
@@ -321,7 +343,7 @@ async function requestQuote(customerId, input, { open = false } = {}, turn = nul
     source: 'portal_chat',
     subject: `Quote requested in portal chat: ${label}`,
     description: `Customer asked the portal chat assistant for a written quote (${label}). ${note ? `Their words: ${note}. ` : ''}Review and follow up. No customer message has been sent.`,
-    revisionSnapshot: { source: 'portal_chat', service },
+    revisionSnapshot: { source: 'portal_chat', service, note },
   });
   await ringQuoteBell({ customerId, label, outcome, requestId: outcome.request?.id, turn });
   return {
