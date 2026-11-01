@@ -3522,6 +3522,18 @@ router.get('/:id', async (req, res, next) => {
     }
     const c = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!c) return res.status(404).json({ error: 'Customer not found' });
+    // ?view=booking: only the fields the New appointment form's customer box takes (Dispatch
+    // "Book it", owner 2026-11-01). The full profile below reads ~28 sources; on a real tap it
+    // took 4.5 s, and the form waits for it. Same values the full profile returns for them.
+    if (req.query.view === 'booking') {
+      return res.json({
+        customer: {
+          id: c.id, firstName: c.first_name, lastName: c.last_name, phone: c.phone,
+          address: { line1: c.address_line1, line2: c.address_line2, city: c.city, state: c.state, zip: c.zip },
+          tier: c.waveguard_tier,
+        },
+      });
+    }
 
     const currentYear = Number(etDateString().slice(0, 4));
     const focusServiceId = typeof req.query.focusServiceId === 'string' && req.query.focusServiceId.trim() ? req.query.focusServiceId.trim() : null;
