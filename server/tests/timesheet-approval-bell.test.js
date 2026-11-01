@@ -79,7 +79,7 @@ describe('Monday 5 AM cron', () => {
     expect(spec.why).toMatch(/^2 timesheets for the week of [A-Z][a-z]{2} \d{1,2} wait, and pay needs them approved first\.$/);
     expect(spec.link).toMatch(/^\/admin\/timetracking\?tab=approvals&weekStart=\d{4}-\d{2}-\d{2}$/);
     const weekStart = spec.link.split('weekStart=')[1];
-    expect(getPendingWeeks).toHaveBeenCalledWith(weekStart);
+    expect(getPendingWeeks).toHaveBeenCalledWith(weekStart, { strict: true });
     expect(opts).toEqual({
       dedupeKey: `timesheets-approve:${weekStart}`,
       bellDefault: true,
@@ -150,7 +150,7 @@ describe('closing after an approval', () => {
   test('the Approvals page lists only approved weeks: the week bell closes', async () => {
     getPendingWeeks.mockResolvedValue([{ status: 'approved' }, { status: 'approved' }]);
     await expect(bells.settleWeekBell('2027-01-04', { conn: 'conn' })).resolves.toBe(1);
-    expect(getPendingWeeks).toHaveBeenCalledWith('2027-01-04');
+    expect(getPendingWeeks).toHaveBeenCalledWith('2027-01-04', { strict: true });
     expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(
       'conn', ['timesheets-approve:2027-01-04'], 'timesheets_approved', { resolution: expect.any(String) },
     );

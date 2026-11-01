@@ -63,10 +63,12 @@ async function closeWeekBell(weekStart, { conn = db, episodes = require('./admin
 
 // How many weeks of this payroll week still wait for approval: the Approvals page's own list (getPendingWeeks), so the
 // bell and the page agree. That list covers every technician with worked time (deactivated ones too) and builds a
-// missing weekly summary on demand. Required at call time: timesheet-approval.js requires this module.
+// missing weekly summary on demand. Strict: a technician whose week cannot be refreshed makes the count throw, because
+// a list that left someone out must never read as "nothing waits". Required at call time: timesheet-approval.js
+// requires this module.
 async function countPendingWeeks(weekStart) {
   const { getPendingWeeks } = require('./timesheet-approval');
-  return (await getPendingWeeks(weekStart)).filter((week) => week.status !== 'approved').length;
+  return (await getPendingWeeks(weekStart, { strict: true })).filter((week) => week.status !== 'approved').length;
 }
 
 // After an approval: close the week's bell once the Approvals page lists no week that still waits. A count that fails
