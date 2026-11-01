@@ -94,6 +94,17 @@ function buildPayerInvoiceBody({ payer, customerFirstName, serviceType, addressL
 
 // The street line the invoice email's Property row shows, without city/state/zip. billing-email-details resolves the
 // right property (the visit's saved property, a staff correction, a packet's shared address). '' when it cannot.
+// A held row's preview: the text as it will read, with the pay link replaced (buildPayerInvoiceBody always ends with
+// " is ready: <link>"). The registered replay never sends this body; it composes the text again at the window open.
+const HELD_PAY_LINK_PLACEHOLDER = '[pay link]';
+const READY_MARKER = ' is ready: ';
+function heldRowBody(body) {
+  const text = String(body || '');
+  const at = text.lastIndexOf(READY_MARKER);
+  if (at < 0) return `Payer invoice text held for the send window. The pay link is added when it sends: ${HELD_PAY_LINK_PLACEHOLDER}`;
+  return `${text.slice(0, at + READY_MARKER.length)}${HELD_PAY_LINK_PLACEHOLDER}`;
+}
+
 async function serviceAddressLine(invoice, customer) {
   try {
     const full = await require('./billing-email-details').invoicePropertyAddress(invoice, customer);
@@ -258,7 +269,9 @@ async function queueHeldPayerText(dbh, facts, { key, body, nextAllowedAt, emailM
       from_phone: require('../config/twilio-numbers').getOutboundNumber(),
       // The payer's AP phone, frozen: the replay drops the text when the payer's phone has changed since.
       to_phone: to,
-      message_body: body,
+      // Never the bearer pay link: the scheduled queue is readable by every technician, and the replay composes a fresh
+      // body (with a fresh link) at the window open, so the row only needs a readable preview.
+      message_body: heldRowBody(body),
       status: 'scheduled',
       scheduled_for: runAt,
       message_type: MESSAGE_TYPE,
@@ -385,6 +398,7 @@ module.exports = {
   recheckHeldPayerText,
   replayHeldPayerText,
   buildPayerInvoiceBody,
+  heldRowBody,
   eventKeyFor,
   MESSAGE_TYPE,
   ENTRY_POINT,

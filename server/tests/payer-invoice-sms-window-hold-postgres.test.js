@@ -100,6 +100,8 @@ postgres('payer text window hold queue (private PostgreSQL)', () => {
       .whereRaw("metadata->>'notificationEventKey' = ?", [key]);
     expect(found).toHaveLength(1);
     expect(found[0]).toMatchObject({ to_phone: '+19415550123', direction: 'outbound' });
+    expect(found[0].message_body).not.toContain('portal.wavespestcontrol.com');
+    expect(found[0].message_body).toMatch(/ is ready: \[pay link\]$/);
     expect(new Date(found[0].scheduled_for).toISOString()).toBe(WINDOW_OPEN);
     expect(found[0].metadata).toMatchObject({
       requires_registered_dispatch: true, replay_purpose: 'payer_payment_link', invoice_id: 'inv-1', payer_id: 7, payer_ap_phone: '9415550123',

@@ -155,6 +155,10 @@ describe('the hold is persisted', () => {
       customer_id: 'cust-1', to_phone: AP_TO, status: 'scheduled', message_type: 'payer_invoice', direction: 'outbound',
     });
     expect(row.scheduled_for).toEqual(new Date(WINDOW_OPEN));
+    // The technician-readable scheduled queue never holds the bearer pay link: a preview with a placeholder.
+    expect(row.message_body).not.toContain('portal.wavespestcontrol.com');
+    expect(row.message_body).not.toContain('/l/');
+    expect(row.message_body).toMatch(/ is ready: \[pay link\]$/);
     expect(JSON.parse(row.metadata)).toMatchObject({
       entry_point: 'payer_invoice_sms_deferred',
       requires_registered_dispatch: true,
@@ -167,6 +171,15 @@ describe('the hold is persisted', () => {
       email_message_id: 'em-1',
     });
     expect(providerSends).toHaveLength(0);
+  });
+
+  test('the held row preview replaces the pay link and keeps the rest of the text', () => {
+    const { heldRowBody } = require('../services/payer-invoice-sms');
+    expect(heldRowBody("Hi Pat! The invoice for Sam's One-Time Pest Control Service at 123 Palm Ave is ready: portal.wavespestcontrol.com/l/abc"))
+      .toBe("Hi Pat! The invoice for Sam's One-Time Pest Control Service at 123 Palm Ave is ready: [pay link]");
+    const fallback = heldRowBody('no marker https://portal.wavespestcontrol.com/pay/tok');
+    expect(fallback).not.toContain('portal.wavespestcontrol.com');
+    expect(fallback).toContain('[pay link]');
   });
 
   test('a second hold for the same episode does not queue a second row', async () => {
