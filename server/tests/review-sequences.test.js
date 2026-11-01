@@ -4448,7 +4448,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     enroll.mockResolvedValueOnce({ enrolled: false, reason: 'member_review_suppressed' });
     const individual = jest.spyOn(ReviewService, 'enrollPostService');
     const result = await ReviewService.enrollForPaidInvoice({ id: 'packet-invoice', customer_id: 'customer-1', service_record_id: 'representative-record' });
-    expect(enroll).toHaveBeenCalledWith('packet-invoice');
+    // The paid signal names itself, so a combined visit closed with GATE_REVIEW_ASK_AT_VISIT on starts nothing.
+    expect(enroll).toHaveBeenCalledWith('packet-invoice', expect.anything(), { trigger: 'payment' });
     expect(individual).not.toHaveBeenCalled();
     expect(result).toEqual({ enrolled: false, reason: 'member_review_suppressed' });
     individual.mockRestore();
@@ -4533,6 +4534,31 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     // Standalone invoices (no service record) are a no-op here.
     const out3 = await ReviewService.enrollForPaidInvoice({ id: 'inv-pi3', customer_id: 'pi-2', service_record_id: null });
     expect(out3).toEqual({ enrolled: false, reason: 'not_completion_invoice' });
+  });
+
+  test('GATE_REVIEW_ASK_AT_VISIT: a visit whose visit-time ask answered gets no second ask from its payment', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'av-1', first_name: 'Ada', last_name: 'V', phone: '+19410000081', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-av', customer_id: 'av-1', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', reviewAskedAtVisit: true }) }],
+    });
+    db.mockImplementation(mock);
+    const enrolled = jest.spyOn(ReviewService, 'enrollPostService');
+    const out = await ReviewService.enrollForPaidInvoice({ id: 'inv-av', customer_id: 'av-1', service_record_id: 'sr-av', invoice_number: 'WPC-AV' }, { source: 'stripe_webhook' });
+    expect(out).toEqual({ enrolled: false, reason: 'asked_at_visit' });
+    expect(enrolled).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences).toHaveLength(0);
+    enrolled.mockRestore();
+
+    // No marker (no visit-time ask, a passing failure, or the payment came first): the payment keeps its ask.
+    const mock2 = makeMock({
+      customers: [{ id: 'av-2', first_name: 'Bo', last_name: 'V', phone: '+19410000082', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-av2', customer_id: 'av-2', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed' }) }],
+    });
+    db.mockImplementation(mock2);
+    const out2 = await ReviewService.enrollForPaidInvoice({ id: 'inv-av2', customer_id: 'av-2', service_record_id: 'sr-av2', invoice_number: 'WPC-AV2' }, { source: 'stripe_webhook' });
+    expect(out2.enrolled).toBe(true);
+    expect(mock2.__state.rows.review_sequences).toHaveLength(1);
   });
 
   test('a cadence touch recovers technician_id + service_date from the service record (rate-page context)', async () => {

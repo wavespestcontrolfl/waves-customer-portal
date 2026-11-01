@@ -148,6 +148,9 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
     }
     res.json({
       ...(firstReviewAsk === undefined ? {} : { firstReviewAsk }),
+      // GATE_REVIEW_ASK_AT_VISIT: an unpaid invoice no longer holds the ask, so the panel words the
+      // normal timing instead of "waits for the invoice to be paid". Gate off: the key is absent.
+      ...(require('../config/feature-gates').reviewAskAtVisitLive() ? { askAtVisit: true } : {}),
       at: at.toISOString(),
       // Names the rule behind `at`; the panel compares buckets, not instants
       // (a relative answer moves with every request) — codex #4140 r4 P1.

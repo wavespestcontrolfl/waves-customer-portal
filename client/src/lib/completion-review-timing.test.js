@@ -136,6 +136,17 @@ describe('the Automatic hint while the ask goes out after the report text', () =
     expect(text).toMatch(/If the report was held for the morning: about 10 minutes after that report text or the payment, whichever is later \(a single visit's held report that went out before the payment keeps the smart send window\)\./);
   });
 
+  test('GATE_REVIEW_ASK_AT_VISIT (askAtVisit in the preview): an unpaid invoice gets the same 10 minutes after the report text, and the link still stays out of the pay-link text', () => {
+    const atVisit = { ...afterReport, askAtVisit: true };
+    const unpaid = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: atVisit, reviewAwaitsPayment: true });
+    expect(unpaid.text).toBe(completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: atVisit }).text);
+    expect(unpaid.text).toMatch(/at least 10 minutes after the report text/);
+    expect(unpaid.text).not.toMatch(/invoice/);
+    const asked = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'customer_requested', preview: { ...atVisit, bundlesImmediateAsk: true }, reviewAwaitsPayment: true });
+    expect(asked.bundled).toBe(false);
+    expect(asked.text).not.toMatch(/waits for invoice payment/);
+  });
+
   test.each([
     ['the completion text is off', { effectiveSendSms: false }],
     ['the customer has no phone', { effectiveSendSms: true, customerPhone: '' }],

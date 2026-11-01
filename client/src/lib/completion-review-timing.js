@@ -427,6 +427,9 @@ export function completionReportTextExpected({ effectiveSendSms, customerPhone }
 // The one-time recap path is exempt server-side (recapReviewOnly) and stays exempt here.
 // `customerPhone` (the schedule payload's) tells whether a report text can go at all;
 // unknown (undefined) reads as yes, as before.
+// GATE_REVIEW_ASK_AT_VISIT (the server's preview names it as askAtVisit): an unpaid invoice no
+// longer holds the ask, so the hint words the normal timing. The link still never rides inside
+// the pay-link text, so `bundled` keeps reading the unpaid invoice.
 export function completionReviewHint({ willReview, oneTimeRecapOnly = false, effectiveSendSms, reviewTiming, reviewCustomAt, preview, reviewAwaitsPayment, customerPhone }) {
   const bundled = willReview
     && effectiveSendSms
@@ -434,8 +437,9 @@ export function completionReviewHint({ willReview, oneTimeRecapOnly = false, eff
       || (reviewTiming === "customer_requested"
         && preview?.bundlesImmediateAsk === true
         && !reviewAwaitsPayment));
+  const awaitsPayment = !!reviewAwaitsPayment && preview?.askAtVisit !== true;
   const text = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment: reviewAwaitsPayment, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone }) })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone }) })
     : "";
   return { text, bundled };
 }
