@@ -1,7 +1,9 @@
 const {
+  annualPrepayHasSellableIncentive,
   lawnFrequenciesFromResultStats,
   lawnFrequenciesFromEngineResult,
   applySelectedLawnTierToEstimateData,
+  acceptedEstimateDataForSelection,
   recurringLawnRowAtRetiredCadence,
   storedLawnRowBelowProgramFloor,
   resolveEstimateQuoteRequirement,
@@ -9,6 +11,7 @@ const {
   sectionTierEligibleFromKeys,
 } = require('../routes/estimate-public');
 const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
+const { resolveAnnualPrepayInvoiceTotal } = require('../services/estimate-converter');
 
 // Lawn cost-floor tiers as the engine stores them in result.results.lawn
 // (4/6/9/12 visits = Basic/Standard/Enhanced/Premium). The builder turns
@@ -1055,6 +1058,162 @@ describe('applySelectedLawnTierToEstimateData — accept re-stamps the picked ca
     const out = applySelectedLawnTierToEstimateData(estDataWithRecurringLawn(), freq);
     expect(out.result.recurring.services[0].visitsPerYear).toBe(12);
     expect(out.result.recurring.services[0].cadence).toBe('monthly');
+  });
+});
+
+describe('applySelectedLawnTierToEstimateData — the selected cadence floor reaches annual prepay', () => {
+  const lawnMix = [{ service: 'lawn_care', name: 'Lawn Care' }];
+  // Saved shape: engine lineItems keep the DEFAULT 9x row (A $589.05 / floor
+  // $584.60); recurring.services holds the lawn row the accept restamps.
+  const armedNineVisitEstimate = () => ({
+    result: {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      lineItems: [{
+        service: 'lawn_care', name: 'Lawn Care', annual: 589.05, annualAfterDiscount: 589.05,
+        minimumCollectedAnnualPrice: 584.6, costFloorAnnual: 584.6, visitsPerYear: 9,
+      }],
+      recurring: {
+        monthlyTotal: 49.09,
+        services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 49.09, ann: 589.05, v: 9, visitsPerYear: 9 }],
+      },
+    },
+  });
+  const premium = { key: 'premium', serviceCategory: 'lawn_care', annual: 760, monthly: 63.33, visitsPerYear: 12 };
+  const prepayFor = (estimateData, baseAnnual) => resolveAnnualPrepayInvoiceTotal({
+    baseAnnual, recurringServices: lawnMix, estimateData,
+  });
+
+  test('a ladder entry carrying marginFloorMonthly stamps lawnFloorMonthly, so prepay uses the 12x floor', () => {
+    const before = armedNineVisitEstimate();
+    // Default 9x line: prepay clamps at its own floor.
+    expect(prepayFor(before, 589.05).amount).toBe(584.6);
+    const after = applySelectedLawnTierToEstimateData(before, { ...premium, marginFloorMonthly: 58.34 });
+    const row = after.result.recurring.services[0];
+    expect(row.lawnFloorMonthly).toBe(58.34);
+    expect(row.visitsPerYear).toBe(12);
+    // 12x: $760 vs a $700.08 floor keeps the full 5% (the stale 9x lineItem
+    // would have protected $500 and billed $747).
+    expect(prepayFor(after, 760).amount).toBe(722);
+  });
+
+  test('a manually discounted row switching cadence takes the selected tier\'s net, not the stored manualFinalAnnual', () => {
+    const before = armedNineVisitEstimate();
+    before.result.recurring.services[0].manualFinalAnnual = 600;
+    const after = applySelectedLawnTierToEstimateData(before, { ...premium, marginFloorMonthly: 58.34 });
+    const row = after.result.recurring.services[0];
+    expect(row.manualFinalAnnual).toBe(760);
+    // With the stale $600 the slice would protect against the 9x net and bill $752.
+    expect(prepayFor(after, 760).amount).toBe(722);
+    // A frequency with no annual leaves the stored net alone.
+    const { annual: _annual, ...noAnnual } = premium;
+    const untouched = applySelectedLawnTierToEstimateData(armedNineVisitEstimate(), noAnnual);
+    expect(untouched.result.recurring.services[0]).not.toHaveProperty('manualFinalAnnual');
+    const kept = armedNineVisitEstimate();
+    kept.result.recurring.services[0].manualFinalAnnual = 600;
+    expect(applySelectedLawnTierToEstimateData(kept, noAnnual).result.recurring.services[0].manualFinalAnnual).toBe(600);
+  });
+
+  test('a frequency with no marginFloorMonthly (floor not armed for it) adds no lawnFloorMonthly', () => {
+    const after = applySelectedLawnTierToEstimateData(armedNineVisitEstimate(), premium);
+    expect(after.result.recurring.services[0]).not.toHaveProperty('lawnFloorMonthly');
+  });
+});
+
+describe('annualPrepayHasSellableIncentive — each offered lawn cadence uses its own floor', () => {
+  // Engine-backed save (no v1 result, no recurring.services): the default 12x
+  // line sits AT its floor ($760), so it earns no prepay discount; the offered
+  // 9x cadence ($700, floor $600) does. Restamping only rewrites rows that
+  // exist, so the candidates must read the SUPPLEMENTED data, as accept does.
+  const engineBacked = () => ({
+    engineInputs: {},
+    engineResult: {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      lineItems: [{
+        service: 'lawn_care', name: 'Lawn Care', annual: 760, annualAfterDiscount: 760, monthly: 63.33,
+        minimumCollectedAnnualPrice: 760, costFloorAnnual: 760, visitsPerYear: 12,
+      }],
+    },
+  });
+  const enhanced9x = {
+    key: 'enhanced', serviceCategory: 'lawn_care', annual: 700, monthly: 58.33, visitsPerYear: 9, marginFloorMonthly: 50,
+  };
+
+  test('an engine-backed estimate offers prepay when a cheaper cadence clears its own floor', () => {
+    expect(annualPrepayHasSellableIncentive({ annual_total: 760 }, engineBacked(), { frequencies: [enhanced9x] })).toBe(true);
+  });
+
+  test('with only the floor-bound default cadence there is no sellable prepay incentive', () => {
+    expect(annualPrepayHasSellableIncentive({ annual_total: 760 }, engineBacked(), { frequencies: [] })).toBe(false);
+  });
+});
+
+describe('acceptedEstimateDataForSelection — one restamp for the prepay quote and the invoice', () => {
+  const lawnMix = [{ service: 'lawn_care', name: 'Lawn Care' }];
+  const lawnRecurring = { name: 'Lawn Care', service: 'lawn_care', mo: 49.09, ann: 589.05, v: 9, visitsPerYear: 9 };
+  // Lawn-only armed 9x estimate: lineItems keep the default row (A $589.05 /
+  // floor $584.60); results.lawn gives the section ladder its two sold tiers.
+  const lawnOnlyEstimate = () => ({
+    result: {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      lineItems: [{
+        service: 'lawn_care', name: 'Lawn Care', annual: 589.05, annualAfterDiscount: 589.05,
+        minimumCollectedAnnualPrice: 584.6, costFloorAnnual: 584.6, visitsPerYear: 9,
+      }],
+      recurring: { monthlyTotal: 49.09, services: [lawnRecurring] },
+      results: {
+        lawn: [
+          { name: 'Enhanced', v: 9, mo: 49.09, ann: 589.05, pa: 65.45, recommended: true },
+          { name: 'Premium', v: 12, mo: 63.33, ann: 760, pa: 63.33 },
+        ],
+      },
+    },
+  });
+  const premium12x = {
+    key: 'premium', serviceCategory: 'lawn_care', annual: 760, monthly: 63.33, visitsPerYear: 12, marginFloorMonthly: 58.34,
+  };
+
+  test('selectedFrequency restamps the lawn row with the 12x floor; the quote equals the converter invoice', () => {
+    const estData = lawnOnlyEstimate();
+    const { data, refusal } = acceptedEstimateDataForSelection(estData, {
+      selectedFrequency: premium12x, selectedCombo: null, serviceCadences: null, recurringSvcList: [lawnRecurring],
+    });
+    expect(refusal).toBeUndefined();
+    const row = data.result.recurring.services[0];
+    expect(row.lawnFloorMonthly).toBe(58.34);
+    expect(row.visitsPerYear).toBe(12);
+    // The restamped data (what the route now quotes AND converts from): $722.
+    const quoted = resolveAnnualPrepayInvoiceTotal({ baseAnnual: 760, recurringServices: lawnMix, estimateData: data });
+    expect(quoted.amount).toBe(722);
+    // The un-restamped stored data (what the quote used to read) over-protects.
+    const stale = resolveAnnualPrepayInvoiceTotal({ baseAnnual: 760, recurringServices: lawnMix, estimateData: estData });
+    expect(stale.amount).toBe(747);
+    // No selection: the stored data comes back untouched.
+    expect(acceptedEstimateDataForSelection(estData, { recurringSvcList: [lawnRecurring] }).data).toBe(estData);
+  });
+
+  test('a per-service cadence restamps through the section ladder', () => {
+    const { data } = acceptedEstimateDataForSelection(lawnOnlyEstimate(), {
+      selectedFrequency: null, selectedCombo: { key: 'combo' }, serviceCadences: { lawn_care: 'premium' }, recurringSvcList: [lawnRecurring],
+    });
+    expect(data.result.recurring.services[0].visitsPerYear).toBe(12);
+  });
+
+  test('a present ladder that lacks the requested tier refuses with the 409 body', () => {
+    const out = acceptedEstimateDataForSelection(lawnOnlyEstimate(), {
+      selectedFrequency: null, selectedCombo: { key: 'combo' }, serviceCadences: { lawn_care: 'retired_tier' }, recurringSvcList: [lawnRecurring],
+    });
+    expect(out.data).toBeUndefined();
+    expect(out.refusal.reason).toBe('service_cadence_tier_unavailable');
+    expect(out.refusal.error).toMatch(/no longer offered/);
+  });
+
+  test('a NULL ladder (single-tier section) is skipped, not refused', () => {
+    const single = { result: { recurring: { services: [lawnRecurring] } } };
+    const out = acceptedEstimateDataForSelection(single, {
+      selectedFrequency: null, selectedCombo: { key: 'combo' }, serviceCadences: { lawn_care: 'premium' }, recurringSvcList: [lawnRecurring],
+    });
+    expect(out.refusal).toBeUndefined();
+    expect(out.data).toBe(single);
   });
 });
 

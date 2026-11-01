@@ -8858,14 +8858,9 @@ function priceDethatching(lawnSqFt, options = {}) {
   const laborCostVal = GLOBAL.LABOR_RATE * timeMin / 60;
   const materialCost = (lawnEst / 1000) * cfg.materialPer1K;
   const cleanupPriceAdder = (lawnEst / 1000) * cleanup.pricePer1K;
-  const rawCost = laborCostVal + materialCost;
-  const formulaBasePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
-  const compatibilityBasePrice = cleanupLevel === 'none' && accessChoice.key === 'easy'
-    ? cfg.baseCompatibilityPrices?.[String(Math.round(lawnEst))]
-    : undefined;
-  const basePrice = Number.isFinite(Number(compatibilityBasePrice))
-    ? Number(compatibilityBasePrice)
-    : formulaBasePrice;
+  const equipmentCost = Number(cfg.equipCost) || 0;
+  const rawCost = laborCostVal + materialCost + equipmentCost;
+  const basePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
   const calculatedPrice = Math.round(basePrice + cleanupPriceAdder);
   const debrisRemovalIncluded = debrisRemovalRequested || cleanupLevel !== 'none';
   const managerApproved = optionBooleanTrue(options.managerApproved);
@@ -8949,6 +8944,7 @@ function priceDethatching(lawnSqFt, options = {}) {
     timeMin: roundMoney(timeMin),
     laborCost: roundMoney(laborCostVal),
     materialCost: roundMoney(materialCost),
+    equipmentCost: roundMoney(equipmentCost),
     cleanupLevel,
     requestedCleanupLevel: cleanupChoice.key,
     cleanupLabel: cleanup.label,

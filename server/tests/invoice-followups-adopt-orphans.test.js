@@ -13,7 +13,8 @@
 // metadata.invoiceId or an invoiceKey prefix), legacy_history_unreadable,
 // past_final_step (every ladder day has passed — adoptionLanding has
 // nowhere to land it), ach_failure_history (ANY unresolved ACH failure,
-// independent of autopay standing), ach_history_unreadable. A survivor is
+// independent of autopay standing), ach_history_unreadable, start_unreadable
+// (the won-proposal read behind a Net-terms bill's due-date start). A survivor is
 // hand ed to `scheduleForInvoice(id, { adoption: true })` — the exact path a
 // normal invoice send takes — which computes its OWN landing under the
 // invoice lock: EVERY adoption takes the 'ach.escalation' advisory lock and
@@ -164,7 +165,7 @@ function setupFullDb({
   orphanRows = [], previewInvoice = null, customer = null, activePlan = null,
   existingRow = null, insertedRow = null, batchReads = [], seqUpdateResult = 1,
   legacyLedgerRows = [], legacyLedgerError = null, activityLogRow = null,
-  achFailureCount = 0, achReadError = null,
+  achFailureCount = 0, achReadError = null, visits = [], estimates = [], estimatesReadError = null,
 } = {}) {
   const orphanQuery = orphanCandidateQuery(orphanRows);
   const activityLog = activityLogQuery(activityLogRow);
@@ -225,6 +226,17 @@ function setupFullDb({
       const qq = { whereRaw: jest.fn(() => qq) };
       qq.where = jest.fn(() => qq);
       qq.then = (resolve, reject) => (legacyLedgerError ? Promise.reject(legacyLedgerError) : Promise.resolve(legacyLedgerRows)).then(resolve, reject);
+      return qq;
+    }
+    // The won-proposal lookup a Net-terms bill's due-date start takes (newSequenceAnchor -> wonProposalInvoice).
+    if (table === 'scheduled_services' || table === 'estimates' || table === 'service_records') {
+      const rows = { scheduled_services: visits, estimates, service_records: [] }[table];
+      const qq = { cond: {} };
+      qq.where = jest.fn((cond) => { Object.assign(qq.cond, cond); return qq; });
+      qq.first = jest.fn(async () => {
+        if (table === 'estimates' && estimatesReadError) throw estimatesReadError;
+        return rows.find((row) => Object.entries(qq.cond).every(([key, value]) => String(row[key]) === String(value))) || undefined;
+      });
       return qq;
     }
     if (table === 'ach_failure_log') {
@@ -352,6 +364,47 @@ describe('selectAdoptionCandidates (dry run)', () => {
     });
     const result = await adoptOrphanInvoices({ dryRun: true });
     expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'past_final_step' }] });
+  });
+
+  // A won proposal's Net-terms bill counts its steps from its due date (newSequenceAnchor, owner 2026-11-01), so the
+  // selection lands it from there too: a Net 60 bill sent 100 days ago (due 40 days ago) still has Day 60 and Day 90.
+  const netTermsOrphan = {
+    invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0',
+    sent_at: new Date('2026-04-27T14:16:00Z'), sms_sent_at: null, created_at: new Date('2026-04-27T14:16:00Z'),
+    due_date: '2026-06-26', scheduled_service_id: 'ss-1', service_record_id: null,
+  };
+  const netTermsProposal = {
+    id: 'est-1', status: 'accepted', bill_by_invoice: true,
+    estimate_data: { proposal: {
+      enabled: true,
+      title: 'Office',
+      buildings: [{ name: 'Main', lineItems: [{ description: 'Monthly pest', quantity: 1, unitPrice: 120, frequency: 'monthly', taxable: true, amount: 120 }] }],
+      commercialTerms: { paymentTerms: 'net60' },
+    } },
+  };
+
+  test('a Net-terms bill from a won proposal lands from its due date: still a candidate after its send-day ladder has passed', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    setupFullDb({ orphanRows: [netTermsOrphan], visits: [{ id: 'ss-1', source_estimate_id: 'est-1' }], estimates: [netTermsProposal] });
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result.skipped).toEqual([]);
+    expect(result.candidates.map((c) => c.invoice_id)).toEqual(['inv-1']);
+  });
+
+  test('the same bill without a won proposal behind it is past its final step (the send-day ladder)', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    setupFullDb({ orphanRows: [netTermsOrphan], visits: [{ id: 'ss-1', source_estimate_id: null }] });
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'past_final_step' }] });
+  });
+
+  test('an unreadable proposal skips the bill as start_unreadable, retried next sweep', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    setupFullDb({
+      orphanRows: [netTermsOrphan], visits: [{ id: 'ss-1', source_estimate_id: 'est-1' }], estimatesReadError: new Error('estimates down'),
+    });
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'start_unreadable' }] });
   });
 
   test('skips ach_failure_history on ANY unresolved ACH failure, independent of autopay standing', async () => {

@@ -129,7 +129,36 @@ async function plannedMove(conn, service, best, record) {
 function auditOf(answer) {
   return {
     verdict: answer.verdict, why: answer.why, entry_id: answer.entry_id || null, model: answer.model || null, prompt_version: answer.prompt_version || null,
+    ...(answer.unread && answer.unread.length ? { unread: answer.unread } : {}),
   };
+}
+
+// Which parts of an incomplete record could not be read (owner 2026-11-01,
+// "build fixes"): channel and reason codes only, so a person can fix the
+// source. Never the entry's time, text or any customer word. Deduplicated,
+// at most UNREAD_KEPT entries. Logging only: no verdict reads this.
+const UNREAD_KEPT = 10;
+const CODE = /^[a-z][a-z0-9_]{0,39}$/;
+function unreadSummary(record) {
+  const seen = new Set();
+  const kept = [];
+  for (const row of (record && record.unread) || []) {
+    const channel = row && typeof row.channel === 'string' && CODE.test(row.channel) ? row.channel : 'unknown';
+    const reason = row && typeof row.reason === 'string' && CODE.test(row.reason) ? row.reason : 'unknown';
+    const key = `${channel}|${reason}`;
+    if (!seen.has(key) && kept.length < UNREAD_KEPT) {
+      seen.add(key);
+      kept.push({ channel, reason });
+    }
+  }
+  return kept;
+}
+
+// The answer with the unread summary of the record it was about, when the
+// record had any unread part.
+function withUnread(answer, record) {
+  const unread = unreadSummary(record);
+  return unread.length ? { ...answer, unread } : answer;
 }
 
 const DESCRIPTION = {
@@ -166,13 +195,13 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     const planned = await plannedMove(conn, service, best, record);
     const move = proofreader.moveFacts(planned);
     const skip = notAskable(record, state);
-    if (skip) return { answer: skip };
+    if (skip) return { answer: withUnread(skip, record) };
     // Only a call that goes to the model spends the run's call limit: a
     // record that cannot be read, or one too long to send, asks nobody
     // (Codex #6313 r2).
     if (!record.tooLong) state.calls += 1;
     const answer = await recordStillAsRead(await proofreader.proofreadMove({ move, record }), record, { service, conn, proofreader });
-    return { answer, recordPrint: recordPrint(record) };
+    return { answer: withUnread(answer, record), recordPrint: recordPrint(record) };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${safeError(err)}`);
@@ -470,5 +499,5 @@ function tallyOf(state) {
 
 module.exports = {
   KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, assertStillApproved, preferencesPrint, approvedSlotTaken, closeNotices, statusAfterNotices, tallyOf,
-  _internals: { plannedMove },
+  _internals: { plannedMove, unreadSummary },
 };
