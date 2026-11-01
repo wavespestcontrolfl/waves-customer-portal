@@ -1851,7 +1851,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     const patch = SeriesSlot.seriesSlotPatch(seriesSlot, { scheduledDate, absentDays: seriesAbsentDays, timed });
     seedSlotPatches.set(scheduledDate, patch);
     if (!patch.windowStart) return;
-    const handoff = await SeriesSlot.seriesSlotHandoff(trx, buildInsert(scheduledDate, null), { cols });
+    // The seeder's own clock (`today`) decides the hand-off date, like every date it seeds.
+    const handoff = await SeriesSlot.seriesSlotHandoff(trx, buildInsert(scheduledDate, null), { cols, now: new Date(`${today}T12:00:00Z`) });
     if (handoff) seedSlotPatches.set(scheduledDate, { ...patch, handoff });
   };
 

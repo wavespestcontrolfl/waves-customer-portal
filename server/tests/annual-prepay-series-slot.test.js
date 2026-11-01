@@ -179,6 +179,15 @@ describe('seriesSlotPatch', () => {
 
 describe('seriesSlotHandoff', () => {
   const PlanTakenHour = require('../services/scheduling/plan-taken-hour');
+  const NOW = new Date('2026-11-01T15:00:00Z'); // hand-off date (4 days out, ET): 2026-11-05
+  const COLS = { window_start: {}, window_end: {}, recurring_dispatch_due_date: {} };
+  const HANDED_OFF = (date) => ({ window_start: null, window_end: null, recurring_dispatch_due_date: date });
+  // A seed transaction whose savepoints get the occupancy TRY-lock answer `locked`.
+  const seedTrx = (locked = true) => {
+    const sp = { raw: jest.fn(async () => ({ rows: [{ locked }] })) };
+    return { sp, trx: { isTransaction: true, transaction: jest.fn(async (cb) => cb(sp)) } };
+  };
+  const row = (date) => ({ scheduled_date: date, window_start: '09:00' });
   afterEach(() => jest.restoreAllMocks());
 
   test('a row without a time is never probed', async () => {
@@ -187,26 +196,47 @@ describe('seriesSlotHandoff', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  test('a taken hour returns the windowless fields with the due date', async () => {
+  test('under 4 days out a copied time is never written, and nothing is locked or read', async () => {
+    const spy = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
+    const { trx } = seedTrx();
+    await expect(seriesSlotHandoff(trx, row('2026-11-03'), { cols: COLS, now: NOW })).resolves.toEqual({ window_start: null, window_end: null });
+    expect(trx.transaction).not.toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('a free hour keeps the copied time: the date lock is taken in a savepoint and the hour read on it', async () => {
+    const spy = jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
+    const { sp, trx } = seedTrx();
+    await expect(seriesSlotHandoff(trx, row('2026-12-15'), { cols: COLS, now: NOW })).resolves.toBeNull();
+    expect(sp.raw).toHaveBeenCalledWith(expect.stringContaining('pg_try_advisory_xact_lock'), expect.any(Array));
+    expect(spy.mock.calls[0][0]).toBe(sp);
+  });
+
+  test('a taken hour returns the hand-off fields (windowless + due date)', async () => {
     jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(true);
-    const fields = await seriesSlotHandoff({}, { scheduled_date: '2026-12-15', window_start: '09:00' }, { cols: { window_start: {}, window_end: {}, recurring_dispatch_due_date: {} } });
-    expect(fields).toEqual({ window_start: null, window_end: null, recurring_dispatch_due_date: '2026-12-15' });
+    const { trx } = seedTrx();
+    await expect(seriesSlotHandoff(trx, row('2026-12-15'), { cols: COLS, now: NOW })).resolves.toEqual(HANDED_OFF('2026-12-15'));
   });
 
-  test('a free hour returns null', async () => {
-    jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValueOnce(false);
-    await expect(seriesSlotHandoff({}, { scheduled_date: '2026-12-15', window_start: '09:00' })).resolves.toBeNull();
+  test('a busy date lock counts as taken, without reading the hour', async () => {
+    const spy = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
+    const { trx } = seedTrx(false);
+    await expect(seriesSlotHandoff(trx, row('2026-12-15'), { cols: COLS, now: NOW })).resolves.toEqual(HANDED_OFF('2026-12-15'));
+    expect(spy).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('occupancy date lock unavailable'));
   });
 
-  test('a failed probe counts as a taken hour: handed off from 4 days out, the copied hour kept nearer', async () => {
-    const now = new Date('2026-11-01T15:00:00Z');
-    const cols = { window_start: {}, window_end: {}, recurring_dispatch_due_date: {} };
+  test('a failed read counts as taken', async () => {
     jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockRejectedValue(new Error('probe boom'));
-    await expect(seriesSlotHandoff({}, { scheduled_date: '2026-12-15', window_start: '09:00' }, { cols, now }))
-      .resolves.toEqual({ window_start: null, window_end: null, recurring_dispatch_due_date: '2026-12-15' });
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('seeding without a time for the night tool'));
-    await expect(seriesSlotHandoff({}, { scheduled_date: '2026-11-03', window_start: '09:00' }, { cols, now })).resolves.toBeNull();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('keeping the copied time'));
+    const { trx } = seedTrx();
+    await expect(seriesSlotHandoff(trx, row('2026-12-15'), { cols: COLS, now: NOW })).resolves.toEqual(HANDED_OFF('2026-12-15'));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('probe boom'));
+  });
+
+  test('a connection that is not a transaction cannot fence the insert: counts as taken', async () => {
+    const spy = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
+    await expect(seriesSlotHandoff({}, row('2026-12-15'), { cols: COLS, now: NOW })).resolves.toEqual(HANDED_OFF('2026-12-15'));
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 
@@ -233,13 +263,4 @@ describe('inSavepoint', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom scheduled_services'));
   });
 
-  test('the taken-hour probe runs on a savepoint of the seed transaction', async () => {
-    const PlanTakenHour = require('../services/scheduling/plan-taken-hour');
-    const savepoint = { tag: 'sp' };
-    const trx = { isTransaction: true, transaction: jest.fn(async (cb) => cb(savepoint)) };
-    const spy = jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
-    await expect(seriesSlotHandoff(trx, { scheduled_date: '2026-12-15', window_start: '09:00' })).resolves.toBeNull();
-    expect(spy.mock.calls[0][0]).toBe(savepoint);
-    spy.mockRestore();
-  });
 });

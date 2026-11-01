@@ -143,26 +143,44 @@ function seriesSlotPatch(slot, { scheduledDate, absentDays = new Set(), timed = 
   return { technicianId: techId, windowStart: copyTime ? slot.windowStart : null };
 }
 
+// The fields that drop a copied time and nothing else (the seed is written as before the gate).
+function clearedWindow(cols) {
+  const fields = { window_start: null, window_end: null };
+  return cols ? Object.fromEntries(Object.entries(fields).filter(([key]) => cols[key])) : fields;
+}
+
 /**
- * The hand-off fields for a seed row that has a copied time (null when the
- * hour is free or the gate is off): the row goes windowless with its date as
- * recurring_dispatch_due_date, as the follow-up seeder does. A probe that
- * cannot answer counts as a taken hour: from the hand-off date (4 days out)
- * the row is handed off, nearer it keeps the copied hour, as every plan
- * writer keeps a nearer hour (the night tool's double-booking notice).
+ * Whether a seed row with a copied time keeps it, read under the occupancy date
+ * lock (scheduling/occupancy.js ordering contract: the date lock, the hour read
+ * and the timed INSERT sit in ONE transaction). Null = the seed keeps the copied
+ * time; otherwise the fields that replace it:
+ *   - under 4 days out (before the hand-off date) a copied time is never
+ *     written, since the taken-hour rule does not look there: the cleared window;
+ *   - from the hand-off date the TRY-lock is taken in a savepoint of the seed's
+ *     transaction (held by that transaction through the insert, as
+ *     seedTimedFirstVisit does) and the taken-hour rule reads the hour; taken ->
+ *     the hand-off fields (windowless + recurring_dispatch_due_date: the night
+ *     tool picks a free hour);
+ *   - a busy lock, a failed read, or a connection that is not a transaction
+ *     (it cannot fence the insert) counts as a taken hour.
  */
 async function seriesSlotHandoff(conn, row, { cols = null, now = new Date() } = {}) {
   if (!row?.window_start) return null;
   const planTakenHour = require('./scheduling/plan-taken-hour');
+  const day = ymd(row.scheduled_date);
+  if (!day || day < planTakenHour.firstHandoffDate(now)) return clearedWindow(cols);
+  const handOff = () => planTakenHour.handoffFields(row.scheduled_date, cols);
+  if (!conn?.isTransaction || typeof conn.transaction !== 'function') return handOff();
   try {
-    if (!(await inSavepoint(conn, (q) => planTakenHour.takenHourHandoff(q, row, { now })))) return null;
-    return planTakenHour.handoffFields(row.scheduled_date, cols);
+    const taken = await conn.transaction(async (sp) => {
+      const { tryAcquireOccupancyLock } = require('./scheduling/occupancy');
+      if (!(await tryAcquireOccupancyLock(sp, day))) throw new Error('occupancy date lock unavailable');
+      return planTakenHour.takenHourHandoff(sp, row, { now });
+    });
+    return taken ? handOff() : null;
   } catch (err) {
-    const day = ymd(row.scheduled_date);
-    const handOff = !!day && day >= planTakenHour.firstHandoffDate(now);
-    logger.warn(`[annual-prepay-series-slot] taken-hour probe failed for ${day} (${err.message}) — ${handOff
-      ? 'seeding without a time for the night tool' : 'keeping the copied time (inside the hand-off window)'}`);
-    return handOff ? planTakenHour.handoffFields(row.scheduled_date, cols) : null;
+    logger.warn(`[annual-prepay-series-slot] ${day}: ${err.message} — seeding without the copied time for the night tool`);
+    return handOff();
   }
 }
 

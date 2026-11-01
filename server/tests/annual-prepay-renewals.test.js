@@ -2387,8 +2387,18 @@ describe('annual prepay renewal helpers', () => {
     const SLOT = { technicianId: 'tech-1', windowStart: '09:00' };
     let slotSpy;
     let insertQueries;
+    // The seed's transaction as knex gives it: callable like db (same query queues), isTransaction, savepoints
+    // on itself, and db.raw's occupancy TRY-lock answer (locked). A copied time is written only under that lock.
+    const asTrx = () => {
+      const trx = jest.fn((...args) => db(...args));
+      for (const key of ['raw', 'schema', 'fn', 'client']) if (key in db) trx[key] = db[key];
+      trx.isTransaction = true;
+      trx.transaction = jest.fn(async (cb) => cb(trx));
+      return trx;
+    };
     beforeEach(() => {
       slotSpy = jest.spyOn(SeriesSlot, 'coverageSeriesSlot').mockResolvedValue(SLOT);
+      db.transaction = jest.fn(async (cb) => cb(asTrx()));
     });
     afterEach(() => {
       jest.restoreAllMocks();
@@ -2480,6 +2490,20 @@ describe('annual prepay renewal helpers', () => {
       // The probe saw the row the insert would have written: technician, date and time.
       const probed = probe.mock.calls.map((c) => c[1]);
       expect(probed[2]).toMatchObject({ customer_id: 'customer-s', technician_id: 'tech-1', scheduled_date: '2026-12-15', window_start: '09:00' });
+    });
+
+    // Pre-push audit P1: a copied time is a timed insert, fenced by the occupancy date lock like seedTimedFirstVisit.
+    test('gate on, the occupancy date lock is busy: no copied time is written unfenced (seeds handed off)', async () => {
+      gateOn();
+      handoffGateOn();
+      const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
+      jest.spyOn(require('../services/scheduling/occupancy'), 'tryAcquireOccupancyLock').mockResolvedValue(false);
+      await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
+      expect(probe).not.toHaveBeenCalled();
+      for (let i = 0; i < 4; i += 1) {
+        expect(inserted(i)).toMatchObject({ technician_id: 'tech-1', window_start: null, window_end: null });
+        expect(inserted(i).recurring_dispatch_due_date).toBe(inserted(i).scheduled_date);
+      }
     });
 
     test('gate on, taken-hour hand-off gate off: technician only, no time and no probe', async () => {
