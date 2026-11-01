@@ -10,6 +10,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');
+const timesheetBells = require('./timesheet-approval-bells');
 const { paidLineCoveringWeeks } = require('./payroll-paid-line-weeks');
 const {
   STAFF_WORK_DATE_SQL,
@@ -396,8 +397,12 @@ async function refreshWeekForReview(technicianId, start, end) {
 /**
  * Get all pending weeks across active techs. Ensures the weekly summary row
  * exists (computes it on demand if there are daily summaries but no roll-up).
+ * A technician whose week cannot be refreshed is skipped (logged), so the
+ * Approvals page still lists the others. `strict: true` rethrows that failure
+ * instead: the "timesheets wait" bell (timesheet-approval-bells.js) must never
+ * count a list that left a technician out.
  */
-async function getPendingWeeks(weekStart) {
+async function getPendingWeeks(weekStart, { strict = false } = {}) {
   const { start, end } = validateCanonicalWeek(weekStart);
   // Include deactivated technicians and completed entries whose summary write
   // was interrupted. Both still represent payroll that must be reviewed.
@@ -439,6 +444,7 @@ async function getPendingWeeks(weekStart) {
         snapshot = await refreshWeekForReview(tech.id, start, end);
         weekly = snapshot.weekly;
       } catch (err) {
+        if (strict) throw err;
         logger.warn(`[timesheet-approval] refreshWeekForReview failed for ${tech.name || tech.id}: ${err.message}`);
         continue;
       }
@@ -668,6 +674,7 @@ async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToke
   });
 
   logger.info(`[timesheet-approval] Week ${start} approved for tech ${technicianId} by ${adminId}`);
+  await timesheetBells.settleWeekBell(start);
   return getWeekDetail(technicianId, weekStart);
 }
 

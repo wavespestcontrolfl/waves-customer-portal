@@ -16,7 +16,10 @@ jest.mock('../services/time-tracking', () => ({
   lockStaffWeek: jest.fn(),
 }));
 
+jest.mock('../services/timesheet-approval-bells', () => ({ settleWeekBell: jest.fn() }));
+
 const db = require('../models/db');
+const timesheetBells = require('../services/timesheet-approval-bells');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const approval = require('../services/timesheet-approval');
@@ -124,6 +127,8 @@ describe('weekly timesheet approval safety', () => {
     db.mockReset();
     db.transaction.mockReset();
     logger.info.mockReset();
+    timesheetBells.settleWeekBell.mockReset();
+    logger.warn.mockReset();
     timeTracking.computeWeeklySummary.mockReset();
     timeTracking.computeDailySummaryInTransaction.mockReset();
     timeTracking.computeWeeklySummaryInTransaction.mockReset();
@@ -743,6 +748,9 @@ describe('weekly timesheet approval safety', () => {
       { lock: false },
     );
     expect(detail.weekly).toMatchObject(approvedWeekly);
+    // The "timesheets wait" bell is judged after the commit, for the approved week.
+    expect(timesheetBells.settleWeekBell).toHaveBeenCalledTimes(1);
+    expect(timesheetBells.settleWeekBell).toHaveBeenCalledWith('2020-01-06');
   });
 
   test('treats a fully consistent approved week as idempotent', async () => {
@@ -1387,5 +1395,66 @@ describe('weekly timesheet approval safety', () => {
       adminId: 'admin-1',
     });
     expect(JSON.stringify(logger.info.mock.calls)).not.toContain('incorrect stop');
+  });
+  describe('pending-week list when one technician cannot be refreshed', () => {
+    const bells = jest.requireActual('../services/timesheet-approval-bells');
+    const approvedWeekly = (tech) => ({
+      id: `weekly-${tech}`, technician_id: tech, status: 'approved', week_start: '2020-01-06', total_shift_minutes: 480,
+    });
+    const dailies = [{ id: 'daily-1', work_date: '2020-01-06', status: 'approved', total_shift_minutes: 480 }];
+    const entries = [{
+      id: 'shift-1', entry_type: 'shift', status: 'completed', approval_status: 'approved',
+      clock_in: WEEK_CLOCK_IN, clock_out: new Date('2020-01-06T22:00:00.000Z'), duration_minutes: 480,
+    }];
+
+    // tech-1 has an approved week; tech-2 has worked time but no weekly summary, and its refresh throws.
+    function installTwoTechs() {
+      const weekly = approvedWeekly('tech-1');
+      installDatabase([], [
+        { table: 'time_entry_daily_summary', label: 'dailyCandidates', thenValue: [{ technician_id: 'tech-1' }, { technician_id: 'tech-2' }] },
+        { table: 'time_entries', label: 'entryCandidates', thenValue: [] },
+        { table: 'technicians', label: 'names', thenValue: [{ id: 'tech-1', name: 'Tech One' }, { id: 'tech-2', name: 'Tech Two' }] },
+        { table: 'time_weekly_summary', label: 'weekly1', firstValue: weekly },
+        { table: 'time_weekly_summary', label: 'snapshotWeekly1', firstValue: weekly },
+        { table: 'time_entry_daily_summary', label: 'snapshotDailies1', thenValue: dailies },
+        { table: 'time_entries', label: 'snapshotEntries1', thenValue: entries },
+        { table: 'time_weekly_summary', label: 'weekly2', firstValue: undefined },
+      ], []);
+      db.transaction.mockRejectedValue(new Error('synthetic refresh failure'));
+    }
+
+    test('the Approvals page default skips that technician and lists the rest', async () => {
+      installTwoTechs();
+      const listed = await approval.getPendingWeeks('2020-01-06');
+      expect(listed.map((row) => row.technician_id)).toEqual(['tech-1']);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('refreshWeekForReview failed for Tech Two'));
+    });
+
+    test('strict rethrows it, so the bell never counts a list that left a technician out', async () => {
+      installTwoTechs();
+      await expect(approval.getPendingWeeks('2020-01-06', { strict: true })).rejects.toThrow('synthetic refresh failure');
+    });
+
+    test('the close after an approval closes nothing', async () => {
+      installTwoTechs();
+      const episodes = { closeAdminAlertKeys: jest.fn() };
+      await expect(bells.settleWeekBell('2020-01-06', { conn: db, episodes })).resolves.toBe(0);
+      expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    });
+
+    test('the Monday check closes nothing and raises from the cron own count', async () => {
+      installTwoTechs();
+      const episodes = { closeAdminAlertKeys: jest.fn() };
+      const raise = jest.fn().mockResolvedValue({ id: 'n1' });
+      await bells.reconcileWeekBell('2020-01-06', { fallbackCount: 1, raise, conn: db, episodes });
+      expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+      expect(raise).toHaveBeenCalledTimes(1);
+
+      installTwoTechs();
+      raise.mockClear();
+      await bells.reconcileWeekBell('2020-01-06', { fallbackCount: 0, raise, conn: db, episodes });
+      expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+      expect(raise).not.toHaveBeenCalled();
+    });
   });
 });
