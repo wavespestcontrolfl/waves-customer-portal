@@ -92,7 +92,7 @@ beforeEach(() => {
   });
   EmailTemplates.sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
     const verdict = await withProviderHandoff(jest.fn());
-    return verdict.ok ? { sent: true, message: { provider_message_id: 'sg-1' } } : { sent: false, reason: verdict.reason };
+    return verdict.ok ? { sent: true, message: { id: 'em-1', provider_message_id: 'sg-1' } } : { sent: false, reason: verdict.reason };
   });
 });
 
@@ -104,6 +104,7 @@ describe('payer invoice email accepted', () => {
     expect(sendPayerInvoiceText).toHaveBeenCalledWith({
       invoiceId: 'inv-1',
       operatorInitiated: false,
+      emailMessageId: 'em-1',
       emailAcceptedAt: expect.any(Date),
     });
     // The text is attempted after the email handoff, never before it.
@@ -115,17 +116,23 @@ describe('payer invoice email accepted', () => {
     expect(sendPayerInvoiceText).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: 'inv-1', operatorInitiated: true }));
   });
 
-  test('a provider-deduped email replays its original acceptance time (so its text dedupes)', async () => {
+  test('a send and its deduped replay hand the text the same email row id', async () => {
     const originalAt = new Date('2026-11-03T15:00:00Z');
+    await sendInvoiceEmail('inv-1');
     EmailTemplates.sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
       await withProviderHandoff(jest.fn());
-      return { sent: true, deduped: true, message: { provider_message_id: 'old', sent_at: originalAt } };
+      // The library's dedupe returns the ORIGINAL stored row.
+      return { sent: true, deduped: true, message: { id: 'em-1', provider_message_id: 'sg-1', sent_at: originalAt } };
     });
     await sendInvoiceEmail('inv-1');
-    expect(sendPayerInvoiceText).toHaveBeenCalledWith(expect.objectContaining({ emailAcceptedAt: originalAt }));
+    expect(sendPayerInvoiceText).toHaveBeenCalledTimes(2);
+    const [fresh, replay] = sendPayerInvoiceText.mock.calls.map(([args]) => args);
+    expect(fresh.emailMessageId).toBe('em-1');
+    expect(replay.emailMessageId).toBe('em-1');
+    expect(replay.emailAcceptedAt).toEqual(originalAt);
   });
 
-  test('a deduped email with no stored time is not a new episode: no text', async () => {
+  test('a deduped email with neither a row id nor a stored time is not provably a new episode: no text', async () => {
     EmailTemplates.sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
       await withProviderHandoff(jest.fn());
       return { sent: true, deduped: true, message: { provider_message_id: 'old' } };

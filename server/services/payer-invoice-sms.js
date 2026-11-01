@@ -100,10 +100,11 @@ async function serviceTypeOf(invoice) {
   }
 }
 
-// One text per send episode: the episode is the instant the provider accepted the email. A provider-deduped email
-// replays the original acceptance time, so it replays the same key and the text is not repeated; a deliberate resend
-// is a new acceptance and texts again.
-function eventKeyFor(invoiceId, emailAcceptedAt) {
+// One text per send episode. The episode is the persisted email row: a provider-deduped email replay returns the ORIGINAL row,
+// so a send and its replay share one key and the text is not repeated; a deliberate resend writes a new row and texts again.
+// Without a row (the SMTP fallback, which has no replay) the episode is the instant the email was accepted.
+function eventKeyFor(invoiceId, { emailMessageId, emailAcceptedAt } = {}) {
+  if (emailMessageId) return `invoice:${invoiceId}:payer_sms:${emailMessageId}`;
   const at = emailAcceptedAt ? new Date(emailAcceptedAt) : new Date();
   const stamp = Number.isNaN(at.getTime()) ? new Date() : at;
   return `invoice:${invoiceId}:payer_sms:${stamp.toISOString()}`;
@@ -157,10 +158,11 @@ async function loadSendFacts(dbh, invoiceId) {
  * @param {string} args.invoiceId
  * @param {Object} [args.database]            a knex handle; the root pool by default
  * @param {boolean} [args.operatorInitiated]  an office send: the text may go outside the 8 AM to 8 PM window, like the invoice text
- * @param {Date|string} [args.emailAcceptedAt] when the provider accepted the email (the dedupe episode)
+ * @param {string} [args.emailMessageId]     the persisted email_messages row of the accepted email (the dedupe episode)
+ * @param {Date|string} [args.emailAcceptedAt] when the email was accepted: the episode only when there is no row
  * @returns {Promise<{ sent: boolean, code: string, reason: string }>} never throws
  */
-async function sendPayerInvoiceText({ invoiceId, database, operatorInitiated = false, emailAcceptedAt = null } = {}) {
+async function sendPayerInvoiceText({ invoiceId, database, operatorInitiated, emailMessageId, emailAcceptedAt } = {}) {
   try {
     const gateLive = require('../config/feature-gates').payerInvoiceSmsLive;
     if (typeof gateLive !== 'function' || !gateLive()) {
@@ -173,7 +175,7 @@ async function sendPayerInvoiceText({ invoiceId, database, operatorInitiated = f
       return facts.skip;
     }
     const { invoice, payer, customer, to } = facts;
-    const key = eventKeyFor(invoice.id, emailAcceptedAt);
+    const key = eventKeyFor(invoice.id, { emailMessageId, emailAcceptedAt });
     if (await alreadyTexted(dbh, customer.id, key)) return result(false, 'already_texted', 'The payer was already texted for this send');
 
     const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {

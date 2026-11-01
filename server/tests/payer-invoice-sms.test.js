@@ -84,7 +84,7 @@ describe('gate', () => {
 
 describe('recipient', () => {
   test('texts the payer ap_phone only, as the payer_payment_link purpose on the invoice customer', async () => {
-    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1', emailAcceptedAt: '2026-11-03T15:00:00.000Z' }))
+    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1', emailMessageId: 'em-1' }))
       .resolves.toMatchObject({ sent: true, code: 'sent' });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     const input = sendCustomerMessage.mock.calls[0][0];
@@ -98,7 +98,7 @@ describe('recipient', () => {
       entryPoint: 'payer_invoice_sms',
       metadata: {
         original_message_type: 'payer_invoice',
-        notificationEventKey: 'invoice:inv-1:payer_sms:2026-11-03T15:00:00.000Z',
+        notificationEventKey: 'invoice:inv-1:payer_sms:em-1',
         payer_id: 7,
         invoice_id: 'inv-1',
       },
@@ -243,14 +243,42 @@ describe('never throws, never repeats', () => {
 
   test('a text already accepted for this send episode is not sent again', async () => {
     tables.sms_log = { id: 'sms-1' };
-    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1', emailAcceptedAt: '2026-11-03T15:00:00.000Z' }))
+    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1', emailMessageId: 'em-1' }))
       .resolves.toMatchObject({ sent: false, code: 'already_texted' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('the event key is per send episode', () => {
-    expect(eventKeyFor('inv-1', '2026-11-03T15:00:00.000Z')).toBe('invoice:inv-1:payer_sms:2026-11-03T15:00:00.000Z');
-    expect(eventKeyFor('inv-1', '2026-11-03T15:00:00.000Z')).toBe(eventKeyFor('inv-1', new Date('2026-11-03T15:00:00.000Z')));
-    expect(eventKeyFor('inv-1', '2026-11-04T09:00:00.000Z')).not.toBe(eventKeyFor('inv-1', '2026-11-03T15:00:00.000Z'));
+  test('an accepted send and its deduped replay (the same email row) text exactly once', async () => {
+    // A stateful sms_log: the first accepted text is found by the replay's lookup on the same key.
+    const logged = [];
+    db.mockImplementation((table) => {
+      const q = chain(table);
+      if (table !== 'sms_log') return q;
+      let key;
+      q.whereRaw = jest.fn((_sql, [value]) => { key = value; return q; });
+      q.first = jest.fn(async () => (logged.includes(key) ? { id: 'sms-1' } : undefined));
+      return q;
+    });
+    sendCustomerMessage.mockImplementation(async (input) => {
+      logged.push(input.metadata.notificationEventKey);
+      return { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}` };
+    });
+    // Fresh send: the email was accepted just now. Replay: the library returns the ORIGINAL row, with its stored (earlier) time.
+    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1', emailMessageId: 'em-1', emailAcceptedAt: new Date('2026-11-03T15:00:00Z') }))
+      .resolves.toMatchObject({ sent: true });
+    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1', emailMessageId: 'em-1', emailAcceptedAt: new Date('2026-11-03T14:59:58Z') }))
+      .resolves.toMatchObject({ sent: false, code: 'already_texted' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // A deliberate resend writes a new email row and texts again.
+    await expect(sendPayerInvoiceText({ invoiceId: 'inv-1', emailMessageId: 'em-2' })).resolves.toMatchObject({ sent: true });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test('the event key is the email row; the acceptance time only when there is no row', () => {
+    expect(eventKeyFor('inv-1', { emailMessageId: 'em-1', emailAcceptedAt: '2026-11-03T15:00:00.000Z' })).toBe('invoice:inv-1:payer_sms:em-1');
+    expect(eventKeyFor('inv-1', { emailMessageId: 'em-1', emailAcceptedAt: '2026-11-09T09:00:00.000Z' })).toBe('invoice:inv-1:payer_sms:em-1');
+    expect(eventKeyFor('inv-1', { emailAcceptedAt: '2026-11-03T15:00:00.000Z' })).toBe('invoice:inv-1:payer_sms:2026-11-03T15:00:00.000Z');
+    expect(eventKeyFor('inv-1', { emailAcceptedAt: new Date('2026-11-03T15:00:00.000Z') })).toBe(eventKeyFor('inv-1', { emailAcceptedAt: '2026-11-03T15:00:00.000Z' }));
+    expect(eventKeyFor('inv-1', { emailMessageId: 'em-2' })).not.toBe(eventKeyFor('inv-1', { emailMessageId: 'em-1' }));
   });
 });

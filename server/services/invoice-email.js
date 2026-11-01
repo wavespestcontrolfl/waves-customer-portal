@@ -216,16 +216,18 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
 
 // Best effort and silent to the caller: a refused, deferred or failed text is logged by the sender, and nothing here throws.
 // A one-off recipient (recipientOverride: an operator naming a bookkeeper or realtor) did not receive the payer's email, so no
-// payer text follows it. A provider-deduped email is an EARLIER episode replayed: it keeps that episode's acceptance time (so its
-// text dedupes against the one already sent), and with no stored time there is no new episode to text.
+// payer text follows it. The text's episode is the persisted email row (emailMessageId), the same value on a send and on its
+// provider-deduped replay. The SMTP fallback has no row or replay, so its episode is the acceptance time. A deduped replay with
+// neither a row id nor a stored time is not provably a new episode: no text.
 async function textPayerAfterAcceptedEmail(invoiceId, options, emailResult) {
   if (options.previewOnly === true || options.recipientOverride) return;
-  if (emailResult.deduped && !emailResult.sentAt) return;
+  if (emailResult.deduped && !emailResult.emailMessageId && !emailResult.sentAt) return;
   try {
     const { sendPayerInvoiceText } = require('./payer-invoice-sms');
     await sendPayerInvoiceText({
       invoiceId,
       operatorInitiated: options.operatorInitiated === true,
+      emailMessageId: emailResult.emailMessageId || null,
       emailAcceptedAt: emailResult.deduped ? emailResult.sentAt : new Date(),
     });
   } catch (err) {
@@ -782,8 +784,10 @@ async function sendInvoiceEmailCore(invoiceId, options = {}) {
       const evidence = acceptedInvoiceEmailEvidence(result);
       await markEmailDelivered(evidence);
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
-      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl,
-        ...(ccList.length ? { cc: ccList } : {}), ...evidence };
+      // emailMessageId: the persisted email_messages row. A provider-deduped replay returns the ORIGINAL row, so the id is the
+      // same on a send and on its replay: it is the payer text's episode key (payer-invoice-sms.js).
+      return { ok: true, messageId: result.message?.provider_message_id || null, emailMessageId: result.message?.id || null,
+        recipient: recipientPayload, payUrl, ...(ccList.length ? { cc: ccList } : {}), ...evidence };
     } catch (err) {
       // The bar's pinned template changed between its render check and the send's own resolve: nothing was sent.
       if (barApproved && /reviewed email content changed/i.test(err?.message || '')) {
