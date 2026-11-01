@@ -28,7 +28,7 @@ jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssued
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async () => null }));
 // gateEnvValue: the termite renewal gate, ON for this suite — the synchronous
 // withdrawal (owner ruling 2026-09-28) is gated like the sweep.
-jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, gateEnvTimestamp: () => null, isEnabled: () => false, gateEnvValue: (name) => name === 'GATE_TERMITE_ANNUAL_PLAN' }));
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, prepaySeedSeriesSlotLive: () => false, gateEnvTimestamp: () => null, isEnabled: () => false, gateEnvValue: (name) => name === 'GATE_TERMITE_ANNUAL_PLAN' }));
 
 const { randomUUID } = require('node:crypto');
 

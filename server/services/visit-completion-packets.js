@@ -766,6 +766,9 @@ function livePaymentVerdict(payment, invoice) {
   if (VOIDED_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) {
     return { ...payment, state: 'office_required', reason: 'invoice_voided', payerId: null };
   }
+  // A payer-owned packet invoice the coordinator delivered to AP (GATE_PAYER_PACKET_AUTOSEND) is a settled
+  // outcome, not a payer review: the invoice was minted for that payer, never withdrawn from the homeowner.
+  if (payment.state === 'payer_billed' && invoice.payer_id) return payment;
   const [, stampedPayer] = String(invoice.scheduled_send_error || '').split(':');
   const payerOwnedNow = Boolean(invoice.payer_id)
     || require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice);
@@ -864,6 +867,11 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
   // collection (visit-completion-payment.js); a withdrawn invoice comes back
   // as office_required with reason payer_assigned.
   let payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
+  // GATE_PAYER_PACKET_AUTOSEND: an invoice minted payer-owned goes to the payer's AP inbox, never to the homeowner
+  // (no collection, no pay link: the summary link below is planned only for the homeowner's own states).
+  if (payment.state === 'payer_billed') {
+    payment = await require('./visit-completion-payer-delivery').deliverPacketInvoiceToPayer(packet.id, payment, database);
+  }
   // One text for the stop. Decided once, here, before the invoice is scheduled or the receipt
   // job could text: when the summary text can carry the invoice's pay link (unpaid) or receipt
   // link (paid), the invoice or receipt is set up email-only from the start and the summary is
