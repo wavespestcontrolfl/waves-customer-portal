@@ -84,6 +84,41 @@ function serviceTaxRule(registry, service) {
   return entry ? entry.taxable === true : undefined;
 }
 
+// Visit bills follow the customer's building use and the service, never a row's Taxable box (a proposal win makes no
+// invoice since PR #7115; tax-calculator.js step 1b). The box still sets the quote and the signed agreement, so a row
+// whose box differs from what the builder itself applies for the chosen use gets a staff warning (owner 2026-11-01,
+// audit fix 4). Residential: not taxable. Business building: the row's rule, which is the per-row rule GET /proposal
+// served for a saved row that names a service (kept only while the row's service is unchanged), else the family
+// registry's rule the builder restores. Undefined when there is no basis (no pick, or a service the registry lacks).
+function billedTaxableFor(buildingUse, row, registry, savedRules) {
+  if (buildingUse === 'residential') return false;
+  if (buildingUse !== 'nonresidential') return undefined;
+  const saved = row.id ? savedRules?.[row.id] : null;
+  return saved && saved.service === row.service ? saved.rule : serviceTaxRule(registry, row.service);
+}
+const ROW_TAX_NOTICES = {
+  true: 'Visit bills follow the building use: this row will be billed with tax.',
+  false: 'Visit bills follow the building use: this row will be billed without tax.',
+};
+function rowTaxNotice(buildingUse, row, registry, savedRules) {
+  const billed = billedTaxableFor(buildingUse, row, registry, savedRules);
+  return billed === undefined || billed === (row.taxable === true) ? null : ROW_TAX_NOTICES[billed];
+}
+// The served per-row business rules for the saved rows that name a service, with the service each was computed for.
+function savedBusinessRules(proposal, businessRules) {
+  const out = {};
+  const add = (row) => {
+    if (row?.id && row.service && typeof businessRules[row.id] === 'boolean') out[row.id] = { service: row.service, rule: businessRules[row.id] };
+  };
+  (proposal.correctiveWork || []).forEach(add);
+  (proposal.buildings || []).forEach((b) => (b.lineItems || []).forEach(add));
+  (proposal.programs || []).forEach(add);
+  return out;
+}
+function RowTaxNotice({ text }) {
+  return text ? <div className="col-span-full basis-full text-12 text-zinc-700" role="note" data-testid="row-tax-warning">{text}</div> : null;
+}
+
 const roundMoney = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 // Auto-fill rule for the tax field. The rate comes from the server's
@@ -421,6 +456,8 @@ function CommercialProposalEditor() {
   // eat a hand-authored line that matches a stock sentence (codex 1A-ii
   // r15). Null until generation fills responsibilities.
   const generatedRespByFamilyRef = React.useRef(null);
+  // Served per-row business tax rules of the saved rows (savedBusinessRules): the warning's basis for a Business building.
+  const savedBizRulesRef = React.useRef({});
   // Family → generated inclusions/exclusions/taxability registry, served on
   // load like responsibilityRegistry — the family-change resync prunes the
   // old family's generated lines and installs the new family's stack by
@@ -442,6 +479,7 @@ function CommercialProposalEditor() {
     // canonical one-time service keeps its own rule), else the family registry's.
     const registry = data.familyRegistry || familyRegistryRef.current;
     const businessRules = data.businessTaxRules || {};
+    savedBizRulesRef.current = savedBusinessRules(p, businessRules);
     const keptRule = (row) => (loadedUse === 'residential'
       ? { bizTaxable: (row.id && typeof businessRules[row.id] === 'boolean') ? businessRules[row.id] : serviceTaxRule(registry, row.service) }
       : {});
@@ -578,6 +616,13 @@ function CommercialProposalEditor() {
 
   const taxRate = (Number(taxRatePct) || 0) / 100;
   const programsMode = programsState.some(programRowIsPriced);
+  // Staff warning on a row whose Taxable box differs from what visit bills do (billedTaxableFor); none on a locked proposal.
+  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current));
+  const differingTaxRows = [
+    ...programsState,
+    ...(programsMode ? [] : buildings.flatMap((b) => b.lineItems || [])),
+    ...correctiveWork,
+  ].filter((row) => rowNotice(row)).length;
   // Any taxable item that would SAVE (buildings are omitted in programs mode,
   // like computeTotals) — on-screen rows with no description/price count too,
   // so the rate is already there the moment the toggle flips.
@@ -1555,6 +1600,12 @@ function CommercialProposalEditor() {
                         || 'Pick before saving. It sets which rows carry sales tax.'}
                     </span>
                   )}
+                  {differingTaxRows > 0 && (
+                    <span className="mt-1 block text-12 text-zinc-700" role="note" data-testid="row-tax-summary">
+                      Taxable differs from the building use on {plural(differingTaxRows, 'row')}.
+                      Visit bills follow the building use, so they will not match the quote there.
+                    </span>
+                  )}
                 </div>
               </div>
             </CardBody>
@@ -1790,6 +1841,7 @@ function CommercialProposalEditor() {
                         </Button>
                       )}
                     </div>
+                    <RowTaxNotice text={rowNotice(p)} />
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <label className="block">
                         <span className={LABEL}>Includes</span>
@@ -1960,6 +2012,7 @@ function CommercialProposalEditor() {
                           </Button>
                         )}
                       </div>
+                      <RowTaxNotice text={rowNotice(li)} />
                     </div>
                   ))}
 
@@ -2056,6 +2109,7 @@ function CommercialProposalEditor() {
                     </Button>
                   )}
                 </div>
+                <RowTaxNotice text={rowNotice(w)} />
                 <label className="block">
                   <span className={LABEL}>What it includes</span>
                   <Textarea
