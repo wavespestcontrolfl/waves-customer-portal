@@ -1027,10 +1027,14 @@ For a row with `customer_pick_by` set:
   `customer_pick_by IS NULL OR window_start IS NOT NULL`, since a hand-off
   keeps the status its CAS pins; the token confirm's CAS already pins the
   date and start it read. Once a time is set, both confirm as before.
-- **The marker ends on a person's move.** A customer pick, a staff move and
-  any other `SmartRebooker.reschedule` caller clear `customer_pick_by` in the
-  move's own write. An Auto-Dispatch placement keeps it (it is how the page
-  knows the visit was booked for the customer).
+- **The marker ends when a person's move gives the visit a time.** A customer
+  pick, a staff move and any other `SmartRebooker.reschedule` caller clear
+  `customer_pick_by` in the move's own write when the row lands with a window.
+  A move that leaves it windowless (a date-only move, or a series move of an
+  earlier visit that sweeps it along) keeps the marker: no time was chosen,
+  so the link and the Auto-Dispatch wait keep working. An Auto-Dispatch
+  placement keeps it too (it is how the page knows the visit was booked for
+  the customer).
 - **Auto-Dispatch waits.** `loadEligibleServices` and the unplaced-visit
   alert skip the row until `customer_pick_by` passes; the page still accepts
   a pick after the deadline, until a run books it.
