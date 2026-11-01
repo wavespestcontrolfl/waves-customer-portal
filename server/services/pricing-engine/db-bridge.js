@@ -960,6 +960,66 @@ async function syncTermiteStationCostsFromCatalog(db) {
   }
 }
 
+// In-code mosquito product costs, captured ONCE at load (before any sync
+// mutates the constants): every sync restores them before the catalog link
+// re-applies, so a missing or refused catalog price falls back to the code
+// value, never to the last catalog value (the termite link's posture).
+const MOSQUITO_PRODUCT_COST_DEFAULTS = Object.freeze({ ...(constants.MOSQUITO?.productCosts || {}) });
+const MOSQUITO_COUNT_UNITS = ['each', 'tablet', 'dunk', 'briquet'];
+
+// Per-unit catalog price for a mosquito product: per ounce from unit_size_oz,
+// per count from a pack count of generic or tablet/dunk units ("20 count").
+// A container noun ("1 box") or a missing size is null, never guessed.
+function mosquitoCatalogPerUnit(row, per, parsePackCount) {
+  const price = Number(row.best_price);
+  if (per === 'oz') {
+    const oz = Number(row.unit_size_oz);
+    return Number.isFinite(oz) && oz > 0 ? Math.round((price / oz) * 10000) / 10000 : null;
+  }
+  const pack = parsePackCount(row.container_size);
+  return pack && MOSQUITO_COUNT_UNITS.includes(pack.unit) ? Math.round((price / pack.count) * 10000) / 10000 : null;
+}
+
+// Mosquito bifenthrin (Talak) and Bti dunk costs from the inventory catalog
+// (owner 2026-11-01: "talak, summit should be in inventory", then "go").
+// Same trust rules as the pre-slab and termite links: the named row's
+// best_price must be backed by an ACTIVE, APPROVED vendor price, and the
+// per-unit figure must sit inside the sanity band of the code value.
+// Fail-open: any miss keeps the code value. These costs feed the mosquito
+// margin report only; the mosquito price comes from its brackets.
+async function syncMosquitoProductCostsFromCatalog(db) {
+  const costs = constants.MOSQUITO?.productCosts;
+  if (!costs) return;
+  const links = Object.entries(constants.MOSQUITO.productCostCatalog || {})
+    .filter(([key, link]) => key in costs && typeof link?.catalogProductName === 'string' && link.catalogProductName.trim());
+  for (const [key] of links) {
+    if (Number.isFinite(MOSQUITO_PRODUCT_COST_DEFAULTS[key])) costs[key] = MOSQUITO_PRODUCT_COST_DEFAULTS[key];
+  }
+  if (!links.length) return;
+  try {
+    const { parsePackCount } = require('../product-costing');
+    const byName = await loadApprovedCatalogRows(
+      db,
+      links.map(([, link]) => link.catalogProductName.trim()),
+      ['name', 'best_price', 'unit_size_oz', 'container_size', 'best_vendor_pricing_id'],
+    );
+    for (const [key, link] of links) {
+      const row = byName.get(link.catalogProductName.trim());
+      if (!row || !(Number(row.best_price) > 0)) continue;
+      const perUnit = mosquitoCatalogPerUnit(row, link.per, parsePackCount);
+      if (perUnit === null) {
+        warnCatalogRefusalOnce(`mosquito.${key}.unit`, `[pricing-engine] mosquito ${key}: catalog size ${JSON.stringify(row.container_size ?? row.unit_size_oz)} is not per ${link.per} — keeping code value`);
+      } else if (!withinCatalogSanityBand(perUnit, costs[key])) {
+        warnCatalogRefusalOnce(`mosquito.${key}.band`, `[pricing-engine] mosquito ${key}: catalog $${perUnit.toFixed(4)} outside sanity band of code $${Number(costs[key]).toFixed(4)} — keeping code value`);
+      } else {
+        costs[key] = perUnit;
+      }
+    }
+  } catch (err) {
+    console.warn('[pricing-engine] mosquito inventory-price link skipped:', err.message);
+  }
+}
+
 // Counter, not a boolean: overlapping direct callers (route + admin config
 // + proposal approval) must all be tracked — the first to finish must not
 // clear the flag while another sync is still mutating constants.
@@ -2232,6 +2292,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
 
     await syncPreSlabContainerCostsFromCatalog(db);
     await syncTermiteStationCostsFromCatalog(db);
+    await syncMosquitoProductCostsFromCatalog(db);
 
     assertValidPestPricingConfig(constants);
 
