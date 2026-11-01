@@ -242,7 +242,15 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
     return { state: finalized.ok ? 'office_required' : 'payment_pending', invoiceId: invoice?.id || null };
   }
   if (!invoice) return { state: 'no_charge', invoiceId: null };
+  // A live send claim (an office Send, the scheduled queue) owns the invoice until it finishes, payer-owned or not.
   if (invoice.status === 'sending') return { state: 'payment_pending', invoiceId: invoice.id };
+  // GATE_PAYER_PACKET_AUTOSEND: a packet invoice MINTED payer-owned (every billed member on one active payer) is
+  // never collected from the homeowner. The coordinator delivers it to the payer's AP inbox under the invoice's own
+  // send claim (visit-completion-payer-delivery.js). Gate off, the payer-owned row still falls through to the charge
+  // guard, which refuses it (invoice_owner_changed) and hands the closeout to the office.
+  if (invoice.payer_id && require('../config/feature-gates').payerPacketAutosendLive()) {
+    return { state: 'payer_billed', invoiceId: invoice.id, payerId: invoice.payer_id };
+  }
   if (!isInvoiceCollectibleStatus(invoice.status)) {
     // Processing also parks ambiguous saved-card requests. Only a durable
     // payment matching this invoice's bound PI proves accepted money in flight.

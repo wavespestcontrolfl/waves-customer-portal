@@ -9735,6 +9735,14 @@ function staffEditLockStartOnlyLive() {
 function prepaySeedSeriesSlotLive() {
   return process.env.GATE_PREPAY_SEED_SERIES_SLOT === 'true';
 }
+// GATE_PAYER_PACKET_AUTOSEND read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, a grouped closeout
+// ("combined stop") whose every billed member resolves to the SAME active third-party payer mints ONE invoice billed to
+// that payer and emails it to the payer's AP inbox at the packet's effects phase, as a single-visit completion already
+// does (visit-completion-invoice.js, visit-completion-payer-delivery.js). Off = every payer-billed member sends the whole
+// packet to office review (`payer_billed_member`). Kill = unset.
+function payerPacketAutosendLive() {
+  return process.env.GATE_PAYER_PACKET_AUTOSEND === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9913,3 +9921,5 @@ module.exports.routeOrderTimeFallbackLive = routeOrderTimeFallbackLive;
 module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
 // GATE_PREPAY_SEED_SERIES_SLOT reader, on its own line so gate PRs never conflict.
 module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;
+// GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
+module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
