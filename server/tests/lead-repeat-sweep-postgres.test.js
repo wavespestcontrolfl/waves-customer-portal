@@ -34,7 +34,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('lead repeat sweep on PostgreSQL', () => {
   let database;
   const schema = `lead_repeat_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['leads', 'lead_activities'];
+  const tables = ['leads', 'lead_activities', 'estimates'];
   const customerA = randomUUID();
 
   beforeAll(async () => {
@@ -68,6 +68,8 @@ jest.setTimeout(30000);
       address: '12 Sample Ct, Parrish, FL 34219',
       city: 'Parrish',
       zip: '34219',
+      service_key: null,
+      service_interest: 'Quarterly Pest Control',
       customer_id: customerA,
       first_contact_at: firstContact,
       created_at: firstContact,
@@ -76,6 +78,12 @@ jest.setTimeout(30000);
     };
     if (row.extracted_data !== undefined && row.extracted_data !== null) row.extracted_data = JSON.stringify(row.extracted_data);
     await database('leads').insert(row);
+    return row;
+  }
+  async function estimate(fields = {}) {
+    const row = { id: randomUUID(), status: 'draft', archived_at: null, created_at: OCT(20), ...fields };
+    if (row.estimate_data) row.estimate_data = JSON.stringify(row.estimate_data);
+    await database('estimates').insert(row);
     return row;
   }
   const read = (id) => database('leads').where({ id }).first();
@@ -132,6 +140,61 @@ jest.setTimeout(30000);
     const result = await runLeadRepeatSweep({ dbi: database });
     expect(result.filed).toBe(1);
     expect(await markerOf(c.id)).toBe(a.id);
+  });
+
+  test('another service from the same person is a separate opportunity (Codex #7340 r1)', async () => {
+    await lead({ status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5, service_interest: 'Recurring Pest Control' });
+    const lawn = await lead({ first_contact_at: OCT(21), service_interest: 'Recurring Lawn Care' });
+    const unlabeled = await lead({ phone: '+19415550500', first_contact_at: OCT(21), service_interest: null });
+    await lead({ phone: '+19415550500', first_contact_at: OCT(20), service_interest: null });
+    const result = await runLeadRepeatSweep({ dbi: database });
+    expect(result.filed).toBe(0);
+    expect((await read(lawn.id)).status).toBe('new');
+    expect((await read(unlabeled.id)).status).toBe('new');
+  });
+
+  test('the same catalog service key files even when the labels differ', async () => {
+    const root = await lead({ status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5, service_key: 'pest_quarterly', service_interest: 'Pest' });
+    const repeat = await lead({ first_contact_at: OCT(21), service_key: 'pest_quarterly', service_interest: 'Quarterly Pest Control' });
+    const result = await runLeadRepeatSweep({ dbi: database });
+    expect(result.filings).toEqual([{ leadId: repeat.id, rootId: root.id }]);
+  });
+
+  test('a root whose estimate closed is not a live courtship: the person came back (Codex #7340 r1)', async () => {
+    const declined = await estimate({ status: 'declined' });
+    await lead({ status: 'estimate_sent', first_contact_at: OCT(20), response_time_minutes: 5, estimate_id: declined.id });
+    const afterDeclined = await lead({ first_contact_at: OCT(25) });
+
+    const mirrorRoot = await lead({ phone: '+19415550600', status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5 });
+    await estimate({ status: 'draft', created_at: OCT(20, '15:00'), estimate_data: { lead_id: mirrorRoot.id } });
+    await estimate({ status: 'expired', created_at: OCT(22), estimate_data: { lead_id: mirrorRoot.id } });
+    const afterExpiredDraft = await lead({ phone: '+19415550600', first_contact_at: OCT(25) });
+
+    const result = await runLeadRepeatSweep({ dbi: database });
+    expect(result.filed).toBe(0);
+    expect((await read(afterDeclined.id)).status).toBe('new');
+    expect((await read(afterExpiredDraft.id)).status).toBe('new');
+  });
+
+  test('a newer open draft is the live courtship, an older closed one is history', async () => {
+    const root = await lead({ status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5 });
+    await estimate({ status: 'declined', created_at: OCT(20, '15:00'), estimate_data: { lead_id: root.id } });
+    await estimate({ status: 'draft', created_at: OCT(22), estimate_data: { lead_id: root.id } });
+    const open = await estimate({ status: 'sent' });
+    await database('leads').where({ id: root.id }).update({ estimate_id: open.id });
+    const repeat = await lead({ first_contact_at: OCT(25) });
+    const result = await runLeadRepeatSweep({ dbi: database });
+    expect(result.filings).toEqual([{ leadId: repeat.id, rootId: root.id }]);
+  });
+
+  test('an estimate closing between the decision and the filing stops it (re-checked under the lock)', async () => {
+    const draft = await estimate({ status: 'draft' });
+    const root = await lead({ status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5, estimate_id: draft.id });
+    const waiting = await lead({ first_contact_at: OCT(21) });
+    const rootRead = await read(root.id);
+    await database('estimates').where({ id: draft.id }).update({ status: 'declined' });
+    expect(await fileRepeat(database, { lead: await read(waiting.id), root: rootRead })).toEqual({ filed: false, reason: 'root_changed' });
+    expect((await read(waiting.id)).status).toBe('new');
   });
 
   test('a won or lost earlier lead never makes a repeat: the person came back', async () => {

@@ -12,7 +12,7 @@ const { leadRepeatSweepLive } = require('../config/feature-gates');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const { runLeadRepeatSweep, isSamePersonRoot, _test } = require('../services/lead-repeat-sweep');
 
-const { namesAgree, differentPremise, mergeableExtractedData, phoneLast10 } = _test;
+const { namesAgree, sameService, extraPropertyCount, differentPremise, mergeableExtractedData, phoneLast10 } = _test;
 
 const ROOT = {
   id: 'root-1',
@@ -23,6 +23,9 @@ const ROOT = {
   address: '12 Sample Ct, Parrish, FL 34219',
   city: 'Parrish',
   zip: '34219',
+  service_key: null,
+  service_interest: 'Quarterly Pest Control',
+  extracted_data: null,
   first_contact_at: new Date('2026-10-27T14:22:00Z'),
   status: 'new',
 };
@@ -65,6 +68,32 @@ describe('isSamePersonRoot', () => {
     expect(differentPremise({ address: null }, { address: null })).toBe(false);
     // The same street spelled out matches its short form.
     expect(differentPremise({ address: '12 Sample Court, Parrish, FL 34219' }, ROOT)).toBe(false);
+  });
+});
+
+describe('the wizard inquiry identity (Codex #7340 r1)', () => {
+  it('needs the same service: pest and lawn from one person are two opportunities', () => {
+    expect(isSamePersonRoot({ ...LEAD, service_interest: 'Recurring Lawn Care' }, ROOT)).toBe(false);
+    expect(isSamePersonRoot({ ...LEAD, service_interest: ' Quarterly Pest Control ' }, ROOT)).toBe(true);
+  });
+
+  it('compares the catalog key when the rows carry one, and never a key with a label', () => {
+    expect(sameService({ service_key: 'pest_quarterly', service_interest: 'A' }, { service_key: 'pest_quarterly', service_interest: 'B' })).toBe(true);
+    expect(sameService({ service_key: 'pest_quarterly' }, { service_key: 'lawn_9x' })).toBe(false);
+    expect(sameService({ service_key: 'pest_quarterly', service_interest: 'X' }, { service_key: null, service_interest: 'X' })).toBe(false);
+  });
+
+  it('a lead with no service identity is never a repeat', () => {
+    expect(sameService({ service_interest: '' }, { service_interest: '' })).toBe(false);
+    expect(isSamePersonRoot({ ...LEAD, service_interest: null }, { ...ROOT, service_interest: null })).toBe(false);
+  });
+
+  it('a multi-property inquiry on either side is a wider one, never a repeat', () => {
+    const wide = { additional_properties: [{ address: '40 Other Rd' }] };
+    expect(extraPropertyCount({ extracted_data: wide })).toBe(1);
+    expect(extraPropertyCount({ extracted_data: null })).toBe(0);
+    expect(isSamePersonRoot({ ...LEAD, extracted_data: wide }, ROOT)).toBe(false);
+    expect(isSamePersonRoot(LEAD, { ...ROOT, extracted_data: wide })).toBe(false);
   });
 });
 

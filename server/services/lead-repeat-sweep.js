@@ -32,6 +32,15 @@
  *  - they are not two customer rows (both linked means the same customer_id)
  *    and not two properties (both carry a parsable street means the same
  *    street key, and the same unit and ZIP where both have one);
+ *  - it is the same inquiry by the wizard's own identity rule: the same
+ *    catalog service_key, or with no key on either the same trimmed
+ *    service_interest label (pest today and lawn next week are two
+ *    opportunities; a lead with no service identity is never a repeat), and
+ *    no additional properties on either row (a multi-property inquiry is a
+ *    wider one);
+ *  - R's courtship is live (whereLiveCourtship, shared with the wizard): no
+ *    closed FK estimate and no closed latest mirrored draft, so a person
+ *    coming back after an expired or declined estimate is a fresh inquiry;
  *  - exactly one such R exists (two open roots that both fit would be a
  *    household or business line: a human decides).
  * Anything else stays waiting. Nothing here texts, calls, books or charges;
@@ -48,6 +57,7 @@ const { applyLeadsAwaitingContactFilter } = require('./lead-waiting-queue');
 const { namesCompatible, normName, normalizeStreetKey } = require('./customer-dedupe');
 const { leadAddressFields } = require('../utils/address-normalizer');
 const { followDuplicateLink } = require('./lead-estimate-link');
+const { whereLiveCourtship } = require('./lead-courtship');
 const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
 
 const REPEAT_WINDOW_DAYS = 30;
@@ -108,6 +118,28 @@ function firstTouchMs(lead) {
   return new Date(lead.first_contact_at || lead.created_at).getTime();
 }
 
+// The wizard's inquiry identity (routes/public-quote.js findPriorOpenWizardLeadId,
+// codex #3834 r1 P1 / r16 P2): the catalog service_key when the row has one,
+// else the trimmed service_interest label; neither = no identity.
+function serviceIdentityOf(lead) {
+  if (lead.service_key) return `key:${lead.service_key}`;
+  const label = String(lead.service_interest || '').trim();
+  return label ? `label:${label}` : null;
+}
+
+function sameService(a, b) {
+  const identity = serviceIdentityOf(a);
+  return Boolean(identity) && identity === serviceIdentityOf(b);
+}
+
+// Extra properties a multi-property inquiry carries (the wizard's
+// "no additional properties on either side" rule).
+function extraPropertyCount(lead) {
+  const data = lead.extracted_data;
+  const extra = data && typeof data === 'object' ? data.additional_properties : null;
+  return Array.isArray(extra) ? extra.length : 0;
+}
+
 // Whether open lead `root` is the same person's earlier lead. Pure.
 function isSamePersonRoot(lead, root) {
   const leadPhone = phoneLast10(lead.phone);
@@ -115,8 +147,16 @@ function isSamePersonRoot(lead, root) {
     && phoneLast10(root.phone) === leadPhone
     && firstTouchMs(root) < firstTouchMs(lead)
     && namesAgree(lead, root)
+    && sameService(lead, root)
+    && extraPropertyCount(lead) === 0
+    && extraPropertyCount(root) === 0
     && !differentCustomer(lead, root)
     && !differentPremise(lead, root);
+}
+
+async function hasLiveCourtship(database, leadId) {
+  const row = await whereLiveCourtship(database('leads').where('id', leadId)).first('id');
+  return Boolean(row);
 }
 
 // extracted_data must be a JSON object (or empty) for the marker merge; any
@@ -152,7 +192,8 @@ async function resolveRepeatRoot(database, lead) {
     const root = await followDuplicateLink(database, row);
     if (!root || root.deleted_at || String(root.id) === String(lead.id)) continue;
     if (!OPEN_LEAD_STATUSES.includes(root.status)) continue;
-    if (isSamePersonRoot(lead, root)) roots.set(String(root.id), root);
+    if (roots.has(String(root.id)) || !isSamePersonRoot(lead, root)) continue;
+    if (await hasLiveCourtship(database, root.id)) roots.set(String(root.id), root);
   }
   if (roots.size === 0) return { reason: 'no_open_same_person_root' };
   if (roots.size > 1) return { reason: 'ambiguous' };
@@ -180,7 +221,7 @@ async function fileRepeat(database, { lead, root }) {
     if (!current || current.deleted_at || !sameAsRead(current, lead)) return { filed: false, reason: 'lead_changed' };
     if (!mergeableExtractedData(current.extracted_data)) return { filed: false, reason: 'extracted_data_shape' };
     if (!currentRoot || currentRoot.deleted_at || !OPEN_LEAD_STATUSES.includes(currentRoot.status)
-      || !isSamePersonRoot(current, currentRoot)) {
+      || !isSamePersonRoot(current, currentRoot) || !(await hasLiveCourtship(trx, currentRoot.id))) {
       return { filed: false, reason: 'root_changed' };
     }
     const updated = await trx('leads')
@@ -305,6 +346,8 @@ module.exports = {
     PERFORMED_BY,
     PINNED_COLUMNS,
     namesAgree,
+    sameService,
+    extraPropertyCount,
     differentPremise,
     premiseOf,
     phoneLast10,
