@@ -18,6 +18,7 @@
 
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
+const { phoneIdentityKey } = require('../utils/phone');
 
 // A lead is "waiting" once it has gone this long with no first response.
 // Mirrors the Response Speed tile's alert threshold order-of-magnitude but
@@ -45,7 +46,27 @@ function applyLeadsAwaitingContactFilter(query, database) {
   return query;
 }
 
+// How many PEOPLE the queue holds (owner 2026-11-01, "yes": one person who
+// reran the quote form six times counted six times). Leads on one phone line
+// are one person: phoneIdentityKey (utils/phone.js) keys a NANP number by its
+// last 10 digits and a +-prefixed international number by all its digits. A
+// lead with no usable phone (none, or a fragment) counts as its own person,
+// so a missing or partial number never merges two people. `rows` carry `id`
+// and `phone`.
+function waitingPersonKey(row) {
+  const key = phoneIdentityKey(row.phone);
+  if (key && /^\d{10}$/.test(key)) return `phone:${key}`;
+  const international = typeof row.phone === 'string' && row.phone.trim().startsWith('+');
+  if (international && /^\+[1-9]\d{7,14}$/.test(key || '')) return `phone:${key}`;
+  return `lead:${row.id}`;
+}
+
+function countWaitingPeople(rows) {
+  return new Set(rows.map(waitingPersonKey)).size;
+}
+
 module.exports = {
   LEAD_RESPONSE_SLA_MINUTES,
   applyLeadsAwaitingContactFilter,
+  countWaitingPeople,
 };
