@@ -18,11 +18,25 @@
 
 const ESTIMATE_COLUMNS = ['id', 'status', 'bill_by_invoice', 'estimate_data'];
 
-// The normalized proposal of an accepted, authored commercial proposal billed by invoice, else null. Pure.
-function billByInvoiceProposal(estimate) {
-  if (!estimate || estimate.status !== 'accepted' || estimate.bill_by_invoice !== true) return null;
+// The normalized proposal of an authored commercial proposal billed by invoice, whatever its status, else null. Pure.
+function authoredInvoiceProposal(estimate) {
+  if (!estimate || estimate.bill_by_invoice !== true) return null;
   const proposal = require('./estimate-proposal').normalizeProposal(estimate);
   return proposal.enabled === true && proposal.synthesized !== true ? proposal : null;
+}
+
+// The normalized proposal of an accepted, authored commercial proposal billed by invoice, else null. Pure.
+function billByInvoiceProposal(estimate) {
+  if (!estimate || estimate.status !== 'accepted') return null;
+  return authoredInvoiceProposal(estimate);
+}
+
+// True for an authored commercial proposal billed by invoice that is not won yet. Its Net term reaches a bill only
+// once the proposal is accepted (proposalTermsDueDate), so a visit booked from it before the win bills due on the
+// visit day. Staff booking refuses it until the win. Pure.
+function billByInvoiceProposalAwaitingWin(estimate) {
+  if (!estimate || estimate.status === 'accepted') return false;
+  return authoredInvoiceProposal(estimate) !== null;
 }
 
 // The ids among `estimateIds` that are such proposals, as strings (one read).
@@ -64,6 +78,7 @@ async function billByInvoiceInvoice(conn, invoice) {
 
 module.exports = {
   billByInvoiceProposal,
+  billByInvoiceProposalAwaitingWin,
   billByInvoiceEstimateIds,
   billByInvoiceVisit,
   billByInvoiceInvoice,
