@@ -64,6 +64,7 @@ const FOLLOWUP_STATE_TEXT = {
   autopay_hold: 'held: the customer is on Auto Pay',
   payment_plan: 'none: the invoice has an active payment plan',
   rearm: 'reminders resume after an earlier void',
+  start_unreadable: 'the reminder start date could not be checked; the reminder sweep arms them later',
   autopay_unreadable: 'Auto Pay could not be checked; reminders may run',
   not_schedulable: 'none: the invoice is not in a billable state',
   payer_billed: 'none: the invoice is billed to a payer',
@@ -135,7 +136,8 @@ async function planSendEffects(invoice, customer, { database = db, requestReview
     leadIds.length ? `Sending this invoice also marks ${leadIds.length === 1 ? 'lead' : 'leads'} ${leadIds.map(shortId).join(', ')} won` : null);
 
   const followup = await require('../invoice-followups').planFollowupSequence({ ...invoice, status: afterStatus }, database, customer || null);
-  const cadence = `Day ${followup.cadence.join(', ')}`;
+  // A Net-terms bill counts its reminder days from its due date (invoice-followups.js newSequenceAnchor).
+  const cadence = `Day ${followup.cadence.join(', ')}${followup.startsOn ? ` after its due date (${followup.startsOn})` : ''}`;
   const followups = effect('followups', followup.arms, followup.state,
     `Sending this invoice also arms billing reminders on ${cadence} unless Auto Pay or a payment plan suppresses them (currently: ${followupStateText(followup.state)})`,
     'comms', { cadence: followup.cadence });
