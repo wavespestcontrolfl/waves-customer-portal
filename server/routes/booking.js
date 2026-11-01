@@ -329,7 +329,11 @@ function compareRankedSlots(a, b) {
   return String(a.start_time).localeCompare(String(b.start_time));
 }
 
-function curateSlots(candidates, today) {
+// The curated "best times": at most `count` picks, one per date. Every caller
+// keeps the default 4 (the phone agent's relay assumes at most 4) except the
+// customer reschedule page for a visit waiting for the customer's pick, which
+// asks for 6 (Quick Move customer pick, reschedule-public.js pickSlotCount).
+function curateSlots(candidates, today, count = 4) {
   const sorted = [...candidates].sort(compareRankedSlots);
   const picks = [];
   const pickedDates = new Set();
@@ -338,7 +342,7 @@ function curateSlots(candidates, today) {
     if (pickedDates.has(slot.date)) continue;
     picks.push(slot);
     pickedDates.add(slot.date);
-    if (picks.length === 4) break;
+    if (picks.length === count) break;
   }
 
   const replaceWorstWith = (replacement) => {
@@ -352,7 +356,7 @@ function curateSlots(candidates, today) {
     picks[worstIndex] = replacement;
   };
 
-  if (picks.length === 4) {
+  if (picks.length === count) {
     const allAm = picks.every(s => timeToMin(s.start_time) < 12 * 60);
     const allPm = picks.every(s => timeToMin(s.start_time) >= 13 * 60);
     if (allAm || allPm) {
@@ -596,7 +600,9 @@ function curateReserviceStrip(candidates, { latencyCutoffDate, nearbyFn }) {
 // and by the legacy `rank` field otherwise (byte-identical for every other
 // caller — Codex r2 P2: is_best_fit must never come from a mutated rank,
 // and with this profile candidate.rank is never mutated at all).
-function applyReserviceProfile({ rankProfile, candidates, today, totalFeasible }) {
+// `bestSlotCount` is curateSlots' opt-in count (undefined = its default 4); the
+// re-service strip keeps its own at-most-3.
+function applyReserviceProfile({ rankProfile, candidates, today, totalFeasible, bestSlotCount }) {
   const active = reserviceRankIsActive(rankProfile);
   const bestFitByDate = new Map();
   for (const candidate of candidates) {
@@ -616,7 +622,7 @@ function applyReserviceProfile({ rankProfile, candidates, today, totalFeasible }
       latencyCutoffDate: businessDayHorizonEnd(today, RESERVICE_LATENCY_BUSINESS_DAYS),
       nearbyFn: isReserviceNearbySlot,
     })
-    : curateSlots(candidates, today);
+    : curateSlots(candidates, today, bestSlotCount);
 
   const diagnostics = { active, before: null, after: slots.map((s) => s.date) };
   if (rankProfile) {
@@ -1683,7 +1689,10 @@ function detachVoiceRouteCheck(plan, candidates) {
 // (GATE_SERVICE_LINE_MAP=live only; see loadLineOfferRanking). A mapped line
 // keeps only its home and gap technician's slots, home first at a start both
 // have. No geometry changes: grace, packing and signatures are untouched.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel, serviceLines }) {
+// `bestSlotCount`: opt-in size of the curated `slots` list (curateSlots, one
+// per date; unset = 4). Only reschedule-public.js passes it (6, for a visit
+// waiting for the customer's pick); days[].slots is never affected.
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel, serviceLines, bestSlotCount }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -2089,7 +2098,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const candidates = await applyRouteCheck(routeCheck, stampedCandidates);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
-    rankProfile, candidates, today, totalFeasible,
+    rankProfile, candidates, today, totalFeasible, bestSlotCount,
   });
 
   // Group slots by date, anonymize tech, add reason + best_fit flag, dedupe (one slot per day+start)

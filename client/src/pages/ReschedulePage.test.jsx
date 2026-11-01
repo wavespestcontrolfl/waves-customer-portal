@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ScheduleFlowPage from './ScheduleFlowPage';
@@ -1006,5 +1006,343 @@ describe('ReschedulePage collective anchoring', () => {
     renderPage();
 
     expect(await screen.findByText(/Only this visit will move/)).toBeInTheDocument();
+  });
+});
+
+// Quick Move "let the customer pick a day" (owner 2026-11-01). payload.customerPick: the visit was
+// handed to the customer and has no time yet; payload.autoPlacedFromPick: nobody picked and
+// Auto-Dispatch booked it. New copy names the service exactly as stored, never lower-cased.
+describe('ReschedulePage customer pick (Quick Move hand-off)', () => {
+  const SERVICE = 'Quarterly Pest Control Service';
+  const MOVE_AGAIN = 'Use this same link to move it again, up to a day before your visit.';
+  // Six route-fit dates. availability.slots arrives in DATE order (booking.js curateSlots sorts it);
+  // the engine rank says Friday 10 AM is the best fit, not the first date.
+  const DAY_DEFS = [
+    ['2026-11-05', 'Thursday, November 5', '09:00', 3],
+    ['2026-11-06', 'Friday, November 6', '10:00', 1],
+    ['2026-11-09', 'Monday, November 9', '09:00', 2],
+    ['2026-11-10', 'Tuesday, November 10', '11:00', 4],
+    ['2026-11-11', 'Wednesday, November 11', '13:00', 5],
+    ['2026-11-12', 'Thursday, November 12', '09:00', 6],
+  ];
+  const label12 = (hhmm) => {
+    const [h, m] = hhmm.split(':').map(Number);
+    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+  };
+  const plusHour = (hhmm) => `${String(Number(hhmm.slice(0, 2)) + 1).padStart(2, '0')}${hhmm.slice(2)}`;
+  function pickAvailability(defs = DAY_DEFS) {
+    return {
+      days: defs.map(([date, fullDate, start, rank]) => ({
+        date,
+        fullDate,
+        nearby: false,
+        slots: [{
+          start_time: start, end_time: plusHour(start), start_label: label12(start), end_label: label12(plusHour(start)),
+          technician_id: 'tech-1', rank, nearby: false,
+        }],
+      })),
+      slots: defs.map(([date, , start, rank]) => ({ date, start_time: start, end_time: plusHour(start), technician_id: 'tech-1', rank })),
+      rangeFrom: '2026-11-02',
+      rangeTo: '2026-11-15',
+    };
+  }
+  function pickPayload(customerPick = {}, overrides = {}) {
+    return reschedulablePayload({
+      service: { type: SERVICE },
+      isRecurring: true,
+      collectiveAnchor: false,
+      reanchorPullForwardDays: null,
+      current: { date: '2026-11-09', windowStart: null, windowEnd: null },
+      availability: pickAvailability(),
+      customerPick: {
+        pickBy: '2026-11-05T01:00:00.000Z',
+        pickByLabel: 'Wed, Nov 4 at 8 PM',
+        deadlinePassed: false,
+        originalDate: '2026-11-03',
+        originalWindowStart: '09:00',
+        reasonCode: 'weather_rain',
+        ...customerPick,
+      },
+      ...overrides,
+    });
+  }
+  const chipNames = () => screen.getAllByRole('button', { name: /^Book / }).map((b) => b.getAttribute('aria-label'));
+
+  it('A: before the deadline, a weather hand-off asks for a pick in the hero and hides the full picker', async () => {
+    stubFetch({ get: jsonResponse(pickPayload()) });
+
+    renderPage();
+
+    expect(await screen.findByText(`Hi Pat — rain moved your ${SERVICE}. Pick a new time.`)).toBeInTheDocument();
+    expect(screen.getByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.getByTestId('pick-intro')).toHaveTextContent(
+      `Your ${SERVICE} visit was set for Tuesday, November 3. Tap a time below to book it — it’s confirmed right away.`,
+    );
+    const note = screen.getByTestId('pick-by-note');
+    expect(note).toHaveTextContent('Pick by Wed, Nov 4 at 8 PM. If we don’t hear from you, we’ll book the best open time on our route and text you 3 days before.');
+    expect(note.querySelector('svg')).not.toBeNull();
+    // The normal hero, the Ask card, the best-times strip and the day grid wait behind "See all open times".
+    expect(screen.queryByText(/Hey Pat/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Search for a day or time')).not.toBeInTheDocument();
+    expect(screen.queryByText('Our best times for you')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pick a day')).not.toBeInTheDocument();
+    expect(screen.getByText(/Don't see a time that works\?/)).toBeInTheDocument();
+  });
+
+  it('A: a non-weather reason gets the schedule eyebrow and heading', async () => {
+    stubFetch({ get: jsonResponse(pickPayload({ reasonCode: 'running_late' })) });
+
+    renderPage();
+
+    expect(await screen.findByText(`Hi Pat — our schedule ran behind, so we need to move your ${SERVICE}. Pick a new time.`)).toBeInTheDocument();
+    expect(screen.getByText('Schedule update')).toBeInTheDocument();
+    expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+  });
+
+  it('A: no reason, no original date and no first name: a neutral heading and no "was set for" clause', async () => {
+    stubFetch({ get: jsonResponse(pickPayload({ reasonCode: null, originalDate: null }, { customerFirstName: null })) });
+
+    renderPage();
+
+    expect(await screen.findByText(`Hi there — we need to move your ${SERVICE}. Pick a new time.`)).toBeInTheDocument();
+    expect(screen.getByText('Schedule update')).toBeInTheDocument();
+    expect(screen.getByTestId('pick-intro')).toHaveTextContent(/^Tap a time below to book it — it’s confirmed right away\.$/);
+  });
+
+  it('B: after the deadline the hero says the times are still open, in the orange note', async () => {
+    stubFetch({ get: jsonResponse(pickPayload({ deadlinePassed: true })) });
+
+    renderPage();
+
+    expect(await screen.findByText('Hi Pat — you can still pick a time.')).toBeInTheDocument();
+    expect(screen.getByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.getByTestId('pick-intro')).toHaveTextContent(
+      `Your ${SERVICE} visit was set for Tuesday, November 3. Nothing is booked yet, so any time below is still yours to take.`,
+    );
+    const note = screen.getByTestId('pick-by-note');
+    expect(note).toHaveTextContent('The pick-by time passed at 8 PM. Overnight we’ll book the best open time for you and text you 3 days before.');
+    expect(note).toHaveStyle({ color: '#9A3412' });
+    // The times are still on offer.
+    expect(screen.getByText('Times that fit our route')).toBeInTheDocument();
+  });
+
+  it('B: the passed-deadline note names the pick-by hour in ET', async () => {
+    stubFetch({ get: jsonResponse(pickPayload({ deadlinePassed: true, pickBy: '2026-11-05T02:30:00.000Z' })) });
+
+    renderPage();
+
+    expect(await screen.findByTestId('pick-by-note')).toHaveTextContent('The pick-by time passed at 9:30 PM.');
+  });
+
+  it('C: lists up to six route-fit times in date order, each with its arrival window', async () => {
+    stubFetch({ get: jsonResponse(pickPayload()) });
+
+    renderPage();
+
+    expect(await screen.findByText('Times that fit our route')).toBeInTheDocument();
+    expect(screen.getByText('These fit our route near you best — easiest for everyone. Tap one to book it.')).toBeInTheDocument();
+    expect(chipNames()).toEqual([
+      'Book Thursday, November 5, arrival 9:00 AM–11:00 AM',
+      'Book Friday, November 6, arrival 10:00 AM–12:00 PM',
+      'Book Monday, November 9, arrival 9:00 AM–11:00 AM',
+      'Book Tuesday, November 10, arrival 11:00 AM–1:00 PM',
+      'Book Wednesday, November 11, arrival 1:00 PM–3:00 PM',
+      'Book Thursday, November 12, arrival 9:00 AM–11:00 AM',
+    ]);
+    const first = screen.getByRole('button', { name: 'Book Thursday, November 5, arrival 9:00 AM–11:00 AM' });
+    expect(first).toHaveAttribute('data-glass', 'chip');
+    expect(within(first).getByText('Thursday, November 5')).toHaveClass('wpk-best-when');
+    expect(within(first).getByText('Arrival 9:00 AM–11:00 AM')).toHaveClass('wpk-best-why');
+    expect(within(first).getByText('Book →')).toHaveClass('wpk-best-go');
+  });
+
+  it('C + D: one tap books a time through the normal commit, and the success card adds the move-again line', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(pickPayload()),
+      post: jsonResponse({
+        success: true, originalDate: '2026-11-09', newDate: '2026-11-10',
+        window: { start: '11:00', end: '12:00' }, startLabel: '11:00 AM', endLabel: '12:00 PM',
+      }),
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Book Tuesday, November 10, arrival 11:00 AM–1:00 PM' }));
+
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    expect(screen.getByText(/visit is now scheduled for/)).toHaveTextContent(`Your ${SERVICE} visit is now scheduled for Tuesday, November 10, arrival window 11:00 AM–1:00 PM.`);
+    expect(screen.getByText(MOVE_AGAIN)).toBeInTheDocument();
+    const posted = JSON.parse(fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST')[1].body);
+    expect(posted).toMatchObject({
+      date: '2026-11-10', start_time: '11:00', end_time: '12:00', technician_id: 'tech-1',
+      disclosed_collective: false, disclosed_current_date: '2026-11-09',
+    });
+  });
+
+  it('C + D: "you pick for me" books the best-ranked time (not the first date) and says we picked it', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(pickPayload()),
+      post: jsonResponse({
+        success: true, originalDate: '2026-11-09', newDate: '2026-11-06',
+        window: { start: '10:00', end: '11:00' }, startLabel: '10:00 AM', endLabel: '11:00 AM',
+      }),
+    });
+
+    renderPage();
+
+    const wePick = await screen.findByRole('button', { name: 'Any of these work — you pick for me' });
+    expect(wePick).toHaveAttribute('data-glass', 'chip');
+    fireEvent.click(wePick);
+
+    await waitFor(() => expect(screen.getByText('You’re all set')).toBeInTheDocument());
+    expect(screen.getByText(/We picked/)).toHaveTextContent(
+      'We picked Friday, November 6, arrival window 10:00 AM–12:00 PM. It’s the best fit on our route near you. We’ll text you a confirmation shortly.',
+    );
+    expect(screen.getByText(MOVE_AGAIN)).toBeInTheDocument();
+    const posted = JSON.parse(fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST')[1].body);
+    expect(posted).toMatchObject({ date: '2026-11-06', start_time: '10:00' });
+  });
+
+  it('C: every time and the "you pick for me" button are disabled while a booking is in flight', async () => {
+    let resolvePost;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return new Promise((resolve) => { resolvePost = resolve; });
+      return Promise.resolve(jsonResponse(pickPayload()));
+    }));
+
+    renderPage();
+
+    const tapped = await screen.findByRole('button', { name: 'Book Monday, November 9, arrival 9:00 AM–11:00 AM' });
+    fireEvent.click(tapped);
+
+    await waitFor(() => expect(tapped).toBeDisabled());
+    expect(within(tapped).getByText('Booking…')).toBeInTheDocument();
+    screen.getAllByRole('button', { name: /^Book / }).forEach((chip) => expect(chip).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Any of these work — you pick for me' })).toBeDisabled();
+
+    resolvePost(jsonResponse({
+      success: true, originalDate: '2026-11-09', newDate: '2026-11-09',
+      window: { start: '09:00', end: '10:00' }, startLabel: '9:00 AM', endLabel: '10:00 AM',
+    }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+  });
+
+  it('C: a time taken meanwhile shows the error in the card and refreshes its times', async () => {
+    stubFetch({
+      get: jsonResponse(pickPayload()),
+      post: jsonResponse({
+        error: 'That time is no longer open. Here are the latest available times.',
+        code: 'SLOT_TAKEN',
+        availability: pickAvailability([DAY_DEFS[5]]),
+      }, 409),
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Book Thursday, November 5, arrival 9:00 AM–11:00 AM' }));
+
+    const card = await screen.findByTestId('customer-pick-times');
+    await waitFor(() => expect(within(card).getByRole('alert')).toHaveTextContent('That time was just taken — here are the latest open times.'));
+    expect(chipNames()).toEqual(['Book Thursday, November 12, arrival 9:00 AM–11:00 AM']);
+    // The hero still asks for the pick.
+    expect(screen.getByText(`Hi Pat — rain moved your ${SERVICE}. Pick a new time.`)).toBeInTheDocument();
+  });
+
+  it('C + D: "See all open times" reveals the Ask card and the full picker (no repeated best-times strip); a pick there gets the same success', async () => {
+    stubFetch({
+      get: jsonResponse(pickPayload()),
+      post: jsonResponse({
+        success: true, originalDate: '2026-11-09', newDate: '2026-11-05',
+        window: { start: '09:00', end: '10:00' }, startLabel: '9:00 AM', endLabel: '10:00 AM',
+      }),
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'See all open times' }));
+
+    expect(await screen.findByText('Search for a day or time')).toBeInTheDocument();
+    expect(screen.getByText('Pick a day')).toBeInTheDocument();
+    expect(screen.queryByText('Our best times for you')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'See all open times' })).not.toBeInTheDocument();
+    expect(screen.getByText('Times that fit our route')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Choose 9:00 AM on Thursday, November 5/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    expect(screen.getByText(MOVE_AGAIN)).toBeInTheDocument();
+  });
+
+  it('C: no times to list shows the existing empty-times card instead of the times card', async () => {
+    stubFetch({ get: jsonResponse(pickPayload({}, { availability: { days: [], slots: [], rangeFrom: '2026-11-02', rangeTo: '2026-11-15' } })) });
+
+    renderPage();
+
+    expect(await screen.findByText(/We don't have open times to offer online right now/)).toBeInTheDocument();
+    expect(screen.queryByText('Times that fit our route')).not.toBeInTheDocument();
+    expect(screen.getByText(`Hi Pat — rain moved your ${SERVICE}. Pick a new time.`)).toBeInTheDocument();
+  });
+
+  it('E: an Auto-Dispatch booking after the deadline says we scheduled it, shows Was/Now, then the normal page', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        service: { type: SERVICE },
+        current: { date: '2026-11-09', windowStart: '10:00', windowEnd: '11:00' },
+        autoPlacedFromPick: {
+          from: { date: '2026-11-03', windowStart: '09:00' },
+          to: { date: '2026-11-09', windowStart: '10:00' },
+        },
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(`Hi Pat — we didn’t hear back, so we scheduled your ${SERVICE} for you.`)).toBeInTheDocument();
+    expect(screen.getByText('Scheduled for you')).toBeInTheDocument();
+    const move = screen.getByTestId('auto-placed-move');
+    expect(within(move).getByText('Was')).toBeInTheDocument();
+    expect(within(move).getByText('Tuesday, November 3')).toBeInTheDocument();
+    expect(within(move).getByText('Arrival 9:00 AM–11:00 AM')).toBeInTheDocument();
+    expect(within(move).getByText('Now')).toBeInTheDocument();
+    expect(within(move).getByText('Monday, November 9')).toBeInTheDocument();
+    expect(within(move).getByText('Arrival 10:00 AM–12:00 PM')).toBeInTheDocument();
+    expect(screen.queryByText(/% rain/)).not.toBeInTheDocument();
+    // Then the existing "different time" block and the normal page.
+    expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
+    expect(screen.getByText(/Your new time is confirmed — nothing else to do/)).toBeInTheDocument();
+    expect(screen.queryByText(/Hey Pat/)).not.toBeInTheDocument();
+    expect(screen.getByText('Search for a day or time')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Sunday, July 12/ })).toBeInTheDocument();
+    expect(screen.queryByText('Times that fit our route')).not.toBeInTheDocument();
+  });
+
+  it('E: with no hand-off row the card shows only the Now row', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        service: { type: SERVICE },
+        autoPlacedFromPick: { from: null, to: { date: '2026-11-09', windowStart: '10:00' } },
+      })),
+    });
+
+    renderPage();
+
+    const move = await screen.findByTestId('auto-placed-move');
+    expect(within(move).queryByText('Was')).not.toBeInTheDocument();
+    expect(within(move).getByText('Now')).toBeInTheDocument();
+  });
+
+  it('F: a payload without either field renders the page as before', async () => {
+    stubFetch();
+
+    renderPage();
+
+    expect(await screen.findByText(/Hey Pat, let's pick a new time/)).toBeInTheDocument();
+    expect(screen.queryByText('Times that fit our route')).not.toBeInTheDocument();
+    expect(screen.queryByText('Scheduled for you')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('pick-by-note')).not.toBeInTheDocument();
+    expect(screen.getByText('Search for a day or time')).toBeInTheDocument();
   });
 });

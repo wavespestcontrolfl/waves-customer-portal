@@ -57,7 +57,7 @@ const { recordPageView } = require('../services/customer-page-views');
 
 // Token-keyed appointment data (address, visit window) — never cacheable.
 router.use(noStore);
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts, formatETDayDate } = require('../utils/datetime-et');
 const { stampedDivergesSql } = require('../services/stamped-address');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 
@@ -514,6 +514,8 @@ function selectSvc(column, value, database = db) {
       // Quick Move customer-pick hand-off: a windowless visit with this set is
       // not "too soon to move" (visitInsideMoveNoticeWindow) and never re-anchors.
       's.customer_pick_by',
+      // An Auto-Dispatch placement after the pick-by instant (autoPlacedAfterPick).
+      's.last_auto_dispatch_at',
       'c.first_name as cust_first_name',
       'c.last_name as cust_last_name',
       // Availability must be computed around the BOOKED property, not the
@@ -651,6 +653,90 @@ async function loadWeatherMove(svc, now = new Date()) {
   return move;
 }
 
+// ── Quick Move "let the customer pick a day" (owner 2026-11-01) ──────────
+// The page's story for a visit the office or technician handed to the customer
+// (customer_pick_by set). Waiting: the hand-off cleared the window, so the visit
+// has no time until the customer picks one. Auto-placed: nobody picked, and
+// Auto-Dispatch booked it after the pick-by instant (its placement keeps the
+// marker and stamps last_auto_dispatch_at). Not behind the gate: a link already
+// sent keeps working after a kill.
+function waitingForPick(svc) {
+  return handedToCustomer(svc) && !svc.window_start;
+}
+
+function autoPlacedAfterPick(svc) {
+  if (!handedToCustomer(svc) || !svc.window_start || !svc.last_auto_dispatch_at) return false;
+  return new Date(svc.last_auto_dispatch_at).getTime() > new Date(svc.customer_pick_by).getTime();
+}
+
+// A waiting visit's page lists up to 6 route-fit times, one per date (booking.js
+// curateSlots' opt-in count); every other visit keeps the default 4. {} adds no
+// key, so every other build's arguments are unchanged. The texting AI's callers
+// of buildAvailabilityForService read only `days`, which the count never touches.
+const PICK_BEST_SLOT_COUNT = 6;
+function pickSlotCount(svc) {
+  return waitingForPick(svc) ? { bestSlotCount: PICK_BEST_SLOT_COUNT } : {};
+}
+
+// "Wed, Nov 4 at 8 PM" (ET). The clock comes from etParts, so the AM/PM spacing
+// is the same on every ICU build.
+function pickByLabel(at) {
+  const { hour, minute } = etParts(at);
+  const clock = `${hour % 12 || 12}${minute ? `:${String(minute).padStart(2, '0')}` : ''} ${hour >= 12 ? 'PM' : 'AM'}`;
+  return `${formatETDayDate(at)} at ${clock}`;
+}
+
+// The newest 'customer_pick' reschedule_log row the hand-off wrote: the visit's
+// ORIGINAL date and window, and the Quick Move reason in `notes` (one of the
+// reason codes above; any other text reads as no reason). Null when there is no
+// row or the read fails: the page then names no original date.
+async function loadPickHandoff(svc) {
+  try {
+    const row = await db('reschedule_log')
+      .where({ scheduled_service_id: svc.id, reason_code: 'customer_pick' })
+      .orderBy('created_at', 'desc')
+      .first('original_date', 'original_window', 'notes');
+    if (!row) return null;
+    const reason = String(row.notes || '').trim();
+    return {
+      date: apptDateStr(row.original_date),
+      windowStart: hhmm(String(row.original_window || '').split('-')[0] || null),
+      reasonCode: WEATHER_REASON_CODES.has(reason) ? reason : null,
+    };
+  } catch (err) {
+    logger.warn(`[reschedule-public] customer-pick log read failed for ${svc.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// GET payload fields for a handed-off visit: `customerPick` while the customer
+// may still pick, `autoPlacedFromPick` once Auto-Dispatch booked it for them.
+// {} for every other visit (no query), so their payload is unchanged.
+async function customerPickFields(svc, now = new Date()) {
+  const waiting = waitingForPick(svc);
+  if (!waiting && !autoPlacedAfterPick(svc)) return {};
+  const handoff = await loadPickHandoff(svc);
+  if (!waiting) {
+    return {
+      autoPlacedFromPick: {
+        from: handoff ? { date: handoff.date, windowStart: handoff.windowStart } : null,
+        to: { date: apptDateStr(svc.scheduled_date), windowStart: hhmm(svc.window_start) },
+      },
+    };
+  }
+  const pickBy = new Date(svc.customer_pick_by);
+  return {
+    customerPick: {
+      pickBy: pickBy.toISOString(),
+      pickByLabel: pickByLabel(pickBy),
+      deadlinePassed: now.getTime() >= pickBy.getTime(),
+      originalDate: handoff ? handoff.date : null,
+      originalWindowStart: handoff ? handoff.windowStart : null,
+      reasonCode: handoff ? handoff.reasonCode : null,
+    },
+  };
+}
+
 // The reschedule window mirrors the public /book funnel's config-driven
 // range: [today + advance_days_min, today + advance_days_max].
 function bookingRange(config, now = new Date()) {
@@ -744,6 +830,8 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     // (Codex round 2 P1 on PR #5267).
     capacityPlacement: bookInsertionOffersLive() && !svc.visit_id && !pickerMayReanchor(svc, rangeFrom, rangeTo),
     ...(timeOfDay ? { timeOfDay } : {}),
+    // Up to 6 curated times while the customer picks (Quick Move customer pick).
+    ...pickSlotCount(svc),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
   // the commit path (SmartRebooker.reschedule / rescheduleSeries) refuses
@@ -827,12 +915,19 @@ router.get('/:token', async (req, res, next) => {
         logger.warn(`[reschedule-public] weatherMove failed for ${svc.id}: ${err.message}`);
         return null;
       });
+    // Quick Move customer-pick story (customerPick / autoPlacedFromPick), read
+    // alongside availability. {} for every other visit and on any failure.
+    const pickFieldsPromise = customerPickFields(svc).catch((err) => {
+      logger.warn(`[reschedule-public] customer-pick fields failed for ${svc.id}: ${err.message}`);
+      return {};
+    });
     try {
       availability = await buildAvailabilityForService(svc, { ...range, config, offer: !limit?.lastDate });
     } catch (err) {
       logger.error(`[reschedule-public] availability failed for ${svc.id}: ${err.message}`);
     }
     weatherMove = await weatherMovePromise;
+    const pickFields = await pickFieldsPromise;
     const limited = applyMoveLimit(limit, availability, availability, range);
     availability = limited.availability;
     const nextVisit = await loadNextVisitShift(svc, availability);
@@ -840,6 +935,8 @@ router.get('/:token', async (req, res, next) => {
     return res.json({
       ...base,
       weatherMove,
+      // Not a handed-off visit: keys omitted.
+      ...pickFields,
       // Gate off / not a series / nothing to name: key omitted.
       ...(nextVisit ? { nextVisit } : {}),
       // moveLimit. Gate off / missed visit / unreadable history: key omitted.
@@ -1469,6 +1566,9 @@ router._test = {
   roundsOneOffDate,
   disclosedRoundsOneOff,
   buildAvailabilityForService,
+  customerPickFields,
+  pickByLabel,
+  pickSlotCount,
 };
 
 module.exports = router;
