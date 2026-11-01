@@ -7108,6 +7108,17 @@ function reviewProbableReviewerGuardLive() {
   return String(process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD || '').trim().toLowerCase() === 'true';
 }
 
+// GATE_REVIEW_ASK_AT_VISIT read at CALL time (owner 2026-11-01, "every customer gets the review text 10
+// minutes after the visit report"): 'true' = an unpaid invoice no longer holds a visit's review ask; it goes
+// after the report text (or a combined visit's summary) like a paid visit's. Once that visit-time ask has
+// answered (started, or a final skip), the service record carries structured_notes.reviewAskedAtVisit and a
+// later payment starts no ask for it (services/review-request.js enrollForPaidInvoice). A visit with no such
+// marker keeps today's ask at payment. The review link still never rides inside the pay-link text. Off =
+// an unpaid invoice holds the ask until it is paid. Unset is the kill, no redeploy.
+function reviewAskAtVisitLive() {
+  return String(process.env.GATE_REVIEW_ASK_AT_VISIT || '').trim().toLowerCase() === 'true';
+}
+
 // GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
 // builds", Route Check Everywhere build 3c). The portal assistant's
 // check_availability and the text drafter's city-based OPEN TIMES fallback
@@ -8885,6 +8896,8 @@ module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 module.exports.reviewNameMatchMode = reviewNameMatchMode;
 module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;
+// GATE_REVIEW_ASK_AT_VISIT reader, on its own line so gate PRs never conflict.
+module.exports.reviewAskAtVisitLive = reviewAskAtVisitLive;
 module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
