@@ -270,12 +270,22 @@ async function bookedVisitsByCustomer(conn, customerIds) {
 // stamps nothing. So the evidence boundary of a bell that can refresh is the later of the two, or
 // contact that predates the new request would settle it (Codex on #6961). Null when neither parses.
 function bellEventAt(row) {
-  const times = [row.created_at, parseMeta(row.metadata).rungAt].map((v) => (v ? new Date(v) : null))
+  const meta = parseMeta(row.metadata);
+  const times = [askedAtOf(row, meta), meta.rungAt].map((v) => (v ? new Date(v) : null))
     .filter((d) => d && !Number.isNaN(d.getTime()));
   return times.length ? new Date(Math.max(...times.map((d) => d.getTime()))) : null;
 }
 
+// When the customer asked, for a portal item bell: metadata.askedAt when present, else created_at. The late
+// re-ring (portal-late-rering.js) bumps created_at to move the row to the top and stamps askedAt first, so
+// a person's reply that landed between the ask and the re-ring still counts as an answer.
+function askedAtOf(row, meta = parseMeta(row.metadata)) {
+  const stamped = meta.askedAt ? new Date(meta.askedAt) : null;
+  return stamped && !Number.isNaN(stamped.getTime()) ? stamped : row.created_at;
+}
+
 const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered']);
+// (portal_add_service_request has no contact witness; its estimate boundary is askedAtOf, in loadQuoteHandoffs.)
 
 // What a customer-contact bell is about, for the witnesses: the text, call or
 // email it names, or the lead's own phone. Nothing here reads the customer's
@@ -351,7 +361,8 @@ async function loadQuoteHandoffs(rows, data, conn) {
     const meta = parseMeta(row.metadata);
     const customerId = isAddServiceChat(meta) || (isBundleRequestBell(meta) && portalItemGate() !== 'off')
       ? uuidOrNull(meta.customerId) : uuidOrNull(repeatFormCustomerId(meta));
-    const bellAt = row.created_at ? new Date(row.created_at) : null;
+    const asked = askedAtOf(row, meta);
+    const bellAt = asked ? new Date(asked) : null;
     if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
     const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
     const handedOff = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id');

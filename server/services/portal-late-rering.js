@@ -19,6 +19,9 @@
  *   handed to the customer for an add-service ask. Judged here whatever the close gates say: a bell that
  *   nobody closed because a close gate is off must still not ring "still waiting" over a reply.
  * - Only asks of the last 24 hours, so turning the gate on cannot burst old items.
+ * - The ask time stays the boundary after the re-ring: the row is stamped metadata.askedAt (the ask's time)
+ *   before its created_at is bumped, and every close and contact check reads askedAt when present
+ *   (admin-alert-relevance.js askedAtOf), so a reply that landed between the ask and the re-ring still answers it.
  * - It sends nothing to a customer. It rewrites one admin row; the write is fenced on the row still being
  *   open and unchanged since it was read, so a reply that closed it, or an emitter's refresh, wins.
  *
@@ -31,6 +34,9 @@ const logger = require('./logger');
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 200;
+// Pages read per sweep: 2000 open portal bells asked in the last day is far past a busy day. A run that
+// stops here says so in the log, and the rest are read by the next sweep (rows rung drop out of the query).
+const MAX_PAGES = 10;
 const STILL_WAITING = 'Still waiting: no reply after 1 business hour';
 const LATE_CLASSES = new Set(['portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered', 'portal_add_service_request']);
 // The classes whose answer is also an estimate handed to the customer.
@@ -44,10 +50,11 @@ function dueAtFor(askedAt) {
   return require('./followup-sla-watcher').followUpDueAt(askedAt);
 }
 
-// Open, unrung bell rows that could be a portal item asked in the last 24 hours. The class test (the
-// relevance table) runs in code; this only narrows what is read. A refreshed chat bell keeps its first
+// Open, unrung bell rows that could be a portal item asked in the last 24 hours, one keyset page after
+// `cursor` ({ createdAt, id }; createdAt as the database's own text, so no microsecond is lost). The class test
+// (the relevance table) runs in code; this only narrows what is read. A refreshed chat bell keeps its first
 // created_at and carries its latest ring in metadata.rungAt, so either may be recent.
-function candidateQuery(since) {
+function candidateQuery(since, cursor, pageSize) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
     .whereNull('done_at')
@@ -58,9 +65,10 @@ function candidateQuery(since) {
       .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), 23) = 'portal-chat-escalation:'")
       .orWhereRaw("metadata->>'doneWhen' = 'request_answered'")
       .orWhereRaw("metadata->>'triggerKey' = 'bundle_quote_requested'"))
-    .orderBy('created_at', 'asc')
-    .limit(PAGE_SIZE)
-    .select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at');
+    .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.createdAt, cursor.id]); })
+    .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .limit(pageSize)
+    .select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', db.raw('created_at::text AS created_at_token'));
 }
 
 // The portal item bells among the rows that are due now: { row, cls, meta, askedAt, customerId }.
@@ -109,7 +117,7 @@ async function stillWaiting(items) {
 
 // The one extra ring: this row, still open and unchanged since it was read, rewritten with the
 // "Still waiting" line, unread, at the top, stamped. Returns 1 when it landed.
-async function ringAgain({ row, meta }, now) {
+async function ringAgain({ row, meta, askedAt }, now) {
   const notifications = require('./notification-service');
   const text = notifications.normalizeAdminText({
     category: row.category,
@@ -128,23 +136,17 @@ async function ringAgain({ row, meta }, now) {
       read_at: null,
       ...notifications._private.DONE_CLEARED,
       created_at: db.fn.now(),
+      // askedAt first: created_at is bumped above, and the close and contact checks must keep the ask as their boundary.
       // `contact: true` declares a customer reaching us, which the bell policy rings (GATE_CUSTOMER_ALERTS_RING).
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ lateReRungAt: at, rungAt: at, contact: true })]),
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ askedAt: askedAt.toISOString(), lateReRungAt: at, contact: true })]),
     });
   return rewritten ? 1 : 0;
 }
 
-async function runPortalLateRering({ now = new Date() } = {}) {
-  if (!require('../config/feature-gates').portalLateReringLive?.()) return { skipped: true, reason: 'gate_off' };
-  const rows = await candidateQuery(new Date(now.getTime() - WINDOW_MS));
+// One page: the items due, those still waiting, and the one ring each. Returns the rows read and rung.
+async function runPage(rows, now) {
   const due = dueItems(rows, now);
-  let waiting;
-  try {
-    waiting = await stillWaiting(due);
-  } catch (err) {
-    logger.warn(`[portal-late-rering] contact witnesses failed to load, nothing rung: ${safeError(err)}`);
-    return { skipped: false, due: due.length, rung: 0 };
-  }
+  const waiting = await stillWaiting(due);
   let rung = 0;
   for (const item of waiting) {
     try {
@@ -153,8 +155,32 @@ async function runPortalLateRering({ now = new Date() } = {}) {
       logger.warn(`[portal-late-rering] notification ${item.row.id} not rung: ${safeError(err)}`);
     }
   }
-  if (rung) logger.info(`[portal-late-rering] rang ${rung} portal item(s) once more: no reply after 1 business hour`);
-  return { skipped: false, due: due.length, rung };
+  return { due: due.length, rung };
+}
+
+async function runPortalLateRering({ now = new Date(), pageSize = PAGE_SIZE } = {}) {
+  if (!require('../config/feature-gates').portalLateReringLive?.()) return { skipped: true, reason: 'gate_off' };
+  const since = new Date(now.getTime() - WINDOW_MS);
+  let cursor = null;
+  const total = { due: 0, rung: 0 };
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const rows = await candidateQuery(since, cursor, pageSize);
+    if (!rows.length) break;
+    const last = rows[rows.length - 1];
+    cursor = { createdAt: last.created_at_token, id: last.id };
+    try {
+      const done = await runPage(rows, now);
+      total.due += done.due;
+      total.rung += done.rung;
+    } catch (err) {
+      // A witness read that fails is no verdict: nothing in this page rings. The next page is still read.
+      logger.warn(`[portal-late-rering] contact witnesses failed to load, nothing rung on this page: ${safeError(err)}`);
+    }
+    if (rows.length < pageSize) break;
+    if (page === MAX_PAGES - 1) logger.warn(`[portal-late-rering] stopped after ${MAX_PAGES} pages; the next sweep reads the rest`);
+  }
+  if (total.rung) logger.info(`[portal-late-rering] rang ${total.rung} portal item(s) once more: no reply after 1 business hour`);
+  return { skipped: false, ...total };
 }
 
 module.exports = { runPortalLateRering, dueAtFor, STILL_WAITING };

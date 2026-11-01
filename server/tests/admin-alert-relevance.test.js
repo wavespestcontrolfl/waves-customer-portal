@@ -1937,6 +1937,27 @@ describe('customer-contact classes', () => {
         expect(classify(note({ category: 'estimate', metadata: { triggerKey: 'bundle_quote_requested', payload: { bundled: true, customerId: CUST } } }))).toBeNull();
       });
 
+      test('the ask is the boundary: metadata.askedAt (stamped by the late re-ring, which bumps created_at) is read before created_at, for the witnesses and the estimate check; a later emitter ring still moves it', async () => {
+        gate('true'); pi('true');
+        const bumped = new Date(T0.getTime() + 3 * 60 * 60 * 1000);
+        const asked = (over = {}) => requestBell({ askedAt: T0.toISOString(), lateReRungAt: bumped.toISOString(), ...over });
+        const row = asked();
+        row.created_at = bumped; // the re-ring moved the row to the top
+        await judged(row, { textAt: at(20) });
+        expect(mockLoadContactBundles.mock.calls.pop()[0].map((i) => i.bellAt)).toEqual([T0]);
+        const { bellEventAt } = require('../services/admin-alert-relevance');
+        expect(bellEventAt(row)).toEqual(T0);
+        // A chat hand-off refreshed by its emitter AFTER the stamp is a new ask.
+        const later = asked({ rungAt: at(120).toISOString() });
+        later.created_at = bumped;
+        expect(bellEventAt(later)).toEqual(at(120));
+        // A bad stamp falls back to created_at.
+        const bad = asked({ askedAt: 'not a date' });
+        expect(bellEventAt(bad)).toEqual(bad.created_at);
+        // No stamp: today's behavior.
+        expect(bellEventAt(requestBell())).toEqual(T0);
+      });
+
       test('a request bell: the four reasons in order, only from a fact after the bell; a visit or an estimate is no reason; own gate off = nothing read', async () => {
         gate('true'); pi('true');
         expect((await judged(requestBell(), { backAt: at(20), inAt: at(20), textAt: at(20), replyAt: at(20) })).reason).toBe('A person called back');

@@ -230,7 +230,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
         expect(row.read_at).toBeNull();
         expect(row.done_at).toBeNull();
         expect(row.created_at.getTime()).toBeGreaterThan(AFTER_DUE.getTime());
-        expect(row.metadata).toMatchObject({ contact: true, lateReRungAt: AFTER_DUE.toISOString(), rungAt: AFTER_DUE.toISOString() });
+        expect(row.metadata).toMatchObject({ contact: true, lateReRungAt: AFTER_DUE.toISOString(), askedAt: ASK.toISOString() });
         // The bell is the same row: its identity metadata is intact.
         expect(row.metadata.customerId).toBe(b === asked ? other.id : customer.id);
       }
@@ -272,6 +272,67 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       for (const key of ['replied', 'called', 'closed', 'old', 'estimateSent', 'cancelled']) expect((await get(rows[key].id)).body).not.toContain('Still waiting');
       expect((await get(rows.before.id)).body).toContain('Still waiting');
       expect((await get(rows.stamped.id)).body).not.toContain('Still waiting');
+    }, 60000);
+
+    test('the ask stays the boundary after the re-ring: a reply dated between the ask and the re-ring (it landed while the re-ring was being written) still closes the bell, and the re-ring happens once', async () => {
+      const customer = await customerWith();
+      const other = await customerWith();
+      const request = await requestRow(customer);
+      const asked = await requestBell(customer, request, ASK);
+      const chat = await chatBell(other, ASK, { topic: 'add_service' });
+      const addCustomer = await customerWith();
+      const addRequest = await requestRow(addCustomer, { category: 'add_service', requested_service: 'mosquito', source: 'portal_home' });
+      const bundle = await bundleBell(addCustomer, addRequest, ASK);
+      lateOn();
+      expect((await sweep(AFTER_DUE)).lateReRung).toBe(3);
+      const bumped = await get(asked.id);
+      expect(bumped.created_at.getTime()).toBeGreaterThan(AFTER_DUE.getTime());
+      // The replies are dated inside the window the re-ring's own check read as empty.
+      await staffText(customer, mins(ASK, 20));
+      await staffText(other, mins(ASK, 25));
+      await insert('estimates', { status: 'accepted', customer_id: addCustomer.id, estimate_data: delivered(mins(ASK, 30)) });
+      process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
+      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+      process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';
+      const result = await sweep(mins(AFTER_DUE, 30));
+      expect(result.lateReRung).toBeUndefined();
+      expect(await state(asked)).toEqual(['relevance', 'Answered by text']);
+      expect(await state(chat)).toEqual(['relevance', 'Answered by text']);
+      expect(await state(bundle)).toEqual(['relevance', 'Estimate was sent']);
+      expect((await getRequest(request.id)).status).toBe('resolved');
+      expect((await getRequest(addRequest.id)).status).toBe('resolved');
+    }, 60000);
+
+    test('a reply AFTER the ask but before the re-ring does not block closing later; one before the ask never does (chat bell, close gates on, re-ring first)', async () => {
+      const customer = await customerWith();
+      const early = await customerWith();
+      const replied = await chatBell(customer, ASK);
+      const before = await chatBell(early, ASK);
+      lateOn();
+      await sweep(AFTER_DUE);
+      await staffText(customer, mins(ASK, 40));
+      await staffText(early, mins(ASK, -40));
+      process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
+      process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';
+      await sweep(mins(AFTER_DUE, 30));
+      expect(await state(replied)).toEqual(['relevance', 'Answered by text']);
+      expect(await state(before)).toBeNull();
+    }, 60000);
+
+    test('every overdue bell is considered even when they outnumber a page: pages keyed on created_at and id, and a bell that is not due does not hide the ones after it', async () => {
+      const { runPortalLateRering } = require('../services/portal-late-rering');
+      const rows = [];
+      // Six overdue bells with the SAME created_at (the keyset must tie-break on id) and, among them later,
+      // one fresh bell that is not due yet.
+      for (let i = 0; i < 6; i += 1) rows.push(await chatBell(await customerWith(), ASK));
+      const fresh = await chatBell(await customerWith(), mins(AFTER_DUE, -5));
+      lateOn();
+      const result = await runPortalLateRering({ now: AFTER_DUE, pageSize: 2 });
+      expect(result.rung).toBe(6);
+      for (const b of rows) expect((await get(b.id)).metadata.lateReRungAt).toBe(AFTER_DUE.toISOString());
+      expect((await get(fresh.id)).metadata.lateReRungAt).toBeUndefined();
+      // Run again: nothing is rung twice.
+      expect((await runPortalLateRering({ now: mins(AFTER_DUE, 5), pageSize: 2 })).rung).toBe(0);
     }, 60000);
 
     test('the sweep closes a replied item first, so a bell the close gates closed is never rung "still waiting"', async () => {
