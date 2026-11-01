@@ -547,7 +547,7 @@ async function allSmsLane(conn, { customerId, now = new Date(), channels = null,
 }
 const SMS_PAGE = 200;
 
-async function loadCommitments({ conn, customerId, now, strict }) {
+async function loadCommitments({ conn, customerId, now, strict, asOf = null }) {
   // strict (a send-time rebuild): every nested read throws instead of reading as empty
   const read = strict ? (_field, _fallback, fn) => fn() : safely;
   const rows = [];
@@ -581,6 +581,13 @@ async function loadCommitments({ conn, customerId, now, strict }) {
     const key = String(r.id);
     if (seen.has(key)) return false;
     seen.add(key);
+    // asOf (late drafts): a promise or ask that began after that instant, such as the reply
+    // staff sent to the very text being drafted, is not a fact the live draft could have read.
+    // A row with no usable start time stays (it cannot be proven late).
+    if (asOf) {
+      const at = rowSourceAt(r);
+      if (at && at.getTime() > asOf.getTime()) return false;
+    }
     return true;
   });
   const byRecent = (a, b) => (rowSourceAt(b)?.getTime() || 0) - (rowSourceAt(a)?.getTime() || 0);
@@ -623,15 +630,16 @@ async function loadCommitments({ conn, customerId, now, strict }) {
  * @param {Date}   [args.now]
  * @param {Function} [args.deriveWindow]  row -> customer-facing window label (the aggregator's own deriveWindow)
  * @param {Function} [args.conn]          knex handle (tests)
+ * @param {Date}   [args.asOf]          late drafts: leave out open promises and asks that began after this instant
  */
 // strict (the send-time rebuild): a failed read throws instead of becoming an
 // empty field, so an outage is a retryable recheck failure, never "the facts changed".
 // Commitments are skipped there (they have their own recheck) unless
 // withCommitments (the gratitude boundary needs the whole picture).
-async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false, withCommitments = false } = {}) {
+async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false, withCommitments = false, asOf = null } = {}) {
   const out = emptyVisitLoops();
   if (!customerId) return out;
-  const ctx = { conn, now, deriveWindow, customerId, strict };
+  const ctx = { conn, now, deriveWindow, customerId, strict, asOf };
   const read = strict ? (_field, _fallback, fn) => fn() : safely;
 
   // The confirmed miss first: the same occurrence is left out of the passed-window

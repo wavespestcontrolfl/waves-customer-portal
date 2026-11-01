@@ -549,6 +549,25 @@ describe('weOwe and customerWaiting', () => {
     expect(out.customerWaiting).toEqual([{ id: 's-2', rev: expect.any(String), kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
   });
 
+  // Late drafts (asOf): a promise or ask that began after the draft's text is not a fact that draft could read.
+  test('asOf drops promises and asks whose source began after it; one with no start time stays; unset keeps every row', async () => {
+    smsCommitmentsEnabled.mockReturnValue(true);
+    listOpenCommitments.mockResolvedValue([
+      callRow({ id: 'c-before', call_started_at: '2026-09-30T14:00:00Z' }),
+      callRow({ id: 'c-after', call_started_at: '2026-10-01T15:30:00Z' }),
+      callRow({ id: 'c-undated', call_started_at: null, created_at: null }),
+    ]);
+    listSmsCommitments.mockImplementation(async (_c, { lane }) => (lane === 'promise'
+      ? [smsRow({ id: 's-staff-reply', sms_started_at: '2026-10-01T15:45:00Z' })]
+      : [smsRow({ id: 's-the-text', kind: 'send_report', description: 'Report requested', due_at: null, sms_started_at: '2026-10-01T15:00:00Z' })]));
+    const asOf = new Date('2026-10-01T15:00:00Z');
+    const late = await loadVisitLoops({ customerId: 'c1', now: NOW, conn: ctxConn({}), asOf });
+    expect(late.weOwe.map((r) => r.id).sort()).toEqual(['c-before', 'c-undated']);
+    expect(late.customerWaiting.map((r) => r.id)).toEqual(['s-the-text']);
+    const live = await loadVisitLoops({ customerId: 'c1', now: NOW, conn: ctxConn({}) });
+    expect(live.weOwe.map((r) => r.id).sort()).toEqual(['c-after', 'c-before', 'c-undated', 's-staff-reply']);
+  });
+
   test('call promises are read to the end of the canonical reader\'s pages, so a new one behind 200 older ones still shows', async () => {
     const older = Array.from({ length: 200 }, (_, i) => callRow({ id: `old-${i}`, call_started_at: '2026-09-01T14:00:00Z' }));
     const fresh = callRow({ id: 'new-1', source: 'human', created_at: '2026-10-01T13:00:00Z' });

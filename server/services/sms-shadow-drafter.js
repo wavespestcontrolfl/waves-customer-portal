@@ -6052,7 +6052,7 @@ function draftPromptHints({ context, reserviceLaneDecides, reserviceState, inbou
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, promptPatch: presetPromptPatch, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, promptPatch: presetPromptPatch, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false, asOf = null }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -6224,7 +6224,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // factsGeneratedAt on every return below, for the caller to persist. A
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
-  const factsAt = presetFactsBlock ? null : new Date();
+  // asOf (a late draft): the instant of the customer's text, so the SLA phrase is the one a draft
+  // written then would have quoted.
+  const factsAt = presetFactsBlock ? null : (asOf instanceof Date ? asOf : new Date());
   const factsBlock = presetFactsBlock || buildFactsBlock(context, { portalCancelAvailable, openTimesBlock, reserviceOpeningsBlock: reserviceOpenings.block, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, ...paymentFactsExtras, labelFacts, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
@@ -6537,7 +6539,14 @@ function parseShadowResponse(text) {
  * from the inbound webhook: all failures are caught, logged masked, and
  * recorded nowhere else — a shadow miss must never affect the live path.
  */
-async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false, source = null, hasMedia = false }) {
+// `asOf` / `liveEta` are the late-draft overrides (services/sms-late-drafter.js; source 'mac_late'),
+// both optional, and leaving both unset keeps the live webhook's behavior exactly:
+//   asOf    a Date. The customer context drops every message source created after it (see
+//           ContextAggregator.getContextForCustomer) and the facts block renders at that instant,
+//           so a draft written minutes after the text reads what a draft written at the text did.
+//   liveEta false forces the LIVE ETA lookup (a GPS + Distance Matrix call) off. Only false has an
+//           effect; true or unset leaves the GATE_SMS_REAL_ANSWERS rule below in charge.
+async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false, source = null, hasMedia = false, asOf = null, liveEta }) {
   const startedAt = Date.now();
   try {
     const classifiedIntent = intent;
@@ -6561,10 +6570,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // "thanks" from an en-route customer would otherwise trigger.
     // Codex round-16 P2: gate-off must be byte-identical — the live-row query
     // changes the upcoming list, so the opt-in also requires the release gate.
-    const includeLiveEta = gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
-    const loadContext = (liveEta) => (customer
-      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: liveEta, includeVisitLoops: true })
-      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: liveEta, includeVisitLoops: true }));
+    const liveEtaForcedOff = liveEta === false;
+    const includeLiveEta = !liveEtaForcedOff && gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
+    const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
+    const loadContext = (withLiveEta) => (customer
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...(asOfDate ? { asOf: asOfDate } : {}) })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...(asOfDate ? { asOf: asOfDate } : {}) }));
     // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
     // a fingerprint of this customer's facts that a delayed send re-derives
     // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE
@@ -6584,7 +6595,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     if (gratitudeCandidate && visitLoopsNeedAnswer(context)) {
       gratitudeCandidate = false;
       intent = classifiedIntent;
-      context = await loadContext(gateEnvValue('GATE_SMS_REAL_ANSWERS'));
+      context = await loadContext(!liveEtaForcedOff && gateEnvValue('GATE_SMS_REAL_ANSWERS'));
       // A plain "Thanks!" classifies no_reply_needed (a shadow rung): route it to a
       // person explicitly so the open loop is never answered with silence.
       openLoopThanks = true;
@@ -6608,6 +6619,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       openTimesSnapshot, paymentStatusSnapshot, labelFactsSnapshot, factsGeneratedAt, zelleInvoiceId, reserviceBooked,
     } = await generateGroundedDraft({
       client, context, inboundMessage, inboundPhone: fromPhone, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
+      ...(asOfDate ? { asOf: asOfDate } : {}),
     });
     if (!parsed) {
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);

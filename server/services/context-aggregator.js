@@ -1319,7 +1319,14 @@ class ContextAggregator {
   // generateLlmReviewDraft) opt in explicitly with { includeLiveEta: true }.
   // false leaves upcomingServices[].liveEta and liveEtaGroups at their
   // empty/null defaults; every other field is unaffected.
-  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false } = {}) {
+  // `asOf` (late drafts, services/sms-late-drafter.js): a Date. Every MESSAGE source read below (the
+  // text thread, call summaries and transcripts, the interaction log, reschedule requests, and the
+  // open promises the visit loops list) drops rows created after it, so a draft written minutes after
+  // a customer's text cannot see the reply staff sent in between. Unset = today's reads, unchanged.
+  // Booking, invoice and visit state still reads as of now; that state has no history to rewind to.
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, asOf = null } = {}) {
+    const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
+    const cappedAt = (qb) => (asOfDate ? qb.where('created_at', '<=', asOfDate) : qb);
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
     // never throws — null on failure) starts right after the payer linkage below (it reuses it) and
     // overlaps the remaining fetches; it is awaited where hasProcessingPayment is derived.
@@ -1348,7 +1355,7 @@ class ContextAggregator {
       // message Waves definitely sent, nor displace a real row out of this
       // bounded window — a row that has since resolved to a real status is
       // unaffected and still appears.
-      excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customer.id }))
+      cappedAt(excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customer.id })))
         .orderBy('created_at', 'desc').limit(20),
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
@@ -1363,15 +1370,15 @@ class ContextAggregator {
       // A never-attempted dispute-hold deferral is not a payment the customer made: out of the recent-payments sample
       // (SQL, so it cannot use up one of the 5 rows), consistent with the failed-payment ledger below.
       paymentsPage(customer, payerLinkage, 0),
-      db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
-      db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
-      db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
+      cappedAt(db('customer_interactions').where({ customer_id: customer.id })).orderBy('created_at', 'desc').limit(10),
+      cappedAt(db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000))),
+      cappedAt(db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000))).count('* as count').first(),
       // whereNull(archived_at): an archived sent/viewed row is a courtship
       // that already closed some other way — not a pending estimate.
       db('estimates').where({ customer_id: customer.id }).whereIn('status', ['sent', 'viewed']).whereNull('archived_at').orderBy('created_at', 'desc').first(),
       db('sms_sequences').where({ customer_id: customer.id, sequence_type: 'cancellation_save', status: 'active' }).first(),
       this.getCompliance(customer.id),
-      this.getRecentCalls(customer.id, { sentinelOnError: true }),
+      this.getRecentCalls(customer.id, { sentinelOnError: true, asOf: asOfDate }),
       // Newest invoice a customer could actually be asked about: unpaid and
       // not voided. payer_id kept in the row — a third-party-billed invoice
       // is a FACT the drafter needs (the customer cannot pay it), never a
@@ -1770,7 +1777,7 @@ class ContextAggregator {
     // email replies, briefs and assistant snapshots never read it.
     if (includeVisitLoops && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
       try {
-        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row) });
+        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row), ...(asOfDate ? { asOf: asOfDate } : {}) });
       } catch (err) {
         logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
         visitLoops = emptyVisitLoops();
@@ -1789,7 +1796,9 @@ class ContextAggregator {
   // sentinelOnError: return null instead of [] on a lookup failure so the
   // caller can tell an outage from a quiet phone (the pre-visit brief
   // must not hash "no calls" over a cached brief during an outage).
-  async getRecentCalls(customerId, { sentinelOnError = false, before = null, phone = null } = {}) {
+  // asOf: a call counts only if it started AND was last written (summary, transcript, extraction)
+  // at or before that instant, so a summary that landed after a late draft's text never grounds it.
+  async getRecentCalls(customerId, { sentinelOnError = false, before = null, phone = null, asOf = null } = {}) {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
@@ -1802,6 +1811,7 @@ class ContextAggregator {
         // Optional upper bound (the review-ask writer scopes calls to a visit)
         // applied before the limit below, so later calls can't crowd it out.
         .modify((qb) => { if (before) qb.where('created_at', '<', before); })
+        .modify((qb) => { if (asOf) qb.where('created_at', '<=', asOf).where('updated_at', '<=', asOf); })
         // Optional caller identity (the review-ask writer: the recipient's own
         // number only), applied before the limit and the transcript pick, so
         // another household contact's calls can't crowd theirs out.

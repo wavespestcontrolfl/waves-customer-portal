@@ -1142,6 +1142,58 @@ describe('auto-send fallback publication', () => {
     }
   });
 
+  // Late drafts (services/sms-late-drafter.js, source 'mac_late'): asOf caps the context's message
+  // sources and liveEta:false forces the GPS + Distance Matrix lookup off. Unset, nothing changes.
+  describe('late-draft overrides (asOf, liveEta)', () => {
+    const restore = (name, prior) => { if (prior === undefined) delete process.env[name]; else process.env[name] = prior; };
+
+    test('asOf rides into the context load as a Date; no asOf adds no key (live webhook call unchanged)', async () => {
+      const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+      const priorFewshot = process.env.SHADOW_FEWSHOT;
+      try {
+        const asOf = new Date('2026-11-01T14:00:00Z');
+        const late = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true }, { asOf, source: 'mac_late' });
+        expect(late.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false, includeVisitLoops: true, asOf });
+        const live = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true }, { source: 'live_webhook' });
+        expect(live.getContextForCustomer.mock.calls[0][1]).toEqual({ includeLiveEta: false, includeVisitLoops: true });
+        expect(Object.keys(live.getContextForCustomer.mock.calls[0][1])).not.toContain('asOf');
+      } finally {
+        restore('SHADOW_DRAFT_VERIFY', priorVerify);
+        restore('SHADOW_FEWSHOT', priorFewshot);
+      }
+    });
+
+    test('an invalid asOf is ignored, never passed on', async () => {
+      const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+      const priorFewshot = process.env.SHADOW_FEWSHOT;
+      try {
+        const bad = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true }, { asOf: 'yesterday' });
+        expect(bad.getContextForCustomer.mock.calls[0][1]).toEqual({ includeLiveEta: false, includeVisitLoops: true });
+      } finally {
+        restore('SHADOW_DRAFT_VERIFY', priorVerify);
+        restore('SHADOW_FEWSHOT', priorFewshot);
+      }
+    });
+
+    test('liveEta:false keeps the lookup off even with GATE_SMS_REAL_ANSWERS on; unset or true leaves the gate in charge', async () => {
+      const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+      const priorFewshot = process.env.SHADOW_FEWSHOT;
+      try {
+        process.env.GATE_SMS_REAL_ANSWERS = 'true';
+        const forcedOff = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true }, { liveEta: false });
+        expect(forcedOff.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false, includeVisitLoops: true });
+        const unset = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
+        expect(unset.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true });
+        const explicitTrue = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true }, { liveEta: true });
+        expect(explicitTrue.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true });
+      } finally {
+        delete process.env.GATE_SMS_REAL_ANSWERS;
+        restore('SHADOW_DRAFT_VERIFY', priorVerify);
+        restore('SHADOW_FEWSHOT', priorFewshot);
+      }
+    });
+  });
+
   // Codex round-12 P2 (PR #5334): a gratitude-only "thanks" is answered with
   // the fixed approved reply — a LIVE ETA (GPS + paid Distance Matrix) could
   // never affect delivery, so the lookup must not run for it.
