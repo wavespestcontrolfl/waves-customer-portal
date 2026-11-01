@@ -4584,13 +4584,23 @@ router.get('/:id/proposal', async (req, res, next) => {
     const proposalGenerate = require('../services/estimate-proposal-generate');
     // Never throws: a failed read is null, and the family defaults apply.
     const taxabilityMap = await proposalGenerate.loadTaxabilityMap(db);
-    // A failed read leaves the line off; it never fails the builder's load.
+    // Whether the customer page offers nothing on this published estimate (won, declined, expired, archived), for
+    // both lines of the builder's Readiness card; a failure reads as closed. A failed read leaves the line off; it
+    // never fails the builder's load.
+    let closedOnline = true;
+    try { closedOnline = require('./estimate-public').estimateClosedOnline(estimate); } catch (_) { closedOnline = true; }
     let commercialAgreement = null;
     if (require('../config/feature-gates').commercialProposalSignLive()) {
       try {
-        commercialAgreement = await require('../services/commercial-proposal-agreement').agreementAdminStatus(estimate);
+        commercialAgreement = await require('../services/commercial-proposal-agreement')
+          .agreementAdminStatus(estimate, db, { closed: closedOnline });
       } catch (_) { commercialAgreement = null; }
     }
+    // GATE_COMMERCIAL_FIRST_VISIT: whether the signer will book the first visit online, and if not why, for the
+    // builder's Readiness card (owner 2026-11-01). Never throws; the key is absent with the gate off.
+    const firstVisit = require('../config/feature-gates').commercialFirstVisitLive()
+      ? await require('../services/commercial-first-visit').firstVisitReadiness(estimate, { conn: db, closed: closedOnline })
+      : null;
     res.json({
       proposal,
       totals: computeProposalTotals(proposal),
@@ -4617,6 +4627,7 @@ router.get('/:id/proposal', async (req, res, next) => {
       // GATE_COMMERCIAL_PROPOSAL_SIGN: where the customer's online agreement stands (none / awaiting /
       // signed) for the builder's read-only line. The key is absent with the gate off.
       ...(commercialAgreement ? { commercialAgreement } : {}),
+      ...(firstVisit ? { firstVisit } : {}),
       // Private operator inputs live beside the public proposal allowlist.
       projectCosting: parseEstimateData(estimate.estimate_data)?.proposalCosting || null,
       // Engine-composed prospect research (commercial proposal lane) — the
