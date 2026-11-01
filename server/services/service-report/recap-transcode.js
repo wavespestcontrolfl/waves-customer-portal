@@ -10,7 +10,7 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const config = require('../../config');
 const logger = require('../logger');
 
@@ -59,6 +59,10 @@ async function uploadFrom(key, filePath, contentType) {
   }));
 }
 
+async function deleteObject(key) {
+  await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+}
+
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     const proc = spawn(FFMPEG, args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -103,4 +107,4 @@ async function ensureRenderable({ s3Key, contentType, mediaType } = {}) {
   }
 }
 
-module.exports = { ensureRenderable, isRenderable };
+module.exports = { ensureRenderable, isRenderable, downloadTo, uploadFrom, runFfmpeg, deleteObject };
