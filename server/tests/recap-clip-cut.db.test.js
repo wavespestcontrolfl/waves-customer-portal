@@ -235,6 +235,36 @@ describeDb('glasses clip cuts', () => {
     expect(transcode.deleteObject.mock.calls).toEqual([[first], [ORIGINAL_KEY]]);
   });
 
+  describe('an older attempt after a stale-cutting recovery gave the clip to a newer one', () => {
+    // While the older attempt works, the clip is recovered and re-claimed: status stays `cutting`, the
+    // claim stamp (updated_at) moves on.
+    const reclaimedBy = (clip, stamp) => async () => {
+      await mockPg('service_media').where({ id: clip.id }).update({ status: 'cutting', updated_at: stamp });
+    };
+
+    test('its failure does not fail the newer attempt\'s clip', async () => {
+      const clip = await insertClip();
+      const newerStamp = new Date(Date.now() + 20 * 60 * 1000);
+      transcode.downloadTo.mockImplementationOnce(async (key, filePath) => {
+        await reclaimedBy(clip, newerStamp)();
+        throw new Error('download failed');
+      });
+
+      expect(await processPendingClipCuts()).toMatchObject({ claimed: 1, failed: 1 });
+      expect(await clipRow(clip.id)).toMatchObject({ status: 'cutting', s3_key: ORIGINAL_KEY });
+      expect(new Date((await clipRow(clip.id)).updated_at).getTime()).toBe(newerStamp.getTime());
+    });
+
+    test('its finish does not publish over the newer attempt: it abandons and deletes only its own cut', async () => {
+      const clip = await insertClip();
+      transcode.uploadFrom.mockImplementationOnce(reclaimedBy(clip, new Date(Date.now() + 20 * 60 * 1000)));
+
+      expect(await processPendingClipCuts()).toMatchObject({ claimed: 1, ready: 0, abandoned: 1 });
+      expect(await clipRow(clip.id)).toMatchObject({ status: 'cutting', s3_key: ORIGINAL_KEY });
+      expect(transcode.deleteObject.mock.calls).toEqual([[cutKeyOf(ORIGINAL_KEY)]]);
+    });
+  });
+
   test('a failed cut sets that clip failed and the next clip is still cut', async () => {
     const first = await insertClip({ created_at: minutesAgo(5) });
     const second = await insertClip({ s3_key: 'recap-media/test/second.mov', created_at: minutesAgo(1) });

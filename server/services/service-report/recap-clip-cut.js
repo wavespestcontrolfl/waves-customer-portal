@@ -125,13 +125,19 @@ async function cutClip(clip, dir) {
   return { key, bytes: (await fsp.stat(outPath)).size, start, source };
 }
 
+// The claim stamps updated_at, and while a clip is `cutting` only the attempt that claimed it writes
+// the row, so updated_at is that attempt's token: a stale-cutting recovery and re-claim restamp it, and
+// the older attempt's finish or failure then matches nothing (it can neither publish over nor fail the
+// newer attempt's work).
+const sameClaim = (row, clip) => new Date(row.updated_at).getTime() === new Date(clip.updated_at).getTime();
+
 // Finish in one transaction, like recap-media: lock the clip row and read it again; a clip the tech
-// removed meanwhile (gone, or no longer `cutting` on its original) changes nothing. Otherwise mark the
+// removed or changed meanwhile, or that another attempt now holds, changes nothing. Otherwise mark the
 // recap first, then point the clip at the cut.
 async function finishCut(knex, clip, cut, now) {
   return knex.transaction(async (trx) => {
     const current = await trx('service_media').where({ id: clip.id }).forUpdate().first();
-    if (!current || current.status !== 'cutting' || current.s3_key !== clip.s3_key) return { abandoned: true };
+    if (!current || current.status !== 'cutting' || current.s3_key !== clip.s3_key || !sameClaim(current, clip)) return { abandoned: true };
     await recapPipeline.markRecapClipsChanged(current.scheduled_service_id, { ...current, status: 'ready' }, { knex: trx, now });
     await trx('service_media').where({ id: clip.id }).update({
       s3_key: cut.key, content_type: 'video/mp4', status: 'ready', duration_ms: CUT_MS, bytes: cut.bytes, updated_at: now,
@@ -163,7 +169,7 @@ async function processClip(knex, clip, now) {
     logger.warn(`[recap-clip-cut] clip ${clip.id} failed: ${err.message}`);
     if (cut) await deleteQuietly(cut.key, 'cut not used');
     try {
-      await knex('service_media').where({ id: clip.id, status: 'cutting' }).update({ status: 'failed', updated_at: new Date() });
+      await knex('service_media').where({ id: clip.id, status: 'cutting', updated_at: clip.updated_at }).update({ status: 'failed', updated_at: new Date() });
     } catch (markErr) {
       logger.warn(`[recap-clip-cut] could not mark clip ${clip.id} failed: ${markErr.message}`);
     }
