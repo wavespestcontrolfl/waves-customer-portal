@@ -38,7 +38,14 @@ function chain(result) {
   return c;
 }
 
-const ymd = (daysAhead) => new Date(Date.now() + daysAhead * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+// Eastern dates, as the finder counts days (a UTC date runs a day ahead
+// from 8 PM ET).
+const { etDateString } = require('../utils/datetime-et');
+const ymd = (daysAhead) => {
+  const d = new Date(`${etDateString(new Date())}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + daysAhead);
+  return d.toISOString().slice(0, 10);
+};
 const [OPEN_DAY, UNVERIFIED_DAY, FULL_DAY] = [ymd(30), ymd(31), ymd(32)];
 const BASE = {
   lat: 27.4, lng: -82.5, durationMinutes: 60, technicianId: 'tech-1', includeWeekends: true, includeBlackoutDates: true,
@@ -230,17 +237,10 @@ test('the road days follow PICKER_ROAD_TRAFFIC_DAYS + PICKER_ROAD_PLAIN_DAYS', a
   enumerateArrivalPlacements.mockReturnValue({ placements: [], evaluated: 0, rejections: {} });
   process.env.PICKER_ROAD_TRAFFIC_DAYS = '2';
   process.env.PICKER_ROAD_PLAIN_DAYS = '0';
-  // Eastern dates, as the finder counts days (the UTC `ymd` can run a day ahead).
-  const { etDateString } = require('../utils/datetime-et');
-  const etYmd = (n) => {
-    const d = new Date(`${etDateString(new Date())}T12:00:00Z`);
-    d.setUTCDate(d.getUTCDate() + n);
-    return d.toISOString().slice(0, 10);
-  };
   try {
-    await findAvailableSlots({ ...BASE, dateFrom: etYmd(1), dateTo: etYmd(3), pickerRoadCheck: true, roadSpender: 'staff-1' });
+    await findAvailableSlots({ ...BASE, dateFrom: ymd(1), dateTo: ymd(3), pickerRoadCheck: true, roadSpender: 'staff-1' });
     const enumerated = enumerateArrivalPlacements.mock.calls.filter(([, opts]) => !opts.collectLegs).map(([context]) => context);
-    expect(enumerated.filter((context) => context.travel === roadTravel).map((context) => context.date)).toEqual([etYmd(1)]);
+    expect(enumerated.filter((context) => context.travel === roadTravel).map((context) => context.date)).toEqual([ymd(1)]);
   } finally {
     delete process.env.PICKER_ROAD_TRAFFIC_DAYS;
     delete process.env.PICKER_ROAD_PLAIN_DAYS;

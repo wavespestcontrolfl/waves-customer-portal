@@ -4459,8 +4459,13 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     // The completion panel posts timezone-less ET ('YYYY-MM-DDTHH:mm'). Build
     // one ~6h out in ET and confirm the schedule lands on the ET instant, not
     // the (4-5h earlier) UTC misread.
-    const targetMs = Date.now() + 6 * 3600000;
-    const naiveEt = new Date(targetMs).toLocaleString('sv-SE', { timeZone: 'America/New_York' }).replace(' ', 'T').slice(0, 16);
+    const etWallClock = (ms) => new Date(ms).toLocaleString('sv-SE', { timeZone: 'America/New_York' }).replace(' ', 'T').slice(0, 16);
+    let targetMs = Date.now() + 6 * 3600000;
+    // In the November fall-back hour one ET wall-clock time names two
+    // instants (CI hit it 2026-11-01 00:54Z). Step past that hour.
+    while (etWallClock(targetMs - 3600000) === etWallClock(targetMs)
+      || etWallClock(targetMs + 3600000) === etWallClock(targetMs)) targetMs += 3600000;
+    const naiveEt = etWallClock(targetMs);
     const mock = makeMock({
       customers: [{ id: 'et-1', first_name: 'Ria', last_name: 'W', phone: '+19410000075', nearest_location_id: 'bradenton' }],
       service_records: [{ id: 'sr-et', customer_id: 'et-1', structured_notes: JSON.stringify({ requestReview: true, reviewScheduledFor: naiveEt }) }],
