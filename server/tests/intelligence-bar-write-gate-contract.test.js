@@ -365,7 +365,7 @@ const READ_ONLY = [
   'get_stripe_balance', 'get_payout_history', 'get_payout_details', 'get_cash_flow',
   'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts', 'list_pending_payouts',
   'lookup_property', 'compute_estimate', 'read_pricing_config', 'recent_pricing_changes',
-  'get_estimate_detail', 'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
+  'get_estimate_detail', 'list_commercial_proposals', 'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
   'get_neighborhood_grass_profile',
   'get_railway_status', 'get_railway_deployments', 'get_railway_logs', 'get_railway_variable_names',
   'get_sentry_top_issues', 'get_sentry_new_issues', 'get_sentry_issue_detail',
