@@ -169,6 +169,8 @@ dbDescribe('PostgreSQL reconciliation transaction', () => {
     await db.schema.createSchema(schema);
     await db.schema.createTable('opportunity_queue', t => {
       t.uuid('id').primary(); t.string('status'); t.string('skip_reason'); t.uuid('claim_id');
+      // read by the poller's parked-row check under lock
+      t.string('bucket'); t.jsonb('signal_metadata');
     });
     await db.schema.createTable('autonomous_runs', t => {
       t.uuid('id').primary(); t.uuid('opportunity_id'); t.timestamp('claimed_at'); t.timestamp('created_at'); t.uuid('queue_claim_id');

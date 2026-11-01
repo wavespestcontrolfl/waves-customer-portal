@@ -754,11 +754,15 @@ pg('getCustomerActivity on Postgres', () => {
 
   test('a source whose table cannot be read is reported unavailable and the rest still returns', async () => {
     await db.raw('DROP TABLE call_log');
+    // On a migrated database public.call_log would answer once the temp table
+    // is gone; a temp view with none of its columns cannot be read.
+    await db.raw('CREATE TEMP VIEW call_log AS SELECT 1 AS unreadable');
     const r = await run({ limit: 200 });
     expect(r.unavailableSources).toEqual(['calls']);
     expect(r.events.some((e) => e.source === 'call')).toBe(false);
     expect(r.events.some((e) => e.title === 'Replied by text')).toBe(true);
     expect(r.summary.lastEngagedAt).toBe(T(55).toISOString());
+    await db.raw('DROP VIEW call_log');
     await db.raw(CALL_LOG_DDL);
   });
 

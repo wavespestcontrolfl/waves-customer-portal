@@ -56,7 +56,7 @@ describeOrSkip('recap context common products on PostgreSQL', () => {
     // Column types mirror the migrations the context and the aggregate read.
     await db.raw(`CREATE TABLE customers (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      first_name text, last_name text, phone text,
+      first_name text, last_name text, phone text, email text,
       address_line1 text, address_line2 text, city text, state text, zip text
     )`);
     await db.raw(`CREATE TABLE scheduled_services (
@@ -93,7 +93,15 @@ describeOrSkip('recap context common products on PostgreSQL', () => {
       product_id uuid REFERENCES products_catalog(id) ON DELETE SET NULL,
       product_name varchar(150) NOT NULL,
       application_rate numeric(8, 3), rate_unit varchar(20),
-      total_amount numeric(8, 3), amount_unit varchar(20)
+      total_amount numeric(8, 3), amount_unit varchar(20),
+      -- an area add-on's product row rides its host's record (excluded from the aggregate)
+      area_addon_key text
+    )`);
+    // The recap's area add-on probe reads the visit's add-on rows.
+    await db.raw('CREATE TABLE services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), service_key text)');
+    await db.raw(`CREATE TABLE scheduled_service_addons (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      scheduled_service_id uuid, service_id uuid, service_key_snapshot text
     )`);
   });
 

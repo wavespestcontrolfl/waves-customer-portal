@@ -154,14 +154,15 @@ jobs:
       # run twice.
       # The third command runs 64 more suites with that same gate (46 of them
       # lawn suites), which also ran nowhere in CI until 2026-10-31.
-      # The last four commands (sweep #7246 B1, 2026-10-31) run suites whose
+      # The last five commands (sweep #7246 B1, 2026-10-31) run suites whose
       # own variable no step set. Every suite that reads REPAIR_TEST_DATABASE_URL
       # builds its own throwaway schema, so its grep lane picks up a new one by
       # itself. The APP_TEST suites copy the migrated tables into a private
       # schema. The next command sets each single-suite variable, plus
       # DATABASE_URL, which two of those suites require to match. The
-      # audit-clone suites refuse any database not named waves_audit_*: the
-      # first command copies the freshly migrated database to waves_audit_ci
+      # audit-clone suites refuse any database not named waves_audit_*, and
+      # the IB workflow baseline wants a waves_ib_workflow_* database of its
+      # own: the first command copies the freshly migrated database to both
       # before any suite writes to it. Nothing else connects to this server,
       # so the copy cannot meet a busy template.
       # tests/ci-db-suites-reached.test.js fails when a self-skipping Postgres
@@ -177,7 +178,7 @@ jobs:
           REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
         run: |
-          node -e "const { Client } = require('pg'); const c = new Client({ connectionString: 'postgresql://waves:waves@localhost:5434/postgres' }); c.connect().then(() => c.query('CREATE DATABASE waves_audit_ci TEMPLATE waves_test')).then(() => c.end(), (e) => { console.error(e); process.exit(1); });"
+          node -e "const { Client } = require('pg'); const c = new Client({ connectionString: 'postgresql://waves:waves@localhost:5434/postgres' }); c.connect().then(() => c.query('CREATE DATABASE waves_audit_ci TEMPLATE waves_test')).then(() => c.query('CREATE DATABASE waves_ib_workflow_ci TEMPLATE waves_test')).then(() => c.end(), (e) => { console.error(e); process.exit(1); });"
           npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
           DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand tests/access-code-capture-postgres.test.js tests/admin-neighborhood-access-postgres.test.js tests/admin-schedule-neighborhood-gate-actions.pg.test.js tests/neighborhood-access-postgres.test.js tests/neighborhood-access-sweep-postgres.test.js tests/neighborhood-access-visit-actions-postgres.test.js tests/neighborhood-caller-link-passes-postgres.test.js tests/neighborhood-gate-fallback-postgres.test.js tests/neighborhood-naming-postgres.test.js
           DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand \
@@ -269,15 +270,18 @@ jobs:
             tests/misting-layouts-migration-postgres.test.js \
             tests/misting-layouts-service-postgres.test.js
           U=postgresql://waves:waves@localhost:5434/waves_test
-          DATABASE_URL=$U ACTIVITY_TIMELINE_TEST_DATABASE_URL=$U ANNUAL_PLAN_DOCUMENT_TEST_DATABASE_URL=$U COPY_AUDIT_TEST_DATABASE_URL=$U DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL=$U IB_TEST_DATABASE_URL=$U LAWN_COPY_V6_TEST_DATABASE_URL=$U LAWN_GATE_TEST_DATABASE_URL=$U LAWN_VISIT_MEMORY_TEST_DATABASE_URL=$U LEAD_EMAIL_LINKS_TEST_DATABASE_URL=$U MANUAL_SMS_TEST_DATABASE_URL=$U SIBLING_RESPLIT_TEST_DATABASE_URL=$U SMS_OPERATIONS_TEST_DATABASE_URL=$U TS_FIELD_TEST_DATABASE_URL=$U UPDATE_DETAILS_DISCOUNT_TEST_DATABASE_URL=$U UPDATE_DETAILS_NEGATIVE_MONEY_TEST_DATABASE_URL=$U VOICE_RECOVERY_TEST_DATABASE_URL=$U \
+          DATABASE_URL=$U ACTIVITY_TIMELINE_TEST_DATABASE_URL=$U ANNUAL_PLAN_DOCUMENT_TEST_DATABASE_URL=$U BLOG_RECONCILE_TEST_DATABASE_URL=$U COPY_AUDIT_TEST_DATABASE_URL=$U DISCLAIMED_HOLDS_TEST_DATABASE_URL=$U DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL=$U IB_TEST_DATABASE_URL=$U LAWN_COPY_V6_TEST_DATABASE_URL=$U LAWN_GATE_TEST_DATABASE_URL=$U LAWN_VISIT_MEMORY_TEST_DATABASE_URL=$U LEAD_EMAIL_LINKS_TEST_DATABASE_URL=$U MANUAL_SMS_TEST_DATABASE_URL=$U RECAP_TEST_DATABASE_URL=$U SIBLING_RESPLIT_TEST_DATABASE_URL=$U SMS_OPERATIONS_TEST_DATABASE_URL=$U TEST_SCHEDULE_DB_URL=$U TS_FIELD_TEST_DATABASE_URL=$U UPDATE_DETAILS_DISCOUNT_TEST_DATABASE_URL=$U UPDATE_DETAILS_NEGATIVE_MONEY_TEST_DATABASE_URL=$U VOICE_RECOVERY_TEST_DATABASE_URL=$U \
             npx jest --ci --silent --runInBand \
             tests/annual-plan-documents-postgres.test.js \
             tests/apply-credit-claim-fence-promotion-postgres.test.js \
             tests/backfill-lead-email-links-postgres.test.js \
             tests/billing-skip-events-schema-postgres.test.js \
             tests/call-recording-relay-postgres.test.js \
+            tests/codex-remediation-reconcile.test.js \
+            tests/customer-activity-timeline-postgres.test.js \
             tests/customer-billing-lock-rollout-race-postgres.test.js \
             tests/customer-copy-audit-postgres.test.js \
+            tests/disclaimed-number-holds-postgres.test.js \
             tests/discount-stack-pricing-provenance-postgres.test.js \
             tests/email-commitments-postgres.test.js \
             tests/estimate-accept-multi-unit-per-unit-pricing.postgres.test.js \
@@ -293,10 +297,13 @@ jobs:
             tests/lawn-visit-memory-postgres.test.js \
             tests/newsletter-bounce-mailbox-postgres.test.js \
             tests/newsletter-merge-deliveries-postgres.test.js \
+            tests/pest-recap-common-products-postgres.test.js \
+            tests/schedule-estimates-pending-postgres.test.js \
             tests/series-extension-own-stop-postgres.test.js \
             tests/tree-shrub-field-guide.postgres.test.js \
             tests/update-details-discount-preserved-no-addons-pg.test.js \
             tests/update-details-negative-discount-clamp-db.test.js \
+            tests/voice-relay-close-postgres.test.js \
             tests/voice-relay-recovery-postgres.test.js \
             tests/voice-relay-segments-postgres.test.js
           DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_audit_ci CONSULTATION_STATS_TEST_DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_audit_ci npx jest --ci --silent --runInBand \
@@ -319,6 +326,7 @@ jobs:
             tests/referral-existing-customer-domestic-phone.test.js \
             tests/series-extend-anchor-exception-refuter.test.js \
             tests/series-extend-anchor-ignores-exception.test.js
+          IB_TEST_DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_ib_workflow_ci npx jest --ci --silent --runInBand tests/intelligence-bar-workflow-baseline-db.test.js
       # Right after the migration, on purpose: the reconcile reads the WHOLE
       # customer/subscriber tables (its counts assume only migration seeds)
       # and its write-mode cases would import or link any row another suite
@@ -363,7 +371,8 @@ jobs:
                   { env: { ...process.env, DATABASE_URL: `${base}${name}` } });
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
                   'tests/customer360-workspace-postgres.test.js', 'tests/admin-billing-recovery-postgres.test.js',
-                  'tests/staff-mfa-postgres.test.js', 'tests/staff-hire-packet-postgres.test.js'],
+                  'tests/staff-mfa-postgres.test.js', 'tests/staff-hire-packet-postgres.test.js',
+                  'tests/customer-list-search-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, C360_TEST_DATABASE_URL: `${base}${name}` } });
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
                   'tests/customer-geocode-review-postgres.test.js',
@@ -373,7 +382,25 @@ jobs:
                   'tests/customer-geocode-review-visit-lock-order-postgres.test.js',
                   'tests/geocoder-service-locations-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, SERVICE_GEOCODE_TEST_DATABASE_URL: `${base}${name}` } });
+                // Suites that accept only a private waves_qa_ database (sweep #7246 B1).
+                run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
+                  'tests/aeo-measurement-db.test.js', 'tests/completion-read-recovery-postgres.test.js'],
+                  { cwd: 'server', env: { ...process.env, AEO_TEST_DATABASE_URL: `${base}${name}`, COMPLETION_READ_TEST_DATABASE_URL: `${base}${name}` } });
+                // Managed-QA suites: the local-dev interlock, with this database as the worktree's own.
+                run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
+                  'tests/callback-bridge-postgres.test.js', 'tests/staff-onboarding-postgres.test.js'],
+                  { cwd: 'server', env: { ...process.env, DATABASE_URL: `${base}${name}`, WAVES_LOCAL_DEV: '1', WAVES_WORKTREE_ID: name.slice('waves_qa_'.length), CALLBACK_BRIDGE_POSTGRES: '1', WAVES_STAFF_DOCUMENT_TEST_DB: '1' } });
               } finally { await client.query(`DROP DATABASE "${name}" WITH (FORCE)`); }
+              // The SMS unread suites build their own tables, so they need an EMPTY
+              // waves_qa_ database, reached through 127.0.0.1.
+              const empty = `waves_qa_${randomBytes(16).toString('hex')}`;
+              await client.query(`CREATE DATABASE "${empty}"`);
+              try {
+                run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
+                  'tests/inbound-sms-unread-postgres.test.js', 'tests/sms-pending-conversations-postgres.test.js',
+                  'tests/sms-spam-block-postgres.test.js'],
+                  { cwd: 'server', env: { ...process.env, UNREAD_TEST_DATABASE_URL: `postgresql://waves:waves@127.0.0.1:5432/${empty}` } });
+              } finally { await client.query(`DROP DATABASE "${empty}" WITH (FORCE)`); }
             } finally { await client.end(); }
           })().catch(error => { console.error(error); process.exitCode = 1; });
           JS
