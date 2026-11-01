@@ -1843,8 +1843,10 @@ function isAreaAddOnCatalogKey(serviceKey) {
 const SPECIALTY = {
   plugging: {
     spacingRates: { '6inch': 4.00, '9inch': 1.78, '12inch': 1.00 },
-    costPerPlug: 19.99 / 18, // $1.111
-    plugsPerTray: 18,
+    // Home Depot SodPods St. Augustine Floratam, 64 plugs (SPSAF64), $109.76 delivered, read
+    // 2026-10-31 (owner: "use the home depot sod number for now"). Was a $19.99 / 18 guess.
+    costPerPlug: 109.76 / 64, // $1.715
+    plugsPerTray: 64,
     laborPerPlugs: 150, // plugs per labor unit
     marginDivisor: 0.55,  // 45% target margin
     floor: r(250),
