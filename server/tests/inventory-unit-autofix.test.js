@@ -525,6 +525,16 @@ describe('resolveDryOzTarget', () => {
     expect(resolveDryOzTarget(dry({ name: 'Beach Grass Granules', formulation: 'granular' }))).toBe('g');
   });
 
+  it('parks a priced row with no cost unit (Codex #7329 r1: the cost basis would change silently)', () => {
+    expect(resolveDryOzTarget(dry({ cost_per_unit: '2.50', cost_unit: null }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ cost_per_unit: 0, cost_unit: '  ' }))).toBe(null);
+    // An explicit cost unit keeps its own basis, and no price means nothing to re-price.
+    expect(resolveDryOzTarget(dry({ cost_per_unit: '2.50', cost_unit: 'oz' }))).toBe('g');
+    expect(resolveDryOzTarget(dry({ cost_per_unit: '40', cost_unit: 'lb' }))).toBe('g');
+    expect(resolveDryOzTarget(dry({ cost_per_unit: null, cost_unit: null }))).toBe('g');
+    expect(resolveDryOzTarget(dry({ cost_per_unit: '', cost_unit: null }))).toBe('g');
+  });
+
   it('parks a dry formulation whose name or fields look liquid (Unit Review heuristic)', () => {
     expect(resolveDryOzTarget(dry({ name: 'Talstar Granules' }))).toBe(null);
     expect(resolveDryOzTarget(dry({ name: 'Liquid Fertilizer Mix' }))).toBe(null);
@@ -598,6 +608,40 @@ describe('applyInventoryUnitFix lockedCheck / movementReason', () => {
     const { outcome } = await applyInventoryUnitFix({ dbi, ...buildArgs() });
     expect(outcome).toBe('applied');
     expect(state.movements[0].metadata.reason).toBe('Inventory unit normalization');
+  });
+
+  it('converts the reorder quantity and per-visit usage with the stock (Codex #7329 r1)', async () => {
+    const { dbi, state } = buildDbi({
+      product: { ...dryProduct, reorder_quantity: '32', per_completion_usage: '0.5' },
+    });
+    const { outcome } = await applyInventoryUnitFix({ dbi, ...buildArgs() });
+    expect(outcome).toBe('applied');
+    expect(state.updated.inventory_unit).toBe('g');
+    expect(state.updated.reorder_quantity).toBeCloseTo(907.1838, 3);
+    expect(state.updated.per_completion_usage).toBeCloseTo(14.1748, 3);
+    expect(state.movements[0].metadata.conversion.otherQuantities).toEqual({
+      reorder_quantity: { before: 32, after: expect.closeTo(907.1838, 3) },
+      per_completion_usage: { before: 0.5, after: expect.closeTo(14.1748, 3) },
+    });
+  });
+
+  it('leaves absent or empty unit-bound columns alone, and zero stays zero', async () => {
+    const absent = buildDbi({ product: dryProduct });
+    await applyInventoryUnitFix({ dbi: absent.dbi, ...buildArgs() });
+    expect(absent.state.updated).not.toHaveProperty('reorder_quantity');
+    expect(absent.state.updated).not.toHaveProperty('per_completion_usage');
+    expect(absent.state.movements[0].metadata.conversion).not.toHaveProperty('otherQuantities');
+
+    const empty = buildDbi({ product: { ...dryProduct, reorder_quantity: null, per_completion_usage: '0' } });
+    await applyInventoryUnitFix({ dbi: empty.dbi, ...buildArgs() });
+    expect(empty.state.updated).not.toHaveProperty('reorder_quantity');
+    expect(empty.state.updated.per_completion_usage).toBe(0);
+  });
+
+  it('a pure rename (no stock conversion) never touches the unit-bound columns', async () => {
+    const { dbi, state } = buildDbi({ product: { ...dryProduct, inventory_unit: 'Ounces', reorder_quantity: '32' } });
+    await applyInventoryUnitFix({ dbi, ...buildArgs({ nextUnit: 'oz', convertExistingStock: false, expectedCurrentUnit: 'Ounces' }) });
+    expect(state.updated).not.toHaveProperty('reorder_quantity');
   });
 
   it('a row counted down to 0 converts to 0 instead of refusing (zero is zero in every weight unit)', async () => {
@@ -723,7 +767,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     // The scan reads the oz family with the columns the decision needs, in stable order.
     const scan = state.chains.find((c) => c.called('whereRaw') && c.args('whereRaw')[0] === OZ_FAMILY_SQL);
     expect(scan.args('select')).toEqual(['id', 'name', 'category', 'subcategory', 'formulation', 'unit_type', 'inventory_unit',
-      'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit']);
+      'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit', 'cost_per_unit', 'cost_unit']);
     expect(scan._calls.filter(([m]) => m === 'orderBy').map(([, a]) => a[0])).toEqual(['name', 'id']);
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
   });

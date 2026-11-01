@@ -205,6 +205,14 @@ function hasDryEvidence(formulation) {
   return !LIQUID_FORMULATION_RE.test(formulation);
 }
 
+// A price with no cost unit: inventory-cost.js reads it as per inventory
+// unit, while other readers fall back to the usage or dose unit, so converting
+// the inventory unit would silently re-price it for some readers and not
+// others. Those rows stay for a person.
+function hasImplicitCostBasis(product) {
+  return numberOrNullValue(product.cost_per_unit) != null && !String(product.cost_unit == null ? '' : product.cost_unit).trim();
+}
+
 // Any sign the product is stocked by the piece: a count word in the name,
 // category, subcategory, formulation or unit type, or a rate/default unit
 // counted per item ("each/station").
@@ -226,6 +234,7 @@ function resolveDryOzTarget(product = {}) {
   const formulation = String(product.formulation == null ? '' : product.formulation).trim().toLowerCase();
   if (!hasDryEvidence(formulation)) return null;
   if (hasCountEvidence(product)) return null;
+  if (hasImplicitCostBasis(product)) return null;
   if (looksLiquidProduct(product)) return null;
   if (isVolumeBaseUnit(product.rate_unit) || isVolumeBaseUnit(product.default_unit)) return null;
   return Number(product.inventory_on_hand) >= DRY_OZ_POUND_THRESHOLD_OZ ? 'lb' : 'g';
@@ -238,6 +247,41 @@ function resolveDryOzTarget(product = {}) {
 function convertStockAmount(amount, fromUnit, toUnit) {
   if (amount === 0) return convertInventoryQuantity(1, fromUnit, toUnit) == null ? null : 0;
   return convertInventoryQuantity(amount, fromUnit, toUnit);
+}
+
+// Every other quantity the catalog keeps IN the inventory unit: the
+// auto-reorder amount (procurement/auto-reorder.js pairs reorder_quantity
+// with inventory_unit) and the per-visit supplies usage (supplies-consumption.js
+// deducts per_completion_usage in inventory_unit). A unit conversion converts
+// them with the stock, or a 32 oz reorder would read as 32 g or 32 lb.
+const UNIT_BOUND_QUANTITY_COLUMNS = ['reorder_quantity', 'per_completion_usage'];
+
+function numberOrNullValue(value) {
+  if (value === '' || value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+// { updates, audit } for the unit-bound columns the locked row carries; throws
+// the same 400 as stock when one cannot convert. A column absent from the row
+// (older schema) or empty is left alone.
+function convertUnitBoundQuantities(product, fromUnit, toUnit) {
+  const updates = {};
+  const audit = {};
+  for (const column of UNIT_BOUND_QUANTITY_COLUMNS) {
+    if (!Object.prototype.hasOwnProperty.call(product, column)) continue;
+    const before = numberOrNullValue(product[column]);
+    if (before == null) continue;
+    const after = convertStockAmount(before, fromUnit, toUnit);
+    if (after == null) {
+      const err = new Error(`Cannot convert ${column} from ${fromUnit} to ${toUnit}`);
+      err.statusCode = 400;
+      throw err;
+    }
+    updates[column] = after;
+    audit[column] = { before, after };
+  }
+  return { updates, audit };
 }
 
 // True when the locked row no longer matches what the caller decided on.
@@ -314,6 +358,7 @@ async function applyInventoryUnitFix({
     let stockAfter = stockBefore;
     let thresholdAfter = thresholdBefore;
     let conversion = null;
+    let unitBound = { updates: {}, audit: {} };
 
     if (convertExistingStock && currentUnit && normalizeInventoryUnit(currentUnit) !== normalizeInventoryUnit(targetUnit)) {
       stockAfter = stockBefore != null ? convertStockAmount(stockBefore, currentUnit, targetUnit) : null;
@@ -323,6 +368,7 @@ async function applyInventoryUnitFix({
         err.statusCode = 400;
         throw err;
       }
+      unitBound = convertUnitBoundQuantities(product, currentUnit, targetUnit);
       conversion = {
         fromUnit: currentUnit,
         toUnit: targetUnit,
@@ -330,6 +376,7 @@ async function applyInventoryUnitFix({
         stockAfter,
         thresholdBefore,
         thresholdAfter,
+        ...(Object.keys(unitBound.audit).length ? { otherQuantities: unitBound.audit } : {}),
       };
     }
 
@@ -337,6 +384,7 @@ async function applyInventoryUnitFix({
       inventory_unit: targetUnit,
       inventory_on_hand: stockAfter,
       low_stock_threshold: thresholdAfter,
+      ...unitBound.updates,
       updated_at: new Date(),
     });
 
@@ -466,7 +514,7 @@ async function runDryOzPhase({ dbi, results }) {
     rows = await dbi('products_catalog')
       .whereRaw(OZ_FAMILY_SQL)
       .select('id', 'name', 'category', 'subcategory', 'formulation', 'unit_type', 'inventory_unit',
-        'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit')
+        'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit', 'cost_per_unit', 'cost_unit')
       .orderBy('name')
       .orderBy('id');
   } catch (err) {
