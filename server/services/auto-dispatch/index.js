@@ -34,6 +34,7 @@ const audit = require('./audit');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveRules = require('./move-rules');
+const dryTime = require('./dry-time');
 const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
 const needsPerson = require('./needs-person-notice');
@@ -375,7 +376,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { current }) } },
     };
   }
 
@@ -410,6 +411,9 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   } = buildPlacementAudit({
     current, currentScore, candidate: best, candidateScore: ranked.bestScore, service, prefs, lockBoundary, ctx, threshold,
   });
+  Object.assign(constraints, dryTimeConstraint(prefs, {
+    current, live: ranked.qualifies ? best : null, shadow: dryTimeShadowBest({ service, prefs, current, candidates, scoreCtx, threshold, config }),
+  }));
 
   // Capped AFTER scoring (Codex r1): with the gate on, findValidCandidateSlots
   // returns every survivor and each was scored above before this cap.
@@ -428,6 +432,30 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
     withoutConflict: ordinaryMoveOf(ranked, { current, currentScore, service, prefs, lockBoundary, ctx, threshold, prefsSnapshot }),
   };
+}
+
+// GATE_AUTO_DISPATCH_DRY_TIME_ORDER (owner 2026-11-01): constraints_checked.dry_time.
+// Empty when the gate is off (no dry_time on the prefs).
+function dryTimeConstraint(prefs, { current, live = null, shadow = null }) {
+  const note = dryTime.auditNote(prefs, { current, live, shadow });
+  return note ? { dry_time: note } : {};
+}
+
+// 'shadow' mode: the slot the dry window would have chosen, ranked by the
+// same pure rule as the live decision. No road check (it can call Google), no
+// write; null when the gate is not in shadow or nothing qualifies.
+function dryTimeShadowBest({ service, prefs, current, candidates, scoreCtx, threshold, config }) {
+  if (!prefs.dry_time || prefs.dry_time.mode !== 'shadow') return null;
+  const shadowPrefs = dryTime.shadowPrefs(prefs);
+  const ranked = moveRules.rankCandidates({
+    service,
+    current,
+    currentScore: scoreAppointmentPlacement(current, shadowPrefs, scoreCtx),
+    scored: candidates.map((cand) => ({ cand, sc: scoreAppointmentPlacement(cand, shadowPrefs, scoreCtx) })),
+    threshold,
+    config,
+  });
+  return ranked.qualifies ? ranked.best : null;
 }
 
 // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='shadow' (owner 2026-10-24): what the

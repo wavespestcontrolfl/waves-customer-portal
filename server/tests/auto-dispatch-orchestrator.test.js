@@ -2183,3 +2183,52 @@ describe('run log line words the day-move rule for the guard mode in force', () 
     expect(describeGuardRule('flex', '2026-11-09', '2026-10-26')).toBe('flex: frozen under 73h, day moves on or after 2026-10-31');
   });
 });
+
+// GATE_AUTO_DISPATCH_DRY_TIME_ORDER (owner 2026-11-01): the decision is audited
+// beside what the dry window would do; shadow moves and writes nothing extra.
+describe('dry time audit (GATE_AUTO_DISPATCH_DRY_TIME_ORDER)', () => {
+  const { TIME_WINDOWS } = require('../services/auto-dispatch/service-category');
+  const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35, minDayMoveDriveSavingMinutes: 0 };
+  const BASE = {
+    preferred_day_indexes: [], effective_time_window: TIME_WINDOWS.early_morning, default_time_window: TIME_WINDOWS.early_morning,
+    preferred_time_window: null, blackout: null, service_category: 'general', preferred_days: null, raw_snapshot: null,
+  };
+  const dryTime = (mode) => ({ mode, hours: 0, class: 'proof', source: 'service_rule', window_key: 'dry_proof', customer_time: false });
+  // A first placement ranks on the raw score, so the time window decides between the two slots.
+  const FIRST_PLACEMENT = () => svc({ recurring_dispatch_due_date: '2026-08-04', window_start: null });
+  const EARLY = { ...CAND_BIG, date: '2026-08-04', start_time: '08:00' };
+  const LATE = { ...CAND_BIG, date: '2026-08-04', start_time: '14:00' };
+
+  test('gate off: no dry_time in the audit', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG], drops: {} });
+    const result = await _internals.evaluatePlacement(svc(), BASE, {}, CONFIG, '2026-06-20');
+    expect(result.audit.constraints).not.toHaveProperty('dry_time');
+  });
+
+  test('shadow: the live choice stays; the audit names where the dry window would put the visit', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: null, candidates: [EARLY, LATE], drops: {} });
+    const prefs = { ...BASE, dry_time: dryTime('shadow') };
+    const noCurrent = await _internals.evaluatePlacement(FIRST_PLACEMENT(), prefs, {}, CONFIG, '2026-06-20');
+    expect(noCurrent.kind).toBe('no_change');
+    expect(noCurrent.audit.constraints.dry_time).toMatchObject({ mode: 'shadow', class: 'proof', live_best: null, shadow_best: null });
+
+    const unplaced = { ...CURRENT, date: '2026-08-04', start_time: null, detour_minutes: 40 };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: unplaced, candidates: [EARLY, LATE], drops: {} });
+    const result = await _internals.evaluatePlacement(FIRST_PLACEMENT(), prefs, {}, CONFIG, '2026-06-20');
+    expect(result.kind).toBe('move');
+    expect(result.best.start_time).toBe('08:00'); // today's early window still decides
+    expect(result.audit.constraints.dry_time).toMatchObject({
+      mode: 'shadow',
+      live_best: { date: '2026-08-04', start: '08:00' },
+      shadow_best: { date: '2026-08-04', start: '14:00' }, // the dry window prefers the afternoon
+    });
+    expect(result.audit.constraints.effective_time_window).toBe('early_morning');
+  });
+
+  test('true: the audit carries the class and the current slot, no shadow_best', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG], drops: {} });
+    const result = await _internals.evaluatePlacement(svc(), { ...BASE, dry_time: dryTime('true') }, {}, CONFIG, '2026-06-20');
+    expect(result.audit.constraints.dry_time).toMatchObject({ mode: 'true', current: { date: '2026-08-04', start: '09:00' } });
+    expect(result.audit.constraints.dry_time).not.toHaveProperty('shadow_best');
+  });
+});
