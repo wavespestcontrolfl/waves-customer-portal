@@ -465,6 +465,26 @@ describe('attachDriveLegs on today\'s clock', () => {
     expect(late[1].driveLateMin).toBe(10 * 60 + 210 + leg - (9 * 60 + 120));
   });
 
+  it('counts only the work still ahead at a visit group, once', () => {
+    const leg = Math.max(1, driveMin(A, C));
+    // A finished member adds nothing: 60 minutes left, then the drive.
+    const doneOne = [
+      stop('g-done', '09:00', A, { visitId: 'v1', windowEnd: '10:00', status: 'completed' }),
+      stop('g-open', '09:00', A, { visitId: 'v1', windowEnd: '10:00' }),
+      stop('next', '10:00', C, { windowEnd: '11:00' }),
+    ];
+    attachDriveLegs(doneOne, { now: et('11:00') });
+    expect(doneOne[2].driveLateMin).toBe(11 * 60 + 60 + leg - (10 * 60 + 120));
+    // An on-site member counts its 30 minutes left once, then the open one.
+    const onSite = [
+      stop('g-here', '09:00', A, { visitId: 'v2', windowEnd: '10:00', status: 'on_site', checkInTime: et('10:30').toISOString() }),
+      stop('g-open', '09:00', A, { visitId: 'v2', windowEnd: '10:00' }),
+      stop('next', '10:00', C, { windowEnd: '11:00' }),
+    ];
+    attachDriveLegs(onSite, { now: et('11:00') });
+    expect(onSite[2].driveLateMin).toBe(11 * 60 + 30 + 60 + leg - (10 * 60 + 120));
+  });
+
   it('stops predicting after a leg it cannot measure', () => {
     const services = [
       stop('done', '08:00', A, { windowEnd: '09:00', status: 'completed' }),

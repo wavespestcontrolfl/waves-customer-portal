@@ -208,7 +208,9 @@ function clockRoute(stops, now) {
   let prev = here;
   for (const i of order) {
     const st = stops[i];
-    const open = stopPieces(st.members).filter((p) => p.open);
+    // Only unreached visits: a finished or under-way group member's work
+    // must not ride along in the open piece (counted once, above).
+    const open = stopPieces(st.members.filter((m) => NOT_REACHED.has(m.status)));
     if (!open.length) continue;
     const leg = !prev || prev === st ? 0 : legBetween(prev, st);
     if (leg == null) break;
