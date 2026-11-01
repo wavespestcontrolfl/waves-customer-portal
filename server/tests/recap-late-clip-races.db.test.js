@@ -2,7 +2,8 @@
 // through PostgreSQL: a forced re-render never pulls a recap out from under a send in progress, a send whose recap
 // was re-queued after its read is not claimed (no customer text for a video that is no longer approved), and a clip
 // that became ready while a render ran queues one more render. Every write runs in a transaction that is rolled
-// back. Synthetic rows only. Skips without DATABASE_URL (CI runs it against the migrated database).
+// back. An approval whose recap was re-queued, or replaced by a newer render, after its read approves nothing.
+// Synthetic rows only. Skips without DATABASE_URL (CI runs it against the migrated database).
 const SKIP = !process.env.DATABASE_URL;
 
 jest.mock('../models/db', () => {
@@ -101,6 +102,56 @@ describeDb('late recap clips: the send and render races', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(await mockPg('service_recaps').where({ id: recap.id }).first('status', 'sent_at', 'send_attempt_at'))
       .toEqual({ status: 'pending', sent_at: null, send_attempt_at: null });
+  });
+
+  describe('an approval that loses the race', () => {
+    // A knex whose first service_recaps read runs `between` before handing back the row it read.
+    function knexWithStepAfterRecapRead(between) {
+      let fired = false;
+      const wrapped = (table) => {
+        const query = mockPg(table);
+        if (table !== 'service_recaps' || fired) return query;
+        const first = query.first.bind(query);
+        query.first = async (...columns) => {
+          const row = await first(...columns);
+          fired = true;
+          await between(row);
+          return row;
+        };
+        return query;
+      };
+      wrapped.fn = mockPg.fn;
+      wrapped.raw = (...args) => mockPg.raw(...args);
+      return wrapped;
+    }
+
+    test('a late clip re-queues the recap after the approval read it: nothing is approved', async () => {
+      const recap = await insertRecap({ status: 'ready', rendered_at: minutesAgo(3) });
+      const knexRace = knexWithStepAfterRecapRead(() => pipeline.enqueueRecap(recap.scheduled_service_id, { force: true }));
+
+      const result = await pipeline.approveRecap(recap.scheduled_service_id, { approvedBy: 'tech', knex: knexRace });
+
+      expect(result).toEqual({ ok: false, error: 'not_ready (re-rendering)' });
+      expect(await mockPg('service_recaps').where({ id: recap.id }).first('status', 'approved_at'))
+        .toEqual({ status: 'pending', approved_at: null });
+    });
+
+    test('a newer render replaced the one the approval read: the newer one is not approved unseen', async () => {
+      const recap = await insertRecap({ status: 'ready', rendered_at: minutesAgo(3) });
+      const knexRace = knexWithStepAfterRecapRead(() => mockPg('service_recaps').where({ id: recap.id })
+        .update({ status: 'ready', rendered_at: new Date(), s3_key: 'recaps/test/visit-recap-v2.mp4' }));
+
+      const result = await pipeline.approveRecap(recap.scheduled_service_id, { approvedBy: 'tech', knex: knexRace });
+
+      expect(result).toEqual({ ok: false, error: 'not_ready (re-rendering)' });
+      expect((await mockPg('service_recaps').where({ id: recap.id }).first('status')).status).toBe('ready');
+    });
+
+    test('with no race, the ready recap is approved', async () => {
+      const recap = await insertRecap({ status: 'ready', rendered_at: minutesAgo(3) });
+      const result = await pipeline.approveRecap(recap.scheduled_service_id, { approvedBy: 'tech' });
+      expect(result).toMatchObject({ ok: true, recap: { status: 'approved', approved_by: 'tech' } });
+    });
   });
 
   describe('a render that finishes', () => {

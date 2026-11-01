@@ -165,9 +165,13 @@ async function approveRecap(scheduledServiceId, { approvedBy = null, knex = db }
   // retry sendRecap (which re-claims sent_at).
   if (recap.status === 'approved' && !recap.sent_at) return { ok: true, recap };
   if (recap.status !== 'ready') return { ok: false, error: `not_ready (${recap.status})` };
-  const [updated] = await knex('service_recaps').where({ id: recap.id }).update({
-    status: 'approved', approved_at: new Date(), approved_by: approvedBy, updated_at: new Date(),
-  }).returning('*');
+  // Approve only the render read above: a late clip or Regenerate that re-queued it since
+  // (or a newer render that replaced it) must not be approved and sent unseen.
+  const [updated] = await knex('service_recaps')
+    .where({ id: recap.id, status: 'ready', rendered_at: recap.rendered_at })
+    .update({ status: 'approved', approved_at: new Date(), approved_by: approvedBy, updated_at: new Date() })
+    .returning('*');
+  if (!updated) return { ok: false, error: 'not_ready (re-rendering)' };
   return { ok: true, recap: updated };
 }
 
