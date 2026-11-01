@@ -10431,7 +10431,7 @@ const SERVICE_CATALOG = [
     // misstates someone's; variant-neutral until the panel reads the
     // matched service's real cadence.
     frequencies: ['Recurring lawn program'],
-    basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, soil testing, thatch monitoring',
+    basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, thatch monitoring, soil testing when a lawn is not responding',
     products: ['Prodiamine 65 WDG', 'Celsius WG', '16-4-8 + Micros', 'Headway G'],
   },
   {
@@ -10520,7 +10520,7 @@ const TIER_SERVICE_NAMES = {
 // Coverage details for each included service
 const SERVICE_COVERAGE = {
   pest_control: { summary: 'Unlimited callbacks within 30 days. Interior re-treatment included.', details: ['Interior + exterior perimeter treatment', 'Granular bait band around foundation', 'Bait station monitoring', 'Cobweb sweep on all eaves', 'Free callback if pests return within 30 days'] },
-  lawn_care: { summary: 'Fertilization, weed control, fungicide. Callbacks for breakthrough weeds.', details: ['Custom fertilization for your turf type', 'Pre-emergent and post-emergent weed control', 'Fungicide treatments as needed', 'Soil testing and thatch monitoring', 'Callback for breakthrough weeds between visits'] },
+  lawn_care: { summary: 'Fertilization, weed control, fungicide. Callbacks for breakthrough weeds.', details: ['Custom fertilization for your turf type', 'Pre-emergent and post-emergent weed control', 'Fungicide treatments as needed', 'Thatch monitoring, plus soil testing when a lawn is not responding', 'Callback for breakthrough weeds between visits'] },
   mosquito: { summary: 'Barrier treatments Apr-Oct. Re-spray within 14 days of heavy rain.', details: ['Monthly perimeter barrier spray (Apr-Oct)', 'Standing water treatment with larvicide', 'Foliage and shrub line application', 'Free re-spray within 14 days of heavy rain', 'Event spray available on request'] },
   tree_shrub: { summary: 'Deep root feeding, insect & disease treatment, palm injections.', details: ['Deep root fertilization', 'Insect and disease treatment', 'Palm trunk injections (Arborjet)', 'Seasonal monitoring and reporting'] },
   termite: { summary: 'Bait station installation and monitoring with damage warranty.', details: ['Bait station installation around perimeter', 'Quarterly monitoring inspections', 'Damage warranty (Premier tier)', 'Annual re-certification report'] },
