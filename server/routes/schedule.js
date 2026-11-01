@@ -125,6 +125,16 @@ function calendarExpiresAtFor(row, now = new Date()) {
 }
 
 
+// Quick Move "let the customer pick a day": a visit handed to the customer
+// (customer_pick_by set) with no window yet is waiting on the customer's pick, and
+// its date is a placeholder. The instant the pick stays open until, as an ISO
+// string; null for every other visit, so the portal renders those as before.
+function customerPickByIso(row) {
+  if (!row || !row.customer_pick_by || row.window_start) return null;
+  const at = new Date(row.customer_pick_by);
+  return Number.isNaN(at.getTime()) ? null : at.toISOString();
+}
+
 // =========================================================================
 // GET /api/schedule — Upcoming scheduled services
 // =========================================================================
@@ -315,6 +325,8 @@ router.get('/', async (req, res, next) => {
         date: s.scheduled_date,
         windowStart: s.window_start,
         windowEnd: s.window_end,
+        // Set only while the visit waits for the customer's pick (see above).
+        customerPickBy: customerPickByIso(s),
         serviceType: normalizeServiceType(s.service_type),
         status: s.status,
         technician: s.technician_name,
@@ -725,7 +737,7 @@ router.get('/account-next', async (req, res, next) => {
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
-      .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed')
+      .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed', 'scheduled_services.customer_pick_by')
       .orderBy('scheduled_services.scheduled_date', 'asc')
       .orderBy('scheduled_services.window_start', 'asc');
     const nextByCustomer = new Map();
@@ -746,6 +758,7 @@ router.get('/account-next', async (req, res, next) => {
             date: n.scheduled_date,
             windowStart: n.window_start,
             windowEnd: n.window_end,
+            customerPickBy: customerPickByIso(n),
             serviceType: normalizeServiceType(n.service_type),
             status: n.status,
             customerConfirmed: n.customer_confirmed === true,
@@ -787,6 +800,7 @@ router.get('/properties-next', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
         'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end',
         'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed',
+        'scheduled_services.customer_pick_by',
       )
       .orderBy('scheduled_services.scheduled_date', 'asc')
       .orderBy('scheduled_services.window_start', 'asc') : [];
@@ -803,6 +817,7 @@ router.get('/properties-next', async (req, res, next) => {
             date: n.scheduled_date,
             windowStart: n.window_start,
             windowEnd: n.window_end,
+            customerPickBy: customerPickByIso(n),
             serviceType: normalizeServiceType(n.service_type),
             status: n.status,
             customerConfirmed: n.customer_confirmed === true,
@@ -906,6 +921,7 @@ router.get('/next', async (req, res, next) => {
         date: nextService.scheduled_date,
         windowStart: nextService.window_start,
         windowEnd: nextService.window_end,
+        customerPickBy: customerPickByIso(nextService),
         serviceType: normalizeServiceType(nextService.service_type),
         status: nextService.status,
         technician: nextService.technician_name,

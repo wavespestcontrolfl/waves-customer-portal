@@ -4377,8 +4377,25 @@ export function scopeEchoMismatch(propertyScope, currentEntry, savedScope, selec
   return currentEntry.isPrimaryProperty !== true;
 }
 
+// Quick Move "let the customer pick a day": the visit's date is a placeholder
+// until the customer picks, so the cards say so instead of showing it.
+const PICK_DAY_LABEL = 'New day: your pick';
+
+// "Wed, Nov 4 at 8 PM" in Eastern time; the minutes show only when not :00.
+function formatPickBy(iso) {
+  const at = new Date(iso);
+  if (isNaN(at)) return '';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  }).formatToParts(at).reduce((acc, p) => ({ ...acc, [p.type]: p.value }), {});
+  const clock = parts.minute === '00' ? `${parts.hour} ${parts.dayPeriod}` : `${parts.hour}:${parts.minute} ${parts.dayPeriod}`;
+  return `${parts.weekday}, ${parts.month} ${parts.day} at ${clock}`;
+}
+
 function nextVisitLabel(next) {
   if (!next) return 'No visit scheduled';
+  if (next.customerPickBy) return `${PICK_DAY_LABEL} · Pick a time`;
   const day = parseDate(next.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   const time = next.windowStart ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}` : 'Time TBD';
   return `${day} · ${time}`;
@@ -5275,6 +5292,20 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Time TBD note helper
   const renderTimeTBD = (s) => {
     if (s.windowStart) return null;
+    if (s.customerPickBy) {
+      return (
+        <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
+          {`Pick a new time by ${formatPickBy(s.customerPickBy)}. If you don't, we'll book the best open time and text you 3 days before.`}
+          {s.rescheduleUrl && !readOnlyVisits && (
+            <div style={{ marginTop: 8 }}>
+              <a href={s.rescheduleUrl} data-glass-accent="" style={{
+                ...secondaryButton, padding: '9px 14px', textDecoration: 'none', fontSize: 14, display: 'inline-flex', alignItems: 'center',
+              }}>Pick a time</a>
+            </div>
+          )}
+        </div>
+      );
+    }
     const prefTime = customer?.preferredTimeWindow;
     return (
       <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
@@ -5350,11 +5381,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 {isGreen ? 'Service Today' : isOrange ? 'Service Tomorrow' : 'Next Up'}
               </div>
               <div style={{ marginTop: 3, fontSize: 18, fontWeight: 700, color: B.glassNavy }}>
-                {s.svcDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+                {s.customerPickBy ? PICK_DAY_LABEL : s.svcDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
               </div>
             </div>
           </div>
-          {!isGreen && (
+          {!isGreen && !s.customerPickBy && (
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui, color: B.glassNavy }}>{s.daysUntil}</div>
               <div style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 700 }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
@@ -5365,7 +5396,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         <div style={{ padding: '16px 18px' }}>
           <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
-            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
+            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : 'Time TBD')}
           </div>
 
           {/* Service description */}
@@ -5449,17 +5480,24 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         background: subtle, border: '1px solid #E7E2D7',
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
       }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui, lineHeight: 1 }}>
-          {s.svcDate.getDate()}
-        </div>
-        <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
-          {s.svcDate.toLocaleDateString('en-US', { month: 'short' })}
-        </div>
+        {s.customerPickBy ? (
+          <Icon name="calendar" size={22} strokeWidth={1.75} />
+        ) : (
+          <>
+            <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui, lineHeight: 1 }}>
+              {s.svcDate.getDate()}
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
+              {s.svcDate.toLocaleDateString('en-US', { month: 'short' })}
+            </div>
+          </>
+        )}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
+        {s.customerPickBy && <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 2 }}>{PICK_DAY_LABEL}</div>}
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
-          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
+          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : 'Time TBD')}
         </div>
         <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
@@ -11874,7 +11912,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
 
   const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const nextDate = nextService ? parseDate(nextService.date) : null;
-  const nextVisitLabel = nextDate && !isNaN(nextDate)
+  const nextVisitLabel = nextService?.customerPickBy
+    ? PICK_DAY_LABEL
+    : nextDate && !isNaN(nextDate)
     ? nextDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
     : 'No visit scheduled';
   const memberSinceLabel = customer.memberSince

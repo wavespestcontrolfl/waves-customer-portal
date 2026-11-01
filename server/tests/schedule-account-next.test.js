@@ -101,7 +101,7 @@ describe('GET /schedule/account-next — every property on the account with its 
       const body = await (await fetch(`${base}/schedule/account-next`)).json();
       for (const p of body.properties) {
         expect(Object.keys(p).sort()).toEqual(['address', 'id', 'isPrimaryProfile', 'next', 'profileLabel']);
-        if (p.next) expect(Object.keys(p.next).sort()).toEqual(['customerConfirmed', 'date', 'id', 'serviceType', 'status', 'windowEnd', 'windowStart']);
+        if (p.next) expect(Object.keys(p.next).sort()).toEqual(['customerConfirmed', 'customerPickBy', 'date', 'id', 'serviceType', 'status', 'windowEnd', 'windowStart']);
       }
     });
   });
