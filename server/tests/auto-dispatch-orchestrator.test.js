@@ -2260,6 +2260,19 @@ describe('dry time audit (GATE_AUTO_DISPATCH_DRY_TIME_ORDER)', () => {
     });
   });
 
+  test('shadow: an empty live pool still records the dry-window pick from shadow_candidates', async () => {
+    const prefs = { ...BASE, dry_time: dryTime('shadow') };
+    const unplaced = { ...CURRENT, date: '2026-08-04', start_time: null, detour_minutes: 40 };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({
+      current: unplaced, candidates: [], shadow_candidates: [LATE], drops: {},
+    });
+    const result = await _internals.evaluatePlacement(FIRST_PLACEMENT(), prefs, {}, CONFIG, '2026-06-20');
+    expect(result.kind).toBe('no_change'); // the live path has nothing to place
+    expect(result.audit.constraints.dry_time).toMatchObject({
+      live_best: null, shadow_best: { date: '2026-08-04', start: '14:00' }, would_move: true,
+    });
+  });
+
   test('apply mode: the applied move keeps the dry_time block, with live_best the slot that moved', async () => {
     const preferences = require('../services/auto-dispatch/preferences');
     const prefs = { ...BASE, dry_time: { ...dryTime('shadow'), class: 'long', window_key: 'dry_long' } };

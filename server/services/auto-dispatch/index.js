@@ -368,31 +368,36 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [],
   } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
+  const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
+  // Already-moved visits must clear a higher bar (defeats the stability penalty)
+  // so the job never thrashes the same customer day to day.
+  const threshold = (service.auto_dispatch_change_count || 0) > 0
+    ? Math.max(config.minScoreImprovement, config.removeStabilityFloor)
+    : config.minScoreImprovement;
 
   if (!current || candidates.length === 0) {
+    // 'shadow': the dry-window starts can exist when today's search found none
+    // (the flex freeze can keep the morning and admit the afternoon), so the
+    // shadow pick is still recorded (Codex pre-push #7371 P1).
+    const emptyShadow = current && dryShadowCandidates.length
+      ? dryTimeShadowBest({ service, prefs, current, candidates: dryShadowCandidates, scoreCtx, threshold, config })
+      : null;
     const reason = staleAnchorReason(noSlotReason(drops, skipped), ctx.tierMeta);
     return {
       kind: 'no_change',
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates }) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates, shadow: emptyShadow }) } },
     };
   }
 
-  const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
   const currentScore = scoreAppointmentPlacement(current, prefs, scoreCtx);
   // Every candidate's score, in encounter order — kept (not just the single
   // best) so a SLOT_TAKEN apply-time refusal (GATE_AUTO_DISPATCH_SHARED_MODEL)
   // can fall back to the next-best still-scored candidate rather than giving
   // up.
   const scored = candidates.map((cand) => ({ cand, sc: scoreAppointmentPlacement(cand, prefs, scoreCtx) }));
-
-  // Already-moved visits must clear a higher bar (defeats the stability penalty)
-  // so the job never thrashes the same customer day to day.
-  const threshold = (service.auto_dispatch_change_count || 0) > 0
-    ? Math.max(config.minScoreImprovement, config.removeStabilityFloor)
-    : config.minScoreImprovement;
 
   // move-rules.js is the ONE rule for which candidate may move this visit:
   // `ranked.best` and every entry of `ranked.ranked` (apply.js's SLOT_TAKEN
