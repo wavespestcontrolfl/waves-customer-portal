@@ -207,9 +207,13 @@ function timestampMs(value) {
 
 function validateSampleTiming({ techStatus, point, service, now = Date.now() }) {
   const pointMs = timestampMs(point?.reported_at);
-  const techMs = timestampMs(techStatus?.location_updated_at);
+  // Gate on, an engine-off is judged by its own trip-end time: its position is the
+  // truck's last known one, reported up to 10 minutes earlier and never written
+  // back, so there is no location time to match.
+  const engineOffEvent = engineOffRuleLive() && point?.engine_off === true;
+  const techMs = engineOffEvent ? null : timestampMs(techStatus?.location_updated_at);
 
-  if (pointMs == null || techMs == null) {
+  if (pointMs == null || (!engineOffEvent && techMs == null)) {
     return { ok: false, reason: 'missing_location_timestamp' };
   }
   return validateEventTiming({ pointMs, techMs, service, now });

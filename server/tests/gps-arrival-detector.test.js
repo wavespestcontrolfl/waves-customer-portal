@@ -1107,6 +1107,20 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(notMarkedWrites()).toHaveLength(0);
   });
 
+  test('gate on: an engine-off is timed by its trip-end, though the stored location is minutes older; a sample is not', async () => {
+    // The receiver never writes a borrowed position back, so tech_status keeps the last sample's time.
+    const techStatus = baseTechStatus({ lat: NEAR_LAT, location_updated_at: minutesAgo(6) });
+
+    const engineOff = await run(baseService(), { techStatus, point: engineOffPoint({ last_location_gap_s: 360 }) });
+    expect(engineOff).toMatchObject({ ok: true, arrivalMarked: true });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ decision_reason: 'engine_off_in_radius', last_location_gap_s: 360 }),
+    }));
+
+    const sample = await run(baseService(), { techStatus, point: basePoint({ lat: NEAR_LAT, speed_mph: 3, ignition: true }) });
+    expect(sample).toMatchObject({ ok: false, reason: 'stale_location_sample' });
+  });
+
   test('gate on: an engine-off with no position for a job that is not en route writes nothing', async () => {
     const point = basePoint({ lat: undefined, lng: undefined, engine_off: true, position_source: null });
     const result = await run(baseService({ track_state: 'on_property', status: 'on_site' }), { point, techStatus: baseTechStatus() });

@@ -184,10 +184,10 @@ describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)
       engine_off: true, position_source: 'last_location', last_location_gap_s: 240,
     };
     expect(tables.vehicle_locations.where).toHaveBeenCalledWith({ bouncie_imei: 'imei-1' });
-    // Stored coordinates reused exactly: the tech marker does not move.
-    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({
-      tech_id: TECH.id, lat: '27.4386000', lng: '-82.3719000', ignition: false, speed_mph: 0, reported_at: ENDED_AT,
-    }));
+    // The borrowed position is never written back as a GPS sample: the stored status is read as it stands.
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(pingTechLocation).not.toHaveBeenCalled();
+    expect(readTechStatus).toHaveBeenCalledWith(TECH.id);
     expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledWith({ techStatus: TECH_STATUS, point: expectedPoint });
     expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'trip-end',
@@ -196,6 +196,25 @@ describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)
       logId: 21,
     }));
     expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
+  });
+
+  test('out of order: a real sample delivered after the trip-end is still written (the engine-off wrote nothing newer)', async () => {
+    installDb({ lastLocation: { lat: '27.4386000', lng: '-82.3719000', heading: 90, reported_at: msBefore(4 * 60 * 1000) } });
+    await router._test.processTrackingEvent({ logId: 31, eventType: 'tripEnd', payload: TRIP_END_NO_GPS });
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(pingTechLocation).not.toHaveBeenCalled();
+
+    // The final trip-data sample, taken 1 minute before the engine-off, arrives late.
+    const lateSampleAt = msBefore(60 * 1000);
+    const lateSample = { eventType: 'tripData', imei: 'imei-1', data: [{ timestamp: lateSampleAt, gps: { lat: 27.4387, lon: -82.3719 }, speed: 0 }] };
+    await router._test.processTrackingEvent({ logId: 32, eventType: 'tripData', payload: lateSample });
+
+    expect(db.raw).toHaveBeenCalledTimes(1);
+    expect(pingTechLocation).toHaveBeenCalledTimes(1);
+    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.4387, lng: -82.3719, reported_at: lateSampleAt }));
+    const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[1][0];
+    expect(point).toEqual(expect.objectContaining({ lat: 27.4387, lng: -82.3719, reported_at: lateSampleAt }));
+    expect(point.engine_off).toBeUndefined();
   });
 
   test('a trip-end with its own GPS uses it as the engine-off position', async () => {

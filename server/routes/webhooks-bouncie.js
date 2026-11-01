@@ -190,6 +190,45 @@ async function engineOffArrivalPoint({ tech, payload, ownPoint }) {
 
 // ---------- event processing ----------
 
+// Writes a GPS point to vehicle_locations and tech_status and returns the status
+// the arrival detector reads. An engine-off on a borrowed last location carries
+// the truck's OLDER observation: writing it back under the trip-end time would
+// make a delayed real sample read as older and be dropped, so it is never
+// persisted and the stored status is read as it stands.
+async function recordPoint({ tech, point }) {
+  const borrowedPosition = point.position_source === 'last_location';
+  if (!borrowedPosition) await upsertLocation(tech.bouncie_imei, point);
+
+  // Also keep tech_status fresh so the dispatch board's left-pane
+  // roster + map markers update in real-time. pingTechLocation
+  // preserves semantic statuses (en_route / on_site / wrapping_up)
+  // so an admin's flip won't get clobbered by the next Bouncie
+  // ping a minute later — see services/tech-status.js header.
+  // Wrapped in catch so a tech_status failure doesn't kill the
+  // log-mark-processed update below; the GPS history in
+  // vehicle_locations is already committed at this point and is
+  // the system of record for the customer-facing track map.
+  try {
+    if (borrowedPosition) return await readTechStatus(tech.id);
+    return await pingTechLocation({
+      tech_id: tech.id,
+      lat: point.lat,
+      lng: point.lng,
+      ignition: point.ignition,
+      speed_mph: point.speed_mph,
+      reported_at: point.reported_at,
+      // Same compare-and-write guard as the Bouncie API fallback (round-37 P2): the
+      // tech was resolved by this IMEI at the top of the request; drop the point if
+      // the mapping moved meanwhile.
+      requireBouncieImei: tech.bouncie_imei,
+    });
+  } catch (err) {
+    logger.error(`[webhooks-bouncie] ${borrowedPosition ? 'readTechStatus' : 'pingTechLocation'} failed: ${err.message}`);
+    return null;
+  }
+}
+
+
 async function processTrackingEvent({ logId, eventType, payload }) {
   try {
     const normalizedEventType = normalizeEventType(eventType);
@@ -236,34 +275,7 @@ async function processTrackingEvent({ logId, eventType, payload }) {
     }
 
     if (point) {
-      await upsertLocation(tech.bouncie_imei, point);
-
-      // Also keep tech_status fresh so the dispatch board's left-pane
-      // roster + map markers update in real-time. pingTechLocation
-      // preserves semantic statuses (en_route / on_site / wrapping_up)
-      // so an admin's flip won't get clobbered by the next Bouncie
-      // ping a minute later — see services/tech-status.js header.
-      // Wrapped in catch so a tech_status failure doesn't kill the
-      // log-mark-processed update below; the GPS history in
-      // vehicle_locations is already committed at this point and is
-      // the system of record for the customer-facing track map.
-      let techStatus = null;
-      try {
-        techStatus = await pingTechLocation({
-          tech_id: tech.id,
-          lat: point.lat,
-          lng: point.lng,
-          ignition: point.ignition,
-          speed_mph: point.speed_mph,
-          reported_at: point.reported_at,
-          // Same compare-and-write guard as the Bouncie API fallback (round-37 P2): the
-          // tech was resolved by this IMEI at the top of the request; drop the point if
-          // the mapping moved meanwhile.
-          requireBouncieImei: tech.bouncie_imei,
-        });
-      } catch (err) {
-        logger.error(`[webhooks-bouncie] pingTechLocation failed: ${err.message}`);
-      }
+      const techStatus = await recordPoint({ tech, point });
 
       let arrival = null;
       try {
