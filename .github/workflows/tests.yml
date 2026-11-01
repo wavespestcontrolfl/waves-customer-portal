@@ -545,7 +545,7 @@ jobs:
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/billing-text-leg-dedupe-postgres.test.js tests/invoice-text-leg-single-handoff-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/billing-text-leg-dedupe-postgres.test.js tests/invoice-text-leg-single-handoff-postgres.test.js tests/payer-invoice-sms-window-hold-postgres.test.js
       - name: Intelligence Bar cancel recovery lease, fence and restore-race tests
         working-directory: server
         env:

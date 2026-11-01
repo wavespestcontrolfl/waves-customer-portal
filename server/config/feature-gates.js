@@ -7615,6 +7615,14 @@ function billingEmailDetailsLive() {
   return process.env.GATE_BILLING_EMAIL_DETAILS === 'true';
 }
 
+// GATE_PAYER_INVOICE_SMS read at CALL time — ships DARK, off unless exactly 'true' (owner
+// 2026-11-01). On, a payer-billed invoice whose email the provider accepted for the payer's
+// AP inbox also texts the same pay link to that payer's ap_phone (services/payer-invoice-sms.js,
+// purpose payer_payment_link). Off, no payer text is ever built or sent.
+function payerInvoiceSmsLive() {
+  return process.env.GATE_PAYER_INVOICE_SMS === 'true';
+}
+
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The one canonical reader for both
 // entry points that need to know whether the Intelligence Bar may
@@ -8904,6 +8912,8 @@ module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
 // GATE_LAWN_NO_SEASON_BOOST reader (kept off the end-of-file append point, where gate PRs keep colliding).
 module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
+// GATE_PAYER_INVOICE_SMS reader, on its own line so gate PRs never conflict.
+module.exports.payerInvoiceSmsLive = payerInvoiceSmsLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
@@ -9757,6 +9767,14 @@ function prepaySeedSeriesSlotLive() {
 function payerPacketAutosendLive() {
   return process.env.GATE_PAYER_PACKET_AUTOSEND === 'true';
 }
+// GATE_RECAP_GLASSES_CLIPS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the visit recap accepts
+// clips from the phone's photo library (camera glasses): a video may run up to 60 s and 200 MB, a clip over 20 s is
+// stored as `processing` (the renderer skips it until it is cut), and a clip added after the recap rendered, but
+// before it is sent, re-renders it (services/service-report/recap-media.js, recap-pipeline.js). Off = 20 s and 80 MB,
+// every clip `ready`, no rebuild on a late clip. Kill = unset.
+function recapGlassesClipsLive() {
+  return process.env.GATE_RECAP_GLASSES_CLIPS === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9937,6 +9955,8 @@ module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
 module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;
 // GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
 module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
+// GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
+module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 // GATE_QUICKMOVE_CUSTOMER_PICK read at CALL time (so a flip needs no redeploy); strict 'true', dark.
 function quickMoveCustomerPickLive() {
   return process.env.GATE_QUICKMOVE_CUSTOMER_PICK === 'true';

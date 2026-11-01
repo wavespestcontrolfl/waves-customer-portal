@@ -92,32 +92,34 @@ function visitMinutesFor(programs, estimateData) {
 }
 
 // The visit the signer may book, or null (the office books it). Pure.
-function firstVisitPlan(estimate = {}) {
+// The online first-visit plan as { plan }, or why the office books the first visit as { reason } (owner 2026-11-01,
+// proposal readiness: the builder shows the reason). firstVisitPlan keeps its plan-or-null contract for every other caller.
+function firstVisitPlanCheck(estimate = {}) {
   // An invoice-mode (Net terms) proposal stays with the office: online booking is for Auto Pay or no terms.
-  if (estimate.bill_by_invoice === true) return null;
+  if (estimate.bill_by_invoice === true) return { reason: 'bill_by_invoice' };
   const { normalizeProposal, computeProposalTotals } = require('./estimate-proposal');
   const proposal = normalizeProposal(estimate);
-  if (proposal.enabled !== true || proposal.synthesized === true) return null;
+  if (proposal.enabled !== true || proposal.synthesized === true) return { reason: 'not_authored' };
   // The win (estimate-manual-acceptance.js winCommercialProposal) refuses a proposal outside invoice mode whose
   // structured payment terms are anything but Auto Pay, so only those proposals book online.
-  if (!ONLINE_PAYMENT_TERMS.has(proposal.commercialTerms?.paymentTerms)) return null;
+  if (!ONLINE_PAYMENT_TERMS.has(proposal.commercialTerms?.paymentTerms)) return { reason: 'payment_terms' };
   // normalizeProposal keeps only priced programs (null when none) and corrective work as null or a non-empty list, so
   // with no building lines and no corrective work the proposal has no one-time total and every visit has a price.
   const programs = proposal.programs;
-  if (!programs || proposal.correctiveWork || proposal.buildings.some((building) => building.lineItems.length)) return null;
+  if (!programs || proposal.correctiveWork || proposal.buildings.some((building) => building.lineItems.length)) return { reason: 'itemization' };
   // Pest programs only; a misting system (identity) is not a pest visit.
-  if (!programs.every((program) => program.service === 'pest' && !program.identity)) return null;
+  if (!programs.every((program) => program.service === 'pest' && !program.identity)) return { reason: 'not_pest' };
   const cadences = new Set(programs.map((program) => program.frequencyPerYear));
   const visitsPerYear = [...cadences][0];
   const pattern = PATTERN_FOR_VISITS[visitsPerYear];
-  if (cadences.size !== 1 || !pattern) return null;
+  if (cadences.size !== 1 || !pattern) return { reason: 'cadence' };
   const pricePerVisit = roundMoney(programs.reduce((sum, program) => sum + program.pricePerApplication, 0));
   const totals = computeProposalTotals(proposal);
   // Every visit bills the same amount, and a year of visits is the quoted annual price.
-  if (roundMoney(pricePerVisit * visitsPerYear) !== totals.annualRecurring) return null;
+  if (roundMoney(pricePerVisit * visitsPerYear) !== totals.annualRecurring) return { reason: 'price' };
   const durationMinutes = visitMinutesFor(programs, parseEstimateData(estimate.estimate_data));
-  if (durationMinutes > MAX_VISIT_MINUTES) return null;
-  return {
+  if (durationMinutes > MAX_VISIT_MINUTES) return { reason: 'too_long' };
+  return { plan: {
     visitsPerYear,
     pattern,
     pricePerVisit,
@@ -132,7 +134,11 @@ function firstVisitPlan(estimate = {}) {
     durationMinutes,
     serviceType: SERVICE_TYPE,
     serviceKey: SERVICE_KEY,
-  };
+  } };
+}
+
+function firstVisitPlan(estimate = {}) {
+  return firstVisitPlanCheck(estimate).plan || null;
 }
 
 // Whether the visit's completion invoice charges the tax the quote shows for a visit. The completion mint
@@ -240,6 +246,38 @@ async function firstVisitOnlineFor(estimateId, conn = db) {
   } catch (err) {
     logger.warn(`[commercial-first-visit] online check skipped for estimate ${estimateId}: ${err.code || 'error'}`);
     return false;
+  }
+}
+
+// The builder's first-visit line (owner 2026-11-01, proposal readiness): { state: 'booked', visit } once a live visit is
+// linked to the estimate, { state: 'online' } when the signer will book the first visit online, else
+// { state: 'office', reason }. The checks are firstVisitCtaFor's and firstVisitOnlineFor's (the plan, the customer at the
+// signed premises, the completion tax, and for a signed agreement the quote as signed), which the customer page and the
+// signed-agreement alert keep calling. `closed` is the route's verdict that a published estimate is closed (won,
+// declined, expired, archived; estimate-public.js estimateClosedOnline); it defaults to closed, so a caller that does not
+// say fails closed. The route asks only with GATE_COMMERCIAL_FIRST_VISIT on. Never throws: a failed read is
+// { state: 'unknown' }.
+async function firstVisitReadiness(estimate, { conn = db, closed = true } = {}) {
+  try {
+    const visit = await linkedFirstVisit(estimate.id, conn);
+    if (visit) return { state: 'booked', visit: publicVisit(visit) };
+    if (closed !== false) return { state: 'office', reason: 'closed' };
+    const check = firstVisitPlanCheck(estimate);
+    if (!check.plan) return { state: 'office', reason: check.reason };
+    const customer = await loadCustomer(estimate.customer_id, conn);
+    if (!customer) return { state: 'office', reason: 'no_customer' };
+    if (!atSignedPremises(check.plan, customer)) return { state: 'office', reason: 'address' };
+    if (!(await completionTaxMatches(check.plan, customer.id, conn))) return { state: 'office', reason: 'tax' };
+    // Signed, but the proposal changed since: firstVisitCtaFor serves no picker, so the office books it.
+    const agreement = require('./commercial-proposal-agreement');
+    const { state } = await agreement.agreementStateForEstimate(estimate.id, conn);
+    if (state === 'signed' && !(await agreement.signedQuoteMatches(estimate, conn))) {
+      return { state: 'office', reason: 'changed_since_signing' };
+    }
+    return { state: 'online' };
+  } catch (err) {
+    logger.warn(`[commercial-first-visit] readiness skipped for estimate ${estimate?.id}: ${err.code || 'error'}`);
+    return { state: 'unknown' };
   }
 }
 
@@ -572,6 +610,7 @@ module.exports = {
   engineOnSiteMinutes,
   linkedFirstVisit,
   firstVisitOnlineFor,
+  firstVisitReadiness,
   firstVisitCtaFor,
   firstVisitAvailability,
   bookFirstVisit,

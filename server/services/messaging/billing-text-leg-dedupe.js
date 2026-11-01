@@ -88,7 +88,7 @@
  * silently dropping the notice. It logs an error naming the customer and
  * key for operator review; nothing here clears a stale claim automatically.
  *
- * Scope: explicit billing Text legs ONLY —
+ * Scope: explicit billing Text legs ONLY (plus GUARDED_PURPOSES, the payer pay-link text) —
  * metadata.billingDeliveryLeg === 'sms' with a non-empty
  * metadata.notificationEventKey and a customerId. A legacy SMS send (no
  * billingDeliveryLeg — every other caller of send-customer-message.js /
@@ -121,6 +121,11 @@ const ACCEPTED_STATUSES = ['queued', 'sent', 'delivered'];
 // Twilio round trip, seconds, not minutes. CLAIM_STALE_MS is documented at
 // the top of this file.
 const DEDUPE_RETRY_MS = 5 * 60 * 1000;
+
+// Purposes guarded by the same claim without an explicit billing leg: the payer's pay-link text (payer-invoice-sms.js)
+// is one text per accepted email row, keyed by its notificationEventKey, and two concurrent calls must send once. Its
+// accepted sms_log row carries no leg marker, so findAcceptedBillingTextLeg finds it by the pre-marker arm (key + real SID).
+const GUARDED_PURPOSES = Object.freeze(['payer_payment_link']);
 const IN_FLIGHT_RETRY_MS = 2 * 60 * 1000;
 const CLAIM_STALE_MS = 5 * 60 * 1000;
 
@@ -396,7 +401,7 @@ async function claimOrResolve(trx, customerId, notificationEventKey, input) {
  */
 async function withBillingTextLegLock(input, send) {
   const metadata = input?.metadata || {};
-  if (metadata.billingDeliveryLeg !== 'sms') return send();
+  if (metadata.billingDeliveryLeg !== 'sms' && !GUARDED_PURPOSES.includes(input?.purpose)) return send();
   const notificationEventKey = String(metadata.notificationEventKey || '').trim();
   const customerId = input?.customerId;
   if (!notificationEventKey || !customerId) return send();

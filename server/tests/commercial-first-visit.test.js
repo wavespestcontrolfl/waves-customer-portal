@@ -552,6 +552,76 @@ describe('the signed premises are the customer\'s address', () => {
   });
 });
 
+describe('firstVisitReadiness (the builder Readiness card, owner 2026-11-01)', () => {
+  const OPEN = { closed: false };
+  test('an eligible plan and customer: the signer books the first visit online', async () => {
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'online' });
+  });
+
+  test('a live linked visit: booked, with its day, whatever the plan says', async () => {
+    rows.scheduled_services = { id: VISIT_ID, scheduled_date: '2026-11-12', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed' };
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ bill_by_invoice: true }), OPEN))
+      .toEqual({ state: 'booked', visit: { date: '2026-11-12', windowStart: '09:00', windowEnd: '10:00' } });
+  });
+
+  const pestProgram = (frequencyPerYear, pricePerApplication) => ({ service: 'pest', label: 'Pest control', frequencyPerYear, pricePerApplication, taxable: true });
+  test.each([
+    ['a Bill-by-invoice proposal', { bill_by_invoice: true }, 'bill_by_invoice'],
+    ['Net 30 payment terms', { proposal: { commercialTerms: { paymentTerms: 'net30' } } }, 'payment_terms'],
+    ['corrective work beside the program', { proposal: { correctiveWork: [{ label: 'Seal entry gaps', amount: 250, taxable: true }] } }, 'itemization'],
+    ['a lawn program', { programs: [{ service: 'lawn', label: 'Lawn care', frequencyPerYear: 12, pricePerApplication: 81.67, taxable: false }] }, 'not_pest'],
+    ['two schedules', { programs: [pestProgram(12, 81.67), pestProgram(4, 100)] }, 'cadence'],
+    ['a visit over 90 minutes', { engineMinutes: 200 }, 'too_long'],
+  ])('%s: the office books it, and the reason says why', async (_label, options, reason) => {
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(options), OPEN)).toEqual({ state: 'office', reason });
+  });
+
+  test('no linked customer, or a customer row that is gone: no_customer', async () => {
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ customer_id: null }), OPEN)).toEqual({ state: 'office', reason: 'no_customer' });
+    rows.customers = undefined;
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'office', reason: 'no_customer' });
+  });
+
+  test('the proposal names other premises than the customer address: address', async () => {
+    const estimate = proposalEstimate({ proposal: { propertyAddress: '200 Harbor Way, Sarasota, FL 34236' } });
+    expect(await firstVisit.firstVisitReadiness(estimate, OPEN)).toEqual({ state: 'office', reason: 'address' });
+  });
+
+  test('the completion bill would carry other tax than the quote: tax', async () => {
+    mockPreview.mockResolvedValue({ tax_amount: 0 });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'office', reason: 'tax' });
+  });
+
+  test('signed, then the proposal changed: the customer page serves no picker, so the office books it', async () => {
+    mockSignedQuoteMatches.mockResolvedValue(false);
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'office', reason: 'changed_since_signing' });
+    // Not signed yet: no signed quote to compare, so the signer books online once they sign.
+    mockAgreementState.mockResolvedValue({ state: 'none' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'online' });
+  });
+
+  test('a closed estimate (won, declined, expired, archived): the office books it; a caller that does not say fails closed', async () => {
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ status: 'accepted' }), { closed: true })).toEqual({ state: 'office', reason: 'closed' });
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'closed' });
+  });
+
+  test('a booked visit still reads booked on a closed estimate', async () => {
+    rows.scheduled_services = { id: VISIT_ID, scheduled_date: '2026-11-12', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed' };
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ status: 'accepted' }), { closed: true }))
+      .toMatchObject({ state: 'booked' });
+  });
+
+  test('a failed read: unknown, never a throw', async () => {
+    rows.scheduled_services = () => { throw new Error('synthetic read failure'); };
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'unknown' });
+  });
+
+  test('firstVisitPlan keeps its plan-or-null contract for the customer path', () => {
+    expect(firstVisit.firstVisitPlan(proposalEstimate({ bill_by_invoice: true }))).toBeNull();
+    expect(firstVisit.firstVisitPlan(proposalEstimate())).toMatchObject({ visitsPerYear: 12, pattern: 'monthly' });
+  });
+});
+
 describe('firstVisitOnlineFor (the signed-agreement alert copy)', () => {
   test('true for an eligible estimate with no visit; false with the gate off or a visit booked', async () => {
     expect(await firstVisit.firstVisitOnlineFor(ESTIMATE_ID)).toBe(true);

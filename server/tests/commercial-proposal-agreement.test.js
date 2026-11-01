@@ -975,3 +975,31 @@ describe('handleAgreementSigned', () => {
     await expect(handleAgreementSigned({ contractId: 'contract-1', database })).resolves.toEqual({ skipped: 'error' });
   });
 });
+
+describe('agreementAdminStatus: the builder Readiness card names every reason online signing is off', () => {
+  test('a one-time-only proposal: not offered, with the note', async () => {
+    const estimate = estimateRow({}, { buildings: [{ name: 'Main', lineItems: [{ description: 'Cleanout', quantity: 1, unitPrice: 400, frequency: 'one_time', taxable: true }] }] });
+    const { database } = makeDb({ estimate });
+    expect(await agreementAdminStatus(estimate, database)).toEqual({
+      state: 'none', signingBlocked: 'not_signable', note: 'Online signing needs a recurring service. One-time work is signed with the office.',
+    });
+  });
+
+  test('a closed proposal (won, declined, expired, archived): closed comes first; a signed agreement still reads signed', async () => {
+    const estimate = estimateRow({ status: 'accepted', customer_id: null });
+    const { database } = makeDb({ estimate });
+    expect(await agreementAdminStatus(estimate, database, { closed: true })).toEqual({
+      state: 'none', signingBlocked: 'closed', note: 'Online signing is closed: the proposal is won, declined, expired or archived.',
+    });
+    expect(await agreementAdminStatus(estimateRow(), database, { closed: false })).toEqual({ state: 'none' });
+  });
+
+  test('no linked customer account: blocked, with the note (the customer page asks the customer to call)', async () => {
+    const estimate = estimateRow({ customer_id: null });
+    const { database } = makeDb({ estimate });
+    expect(await agreementCtaFor(estimate, database)).toEqual({ canSign: false, state: 'none' });
+    expect(await agreementAdminStatus(estimate, database)).toEqual({
+      state: 'none', signingBlocked: 'no_account', note: 'Online signing needs a linked customer account. Until then the page asks the customer to call.',
+    });
+  });
+});
