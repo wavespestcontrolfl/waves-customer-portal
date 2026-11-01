@@ -177,6 +177,27 @@ describeDb('late recap clips: the send and render races', () => {
       expect(await row(recap.id)).toMatchObject({ status: 'approved', approved_at: expect.any(Date) });
     });
 
+    test('a clip changed during a send that then failed: the retry renders again instead of sending the old video', async () => {
+      const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(1), send_attempt_at: minutesAgo(1) });
+      await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP);
+      // The send fails: recap-delivery releases its in-flight marker; the recap is still approved.
+      await mockPg('service_recaps').where({ id: recap.id }).update({ send_attempt_at: null });
+
+      expect(await sendRecap(recap.scheduled_service_id)).toEqual({ ok: false, reason: 'rerendering_clips' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await row(recap.id)).toMatchObject({ status: 'pending', approved_at: null, clip_revision: 1 });
+    });
+
+    test('a send that died mid-way: the re-claim after its window renders again too', async () => {
+      const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(20), send_attempt_at: minutesAgo(1) });
+      await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP);
+      await mockPg('service_recaps').where({ id: recap.id }).update({ send_attempt_at: minutesAgo(10) });
+
+      expect(await sendRecap(recap.scheduled_service_id)).toEqual({ ok: false, reason: 'rerendering_clips' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await row(recap.id)).toMatchObject({ status: 'pending', approved_at: null });
+    });
+
     test('a sent recap is not touched', async () => {
       const recap = await insertRecap({ status: 'approved', approved_at: minutesAgo(9), sent_at: minutesAgo(8) });
       expect(await pipeline.markRecapClipsChanged(recap.scheduled_service_id, READY_CLIP)).toEqual({ marked: false, status: null });
@@ -217,11 +238,13 @@ describeDb('late recap clips: the send and render races', () => {
         .toEqual({ status: 'pending', attempts: 0 });
     });
 
-    test('gate on: no clip after the claim publishes ready', async () => {
+    test('gate on: no clip after the claim publishes ready, and the count starts again from 0', async () => {
       process.env.GATE_RECAP_GLASSES_CLIPS = 'true';
       const claimed = await claimedRecap();
-      expect(await pipeline.processRecap(claimed)).toMatchObject({ status: 'ready' });
-      expect((await mockPg('service_recaps').where({ id: claimed.id }).first('status')).status).toBe('ready');
+      await mockPg('service_recaps').where({ id: claimed.id }).update({ clip_revision: 2 });
+      expect(await pipeline.processRecap({ ...claimed, clip_revision: 2 })).toMatchObject({ status: 'ready' });
+      expect(await mockPg('service_recaps').where({ id: claimed.id }).first('status', 'clip_revision'))
+        .toEqual({ status: 'ready', clip_revision: 0 });
     });
 
     test('gate off: the render ends ready, exactly as before', async () => {

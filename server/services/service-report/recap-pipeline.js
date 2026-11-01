@@ -71,6 +71,13 @@ async function recapNeedsGreetingRerender(recap) {
   return !!recap && !recap.sent_at && Number(recap.greeting_version || 0) < RECAP_GREETING_VERSION;
 }
 
+// GATE_RECAP_GLASSES_CLIPS: true when an unsent recap has clip changes since its render (clip_revision,
+// reset when a render publishes). Only a change during a send in progress leaves an approved recap
+// like that; when that send did not go out, the recap renders again instead of sending the old video.
+function recapNeedsClipRerender(recap) {
+  return glassesClipsOn() && !!recap && !recap.sent_at && Number(recap.clip_revision || 0) > 0;
+}
+
 // Queue (or re-queue) a recap render. force=true regenerates a ready/failed one.
 async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {}) {
   if (!scheduledServiceId) throw new Error('scheduledServiceId is required');
@@ -115,10 +122,12 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
 
 // GATE_RECAP_GLASSES_CLIPS: a clip confirmed, or removed, before the recap was sent must be in (or out
 // of) the video the customer gets. One UPDATE on the recap row, so it orders against a render's finish,
-// an approval and a send claim: clip_revision counts the change; a built recap (not pending or rendering)
+// an approval and a send claim: clip_revision counts the changes since the last published render (the
+// finish resets it to 0), and a built recap (not pending or rendering)
 // with no send in progress goes back to pending, approval cleared; a pending one renders the new clip set
 // anyway, and a rendering one renders again at its finish (processRecap compares clip_revision). A sent
-// recap, or one being sent, keeps its video. Only a clip the renderer uses (`ready`) counts; a
+// recap keeps its video; one being sent keeps its approval, and if that send fails, sendRecap sees the
+// count and renders again instead of sending the old video. Only a clip the renderer uses (`ready`) counts; a
 // `processing` clip counts when it is cut. Never throws: the confirm or removal has already happened.
 async function markRecapClipsChanged(scheduledServiceId, media, { knex = db, now = new Date() } = {}) {
   if (!glassesClipsOn()) return { marked: false };
@@ -235,9 +244,11 @@ async function processRecap(recap, knex = db) {
     if (glassesClipsOn() && recap.clip_revision != null) {
       // GATE_RECAP_GLASSES_CLIPS: a clip counted after this claim may be missing from the video, so
       // render again instead of publishing. Decided in the UPDATE that publishes, on the recap row:
-      // no clip, approval or send claim can fall between the check and the publish.
+      // no clip, approval or send claim can fall between the check and the publish. A publish resets
+      // the count: it counts changes since the published video.
       const late = Number(recap.clip_revision);
       finish.status = knex.raw("CASE WHEN clip_revision <> ? THEN 'pending' ELSE 'ready' END", [late]);
+      finish.clip_revision = knex.raw('CASE WHEN clip_revision <> ? THEN clip_revision ELSE 0 END', [late]);
       finish.attempts = knex.raw('CASE WHEN clip_revision <> ? THEN 0 ELSE attempts END', [late]);
       finish.next_attempt_at = knex.raw('CASE WHEN clip_revision <> ? THEN ? ELSE next_attempt_at END', [late, new Date()]);
     }
@@ -276,6 +287,6 @@ async function processDueRecaps({ now = new Date(), limit = CLAIM_LIMIT } = {}, 
 
 module.exports = {
   CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION, RECAP_SEND_STALE_MS,
-  getRecap, enqueueRecap, markRecapClipsChanged, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender,
+  getRecap, enqueueRecap, markRecapClipsChanged, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender, recapNeedsClipRerender,
   claimDueRecaps, recoverStaleRecaps, processRecap, processDueRecaps,
 };

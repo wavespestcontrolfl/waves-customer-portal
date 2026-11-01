@@ -54,10 +54,16 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   // An approved video rendered before the greeting rule would greet a no-first-name
   // customer by their surname: re-render it (back to pending, approval cleared) instead
   // of sending it (codex #5674 r1).
-  const { recapNeedsGreetingRerender, enqueueRecap, RECAP_SEND_STALE_MS } = require('./recap-pipeline');
+  const { recapNeedsGreetingRerender, recapNeedsClipRerender, enqueueRecap, RECAP_SEND_STALE_MS } = require('./recap-pipeline');
   if (await recapNeedsGreetingRerender(recap, knex)) {
     await enqueueRecap(scheduledServiceId, { force: true, knex });
     return { ok: false, reason: 'rerendering_greeting' };
+  }
+  // A clip added or removed while an earlier send was in progress (that send did not go out):
+  // render again, approval cleared, instead of sending a video without the change.
+  if (recapNeedsClipRerender(recap)) {
+    await enqueueRecap(scheduledServiceId, { force: true, knex });
+    return { ok: false, reason: 'rerendering_clips' };
   }
 
   const service = await knex('service_records')
