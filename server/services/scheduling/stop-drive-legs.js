@@ -204,32 +204,51 @@ function touchedAt(m) {
     .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite));
 }
 
-// Where the tech is now: the stop with a reached visit touched last. A
-// stale on-site mark (an old check-in) never wins over later work, and a
-// later stop worked early does not pull the tech forward. Without any time
-// stamp, the last stop in day order with a reached visit.
-function currentStop(stops) {
-  let at = -1;
-  let latest = -Infinity;
-  stops.forEach((st, i) => {
+// Reached stops, the one touched last first: the tech is at (or driving
+// to) the first. A stale on-site mark (an old check-in) never wins over
+// later work, and a later stop worked early does not pull the tech forward.
+// Without time stamps, day order decides.
+function touchOrder(stops) {
+  return stops.map((st, i) => {
     const reached = st.members.filter((m) => !NOT_REACHED.has(m.status));
-    const t = Math.max(-Infinity, ...reached.map(touchedAt));
-    if (reached.length && t >= latest) { at = i; latest = t; }
-  });
-  return at;
+    return { i, n: reached.length, t: Math.max(-Infinity, ...reached.map(touchedAt)) };
+  }).filter((x) => x.n).sort((a, b) => (b.t - a.t) || (b.i - a.i)).map((x) => x.i);
+}
+
+// The drive still ahead to an en-route stop: the leg from the stop touched
+// before it, less the minutes since the tech set off (all of it without an
+// en-route time; none without a stop to come from, or once checked in).
+function driveLeft(here, from, now) {
+  const enRoute = here?.members.find((m) => m.status === 'en_route');
+  if (!enRoute || !from || here.members.some((m) => m.checkInTime && UNDER_WAY.has(m.status))) return 0;
+  const setOff = enRoute.enRouteAt ? new Date(enRoute.enRouteAt).getTime() : NaN;
+  const gone = Number.isFinite(setOff) ? Math.max(0, Math.floor((now.getTime() - setOff) / 60000)) : 0;
+  return Math.max(0, (legBetween(from, here) || 0) - gone);
+}
+
+// A visit group part-way through at the tech's stop: the work under way
+// runs at once, and each member not started keeps its own window (a 12:00
+// member still waits for 12:00). A co-visit chain shares one window, so it
+// stays whole.
+function remainingPieces(p) {
+  if (!p.rows || !(p.startedWork > 0) || p.startedWork >= p.work) return [p];
+  const later = p.rows.filter((r) => !UNDER_WAY.has(r.status)).map((r) => ({
+    id: r.id, start: minutesOf(r.window_start), work: workDuration(r), range: null, startedWork: 0,
+  }));
+  return [{ ...p, work: p.startedWork, range: null }, ...later];
 }
 
 // Today (owner 2026-11-01, "build clock"): the day restarts from now at the
-// stop where the tech is (currentStop). Everything there not finished yet
-// runs first, as one stop's pieces (a co-visit pair shares its hour): work
-// under way starts at once, less the minutes since check-in, and a later
-// piece there still waits for its own window. The tech is at that stop, so
-// it is not flagged. The drive to an en-route stop counts as done (how much
-// is left is unknown). Then every other stop's unreached visits run in day
-// order; a reached visit elsewhere counts as done. After a leg that cannot
-// be measured, arrivals are unknown.
+// stop the tech touched last (touchOrder). An en-route stop first takes the
+// rest of its drive (driveLeft). Everything there not finished yet runs
+// next, as one stop's pieces (a co-visit pair shares its hour): work under
+// way starts at once, less the minutes since check-in, and a later piece
+// there still waits for its own window. The tech is at that stop, so it is
+// not flagged. Then every other stop's unreached visits run in day order; a
+// reached visit elsewhere counts as done. After a leg that cannot be
+// measured, arrivals are unknown.
 function clockRoute(stops, now) {
-  const at = currentStop(stops);
+  const [at = -1, before = -1] = touchOrder(stops);
   const here = stops[at] || null;
   const ahead = here ? here.members.filter((m) => NOT_REACHED.has(m.status) || UNDER_WAY.has(m.status)) : [];
   const checkIns = ahead.filter((m) => UNDER_WAY.has(m.status) && m.checkInTime)
@@ -238,7 +257,10 @@ function clockRoute(stops, now) {
   const seq = [];
   const legIn = new Map();
   const piecesOf = new Map();
-  stopPieces(ahead).forEach((p, j) => {
+  // Work under way first, then the rest by start time.
+  const herePieces = stopPieces(ahead).flatMap(remainingPieces)
+    .sort((a, b) => (Number(b.startedWork > 0) - Number(a.startedWork > 0)) || (a.start - b.start));
+  herePieces.forEach((p, j) => {
     const done = Math.min(p.startedWork, p.work, worked);
     worked -= done;
     if (p.work - done <= 0) return;
@@ -260,7 +282,7 @@ function clockRoute(stops, now) {
   }
   if (!seq.length) return null;
   const { hour, minute } = etParts(now);
-  return { seq, legIn, piecesOf, startMin: hour * 60 + minute };
+  return { seq, legIn, piecesOf, startMin: hour * 60 + minute + driveLeft(here, stops[before], now) };
 }
 
 // Minutes past each stop's 2-hour arrival window, from the shared route

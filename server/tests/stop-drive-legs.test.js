@@ -422,17 +422,24 @@ describe('attachDriveLegs on today\'s clock', () => {
   });
 
   it('finishes the stop the tech is driving to before an open one it passed', () => {
-    const services = [
-      stop('done', '15:00', A, { windowEnd: '16:00', status: 'completed' }),
+    const day = (enRouteAt) => [
+      stop('done', '15:00', A, { windowEnd: '16:00', status: 'completed', checkOutTime: et('17:20').toISOString() }),
       stop('passed', '16:00', C, { windowEnd: '17:00' }),
-      stop('driving', '17:00', B, { windowEnd: '18:00', status: 'en_route' }),
+      stop('driving', '17:00', B, { windowEnd: '18:00', status: 'en_route', enRouteAt }),
     ];
-    attachDriveLegs(services, { now: et('17:33') });
-    const leg = Math.max(1, driveMin(B, C));
-    // 60 planned minutes at the en-route stop, then the drive back.
-    expect(services[1].driveLateMin).toBe(17 * 60 + 33 + 60 + leg - (16 * 60 + 120));
-    expect([services[1].driveLateWindowStart, services[1].driveLateWindowEnd]).toEqual(['16:00', '18:00']);
-    expect(services[2].driveLateMin).toBeNull();
+    const toB = Math.max(1, driveMin(A, B));
+    const toC = Math.max(1, driveMin(B, C));
+    // Set off at 17:25: the rest of the drive to B, B's hour, then back to C.
+    const set = day(et('17:25').toISOString());
+    attachDriveLegs(set, { now: et('17:33') });
+    expect(set[1].driveLateMin).toBe(17 * 60 + 33 + (toB - 8) + 60 + toC - (16 * 60 + 120));
+    expect([set[1].driveLateWindowStart, set[1].driveLateWindowEnd]).toEqual(['16:00', '18:00']);
+    expect(set[2].driveLateMin).toBeNull();
+    // No en-route time: the whole drive is still ahead.
+    const unset = day(null);
+    unset[0].checkOutTime = null;
+    attachDriveLegs(unset, { now: et('17:33') });
+    expect(unset[1].driveLateMin).toBe(17 * 60 + 33 + toB + 60 + toC - (16 * 60 + 120));
   });
 
   it('counts the planned work left on site from the check-in time', () => {
@@ -529,6 +536,19 @@ describe('attachDriveLegs on today\'s clock', () => {
     expect(services[3].driveLateMin).toBe(11 * 60 + 90 + leg - (10 * 60 + 120));
   });
 
+  it("keeps a started visit group's later member waiting for its own window", () => {
+    const services = [
+      stop('before', '08:00', B, { windowEnd: '09:00', status: 'completed', displayOrder: 0 }),
+      stop('g1', '09:00', A, { visitId: 'v5', windowEnd: '10:00', status: 'on_site', checkInTime: et('09:00').toISOString(), displayOrder: 1 }),
+      stop('g2', '12:00', A, { visitId: 'v5', windowEnd: '13:00', displayOrder: 2 }),
+      stop('next', '11:00', C, { windowEnd: '12:00', displayOrder: 3 }),
+    ];
+    attachDriveLegs(services, { now: et('09:30') });
+    const leg = Math.max(1, driveMin(A, C));
+    // g1's last 30 minutes, then g2 waits for 12:00: the tech leaves at 13:00.
+    expect(services[3].driveLateMin).toBe(13 * 60 + leg - (11 * 60 + 120));
+  });
+
   it("waits at the tech's stop for a later member's own window", () => {
     const services = [
       stop('before', '08:00', B, { windowEnd: '09:00', status: 'completed', displayOrder: 0 }),
@@ -578,6 +598,23 @@ describe('attachDriveLegs on today\'s clock', () => {
     const leg = Math.max(1, driveMin(A, C));
     // The tech left 'done' last: the drive to next starts there at 15:00.
     expect(services[2].driveLateMin).toBe(15 * 60 + leg - (13 * 60 + 120));
+  });
+
+  it("finishes the work under way at the tech's stop before one that waits", () => {
+    const services = [
+      stop('before', '07:00', B, { windowEnd: '07:30', status: 'completed', checkOutTime: et('07:30').toISOString(), displayOrder: 0 }),
+      stop('nine', '09:00', A, { windowEnd: '10:00', displayOrder: 1 }),
+      // Started early, ahead of its 13:00 slot.
+      stop('early', '13:00', A, { windowEnd: '14:00', status: 'on_site', checkInTime: et('07:45').toISOString(), displayOrder: 2 }),
+      stop('next', '09:00', C, { windowEnd: '10:00', displayOrder: 3 }),
+    ];
+    attachDriveLegs(services, { now: et('08:00') });
+    const leg = Math.max(1, driveMin(A, C));
+    // early's last 45 minutes run first, nine waits for 09:00 and ends at
+    // 10:00: next lands by 11:00. The other order would end early at 10:45.
+    expect(10 * 60 + leg).toBeLessThanOrEqual(11 * 60);
+    expect(10 * 60 + 45 + leg).toBeGreaterThan(11 * 60);
+    expect(services[3].driveLateMin).toBeNull();
   });
 
   it('stops predicting after a leg it cannot measure', () => {
