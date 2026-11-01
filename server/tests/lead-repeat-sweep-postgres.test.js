@@ -178,8 +178,42 @@ jest.setTimeout(30000);
     await lead({ status: 'contacted', first_contact_at: new Date('2026-09-01T14:00:00Z'), response_time_minutes: 5 });
     const waiting = await lead({ first_contact_at: new Date('2026-10-05T14:00:00Z') });
     const result = await runLeadRepeatSweep({ dbi: database });
+    // Not even a candidate: no earlier same-phone lead inside the window.
+    expect(result.scanned).toBe(0);
     expect(result.filed).toBe(0);
-    expect(result.kept.not_repeat).toBe(1);
+    expect((await read(waiting.id)).status).toBe('new');
+  });
+
+  test('leads kept on earlier pages never hide a newer repeat (keyset paging through the whole queue)', async () => {
+    // Three kept candidates sort first: each has an earlier same-phone lead from another person.
+    for (const [index, name] of ['Sam', 'Lee', 'Kim'].entries()) {
+      const phone = `+1941555040${index}`;
+      await lead({ phone, first_name: 'Alex', first_contact_at: OCT(1 + index) });
+      await lead({ phone, first_name: name, first_contact_at: OCT(2 + index) });
+    }
+    const root = await lead({ status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5 });
+    const repeat = await lead({ first_contact_at: OCT(21) });
+    const result = await runLeadRepeatSweep({ dbi: database, pageSize: 2 });
+    expect(result.scanned).toBe(4);
+    expect(result.kept.no_open_same_person_root).toBe(3);
+    expect(result.filings).toEqual([{ leadId: repeat.id, rootId: root.id }]);
+  });
+
+  test('a root closed by a concurrent transaction is read after it commits (the root is locked)', async () => {
+    const root = await lead({ status: 'contacted', first_contact_at: OCT(20), response_time_minutes: 5 });
+    const waiting = await lead({ first_contact_at: OCT(21) });
+    const rootRead = await read(root.id);
+    const waitingRead = await read(waiting.id);
+
+    const other = await database.transaction();
+    await other('leads').where({ id: root.id }).forUpdate().first();
+    const filing = fileRepeat(database, { lead: waitingRead, root: rootRead });
+    // The filing must now be waiting on the root's row lock.
+    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    await other('leads').where({ id: root.id }).update({ status: 'lost' });
+    await other.commit();
+
+    expect(await filing).toEqual({ filed: false, reason: 'root_changed' });
     expect((await read(waiting.id)).status).toBe('new');
   });
 
@@ -237,6 +271,6 @@ jest.setTimeout(30000);
   test('constants the doc names', () => {
     expect(_test.REPEAT_WINDOW_DAYS).toBe(30);
     expect(_test.WRITE_CAP).toBe(50);
-    expect(_test.SCAN_LIMIT).toBe(500);
+    expect(_test.PAGE_SIZE).toBe(200);
   });
 });

@@ -36,8 +36,8 @@
  *    household or business line: a human decides).
  * Anything else stays waiting. Nothing here texts, calls, books or charges;
  * no first-response time is stamped (nobody responded). Every write re-reads
- * the lead under its row lock, pins the identity the decision read, and
- * re-checks the root.
+ * the lead and its root under row locks (taken in id order, held to commit),
+ * pins the identity the decision read, and re-checks the root.
  */
 
 const db = require('../models/db');
@@ -52,14 +52,18 @@ const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
 
 const REPEAT_WINDOW_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
-// Waiting leads read per run, and repeats filed per run.
-const SCAN_LIMIT = 500;
+// The run pages through every candidate (keyset on first_contact_at, id), so a
+// lead kept on an earlier run never hides a newer one. MAX_PAGES only bounds a
+// runaway queue; WRITE_CAP bounds the filings per run.
+const PAGE_SIZE = 200;
+const MAX_PAGES = 50;
 const WRITE_CAP = 50;
 // Earlier same-phone leads read per waiting lead. More than this is a busy
 // shared line: the lead stays waiting rather than being judged on a partial read.
 const EARLIER_LIMIT = 25;
 const PERFORMED_BY = 'Lead repeat sweep';
-const PHONE_LAST10_SQL = "right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10)";
+const phoneLast10Sql = (column) => `right(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10)`;
+const PHONE_LAST10_SQL = phoneLast10Sql('phone');
 // The identity a filing decision read. The locked re-read must match it, so a
 // staff edit between the read and the write wins.
 const PINNED_COLUMNS = ['status', 'phone', 'customer_id', 'first_name', 'last_name', 'address', 'city', 'zip', 'response_time_minutes'];
@@ -166,11 +170,17 @@ function sameAsRead(current, read) {
  */
 async function fileRepeat(database, { lead, root }) {
   const outcome = await database.transaction(async (trx) => {
-    const current = await trx('leads').where({ id: lead.id }).whereNull('deleted_at').forUpdate().first();
-    if (!current || !sameAsRead(current, lead)) return { filed: false, reason: 'lead_changed' };
+    // Lock the repeat AND its root through commit, in id order (one statement,
+    // so every writer that locks both takes them in the same order): a root
+    // closed, deleted or reassigned by a concurrent transaction is read after
+    // that transaction commits, never before.
+    const locked = await trx('leads').whereIn('id', [lead.id, root.id]).orderBy('id').forUpdate().select('*');
+    const current = locked.find((row) => String(row.id) === String(lead.id));
+    const currentRoot = locked.find((row) => String(row.id) === String(root.id));
+    if (!current || current.deleted_at || !sameAsRead(current, lead)) return { filed: false, reason: 'lead_changed' };
     if (!mergeableExtractedData(current.extracted_data)) return { filed: false, reason: 'extracted_data_shape' };
-    const currentRoot = await trx('leads').where({ id: root.id }).whereNull('deleted_at').first();
-    if (!currentRoot || !OPEN_LEAD_STATUSES.includes(currentRoot.status) || !isSamePersonRoot(current, currentRoot)) {
+    if (!currentRoot || currentRoot.deleted_at || !OPEN_LEAD_STATUSES.includes(currentRoot.status)
+      || !isSamePersonRoot(current, currentRoot)) {
       return { filed: false, reason: 'root_changed' };
     }
     const updated = await trx('leads')
@@ -215,40 +225,66 @@ function bump(counts, key) {
   counts[key] = (counts[key] || 0) + 1;
 }
 
+// Waiting leads that have an earlier same-phone lead in the window: the only
+// rows that can be repeats, so a queue of answered-by-nobody singles never
+// costs a lookup each.
+function repeatCandidatesQuery(dbi) {
+  return applyLeadsAwaitingContactFilter(dbi('leads'), dbi)
+    .whereRaw(`length(${PHONE_LAST10_SQL}) = 10`)
+    .whereExists(function earlierSamePhone() {
+      this.select(dbi.raw('1')).from('leads as earlier')
+        .whereNull('earlier.deleted_at')
+        .whereRaw('earlier.id <> leads.id')
+        .whereRaw(`${phoneLast10Sql('earlier.phone')} = ${phoneLast10Sql('leads.phone')}`)
+        .whereRaw('earlier.first_contact_at < leads.first_contact_at')
+        .whereRaw(`earlier.first_contact_at >= leads.first_contact_at - interval '${REPEAT_WINDOW_DAYS} days'`);
+    });
+}
+
+async function settleOne(dbi, lead, results) {
+  try {
+    const verdict = await resolveRepeatRoot(dbi, lead);
+    if (!verdict.root) {
+      bump(results.kept, verdict.reason);
+      return;
+    }
+    const outcome = await fileRepeat(dbi, { lead, root: verdict.root });
+    if (outcome.filed) {
+      results.filed += 1;
+      results.filings.push({ leadId: String(lead.id), rootId: String(verdict.root.id) });
+    } else {
+      bump(results.kept, outcome.reason);
+    }
+  } catch (err) {
+    results.errors += 1;
+    logger.warn(`[lead-repeat-sweep] lead ${lead.id} left waiting: ${err.message}`);
+  }
+}
+
 /**
- * The nightly run. Waiting leads oldest first (a root is always read before
- * its repeats), one transaction per filing, bounded by WRITE_CAP.
+ * The nightly run. Candidates oldest first (a root is always judged before
+ * its repeats, and each filing is read back by the next lookup), keyset-paged
+ * through the whole queue, one transaction per filing, at most WRITE_CAP.
  */
-async function runLeadRepeatSweep({ dbi = db } = {}) {
+async function runLeadRepeatSweep({ dbi = db, pageSize = PAGE_SIZE } = {}) {
   if (!leadRepeatSweepLive()) return { skipped: 'gate_off' };
 
-  const waiting = await applyLeadsAwaitingContactFilter(dbi('leads'), dbi)
-    .whereRaw(`length(${PHONE_LAST10_SQL}) = 10`)
-    .orderBy('first_contact_at', 'asc')
-    .orderBy('id', 'asc')
-    .limit(SCAN_LIMIT)
-    .select('*');
-
-  const results = { scanned: waiting.length, filed: 0, kept: {}, errors: 0, filings: [] };
-  for (const lead of waiting) {
-    if (results.filed >= WRITE_CAP) break;
-    try {
-      const verdict = await resolveRepeatRoot(dbi, lead);
-      if (!verdict.root) {
-        bump(results.kept, verdict.reason);
-        continue;
-      }
-      const outcome = await fileRepeat(dbi, { lead, root: verdict.root });
-      if (outcome.filed) {
-        results.filed += 1;
-        results.filings.push({ leadId: String(lead.id), rootId: String(verdict.root.id) });
-      } else {
-        bump(results.kept, outcome.reason);
-      }
-    } catch (err) {
-      results.errors += 1;
-      logger.warn(`[lead-repeat-sweep] lead ${lead.id} left waiting: ${err.message}`);
+  const results = { scanned: 0, filed: 0, kept: {}, errors: 0, filings: [] };
+  let after = null;
+  for (let page = 0; page < MAX_PAGES && results.filed < WRITE_CAP; page += 1) {
+    const query = repeatCandidatesQuery(dbi);
+    if (after) {
+      query.where((next) => next.where('first_contact_at', '>', after.first_contact_at)
+        .orWhere((tie) => tie.where('first_contact_at', after.first_contact_at).where('id', '>', after.id)));
     }
+    const rows = await query.orderBy('first_contact_at', 'asc').orderBy('id', 'asc').limit(pageSize).select('*');
+    for (const lead of rows) {
+      if (results.filed >= WRITE_CAP) break;
+      results.scanned += 1;
+      await settleOne(dbi, lead, results);
+    }
+    if (rows.length < pageSize) break;
+    after = rows[rows.length - 1];
   }
 
   logger.info(`[lead-repeat-sweep] scanned=${results.scanned} filed=${results.filed} errors=${results.errors} kept=${JSON.stringify(results.kept)}`);
@@ -262,7 +298,8 @@ module.exports = {
   isSamePersonRoot,
   _test: {
     REPEAT_WINDOW_DAYS,
-    SCAN_LIMIT,
+    PAGE_SIZE,
+    MAX_PAGES,
     WRITE_CAP,
     EARLIER_LIMIT,
     PERFORMED_BY,
