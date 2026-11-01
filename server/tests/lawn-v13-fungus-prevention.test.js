@@ -26,7 +26,7 @@ const lines = (grass, month) => visit(grass, month).secondary.split('\n');
 const lineOf = (grass, month, name) => lines(grass, month).find((l) => l.startsWith(`${name} — `));
 
 const GRAY_LEAF_SPOT_LINE = 'Artavia 2 SC (Azoxy) — gray leaf spot prevention, one pass in May on areas mapped for gray leaf spot last summer';
-const LARGE_PATCH_SPRING_LINE = 'Velista — mapped large patch, spring prevention pass at 2 gal per 1,000 sq ft, one pass in February on areas mapped for large patch this winter';
+const LARGE_PATCH_SPRING_LINE = 'Velista — mapped large patch, spring prevention pass at 2 gal per 1,000 sq ft, one pass in February on areas mapped for large patch this winter, only when the lawn\'s last large patch product was Artavia (never Velista twice in a row)';
 const ALL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 describe('fungus prevention: the recipe', () => {
@@ -65,7 +65,7 @@ describe('fungus prevention: the recipe', () => {
   test.each(TRACKS)('%s: the notes say where each line applies', (grass) => {
     const notes = v13Recipe[grass].notes;
     const largePatch = notes.find((n) => n.startsWith('Large patch: Artavia, then Velista.'));
-    expect(largePatch).toContain("The February spring prevention pass is Velista, after January's Artavia, at 2 gal per 1,000 sq ft on areas mapped for large patch this winter; the disease runs to May.");
+    expect(largePatch).toContain("The February spring prevention pass is Velista at 2 gal per 1,000 sq ft on areas mapped for large patch this winter, only when the lawn's last large patch product was Artavia; a lawn that took Velista in January skips it (no Group 7 twice in a row). The disease runs to May.");
     expect(notes).toContain('Gray leaf spot: Artavia, then Gravex. A lawn mapped for gray leaf spot last summer gets one Artavia prevention pass in May.');
   });
 

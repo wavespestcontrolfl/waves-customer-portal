@@ -970,7 +970,7 @@ describe('Blindside in the recipe', () => {
   test('February is Celsius alone for weeds: no Certainty, no surfactant, no Blindside, and the line says so (then the Velista large patch spring pass)', () => {
     expect(lines(visitFor(2).secondary)).toEqual([
       'Celsius WG — light weed spots only during green-up, 0.085 oz per 1,000 sq ft, alone: no Certainty and no surfactant this month',
-      'Velista — mapped large patch, spring prevention pass at 2 gal per 1,000 sq ft, one pass in February on areas mapped for large patch this winter',
+      'Velista — mapped large patch, spring prevention pass at 2 gal per 1,000 sq ft, one pass in February on areas mapped for large patch this winter, only when the lawn\'s last large patch product was Artavia (never Velista twice in a row)',
     ]);
     const [parsed] = engine.parseProtocolLines(lines(visitFor(2).secondary)[0], 'conditional', { exactName: true });
     expect(parsed).toMatchObject({ scope: 'SPOT_ALLOWANCE', conditional: true });
