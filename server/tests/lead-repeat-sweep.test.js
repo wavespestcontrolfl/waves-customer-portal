@@ -9,6 +9,7 @@ jest.mock('../config/feature-gates', () => ({ leadRepeatSweepLive: jest.fn(() =>
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn() }));
 
 const { leadRepeatSweepLive } = require('../config/feature-gates');
+const logger = require('../services/logger');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const { runLeadRepeatSweep, isSamePersonRoot, _test } = require('../services/lead-repeat-sweep');
 
@@ -131,5 +132,38 @@ describe('runLeadRepeatSweep gate', () => {
     expect(await runLeadRepeatSweep({ dbi })).toEqual({ skipped: 'gate_off' });
     expect(dbi).not.toHaveBeenCalled();
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+});
+
+describe('runLeadRepeatSweep error logging (security review P2)', () => {
+  // A chainable knex stand-in: the first awaited query (the candidate page)
+  // yields one lead; the second (its earlier same-phone lookup) fails with a
+  // message that carries the phone, as knex errors carry their bindings.
+  function failingDbi() {
+    let awaited = 0;
+    const chain = new Proxy({}, {
+      get(target, prop) {
+        if (prop === 'then') {
+          awaited += 1;
+          const outcome = awaited === 1
+            ? Promise.resolve([{ ...LEAD, id: 'lead-2' }])
+            : Promise.reject(Object.assign(new Error("select * from leads where right(phone, 10) = '9415550100'"), { code: '57014' }));
+          return outcome.then.bind(outcome);
+        }
+        return () => chain;
+      },
+    });
+    const dbi = jest.fn(() => chain);
+    dbi.raw = jest.fn(() => 'raw');
+    return dbi;
+  }
+
+  it('logs the error code and lead id, never the message with the phone', async () => {
+    leadRepeatSweepLive.mockReturnValue(true);
+    const result = await runLeadRepeatSweep({ dbi: failingDbi() });
+    expect(result.errors).toBe(1);
+    const lines = logger.warn.mock.calls.map(([line]) => line);
+    expect(lines).toEqual(['[lead-repeat-sweep] lead lead-2 left waiting: 57014']);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/9415550100/);
   });
 });

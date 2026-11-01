@@ -269,10 +269,16 @@ async function fileRepeat(database, { lead, root }) {
     try {
       await bridgeLeadFunnelStage(lead.id, 'duplicate', database);
     } catch (err) {
-      logger.warn(`[lead-repeat-sweep] funnel bridge failed for lead ${lead.id} (status kept): ${err.message}`);
+      logger.warn(`[lead-repeat-sweep] funnel bridge failed for lead ${lead.id} (status kept): ${errorLabel(err)}`);
     }
   }
   return outcome;
+}
+
+// A database error's message carries the query's bindings (the lead's phone),
+// so logs get only its code or name, never the message (security review P2).
+function errorLabel(err) {
+  return err?.code || err?.name || 'Error';
 }
 
 function bump(counts, key) {
@@ -316,7 +322,7 @@ async function settleOne(dbi, lead, results) {
     }
   } catch (err) {
     results.errors += 1;
-    logger.warn(`[lead-repeat-sweep] lead ${lead.id} left waiting: ${err.message}`);
+    logger.warn(`[lead-repeat-sweep] lead ${lead.id} left waiting: ${errorLabel(err)}`);
   }
 }
 
