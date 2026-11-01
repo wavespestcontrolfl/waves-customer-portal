@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
+const { whereLiveCourtship } = require('../services/lead-courtship');
 const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
 const { stampLeadFunnelRow, bridgeLeadFunnelStage, LEAD_STATUS_TO_FUNNEL_STAGE } = require('../services/lead-funnel-bridge');
 // A wizard re-run of the same inquiry inside this window lands as a
@@ -65,22 +66,10 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
     // accept. That rerun is a fresh inquiry and files as a normal new lead.
     // A lead still holding an OPEN estimate stays a duplicate target — the
     // same-phone estimate guard withholds the rerun's draft in that case.
-    .whereRaw(
-      `(estimate_id IS NULL OR EXISTS (SELECT 1 FROM estimates e WHERE e.id = leads.estimate_id AND e.archived_at IS NULL AND e.status IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
-      OPEN_ESTIMATE_STATUSES,
-    )
-    // A wizard draft is mirrored through estimate_data.lead_id, not the FK
-    // (the FK is rescued only at send/view): a draft the office declined —
-    // or that expired or was archived — closed that courtship the same way,
-    // and the 'new' lead it left behind is not a live target either
-    // (codex #3834 r24 P1). Judged on the LATEST mirror: a rerun on the
-    // same token after its draft closed inserts a fresh draft (the draft
-    // lookup skips closed rows), and that newer open draft is the live
-    // courtship — an older closed one is history, not a verdict (r26 P1).
-    .whereRaw(
-      `NOT EXISTS (SELECT 1 FROM estimates e WHERE e.id = (SELECT n.id FROM estimates n WHERE n.estimate_data->>'lead_id' = leads.id::text ORDER BY n.created_at DESC, n.id DESC LIMIT 1) AND (e.archived_at IS NOT NULL OR e.status NOT IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
-      OPEN_ESTIMATE_STATUSES,
-    )
+    // The LATEST mirrored draft (estimate_data.lead_id) closing ends the
+    // courtship the same way (codex #3834 r24 P1, r26 P1). One predicate,
+    // shared with the nightly lead repeat sweep: services/lead-courtship.js.
+    .modify(whereLiveCourtship)
     .where('created_at', '>', new Date(now - WIZARD_LEAD_REUSE_DAYS * 24 * 60 * 60 * 1000))
     // The token path only looks BACK: two lookup-minted rows for the same
     // inquiry reaching /calculate together must not each pick the other and
@@ -123,7 +112,6 @@ const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
-  OPEN_ESTIMATE_STATUSES,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
