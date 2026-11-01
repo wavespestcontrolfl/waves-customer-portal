@@ -248,6 +248,35 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     expect(numbers(trx)).toEqual({ [SERVICE]: 1, s1: 2, s2: 3 });
   });
 
+  test('gate on: the visit never goes ahead of a completed stop or the stop under way', async () => {
+    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+    // The technician finished 8 AM and is on site at 10 AM; a 9 AM visit saved now goes after the 10 AM stop,
+    // so the customer "stops away" count still counts the stop under way (stops-ahead.js).
+    mockDayRows = [timed('s1', '08:00', 1, { status: 'completed', actual_end_time: `${DATE}T12:30:00Z` }),
+      timed('s2', '10:00', 2, { status: 'on_site' }), timed('s3', '13:00', 3)];
+    const trx = fakeTrx({ stored: unpinned(), current });
+    await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toEqual(['s1', 's2', SERVICE, 's3']);
+    expect(numbers(trx)).toEqual({ [SERVICE]: 3, s3: 4 });
+    expect(placedLines()).toHaveLength(1);
+    // Stops done out of order: a pending 8 AM stop numbered ahead of a completed 9:30 stop keeps its place,
+    // and the visit goes after the completed stop.
+    mockDayRows = [timed('p1', '08:00', 1), timed('c2', '09:30', 2, { status: 'completed', actual_end_time: `${DATE}T14:00:00Z` }),
+      timed('s3', '13:00', 3)];
+    const late = fakeTrx({ stored: unpinned(), current: { p1: 1, c2: 2, s3: 3 } });
+    await expect(placeMovedVisit(late, { serviceId: SERVICE })).resolves.toEqual(['p1', 'c2', SERVICE, 's3']);
+    expect(numbers(late)).toEqual({ [SERVICE]: 3, s3: 4 });
+  });
+
+  test('gate on: a visit that is itself under way keeps its number', async () => {
+    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+    mockDayRows = dayRows();
+    const trx = fakeTrx({ stored: unpinned({ status: 'on_site', route_order: 3 }), current: { ...current, [SERVICE]: 3 } });
+    await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toBeNull();
+    expect(trx.writes).toEqual([]);
+    expect(placedLines()).toEqual([]);
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+  });
+
   test('gate on: untimed, unassigned, no_context, lock_busy and grouped refusals still write nothing', async () => {
     process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
     mockDayRows = dayRows();

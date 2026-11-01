@@ -1309,6 +1309,7 @@ function refusePlacement(serviceId, source, reason, date) {
 // runs inside placeInSavepoint's savepoint, under the tech-day lock it holds.
 async function placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId, reason }) {
   const order = timeFallbackOrder(context.rows, { ...context.target, id: serviceId, technician_id: technicianId });
+  if (!order) return null;
   await writeOrderNumbers(sp, order, date, technicianId);
   logger.info(`[arrival-route] route order placed by time after refusal: service=${String(serviceId).slice(0, 8)} reason=${reason}`);
   await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
