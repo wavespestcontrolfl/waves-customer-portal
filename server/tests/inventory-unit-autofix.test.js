@@ -535,6 +535,17 @@ describe('resolveDryOzTarget', () => {
     expect(resolveDryOzTarget(dry({ cost_per_unit: '', cost_unit: null }))).toBe('g');
   });
 
+  it('parks an explicit cost unit that cannot price weight stock (Codex #7329 r2)', () => {
+    for (const cost_unit of ['fl_oz', 'gal', 'ml', 'each', 'bag', 'oz/gal']) {
+      expect([cost_unit, resolveDryOzTarget(dry({ cost_per_unit: '3.10', cost_unit }))]).toEqual([cost_unit, null]);
+    }
+    // Contradicting evidence parks even with no price.
+    expect(resolveDryOzTarget(dry({ cost_per_unit: null, cost_unit: 'fl_oz' }))).toBe(null);
+    for (const cost_unit of ['oz', 'Ounces', 'lb', 'g', 'kg']) {
+      expect([cost_unit, resolveDryOzTarget(dry({ cost_per_unit: '3.10', cost_unit }))]).toEqual([cost_unit, 'g']);
+    }
+  });
+
   it('parks a dry formulation whose name or fields look liquid (Unit Review heuristic)', () => {
     expect(resolveDryOzTarget(dry({ name: 'Talstar Granules' }))).toBe(null);
     expect(resolveDryOzTarget(dry({ name: 'Liquid Fertilizer Mix' }))).toBe(null);

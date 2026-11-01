@@ -213,6 +213,17 @@ function hasImplicitCostBasis(product) {
   return numberOrNullValue(product.cost_per_unit) != null && !String(product.cost_unit == null ? '' : product.cost_unit).trim();
 }
 
+// An explicit cost unit must still price the converted stock. Weight units and
+// the oz family convert to g / lb; a volume (fl_oz), count (each) or unknown
+// cost unit does not, so inventory-cost.js would stop costing the product's
+// usage (and contradicts the dry reading anyway). Those rows stay for a person.
+function costUnitBlocksWeight(product) {
+  const raw = String(product.cost_unit == null ? '' : product.cost_unit).trim();
+  if (!raw) return false;
+  const def = unitDefinition(raw);
+  return !def || (def.dimension !== 'weight' && def.dimension !== 'ambiguous');
+}
+
 // Any sign the product is stocked by the piece: a count word in the name,
 // category, subcategory, formulation or unit type, or a rate/default unit
 // counted per item ("each/station").
@@ -234,7 +245,7 @@ function resolveDryOzTarget(product = {}) {
   const formulation = String(product.formulation == null ? '' : product.formulation).trim().toLowerCase();
   if (!hasDryEvidence(formulation)) return null;
   if (hasCountEvidence(product)) return null;
-  if (hasImplicitCostBasis(product)) return null;
+  if (hasImplicitCostBasis(product) || costUnitBlocksWeight(product)) return null;
   if (looksLiquidProduct(product)) return null;
   if (isVolumeBaseUnit(product.rate_unit) || isVolumeBaseUnit(product.default_unit)) return null;
   return Number(product.inventory_on_hand) >= DRY_OZ_POUND_THRESHOLD_OZ ? 'lb' : 'g';
