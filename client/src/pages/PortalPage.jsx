@@ -8620,7 +8620,13 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           // before. A genuine transport/5xx failure (no per-field detail)
           // still re-queues the whole batch, unchanged.
           const rejectedFields = Array.isArray(err?.rejected) ? err.rejected : [];
-          const requeueable = (fields) => (awayWatchPairRevision.current === savingAwayWatchRevision ? fields : withoutAwayWatchPair(fields));
+          // What a failure may re-queue: never an Away Watch pair the member withdrew after this save left, and never
+          // `confirmed_as_of` (every flush synthesizes it fresh), so a batch left with no real field queues nothing.
+          const requeueable = (fields) => {
+            const kept = awayWatchPairRevision.current === savingAwayWatchRevision ? { ...fields } : withoutAwayWatchPair(fields);
+            delete kept.confirmed_as_of;
+            return kept;
+          };
           if (rejectedFields.length) {
             setFieldErrors(prev => {
               const next = { ...prev };
@@ -8645,7 +8651,8 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             // left wins) so the next flush retries these without clobbering
             // fresher input. The UI is not reverted, so queue and screen
             // agree.
-            pendingRef.current = { ...requeueable(toSave), ...pendingRef.current };
+            const retry = requeueable(toSave);
+            if (Object.keys(retry).length) pendingRef.current = { ...retry, ...pendingRef.current };
           }
           throw err;
         }

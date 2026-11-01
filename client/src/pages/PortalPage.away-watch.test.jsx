@@ -120,6 +120,26 @@ describe('Away Watch section on the Property tab', () => {
     expect(sent).not.toHaveProperty('awayWatchUntil');
   });
 
+  it('an Away Watch-only save that fails after the member clears a day queues nothing: a property-switch flush sends no request', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: {}, hasLawnCare: false, awayWatchEnabled: true });
+    let failFirst;
+    api.updatePropertyPreferences
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirst = reject; }))
+      .mockResolvedValue({ preferences: {}, saved: true });
+    render(<PropertyTab customer={customer} />);
+    await sectionOf();
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.fromLabel), { target: { value: '2026-06-01' } });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '2026-09-15' } });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '' } });
+    failFirst(new Error('network down'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const waiters = [];
+    window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
+    await Promise.allSettled(waiters);
+    expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+  });
+
   it('a saved pair shows its summary; Remove sends two nulls and empties the inputs', async () => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { awayWatchFrom: '2026-06-01', awayWatchUntil: '2026-09-15' }, hasLawnCare: false, awayWatchEnabled: true });
     render(<PropertyTab customer={customer} />);
