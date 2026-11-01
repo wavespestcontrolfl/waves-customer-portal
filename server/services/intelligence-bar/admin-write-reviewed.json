@@ -21,7 +21,7 @@
         }
       },
       "required": [],
-      "reviewed": "Handler read end to end (admin-sms-templates.js PUT /:id) with validateTemplateBody, extractTemplatePlaceholders and the keep-list checks it calls: loads the template row, validates the new body (required placeholders, the STOP line on first-contact texts, no double braces), then one UPDATE of sms_templates (body, name, updated_at). is_active and trigger_event_key are left off the allow-list: they switch a text on or off. Re-reviewed 2026-10-30 (#7129): REQUIRED_TEMPLATE_PLACEHOLDERS gained the two cancellation balance twins ({balance}, {pay_url}); a stricter validator only, same writes and signals.",
+      "reviewed": "Handler read end to end (admin-sms-templates.js PUT /:id) with validateTemplateBody, extractTemplatePlaceholders and the keep-list checks it calls: loads the template row, validates the new body (required placeholders, the STOP line on first-contact texts, no double braces), then one UPDATE of sms_templates (body, name, updated_at). is_active and trigger_event_key are left off the allow-list: they switch a text on or off. Re-reviewed 2026-10-30 (#7129): REQUIRED_TEMPLATE_PLACEHOLDERS gained the two cancellation balance twins ({balance}, {pay_url}); a stricter validator only, same writes and signals. Re-reviewed 2026-11-01 (#7368): REQUIRED_TEMPLATE_PLACEHOLDERS gained rain_out_customer_pick_v1 ({pick_url}, {pick_by}); a stricter validator only, same writes and signals.",
       "reason": "Changes the stored wording of one SMS template. The handler runs the same validator the Templates screen runs. No send, queue, schedule or customer lookup is in the chain; the only write is one UPDATE of sms_templates.",
       "noSend": "Changes template wording only. No text is sent or queued now; later texts of this kind use the new wording.",
       "writes": [
@@ -33,7 +33,7 @@
       "unresolved": [
         "routes/admin-sms-templates.js#db.update"
       ],
-      "hash": "0393f4148b3ce50be0f2fcbe4ace7194"
+      "hash": "e5bf6579c2f924c8cbc07cee5e3c6660"
     },
     {
       "method": "PUT",

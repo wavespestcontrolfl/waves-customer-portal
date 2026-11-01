@@ -993,6 +993,57 @@ loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
 page reloads. A page loaded before the gate was set sends no field and gets
 the same reload when a date would be named.
 
+Visits handed to the customer by Quick Move (owner 2026-11-01; the hand-off is
+behind `GATE_QUICKMOVE_CUSTOMER_PICK`, but everything below is keyed on the
+column and is NOT gated). Quick Move's "let the customer pick a day" parks a
+recurring plan visit with no window at a placeholder date about a week out and
+sets `scheduled_services.customer_pick_by` (timestamptz: 8 PM ET the next day).
+For a row with `customer_pick_by` set:
+- **Not refused for having no time.** The self-serve notice rule
+  (`services/scheduling/self-serve-notice.js visitInsideMoveNoticeWindow`)
+  treats a windowless row WITH the column as outside the notice window, so
+  `GET /api/public/reschedule/:token` answers a movable visit (not
+  `not_reschedulable`) and the commit accepts a pick. A windowless row
+  without it is refused exactly as before.
+- **Single-visit move while it has no time.** The date is a placeholder, so
+  a pick never shifts the plan's later visits. This holds while the row has
+  the column and no window (`awaitingCustomerPick`); once any writer gives it
+  a time (the pick, Auto-Dispatch, a staff edit or move, whether or not that
+  writer cleared the column) it is an ordinary visit again. While it holds,
+  the GET sends `reanchorPullForwardDays: null`,
+  `collectiveAnchor: false` and `roundsOneOff: null`, omits `nextVisit`, and the
+  commit moves only this visit (no series re-anchor). A page that disclosed
+  series anchoring for the visit (loaded before the hand-off) gets
+  `409 SCOPE_CHANGED` and reloads.
+- **Never confirmable while it has no time.** A customer confirmation would
+  hold the visit out of Auto-Dispatch (`CUSTOMER_CONFIRMED`), the booking the
+  text promised. While the row has the column and no window
+  (`self-serve-notice.js awaitingCustomerPick`): `GET
+  /api/public/appointment/:token` sends `confirmable: false`, and both
+  `POST /api/public/appointment/:token/confirm` and the portal's
+  `POST /api/schedule/:id/confirm` answer `409 { error: "This visit doesn't
+  have a time yet. Please pick one with the link we texted you.", code:
+  'PICK_A_TIME' }` and write nothing. The portal confirm's write also requires
+  `customer_pick_by IS NULL OR window_start IS NOT NULL`, since a hand-off
+  keeps the status its CAS pins; the token confirm's CAS already pins the
+  date and start it read. Once a time is set, both confirm as before.
+- **The marker ends when a person's move gives the visit a time.** A customer
+  pick, a staff move and any other `SmartRebooker.reschedule` caller clear
+  `customer_pick_by` in the move's own write when the row lands with a window.
+  A move that leaves it windowless (a date-only move, or a series move of an
+  earlier visit that sweeps it along) keeps the marker: no time was chosen,
+  so the link and the Auto-Dispatch wait keep working. An Auto-Dispatch
+  placement keeps it too (it is how the page knows the visit was booked for
+  the customer).
+- **Auto-Dispatch waits.** `loadEligibleServices` and the unplaced-visit
+  alert skip the row until `customer_pick_by` passes; the page still accepts
+  a pick after the deadline, until a run books it.
+- **After a kill.** Turning `GATE_QUICKMOVE_CUSTOMER_PICK` off stops new
+  hand-offs only (the Quick Move option disappears and both
+  `POST .../customer-pick` routes answer `404 { error: 'disabled' }`). A link
+  already sent keeps working, and Auto-Dispatch still books an unpicked visit
+  after its deadline.
+
 Lawn rounds on the public reschedule link (owner 2026-10-28, `lawn_rounds_9`;
 no gate, inert until a visit carries that pattern; every other pattern is
 byte-identical). A `lawn_rounds_9` visit has one visit in each of nine fixed
