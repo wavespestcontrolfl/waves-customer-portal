@@ -3017,12 +3017,12 @@ export function calculateEstimate(inputs) {
   /* ── Plugging ────────────────────────────────────────────── */
   if (svcPlugging && !isCommercial && plugArea > 0) {
     hasOT = true;
-    const cpp = 19.99 / 18, ir = 150;
+    const cpp = 109.76 / 64, ir = 150; // mirrors SPECIALTY.plugging (Home Depot SodPods Floratam 64)
     let ppsf, sl;
     if (plugSpacing == 6) { ppsf = 4; sl = '6" Premium'; }
     else if (plugSpacing == 9) { ppsf = 1.78; sl = '9" Standard'; }
     else { ppsf = 1; sl = '12" Economy'; }
-    const tp = Math.ceil(plugArea * ppsf), tr = Math.ceil(tp / 18);
+    const tp = Math.ceil(plugArea * ppsf), tr = Math.ceil(tp / 64);
     const fp = otP(Math.max(250, Math.round((tp * cpp + (tp / ir) * LABOR) / (1 - 0.45))));
     const ps = Math.round(fp / plugArea * 100) / 100;
     otItems.push({ name: 'Lawn Plugging Service', price: fp, detail: plugArea.toLocaleString() + ' sf | ' + tp.toLocaleString() + ' plugs | $' + ps + '/sf', spacing: sl, plugArea, plugSpacing, warn6: plugSpacing == 6 });

@@ -529,7 +529,7 @@ tiers, bracket tables, or fixed floors as identified below.
 
 | Service | Margin target | Floor | Notes |
 |---|---|---|---|
-| Plugging | 45% | $250 | 6in/9in/12in spacing rates; $1.111/plug |
+| Plugging | 45% | $250 | 6in/9in/12in spacing rates; $1.715/plug (Home Depot SodPods Floratam 64-count, 2026-10-31) |
 | Top-dressing ⅛" | 60% | $250 | sand $4.09, delivery $2.62 |
 | Top-dressing ¼" | 65% | $450 | sand $4.09, delivery $5.24 |
 | Dethatching | 60% | $150 | material $2.10/1K |

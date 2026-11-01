@@ -88,6 +88,11 @@ function refuseInsideMoveNotice(row, noticeApplies) {
   if (noticeApplies && require('./scheduling/self-serve-notice').visitInsideMoveNoticeWindow(row)) throw guardError('self_serve_notice');
 }
 
+// The size-rule inputs of a visit (lawn rounds): its pattern, whether its date is a date exception, and the regular (cadence)
+// date that exception deviated from. The decide step chose single or series from them (shouldReanchor), so the locked row
+// must still carry the same ones, as the public POST pins. Not the admin-gate scope check: this executor runs on its own gates.
+const sizeRuleKey = (row) => [row.recurring_pattern, row.date_exception === true, dateOnlyString(row.date_exception_cadence_date)].join('|');
+
 function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, expected, inboundSmsLogId, repliedAt, noticeApplies }) {
   return async ({ trx }) => {
     const fences = require('./call-reschedule-apply');
@@ -95,12 +100,14 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
     // files a schedule-change request, so that request is either visible
     // below or starts after this move.
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
-      .first('scheduled_date', 'window_start', 'window_end', 'status', 'customer_id', 'visit_id', 'source_action', 'customer_confirmed', 'office_move_approved_for');
+      .first('scheduled_date', 'window_start', 'window_end', 'status', 'customer_id', 'visit_id', 'source_action', 'customer_confirmed', 'office_move_approved_for',
+        'recurring_pattern', 'date_exception', 'date_exception_cadence_date');
     // The locked visit is still the one the decide step checked: an Edit
     // appointment save logs no move, and the series mover pins only date and
     // start, so the comparison is made here for both movers.
-    const unchanged = row && dateOnlyString(row.scheduled_date) === expected.date
-      && hhmm(row.window_start) === expected.start && hhmm(row.window_end) === expected.end
+    const unchanged = row
+      && [dateOnlyString(row.scheduled_date), hhmm(row.window_start), hhmm(row.window_end), sizeRuleKey(row)].join('|')
+        === [expected.date, expected.start, expected.end, expected.rule].join('|')
       && row.status === expected.status && String(row.customer_id) === String(customerId) && !row.visit_id;
     if (!unchanged) throw guardError('visit_changed');
     refuseInsideMoveNotice(row, noticeApplies);
@@ -308,7 +315,7 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId,
   };
   const moveGuard = buildMoveGuard({
     decisionId, offer, visitId: svc.id, customerId: svc.customer_id, now, target, inboundSmsLogId, repliedAt,
-    expected: { date: dateOnlyString(svc.scheduled_date), start: hhmm(svc.window_start), end: hhmm(svc.window_end), status: svc.status },
+    expected: { date: dateOnlyString(svc.scheduled_date), start: hhmm(svc.window_start), end: hhmm(svc.window_end), status: svc.status, rule: sizeRuleKey(svc) },
     noticeApplies: !eligible.missed,
   });
   // Customer-facing move: the offer was built under the travel-gap rule.
@@ -378,4 +385,4 @@ async function executeMove({ decisionId, offer, slot, visit, inboundSmsLogId, re
   }
 }
 
-module.exports = { actMoveLive, executeMove, finishMoveEffects, buildMoveGuard, INITIATED_BY, MAX_REPLY_AGE_MS };
+module.exports = { actMoveLive, executeMove, finishMoveEffects, buildMoveGuard, sizeRuleKey, INITIATED_BY, MAX_REPLY_AGE_MS };

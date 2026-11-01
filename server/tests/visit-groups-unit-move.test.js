@@ -306,6 +306,26 @@ describe('moveVisitAsUnit', () => {
     }
   });
 
+  test('lawn rounds size rule: a grouped one-off moves the whole visit as a unit; a bigger move still refuses the implicit series move', async () => {
+    const prevGate = process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    const rounds = { is_recurring: true, recurring_pattern: 'lawn_rounds_9' };
+    try {
+      // Aug 30 -> Sep 2: 3 days, both in round 7 (Aug 22 - Sep 30): a one-off, no series move.
+      db.__script = script({ members: [member('a', rounds), member('b')] });
+      const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' });
+      expect(out.visitMove.moved).toEqual(['a', 'b']);
+      // Aug 30 -> Sep 25: 26 days re-anchors the series, which this mover cannot carry.
+      db.__script = script({ members: [member('a', rounds), member('b')] });
+      const rb = fakeRebooker();
+      await expect(moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-25', initiatedBy: 'admin' }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED' });
+      expect(rb.reschedule).not.toHaveBeenCalled();
+    } finally {
+      if (prevGate === undefined) delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; else process.env.GATE_ADMIN_COLLECTIVE_MOVE = prevGate;
+    }
+  });
+
   test('a windowless tapped row anchors the sibling offset on the VISIT start; no anchor at all with windowed siblings is refused (local audit)', async () => {
     // visit start 09:00 (VISIT), tapped row windowless, sibling 10:00-11:00, request 13:00 ⇒ +4h ⇒ sibling 14:00-15:00
     db.__script = script({ members: [member('a', { window_start: null, window_end: null }), member('b', { window_start: '10:00', window_end: '11:00' })] });
@@ -361,6 +381,15 @@ describe('moveVisitAsUnit', () => {
       const single = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { seriesPolicy: 'single' } });
       expect(rebooker.reschedule).not.toHaveBeenCalled();
       expect(single).toMatchObject({ success: true, visitMove: { alreadyAtTarget: true } });
+      // a committed lawn rounds one-off (the primary carries its date exception): no series operation to replay
+      db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [
+        member('a', { scheduled_date: '2026-09-02', is_recurring: true, recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: '2026-08-30' }),
+        member('b', { scheduled_date: '2026-09-02' }),
+      ] });
+      rebooker = replayer();
+      const oneOff = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+      expect(rebooker.reschedule).not.toHaveBeenCalled();
+      expect(oneOff).toMatchObject({ success: true, visitMove: { alreadyAtTarget: true } });
     } finally { delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; }
     // collective gate dark: no series operation could exist → plain no-op
     db.__script = committed();

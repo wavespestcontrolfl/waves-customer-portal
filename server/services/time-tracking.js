@@ -18,6 +18,7 @@ const { lockPayrollMutationsShared } = require('./payroll-lock');
 const { paidLineCoveringWeeks } = require('./payroll-paid-line-weeks');
 const { unpaidMealUnits } = require('../utils/unpaid-meal');
 const { autoLunchLive, shiftCloseReviewLive } = require('../config/feature-gates');
+const { recordAuditEvent } = require('./audit-log');
 
 const UNDO_STOP_WINDOW_MINUTES = 30;
 const AUTO_LUNCH_OFF_MESSAGE = 'Auto lunch is not turned on, so there is no lunch to change.';
@@ -718,6 +719,131 @@ async function adminEditEntry(entryId, {
 
   logger.info(`[time-tracking] Entry ${entryId} edited by ${edited_by}`, { edit_reason });
   return updated;
+}
+
+// An added missed shift is a completed day, so a span past this is a typo (a
+// wrong date or an AM/PM slip), not a shift. The edit path has no such cap.
+const MAX_ADDED_SHIFT_MINUTES = 16 * 60;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/i;
+
+function parseAddedInstant(value, label) {
+  if (typeof value !== 'string' || !INSTANT_RE.test(value.trim())) {
+    throw staffTimeHttpError(400, `${label} must be a date and time with a time zone.`);
+  }
+  const parsed = new Date(value.trim());
+  if (Number.isNaN(parsed.getTime())) {
+    throw staffTimeHttpError(400, `${label} must be a date and time with a time zone.`);
+  }
+  return parsed;
+}
+
+// Validate the requested interval before any lock is taken. Returns the parsed
+// instants and the stored duration (hundredths of a minute, like adminEditEntry).
+function validateAddedShiftInterval(clockInValue, clockOutValue, now = new Date()) {
+  const clockIn = parseAddedInstant(clockInValue, 'clock_in');
+  const clockOut = parseAddedInstant(clockOutValue, 'clock_out');
+  if (clockOut.getTime() <= clockIn.getTime()) {
+    throw staffTimeHttpError(400, 'clock_out must be after clock_in.');
+  }
+  if (clockOut.getTime() > now.getTime()) {
+    throw staffTimeHttpError(400, 'A missed shift cannot end in the future.');
+  }
+  const durationMinutes = Math.round(((clockOut - clockIn) / 60000) * 100) / 100;
+  if (durationMinutes > MAX_ADDED_SHIFT_MINUTES) {
+    throw staffTimeHttpError(400, 'A missed shift cannot be longer than 16 hours. Check the dates and AM/PM.');
+  }
+  return { clockIn, clockOut, durationMinutes };
+}
+
+// Lock the technician row. Clock-in locks the same row before it checks for an
+// open shift, so an added shift and a live clock-in cannot both pass the
+// overlap check.
+async function lockTechnicianForAddedShift(trx, technicianId) {
+  if (typeof technicianId !== 'string' || !UUID_RE.test(technicianId)) {
+    throw staffTimeHttpError(404, 'Technician not found.');
+  }
+  const technician = await trx('technicians')
+    .where({ id: technicianId })
+    .forUpdate()
+    .first('id', 'active');
+  if (!technician) throw staffTimeHttpError(404, 'Technician not found.');
+  if (!technician.active) {
+    throw staffTimeHttpError(409, 'That staff account is inactive; reactivate it before adding a shift.');
+  }
+}
+
+async function assertNoShiftOverlap(trx, technicianId, clockIn, clockOut) {
+  const clash = await trx('time_entries')
+    .where({ technician_id: technicianId, entry_type: 'shift' })
+    .whereNot({ status: 'voided' })
+    .where('clock_in', '<', clockOut)
+    .where((q) => q.whereNull('clock_out').orWhere('clock_out', '>', clockIn))
+    .first('id');
+  if (clash) {
+    throw staffTimeHttpError(409, 'That time overlaps a shift already on this technician. Edit that shift instead.');
+  }
+}
+
+/**
+ * Admin adds a shift the technician never clocked (a missed day). Treated like
+ * an edited shift: same week/day/pay guards as adminEditEntry, the row carries
+ * the edit markers (status 'edited', edited_by, edit_reason, edited_at), the
+ * summaries are recomputed and the week's sign-off is cleared.
+ */
+async function adminAddEntry({
+  technician_id, clock_in, clock_out, notes, edit_reason, edited_by,
+}) {
+  if (typeof edit_reason !== 'string' || !edit_reason.trim()) {
+    throw staffTimeHttpError(400, 'edit_reason is required.');
+  }
+  const interval = validateAddedShiftInterval(clock_in, clock_out);
+  const workDate = staffWorkDate(interval.clockIn);
+
+  const created = await db.transaction(async (trx) => {
+    await lockStaffWeeks(trx, technician_id, [staffWeekStartForWorkDate(workDate)]);
+    await lockTechnicianForAddedShift(trx, technician_id);
+    await assertEntryMutable(trx, {
+      technician_id,
+      clock_in: interval.clockIn,
+      status: 'completed',
+      approval_status: 'pending',
+    }, 'add', [workDate]);
+    await assertNoShiftOverlap(trx, technician_id, interval.clockIn, interval.clockOut);
+
+    const now = new Date();
+    const [saved] = await trx('time_entries')
+      .insert({
+        technician_id,
+        entry_type: 'shift',
+        status: 'edited',
+        approval_status: 'pending',
+        clock_in: interval.clockIn,
+        clock_out: interval.clockOut,
+        duration_minutes: interval.durationMinutes,
+        notes: notes ? String(notes).trim() || null : null,
+        source: 'admin_added',
+        edit_reason: edit_reason.trim(),
+        edited_by: edited_by || null,
+        edited_at: now,
+      })
+      .returning('*');
+    await recordAuditEvent({
+      trx,
+      critical: true,
+      actor_type: 'admin',
+      actor_id: edited_by || null,
+      action: 'payroll.time_entry_added',
+      resource_type: 'time_entries',
+      resource_id: saved.id,
+      metadata: { technician_id, work_date: workDate, duration_minutes: interval.durationMinutes },
+    });
+    await recomputeEntryMutationSummaries(trx, technician_id, [workDate]);
+    return saved;
+  });
+
+  logger.info(`[time-tracking] Shift ${created.id} added by ${edited_by}`, { edit_reason });
+  return created;
 }
 
 /**
@@ -1446,6 +1572,7 @@ module.exports = {
   closeActiveShiftAtomically,
   getStatus,
   adminEditEntry,
+  adminAddEntry,
   confirmAutoClose,
   voidEntry,
   computeDailySummary,

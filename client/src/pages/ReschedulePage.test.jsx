@@ -613,6 +613,96 @@ describe('ReschedulePage weather-move banner', () => {
   });
 });
 
+// Lawn rounds size rule (owner 2026-10-31): the server discloses payload.roundsOneOff; a date within
+// maxDays of fromDate and inside [roundStart, roundEnd] moves only this visit, a bigger one re-anchors.
+describe('ReschedulePage lawn rounds size rule', () => {
+  const TERMS = { maxDays: 7, fromDate: '2026-10-15', roundStart: '2026-10-01', roundEnd: '2026-11-09' };
+  const day = (date, fullDate) => ({
+    date, fullDate, nearby: false,
+    slots: [{ start_time: '13:00', end_time: '14:00', start_label: '1:00 PM', end_label: '2:00 PM', technician_id: 'tech-1' }],
+  });
+  // The picker opens on one day; each test offers the one date it is about.
+  const payload = (date, fullDate, over = {}) => reschedulablePayload({
+    isRecurring: true, collectiveAnchor: true, roundsOneOff: TERMS, current: { date: '2026-10-15', windowStart: '09:00', windowEnd: '10:00' },
+    availability: { days: [day(date, fullDate)] },
+    ...over,
+  });
+  const ONE_OFF_DAY = ['2026-10-22', 'Thursday, October 22'];   // +7
+  const BIG_DAY = ['2026-10-23', 'Friday, October 23'];         // +8
+  const NEXT_ROUND_DAY = ['2026-11-10', 'Tuesday, November 10']; // round 9
+  const choose = () => fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on/ }));
+  const ONE_OFF = /Only this visit will move — the rest of your regular service schedule stays the same\./;
+  const REANCHOR = /re-anchors your later visits around the new date/;
+
+  it('a date within 7 days inside the round says only this visit moves', async () => {
+    stubFetch({ get: jsonResponse(payload(...ONE_OFF_DAY)) });
+    renderPage();
+    expect(await screen.findByText(REANCHOR)).toBeInTheDocument(); // nothing picked yet: the steady note
+    choose();
+    expect(screen.getByText(ONE_OFF)).toBeInTheDocument();
+    expect(screen.queryByText(REANCHOR)).not.toBeInTheDocument();
+  });
+
+  it.each([['8 days out', BIG_DAY], ['a short move into the next round', NEXT_ROUND_DAY]])('%s keeps the re-anchor note', async (_label, [date, fullDate]) => {
+    stubFetch({ get: jsonResponse(payload(date, fullDate, date === '2026-11-10' ? { current: { date: '2026-11-07', windowStart: '09:00', windowEnd: '10:00' }, roundsOneOff: { ...TERMS, fromDate: '2026-11-07' } } : {})) });
+    renderPage();
+    await screen.findByText(REANCHOR);
+    choose();
+    expect(screen.getByText(REANCHOR)).toBeInTheDocument();
+    expect(screen.queryByText(ONE_OFF)).not.toBeInTheDocument();
+  });
+
+  it('the commit POST carries the size rule the page showed, and the success line follows seriesShifted', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(payload(...ONE_OFF_DAY)),
+      post: jsonResponse({
+        success: true, originalDate: '2026-10-15', newDate: '2026-10-22', seriesShifted: false,
+        window: { start: '13:00', end: '14:00' }, startLabel: '1:00 PM', endLabel: '2:00 PM',
+      }),
+    });
+    renderPage();
+    await screen.findByText(REANCHOR);
+    choose();
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const posted = JSON.parse(fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST')[1].body);
+    expect(posted.disclosed_rounds_one_off).toEqual(TERMS);
+    expect(posted.disclosed_collective).toBe(true);
+    expect(screen.queryByText(/We also shifted your upcoming visits/)).not.toBeInTheDocument();
+  });
+
+  it('a series move of a rounds visit shows the shifted-visits success line', async () => {
+    stubFetch({
+      get: jsonResponse(payload(...BIG_DAY)),
+      post: jsonResponse({
+        success: true, originalDate: '2026-10-15', newDate: '2026-10-23', seriesShifted: true,
+        window: { start: '13:00', end: '14:00' }, startLabel: '1:00 PM', endLabel: '2:00 PM',
+      }),
+    });
+    renderPage();
+    await screen.findByText(REANCHOR);
+    choose();
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+    await waitFor(() => expect(screen.getByText(/We also shifted your upcoming visits/)).toBeInTheDocument());
+  });
+
+  it('a visit with no rounds rule keeps today\'s copy for the same date and posts a null disclosure', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(payload(...ONE_OFF_DAY, { roundsOneOff: null })),
+      post: jsonResponse({ success: true, originalDate: '2026-10-15', newDate: '2026-10-22', window: { start: '13:00', end: '14:00' }, startLabel: '1:00 PM', endLabel: '2:00 PM' }),
+    });
+    renderPage();
+    await screen.findByText(REANCHOR);
+    choose();
+    expect(screen.getByText(REANCHOR)).toBeInTheDocument();
+    expect(screen.queryByText(ONE_OFF)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const posted = JSON.parse(fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST')[1].body);
+    expect(posted.disclosed_rounds_one_off).toBeNull();
+  });
+});
+
 describe('ReschedulePage collective anchoring', () => {
   it('shows the schedule-follows-your-treatment note and drops the pull-forward warning when collectiveAnchor is on', async () => {
     stubFetch({

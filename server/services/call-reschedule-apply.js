@@ -93,6 +93,7 @@ const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 const { stripServiceSuffixes } = require('../utils/service-normalizer');
 const { serviceNameCandidates } = require('./service-completion-profiles');
 const { assertAdminAppointmentWindow } = require('./scheduling/window-rules');
+const { datesMoveSeries } = require('./lawn-rounds');
 const { isEnabled } = require('../config/feature-gates');
 const { createHash } = require('crypto');
 const logger = require('./logger');
@@ -383,6 +384,9 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     propertyKey: targetKey,
     visitId: visit.id,
     dateMove: currentDate !== newDate,
+    // A date move that shifts the series: every date move except a lawn rounds one-off (size rule,
+    // owner 2026-10-31: 7 days or fewer inside the round moves only this visit).
+    seriesMove: datesMoveSeries(visit, currentDate, newDate),
     from: { date: currentDate, start: currentStart, end: hhmm(visit.window_end) },
     newDate,
     newWindow: { start: newStart, end: newEnd },
@@ -409,6 +413,8 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes',
       'scheduled_services.service_key_snapshot', 'scheduled_services.status', 'scheduled_services.source_action', 'scheduled_services.visit_id',
       'scheduled_services.customer_confirmed',
+      // The size rule for lawn rounds reads the pattern and the regular (cadence) date.
+      'scheduled_services.recurring_pattern', 'scheduled_services.date_exception', 'scheduled_services.date_exception_cadence_date',
       'scheduled_services.internal_notes', 'scheduled_services.is_recurring', 'scheduled_services.self_booking_id',
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
       'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
@@ -426,7 +432,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
   const plan = planRescheduleFromCall({ call, v2, customer, candidates, now, humanOverride: { visitId } });
   if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason };
   const visit = candidates.find((row) => String(row.id) === String(plan.visitId));
-  const seriesIds = plan.dateMove ? occurrenceIds : [];
+  const seriesIds = plan.seriesMove ? occurrenceIds : [];
   const affectedVisitIds = [...new Set([visit.id, ...seriesIds].map(String))].sort();
   const beforeMove = async (trx) => {
     // The call-booking creator takes this canonical fence before reading the
@@ -497,7 +503,12 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
         }
       },
       beforeMove,
-      ...(plan.dateMove ? { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences } : { seriesPolicy: 'single' }),
+      // No date change: a plain single edit. A date change the plan calls a one-off (lawn rounds size rule) is
+      // single only because of that rule, so the rebooker judges it again (expectScope). A series move keeps the
+      // reviewed occurrence set, and its scope when the review previewed one.
+      ...[{ seriesPolicy: 'single' }, { expectScope: 'single' }, {
+        expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences, ...(occurrenceIds.length ? { expectScope: 'series' } : {}),
+      }][Number(plan.dateMove) + Number(plan.seriesMove)],
       expect: {
         scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
@@ -799,7 +810,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
       return { outcome: 'noop', reason: 'already_at_requested_time', visitId: visit.id, cardsResolved };
     }
     const result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, INITIATED_BY, {
-      keepStatus: true, beforeMove, ...(plan.dateMove ? {} : { seriesPolicy: 'single' }), moveGuard: writeDecision,
+      keepStatus: true, beforeMove, ...[{ seriesPolicy: 'single' }, { expectScope: 'single' }, {}][Number(plan.dateMove) + Number(plan.seriesMove)], moveGuard: writeDecision,
       sourceSurface: 'call_reschedule', notifyRequested: false,
       expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
@@ -1272,6 +1283,8 @@ async function applyCallMakeupMove({ conn, call, plan, procToken = null, procGen
     result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, MAKEUP_REASON_CODE, INITIATED_BY, {
       // DEFAULT series policy (owner rulings 2026-07-30 + 08-28): a date move of
       // a recurring visit carries its cadence; never seriesPolicy 'single'.
+      // The rebooker's choke point applies the lawn rounds size rule (owner
+      // 2026-10-31): a short move inside the round stays a single move.
       keepStatus: true, beforeMove, moveGuard: writeDecision,
       sourceSurface: 'call_makeup', notifyRequested: false,
       expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,

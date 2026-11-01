@@ -185,6 +185,31 @@ test('terminal rows land in failed[] with the reason; nothing is updated', async
   expect(body.failed).toEqual([{ id: 'svc-1', reason: 'already completed' }]);
 });
 
+// Size rule (owner 2026-10-31, lawn_rounds_9 only): with collective moves on, the bulk mover refuses a
+// series move (it writes one row), but a rounds one-off is a single-row move it may make.
+describe('bulk reschedule, collective gate on: the lawn rounds size rule', () => {
+  // 2099-04-01 sits in round 3 of 2099 (2099-03-15 to 2099-04-23).
+  const roundsRow = (extra = {}) => ({ ...SVC, scheduled_date: '2099-04-01', status: 'pending', is_recurring: true, recurring_pattern: 'lawn_rounds_9', ...extra });
+  const run = async (row, scheduledDate) => {
+    wireTrx({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue(row) })] });
+    return bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate } });
+  };
+  beforeEach(() => { process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true'; });
+  afterEach(() => { delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+  const refusedAsSeries = (body) => body.failed.some((f) => /part of a recurring plan/.test(f.reason));
+
+  test.each([
+    ['5 days inside the round', '2099-04-06', {}, false],
+    ['11 days', '2099-04-12', {}, true],
+    ['5 days of another pattern', '2099-04-06', { recurring_pattern: 'custom' }, true],
+    ['5 days of a row with no pattern', '2099-04-06', { recurring_pattern: null }, true],
+  ])('%s: refused as a series move = %s', async (_label, date, extra, refused) => {
+    const { status, body } = await run(roundsRow(extra), date);
+    expect(status).toBe(200);
+    expect(refusedAsSeries(body)).toBe(refused);
+  });
+});
+
 test('a GROUPED member is refused before any write (codex #3609 r23 P1): the bulk mover writes one row, so it would strand the siblings — the schedule move carries the visit', async () => {
   const updateChain = chain();
   wireTrx({
@@ -254,6 +279,26 @@ test('an UNGROUPED row pins visit_id IS NULL in its CAS (a row grouped since the
   const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
   expect(body.failed).toHaveLength(1);
   expect(updateChain.where).toHaveBeenCalledWith({ scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00', visit_id: null });
+});
+
+test('the bulk write pins the size-rule inputs its single-versus-series decision was made on (collective gate on: a lawn rounds one-off)', async () => {
+  process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+  try {
+    const updateChain = chain({ update: jest.fn().mockImplementation(() => updateResult(0)) });
+    wireTrx({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...SVC, scheduled_date: '2099-04-01', status: 'confirmed', visit_id: null, is_recurring: true, recurring_pattern: 'lawn_rounds_9', date_exception: false, date_exception_cadence_date: null }) }),
+        chain(), // advisory occupancy probe
+        updateChain,
+      ],
+    });
+    const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-04-05' } });
+    expect(body.failed).toHaveLength(1); // the CAS miss: a re-anchor since the read makes the write miss, nothing moves
+    expect(body.failed[0].reason).toMatch(/changed concurrently/);
+    expect(updateChain.where).toHaveBeenCalledWith({ track_state: null, recurring_pattern: 'lawn_rounds_9', date_exception: false, date_exception_cadence_date: null });
+  } finally {
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+  }
 });
 
 test('a past scheduledDate produces per-row failed[] entries instead of moving anything', async () => {

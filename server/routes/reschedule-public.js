@@ -67,6 +67,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
 const { visitInsideMoveNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const moveLimits = require('../services/scheduling/customer-move-limits');
+const { roundsOneOffWindow, roundsRegularDate } = require('../services/lawn-rounds');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -135,12 +136,38 @@ function nextVisitDateActive() {
   return process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE === 'true';
 }
 
+// Size rule for lawn rounds (owner 2026-10-31): under collective anchoring a
+// lawn_rounds_9 visit moves ALONE for a date within `maxDays` of its regular
+// date inside its round; a bigger move re-anchors as before. This is the rule
+// the page DISCLOSES (payload.roundsOneOff) and the POST pins. Null for every
+// other visit, and while collective anchoring is off (the legacy pull-forward
+// rule then decides, unchanged).
+function roundsOneOffTerms(svc) {
+  if (!isSeriesVisit(svc) || !collectiveAnchorActive()) return null;
+  const w = roundsOneOffWindow(svc.recurring_pattern, roundsRegularDate(svc));
+  return w ? { maxDays: w.maxDays, fromDate: w.fromDate, roundStart: w.roundStart, roundEnd: w.roundEnd, start: w.start, end: w.end } : null;
+}
+
+// What the page and the pin compare: the terms without the derived window.
+function disclosedRoundsOneOff(svc) {
+  const t = roundsOneOffTerms(svc);
+  return t ? { maxDays: t.maxDays, fromDate: t.fromDate, roundStart: t.roundStart, roundEnd: t.roundEnd } : null;
+}
+
+// True when the offered date is one the size rule moves alone.
+function roundsOneOffDate(svc, dateStr) {
+  const t = roundsOneOffTerms(svc);
+  const day = String(dateStr || '').slice(0, 10);
+  return !!t && day >= t.start && day <= t.end;
+}
+
 // { currentDate, byDate: { <offered date>: <next visit's new date> } } for a
 // series visit under collective anchoring, else null. Decoration only: any
 // failure returns null and the page keeps its general plan note.
 async function loadNextVisitShift(svc, availability) {
   if (!nextVisitDateActive() || !isSeriesVisit(svc) || !collectiveAnchorActive()) return null;
-  const dates = (availability?.days || []).map((day) => day.date).filter(Boolean);
+  // A one-off date of a rounds visit moves nothing else: no next-visit line for it.
+  const dates = (availability?.days || []).map((day) => day.date).filter((d) => d && !roundsOneOffDate(svc, d));
   if (!dates.length) return null;
   try {
     const shift = await SmartRebooker.projectNextVisitDates(svc.id, dates);
@@ -272,7 +299,7 @@ function shouldReanchor(svc, targetDateStr) {
   if (!isSeriesVisit(svc)) return false;
   if (collectiveAnchorActive()) {
     const target = String(targetDateStr || '').slice(0, 10);
-    return !!target && apptDateStr(svc.scheduled_date) !== target;
+    return !!target && apptDateStr(svc.scheduled_date) !== target && !roundsOneOffDate(svc, target);
   }
   return pullForwardDays(apptDateStr(svc.scheduled_date), targetDateStr) >= REANCHOR_PULLFORWARD_DAYS;
 }
@@ -299,7 +326,10 @@ function pickerMayReanchor(svc, rangeFrom, rangeTo) {
   if (!isSeriesVisit(svc)) return false;
   const currentDateStr = apptDateStr(svc.scheduled_date);
   if (collectiveAnchorActive()) {
-    return rangeFrom !== currentDateStr || rangeTo !== currentDateStr;
+    if (rangeFrom === currentDateStr && rangeTo === currentDateStr) return false;
+    // A rounds visit: the range stays a single move only when it sits wholly inside the one-off window.
+    const t = roundsOneOffTerms(svc);
+    return !t || rangeFrom < t.start || rangeTo > t.end;
   }
   return pullForwardDays(currentDateStr, rangeFrom) >= REANCHOR_PULLFORWARD_DAYS;
 }
@@ -328,7 +358,20 @@ function seriesScopeMismatch(svc, body) {
   if ((body?.disclosed_future_placement_days ?? null) !== placementDays) return true;
   const disclosedDate = String(body?.disclosed_current_date || '').slice(0, 10);
   if (!disclosedDate || disclosedDate !== apptDateStr(svc.scheduled_date)) return true;
-  return false;
+  return roundsOneOffMismatch(svc, body);
+}
+
+// The size rule the page disclosed (payload.roundsOneOff) must be the one the
+// server holds now. A lawn rounds visit with the field ABSENT fails closed (a
+// page left open across the deploy would promise the old all-moves-shift
+// copy); any other visit expects none. The comparison covers the maxDays, the
+// regular date and the round bounds, so every date the page called "only this
+// visit" is one the commit moves alone.
+function roundsOneOffMismatch(svc, body) {
+  const want = disclosedRoundsOneOff(svc);
+  const sent = body?.disclosed_rounds_one_off ?? null;
+  if (!want || !sent) return !!want !== !!sent;
+  return ['maxDays', 'fromDate', 'roundStart', 'roundEnd'].some((key) => sent[key] !== want[key]);
 }
 
 router.use(rateLimit({
@@ -446,6 +489,9 @@ function selectSvc(column, value, database = db) {
       's.visit_id',
       's.recurring_pattern',
       's.recurring_interval_days',
+      // The lawn rounds size rule measures a move from the visit's regular (cadence) date.
+      's.date_exception',
+      's.date_exception_cadence_date',
       // Callbacks and included follow-ups are not plan visits (move limits).
       's.is_callback',
       's.followup_included',
@@ -737,6 +783,9 @@ router.get('/:token', async (req, res, next) => {
       // recurring note to "your later visits shift to match" and drops the
       // legacy pull-forward warning (every date move re-anchors).
       collectiveAnchor: isSeriesVisit(svc) && collectiveAnchorActive(),
+      // Lawn rounds size rule: dates within maxDays of fromDate and inside
+      // [roundStart, roundEnd] move only this visit. Null for every other visit.
+      roundsOneOff: disclosedRoundsOneOff(svc),
       futurePlacementDays: isSeriesVisit(svc) && isCustomerRecurringDispatchEnabled() ? 3 : null,
       // The visit's time already passed without service — the page renders
       // the "we missed each other" rebook framing instead of the standard
@@ -1115,10 +1164,19 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
     };
     const officeApprovalRecheck = async ({ trx }) => {
-      if (elig.missed) return;
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
         .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',
-          'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+          'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',
+          'date_exception', 'date_exception_cadence_date');
+      // The size rule the page disclosed, judged again on the locked row for EVERY commit (a missed visit
+      // too): a series re-anchor can change the regular date while the date and window the expect fence
+      // pins stay put, and the single-versus-series decision was made on the unlocked read.
+      if (roundsOneOffMismatch(locked, req.body)) {
+        throw Object.assign(new Error('The scheduling details for your plan just updated — please review the latest options.'), {
+          statusCode: 409, isOperational: true, code: 'SCOPE_CHANGED',
+        });
+      }
+      if (elig.missed) return;
       if (visitInsideMoveNoticeWindow(locked)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
@@ -1395,6 +1453,9 @@ router._test = {
   nextVisitDateActive,
   loadNextVisitShift,
   seriesScopeMismatch,
+  roundsOneOffTerms,
+  roundsOneOffDate,
+  disclosedRoundsOneOff,
   buildAvailabilityForService,
 };
 

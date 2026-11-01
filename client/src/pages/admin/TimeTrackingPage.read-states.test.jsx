@@ -243,6 +243,61 @@ describe("approvals week switch", () => {
     expect(screen.queryByText("2026-10-19")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Details" })).toBeInTheDocument();
   });
+
+  // The "timesheets wait" bell links to ?tab=approvals&weekStart=<Monday>: that week opens, however old.
+  function stubPending() {
+    const asked = [];
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const u = new URL(String(url), "http://localhost");
+      if (u.pathname.endsWith("/pending")) {
+        asked.push(u.searchParams.get("weekStart"));
+        return json({ techs: [week("Field Tech", `token-${u.searchParams.get("weekStart")}`)] });
+      }
+      return json({ technicians: [TECH], allTechs: [TECH] });
+    }));
+    return asked;
+  }
+  const openLink = (query) => render(
+    <MemoryRouter initialEntries={[`/admin/timetracking?tab=approvals${query}`]}>
+      <TimeTrackingPage />
+    </MemoryRouter>,
+  );
+
+  it("a bell link for an older Monday opens that week, not last week", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-28T15:00:00Z"));
+    const asked = stubPending();
+    openLink("&weekStart=2026-10-05");
+
+    expect(await screen.findByText("Week of 2026-10-05")).toBeInTheDocument();
+    expect(await screen.findByText("Field Tech")).toBeInTheDocument();
+    expect(asked).toEqual(["2026-10-05"]);
+  });
+
+  it.each([["not a Monday", "2026-10-06"], ["not a real date", "2026-02-30"], ["not a date", "soon"]])(
+    "a bell link with a weekStart that is %s falls back to last week",
+    async (_label, value) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-28T15:00:00Z"));
+      const asked = stubPending();
+      openLink(`&weekStart=${value}`);
+
+      expect(await screen.findByText("Week of 2026-10-19")).toBeInTheDocument();
+      expect(asked).toEqual(["2026-10-19"]);
+    },
+  );
+
+  it("a bell clicked while the page is open moves it to that week", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-28T15:00:00Z"));
+    const asked = stubPending();
+    const { rerender } = render(<ApprovalsTab showToast={() => {}} weekStartParam={null} />);
+    expect(await screen.findByText("Week of 2026-10-19")).toBeInTheDocument();
+
+    rerender(<ApprovalsTab showToast={() => {}} weekStartParam="2026-10-05" />);
+    expect(await screen.findByText("Week of 2026-10-05")).toBeInTheDocument();
+    await waitFor(() => expect(asked).toContain("2026-10-05"));
+  });
 });
 
 describe("failed reads are not empty lists", () => {

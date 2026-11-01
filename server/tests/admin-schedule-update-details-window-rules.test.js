@@ -223,6 +223,42 @@ describe('date-only moves + the scheduling-field CAS', () => {
     }
   });
 
+  // Size rule (owner 2026-10-31, lawn_rounds_9 only): with collective moves on the Edit modal demands the
+  // series acknowledgement for a series move, but a rounds one-off saves as an ordinary single date edit.
+  describe('collective gate on: the lawn rounds size rule', () => {
+    // 2099-01-15 sits in round 1 of 2099 (2098-12-25 to 2099-02-02).
+    const roundsRow = (extra = {}) => ({ ...STORED, is_recurring: true, status: 'confirmed', visit_id: null, recurring_pattern: 'lawn_rounds_9', ...extra });
+    beforeEach(() => { process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true'; });
+    afterEach(() => { delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+
+    test('a one-off (5 days) is not stopped for an acknowledgement: the save opens its transaction', async () => {
+      db.mockImplementation(() => chain(roundsRow()));
+      db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+      const { status } = await put({ scheduledDate: '2099-01-20' });
+      expect(status).toBe(418);
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['8 days', '2099-01-23', {}],
+      ['a one-day move of another pattern', '2099-01-16', { recurring_pattern: 'custom' }],
+      ['a one-day move of a row with no pattern', '2099-01-16', { recurring_pattern: null }],
+    ])('%s still demands the series acknowledgement, nothing saved', async (_label, scheduledDate, extra) => {
+      db.mockImplementation(() => chain(roundsRow(extra)));
+      const { status, body } = await put({ scheduledDate });
+      expect(status).toBe(409);
+      expect(body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    test('the dry-run preview mirrors the save: a one-off keeps its date, a series move strips it', () => {
+      const at = src.indexOf("router.post('/:id/update-details/preview'");
+      const block = src.slice(at, src.indexOf('collectiveMoveTarget !== dateOnly(moveRow.scheduled_date)', at));
+      expect(block).toContain('movesAsSeries(moveRow, collectiveMoveTarget)');
+      expect(block).toContain("'recurring_pattern', 'date_exception', 'date_exception_cadence_date'");
+    });
+  });
+
   test('a DATE-ONLY move of a windowless row (both null) passes validation and opens the transaction', async () => {
     db.mockImplementation(() => chain({ ...STORED, window_start: null, window_end: null }));
     db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
@@ -661,5 +697,45 @@ describe('financialStateDrifted wiring under the write lock (source-pattern guar
     expect(refusal).toContain("code: 'VISIT_CHANGED_RETRY'");
     expect(refusal).toContain("reason: 'FINANCIAL_STATE_DRIFT'");
     expect(refusal).toMatch(/pricing changed while saving/);
+  });
+});
+
+// Size rule (owner 2026-10-31, lawn_rounds_9 only): the Edit modal re-submits isRecurring + the existing pattern with
+// spawnRecurringChildren false, which turns on the cadence rewrite of the pending children. Moving the PARENT by 7
+// days or fewer inside its round is "only this visit", so its date must not count as a cadence change: the stored round
+// anchor stays and the children keep their dates. The planner, the probe excludes and the write ask one function.
+describe('shouldRewritePendingRecurringRows — lawn rounds size rule', () => {
+  const { shouldRewritePendingRecurringRows: rewrite } = adminScheduleRouter;
+  // 2099-04-01 sits in round 3 of 2099 (2099-03-15 to 2099-04-23).
+  const parent = (extra = {}) => ({ id: 'p1', is_recurring: true, recurring_parent_id: null, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2099-04-01', ...extra });
+  const after = (before, extra) => ({ ...before, ...extra });
+
+  test('a one-off date move of the parent (7 days or fewer inside the round) is no cadence change', () => {
+    const before = parent();
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-02' }))).toBe(false);
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-08' }))).toBe(false);
+    expect(rewrite(before, after(before, { scheduled_date: '2099-03-25' }))).toBe(false);
+  });
+
+  test('8 days, a move into the next round, and an exception-measured move still rewrite', () => {
+    const before = parent();
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-09' }))).toBe(true);
+    expect(rewrite(parent({ scheduled_date: '2099-04-22' }), after(parent(), { scheduled_date: '2099-04-26' }))).toBe(true);
+    const moved = parent({ scheduled_date: '2099-04-06', date_exception: true, date_exception_cadence_date: '2099-04-01' });
+    expect(rewrite(moved, after(moved, { scheduled_date: '2099-04-09' }))).toBe(true); // 8 days from the regular date
+  });
+
+  test('a real cadence change still rewrites, even with a one-off date: pattern, weekend rule', () => {
+    const before = parent();
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-02', recurring_pattern: 'custom', recurring_interval_days: 42 }))).toBe(true);
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-02', skip_weekends: true }))).toBe(true);
+    expect(rewrite(before, after(before, { scheduled_date: '2099-04-02', weekend_shift: 'back', skip_weekends: true }))).toBe(true);
+  });
+
+  test('any other pattern keeps the date-driven rewrite for the same one-day move; no change, no rewrite', () => {
+    const custom = parent({ recurring_pattern: 'custom', recurring_interval_days: 42 });
+    expect(rewrite(custom, after(custom, { scheduled_date: '2099-04-02' }))).toBe(true);
+    expect(rewrite(parent(), after(parent(), {}))).toBe(false);
+    expect(rewrite(null, parent())).toBe(false);
   });
 });
