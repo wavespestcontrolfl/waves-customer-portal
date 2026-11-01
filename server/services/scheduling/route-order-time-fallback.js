@@ -1,0 +1,43 @@
+/**
+ * GATE_ROUTE_ORDER_TIME_FALLBACK (owner 2026-11-01, "build fixes", dispatch lane F1).
+ *
+ * When the save's route check REFUSES to place a visit (arrival_window,
+ * route_unverified, ...), the visit used to keep route_order NULL, and every
+ * reader of a day's stops (COALESCE(route_order, 999)) listed it last. This
+ * builds the day's order from the arrival times alone: the technician's
+ * numbered stops keep their order, and the visit goes in before the first of
+ * them whose window starts later. Ordering only: no arrival simulation runs
+ * (the check already refused). The window and co-visit rules are the ones
+ * computeChronologicalRepair uses (route-reorder-window-fit.js).
+ */
+const { currentOrder, effectiveWindowRange, isCoVisitPair } = require('../route-reorder-window-fit');
+
+// A completed stop or the stop under way is behind the technician: the visit never goes ahead of one
+// (stops-ahead.js counts only the live stops numbered before a visit).
+const DONE_OR_UNDER_WAY = ['completed', 'en_route', 'on_site'];
+
+/** The ids of the target's technician day in the order to number them: the
+ *  numbered stops of `rows` in their current order (the target's own stale
+ *  number dropped), then the target placed by arrival window start, after
+ *  every completed stop and the stop under way. A same-customer, same-window,
+ *  same-pin sibling takes the target right after it. Stops with no number
+ *  other than the target stay out of the list. A target that is itself
+ *  completed or under way keeps its number: null. */
+function timeFallbackOrder(rows, target) {
+  if (DONE_OR_UNDER_WAY.includes(target.status)) return null;
+  const mine = (rows || []).filter(row => row.technician_id === target.technician_id
+    && row.reservation_expires_at == null && row.route_order != null && String(row.id) !== String(target.id));
+  const candidate = currentOrder(mine);
+  const floor = candidate.reduce((after, stop, i) => (DONE_OR_UNDER_WAY.includes(stop.status) ? i + 1 : after), 0);
+  const range = effectiveWindowRange(target);
+  const siblingIndex = candidate.findIndex(other => isCoVisitPair(effectiveWindowRange, other, target));
+  let index = siblingIndex !== -1 ? siblingIndex + 1 : candidate.length;
+  if (siblingIndex === -1 && range) {
+    const later = candidate.findIndex((other, i) => i >= floor && effectiveWindowRange(other)?.startMin > range.startMin);
+    if (later !== -1) index = later;
+  }
+  candidate.splice(Math.max(index, floor), 0, target);
+  return candidate.map(stop => stop.id);
+}
+
+module.exports = { timeFallbackOrder };

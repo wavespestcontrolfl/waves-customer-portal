@@ -15,6 +15,7 @@ const { TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwai
 const { renderCompanyFactsSection } = require('../sms-company-facts');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
+const portalOpen = require('./portal-open');
 
 // One texting-AI gap report for an escalation its caller marked as the
 // assistant not knowing how to help. Legacy calls fire-and-forget; a portal
@@ -216,6 +217,13 @@ const PORTAL_CHAT = 'portal_chat';
 // Off, portal chat runs exactly as the other channels do.
 const portalSelfServe = (channel) => channel === PORTAL_CHAT
   && require('../../config/feature-gates').portalChatSelfServeLive();
+// The opened-up portal chat (GATE_PORTAL_CHAT_OPEN, default off).
+// GATE_CANCEL_FLOW_V2, read at call time as the cancel-resolution endpoints do.
+const cancelFlowLive = () => {
+  try { return require('../cancellation-resolution').cancelFlowV2Enabled(); } catch { return false; }
+};
+const portalOpenFor = (channel) => portalSelfServe(channel)
+  && require('../../config/feature-gates').portalChatOpenLive();
 // Prompt, tools and the reply extras a channel gets. Portal chat gets its
 // own prompt and button tools, plus the payment card under
 // GATE_PORTAL_CHAT_FACTS; every other channel (and the portal with its
@@ -252,6 +260,11 @@ function answeredInsteadOfRun(toolUse, toolResults) {
   toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(ESCALATE_AFTER_READ_BACK) });
   return true;
 }
+// What an opened portal chat's escalate call adds: the open hand-off, and the
+// one sanitized sentence the model may add to the reply. Nothing otherwise.
+function openHandOffOptions(lane, input) {
+  return lane.open ? { open: true, say: portalOpen.sanitizeSay(input.say) } : {};
+}
 // Tools that end the turn run last, in this order (every other tool first).
 const HAND_OFF_ORDER = ['request_email_change', 'escalate'];
 
@@ -272,9 +285,13 @@ function portalLane(channel, { secondaryProperty = true, replay = false } = {}) 
   // A crashed turn cannot confirm an address from a later transcript read-back.
   // Recover its original ask through the ordinary account-change handoff instead.
   const emailChange = !replay && gates.portalChatEmailChangeLive();
+  // The opened-up chat: its own gate, on top of the self-serve switch.
+  const open = gates.portalChatOpenLive();
+  // The open prompt's cancel options exist only in the GATE_CANCEL_FLOW_V2 flow.
+  const cancelFlow = open && cancelFlowLive();
   return {
-    prompt: portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange }),
-    tools: portalToolsFor({ payments, visits, reservice, reserviceLawn, emailChange }),
+    prompt: portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange, open, cancelFlow }),
+    tools: portalToolsFor({ payments, visits, reservice, reserviceLawn, emailChange, open }),
     actions: [],
     cards: payments || visits ? [] : null,
     portal: true,
@@ -282,7 +299,8 @@ function portalLane(channel, { secondaryProperty = true, replay = false } = {}) 
     payments,
     reservice,
     emailChange,
-    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn, emailChange },
+    open,
+    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn, emailChange, open },
   };
 }
 
@@ -380,7 +398,9 @@ RULES:
 // What the customer is told at a hand-off. Portal chat says the team was told
 // only when the bell exists; other channels keep the original wording (an SMS
 // hand-off reply is never sent).
-function escalationReply({ isPortal, teamNotified, firstName, newEmail }) {
+// `say`: the one sanitized sentence an opened portal chat may add (empty
+// otherwise).
+function escalationReply({ isPortal, teamNotified, firstName, newEmail, say = '' }) {
   if (!isPortal) {
     return firstName
       ? `Thanks ${firstName} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
@@ -394,7 +414,7 @@ function escalationReply({ isPortal, teamNotified, firstName, newEmail }) {
       : `${thanks}. I've saved your email change request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
   }
   return teamNotified
-    ? `${thanks}. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?`
+    ? `${thanks}. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM.${say ? ` ${say}` : ''} Is there anything else you'd like me to pass along?`
     : `${thanks}. I've saved your request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
 }
 
@@ -482,14 +502,15 @@ WHAT YOU MUST ESCALATE (use the escalate tool):`);
 // model for a combination never varies between requests (it carries the
 // cache breakpoint).
 const PORTAL_PROMPTS = new Map();
-function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange }) {
-  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}${reserviceLawn ? '+lawn' : ''}${emailChange ? '+email' : ''}`;
+function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange, open, cancelFlow = true }) {
+  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}${reserviceLawn ? '+lawn' : ''}${emailChange ? '+email' : ''}${open ? `+open${cancelFlow ? '' : '-legacycancel'}` : ''}`;
   if (!PORTAL_PROMPTS.has(key)) {
     let prompt = payments ? PORTAL_FACTS_PROMPT : PORTAL_SYSTEM_PROMPT;
     if (visits) prompt = withVisitFacts(prompt);
     if (reservice) prompt = withReservice(prompt);
     if (reserviceLawn) prompt = withReserviceLawn(prompt);
     if (emailChange) prompt = withEmailChange(prompt);
+    if (open) prompt = portalOpen.withOpen(prompt, { cancelFlow });
     PORTAL_PROMPTS.set(key, prompt);
   }
   return PORTAL_PROMPTS.get(key);
@@ -569,7 +590,7 @@ const TOPIC_WORDING = {
 const TRIGGER_TOPICS = [
   ['cancellation', ['cancel', 'cancellation', 'stop service', 'end service', 'discontinue']],
   ['schedule_change', RESCHEDULE_TRIGGERS],
-  ['complaint', ['complaint', 'not happy', 'terrible', 'worst', 'never coming back', 'lawsuit', 'bbb']],
+  ['complaint', ['complaint', 'not happy', 'terrible', 'worst', 'never coming back', 'lawsuit', 'bbb', 'attorney', 'lawyer']],
   ['billing', ['refund', 'charge back', 'dispute']],
   ['manager', ['manager', 'supervisor', 'owner', 'adam']],
 ];
@@ -596,7 +617,9 @@ class WavesAssistant {
       );
     } catch (convErr) {
       logger.error(`[ai-assistant] getOrCreateConversation failed: ${convErr.message}`, { stack: convErr.stack });
-      return { reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false };
+      // GATE_PORTAL_CHAT_OPEN: the message is filed as a hand-off item when it can be.
+      return this.rescueFailedTurn({ message, channel, channelIdentifier, customerId, customerPhone, turn, error: convErr },
+        { reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false });
     }
     const replay = portalReplay(conversation, message);
     const turnMessage = replay.content;
@@ -650,7 +673,7 @@ class WavesAssistant {
       // address rides on the same hand-off for the team to confirm.
       const emailReadBack = lane.emailChange ? await emailReadBackAwaitingAnswer(conversation.id, turnMessage, turn) : null;
       const escResult = await this.escalate(conversation, turnMessage, 'Sensitive topic detected in customer message', {
-        topic, ...(emailReadBack ? { emailReadBack } : {}), ...(turn ? { turn } : {}),
+        topic, ...(emailReadBack ? { emailReadBack } : {}), ...(turn ? { turn } : {}), ...(lane.open ? { open: true } : {}),
       });
       return { ...escResult, ...laneExtras(lane) };
     }
@@ -666,8 +689,7 @@ class WavesAssistant {
     // Only this message counts: an earlier report is never carried forward
     // past a later "they're gone now".
     lane.context.customerMessage = turnMessage;
-    // The chat whose messages the email-change check reads.
-    if (lane.emailChange) lane.context.conversationId = conversation.id;
+    this.bindLaneContext(lane, conversation, turnMessage, turn);
 
     // 6. Build a data-minimized context string. Older active rows may still
     // contain the legacy full-account summary; never forward that shape to the
@@ -685,8 +707,38 @@ class WavesAssistant {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
       // A card or button a tool already built this turn still shows under
       // the fallback text.
-      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false, ...laneExtras(lane) };
+      return this.rescueFailedTurn({ conversation, message: turnMessage, channel, customerId, lane, turn, error: err },
+        { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false, ...laneExtras(lane) });
     }
+  }
+
+  /**
+   * GATE_PORTAL_CHAT_OPEN safety net: a portal turn that ends without a model
+   * reply (an error, an empty tool loop, a failed conversation read, or the
+   * coordinator's timeout) files the customer's message as the chat's hand-off
+   * item (topic other, reason "chat turn failed") and answers with the fixed
+   * hand-off text, instead of the call-us fallback. Returns that reply, or
+   * `fallback` (today's reply; gate off, no customer, a cancelled turn, or
+   * filing failed). Never throws.
+   */
+  async rescueFailedTurn({ conversation = null, message, channel, channelIdentifier, customerId, customerPhone, lane = null, turn = null, error = null }, fallback = null) {
+    try {
+      if (!portalOpenFor(channel) || !customerId || portalOpen.isCancellation(error)) return fallback;
+      const found = conversation || await this.resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn);
+      const handOff = await this.escalate(found, message, 'chat turn failed', { topic: 'other', open: true, turn });
+      return { ...handOff, ...(lane ? laneExtras(lane) : {}) };
+    } catch (err) {
+      logger.error(`[ai-assistant] failed-turn hand-off failed: ${err.message}`, { customerId });
+      return fallback;
+    }
+  }
+
+  // What the lane's tools need to know about this chat: the conversation the
+  // email-change check reads, and (opened chat) the writer of the chat's
+  // moving hand-off item.
+  bindLaneContext(lane, conversation, customerMessage, turn) {
+    if (lane.emailChange) lane.context.conversationId = conversation.id;
+    if (lane.open) lane.context.recordMove = (move) => this.recordMoveItem({ conversation, customerMessage, move, turn });
   }
 
   async resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn) {
@@ -786,7 +838,7 @@ class WavesAssistant {
         if (toolUse.name === 'escalate') {
           prepareHandOff(lane);
           const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
-            execution.escalationOptions({ gap: toolUse.input.not_supported === true, topic: toolUse.input.topic, ...email.handOffOptions }));
+            execution.escalationOptions({ gap: toolUse.input.not_supported === true, topic: toolUse.input.topic, ...email.handOffOptions, ...openHandOffOptions(lane, toolUse.input) }));
           return { ...escResult, ...laneExtras(lane) };
         }
 
@@ -842,7 +894,8 @@ class WavesAssistant {
       // one that answered nothing (Codex r12 on #4884).
       if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
       logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
-      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false, ...laneExtras(lane) };
+      return this.rescueFailedTurn({ conversation, message, channel, customerId, lane, turn },
+        { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false, ...laneExtras(lane) });
     }
 
     // The transcript and the exact portal response are one durable outcome.
@@ -1015,15 +1068,23 @@ class WavesAssistant {
     // Under the email-change lane an address the customer types is not their
     // words: "homeowner@…" or "adam@…" must not read as asking for the owner.
     // Only the address itself is left out, never the words around it.
-    if (portal && require('../../config/feature-gates').portalChatEmailChangeLive()) lower = withoutEmails(lower);
-    const triggers = portal ? PORTAL_ESCALATION_TRIGGERS : ESCALATION_TRIGGERS;
+    // The opened-up chat keeps only the legal words (GATE_PORTAL_CHAT_OPEN).
+    const open = portalOpenFor(channel);
+    if (portal && (open || require('../../config/feature-gates').portalChatEmailChangeLive())) lower = withoutEmails(lower);
+    let triggers = portal ? PORTAL_ESCALATION_TRIGGERS : ESCALATION_TRIGGERS;
+    if (open) triggers = portalOpen.PORTAL_OPEN_TRIGGERS;
     return triggers.find(trigger => lower.includes(trigger)) || null;
   }
 
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn = null } = {}) {
+  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn = null, open = false, say = '' } = {}) {
+    // An opened portal chat keeps one hand-off item per chat. A confirmed
+    // email change keeps its own bell and row.
+    if (open && !newEmail && !emailReadBack && !alsoAsked && !emailUnchecked) {
+      return this.escalateOpen(conversation, customerMessage, reason, { gap, topic, say, turn });
+    }
     if (turn) return this.escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn });
     const customer = await escalationCustomer(conversation.customer_id);
 
@@ -1183,6 +1244,154 @@ class WavesAssistant {
     return persisted.handoff;
   }
 
+  // ── GATE_PORTAL_CHAT_OPEN: one hand-off item per chat ───────────────────
+  // While a chat already has a pending hand-off row, a further escalate or
+  // request_move updates that row (its summary and the customer's words) and
+  // refreshes its bell, instead of adding a row and a bell. The chat also
+  // stays open after a hand-off, so the customer's next message lands in it.
+
+  /**
+   * Write or update the chat's pending hand-off row. Runs on `executor`
+   * (a transaction); the conversation row is locked first so two turns of one
+   * chat cannot both insert. Returns { customer, escalation, created }.
+   */
+  async upsertOpenItem(executor, { conversation, customerMessage, reason, topic, priority, move = null, turn = null }) {
+    await executor('agent_sessions').where('id', conversation.id).forUpdate().first('id');
+    const customer = await escalationCustomer(conversation.customer_id, executor);
+    // This turn's own row first (a replayed turn finds what it wrote).
+    // A confirmed email change is never merged into: it keeps its own row.
+    const own = turn ? await portalOpen.withoutEmailRows(executor('ai_escalations').where({ portal_chat_request_id: turn.requestRowId })).first() : null;
+    const standing = own || await portalOpen.withoutEmailRows(executor('ai_escalations')
+      .where({ conversation_id: conversation.id, status: 'pending' }))
+      .orderBy('created_at', 'desc')
+      .first();
+    if (standing) {
+      const change = portalOpen.mergedItem(standing, { customerMessage, reason, move, urgent: priority === 'urgent' });
+      if (change) await executor('ai_escalations').where({ id: standing.id }).update(change);
+      return { customer, escalation: { ...standing, ...(change || {}) }, created: false };
+    }
+    const [escalation] = await executor('ai_escalations').insert({
+      conversation_id: conversation.id,
+      customer_id: conversation.customer_id,
+      reason: this.savedReason(customerMessage, { topic, channel: conversation.channel }),
+      summary: move ? portalOpen.summaryWithMove('', move) : reason,
+      customer_message: customerMessage,
+      ai_draft_response: null,
+      priority,
+      status: 'pending',
+      // A move item does not take the turn's row key: the turn goes on and may
+      // still hand off (or confirm an email change) on a row of its own.
+      ...(turn && !move ? { portal_chat_request_id: turn.requestRowId } : {}),
+    }).returning('*');
+    return { customer, escalation, created: true };
+  }
+
+  /**
+   * An opened portal chat's hand-off. Same outcome as escalate()/
+   * escalatePortalTurn() (the row, the bell, the fixed reply) except that a
+   * pending row of this chat is updated rather than a second one added.
+   */
+  async escalateOpen(conversation, customerMessage, reason, { gap = false, topic, say = '', turn = null }) {
+    const priority = escalationPriority(customerMessage);
+    const item = { conversation, customerMessage, reason, topic, priority, say, turn };
+    let saved;
+    if (turn) {
+      saved = await turn.transaction('escalation persistence', async (trx) => {
+        turn.assertActive('escalation persistence');
+        const stored = await this.upsertOpenItem(trx, item);
+        await this.markSessionEscalated(trx, conversation, reason);
+        const handoff = await this.completeOpenHandOff(trx, { ...item, ...stored });
+        await turn.persistCommittedResult(trx, handoff);
+        return { ...stored, handoff };
+      });
+      turn.rememberCommittedResult(saved.handoff);
+    } else {
+      const stored = await db.transaction(async (trx) => {
+        const row = await this.upsertOpenItem(trx, item);
+        await this.markSessionEscalated(trx, conversation, reason);
+        return row;
+      });
+      saved = { ...stored, handoff: await this.completeOpenHandOff(db, { ...item, ...stored }) };
+    }
+    await this.afterOpenHandOff(saved, { conversation, customerMessage, reason, gap, priority, turn });
+    logger.info('[ai-assistant] portal open hand-off committed', { conversationId: conversation.id, escalationId: saved.escalation.id, priority, created: saved.created });
+    return saved.handoff;
+  }
+
+  // The chat is flagged escalated but stays active, so the next message
+  // lands in the same chat (and the same item).
+  async markSessionEscalated(executor, conversation, reason) {
+    await executor('agent_sessions').where('id', conversation.id).update({
+      escalated: true, escalation_reason: reason, updated_at: new Date(),
+    });
+  }
+
+  // The bell, the fixed reply and the saved reply row of an opened chat's
+  // hand-off. Inside the turn's transaction the bell is a savepoint, so a
+  // failed bell leaves the row and the reply standing.
+  async completeOpenHandOff(executor, { conversation, customerMessage, topic, say, turn, customer, escalation }) {
+    const ring = (trx) => this.notifyOpenItem({ escalation, topic, conversation, customer, trx });
+    const teamNotified = turn ? await executor.transaction((bellTrx) => ring(bellTrx)).catch(() => false) : await ring(null);
+    const reply = escalationReply({ isPortal: true, teamNotified, firstName: String(customer?.first_name || '').trim(), say });
+    const row = {
+      conversation_id: conversation.id,
+      role: 'assistant',
+      content: reply,
+      channel: conversation.channel,
+      sent_to_customer: true,
+      ...(turn ? { portal_chat_request_id: turn.requestRowId } : {}),
+    };
+    const insert = executor('agent_messages').insert(row).onConflict().ignore();
+    if (turn) await insert;
+    else await insert.catch((e) => logger.error(`[ai-assistant] Failed to save escalation reply: ${e.message}`, { conversationId: conversation.id }));
+    return {
+      reply, conversationId: conversation.id, escalated: true, escalationId: escalation.id, teamNotified,
+      ...(turn ? { generated: false, ...turn.fallbackExtras() } : {}),
+    };
+  }
+
+  // Best-effort work after the hand-off committed: the gap report and the
+  // urgent owner alert (only the attempt that created the row, and only when
+  // the bell did not land).
+  async afterOpenHandOff(saved, { conversation, customerMessage, reason, gap, priority, turn }) {
+    if (gap) {
+      if (turn) await turn.transaction('gap persistence', (database) => recordEscalationGap(customerMessage, reason, database)).catch(() => {});
+      else recordEscalationGap(customerMessage, reason);
+    }
+    if (priority !== 'urgent' || !saved.created || saved.handoff.teamNotified) return;
+    const alert = () => require('../owner-alerts').recordUrgentEscalation({
+      customer: saved.customer, reason, customerMessage, conversationId: conversation.id, escalationId: saved.escalation.id,
+    });
+    try { await (turn ? waitFor(alert, turn, 'urgent escalation notification') : alert()); } catch { /* the bell is the record */ }
+  }
+
+  /**
+   * request_move: the moving customer's new address and date go to the team
+   * as the chat's one hand-off item (ai_escalations row + the chat bell,
+   * topic account_change). The turn goes on: the model asks for any missing
+   * part and calls the tool again, which updates this same item.
+   */
+  async recordMoveItem({ conversation, customerMessage, move, turn = null }) {
+    const item = {
+      conversation, customerMessage, topic: 'account_change', priority: escalationPriority(customerMessage), move,
+      reason: 'Customer is moving and asked the portal assistant to transfer service',
+    };
+    const ring = (stored, trx) => this.notifyOpenItem({
+      escalation: stored.escalation, topic: 'account_change', conversation, customer: stored.customer, move, trx,
+    });
+    if (turn) {
+      return turn.transaction('move hand-off', async (trx) => {
+        turn.assertActive('move hand-off');
+        const stored = await this.upsertOpenItem(trx, { ...item, turn });
+        await trx.transaction((bellTrx) => ring(stored, bellTrx)).catch(() => false);
+        return portalOpen.savedMove(stored.escalation.summary);
+      });
+    }
+    const stored = await db.transaction((trx) => this.upsertOpenItem(trx, item));
+    await ring(stored, null);
+    return portalOpen.savedMove(stored.escalation.summary);
+  }
+
   /**
    * Ring the admin bell for a portal-chat hand-off. Returns true only when a
    * notification row exists (new or already standing for this escalation).
@@ -1238,13 +1447,58 @@ class WavesAssistant {
     }
   }
 
+  /**
+   * The bell of an opened portal chat's hand-off item: it names the customer,
+   * says what the item holds (a move says so), and is ONE bell per item. A
+   * further hand-off in the chat rewrites the standing bell with the item's
+   * new text and rings it again. Returns true only when a bell row exists.
+   * Never throws without a caller transaction (the row is the record).
+   */
+  async notifyOpenItem({ escalation, topic, conversation, customer, move = null, trx = null }) {
+    if (!customer?.id) return false;
+    try {
+      const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
+      const { fitAction } = require('../admin-alert-names');
+      const named = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim();
+      const name = named || 'A customer';
+      const action = named
+        ? fitAction('Comms', named, [(who) => `Reply to ${who}'s portal chat`, (who) => `Reply to ${who}'s chat`, (who) => `Reply to ${who}`])
+        : 'Reply to a portal chat request';
+      const why = move
+        ? `${name} is moving and asked the portal assistant to transfer service`
+        : `${name} asked the portal assistant about ${TOPIC_WORDING[topic] || 'a request it could not handle'}`;
+      const result = await raiseAdminAlert('alert', {
+        area: 'Comms',
+        action,
+        why: cutAtWord(why, 110),
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+        subject: { type: 'customer', id: String(customer.id) },
+        doneWhen: 'customer_answered',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey: bellKey({ escalation, conversation }),
+        refreshOnDedupe: true,
+        detail: portalOpen.itemBellDetail(escalation),
+        metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id, ...(Object.hasOwn(TOPIC_WORDING, topic) ? { topic } : {}) },
+        ...(trx ? { trx } : {}),
+      });
+      return Boolean(result?.id) && !result.suppressed;
+    } catch (err) {
+      logger.error(`[ai-assistant] open hand-off bell failed: ${err.message}`, { conversationId: conversation.id });
+      if (trx) throw err;
+      return false;
+    }
+  }
+
   // The reason a hand-off is saved under. Under the email-change lane an
   // account change (a confirmed email change, or the lane's own fallback to
   // escalate with that topic) is saved as one, whatever the message says:
   // "please change my email" is not a schedule change.
   savedReason(message, { newEmail, topic, channel } = {}) {
     const accountChange = newEmail || (topic === 'account_change' && portalSelfServe(channel)
-      && require('../../config/feature-gates').portalChatEmailChangeLive());
+      && (require('../../config/feature-gates').portalChatEmailChangeLive() || portalOpenFor(channel)));
     return accountChange ? 'account_change' : this.classifyEscalation(message);
   }
 

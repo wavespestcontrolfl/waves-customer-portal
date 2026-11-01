@@ -16,7 +16,9 @@ const db = require('../models/db');
 const { excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
+// The waiting-for-first-contact queue (SLA, fresh-start floor, internal-name
+// exclusion) is ONE definition shared with the nightly lead repeat sweep.
+const { LEAD_RESPONSE_SLA_MINUTES, applyLeadsAwaitingContactFilter } = require('./lead-waiting-queue');
 const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
@@ -64,10 +66,6 @@ function heldCloseoutAlert({ count, label }) {
   };
 }
 
-// A lead is "waiting" once it has gone this long with no first response.
-// Mirrors the Response Speed tile's alert threshold order-of-magnitude but
-// fires earlier — 30 minutes is where a same-day booking realistically slips.
-const LEAD_RESPONSE_SLA_MINUTES = 30;
 
 // Below this share of live customers on chargeable autopay, the coverage gap
 // itself is an action item (manual collection labor + churn risk).
@@ -606,26 +604,13 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   // opposed to the watch-state alarms above. Same fail-soft contract: each
   // generator is independently try/caught so one bad query can't blank the rest.
 
-  // 8. Leads still waiting for a first response past the SLA. Mirrors the
-  //    Speed-to-Lead backlog definition (routes/admin-leads.js): status='new'
-  //    is the sole pre-first-response state, response_time_minutes is stamped
-  //    at first response, and first_contact_at is the lead's own inbound
-  //    moment. The shared fresh-start floor keeps the pre-reset backlog of
-  //    never-answered leads from nagging forever.
+  // 8. Leads still waiting for a first response past the SLA. The queue
+  //    definition (Speed-to-Lead backlog: status='new', no first-response
+  //    stamp, past the SLA, not deleted, not internal, after the fresh-start
+  //    floor) lives in lead-waiting-queue.js, shared with the nightly lead
+  //    repeat sweep, so the sweep only settles rows this item counts.
   try {
-    const waitingQuery = excludeInternalLeads(
-      db('leads')
-        .where('status', 'new')
-        // Soft-deleted leads are invisible on every Leads surface — a
-        // critical item the operator can't find or act on must not page.
-        .whereNull('deleted_at')
-        .whereNull('response_time_minutes')
-        .whereNotNull('first_contact_at')
-        .whereRaw(`first_contact_at <= NOW() - INTERVAL '${LEAD_RESPONSE_SLA_MINUTES} minutes'`),
-    );
-    if (SPEED_TO_LEAD_FRESH_START) {
-      waitingQuery.where('first_contact_at', '>=', SPEED_TO_LEAD_FRESH_START);
-    }
+    const waitingQuery = applyLeadsAwaitingContactFilter(db('leads'), db);
     const waitingRows = (await waitingQuery.select('id')) || [];
     const count = waitingRows.length;
     if (count > 0) {
