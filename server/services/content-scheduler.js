@@ -55,6 +55,9 @@ function httpUrlOrNull(value) {
   }
 }
 
+// A weekly series post from the intake route (routes/social-series-ingest.js).
+const SERIES_SOURCE_TYPE = 'series';
+
 // A saved Social Studio campaign draft (Campaign Builder > Save Draft, SOC-01)
 // waits at status 'draft' with no time until the Calendar gives it one.
 const SAVED_DRAFT = { source_type: 'campaign_builder', status: 'draft', publish_status: 'pending' };
@@ -82,18 +85,43 @@ function storedChannels(platformsPosted) {
     : [];
 }
 
-// Extra publishToAll options for a saved campaign draft only: its own image,
-// and never a fresh generated image in place of the saved one. A real publish
-// folds its results into this same row (postId: one History entry). A dry run
-// does not: publishToAll would replace the REQUESTED channels in
-// platforms_posted with results, and the next tick reads them; it records like
-// a typed scheduled post instead. GBP takes no shared image (only an approved
-// card), so a saved draft posts to GBP text-only. Every other scheduled row
-// gets none and publishes exactly as before.
+// A jsonb list column (node-pg parses it; a string is tolerated): an array, else null.
+function storedList(value) {
+  let stored = value;
+  if (typeof stored === 'string') {
+    try { stored = JSON.parse(stored); } catch { stored = null; }
+  }
+  return Array.isArray(stored) ? stored : null;
+}
+
+// Extra publishToAll options for the two kinds of stored row that carry their
+// own media. A saved campaign draft: its own image, and never a fresh generated
+// image in place of the saved one. A series post (routes/social-series-ingest.js,
+// source_type 'series'): its hosted image or video, the same image as the GBP
+// picture, and the GBP locations it names (gbp_location_ids; none stored = every
+// location). A real publish folds its results into the same row (postId: one
+// History entry). A dry run does not: publishToAll would replace the REQUESTED
+// channels in platforms_posted with results, and the next tick reads them; it
+// records like a typed scheduled post instead. A saved draft takes no GBP image
+// (GBP takes only an approved card), so it posts to GBP text-only. Every other
+// scheduled row gets none and publishes exactly as before.
 function storedPostOptions(social, { dryRun = false } = {}) {
+  const postId = dryRun ? {} : { postId: social.id };
+  if (social.source_type === SERIES_SOURCE_TYPE) {
+    const imageUrl = httpUrlOrNull(social.image_url);
+    const videoUrl = httpUrlOrNull(social.video_url);
+    const gbpLocationIds = storedList(social.gbp_location_ids);
+    return {
+      ...(imageUrl ? { imageUrl, gbpImageUrl: imageUrl } : {}),
+      ...(videoUrl ? { videoUrl } : {}),
+      ...(gbpLocationIds ? { gbpLocationIds } : {}),
+      noAiImage: true,
+      ...postId,
+    };
+  }
   if (social.source_type !== SAVED_DRAFT.source_type) return {};
   const imageUrl = httpUrlOrNull(social.image_url);
-  return { ...(imageUrl ? { imageUrl } : {}), noAiImage: true, ...(dryRun ? {} : { postId: social.id }) };
+  return { ...(imageUrl ? { imageUrl } : {}), noAiImage: true, ...postId };
 }
 
 function parseCalendarStart(value) {

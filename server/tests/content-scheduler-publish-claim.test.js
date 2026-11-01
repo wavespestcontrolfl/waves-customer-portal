@@ -483,6 +483,55 @@ describe('atomic SOCIAL publishing claim', () => {
     expect(plainCall).not.toHaveProperty('noAiImage');
   });
 
+  test('a series row posts its hosted image (also as the GBP picture), its video and its GBP locations; a campaign draft is unchanged', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.publishToAll.mockResolvedValue({ ok: true });
+    const base = { ...social, source_type: 'series', source_guid: 'series:wk-1', platforms_posted: '["facebook","gbp"]', custom_content: '{"facebook":"fb","gbp":"gbp copy"}' };
+    const still = { ...base, id: 'soc-s1', image_url: 'https://cdn.example.com/series-1.jpg', gbp_location_ids: ['sarasota', 'venice'] };
+    const reel = { ...base, id: 'soc-s2', platforms_posted: '["facebook","instagram"]', video_url: 'https://cdn.example.com/series-2.mp4', gbp_location_ids: null };
+    const draft = { ...base, id: 'soc-c1', source_type: 'campaign_builder', image_url: 'https://cdn.example.com/card.png', video_url: 'https://cdn.example.com/x.mp4', gbp_location_ids: ['venice'] };
+    mockState.pendingSocials = [still, reel, draft];
+
+    await ContentScheduler.processScheduledPosts();
+
+    const [stillCall, reelCall, draftCall] = SocialMedia.publishToAll.mock.calls.map(([arg]) => arg);
+    expect(stillCall).toMatchObject({
+      guid: 'series:wk-1',
+      channels: ['facebook', 'gbp'],
+      customContent: { facebook: 'fb', gbp: 'gbp copy' },
+      imageUrl: 'https://cdn.example.com/series-1.jpg',
+      gbpImageUrl: 'https://cdn.example.com/series-1.jpg',
+      gbpLocationIds: ['sarasota', 'venice'],
+      noAiImage: true,
+      postId: 'soc-s1',
+    });
+    expect(stillCall).not.toHaveProperty('videoUrl');
+    expect(reelCall).toMatchObject({ videoUrl: 'https://cdn.example.com/series-2.mp4', noAiImage: true, postId: 'soc-s2' });
+    expect(reelCall).not.toHaveProperty('imageUrl');
+    expect(reelCall).not.toHaveProperty('gbpLocationIds');
+    // the campaign draft keeps exactly its old options: image only, no video, no GBP fields
+    expect(draftCall).toMatchObject({ imageUrl: 'https://cdn.example.com/card.png', noAiImage: true, postId: 'soc-c1' });
+    for (const key of ['videoUrl', 'gbpImageUrl', 'gbpLocationIds']) expect(draftCall).not.toHaveProperty(key);
+  });
+
+  test('a series row reads gbp_location_ids from a JSON string, and on a dry run passes no postId', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.SOCIAL_FLAGS.dryRun = true;
+    try {
+      SocialMedia.publishToAll.mockResolvedValue({ dryRun: true });
+      mockState.pendingSocials = [{ ...social, source_type: 'series', platforms_posted: '["gbp"]', gbp_location_ids: '["parrish"]' }];
+
+      await ContentScheduler.processScheduledPosts();
+
+      const call = SocialMedia.publishToAll.mock.calls[0][0];
+      expect(call.gbpLocationIds).toEqual(['parrish']);
+      expect(call.noAiImage).toBe(true);
+      expect(call).not.toHaveProperty('postId');
+    } finally {
+      SocialMedia.SOCIAL_FLAGS.dryRun = false;
+    }
+  });
+
   test('on a dry run a saved draft passes no postId, so its requested channels survive for the next tick (SOC-01)', async () => {
     const SocialMedia = enableSocial();
     SocialMedia.SOCIAL_FLAGS.dryRun = true;
