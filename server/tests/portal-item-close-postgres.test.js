@@ -187,6 +187,15 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       await portalInbox.resolveRequestQuietly(noted.id, customer.id, 'A person called back');
       expect((await getRequest(noted.id)).admin_notes).toBe('Called twice\nA person called back');
     });
+
+    test('quiet resolve leaves a request a person already moved (a newer revision)', async () => {
+      const customer = await customerWith();
+      for (const status of ['acknowledged', 'scheduled']) {
+        const moved = await requestRow(customer, { status });
+        expect(await portalInbox.resolveRequestQuietly(moved.id, customer.id, 'Answered by text')).toBe(0);
+        expect((await getRequest(moved.id)).status).toBe(status);
+      }
+    });
   });
 
   describe('GATE_PORTAL_LATE_RERING', () => {

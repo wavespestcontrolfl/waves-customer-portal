@@ -217,7 +217,10 @@ async function resolveRequestQuietly(requestId, customerId, note, conn = db, now
   const cleaned = cut(note, 200);
   const rows = await conn('service_requests')
     .where({ id: requestId, customer_id: customerId })
-    .whereRaw("coalesce(status, 'new') not in (?, ?, ?)", TERMINAL_REQUEST_STATUSES)
+    // Only a row nobody has moved since it was filed: a staff status change
+    // (acknowledged, scheduled) is a newer revision the sweep must not
+    // overwrite, and a terminal row is already done.
+    .whereRaw("coalesce(status, 'new') = 'new'")
     .update({
       status: 'resolved',
       resolved_at: now,
