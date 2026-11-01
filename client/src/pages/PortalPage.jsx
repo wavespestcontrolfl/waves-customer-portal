@@ -8567,9 +8567,12 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
           // A pair the member withdrew while this save was in flight saved anyway: show the window the server now
-          // holds, so the summary (and the inputs, when the section reopens) never hide an active Away Watch.
+          // holds, so the summary (and the inputs, when the section reopens) never hide an active Away Watch. A newer
+          // Away Watch edit still queued (Remove, a new pair) wins: saves run one after another, so it is still in
+          // pendingRef here, and its own save settles the screen.
           if (result?.preferences && awayWatchPairRevision.current !== savingAwayWatchRevision
-            && AWAY_WATCH_PAIR_FIELDS.some((field) => field in toSave)) {
+            && AWAY_WATCH_PAIR_FIELDS.some((field) => field in toSave)
+            && !AWAY_WATCH_PAIR_FIELDS.some((field) => field in pendingRef.current)) {
             setPrefs((prev) => ({
               ...prev,
               awayWatchFrom: result.preferences.awayWatchFrom ?? null,

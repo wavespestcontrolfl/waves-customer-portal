@@ -157,6 +157,27 @@ describe('Away Watch section on the Property tab', () => {
     expect(await within(section).findByText('Away Jun 1 to Sep 15')).toBeInTheDocument();
   });
 
+  it('a withdrawn pair\'s late success never overrides a newer Remove: the screen ends with no window', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: {}, hasLawnCare: false, awayWatchEnabled: true });
+    let finishFirst;
+    api.updatePropertyPreferences
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValue({ preferences: { awayWatchFrom: null, awayWatchUntil: null }, saved: true });
+    render(<PropertyTab customer={customer} />);
+    const section = await sectionOf();
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.fromLabel), { target: { value: '2026-06-01' } });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '2026-09-15' } });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    fireEvent.change(screen.getByLabelText(AWAY_WATCH_COPY.untilLabel), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: AWAY_WATCH_COPY.remove }));
+    finishFirst({ preferences: { awayWatchFrom: '2026-06-01', awayWatchUntil: '2026-09-15' }, saved: true });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ awayWatchFrom: null, awayWatchUntil: null });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(within(section).getByText(AWAY_WATCH_COPY.summaryOff)).toBeInTheDocument();
+    expect(within(section).queryByText('Away Jun 1 to Sep 15')).toBeNull();
+  });
+
   it('a saved pair shows its summary; Remove sends two nulls and empties the inputs', async () => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { awayWatchFrom: '2026-06-01', awayWatchUntil: '2026-09-15' }, hasLawnCare: false, awayWatchEnabled: true });
     render(<PropertyTab customer={customer} />);
