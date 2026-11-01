@@ -1678,7 +1678,9 @@ function pickOnlyOptions(data) {
 // the row that starts selected. Throws the server's message on a refusal.
 function readOptionsAnswer(res, data) {
   if (res.status === 403 && data.customerPickOnly) {
-    if (!data.customerPick?.available) throw new Error(data.customerPick?.unavailableReason || data.error || 'HTTP 403');
+    // No pick on offer: today's refusal stands ("Ask the office to move this
+    // visit."); unavailableReason is a machine code, never shown.
+    if (!data.customerPick?.available) throw new Error(data.error || 'HTTP 403');
     return { options: pickOnlyOptions(data), selectedKey: PICK_KEY };
   }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);

@@ -95,9 +95,11 @@ describe('customer pick helpers', () => {
   });
 
   it('offers the pick only when the payload says so and the reason is not custom', () => {
-    const customerPick = { available: true, pickByLabel: 'Wed 8 PM' };
+    const customerPick = { available: true, pickByLabel: 'Wed 8 PM', previewByReason: { weather_rain: 'Hi Ada - rain...' } };
     expect(usablePick({ customerPick }, 'weather_rain')).toBe(customerPick);
     expect(usablePick({ customerPick }, 'custom')).toBeNull();
+    // A reason the server left out of previewByReason (its text cannot fit) offers no pick.
+    expect(usablePick({ customerPick }, 'weather_wind')).toBeNull();
     expect(usablePick({ customerPick: { available: false } }, 'weather_rain')).toBeFalsy();
     expect(usablePick({}, 'weather_rain')).toBeFalsy();
   });

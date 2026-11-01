@@ -103,10 +103,11 @@ export function customerLastName(service) {
 
 // The payload's pick block when the option is on for this reason, else null.
 // The server only sends the block with the gate on; "Custom message" is a
-// dispatcher-written text, so it never offers a hand-off.
+// dispatcher-written text, so it never offers a hand-off; and a reason whose
+// text cannot fit two segments has no preview, so it offers none either.
 export function usablePick(options, reason) {
   const pick = options?.customerPick;
-  return pick?.available && reason !== CUSTOM_REASON_CODE ? pick : null;
+  return pick?.available && reason !== CUSTOM_REASON_CODE && pick.previewByReason?.[reason] ? pick : null;
 }
 
 export const pickSentMessage = (first, { offRoute } = {}) => (

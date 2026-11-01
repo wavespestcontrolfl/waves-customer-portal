@@ -263,4 +263,20 @@ describe('Tech Home Quick Move: let the customer pick a day', () => {
     expect(await screen.findByText('Ask the office to move this visit.')).toBeInTheDocument();
     expect(screen.queryByText(/pick a day/i)).not.toBeInTheDocument();
   });
+
+  it('keeps today\'s error box, never the machine code, when the pick is not on offer either', async () => {
+    optionsRefusal = {
+      status: 403,
+      body: {
+        error: 'Ask the office to move this visit.', code: 'move_not_allowed', customerPickOnly: true,
+        customerPick: { available: false, unavailableReason: 'auto_dispatch_held', previewByReason: {} },
+      },
+    };
+    mount();
+    await screen.findByText('Property brief for one');
+    fireEvent.click(screen.getByRole('button', { name: 'Quick Move' }));
+    expect(await screen.findByText('Ask the office to move this visit.')).toBeInTheDocument();
+    expect(screen.queryByText('auto_dispatch_held')).not.toBeInTheDocument();
+    expect(screen.queryByText(/pick a day/i)).not.toBeInTheDocument();
+  });
 });
