@@ -1095,6 +1095,23 @@ describe('applySelectedLawnTierToEstimateData — the selected cadence floor rea
     expect(prepayFor(after, 760).amount).toBe(722);
   });
 
+  test('a manually discounted row switching cadence takes the selected tier\'s net, not the stored manualFinalAnnual', () => {
+    const before = armedNineVisitEstimate();
+    before.result.recurring.services[0].manualFinalAnnual = 600;
+    const after = applySelectedLawnTierToEstimateData(before, { ...premium, marginFloorMonthly: 58.34 });
+    const row = after.result.recurring.services[0];
+    expect(row.manualFinalAnnual).toBe(760);
+    // With the stale $600 the slice would protect against the 9x net and bill $752.
+    expect(prepayFor(after, 760).amount).toBe(722);
+    // A frequency with no annual leaves the stored net alone.
+    const { annual: _annual, ...noAnnual } = premium;
+    const untouched = applySelectedLawnTierToEstimateData(armedNineVisitEstimate(), noAnnual);
+    expect(untouched.result.recurring.services[0]).not.toHaveProperty('manualFinalAnnual');
+    const kept = armedNineVisitEstimate();
+    kept.result.recurring.services[0].manualFinalAnnual = 600;
+    expect(applySelectedLawnTierToEstimateData(kept, noAnnual).result.recurring.services[0].manualFinalAnnual).toBe(600);
+  });
+
   test('a frequency with no marginFloorMonthly (floor not armed for it) adds no lawnFloorMonthly', () => {
     const after = applySelectedLawnTierToEstimateData(armedNineVisitEstimate(), premium);
     expect(after.result.recurring.services[0]).not.toHaveProperty('lawnFloorMonthly');

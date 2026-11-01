@@ -25605,6 +25605,15 @@ function withSelectedCadenceFloor(row, frequency = {}) {
   return floorMonthly != null && floorMonthly > 0 ? { ...row, lawnFloorMonthly: floorMonthly } : row;
 }
 
+// The ladder entry's annual is the selected cadence's NET (its manual discount
+// and floor clamp already applied). An inherited manualFinalAnnual is the
+// STORED cadence's net, and readers take it as authoritative (the annual-prepay
+// protected slice, the plan-rate ledger), so it follows the selected tier.
+function withSelectedCadenceNet(row, frequency = {}) {
+  const net = finiteNumberOrNull(frequency.annual);
+  return row.manualFinalAnnual != null && net != null ? { ...row, manualFinalAnnual: net } : row;
+}
+
 function selectedLawnServiceRow(existing = {}, frequency = {}) {
   const meta = lawnTierRuntimeMeta(frequency?.key);
   if (!meta) return existing;
@@ -25626,7 +25635,7 @@ function selectedLawnServiceRow(existing = {}, frequency = {}) {
   if (annual != null) { row.ann = annual; row.annual = annual; row.annualAfterDiscount = annual; }
   if (perTreatment != null) { row.pa = perTreatment; row.perTreatment = perTreatment; row.perVisit = perTreatment; }
   if (visits != null) { row.v = visits; row.visits = visits; row.visitsPerYear = visits; row.appsPerYear = visits; }
-  return withSelectedCadenceFloor(row, frequency);
+  return withSelectedCadenceFloor(withSelectedCadenceNet(row, frequency), frequency);
 }
 
 function rewriteLawnRecurringServices(services = [], frequency = {}) {
