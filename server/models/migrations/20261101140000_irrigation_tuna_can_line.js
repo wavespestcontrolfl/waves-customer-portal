@@ -145,7 +145,9 @@ async function publishLine(knex, key = TEMPLATE_KEY) {
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('email_templates'))) return;
-  await publishLine(knex);
+  // The outcome goes to the deploy log, so a 'skipped' (office-edited body with no setup callout) is visible.
+  const outcome = await publishLine(knex);
+  console.log(`[${MIGRATION_ID}] ${TEMPLATE_KEY}: ${outcome}`);
 };
 
 // Intentionally a no-op: see the header.
