@@ -5,6 +5,7 @@ const { ensureCustomerGeocoded } = require('./geocoder');
 const { recordAuditEvent } = require('./audit-log');
 const { stampedAddressDiverges } = require('./stamped-address');
 const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
+const gates = require('../config/feature-gates');
 
 const SETTINGS_KEYS = [
   'gps_arrival.enabled',
@@ -145,9 +146,13 @@ function distanceMeters(fromLat, fromLng, toLat, toLng) {
   return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function buildArrivalDecision({ distance, speedMph, ignition, config }) {
-  if (distance == null) return { arrived: false, reason: 'invalid_distance' };
+// GATE_ARRIVAL_ENGINE_OFF (owner 2026-11-01), read at call time.
+const engineOffRuleLive = () => typeof gates.arrivalEngineOffLive === 'function' && gates.arrivalEngineOffLive();
+const engineOffContext = (point) => ({ engineOffRule: engineOffRuleLive(), engineOff: point?.engine_off === true });
+// An engine-off marker the receiver could not give a position (gate on only).
+const engineOffWithoutPosition = (point) => engineOffRuleLive() && point?.engine_off === true && validLatitude(point.lat) == null;
 
+function buildSpeedDecision({ distance, speedMph, ignition, config }) {
   const speed = finiteNumber(speedMph);
   const stoppedSignal = ignition === false;
   const slowEnough = stoppedSignal || (speed != null && speed <= config.maxSpeedMph);
@@ -166,6 +171,20 @@ function buildArrivalDecision({ distance, speedMph, ignition, config }) {
   }
 
   return { arrived: false, reason: 'outside_arrival_radius' };
+}
+
+// Gate on: only the engine-off point (a trip-end the receiver flagged) marks,
+// inside the arrival radius. A sample the speed rules would have marked is
+// recorded as awaiting_engine_off instead, so the old rule can be compared.
+function buildArrivalDecision({ distance, speedMph, ignition, config, engineOffRule = false, engineOff = false }) {
+  if (distance == null) return { arrived: false, reason: 'invalid_distance' };
+  if (engineOffRule && engineOff) {
+    return distance <= config.radiusMeters
+      ? { arrived: true, reason: 'engine_off_in_radius' }
+      : { arrived: false, reason: 'engine_off_outside_radius' };
+  }
+  const decision = buildSpeedDecision({ distance, speedMph, ignition, config });
+  return engineOffRule && decision.arrived ? { arrived: false, reason: 'awaiting_engine_off' } : decision;
 }
 
 function isAcceptedCurrentSample({ techLat, techLng, point }) {
@@ -344,6 +363,16 @@ function stopKey(service) {
   return service?.visit_id ? `visit:${service.visit_id}` : `service:${service?.id}`;
 }
 
+// Where the engine-off position came from (set by the Bouncie receiver).
+function engineOffMetadata(point) {
+  if (point?.engine_off !== true) return {};
+  return {
+    engine_off: true,
+    position_source: point.position_source ?? null,
+    last_location_gap_s: point.last_location_gap_s ?? null,
+  };
+}
+
 function auditMetadata({ service, techStatus, destination, distance, point, decision, result, error, notMarked }) {
   if (notMarked) {
     return {
@@ -353,10 +382,11 @@ function auditMetadata({ service, techStatus, destination, distance, point, deci
       detail: notMarked.detail || null,
       tech_id: techStatus?.tech_id || null,
       destination_source: destination.source,
-      distance_m: Math.round(distance),
+      distance_m: distance == null ? null : Math.round(distance),
       speed_mph: finiteNumber(point?.speed_mph),
       ignition: point?.ignition ?? null,
       sample_age_s: sampleAgeSeconds(point),
+      ...engineOffMetadata(point),
     };
   }
   return {
@@ -368,6 +398,7 @@ function auditMetadata({ service, techStatus, destination, distance, point, deci
     decision_reason: decision.reason,
     mark_on_property_result: result || null,
     error: error ? error.message : null,
+    ...engineOffMetadata(point),
   };
 }
 
@@ -470,14 +501,16 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
 // normal driving). The destination is the STORED one (visit, then customer
 // coordinates): a refusal never triggers a geocode (an outbound call plus a
 // customer row write); with none stored, nothing is recorded. Never throws.
-async function recordNotMarked({ service, techStatus, point, config, reason, detail = null, destination = null, distance = null }) {
+// `ignoreRadius` (engine-off reasons only): the engine turning off is the event,
+// so the row is written wherever the truck stopped, and with no position at all.
+async function recordNotMarked({ service, techStatus, point, config, reason, detail = null, destination = null, distance = null, ignoreRadius = false }) {
   try {
     // The one guard every path shares: a visit that already arrived (by
     // timestamp or by lifecycle state) or is closed is never a miss.
     if (!isOpenWithoutArrival(service)) return;
     const dest = destination || extractDestination(service);
     const dist = distance ?? (dest ? distanceMeters(point?.lat, point?.lng, dest.lat, dest.lng) : null);
-    if (dist == null || dist > config.radiusMeters) return;
+    if (!dest || (!ignoreRadius && (dist == null || dist > config.radiusMeters))) return;
     await writeNotMarkedOnce(service.id, reason, {
       service, techStatus, destination: dest, distance: dist, point, notMarked: { reason, detail },
     });
@@ -496,6 +529,19 @@ async function recordSupersededSample({ techStatus, point, config }) {
     await recordNotMarked({ service, techStatus, point, config, reason: 'stale_location_sample' });
   } catch (err) {
     logger.warn(`[gps-arrival] superseded-sample diagnostic failed: ${err.message}`);
+  }
+}
+
+// A trip-end with no usable engine-off position (no GPS of its own and no fresh
+// last location): nothing to judge, so the visit gets the not-marked row only.
+async function recordEngineOffNoPosition({ techStatus, point, config }) {
+  try {
+    const service = await loadCurrentService(techStatus.current_job_id);
+    if (!service || !isEnRouteService(service)) return;
+    if (service.technician_id && techStatus.tech_id && service.technician_id !== techStatus.tech_id) return;
+    await recordNotMarked({ service, techStatus, point, config, reason: 'engine_off_no_position', ignoreRadius: true });
+  } catch (err) {
+    logger.warn(`[gps-arrival] engine-off no-position diagnostic failed: ${err.message}`);
   }
 }
 
@@ -616,6 +662,11 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
   const currentJobId = techStatus?.current_job_id;
   if (!currentJobId) return { ok: false, reason: 'no_current_job' };
 
+  if (engineOffWithoutPosition(point)) {
+    await recordEngineOffNoPosition({ techStatus, point, config });
+    return { ok: false, reason: 'engine_off_no_position' };
+  }
+
   const techLat = validLatitude(techStatus.lat);
   const techLng = validLongitude(techStatus.lng);
   if (techLat == null || techLng == null) {
@@ -654,10 +705,14 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
     speedMph: point?.speed_mph,
     ignition: point?.ignition,
     config,
+    ...engineOffContext(point),
   });
 
   if (!decision.arrived) {
-    await recordNotMarked({ service, techStatus, point, config, destination, distance, reason: decision.reason });
+    await recordNotMarked({
+      service, techStatus, point, config, destination, distance, reason: decision.reason,
+      ignoreRadius: decision.reason === 'engine_off_outside_radius',
+    });
     return {
       ok: false,
       reason: decision.reason,

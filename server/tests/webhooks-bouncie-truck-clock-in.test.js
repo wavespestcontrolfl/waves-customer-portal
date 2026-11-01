@@ -136,3 +136,153 @@ describe('Bouncie tracking webhook, truck clock-in hook', () => {
     expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledTimes(1);
   });
 });
+
+// GATE_ARRIVAL_ENGINE_OFF (owner 2026-11-01): a trip-end is the engine-off arrival event.
+describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', () => {
+  const ENDED_AT = '2026-11-02T15:00:00.000Z';
+  const msBefore = (ms) => new Date(Date.parse(ENDED_AT) - ms).toISOString();
+  const TRIP_END_NO_GPS = { eventType: 'tripEnd', imei: 'imei-1', transactionId: 't-1', end: { timestamp: ENDED_AT, timeZone: 'America/New_York', odometer: 100, fuelConsumed: 1 } };
+  const TRIP_END_WITH_GPS = { ...TRIP_END_NO_GPS, end: { ...TRIP_END_NO_GPS.end, gps: { lat: 27.51, lon: -82.52, speed: 4 } } };
+  let logUpdate;
+  let tables;
+
+  function installDb({ lastLocation = null, lastLocationError = null } = {}) {
+    logUpdate = tableMock();
+    tables = {
+      technicians: tableMock({ first: TECH }),
+      vehicle_locations: lastLocationError
+        ? { where: jest.fn().mockReturnThis(), first: jest.fn().mockRejectedValue(lastLocationError) }
+        : tableMock({ first: lastLocation }),
+      tech_status: tableMock({ first: TECH_STATUS }),
+      bouncie_webhook_log: logUpdate,
+    };
+    db.mockReset();
+    db.mockImplementation((table) => tables[table]);
+    db.raw = jest.fn().mockResolvedValue({});
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_ARRIVAL_ENGINE_OFF = 'true';
+    pingTechLocation.mockResolvedValue(TECH_STATUS);
+    gpsArrivalDetector.maybeMarkArrivedFromGps.mockResolvedValue({ ok: true, arrivalMarked: true, serviceId: 'svc-1' });
+    truckClockIn.maybeClockInFromTruck.mockResolvedValue({ action: 'recorded' });
+  });
+
+  afterAll(() => {
+    delete process.env.GATE_ARRIVAL_ENGINE_OFF;
+  });
+
+  test('a trip-end with no GPS uses the fresh last location, and clock-in gets the arrival from that call', async () => {
+    installDb({ lastLocation: { lat: '27.4386000', lng: '-82.3719000', heading: 90, reported_at: msBefore(4 * 60 * 1000) } });
+
+    await router._test.processTrackingEvent({ logId: 21, eventType: 'tripEnd', payload: TRIP_END_NO_GPS });
+
+    const expectedPoint = {
+      lat: '27.4386000', lng: '-82.3719000', heading: 90, ignition: false, speed_mph: 0, reported_at: ENDED_AT,
+      engine_off: true, position_source: 'last_location', last_location_gap_s: 240,
+    };
+    expect(tables.vehicle_locations.where).toHaveBeenCalledWith({ bouncie_imei: 'imei-1' });
+    // Stored coordinates reused exactly: the tech marker does not move.
+    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({
+      tech_id: TECH.id, lat: '27.4386000', lng: '-82.3719000', ignition: false, speed_mph: 0, reported_at: ENDED_AT,
+    }));
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledWith({ techStatus: TECH_STATUS, point: expectedPoint });
+    expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'trip-end',
+      point: expectedPoint,
+      arrival: { ok: true, arrivalMarked: true, serviceId: 'svc-1' },
+      logId: 21,
+    }));
+    expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
+  });
+
+  test('a trip-end with its own GPS uses it as the engine-off position', async () => {
+    installDb({ lastLocation: { lat: 1, lng: 2, reported_at: msBefore(60 * 1000) } });
+
+    await router._test.processTrackingEvent({ logId: 22, eventType: 'tripEnd', payload: TRIP_END_WITH_GPS });
+
+    expect(tables.vehicle_locations.first).not.toHaveBeenCalled();
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledWith({
+      techStatus: TECH_STATUS,
+      point: expect.objectContaining({
+        lat: 27.51, lng: -82.52, ignition: false, speed_mph: 0, reported_at: ENDED_AT,
+        engine_off: true, position_source: 'trip_end_gps', last_location_gap_s: null,
+      }),
+    });
+    expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledWith(expect.objectContaining({
+      arrival: { ok: true, arrivalMarked: true, serviceId: 'svc-1' },
+    }));
+  });
+
+  test.each([
+    ['older than 10 minutes before the trip-end', msBefore(10 * 60 * 1000 + 1000), 601],
+    ['after the trip-end', new Date(Date.parse(ENDED_AT) + 5000).toISOString(), -5],
+  ])('a last location %s is not used: only the no-position diagnostic runs', async (_label, reportedAt, gapSeconds) => {
+    installDb({ lastLocation: { lat: '27.4386000', lng: '-82.3719000', heading: 0, reported_at: reportedAt } });
+
+    await router._test.processTrackingEvent({ logId: 23, eventType: 'tripEnd', payload: TRIP_END_NO_GPS });
+
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledTimes(1);
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledWith({
+      techStatus: TECH_STATUS,
+      point: {
+        ignition: false, speed_mph: 0, reported_at: ENDED_AT, engine_off: true, position_source: null, last_location_gap_s: gapSeconds,
+      },
+    });
+    expect(pingTechLocation).not.toHaveBeenCalled();
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(truckClockIn.maybeClockInFromTruck).not.toHaveBeenCalled();
+    expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
+  });
+
+  test('no last location row, or a failed lookup, is engine_off_no_position input too (and never throws)', async () => {
+    installDb({ lastLocation: undefined });
+    await router._test.processTrackingEvent({ logId: 24, eventType: 'tripEnd', payload: TRIP_END_NO_GPS });
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenLastCalledWith({
+      techStatus: TECH_STATUS,
+      point: expect.objectContaining({ engine_off: true, position_source: null, last_location_gap_s: null }),
+    });
+
+    installDb({ lastLocationError: new Error('pg down') });
+    await expect(router._test.processTrackingEvent({ logId: 25, eventType: 'tripEnd', payload: TRIP_END_NO_GPS })).resolves.toBeUndefined();
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('last location lookup failed: pg down'));
+    expect(truckClockIn.maybeClockInFromTruck).not.toHaveBeenCalled();
+  });
+
+  test('a trip-data sample is untouched by the gate (same point, no engine-off marker, no last-location read)', async () => {
+    installDb({ lastLocation: { lat: 1, lng: 2, reported_at: ENDED_AT } });
+
+    await router._test.processTrackingEvent({ logId: 26, eventType: 'tripData', payload: PAYLOAD });
+
+    expect(tables.vehicle_locations.first).not.toHaveBeenCalled();
+    const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[0][0];
+    expect(point).toEqual(expect.objectContaining({ lat: 27.3, lng: -82.5 }));
+    expect(point.engine_off).toBeUndefined();
+  });
+
+  test('gate off: a trip-end with no GPS does nothing, exactly as before (no read, no detector call)', async () => {
+    delete process.env.GATE_ARRIVAL_ENGINE_OFF;
+    installDb({ lastLocation: { lat: '27.4386000', lng: '-82.3719000', reported_at: msBefore(60 * 1000) } });
+
+    await router._test.processTrackingEvent({ logId: 27, eventType: 'tripEnd', payload: TRIP_END_NO_GPS });
+
+    expect(tables.vehicle_locations.first).not.toHaveBeenCalled();
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).not.toHaveBeenCalled();
+    expect(pingTechLocation).not.toHaveBeenCalled();
+    expect(truckClockIn.maybeClockInFromTruck).not.toHaveBeenCalled();
+    expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
+  });
+
+  test('gate off: a trip-end with its own GPS passes the payload point untouched (no engine-off marker)', async () => {
+    delete process.env.GATE_ARRIVAL_ENGINE_OFF;
+    installDb();
+
+    await router._test.processTrackingEvent({ logId: 28, eventType: 'tripEnd', payload: TRIP_END_WITH_GPS });
+
+    const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[0][0];
+    expect(point).toEqual(expect.objectContaining({ lat: 27.51, lng: -82.52, speed_mph: 4, ignition: null }));
+    expect(point.engine_off).toBeUndefined();
+  });
+});

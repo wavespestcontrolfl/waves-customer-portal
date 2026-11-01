@@ -26,6 +26,7 @@ const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const gpsArrivalDetector = require('../services/gps-arrival-detector');
 const truckClockIn = require('../services/truck-clock-in');
+const gates = require('../config/feature-gates');
 const { pingTechLocation } = require('../services/tech-status');
 const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('../services/customer-tracking-eta');
 const {
@@ -35,6 +36,7 @@ const {
 const {
   eventTypeFromPayload,
   extractImei,
+  firstPresent,
   normalizeEventType,
   normalizeTripMetricsPayload,
   pointFromPayload,
@@ -131,6 +133,58 @@ async function resolveTechnician(imei) {
   }
 }
 
+// ---------- engine-off arrival (GATE_ARRIVAL_ENGINE_OFF, owner 2026-11-01) ----------
+
+const arrivalEngineOffLive = () => typeof gates.arrivalEngineOffLive === 'function' && gates.arrivalEngineOffLive();
+// A last known location counts as the engine-off position only when it was
+// reported at most this long before the trip-end (and never after it).
+const ENGINE_OFF_LAST_LOCATION_MAX_MS = 10 * 60 * 1000;
+
+// The engine-off point of a trip-end: its own GPS, else the truck's last known
+// location (stored coordinates reused exactly), else a position-less marker the
+// detector records as engine_off_no_position. ignition false, speed 0,
+// reported_at = the trip-end time.
+async function engineOffPoint({ imei, payload, ownPoint }) {
+  const endedMs = Date.parse(firstPresent(payload.end?.timestamp, ownPoint?.reported_at, payload.timestamp) || '');
+  const endedAt = new Date(Number.isFinite(endedMs) ? endedMs : Date.now());
+  const base = { ignition: false, speed_mph: 0, reported_at: endedAt.toISOString(), engine_off: true };
+  if (ownPoint) {
+    return { ...ownPoint, ...base, position_source: 'trip_end_gps', last_location_gap_s: null };
+  }
+
+  let last = null;
+  try {
+    last = await db('vehicle_locations').where({ bouncie_imei: imei }).first('lat', 'lng', 'heading', 'reported_at');
+  } catch (err) {
+    logger.warn(`[webhooks-bouncie] engine-off last location lookup failed: ${err.message}`);
+  }
+  const gapMs = last?.reported_at ? endedAt.getTime() - new Date(last.reported_at).getTime() : NaN;
+  const gapSeconds = Number.isFinite(gapMs) ? Math.round(gapMs / 1000) : null;
+  if (last?.lat != null && last?.lng != null && gapMs >= 0 && gapMs <= ENGINE_OFF_LAST_LOCATION_MAX_MS) {
+    return { ...base, lat: last.lat, lng: last.lng, heading: last.heading ?? null, position_source: 'last_location', last_location_gap_s: gapSeconds };
+  }
+  return { ...base, position_source: null, last_location_gap_s: gapSeconds };
+}
+
+const isEngineOffArrivalEvent = (eventType) => eventType === 'trip-end' && arrivalEngineOffLive();
+
+// The point the rest of the event runs on. With no usable engine-off position
+// only the detector's not-marked diagnostic runs and the event carries no point:
+// nothing is upserted or pinged, and truck clock-in has no position to read.
+async function engineOffArrivalPoint({ tech, payload, ownPoint }) {
+  const point = await engineOffPoint({ imei: tech.bouncie_imei, payload, ownPoint });
+  if (point.lat != null) return point;
+  try {
+    const techStatus = await db('tech_status')
+      .where({ tech_id: tech.id })
+      .first('tech_id', 'current_job_id', 'lat', 'lng', 'location_updated_at');
+    await gpsArrivalDetector.maybeMarkArrivedFromGps({ techStatus, point });
+  } catch (err) {
+    logger.error(`[webhooks-bouncie] engine-off no-position check failed: ${err.message}`);
+  }
+  return null;
+}
+
 // ---------- event processing ----------
 
 async function processTrackingEvent({ logId, eventType, payload }) {
@@ -172,6 +226,10 @@ async function processTrackingEvent({ logId, eventType, payload }) {
       default: {
         point = pointFromPayload(payload, normalizedEventType);
       }
+    }
+
+    if (isEngineOffArrivalEvent(normalizedEventType)) {
+      point = await engineOffArrivalPoint({ tech, payload, ownPoint: point });
     }
 
     if (point) {
@@ -321,6 +379,7 @@ module.exports = router;
 router._test = {
   normalizeTripMetricsPayload,
   normalizeLocationReportedAt,
+  engineOffPoint,
   processTrackingEvent,
   upsertLocation,
 };
