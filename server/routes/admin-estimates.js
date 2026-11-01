@@ -4862,10 +4862,14 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: 'Property scope is limited to 24 rows (labels 80 chars, values 160 chars).' });
       }
     }
-    // Building use (owner 2026-10-28): residential, nonresidential or unset. An unknown value gets a 400 rather than
-    // a silent drop, since it decides which rows the builder taxes.
-    if (incoming.buildingUse != null && String(incoming.buildingUse).trim() !== ''
-      && require('../services/estimate-proposal').normalizeBuildingUse(incoming.buildingUse) === null) {
+    // Building use (owner 2026-10-28): residential or nonresidential. It decides which rows the builder taxes and the
+    // tax every visit bill takes, and online signing refuses a proposal without one, so every save states it (owner
+    // 2026-11-01, proposal readiness PR B; the builder already asks, CommercialProposalPage.jsx BUILDING_USE_REQUIRED,
+    // same words). An unknown value gets a 400 rather than a silent drop.
+    if (incoming.buildingUse == null || String(incoming.buildingUse).trim() === '') {
+      return res.status(400).json({ error: 'Pick the building use before saving: homes or residential community, or business building. It sets which rows carry sales tax.' });
+    }
+    if (require('../services/estimate-proposal').normalizeBuildingUse(incoming.buildingUse) === null) {
       return res.status(400).json({ error: 'Building use must be residential or nonresidential.' });
     }
     // Present-but-invalid term numbers get a 400, not a silent normalize:
