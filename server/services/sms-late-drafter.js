@@ -60,6 +60,10 @@ function silenceRefusal() {
   if (g.isEnabled('smsSuggestMode')) return 'suggest_mode_on';
   if (g.isEnabled('smsAutoSend')) return 'auto_send_on';
   if (require('./sms-unanswered-reply').unansweredReplyLive()) return 'unanswered_reply_on';
+  // The live webhook drafter and this one never run together: with live drafting on (GATE_SMS_SHADOW_DRAFTS,
+  // which the Mac job reads from production), a live draft still generating could race a late one for the same
+  // text, and message_drafts has no unique key on sms_log_id. The Mac fills in only while live drafting is off.
+  if (g.isEnabled('smsShadowDrafts')) return 'live_drafting_on';
   return null;
 }
 

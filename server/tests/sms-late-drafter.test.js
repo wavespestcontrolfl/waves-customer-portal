@@ -76,13 +76,14 @@ const findCustomerOk = jest.fn(async () => customerFor());
 beforeEach(() => {
   jest.clearAllMocks();
   stubFetch.mockClear();
-  priorGates = { smsSuggestMode: featureGates.gates.smsSuggestMode, smsAutoSend: featureGates.gates.smsAutoSend };
+  priorGates = { smsSuggestMode: featureGates.gates.smsSuggestMode, smsAutoSend: featureGates.gates.smsAutoSend, smsShadowDrafts: featureGates.gates.smsShadowDrafts };
   priorEnv = { mac: process.env.GATE_SMS_MAC_DRAFTS, unanswered: process.env.GATE_SMS_UNANSWERED_REPLY };
   process.env.GATE_SMS_MAC_DRAFTS = 'true';
   delete process.env.GATE_SMS_UNANSWERED_REPLY;
   // The silent baseline a production Mac job runs in: suggest mode and auto-send off.
   featureGates.gates.smsSuggestMode = false;
   featureGates.gates.smsAutoSend = false;
+  featureGates.gates.smsShadowDrafts = false;
   draftShadowReply.mockImplementation(async ({ smsLogId }) => `draft-for-${smsLogId}`);
   findCustomerOk.mockImplementation(async () => customerFor());
 });
@@ -90,6 +91,7 @@ beforeEach(() => {
 afterEach(() => {
   featureGates.gates.smsSuggestMode = priorGates.smsSuggestMode;
   featureGates.gates.smsAutoSend = priorGates.smsAutoSend;
+  featureGates.gates.smsShadowDrafts = priorGates.smsShadowDrafts;
   for (const [key, name] of [['mac', 'GATE_SMS_MAC_DRAFTS'], ['unanswered', 'GATE_SMS_UNANSWERED_REPLY']]) {
     if (priorEnv[key] === undefined) delete process.env[name];
     else process.env[name] = priorEnv[key];
@@ -161,6 +163,21 @@ describe('silence guard', () => {
     expect(silenceRefusal()).toBe('unanswered_reply_on');
     delete process.env.GATE_SMS_UNANSWERED_REPLY;
     expect(silenceRefusal()).toBeNull();
+  });
+
+  test('live drafting on refuses: the two drafters never run together', async () => {
+    featureGates.gates.smsShadowDrafts = true;
+    const dbi = fakeDbi({ rows: [inboundRow()] });
+    expect(await run(dbi)).toEqual({ refused: 'live_drafting_on' });
+    expect(dbi).not.toHaveBeenCalled();
+    expect(draftShadowReply).not.toHaveBeenCalled();
+  });
+
+  test('live drafting switched on mid-run stops the run before the next draft', async () => {
+    draftShadowReply.mockImplementationOnce(async () => { featureGates.gates.smsShadowDrafts = true; return 'draft-1'; });
+    const result = await run(fakeDbi({ rows: [inboundRow({ id: 'sms-1' }), inboundRow({ id: 'sms-2' })] }));
+    expect(draftShadowReply).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ drafted: 1, stopped: 'live_drafting_on' });
   });
 
   test('suggest mode switched on mid-run stops the run before the next draft', async () => {
