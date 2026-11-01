@@ -1503,6 +1503,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "list_commercial_proposals": {
+    "module": "estimate-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
   "list_gap_reports": {
     "module": "gap-report-tools.js",
     "domain": "ops",
