@@ -454,6 +454,7 @@
  *   GATE_PAYROLL_MERCURY_STATUS=true (basic payroll option A, owner plan 2026-10-30: Waves works out each W-2 paycheck and Mercury sends it only after the owner approves it in the Mercury app. Needs GATE_PAYROLL. This is the read-only half: the 15-minute poller that reads each payment's approval request and transaction from Mercury, the recipient check when a Mercury recipient id is saved on a technician, the warnings before a send, and the payment chips on the pay run. Needs the env MERCURY_API_TOKEN (a custom token with read scopes and Send Money with Approval) and MERCURY_ACCOUNT_ID; MERCURY_API_BASE defaults to https://api.mercury.com/api/v1. The token, account number, routing number and any Mercury answer are never logged or stored. Read at call time via payrollMercuryStatusLive(), strict 'true', dark by default; off = no Mercury call at all and every payroll output and route is byte for byte today's; rollback = unset. Sends nothing to a customer or staff member.)
  *   GATE_PAYROLL_MERCURY_PAY=true (basic payroll option A, owner plan 2026-10-30. Needs GATE_PAYROLL and GATE_PAYROLL_MERCURY_STATUS. Turns on Send to Mercury and Send again on a finalized pay run: for each bank-transfer paycheck with a Mercury recipient id the portal asks Mercury for an APPROVAL REQUEST (POST request-send-money); no money moves until a different Mercury user approves it in the Mercury app, and the portal never calls Mercury's direct send. A request is never sent twice by code: a lost answer becomes an 'unknown' payment the owner resolves. Read at call time via payrollMercuryPayLive(), strict 'true', dark by default; off = no request is ever made; rollback = unset (existing payment rows stay and still block a void).)
  *   GATE_BUG_ID_EXTENSION=true (owner 2026-10-31, "Let's do the insect identification": the Chrome extension's bug identifier, POST /api/public/bug-id-extension/identify. Anonymous and worldwide, so no lead capture, no pricing, no row and no stored photo; 1–3 photos go to the v2 species-catalog pest engine (identifyPestV2, Gemini-only ladder, as the customer app) and only its customer-facing v2 answer comes back. Paid vision per request, bounded by 6/hour and 15/day per IP plus one worldwide daily cap of its own (PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION, default 100, bucket bug-id-extension) that counts whatever GATE_PUBLIC_LLM_SHARED_CAP says and fails closed. Read at call time via bugIdExtensionLive(), strict 'true', dark by default; off = the whole /api/public/bug-id-extension surface answers 404 before cors(), any limiter or body parser. Sends nothing to anyone. Kill switch: unset.)
+ *   GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ=true (owner 2026-11-01, Action inbox agents A, "yes do this": the 3:45 AM ET inventory unit sweep also converts a DRY product whose unit is a bare ounce (oz, Ounces) to g, or to lb from 16 oz of stock up, with its stock, low-stock level, reorder quantity and per-visit usage converted by the exact weight factor. A product counts as dry only when its formulation says so (WDG, WG, WSG, granular, powder, dust, paste, gel bait) and nothing says liquid or count (no liquid code or word, no liquid look on the Unit Review page, no volume rate or default unit, no station, cartridge, tablet or trap in the name, category or any unit field, no per-item rate unit) and its price has an explicit cost unit when it has a price, and any cost unit is a weight unit or a bare ounce, and it has no per-visit supplies usage. Everything else stays in the Unit Review queue as before. Needs GATE_INVENTORY_UNIT_AUTOFIX ON too. Every fix leaves a movement audit row (source inventory_unit_review_autofix_dry_oz) and rings no bell; the alias digest keeps its old wording. Strict opt-in, read at call time via inventoryUnitAutofixDryOzLive(); off = oz rows stay parked exactly as before. Kill switch: unset.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3111,6 +3112,11 @@ const gates = {
   // 'inventory_unit_review_autofix') and is hand-reversible from the
   // unit-review tab.
   inventoryUnitAutofix: process.env.GATE_INVENTORY_UNIT_AUTOFIX === 'true',
+
+  // Dry-oz phase of the same sweep (owner 2026-11-01, Action inbox agents A).
+  // Needs inventoryUnitAutofix too. Boot-log entry only; the call-time reader
+  // is inventoryUnitAutofixDryOzLive().
+  inventoryUnitAutofixDryOz: process.env.GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true',
 
   // Weekly incident regression eval — replays the incident corpus
   // (server/fixtures/incident-eval/) through the LIVE fact-check gate and
@@ -9658,6 +9664,12 @@ function routeEngineSummaryLive() {
 function inspectionReuseLeadShellLive() {
   return process.env.GATE_INSPECTION_REUSE_LEAD_SHELL === 'true';
 }
+// GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ read at CALL time, strict `=== 'true'`, dark in every environment. Off = the
+// 3:45 AM inventory unit sweep leaves every oz-family row parked for the Unit Review page, as before.
+function inventoryUnitAutofixDryOzLive() {
+  return process.env.GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true';
+}
+
 // GATE_QUOTE_SAME_PERSON_MATCH read at CALL time, strict `=== 'true'`, dark in every environment. Off = a typed phone that matches
 // 2 or more customer rows adds a new customers row on every quote wizard run, as before.
 function quoteSamePersonMatchLive() {
@@ -9841,6 +9853,8 @@ module.exports.messengerInboxLive = messengerInboxLive;
 module.exports.routeEngineSummaryLive = routeEngineSummaryLive;
 // GATE_INSPECTION_REUSE_LEAD_SHELL reader, on its own line so gate PRs never conflict.
 module.exports.inspectionReuseLeadShellLive = inspectionReuseLeadShellLive;
+// GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ reader, on its own line (away from the busy tail) so gate PRs never conflict.
+module.exports.inventoryUnitAutofixDryOzLive = inventoryUnitAutofixDryOzLive;
 // GATE_QUOTE_SAME_PERSON_MATCH reader, on its own line so gate PRs never conflict.
 module.exports.quoteSamePersonMatchLive = quoteSamePersonMatchLive;
 // GATE_ROUTE_ORDER_TIME_FALLBACK reader, on its own line so gate PRs never conflict.
