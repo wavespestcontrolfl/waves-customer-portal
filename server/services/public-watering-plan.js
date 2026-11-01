@@ -225,12 +225,18 @@ function restrictionNote(policy) {
   return `${policy.label} limits lawn watering to ${dayWord} a week${hours}. Your city or county can set stricter limits, so check with your utility.`;
 }
 
+// "no measurable rain" under 0.01", else "about N"" — never "about 0"".
+function rainAmount(inches) {
+  return inches < 0.01 ? 'no measurable rain' : `about ${inchesText(inches)}`;
+}
+
 function rainNote(observed) {
   if (!observed || observed.rainInches == null) {
     return 'We could not get the last 7 days of rainfall, so this plan counts none of it.';
   }
   const how = observed.rainSource === 'mrms' ? ' (NOAA radar and rain-gauge estimate)' : ' (weather-model estimate)';
-  return `About ${inchesText(observed.rainInches)} of rain fell in the last 7 days${how}.`;
+  const amount = rainAmount(observed.rainInches);
+  return `${amount.charAt(0).toUpperCase()}${amount.slice(1)}${amount.startsWith('no ') ? '' : ' of rain'} fell in the last 7 days${how}.`;
 }
 
 // Deterministic copy: the plan card's own renderer for a covered county, a
@@ -248,8 +254,8 @@ function buildText({
     notes.push(restrictionNote(policy));
   } else if (action === 'need_only') {
     headline = `Your lawn needs about ${inchesText(targetInches)} of water this week`;
-    const rainClause = forecastRain != null ? `, and about ${inchesText(forecastRain)} is in the forecast` : '';
-    actionText = `Rain counts toward that: about ${inchesText(lastWeekRain != null ? lastWeekRain : 0)} fell in the last 7 days${rainClause}. Water only on the days your county allows, inside its allowed hours, and skip a run after ½" of rain. Check the current rules from the ${rules.districtName}: ${rules.url}`;
+    const rainClause = forecastRain != null ? `, and ${rainAmount(forecastRain)} is in the forecast` : '';
+    actionText = `Rain counts toward that: ${rainAmount(lastWeekRain != null ? lastWeekRain : 0)} fell in the last 7 days${rainClause}. Water only on the days your county allows, inside its allowed hours, and skip a run after ½" of rain. Check the current rules from the ${rules.districtName}: ${rules.url}`;
     notes.push('We cannot confirm a watering order for this area, so this shows what the lawn needs, not a schedule.');
   } else {
     headline = 'We could not build a watering plan right now';

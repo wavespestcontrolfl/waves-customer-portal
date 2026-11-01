@@ -116,6 +116,18 @@ describe('computePublicWateringPlan', () => {
     expect(none.text.notes.join(' ')).toMatch(/about \d+ minutes on spray zones and \d+ on rotor zones/);
   });
 
+  test('a dry week reads "no measurable rain", never an empty or zero amount', () => {
+    const dry = { ...OBSERVED, rainInches: 0, rainSource: 'mrms' };
+    const covered = compute({ observed: dry });
+    expect(covered.text.notes).toContain('No measurable rain fell in the last 7 days (NOAA radar and rain-gauge estimate).');
+    const open = compute({ policy: null, observed: dry, forecast: { ...FORECAST, rainInches: 0 } });
+    expect(open.text.action).toContain('Rain counts toward that: no measurable rain fell in the last 7 days, and no measurable rain is in the forecast.');
+    for (const body of [covered, open]) {
+      const words = [body.text.headline, body.text.action, ...body.text.notes].join(' ');
+      expect(words).not.toMatch(/about "|About "|about 0"|About 0"/);
+    }
+  });
+
   test('uncovered county (no policy): need_only, the week\'s need in inches, no event count, no legal maximum', () => {
     const body = compute({ policy: null });
     expect(body.plan).toEqual({
