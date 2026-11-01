@@ -88,6 +88,10 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
     test('a label dry-before-rain product takes its label hours', () => {
       expect(dryTime.productDryHours({ name: 'Sedgehammer Plus', epa_reg_number: '81880-24' }, 2)).toBe(4);
     });
+    test('a catalog formulation of granular needs none even when name and category do not say so', () => {
+      // LESCO 24-0-11 with PolyPlus OPTI is seeded formulation='granular', category='fertilizer'.
+      expect(dryTime.productDryHours({ name: 'LESCO 24-0-11 with PolyPlus OPTI', product_category: 'fertilizer', formulation: 'granular' }, 4)).toBe(0);
+    });
     test('a granular, bait, gel, dust or station product needs none', () => {
       expect(dryTime.productDryHours({ name: 'Mystery Product', application_method: 'granular_broadcast' }, 4)).toBe(0);
       expect(dryTime.productDryHours({ name: 'Roach Gel Bait', product_category: 'bait' }, 4)).toBe(0);
@@ -139,6 +143,14 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       const out = await dryTime.resolveDryHours(conn, ctx);
       expect(out).toEqual({ hours: 4, source: 'last_visit_products' });
       expect(conn.calls).toEqual(['scheduled_services as ss', 'service_products as sp']);
+    });
+    test('the last visit products carry the catalog formulation (a granular fertilizer is rain-proof)', async () => {
+      const conn = fakeConn([
+        { id: 'rec1' },
+        [{ product_name: 'LESCO 24-0-11 with PolyPlus OPTI', product_category: 'fertilizer', formulation: 'granular' }],
+      ]);
+      expect(await dryTime.resolveDryHours(conn, { customerId: 'c1', serviceType: 'Every 6 Weeks Lawn Care Service', serviceKey: null }))
+        .toEqual({ hours: 0, source: 'last_visit_products' });
     });
     test('the catalog EPA number fills a visit product without one', async () => {
       const conn = fakeConn([{ id: 'rec1' }, [{ product_name: 'Sedge', catalog_epa: '81880-24' }]]);

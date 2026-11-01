@@ -77,7 +77,9 @@ function productDryHours(product, serviceHours) {
   const rule = labelRainRuleFor({ epa_reg_number: product?.epa_reg_number, name: product?.name });
   if (rule?.waterIn) return 0;
   if (rule?.dryBeforeRain) return Number(rule.dryBeforeRain.hours) || 0;
-  const form = [product?.application_method, product?.product_category, product?.name].join(' ').replace(/_/g, ' ');
+  // products_catalog.formulation names the form when the name and category do not
+  // ('granular' on a fertilizer row; Codex pre-push #7371 P1).
+  const form = [product?.formulation, product?.application_method, product?.product_category, product?.name].join(' ').replace(/_/g, ' ');
   if (RAIN_PROOF_FORM.test(form)) return 0;
   return Number(serviceHours) > 0 ? Number(serviceHours) : DEFAULT_LIQUID_HOURS;
 }
@@ -111,11 +113,12 @@ async function lastVisitProducts(conn, { customerId, serviceType, serviceKey }) 
     .leftJoin('products_catalog as pc', 'pc.id', 'sp.product_id')
     .where('sp.service_record_id', visit.id)
     .limit(MAX_PRODUCTS)
-    .select('sp.product_name', 'sp.product_category', 'sp.application_method', 'sp.epa_reg_number', 'pc.epa_reg_number as catalog_epa');
+    .select('sp.product_name', 'sp.product_category', 'sp.application_method', 'sp.epa_reg_number', 'pc.epa_reg_number as catalog_epa', 'pc.formulation');
   return rows.map((r) => ({
     name: r.product_name,
     product_category: r.product_category,
     application_method: r.application_method,
+    formulation: r.formulation,
     epa_reg_number: r.epa_reg_number || r.catalog_epa,
   }));
 }
@@ -126,7 +129,7 @@ async function catalogProducts(conn, serviceType) {
     .join('products_catalog as pc', 'pc.id', 'u.product_id')
     .where('u.service_type', serviceType)
     .limit(MAX_PRODUCTS)
-    .select('pc.name', 'pc.category as product_category', 'pc.application_method', 'pc.epa_reg_number');
+    .select('pc.name', 'pc.category as product_category', 'pc.application_method', 'pc.epa_reg_number', 'pc.formulation');
 }
 
 function maxDryHours(products, ruleHours) {
