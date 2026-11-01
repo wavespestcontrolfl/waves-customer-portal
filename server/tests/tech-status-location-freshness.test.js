@@ -211,6 +211,20 @@ describe('tech_status GPS freshness writes', () => {
     expect(values.slice(5)).toEqual(['tech-1', '356938035643809']);
   });
 
+  test('readTechStatus for one Bouncie device answers only while technicians.bouncie_imei still equals it', async () => {
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ tech_id: 'tech-1', current_job_id: 'job-1' }] });
+    const row = await techStatus.readTechStatus('tech-1', { requireBouncieImei: ' DEV-A ' });
+    const [sql, values] = db.raw.mock.calls[0];
+    expect(sql).toMatch(/^SELECT tech_id, current_job_id, lat, lng, location_updated_at FROM tech_status WHERE tech_id = \?::uuid/);
+    expect(sql).toContain('AND EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ?)');
+    expect(values).toEqual(['tech-1', 'tech-1', 'DEV-A']);
+    expect(row).toEqual({ tech_id: 'tech-1', current_job_id: 'job-1' });
+
+    db.raw = jest.fn().mockResolvedValue({ rows: [] }); // the truck was remapped meanwhile
+    expect(await techStatus.readTechStatus('tech-1', { requireBouncieImei: 'OLD-DEVICE' })).toBeNull();
+    expect(await techStatus.readTechStatus(null)).toBeNull();
+  });
+
   test('a guarded ping whose mapping moved mid-flight matches no row: nothing is broadcast and null is returned', async () => {
     const raw = jest.fn().mockResolvedValue({ rows: [] });
     db.transaction = jest.fn(async (cb) => cb({ raw }));

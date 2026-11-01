@@ -382,11 +382,18 @@ function haversineEtaMinutes(fromLat, fromLng, toLat, toLng) {
 
 // Read only: the technician's status row as the GPS arrival detector reads it
 // (current job and last ping), or null. Every write stays in the functions above.
-async function readTechStatus(techId) {
+// Same mapping guard as pingTechLocation: a read for ONE Bouncie device answers
+// only while technicians.bouncie_imei still equals that IMEI, so an admin remap
+// after the event was resolved returns nothing.
+async function readTechStatus(techId, { requireBouncieImei = null } = {}) {
   if (!techId) return null;
-  return db('tech_status')
-    .where({ tech_id: techId })
-    .first('tech_id', 'current_job_id', 'lat', 'lng', 'location_updated_at');
+  const imei = requireBouncieImei == null ? '' : String(requireBouncieImei).trim();
+  const mapping = imei ? ' AND EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ?)' : '';
+  const { rows } = await db.raw(
+    `SELECT tech_id, current_job_id, lat, lng, location_updated_at FROM tech_status WHERE tech_id = ?::uuid${mapping} LIMIT 1`,
+    imei ? [techId, techId, imei] : [techId],
+  );
+  return rows?.[0] || null;
 }
 
 module.exports = {

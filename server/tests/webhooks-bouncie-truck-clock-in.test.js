@@ -187,7 +187,7 @@ describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)
     // The borrowed position is never written back as a GPS sample: the stored status is read as it stands.
     expect(db.raw).not.toHaveBeenCalled();
     expect(pingTechLocation).not.toHaveBeenCalled();
-    expect(readTechStatus).toHaveBeenCalledWith(TECH.id);
+    expect(readTechStatus).toHaveBeenCalledWith(TECH.id, { requireBouncieImei: 'imei-1' });
     expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledWith({ techStatus: TECH_STATUS, point: expectedPoint });
     expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'trip-end',
@@ -243,7 +243,7 @@ describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)
 
     await router._test.processTrackingEvent({ logId: 23, eventType: 'tripEnd', payload: TRIP_END_NO_GPS });
 
-    expect(readTechStatus).toHaveBeenCalledWith(TECH.id);
+    expect(readTechStatus).toHaveBeenCalledWith(TECH.id, { requireBouncieImei: 'imei-1' });
     expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledTimes(1);
     expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledWith({
       techStatus: TECH_STATUS,

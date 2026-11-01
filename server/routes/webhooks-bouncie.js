@@ -180,7 +180,7 @@ async function engineOffArrivalPoint({ tech, payload, ownPoint }) {
   if (!point) return ownPoint;
   if (point.lat != null) return point;
   try {
-    const techStatus = await readTechStatus(tech.id);
+    const techStatus = await readTechStatus(tech.id, { requireBouncieImei: tech.bouncie_imei });
     await gpsArrivalDetector.maybeMarkArrivedFromGps({ techStatus, point });
   } catch (err) {
     logger.error(`[webhooks-bouncie] engine-off no-position check failed: ${err.message}`);
@@ -209,7 +209,7 @@ async function recordPoint({ tech, point }) {
   // vehicle_locations is already committed at this point and is
   // the system of record for the customer-facing track map.
   try {
-    if (borrowedPosition) return await readTechStatus(tech.id);
+    if (borrowedPosition) return await readTechStatus(tech.id, { requireBouncieImei: tech.bouncie_imei });
     return await pingTechLocation({
       tech_id: tech.id,
       lat: point.lat,

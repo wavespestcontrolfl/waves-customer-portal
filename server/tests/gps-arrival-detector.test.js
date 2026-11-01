@@ -1121,6 +1121,31 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(sample).toMatchObject({ ok: false, reason: 'stale_location_sample' });
   });
 
+  test('gate on: a borrowed engine-off is refused when its trip-end is in the future or a newer sample exists', async () => {
+    const future = await run(baseService(), {
+      techStatus: baseTechStatus({ lat: NEAR_LAT, location_updated_at: minutesAgo(3) }),
+      point: engineOffPoint({ reported_at: new Date(Date.now() + 5 * 60 * 1000).toISOString() }),
+    });
+    expect(future).toMatchObject({ ok: false, reason: 'stale_location_sample' });
+
+    // The truck reported again after this engine-off: it moved on, so the late trip-end is superseded.
+    const superseded = await run(baseService(), {
+      techStatus: baseTechStatus({ lat: NEAR_LAT, location_updated_at: new Date().toISOString() }),
+      point: engineOffPoint({ reported_at: minutesAgo(4) }),
+    });
+    expect(superseded).toMatchObject({ ok: false, reason: 'stale_location_sample' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a trip-end with its own GPS keeps the location-time match of a sample', async () => {
+    const result = await run(baseService(), {
+      techStatus: baseTechStatus({ lat: NEAR_LAT, location_updated_at: minutesAgo(6) }),
+      point: engineOffPoint({ position_source: 'trip_end_gps', last_location_gap_s: null }),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'stale_location_sample' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
   test('gate on: an engine-off with no position for a job that is not en route writes nothing', async () => {
     const point = basePoint({ lat: undefined, lng: undefined, engine_off: true, position_source: null });
     const result = await run(baseService({ track_state: 'on_property', status: 'on_site' }), { point, techStatus: baseTechStatus() });

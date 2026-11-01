@@ -151,6 +151,8 @@ const engineOffRuleLive = () => typeof gates.arrivalEngineOffLive === 'function'
 const engineOffContext = (point) => ({ engineOffRule: engineOffRuleLive(), engineOff: point?.engine_off === true });
 // An engine-off marker the receiver could not give a position (gate on only).
 const engineOffWithoutPosition = (point) => engineOffRuleLive() && point?.engine_off === true && validLatitude(point.lat) == null;
+// An engine-off on the truck's borrowed last location (gate on only).
+const borrowedEngineOff = (point) => engineOffRuleLive() && point?.engine_off === true && point?.position_source === 'last_location';
 
 function buildSpeedDecision({ distance, speedMph, ignition, config }) {
   const speed = finiteNumber(speedMph);
@@ -207,21 +209,26 @@ function timestampMs(value) {
 
 function validateSampleTiming({ techStatus, point, service, now = Date.now() }) {
   const pointMs = timestampMs(point?.reported_at);
-  // Gate on, an engine-off is judged by its own trip-end time: its position is the
-  // truck's last known one, reported up to 10 minutes earlier and never written
-  // back, so there is no location time to match.
-  const engineOffEvent = engineOffRuleLive() && point?.engine_off === true;
-  const techMs = engineOffEvent ? null : timestampMs(techStatus?.location_updated_at);
+  const techMs = timestampMs(techStatus?.location_updated_at);
 
-  if (pointMs == null || (!engineOffEvent && techMs == null)) {
+  if (pointMs == null || techMs == null) {
     return { ok: false, reason: 'missing_location_timestamp' };
+  }
+  // Gate on, an engine-off on a borrowed last location is timed by its trip-end:
+  // the position was reported up to 10 minutes earlier and never written back, so
+  // the stored location may be older than the trip-end, but never newer (the truck
+  // moved on after the engine-off). A trip-end with its own GPS is a sample.
+  if (borrowedEngineOff(point)) {
+    if (techMs > pointMs + SAMPLE_TIMESTAMP_TOLERANCE_MS) return { ok: false, reason: 'stale_location_sample' };
+    return validateEventTiming({ pointMs, service, now });
   }
   return validateEventTiming({ pointMs, techMs, service, now });
 }
 
 // The event's own time against the visit: fresh, close to the stored location's
-// time when there is one (techMs null = a position-less engine-off, nothing to
-// match), and not before the visit went en route.
+// time when it is this event's own (techMs null = a borrowed or missing engine-off
+// position: nothing to match, so the event's time must not be in the future), and
+// not before the visit went en route.
 function validateEventTiming({ pointMs, techMs = null, service, now = Date.now() }) {
   const enRouteMs = timestampMs(service?.en_route_at);
   if (enRouteMs == null) {
@@ -230,7 +237,8 @@ function validateEventTiming({ pointMs, techMs = null, service, now = Date.now()
   if (now - pointMs > MAX_SAMPLE_AGE_MS) {
     return { ok: false, reason: 'stale_location_sample' };
   }
-  if (techMs != null && Math.abs(pointMs - techMs) > SAMPLE_TIMESTAMP_TOLERANCE_MS) {
+  const offBy = techMs == null ? pointMs - now : Math.abs(pointMs - techMs);
+  if (offBy > SAMPLE_TIMESTAMP_TOLERANCE_MS) {
     return { ok: false, reason: 'stale_location_sample' };
   }
   if (pointMs < enRouteMs - EN_ROUTE_TIMESTAMP_TOLERANCE_MS) {
