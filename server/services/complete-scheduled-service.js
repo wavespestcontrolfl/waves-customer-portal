@@ -9,6 +9,7 @@ const { storeLawnWateringYieldNote } = require('../services/service-report/lawn-
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { serviceDateOnly, invoiceDueBaseDay } = require('../utils/invoice-due-base-day');
 const trackTransitions = require('../services/track-transitions');
 const { stampedDivergesSql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
@@ -676,19 +677,6 @@ function toETNoonServiceDate(value) {
     : etDateString();
   const parsed = parseETDateTime(`${dateOnly}T12:00`);
   return Number.isNaN(parsed.getTime()) ? parseETDateTime(`${etDateString()}T12:00`) : parsed;
-}
-
-function serviceDateOnly(value) {
-  return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : etDateString();
-}
-
-// The day a completion's invoice is due from: the record's service day, never
-// before today. A backdated record (a backfill, or a late form dated to the
-// tech's arrival day) would otherwise mint its invoice instantly overdue and
-// light up the dunning and overdue surfaces.
-function invoiceDueBaseDay(recordServiceDate, today = etDateString()) {
-  const day = serviceDateOnly(recordServiceDate);
-  return day < today ? today : day;
 }
 
 // Backdated quiet completion (stale-visit backlog closeout). `backfill: true`
