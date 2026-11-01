@@ -226,6 +226,13 @@ function costUnitBlocksWeight(product) {
   return !def || (def.dimension !== 'weight' && def.dimension !== 'ambiguous');
 }
 
+// A per-visit supplies product (per_completion_usage > 0). supplies-consumption.js
+// prices that usage only while cost_unit equals inventory_unit, so a converted
+// unit would leave its later visits uncosted. Those rows stay for a person.
+function hasPerVisitUsage(product) {
+  return (numberOrNullValue(product.per_completion_usage) || 0) > 0;
+}
+
 // Any sign the product is stocked by the piece: a count word in the name,
 // category, subcategory, formulation or unit type, or a rate/default unit
 // counted per item ("each/station").
@@ -248,6 +255,7 @@ function resolveDryOzTarget(product = {}) {
   if (!hasDryEvidence(formulation)) return null;
   if (hasCountEvidence(product)) return null;
   if (hasImplicitCostBasis(product) || costUnitBlocksWeight(product)) return null;
+  if (hasPerVisitUsage(product)) return null;
   if (looksLiquidProduct(product)) return null;
   if (isVolumeBaseUnit(product.rate_unit) || isVolumeBaseUnit(product.default_unit)) return null;
   return Number(product.inventory_on_hand) >= DRY_OZ_POUND_THRESHOLD_OZ ? 'lb' : 'g';
@@ -530,7 +538,8 @@ async function runDryOzPhase({ dbi, results }) {
     rows = await dbi('products_catalog')
       .whereRaw(OZ_FAMILY_SQL)
       .select('id', 'name', 'category', 'subcategory', 'formulation', 'unit_type', 'inventory_unit',
-        'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit', 'cost_per_unit', 'cost_unit')
+        'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit', 'cost_per_unit', 'cost_unit',
+        'per_completion_usage')
       .orderBy('name')
       .orderBy('id');
   } catch (err) {

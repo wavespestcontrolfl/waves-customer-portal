@@ -545,6 +545,13 @@ describe('resolveDryOzTarget', () => {
     }
   });
 
+  it('parks a per-visit supplies product (pre-push audit P1: its usage would stop being costed)', () => {
+    expect(resolveDryOzTarget(dry({ per_completion_usage: '0.5', cost_per_unit: '2', cost_unit: 'oz' }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ per_completion_usage: 1 }))).toBe(null);
+    expect(resolveDryOzTarget(dry({ per_completion_usage: null }))).toBe('g');
+    expect(resolveDryOzTarget(dry({ per_completion_usage: '0' }))).toBe('g');
+  });
+
   it('parks a dry formulation whose name or fields look liquid (Unit Review heuristic)', () => {
     expect(resolveDryOzTarget(dry({ name: 'Talstar Granules' }))).toBe(null);
     expect(resolveDryOzTarget(dry({ name: 'Liquid Fertilizer Mix' }))).toBe(null);
@@ -779,7 +786,8 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     // The scan reads the oz family with the columns the decision needs, in stable order.
     const scan = state.chains.find((c) => c.called('whereRaw') && c.args('whereRaw')[0] === OZ_FAMILY_SQL);
     expect(scan.args('select')).toEqual(['id', 'name', 'category', 'subcategory', 'formulation', 'unit_type', 'inventory_unit',
-      'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit', 'cost_per_unit', 'cost_unit']);
+      'inventory_on_hand', 'low_stock_threshold', 'rate_unit', 'default_unit', 'cost_per_unit', 'cost_unit',
+      'per_completion_usage']);
     expect(scan._calls.filter(([m]) => m === 'orderBy').map(([, a]) => a[0])).toEqual(['name', 'id']);
     // Deterministic fixes ring nothing: the movement rows are the audit trail.
     expect(notifyAdmin).not.toHaveBeenCalled();
