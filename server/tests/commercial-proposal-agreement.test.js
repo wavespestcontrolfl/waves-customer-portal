@@ -245,6 +245,51 @@ describe('quote fingerprint: an open agreement is reused only for the identical 
   });
 });
 
+describe('building use: online signing needs the pick (audit fix 5)', () => {
+  const NOTE = 'Online signing needs the building use: pick it in the builder and save.';
+  const NO_USE = [['missing', undefined], ['blank', ''], ['whitespace only', '   '], ['an unknown value', 'warehouse']];
+
+  test.each(NO_USE)('building use %s: unsignable, with the existing terms_conflict reason and an operator note', (_label, buildingUse) => {
+    expect(signEligibility(estimateRow({}, { buildingUse }))).toMatchObject({ ok: false, reason: 'terms_conflict', field: 'buildingUse', note: NOTE });
+  });
+
+  test.each(['residential', 'nonresidential', ' Residential '])('building use %j: signable', (buildingUse) => {
+    expect(signEligibility(estimateRow({}, { buildingUse }))).toMatchObject({ ok: true });
+  });
+
+  test('no building use: /data offers no button, the builder status carries the note, the issuer refuses and writes nothing', async () => {
+    const estimate = estimateRow({}, { buildingUse: undefined });
+    const { database, state } = makeDb({ estimate });
+    expect(await agreementCtaFor(estimate, database)).toEqual({ canSign: false, state: 'none', reason: 'terms_conflict', field: 'buildingUse' });
+    expect(await agreementAdminStatus(estimate, database)).toEqual({ state: 'none', signingBlocked: 'terms_conflict', field: 'buildingUse', note: NOTE });
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 404, code: 'not_signable' });
+    expect(state.writes).toEqual([]);
+  });
+
+  test('the locked re-check refuses when the pick was removed between the route read and the lock', async () => {
+    const { database, state } = makeDb({ estimate: estimateRow({}, { buildingUse: undefined }) });
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: false, status: 404 });
+    expect(state.writes).toEqual([]);
+  });
+
+  test('sign time: an open agreement whose proposal lost its building use is refused and cancelled', async () => {
+    const made = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database: made.database });
+    made.state.estimate = estimateRow({}, { buildingUse: undefined });
+    const contract = made.state.contracts[0];
+    const estimateLock = await lockEstimateForSign(made.database, contract);
+    expect(await refuseStaleSignature({ trx: made.database, contract, estimateLock, req })).toBe(STALE_PROPOSAL_MESSAGE);
+    expect(made.state.contracts[0].status).toBe('cancelled');
+  });
+
+  test('a signed agreement keeps its status line when the pick is later removed (signing history is final)', async () => {
+    const made = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database: made.database });
+    made.state.contracts[0].status = 'signed';
+    expect(await agreementAdminStatus(estimateRow({}, { buildingUse: undefined }), made.database)).toMatchObject({ state: 'signed' });
+  });
+});
+
 describe('agreement terms: online signing only when EVERY structured term agrees with the agreement (one chokepoint)', () => {
   test('the server reads the same constants the proposal builder prefills (shared module), word for word', () => {
     expect(AGREEMENT_TERMS).toBe(require('../../shared/commercial-agreement-terms.cjs').AGREEMENT_TERMS);
@@ -607,7 +652,7 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY), Net 30 or Net 6
     test('a building use picked after signing is the operator classification: still true', async () => {
       const estimate = estimateRow();
       const { database } = await signedFor(estimate);
-      expect(await signedQuoteMatches(estimateRow({}, { buildingUse: 'nonresidential' }), database)).toBe(true);
+      expect(await signedQuoteMatches(estimateRow({}, { buildingUse: 'residential' }), database)).toBe(true);
     });
 
     test('nothing signed, or another customer: false', async () => {
