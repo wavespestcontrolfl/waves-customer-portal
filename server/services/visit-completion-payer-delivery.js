@@ -41,19 +41,23 @@ async function claimPayerDelivery(database, packetId, invoiceId) {
   return Number(claimed) > 0;
 }
 
+// True when the invoice is finalized. A failure is reported, never swallowed: the caller keeps the packet on the
+// recovery sweep, and the next run (email_sent_at is already stamped) repeats only this step.
 async function finalizeDelivery(invoiceId) {
   try {
     await require('./invoice').markDeliverySent(invoiceId, { email: true, source: 'dispatch_completion_payer' });
+    return true;
   } catch (err) {
     // AP already has the email (email_sent_at is stamped); a failed finalize must never re-send it.
     logger.error(`[visit-closeout] payer invoice ${invoiceId} was emailed to AP but could not be finalized: ${err.message}`);
+    return false;
   }
 }
 
 /**
  * Deliver the packet's payer-owned invoice to the payer, once. `payment` is the collector's `payer_billed` answer.
  * Returns the payment verdict to carry on: `payer_billed` (delivered, already delivered, or carried on the payer's
- * monthly statement), `payment_pending` (another runner holds the send), or `office_required` (not delivered).
+ * monthly statement), `payment_pending` (another runner holds the send, or the AP email went out but the finalize failed and is retried), or `office_required` (not delivered).
  */
 async function deliverPacketInvoiceToPayer(packetId, payment, database = db) {
   const invoice = await database('invoices').where({ id: payment.invoiceId, visit_completion_packet_id: packetId }).first();
@@ -63,7 +67,9 @@ async function deliverPacketInvoiceToPayer(packetId, payment, database = db) {
   const status = String(invoice.status || '').toLowerCase();
   if (DELIVERED_OR_TERMINAL.has(status) || invoice.email_sent_at) {
     // An accepted AP email whose finalize then failed: finalize again, never mail again.
-    if (!DELIVERED_OR_TERMINAL.has(status)) await finalizeDelivery(invoice.id);
+    if (!DELIVERED_OR_TERMINAL.has(status) && !await finalizeDelivery(invoice.id)) {
+      return { state: 'payment_pending', invoiceId: invoice.id };
+    }
     return payment;
   }
   // Backfill closeouts skip the automatic payer send; the invoice stays for the office to review and send by hand.
@@ -79,7 +85,7 @@ async function deliverPacketInvoiceToPayer(packetId, payment, database = db) {
     logger.error(`[visit-closeout] payer invoice AP send failed for ${invoice.id}: ${err.message}`);
     return officeVerdict(payment);
   }
-  await finalizeDelivery(invoice.id);
+  if (!await finalizeDelivery(invoice.id)) return { state: 'payment_pending', invoiceId: invoice.id };
   return payment;
 }
 

@@ -4535,6 +4535,31 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect((await mockPg('invoices').where({ id: invoiceId }).first()).status).toBe('sent');
     });
 
+    test('an accepted AP email whose finalize fails keeps the packet on the sweep; the resume finalizes without a second email', async () => {
+      const payerId = await insertPayer();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payerId });
+      // The real sender stamps email_sent_at the moment the provider accepts; the stub does the same.
+      const send = jest.spyOn(InvoiceEmail, 'sendInvoiceEmail').mockImplementation(async (invoiceId) => {
+        await mockPg('invoices').where({ id: invoiceId }).update({ email_sent_at: mockPg.fn.now() });
+        return { ok: true };
+      });
+      const finalize = jest.spyOn(require('../services/invoice'), 'markDeliverySent');
+      finalize.mockRejectedValueOnce(new Error('Synthetic finalize interruption'));
+      const saved = await saveVisitCompletionPacket(submission());
+      const invoiceId = saved.body.billing.invoiceId;
+      const first = await runVisitCompletionPacketEffects(saved.body.packetId);
+      expect(first).toMatchObject({ status: 202, body: { state: 'effects_pending' } });
+      expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).status).toBe('processing');
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', payer_id: payerId });
+      expect(send).toHaveBeenCalledTimes(1);
+      const second = await runVisitCompletionPacketEffects(saved.body.packetId);
+      expect(second).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payer_billed' } } });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(finalize).toHaveBeenCalledTimes(2);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', payer_id: payerId });
+      expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).status).toBe('done');
+    });
+
     test('a send another runner holds is pending, not repeated', async () => {
       const payerId = await insertPayer();
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payerId });
