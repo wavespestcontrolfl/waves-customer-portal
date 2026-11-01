@@ -4203,7 +4203,7 @@ limitLabel }` (`visit` is the month's report text, `atHome` one thing to do at
 home, `open` true for the build month and the next two), and it adds `tiles`
 and `categories` sections whose keys are `problems`, `products`,
 `after_treatment`, `your_watering`, `your_mowing`, `what_to_expect` and
-`common_questions`. A `tiles` item may carry `until` (`YYYY-MM-DD`): the page
+`common_questions`. A `tiles` or `facts` item may carry `until` (`YYYY-MM-DD`): the page
 hides that tile after that ET day (the watering-order tile, which a stored
 packet keeps after the order ends). Product names in `products` are public
 label names with an active ingredient; no rate, price or PII. A packet built

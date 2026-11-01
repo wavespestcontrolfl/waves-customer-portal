@@ -602,10 +602,11 @@ function FactMedia({ item }) {
 }
 
 // Big-number tiles (watering depth, mowing height), the Monday email tile with its sample picture and the tour videos.
+// A tile with `until` (the one-day watering order) hides after that ET day, as in TilesVisual: a stored packet keeps it.
 function FactsVisual({ items = [] }) {
   return (
     <ul className="mt-4 grid list-none gap-3 pl-0 sm:grid-cols-2">
-      {items.map((item) => (
+      {items.filter(tileStillShown).map((item) => (
         <li key={item.title} data-glass="soft" className={`rounded-md border border-zinc-200 bg-surface-page p-4 ${item.wide ? "sm:col-span-2 sm:grid sm:grid-cols-2 sm:items-start sm:gap-4" : ""}`}>
           <div>
             {item.big && <p className="text-3xl font-bold tracking-tight text-waves-blue-deeper">{item.big}</p>}
