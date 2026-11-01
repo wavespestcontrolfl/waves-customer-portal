@@ -1479,7 +1479,7 @@ const dayCellButton = {
 // =============================================================================
 // ENTRIES TAB
 // =============================================================================
-function EntriesTab({ showToast }) {
+export function EntriesTab({ showToast }) {
   const [entries, setEntries] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -1492,6 +1492,7 @@ function EntriesTab({ showToast }) {
   });
   const [loading, setLoading] = useState(true);
   const [editModal, setEditModal] = useState(null);
+  const [addOpen, setAddOpen] = useState(false);
   const [techs, setTechs] = useState([]);
   const LIMIT = 30;
 
@@ -1562,10 +1563,35 @@ function EntriesTab({ showToast }) {
     [load],
   );
 
+  // Add a shift the technician never clocked. Returns the server's reason when
+  // it refuses (overlap, approved or paid week, ...) so the form can show it.
+  const handleAdd = useCallback(
+    async (payload) => {
+      try {
+        await adminFetch("/admin/timetracking/entries", {
+          method: "POST",
+          body: payload,
+        });
+        showToast("Shift added");
+        setAddOpen(false);
+        load();
+        return null;
+      } catch (e) {
+        return e.data?.error || "Could not add the shift";
+      }
+    },
+    [load],
+  );
+
   const totalPages = Math.ceil(total / LIMIT);
 
   return (
     <div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <button onClick={() => setAddOpen(true)} style={sBtn(D.teal, D.white)}>
+          Add missed shift
+        </button>
+      </div>
       {/* Filters */}
       <div
         style={{
@@ -1894,7 +1920,159 @@ function EntriesTab({ showToast }) {
           onSave={handleEdit}
         />
       )}
+      {addOpen && (
+        <AddShiftModal
+          techs={techs}
+          defaultTechId={filters.technicianId}
+          onClose={() => setAddOpen(false)}
+          onSave={handleAdd}
+        />
+      )}
     </div>
+  );
+}
+
+// A shift the technician never clocked: the admin enters the Eastern date and
+// start / end times; they are converted to instants here (the server takes
+// instants only) and the server refuses overlaps and approved or paid weeks.
+function AddShiftModal({ techs, defaultTechId, onClose, onSave }) {
+  const isMobile = useIsMobile(640);
+  const [form, setForm] = useState({
+    technician_id: defaultTechId || "",
+    date: etDateString(),
+    start: "08:00",
+    end: "17:00",
+    notes: "",
+    edit_reason: "",
+  });
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const labelStyle = { fontSize: 14, color: D.muted, display: "block", marginBottom: 4 };
+  const complete =
+    form.technician_id && form.date && form.start && form.end && form.edit_reason.trim();
+
+  const submit = async () => {
+    const clockIn = etDatetimeLocalToISO(`${form.date}T${form.start}`);
+    const clockOut = etDatetimeLocalToISO(`${form.date}T${form.end}`);
+    if (!clockIn || !clockOut) {
+      setError("Enter a valid date, start time and end time.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    const failure = await onSave({
+      technician_id: form.technician_id,
+      clock_in: clockIn,
+      clock_out: clockOut,
+      notes: form.notes.trim() || undefined,
+      edit_reason: form.edit_reason.trim(),
+    });
+    if (failure) {
+      setError(failure);
+      setSaving(false);
+    }
+  };
+
+  return createPortal(
+    <div
+      className="staff-foundation"
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: "rgba(0,0,0,.7)",
+        zIndex: 1000,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: isMobile ? 0 : 20,
+      }}
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-label="Add missed shift"
+        style={{
+          ...sCard,
+          maxWidth: 500,
+          width: "100%",
+          ...(isMobile
+            ? { maxWidth: "none", height: "100%", borderRadius: 0, overflowY: "auto" }
+            : {}),
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 16 }}>
+          Add missed shift
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <label htmlFor="add-shift-tech" style={labelStyle}>Tech</label>
+            <select id="add-shift-tech" value={form.technician_id} onChange={set("technician_id")} style={sInput}>
+              <option value="">Choose a tech</option>
+              {techs.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="add-shift-date" style={labelStyle}>Date</label>
+            <input id="add-shift-date" type="date" value={form.date} onChange={set("date")} style={sInput} />
+          </div>
+          <div>
+            <label htmlFor="add-shift-start" style={labelStyle}>Start time</label>
+            <input id="add-shift-start" type="time" value={form.start} onChange={set("start")} style={sInput} />
+          </div>
+          <div>
+            <label htmlFor="add-shift-end" style={labelStyle}>End time</label>
+            <input id="add-shift-end" type="time" value={form.end} onChange={set("end")} style={sInput} />
+          </div>
+          <div>
+            <label htmlFor="add-shift-notes" style={labelStyle}>Notes</label>
+            <textarea
+              id="add-shift-notes"
+              value={form.notes}
+              onChange={set("notes")}
+              style={{ ...sInput, minHeight: 60, resize: "vertical" }}
+            />
+          </div>
+          <div>
+            <label htmlFor="add-shift-reason" style={{ ...labelStyle, color: D.red }}>
+              Reason (required)
+            </label>
+            <input
+              id="add-shift-reason"
+              type="text"
+              value={form.edit_reason}
+              onChange={set("edit_reason")}
+              style={sInput}
+              placeholder="Why is this shift being added?"
+            />
+          </div>
+          {error && (
+            <div role="alert" style={{ fontSize: 14, color: D.red }}>
+              {error}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+            <button onClick={onClose} style={sBtn(D.card, D.muted)}>
+              Cancel
+            </button>
+            <button
+              disabled={!complete || saving}
+              onClick={submit}
+              style={{ ...sBtn(D.teal, D.white), opacity: complete && !saving ? 1 : 0.5 }}
+            >
+              {saving ? "Adding..." : "Add shift"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

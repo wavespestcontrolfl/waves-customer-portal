@@ -368,6 +368,31 @@ router.get('/entries/:id', requireAdmin, async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /entries — admin adds a shift the technician never clocked (a missed
+// day). Same rules as the edit below: edit_reason required, refused on an
+// approved or paid week. Body: technician_id, clock_in, clock_out (ISO
+// instants), notes, edit_reason. Returns the new entry.
+// ---------------------------------------------------------------------------
+router.post('/entries', requireAdmin, async (req, res, next) => {
+  try {
+    const { technician_id, clock_in, clock_out, notes, edit_reason } = req.body || {};
+    if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
+
+    const created = await timeTracking.adminAddEntry({
+      technician_id,
+      clock_in,
+      clock_out,
+      notes,
+      edit_reason,
+      edited_by: req.technicianId,
+    });
+    res.status(201).json(created);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // PUT /entries/:id — admin edit (requires edit_reason)
 // ---------------------------------------------------------------------------
 router.put('/entries/:id', requireAdmin, async (req, res, next) => {
