@@ -5,6 +5,15 @@ jest.mock('../services/messaging/providers/twilio-sms', () => ({
   sendViaTwilio: jest.fn(),
 }));
 
+// feature-gates reads GATE_AUTOPAY_CUSTOMER_SMS when it loads. Pin it off for
+// this file so a shell that exports it cannot flip the gate-off cases.
+const priorAutopaySmsGate = process.env.GATE_AUTOPAY_CUSTOMER_SMS;
+delete process.env.GATE_AUTOPAY_CUSTOMER_SMS;
+afterAll(() => {
+  if (priorAutopaySmsGate === undefined) delete process.env.GATE_AUTOPAY_CUSTOMER_SMS;
+  else process.env.GATE_AUTOPAY_CUSTOMER_SMS = priorAutopaySmsGate;
+});
+
 const { _internals } = require('../services/messaging/send-customer-message');
 const { resolvePolicy } = require('../services/messaging/policy');
 
@@ -85,6 +94,25 @@ describe('sendCustomerMessage contract guardrails', () => {
       audience: 'customer',
       purpose: 'appointment',
     })).toEqual({ ok: true });
+  });
+
+  test('lets autopay customer SMS through once the rollout gate is on', () => {
+    jest.isolateModules(() => {
+      process.env.GATE_AUTOPAY_CUSTOMER_SMS = 'true';
+      try {
+        const { _internals: gateOn } = require('../services/messaging/send-customer-message');
+        expect(gateOn.checkAutopayCustomerSmsGate({
+          to: '+19415550123',
+          body: 'Payment failed',
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'payment_failure',
+          metadata: { original_message_type: 'autopay_charge_failed' },
+        })).toEqual({ ok: true });
+      } finally {
+        delete process.env.GATE_AUTOPAY_CUSTOMER_SMS;
+      }
+    });
   });
 
   test('review requests honor the review_request notification preference', () => {

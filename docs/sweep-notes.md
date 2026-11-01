@@ -39,6 +39,18 @@ has no "Triage done" comment.
 
 ## By-design behaviors (not bugs)
 
+- The raw `notifyAdmin(` ratchet fails only when a file gains a call. A file
+  that loses calls passes with its old baseline, so parallel conversion PRs
+  never conflict on the fixture (test header). CLAUDE.md rule 21 now says so.
+  (sweep #7246 B3, triaged 2026-10-31)
+- AGENTS.md sits just under its 30 KiB budget on purpose: `check:domain-rules`
+  fails the PR that adds a line, and that PR trims. (sweep #7246 B4, triaged
+  2026-10-31)
+- 64 gates read `isProd ? strict : on unless 'false'`, so local development
+  runs with features on. Staging runs `NODE_ENV=production` (strict reads),
+  and no Railway environment outside production holds Plaid credentials
+  (checked 2026-10-31), so `GATE_ZELLE_BANK_RECONCILE` cannot settle an
+  invoice outside production. (sweep #7246 A5, triaged 2026-10-31)
 - The four blog-automation switches read unset as ON
   (`GATE_NAMED_COMPETITOR_AUTOPUBLISH`, `AUTONOMOUS_BLOG_AUTO_MERGE`,
   `AUTONOMOUS_CODEX_REMEDIATION`, `AUTO_PUBLISH_NEW_SUPPORTING_BLOG`); `=false`
