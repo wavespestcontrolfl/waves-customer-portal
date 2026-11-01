@@ -985,6 +985,15 @@ describe('agreementAdminStatus: the builder Readiness card names every reason on
     });
   });
 
+  test('a closed proposal (won, declined, expired, archived): closed comes first; a signed agreement still reads signed', async () => {
+    const estimate = estimateRow({ status: 'accepted', customer_id: null });
+    const { database } = makeDb({ estimate });
+    expect(await agreementAdminStatus(estimate, database, { closed: true })).toEqual({
+      state: 'none', signingBlocked: 'closed', note: 'Online signing is closed: the proposal is won, declined, expired or archived.',
+    });
+    expect(await agreementAdminStatus(estimateRow(), database, { closed: false })).toEqual({ state: 'none' });
+  });
+
   test('no linked customer account: blocked, with the note (the customer page asks the customer to call)', async () => {
     const estimate = estimateRow({ customer_id: null });
     const { database } = makeDb({ estimate });

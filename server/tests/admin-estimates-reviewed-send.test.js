@@ -89,7 +89,7 @@ jest.mock('../routes/estimate-public', () => ({
   findLinkedUpcomingAppointment: jest.fn(async () => null), adoptionServiceModesForContract: jest.fn(() => []),
   acceptanceServiceLists: jest.fn(), bookingServiceFor: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({ services: [] })),
-  firstVisitClosedFor: jest.fn(() => false),
+  estimateClosedOnline: jest.fn(() => false),
 }));
 jest.mock('../services/admin-estimate-persistence', () => ({
   ...jest.requireActual('../services/admin-estimate-persistence'),
@@ -1964,7 +1964,7 @@ describe('GET /:id/proposal firstVisit (the builder Readiness card)', () => {
     const readiness = jest.spyOn(firstVisitModule, 'firstVisitReadiness').mockResolvedValue({ state: 'office', reason: 'itemization' });
     const res = await invoke('/:id/proposal', 'get');
     expect(res.body.firstVisit).toEqual({ state: 'office', reason: 'itemization' });
-    expect(readiness).toHaveBeenCalledWith(expect.objectContaining({ id: row.id }), expect.objectContaining({ closedFor: expect.any(Function) }));
+    expect(readiness).toHaveBeenCalledWith(expect.objectContaining({ id: row.id }), expect.objectContaining({ closed: false }));
   });
 
   test('gate off: no firstVisit key and no read', async () => {

@@ -553,7 +553,7 @@ describe('the signed premises are the customer\'s address', () => {
 });
 
 describe('firstVisitReadiness (the builder Readiness card, owner 2026-11-01)', () => {
-  const OPEN = { closedFor: () => false };
+  const OPEN = { closed: false };
   test('an eligible plan and customer: the signer books the first visit online', async () => {
     expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'online' });
   });
@@ -600,16 +600,14 @@ describe('firstVisitReadiness (the builder Readiness card, owner 2026-11-01)', (
     expect(await firstVisit.firstVisitReadiness(proposalEstimate(), OPEN)).toEqual({ state: 'online' });
   });
 
-  test('a closed estimate (won, declined, expired, archived): the office books it; without the verdict it fails closed', async () => {
-    const closedFor = jest.fn(() => true);
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ status: 'accepted' }), { closedFor })).toEqual({ state: 'office', reason: 'closed' });
-    expect(closedFor).toHaveBeenCalledWith(expect.objectContaining({ status: 'accepted' }));
+  test('a closed estimate (won, declined, expired, archived): the office books it; a caller that does not say fails closed', async () => {
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ status: 'accepted' }), { closed: true })).toEqual({ state: 'office', reason: 'closed' });
     expect(await firstVisit.firstVisitReadiness(proposalEstimate())).toEqual({ state: 'office', reason: 'closed' });
   });
 
   test('a booked visit still reads booked on a closed estimate', async () => {
     rows.scheduled_services = { id: VISIT_ID, scheduled_date: '2026-11-12', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed' };
-    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ status: 'accepted' }), { closedFor: () => true }))
+    expect(await firstVisit.firstVisitReadiness(proposalEstimate({ status: 'accepted' }), { closed: true }))
       .toMatchObject({ state: 'booked' });
   });
 

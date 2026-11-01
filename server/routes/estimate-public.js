@@ -19334,10 +19334,11 @@ function firstVisitOpenFor(row) {
   return isEstimateCustomerViewable(row) && isEstimateAcceptActive(row);
 }
 
-// The builder's Readiness card (owner 2026-11-01): a published estimate the routes would refuse (won, declined,
-// expired, archived, held off the customer surface) books no first visit online. A draft or a scheduled send is not
-// published yet, so it is judged once it goes out.
-function firstVisitClosedFor(row) {
+// The builder's Readiness card (owner 2026-11-01): a published estimate the customer page offers nothing on (won,
+// declined, expired, archived, held off the customer surface), so neither online signing (the agreement card's
+// isEstimateAcceptActive condition) nor the first-visit picker (firstVisitOpenFor) applies. A draft or a scheduled send
+// is not published yet, so it is judged once it goes out.
+function estimateClosedOnline(row) {
   return !UNPUBLISHED_ESTIMATE_STATUSES.includes(row.status) && !firstVisitOpenFor(row);
 }
 
@@ -32507,7 +32508,7 @@ module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
-module.exports.firstVisitClosedFor = firstVisitClosedFor;
+module.exports.estimateClosedOnline = estimateClosedOnline;
 module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;
 module.exports.estimateOffCustomerSurface = estimateOffCustomerSurface;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
