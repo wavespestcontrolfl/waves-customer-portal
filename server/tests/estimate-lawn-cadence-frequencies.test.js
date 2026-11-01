@@ -2,6 +2,7 @@ const {
   lawnFrequenciesFromResultStats,
   lawnFrequenciesFromEngineResult,
   applySelectedLawnTierToEstimateData,
+  acceptedEstimateDataForSelection,
   recurringLawnRowAtRetiredCadence,
   storedLawnRowBelowProgramFloor,
   resolveEstimateQuoteRequirement,
@@ -1097,6 +1098,76 @@ describe('applySelectedLawnTierToEstimateData — the selected cadence floor rea
   test('a frequency with no marginFloorMonthly (floor not armed for it) adds no lawnFloorMonthly', () => {
     const after = applySelectedLawnTierToEstimateData(armedNineVisitEstimate(), premium);
     expect(after.result.recurring.services[0]).not.toHaveProperty('lawnFloorMonthly');
+  });
+});
+
+describe('acceptedEstimateDataForSelection — one restamp for the prepay quote and the invoice', () => {
+  const lawnMix = [{ service: 'lawn_care', name: 'Lawn Care' }];
+  const lawnRecurring = { name: 'Lawn Care', service: 'lawn_care', mo: 49.09, ann: 589.05, v: 9, visitsPerYear: 9 };
+  // Lawn-only armed 9x estimate: lineItems keep the default row (A $589.05 /
+  // floor $584.60); results.lawn gives the section ladder its two sold tiers.
+  const lawnOnlyEstimate = () => ({
+    result: {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      lineItems: [{
+        service: 'lawn_care', name: 'Lawn Care', annual: 589.05, annualAfterDiscount: 589.05,
+        minimumCollectedAnnualPrice: 584.6, costFloorAnnual: 584.6, visitsPerYear: 9,
+      }],
+      recurring: { monthlyTotal: 49.09, services: [lawnRecurring] },
+      results: {
+        lawn: [
+          { name: 'Enhanced', v: 9, mo: 49.09, ann: 589.05, pa: 65.45, recommended: true },
+          { name: 'Premium', v: 12, mo: 63.33, ann: 760, pa: 63.33 },
+        ],
+      },
+    },
+  });
+  const premium12x = {
+    key: 'premium', serviceCategory: 'lawn_care', annual: 760, monthly: 63.33, visitsPerYear: 12, marginFloorMonthly: 58.34,
+  };
+
+  test('selectedFrequency restamps the lawn row with the 12x floor; the quote equals the converter invoice', () => {
+    const estData = lawnOnlyEstimate();
+    const { data, refusal } = acceptedEstimateDataForSelection(estData, {
+      selectedFrequency: premium12x, selectedCombo: null, serviceCadences: null, recurringSvcList: [lawnRecurring],
+    });
+    expect(refusal).toBeUndefined();
+    const row = data.result.recurring.services[0];
+    expect(row.lawnFloorMonthly).toBe(58.34);
+    expect(row.visitsPerYear).toBe(12);
+    // The restamped data (what the route now quotes AND converts from): $722.
+    const quoted = resolveAnnualPrepayInvoiceTotal({ baseAnnual: 760, recurringServices: lawnMix, estimateData: data });
+    expect(quoted.amount).toBe(722);
+    // The un-restamped stored data (what the quote used to read) over-protects.
+    const stale = resolveAnnualPrepayInvoiceTotal({ baseAnnual: 760, recurringServices: lawnMix, estimateData: estData });
+    expect(stale.amount).toBe(747);
+    // No selection: the stored data comes back untouched.
+    expect(acceptedEstimateDataForSelection(estData, { recurringSvcList: [lawnRecurring] }).data).toBe(estData);
+  });
+
+  test('a per-service cadence restamps through the section ladder', () => {
+    const { data } = acceptedEstimateDataForSelection(lawnOnlyEstimate(), {
+      selectedFrequency: null, selectedCombo: { key: 'combo' }, serviceCadences: { lawn_care: 'premium' }, recurringSvcList: [lawnRecurring],
+    });
+    expect(data.result.recurring.services[0].visitsPerYear).toBe(12);
+  });
+
+  test('a present ladder that lacks the requested tier refuses with the 409 body', () => {
+    const out = acceptedEstimateDataForSelection(lawnOnlyEstimate(), {
+      selectedFrequency: null, selectedCombo: { key: 'combo' }, serviceCadences: { lawn_care: 'retired_tier' }, recurringSvcList: [lawnRecurring],
+    });
+    expect(out.data).toBeUndefined();
+    expect(out.refusal.reason).toBe('service_cadence_tier_unavailable');
+    expect(out.refusal.error).toMatch(/no longer offered/);
+  });
+
+  test('a NULL ladder (single-tier section) is skipped, not refused', () => {
+    const single = { result: { recurring: { services: [lawnRecurring] } } };
+    const out = acceptedEstimateDataForSelection(single, {
+      selectedFrequency: null, selectedCombo: { key: 'combo' }, serviceCadences: { lawn_care: 'premium' }, recurringSvcList: [lawnRecurring],
+    });
+    expect(out.refusal).toBeUndefined();
+    expect(out.data).toBe(single);
   });
 });
 
