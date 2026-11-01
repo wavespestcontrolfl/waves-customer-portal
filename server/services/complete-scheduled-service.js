@@ -15052,6 +15052,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // today's renders are byte-identical. Never throws.
         const { reserviceLineForCustomer } = require('../services/reservice-link');
         const completionReserviceLine = await reserviceLineForCustomer(svc.customer_id);
+        // WaveGuard pet line (GATE_PET_NAME_TEXT, pet-name-line.js): one sentence naming the
+        // customer's pets, its own paragraph after the template body and before the review line.
+        // '' while the gate is off, on the fixed re-service text (it has its own pets line), for a
+        // visit not performed and for a visit whose report prints no until-dry re-entry. Never throws.
+        const completionPetLine = reserviceFixedRecap || ['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome)
+          ? ''
+          : await require('./pet-name-line').petLineForCompletion({ customerId: svc.customer_id, recordId: record.id });
+        const petSuffix = completionPetLine ? `\n\n${completionPetLine}` : '';
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -15170,7 +15178,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           }
           if (!body) throw new Error(`SMS template ${sentSmsType} is missing or inactive`);
-          sentSmsBody = `${body}${reviewSuffix}`.trim();
+          sentSmsBody = `${body}${petSuffix}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
         } else if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
           const body = await renderTemplate('service_complete_with_invoice', {
@@ -15187,7 +15195,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           });
           if (!body) throw new Error('SMS template service_complete_with_invoice is missing or inactive');
           sentSmsType = 'service_complete_with_invoice';
-          sentSmsBody = `${body}${reviewSuffix}`.trim();
+          sentSmsBody = `${body}${petSuffix}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
         } else {
           if (usePaidCompletionTemplate) {
@@ -15261,7 +15269,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
             }
             if (!body) throw new Error('SMS template service_complete_prepaid is missing or inactive');
-            sentSmsBody = `${body}${reviewSuffix}`.trim();
+            sentSmsBody = `${body}${petSuffix}${reviewSuffix}`.trim();
             completionSmsWasTruncated = false;
           } else {
             let body = await renderTemplate('service_complete', {
@@ -15279,7 +15287,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             body = ensureSmsContainsReportLink(body, reportSmsUrl || reportUrl);
             sentSmsType = 'service_complete';
             if (serviceReportV1Delivery) {
-              sentSmsBody = `${body}${reviewSuffix}`.trim();
+              sentSmsBody = `${body}${petSuffix}${reviewSuffix}`.trim();
               completionSmsWasTruncated = false;
             } else {
               // The service_complete_concise overflow swap was removed
@@ -15289,7 +15297,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = composeCompletionSmsBody({
                 recapText,
                 body,
-                suffix: reviewSuffix,
+                suffix: `${petSuffix}${reviewSuffix}`,
               }));
             }
           }
