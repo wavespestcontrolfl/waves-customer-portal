@@ -908,6 +908,27 @@ describe('annual prepay respects the armed lawn cost floor', () => {
     expect(prepay(data, 589.05).amount).toBe(584.6);
   });
 
+  test('manual discount: the slice uses the net manualFinalAnnual, not the pre-manual annualAfterDiscount', () => {
+    // Engine line after an operator manual discount: WaveGuard-net $700, manual
+    // net $600 = the armed floor. The customer is billed $600, so prepay must
+    // not cut it ($570 before this fix).
+    const data = lawnEstimate({ annual: 700, floor: 600, armed: true });
+    Object.assign(data.result.lineItems[0], {
+      annualBeforeDiscount: 760, annualAfterDiscount: 700, manualFinalAnnual: 600, manualFinalMargin: 0.35,
+    });
+    const r = prepay(data, 600);
+    expect(r.amount).toBe(600);
+    expect(r.discount).toBe(0);
+    // A manual net above the floor still earns the 5%, on the manual net.
+    const above = lawnEstimate({ annual: 700, floor: 600, armed: true });
+    Object.assign(above.result.lineItems[0], { annualAfterDiscount: 700, manualFinalAnnual: 650 });
+    expect(prepay(above, 650).amount).toBe(617.5);
+    // A null/absent manualFinalAnnual falls back to the shared annual reader.
+    const none = lawnEstimate({ annual: 589.05, floor: 584.6, armed: true });
+    none.result.lineItems[0].manualFinalAnnual = null;
+    expect(prepay(none, 589.05).amount).toBe(584.6);
+  });
+
   test('SSR protectedFloor + rate reassemble to the invoice total for the stored annual', () => {
     for (const [annual, floor] of [[589.05, 584.6], [700, 584.6], [600, 600], [1010.1, 1000]]) {
       const data = lawnEstimate({ annual, floor, armed: true });

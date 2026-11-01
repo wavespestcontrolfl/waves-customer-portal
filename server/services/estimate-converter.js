@@ -3661,11 +3661,24 @@ function lawnCostFloorPrepaySlice(annual, floor, rate) {
   return Math.max(0, Math.min(annual, cents));
 }
 
+// A lawn line's NET annual for the cost slice: the engine stamps
+// manualFinalAnnual (post operator manual discount) on top of
+// annualAfterDiscount (post WaveGuard), and the customer is billed that net.
+// recurringLineAnnualAmount (shared) does not read it, so a manually
+// discounted line would look like it still sits above its floor.
+function lawnLineNetAnnual(item = {}) {
+  if (item.manualFinalAnnual != null && item.manualFinalAnnual !== '') {
+    const manual = Number(item.manualFinalAnnual);
+    if (Number.isFinite(manual) && manual >= 0) return manual;
+  }
+  return recurringLineAnnualAmount(item);
+}
+
 // One lawn line's protected slice: the larger of the program-minimum floor
 // and (when this source decides the cost slice) the armed cost-floor slice.
 function lawnPrepayLineProtected(item, { floorAnnual, discountRate, withCostSlice }) {
-  const annual = recurringLineAnnualAmount(item);
-  if (!(annual > 0)) return 0;
+  const listAnnual = recurringLineAnnualAmount(item);
+  if (!(listAnnual > 0)) return 0;
   // Protect the FULL program floor per line, not min(annual, floor): the
   // floor is what the customer is actually billed — public render/accept
   // clamp every recurring lawn line up to the program minimum, so a stale
@@ -3675,7 +3688,7 @@ function lawnPrepayLineProtected(item, { floorAnnual, discountRate, withCostSlic
   // the safe direction: the caller's Math.min(base, floor) cap means it can
   // only shrink the prepay discount, never raise the invoice above base.
   const costSlice = withCostSlice
-    ? lawnCostFloorPrepaySlice(annual, lawnLineCostFloorAnnual(item), discountRate)
+    ? lawnCostFloorPrepaySlice(lawnLineNetAnnual(item), lawnLineCostFloorAnnual(item), discountRate)
     : 0;
   return Math.max(floorAnnual, costSlice);
 }

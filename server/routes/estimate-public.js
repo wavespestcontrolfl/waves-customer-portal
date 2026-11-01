@@ -25621,6 +25621,16 @@ function isLawnTierFrequency(frequency = {}) {
   });
 }
 
+// The selected cadence's own (ceiled) cost floor, present on the ladder entry
+// only when the floor is armed for it. The row's inherited
+// minimumCollectedAnnualPrice / costFloorAnnual stay the DEFAULT cadence's, so
+// downstream readers (shapeFromV1's lawnFloorMonthlyFor, the annual-prepay
+// protected slice) take lawnFloorMonthly first. No usable floor: row untouched.
+function withSelectedCadenceFloor(row, frequency = {}) {
+  const floorMonthly = finiteNumberOrNull(frequency.marginFloorMonthly);
+  return floorMonthly != null && floorMonthly > 0 ? { ...row, lawnFloorMonthly: floorMonthly } : row;
+}
+
 function selectedLawnServiceRow(existing = {}, frequency = {}) {
   const meta = lawnTierRuntimeMeta(frequency?.key);
   if (!meta) return existing;
@@ -25642,7 +25652,7 @@ function selectedLawnServiceRow(existing = {}, frequency = {}) {
   if (annual != null) { row.ann = annual; row.annual = annual; row.annualAfterDiscount = annual; }
   if (perTreatment != null) { row.pa = perTreatment; row.perTreatment = perTreatment; row.perVisit = perTreatment; }
   if (visits != null) { row.v = visits; row.visits = visits; row.visitsPerYear = visits; row.appsPerYear = visits; }
-  return row;
+  return withSelectedCadenceFloor(row, frequency);
 }
 
 function rewriteLawnRecurringServices(services = [], frequency = {}) {

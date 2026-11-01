@@ -9,6 +9,7 @@ const {
   sectionTierEligibleFromKeys,
 } = require('../routes/estimate-public');
 const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
+const { resolveAnnualPrepayInvoiceTotal } = require('../services/estimate-converter');
 
 // Lawn cost-floor tiers as the engine stores them in result.results.lawn
 // (4/6/9/12 visits = Basic/Standard/Enhanced/Premium). The builder turns
@@ -1055,6 +1056,47 @@ describe('applySelectedLawnTierToEstimateData — accept re-stamps the picked ca
     const out = applySelectedLawnTierToEstimateData(estDataWithRecurringLawn(), freq);
     expect(out.result.recurring.services[0].visitsPerYear).toBe(12);
     expect(out.result.recurring.services[0].cadence).toBe('monthly');
+  });
+});
+
+describe('applySelectedLawnTierToEstimateData — the selected cadence floor reaches annual prepay', () => {
+  const lawnMix = [{ service: 'lawn_care', name: 'Lawn Care' }];
+  // Saved shape: engine lineItems keep the DEFAULT 9x row (A $589.05 / floor
+  // $584.60); recurring.services holds the lawn row the accept restamps.
+  const armedNineVisitEstimate = () => ({
+    result: {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      lineItems: [{
+        service: 'lawn_care', name: 'Lawn Care', annual: 589.05, annualAfterDiscount: 589.05,
+        minimumCollectedAnnualPrice: 584.6, costFloorAnnual: 584.6, visitsPerYear: 9,
+      }],
+      recurring: {
+        monthlyTotal: 49.09,
+        services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 49.09, ann: 589.05, v: 9, visitsPerYear: 9 }],
+      },
+    },
+  });
+  const premium = { key: 'premium', serviceCategory: 'lawn_care', annual: 760, monthly: 63.33, visitsPerYear: 12 };
+  const prepayFor = (estimateData, baseAnnual) => resolveAnnualPrepayInvoiceTotal({
+    baseAnnual, recurringServices: lawnMix, estimateData,
+  });
+
+  test('a ladder entry carrying marginFloorMonthly stamps lawnFloorMonthly, so prepay uses the 12x floor', () => {
+    const before = armedNineVisitEstimate();
+    // Default 9x line: prepay clamps at its own floor.
+    expect(prepayFor(before, 589.05).amount).toBe(584.6);
+    const after = applySelectedLawnTierToEstimateData(before, { ...premium, marginFloorMonthly: 58.34 });
+    const row = after.result.recurring.services[0];
+    expect(row.lawnFloorMonthly).toBe(58.34);
+    expect(row.visitsPerYear).toBe(12);
+    // 12x: $760 vs a $700.08 floor keeps the full 5% (the stale 9x lineItem
+    // would have protected $500 and billed $747).
+    expect(prepayFor(after, 760).amount).toBe(722);
+  });
+
+  test('a frequency with no marginFloorMonthly (floor not armed for it) adds no lawnFloorMonthly', () => {
+    const after = applySelectedLawnTierToEstimateData(armedNineVisitEstimate(), premium);
+    expect(after.result.recurring.services[0]).not.toHaveProperty('lawnFloorMonthly');
   });
 });
 
