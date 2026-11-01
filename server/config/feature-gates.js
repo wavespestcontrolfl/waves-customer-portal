@@ -7098,6 +7098,15 @@ function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
 }
 
+// GATE_ROUTE_ORDER_TIME_FALLBACK read at CALL time - strict `=== 'true'`. The one reader for
+// arrival-route.js placeInSavepoint (owner 2026-11-01, "build fixes", dispatch lane F1): when the
+// route check REFUSES to place a visit, the visit is numbered by its arrival time among the
+// day's numbered stops instead of keeping route_order NULL (which lists it last). Off = the
+// refusal leaves the number empty, byte-identical to before.
+function routeOrderTimeFallbackLive() {
+  return process.env.GATE_ROUTE_ORDER_TIME_FALLBACK === 'true';
+}
+
 // GATE_ADS_CAPACITY_WORK_DAYS read at CALL time - strict `=== 'true'`. The one
 // reader for BudgetManager.getTechCountForArea: on, a dated capacity count skips
 // a technician on a date they are absent or do not work; off, every assignable
@@ -9757,3 +9766,5 @@ module.exports.routeEngineSummaryLive = routeEngineSummaryLive;
 module.exports.inspectionReuseLeadShellLive = inspectionReuseLeadShellLive;
 // GATE_QUOTE_SAME_PERSON_MATCH reader, on its own line so gate PRs never conflict.
 module.exports.quoteSamePersonMatchLive = quoteSamePersonMatchLive;
+// GATE_ROUTE_ORDER_TIME_FALLBACK reader, on its own line so gate PRs never conflict.
+module.exports.routeOrderTimeFallbackLive = routeOrderTimeFallbackLive;
