@@ -380,9 +380,19 @@ function haversineEtaMinutes(fromLat, fromLng, toLat, toLng) {
   return Math.max(1, Math.round((distMi / 30) * 60));
 }
 
+// Read only: the technician's status row as the GPS arrival detector reads it
+// (current job and last ping), or null. Every write stays in the functions above.
+async function readTechStatus(techId) {
+  if (!techId) return null;
+  return db('tech_status')
+    .where({ tech_id: techId })
+    .first('tech_id', 'current_job_id', 'lat', 'lng', 'location_updated_at');
+}
+
 module.exports = {
   upsertTechStatus,
   pingTechLocation,
+  readTechStatus,
   setTechJobStatus,
   clearTechCurrentJob,
   ROOM,

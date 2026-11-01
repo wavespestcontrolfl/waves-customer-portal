@@ -7,6 +7,7 @@ jest.mock('../services/bouncie-mileage', () => ({
 }));
 jest.mock('../services/tech-status', () => ({
   pingTechLocation: jest.fn(),
+  readTechStatus: jest.fn(),
 }));
 jest.mock('../services/gps-arrival-detector', () => ({
   maybeMarkArrivedFromGps: jest.fn(),
@@ -21,7 +22,7 @@ jest.mock('../services/bouncie-webhook-security', () => ({
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { pingTechLocation } = require('../services/tech-status');
+const { pingTechLocation, readTechStatus } = require('../services/tech-status');
 const gpsArrivalDetector = require('../services/gps-arrival-detector');
 const truckClockIn = require('../services/truck-clock-in');
 const { inspectBouncieWebhook } = require('../services/bouncie-webhook-security');
@@ -153,7 +154,6 @@ describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)
       vehicle_locations: lastLocationError
         ? { where: jest.fn().mockReturnThis(), first: jest.fn().mockRejectedValue(lastLocationError) }
         : tableMock({ first: lastLocation }),
-      tech_status: tableMock({ first: TECH_STATUS }),
       bouncie_webhook_log: logUpdate,
     };
     db.mockReset();
@@ -165,6 +165,7 @@ describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)
     jest.clearAllMocks();
     process.env.GATE_ARRIVAL_ENGINE_OFF = 'true';
     pingTechLocation.mockResolvedValue(TECH_STATUS);
+    readTechStatus.mockResolvedValue(TECH_STATUS);
     gpsArrivalDetector.maybeMarkArrivedFromGps.mockResolvedValue({ ok: true, arrivalMarked: true, serviceId: 'svc-1' });
     truckClockIn.maybeClockInFromTruck.mockResolvedValue({ action: 'recorded' });
   });
@@ -223,6 +224,7 @@ describe('Bouncie tracking webhook, engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)
 
     await router._test.processTrackingEvent({ logId: 23, eventType: 'tripEnd', payload: TRIP_END_NO_GPS });
 
+    expect(readTechStatus).toHaveBeenCalledWith(TECH.id);
     expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledTimes(1);
     expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledWith({
       techStatus: TECH_STATUS,

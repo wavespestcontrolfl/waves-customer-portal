@@ -27,7 +27,7 @@ const mileageService = require('../services/bouncie-mileage');
 const gpsArrivalDetector = require('../services/gps-arrival-detector');
 const truckClockIn = require('../services/truck-clock-in');
 const gates = require('../config/feature-gates');
-const { pingTechLocation } = require('../services/tech-status');
+const { pingTechLocation, readTechStatus } = require('../services/tech-status');
 const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('../services/customer-tracking-eta');
 const {
   inspectBouncieWebhook,
@@ -180,9 +180,7 @@ async function engineOffArrivalPoint({ tech, payload, ownPoint }) {
   if (!point) return ownPoint;
   if (point.lat != null) return point;
   try {
-    const techStatus = await db('tech_status')
-      .where({ tech_id: tech.id })
-      .first('tech_id', 'current_job_id', 'lat', 'lng', 'location_updated_at');
+    const techStatus = await readTechStatus(tech.id);
     await gpsArrivalDetector.maybeMarkArrivedFromGps({ techStatus, point });
   } catch (err) {
     logger.error(`[webhooks-bouncie] engine-off no-position check failed: ${err.message}`);
