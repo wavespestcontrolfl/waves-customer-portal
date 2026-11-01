@@ -13,6 +13,8 @@
  *   - the service-type DEFAULT time window (pest → early AM, lawn → mid/late AM,
  *     from service-category.js) is NOT a customer preference — it stays SOFT
  *     scoring so route can still optimize freely when the customer set no time.
+ *     With GATE_AUTO_DISPATCH_DRY_TIME_ORDER the product dry-time window
+ *     (dry-time.js) replaces that family default; off, it is untouched.
  */
 const db = require('../../models/db');
 const {
@@ -21,6 +23,8 @@ const {
   classifyServiceCategory,
 } = require('./service-category');
 const { toDateStr } = require('./dates');
+const { withDryTime } = require('./dry-time');
+const { etDateString } = require('../../utils/datetime-et');
 
 const DAY_NAME_TO_INDEX = {
   sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
@@ -99,7 +103,9 @@ async function getCustomerSchedulingPreferences(customerId, serviceType, conn = 
     );
     normalized.service_category = category;
   }
-  return normalized;
+  // Every caller (pass 1, the pass-2 changed check, the proofreader's locked re-read)
+  // gets the same transformed prefs, so none sees a spurious change.
+  return withDryTime(normalized, conn, { customerId, serviceType, serviceKey, runDate: etDateString() });
 }
 
 module.exports = { getCustomerSchedulingPreferences, normalizePreferences, DAY_NAME_TO_INDEX };

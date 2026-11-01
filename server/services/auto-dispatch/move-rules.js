@@ -59,12 +59,21 @@ function withoutDefaultTime(score) {
   return score.total_without_default_time ?? (score.total_score - (score.default_time_score || 0));
 }
 
+// GATE_AUTO_DISPATCH_DRY_TIME_ORDER: the dry-time credit counts in a same-day
+// re-time's gain; on another date it counts for nothing (owner 2026-10-24: no
+// automatic day moves for rain). Scores without the field are unchanged.
+function gainBasis(score, dayMove) {
+  return dayMove && score.total_without_dry_time != null ? score.total_without_dry_time : withoutDefaultTime(score);
+}
+
 // Points the candidate gains over the current placement. The default-time
-// credit is left out of both totals, except for an unplaced due-date visit
+// credit is left out of both totals (a dry-time credit stays in for a same-day
+// re-time, see gainBasis), except for an unplaced due-date visit
 // (a first placement: the raw difference, as before 2026-10-09).
-function moveGain({ service, currentScore, candScore }) {
+function moveGain({ service, current, cand, currentScore, candScore }) {
   if (isUnplacedDueDate(service)) return round2(candScore.total_score - currentScore.total_score);
-  return round2(withoutDefaultTime(candScore) - withoutDefaultTime(currentScore));
+  const dayMove = !!(current && cand) && isDayMove(current, cand);
+  return round2(gainBasis(candScore, dayMove) - gainBasis(currentScore, dayMove));
 }
 
 // Whether a candidate is a legal KIND of move at all, before the score bar:
