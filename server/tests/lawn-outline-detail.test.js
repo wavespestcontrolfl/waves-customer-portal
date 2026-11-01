@@ -128,15 +128,15 @@ describe('the gate', () => {
       'lawn_program', 'season_focus', 'program_year', 'treatment_categories', 'typical_visit',
       'local_rules', 'safety', 'after_visit', 'not_included',
     ]);
-    expect(unset.meta.contentLibraryVersion).toBe('lawn-v13-copy-1');
+    expect(unset.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
   });
 
   test('on: its own content version, so outlines built before the flip show as updated', async () => {
     await withGates(DETAIL, async () => {
-      expect(outline.contentLibraryVersion()).toBe('lawn-v13-detail-1');
-      expect((await build()).meta.contentLibraryVersion).toBe('lawn-v13-detail-1');
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-detail-2');
+      expect((await build()).meta.contentLibraryVersion).toBe('lawn-v13-detail-2');
     });
-    await withGates(V13, async () => expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-1'));
+    await withGates(V13, async () => expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-2'));
   });
 });
 

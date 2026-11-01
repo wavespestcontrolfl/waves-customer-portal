@@ -124,10 +124,10 @@ describe('the gate', () => {
       expect((await build(ST_AUG_ESTIMATE)).meta.contentLibraryVersion).toBe('seed-v1');
     });
     await withGates(BOTH, async () => {
-      expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-1');
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-2');
       expect(outline.CONTENT_LIBRARY_VERSION).toBe('seed-v1');
       const result = await build(ST_AUG_ESTIMATE);
-      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-1');
+      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
       expect(result.meta.protocolVersion).toBe('lawn-v13');
     });
   });
@@ -142,7 +142,7 @@ describe('the grass is the one the estimate recorded', () => {
       const result = await build(ST_AUG_ESTIMATE);
       expect(result.meta.turf.turfType).toBe('st_augustine');
       // The page names the program, not the grass.
-      expect(result.content.property).toMatchObject({ turfType: null, programLabel: 'One program for every lawn' });
+      expect(result.content.property).toMatchObject({ turfType: null, programLabel: 'Year-round, set to your lawn' });
     });
   });
 
@@ -229,7 +229,8 @@ describe('one page for every lawn', () => {
       const text = JSON.stringify(page);
       expect(section({ content: page }, 'lawn_program').body).toMatch(/^Most of the lawns we treat are St\. Augustine, so the program is built around it\./);
       expect(text.match(/augustine/gi)).toHaveLength(1);
-      expect(text).not.toMatch(/bermuda|zoysia|bahia|grass type|turf type/i);
+      // The intro (owner-approved words) names bermudagrass only as a spot the crew maps, never as the lawn's grass.
+      expect(text.replace('insects, disease or bermudagrass.', 'insects or disease.')).not.toMatch(/bermuda|zoysia|bahia|grass type|turf type/i);
     });
   });
 });
@@ -249,7 +250,7 @@ describe('regenerating an older outline', () => {
       expect(outline.regenerationTurfType(pickedPacket)).toBe('zoysia');
       const regenerated = await build(ST_AUG_ESTIMATE, { month: 10, turfType: outline.regenerationTurfType(guessedPacket) });
       expect(regenerated.meta.turf.turfType).toBe('st_augustine');
-      expect(regenerated.meta.contentLibraryVersion).toBe('lawn-v13-copy-1');
+      expect(regenerated.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
     });
   });
 });
@@ -261,7 +262,7 @@ describe('the sections', () => {
       expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
       expect(result.content.title).toBe('Your Waves Lawn Care Program Overview');
       // The property summary section is gone: the intro names the customer, the side panel the address.
-      expect(result.content.intro).toMatch(/^Based on your estimate for Test Customer\. One program covers every lawn we treat\./);
+      expect(result.content.intro).toMatch(/^Based on your estimate for Test Customer\. The program follows the time of year\./);
       const text = JSON.stringify(result.content.sections);
       expect(text).not.toMatch(/service tier/i);
       expect(text).not.toMatch(/restricted-season logic/i);
