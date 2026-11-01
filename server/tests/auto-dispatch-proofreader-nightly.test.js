@@ -321,6 +321,64 @@ describe('checkMove', () => {
     expect(await check(run, proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, noTranscript))).toMatchObject({ broke: false });
   });
 
+  describe('which part of an incomplete record could not be read (owner 2026-11-01)', () => {
+    const SECRET = 'Pat said the gate code is 4417 at 12 Palm Way';
+    const unreadRecord = (unread) => ({ ...RECORD, unread });
+
+    test('record_incomplete keeps channel and reason codes only, deduplicated', async () => {
+      const unread = [
+        { channel: 'call', at: '2026-10-01T09:00:00-04:00', reason: 'not_transcribed' },
+        { channel: 'call', at: '2026-10-02T09:00:00-04:00', reason: 'not_transcribed' },
+        { channel: 'text', reason: 'revised_later', text: SECRET, phone: '+19415550100' },
+        { channel: 'note', at: '2026-10-03T09:00:00-04:00', reason: 'time_masked' },
+      ];
+      const run = runOf();
+      const got = await check(run, proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, unreadRecord(unread)));
+      expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', broke: false });
+      expect(got.audit).toEqual({
+        verdict: 'unknown', why: 'record_incomplete', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1',
+        unread: [
+          { channel: 'call', reason: 'not_transcribed' }, { channel: 'text', reason: 'revised_later' }, { channel: 'note', reason: 'time_masked' },
+        ],
+      });
+      expect(JSON.stringify(got)).not.toMatch(/4417|Palm Way|9415550100|T09:00/);
+      expect(run.proofreader.unsure).toBe(1);
+    });
+
+    test('at most ten entries are kept', async () => {
+      const unread = Array.from({ length: 14 }, (_, i) => ({ channel: `source_${i}`, reason: 'revised_later' }));
+      const got = await check(runOf(), proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, unreadRecord(unread)));
+      expect(got.audit.unread).toHaveLength(10);
+      expect(got.audit.unread[9]).toEqual({ channel: 'source_9', reason: 'revised_later' });
+    });
+
+    test('a channel or reason that is not a plain code is replaced, never stored', () => {
+      const { unreadSummary } = nightly._internals;
+      expect(unreadSummary({ unread: [{ channel: SECRET, reason: 'x y' }, { channel: 'call' }, null] }))
+        .toEqual([{ channel: 'unknown', reason: 'unknown' }, { channel: 'call', reason: 'unknown' }]);
+      expect(unreadSummary(null)).toEqual([]);
+    });
+
+    test('a source the database could not read is also named (check_failed)', async () => {
+      const got = await check(runOf(), proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }, unreadRecord([{ channel: 'email', reason: 'read_failed' }])));
+      expect(got).toMatchObject({ allowed: false, broke: true, audit: { why: 'check_failed', unread: [{ channel: 'email', reason: 'read_failed' }] } });
+    });
+
+    test('a hold on an incomplete record also names the unread part; the verdict is unchanged', async () => {
+      const got = await check(runOf(), proofreaderOf(
+        { verdict: 'hold', why: 'quoted_statement', entry_id: 'E1', quote: 'never come on Thursdays' },
+        unreadRecord([{ channel: 'call', reason: 'not_transcribed' }]),
+      ));
+      expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_HOLD', audit: { verdict: 'hold', unread: [{ channel: 'call', reason: 'not_transcribed' }] } });
+    });
+
+    test('a complete record stores no unread key, and an unknown answer still leaves the visit in place', async () => {
+      const got = await check(runOf(), proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }));
+      expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE' });
+      expect(got.audit).not.toHaveProperty('unread');
+    });
+  });
+
   test('past the call limit a move is held without a call', async () => {
     const run = runOf({ config: { proofreaderMaxCalls: 1 } });
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
