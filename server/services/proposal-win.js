@@ -383,21 +383,36 @@ async function assertProposalTermsMatchPayer({ trx, customerId, proposal }) {
   }
 }
 
-// The due date of a visit invoice billed from an accepted invoice-mode commercial proposal: the base date plus the
-// agreement's Net term (net15 / net30 / net60, payer.js's shared PAYMENT_TERM_NET_DAYS map, never a parse). The win
-// makes no invoice (owner 2026-10-30, option A), so the visit invoices keep the agreement's terms. Null when the visit's
-// estimate is not such a proposal, or its term is none or due on receipt: the caller keeps its own due date. These are
-// the visits Auto Pay never collects (bill-by-invoice.js).
+// The due date of a visit invoice billed from a won commercial proposal on Net terms: the base date plus the Net days
+// proposalTermsNetDays gives (payer.js's shared PAYMENT_TERM_NET_DAYS map, never a parse). The win makes no invoice
+// (owner 2026-10-30, option A), so the visit invoices keep the agreement's terms. Null when the visit's estimate is no
+// such proposal, or its term is none or due on receipt: the caller keeps its own due date.
 async function proposalTermsDueDate(conn, sourceEstimateId, baseDate) {
   if (!conn || !sourceEstimateId || !baseDate) return null;
-  const estimate = await conn('estimates').where({ id: sourceEstimateId }).first('status', 'bill_by_invoice', 'estimate_data');
-  const proposal = require('./bill-by-invoice').billByInvoiceProposal(estimate);
-  if (!proposal) return null;
-  const days = require('./payer').PAYMENT_TERM_NET_DAYS[proposal.commercialTerms?.paymentTerms] || 0;
+  const estimate = await conn('estimates').where({ id: sourceEstimateId })
+    .first('status', 'bill_by_invoice', 'estimate_data', 'customer_id');
+  const days = await proposalTermsNetDays(conn, estimate);
   if (!(days > 0)) return null;
   // The base is already a calendar date (YYYY-MM-DD): whole days are added to its own fields, no clock or zone involved.
   const [year, month, day] = String(baseDate instanceof Date ? baseDate.toISOString() : baseDate).slice(0, 10).split('-').map(Number);
   return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
+// The Net days a won proposal's visit invoices carry, else 0. An invoice-mode proposal carries its own Net term: these
+// are the visits Auto Pay never collects (bill-by-invoice.js). An Auto Pay proposal whose customer has turned Auto Pay
+// off carries Net 30, as the agreement's payment paragraph says ("cancel autopay with 30 days' written notice, after
+// which invoices are due Net 30", shared/commercial-agreement-terms.cjs; owner 2026-11-01). A pause or a missing card
+// is not a turn-off: those visits keep their own due date.
+async function proposalTermsNetDays(conn, estimate) {
+  const { PAYMENT_TERM_NET_DAYS } = require('./payer');
+  const BillByInvoice = require('./bill-by-invoice');
+  const invoiceProposal = BillByInvoice.billByInvoiceProposal(estimate);
+  if (invoiceProposal) return PAYMENT_TERM_NET_DAYS[invoiceProposal.commercialTerms?.paymentTerms] || 0;
+  const { AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
+  const won = BillByInvoice.wonAuthoredProposal(estimate);
+  if (won?.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS || !estimate.customer_id) return 0;
+  const customer = await conn('customers').where({ id: estimate.customer_id }).first('autopay_enabled');
+  return customer?.autopay_enabled === false ? PAYMENT_TERM_NET_DAYS[INVOICE_PAYMENT_TERMS] : 0;
 }
 
 module.exports = {

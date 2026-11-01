@@ -278,6 +278,58 @@ describe('proposalTermsDueDate', () => {
     expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net30')), null, '2026-11-03')).toBeNull();
   });
 
+  // The agreement's Auto Pay paragraph: "cancel autopay with 30 days' written notice, after which invoices are due
+  // Net 30" (owner 2026-11-01, commercial audit fix 3).
+  describe('a won Auto Pay proposal after the customer turned Auto Pay off', () => {
+    const autopayRow = (extra = {}) => ({
+      status: 'accepted', bill_by_invoice: false, customer_id: 'cust-1',
+      estimate_data: { proposal: { ...SIESTA_PROPOSAL, enabled: true, commercialTerms: { paymentTerms: 'autopay' } } },
+      ...extra,
+    });
+    // Answers the estimate read and the customer read by table; `fail` makes the customer read reject.
+    const tablesConn = (estimate, customer, { fail = false } = {}) => jest.fn((table) => ({
+      where() { return this; },
+      first: async () => {
+        if (table === 'estimates') return estimate;
+        if (table === 'customers') return fail ? Promise.reject(new Error('customers read failed')) : customer;
+        throw new Error(`unexpected table ${table}`);
+      },
+    }));
+
+    test('is due Net 30 from the base date', async () => {
+      expect(await proposalTermsDueDate(tablesConn(autopayRow(), { autopay_enabled: false }), 'est-1', '2026-11-03')).toBe('2026-12-03');
+    });
+
+    test('keeps the caller\'s due date while Auto Pay is on, or was never turned off (a pause or a missing card is not a turn-off)', async () => {
+      for (const customer of [{ autopay_enabled: true }, { autopay_enabled: null }, {}, null]) {
+        expect(await proposalTermsDueDate(tablesConn(autopayRow(), customer), 'est-1', '2026-11-03')).toBeNull();
+      }
+    });
+
+    test('never for a proposal that is not won, not on Auto Pay, or has no customer; the customer is not read then', async () => {
+      for (const row of [
+        autopayRow({ status: 'sent' }),
+        autopayRow({ estimate_data: { proposal: { ...SIESTA_PROPOSAL, enabled: true, commercialTerms: { paymentTerms: null } } } }),
+        autopayRow({ customer_id: null }),
+      ]) {
+        const conn = tablesConn(row, { autopay_enabled: false });
+        expect(await proposalTermsDueDate(conn, 'est-1', '2026-11-03')).toBeNull();
+        expect(conn.mock.calls.map(([table]) => table)).not.toContain('customers');
+      }
+    });
+
+    test('an invoice-mode proposal keeps its own Net term and never reads the customer', async () => {
+      const conn = tablesConn(invoiceModeRow('net60', { customer_id: 'cust-1' }), { autopay_enabled: false });
+      expect(await proposalTermsDueDate(conn, 'est-1', '2026-11-03')).toBe('2027-01-02');
+      expect(conn.mock.calls.map(([table]) => table)).toEqual(['estimates']);
+    });
+
+    test('a failed customer read throws, so the completion lane mints nothing (PROPOSAL_TERMS_UNREAD)', async () => {
+      await expect(proposalTermsDueDate(tablesConn(autopayRow(), null, { fail: true }), 'est-1', '2026-11-03'))
+        .rejects.toThrow('customers read failed');
+    });
+  });
+
   test('both completion lanes use it for the visit invoice due date (source pins)', () => {
     const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
     const legacy = read('../services/complete-scheduled-service.js');
