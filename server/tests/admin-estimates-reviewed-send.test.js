@@ -24,6 +24,7 @@ jest.mock('../config/feature-gates', () => ({
   termiteAnnualPlanSelectionEnabled: jest.fn(() => false),
   commercialProposalSignLive: () => false,
   commercialAutopayLive: jest.fn(() => false),
+  buildingUseTaxLive: jest.fn(() => false),
   satellitePalmCountTypedLive: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
@@ -102,7 +103,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
-const { gateEnvValue, commercialAutopayLive } = require('../config/feature-gates');
+const { gateEnvValue, commercialAutopayLive, buildingUseTaxLive } = require('../config/feature-gates');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { buildPricingBundle } = require('../routes/estimate-public');
 const { estimateOfferVersion } = require('../services/estimate-offer-version');
@@ -1832,6 +1833,16 @@ describe('GET /:id/proposal suggestedTaxRate', () => {
 
 // Owner 2026-10-24 "autopay default" (GATE_COMMERCIAL_AUTOPAY): Auto Pay is the payment term of a proposal that does
 // not bill by invoice, and never sits beside Bill by invoice. Net terms still need Bill by invoice.
+describe('building-use tax gate on the builder read', () => {
+  test('GET /:id/proposal says whether GATE_BUILDING_USE_TAX is live (the Taxable-box warning for Residential follows it)', async () => {
+    Object.assign(row, { status: 'draft', estimate_data: { proposal: { enabled: true, buildings: [] } } });
+    buildingUseTaxLive.mockReturnValue(true);
+    expect((await invoke('/:id/proposal', 'get')).body.buildingUseTaxLive).toBe(true);
+    buildingUseTaxLive.mockReturnValue(false);
+    expect((await invoke('/:id/proposal', 'get')).body.buildingUseTaxLive).toBe(false);
+  });
+});
+
 describe('commercial Auto Pay payment term', () => {
   const recurring = (commercialTerms) => ({
     enabled: true,

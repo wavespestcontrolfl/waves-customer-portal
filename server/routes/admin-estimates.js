@@ -4554,6 +4554,9 @@ router.get('/:id/proposal', async (req, res, next) => {
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
       // GATE_COMMERCIAL_AUTOPAY: the builder offers Auto Pay as the payment term (and prefills it).
       commercialAutopayEnabled: require('../config/feature-gates').commercialAutopayLive(),
+      // GATE_BUILDING_USE_TAX: a residential building use means bills carry no tax only while it is on (tax-calculator.js
+      // step 1b); the builder's Taxable-box warning for a Residential pick follows it.
+      buildingUseTaxLive: require('../config/feature-gates').buildingUseTaxLive(),
       // GATE_COMMERCIAL_PROPOSAL_SIGN: where the customer's online agreement stands (none / awaiting /
       // signed) for the builder's read-only line. The key is absent with the gate off.
       ...(commercialAgreement ? { commercialAgreement } : {}),

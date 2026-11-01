@@ -15,8 +15,9 @@ const WITHOUT_TAX = 'Visit bills follow the building use: this row will be bille
 const family = (taxable) => ({ taxable, inclusions: [], exclusions: [], responsibilities: [] });
 const line = (taxable, extra = {}) => ({ description: 'Monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly', taxable, ...extra });
 const program = (taxable, extra = {}) => ({ service: 'pest', label: 'Pest control', frequencyPerYear: 4, pricePerApplication: 100, taxable, ...extra });
-const makeFixture = ({ buildingUse = 'nonresidential', status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
+const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
   bidToolsEnabled: true,
+  buildingUseTaxLive,
   suggestedTaxRate: 0.07,
   suggestedTaxSource: 'Manatee County',
   familyRegistry: { pest: family(true), lawn: family(false), tree_shrub: family(false), other: family(true) },
@@ -54,6 +55,18 @@ it('residential: a taxable row is warned (billed without tax); a not-taxable row
   await mount({ buildingUse: 'residential', buildings: [{ name: 'Office', lineItems: [line(true), line(false, { description: 'Second' })] }] });
   expect(warnings()).toEqual([WITHOUT_TAX]);
   expect(summary()).toHaveTextContent('Taxable differs from the building use on 1 row.');
+});
+
+it('residential with GATE_BUILDING_USE_TAX off: bills are taxed by property type, so no warning and no summary line', async () => {
+  await mount({ buildingUse: 'residential', buildingUseTaxLive: false, buildings: [{ name: 'Office', lineItems: [line(true)] }] });
+  expect(warnings()).toEqual([]);
+  expect(summary()).toBeNull();
+});
+
+it('business building with the gate off still warns (that rule does not depend on the gate)', async () => {
+  await mount({ buildingUseTaxLive: false, buildings: [{ name: 'Office', lineItems: [line(false)] }] });
+  expect(warnings()).toEqual([WITH_TAX]);
+  expect(summary()).toBeInTheDocument();
 });
 
 it('residential with no taxable rows: no warning and no summary line', async () => {

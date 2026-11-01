@@ -87,11 +87,12 @@ function serviceTaxRule(registry, service) {
 // Visit bills follow the customer's building use and the service, never a row's Taxable box (a proposal win makes no
 // invoice since PR #7115; tax-calculator.js step 1b). The box still sets the quote and the signed agreement, so a row
 // whose box differs from what the builder itself applies for the chosen use gets a staff warning (owner 2026-11-01,
-// audit fix 4). Residential: not taxable. Business building: the row's rule, which is the per-row rule GET /proposal
+// audit fix 4). Residential: not taxable, but only while GATE_BUILDING_USE_TAX is on (tax-calculator.js step 1b; with
+// it off a commercial account is taxed by property type and service, so there is nothing to predict). Business building: the row's rule, which is the per-row rule GET /proposal
 // served for a saved row that names a service (kept only while the row's service is unchanged), else the family
 // registry's rule the builder restores. Undefined when there is no basis (no pick, or a service the registry lacks).
-function billedTaxableFor(buildingUse, row, registry, savedRules) {
-  if (buildingUse === 'residential') return false;
+function billedTaxableFor(buildingUse, row, registry, savedRules, buildingUseTaxLive) {
+  if (buildingUse === 'residential') return buildingUseTaxLive ? false : undefined;
   if (buildingUse !== 'nonresidential') return undefined;
   const saved = row.id ? savedRules?.[row.id] : null;
   return saved && saved.service === row.service ? saved.rule : serviceTaxRule(registry, row.service);
@@ -100,8 +101,8 @@ const ROW_TAX_NOTICES = {
   true: 'Visit bills follow the building use: this row will be billed with tax.',
   false: 'Visit bills follow the building use: this row will be billed without tax.',
 };
-function rowTaxNotice(buildingUse, row, registry, savedRules) {
-  const billed = billedTaxableFor(buildingUse, row, registry, savedRules);
+function rowTaxNotice(buildingUse, row, registry, savedRules, buildingUseTaxLive) {
+  const billed = billedTaxableFor(buildingUse, row, registry, savedRules, buildingUseTaxLive);
   return billed === undefined || billed === (row.taxable === true) ? null : ROW_TAX_NOTICES[billed];
 }
 // The served per-row business rules for the saved rows that name a service, with the service each was computed for.
@@ -458,6 +459,8 @@ function CommercialProposalEditor() {
   const generatedRespByFamilyRef = React.useRef(null);
   // Served per-row business tax rules of the saved rows (savedBusinessRules): the warning's basis for a Business building.
   const savedBizRulesRef = React.useRef({});
+  // GET /proposal buildingUseTaxLive: whether a Residential pick means untaxed bills (GATE_BUILDING_USE_TAX).
+  const [buildingUseTaxLive, setBuildingUseTaxLive] = useState(false);
   // Family → generated inclusions/exclusions/taxability registry, served on
   // load like responsibilityRegistry — the family-change resync prunes the
   // old family's generated lines and installs the new family's stack by
@@ -500,6 +503,7 @@ function CommercialProposalEditor() {
     setSavedValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
     setAutopayEnabled(data.commercialAutopayEnabled === true);
+    setBuildingUseTaxLive(data.buildingUseTaxLive === true);
     if (!bidToolsChosenRef.current) {
       setBidToolsOpen(
         (data.projectCosting?.rows?.length || 0) > 0
@@ -617,7 +621,7 @@ function CommercialProposalEditor() {
   const taxRate = (Number(taxRatePct) || 0) / 100;
   const programsMode = programsState.some(programRowIsPriced);
   // Staff warning on a row whose Taxable box differs from what visit bills do (billedTaxableFor); none on a locked proposal.
-  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current));
+  const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current, buildingUseTaxLive));
   const differingTaxRows = [
     ...programsState,
     ...(programsMode ? [] : buildings.flatMap((b) => b.lineItems || [])),
