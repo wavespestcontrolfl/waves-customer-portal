@@ -107,9 +107,9 @@ describe('responses', () => {
 
 
 describe('awayWatchClosePhotoCount', () => {
-  const fakeKnex = (count, seen = []) => (table) => {
+  const fakeKnex = (count, seen = [], wheres = []) => (table) => {
     seen.push(table);
-    const builder = { where: () => builder, whereNotNull: () => builder, whereNot: () => builder, count: () => builder, first: async () => ({ n: String(count) }) };
+    const builder = { where: (w) => { wheres.push(w); return builder; }, whereNotNull: () => builder, whereNot: () => builder, count: () => builder, first: async () => ({ n: String(count) }) };
     return builder;
   };
 
@@ -126,10 +126,13 @@ describe('awayWatchClosePhotoCount', () => {
     expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(0), { uploadResult: { uploaded: 1 } })).toBe(1);
   });
 
-  test('a linked lawn assessment adds its uploaded photos', async () => {
+  test('a linked lawn assessment adds its uploaded, customer-visible photos only', async () => {
     const seen = [];
-    expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(4, seen), { lawnAssessmentId: 'la1' })).toBe(4);
+    const wheres = [];
+    expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(4, seen, wheres), { lawnAssessmentId: 'la1' })).toBe(4);
     expect(seen).toEqual(['lawn_assessment_photos']);
+    // Hidden rows (customer_visible = false: failed quality, suppressed) never count.
+    expect(wheres).toContainEqual({ assessment_id: 'la1', customer_visible: true });
     expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(2), { promotedIds: ['p1'], lawnAssessmentId: 'la1' })).toBe(3);
     expect(await AwayWatch.awayWatchClosePhotoCount(fakeKnex(1), { uploadResult: { uniqueUploaded: 2 }, lawnAssessmentId: 'la1' })).toBe(3);
   });

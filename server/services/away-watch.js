@@ -100,8 +100,8 @@ async function awayWatchCardLines(dbh, customerId, visitDay) {
 
 // Closeout: every photo this closeout puts on the visit counts once. The body's completion photos (the full form, the
 // Tree & Shrub sheet), the visit photos the tech staged from Tech Home or the pest sheet (promoted to the record in the
-// same transaction, before this count), and the photos of the lawn assessment the lawn sheet linked (its front, back
-// and side shots are photos of the outside from the ground). A Fast Complete sheet that sends no photo of its own is
+// same transaction, before this count), and the customer-visible photos of the lawn assessment the lawn sheet linked
+// (its front, back and side shots are photos of the outside from the ground). A Fast Complete sheet that sends no photo of its own is
 // covered by the visit photos staged from Tech Home.
 // The body's count is the upload's own unique count; a staged photo the upload deduped onto (same bytes, same
 // row) is counted there, not again.
@@ -110,8 +110,10 @@ async function awayWatchClosePhotoCount(dbh, { promotedIds = [], uploadResult = 
   const staged = promotedIds.map(String).filter((id) => !uploadedIds.has(id)).length;
   const body = Number(uploadResult.uniqueUploaded ?? uploadResult.uploaded ?? 0) || 0;
   if (!lawnAssessmentId) return body + staged;
+  // Only photos the customer receives: the lawn report leaves out customer_visible = false rows (report-photo-set.js
+  // resolveLawnReportPhotos), so those never meet an Away Watch promise.
   const lawn = await dbh('lawn_assessment_photos')
-    .where({ assessment_id: lawnAssessmentId })
+    .where({ assessment_id: lawnAssessmentId, customer_visible: true })
     .whereNotNull('s3_key')
     .whereNot('s3_key', 'like', 'pending/%')
     .count({ n: '*' })
