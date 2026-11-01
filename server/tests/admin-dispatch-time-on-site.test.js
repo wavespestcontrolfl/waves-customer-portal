@@ -1520,7 +1520,9 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // 19 with the membership-dues stale-rate restamp (B08): the required-mint
     // catch refreshes the frozen dues amount after a monthly-rate change, a
     // key-merge like the SCHEDULED_PRICE_MOVED restamp.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(19);
+    // 20 with the review ask-at-visit fallback (GATE_REVIEW_ASK_AT_VISIT): a visit-time ask
+    // that failed for a passing reason turns reviewAskAtVisit off — a key-merge too.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(20);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {
