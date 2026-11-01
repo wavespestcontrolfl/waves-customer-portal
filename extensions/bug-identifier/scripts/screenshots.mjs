@@ -293,14 +293,15 @@ try {
       await page.addScriptTag({ path: join(EXT, 'content', 'select-region.js') });
     };
     await inject();
-    await page.mouse.move(560, 90);
+    // The box frames the female spider in sample-photos/golden-silk-orbweaver.jpg.
+    await page.mouse.move(500, 320);
     await page.mouse.down();
-    await page.mouse.move(860, 560, { steps: 8 });
+    await page.mouse.move(800, 760, { steps: 8 });
     await page.screenshot({ path: join(OUT, '2-select-on-page.png') });
     await page.mouse.up();
     await page.waitForFunction(() => window.__sent.length === 1);
     const [message] = await page.evaluate(() => window.__sent);
-    assert.deepEqual(message, { type: 'bugid:region', rect: { x: 560, y: 90, width: 300, height: 470, viewportW: 1280 } });
+    assert.deepEqual(message, { type: 'bugid:region', rect: { x: 500, y: 320, width: 300, height: 440, viewportW: 1280 } });
     assert.equal(await page.evaluate(() => window.__wavesBugIdSelect), undefined, 'overlay flag cleared');
     assert.equal(await page.evaluate(() => document.documentElement.lastElementChild.tagName), 'BODY', 'overlay removed');
     await inject();

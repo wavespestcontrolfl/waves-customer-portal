@@ -52,9 +52,10 @@ species count from the catalog (239 approved entries in 29 groups as of
 | Screenshots (1280x800) | `screenshots/1-identify.png`, `screenshots/2-select-on-page.png`, `screenshots/3-start.png` |
 | Small promo tile (440x280) | `screenshots/promo-small-440x280.png` |
 
-The screenshots use two photos from the Waves blog (`sample-photos/`).
-Confirm they are cleared for the store listing, or swap in your own photos
-and re-run `scripts/screenshots.mjs`.
+The store images use one photo, `sample-photos/golden-silk-orbweaver.jpg`,
+which is public domain (CC0), so the listing needs no photo credit. Sources
+and licenses for both sample photos are in `sample-photos/CREDITS.md`. To use
+another photo, replace that file and re-run `scripts/screenshots.mjs`.
 
 ## Privacy practices tab
 
