@@ -184,6 +184,46 @@ describe('Action Inbox generators', () => {
     expect(ac.members).not.toEqual(ab.members);
   });
 
+  test('leads_awaiting_contact: counts people (one per phone line), members stay per lead', async () => {
+    const capture = primeDb({
+      leads: leadsResult({
+        waiting: [
+          { id: 'lead-e', phone: '9415550000' },
+          { id: 'lead-a', phone: '+19415551234' },
+          { id: 'lead-b', phone: '(941) 555-1234' }, // same line as lead-a
+          { id: 'lead-c', phone: null }, // no phone: its own person
+          { id: 'lead-f', phone: '' }, // blank phone: its own person, never merged with lead-c
+          { id: 'lead-d', phone: '+447911123456' },
+        ],
+        unattributed: { count: 0 },
+      }),
+    });
+    const { alerts } = await computeDashboardAlertsUncached();
+
+    const item = alerts.find((a) => a.id === 'leads_awaiting_contact');
+    expect(item.count).toBe(5);
+    expect(item.label).toBe('5 people waiting over 30m for first contact');
+    // A dismissal still records every waiting lead, so a person who asks
+    // again re-surfaces a dismissed item.
+    expect(item.members).toEqual(['lead-a', 'lead-b', 'lead-c', 'lead-d', 'lead-e', 'lead-f']);
+    const select = capture.find((c) => c.table === 'leads' && c.method === 'select' && c.args.includes('phone'));
+    expect(select.args).toEqual(['id', 'phone']);
+  });
+
+  test('leads_awaiting_contact: one person with two leads reads "1 person"', async () => {
+    primeDb({
+      leads: leadsResult({
+        waiting: [{ id: 'lead-a', phone: '941-555-1234' }, { id: 'lead-b', phone: '+1 941 555 1234' }],
+        unattributed: { count: 0 },
+      }),
+    });
+    const { alerts } = await computeDashboardAlertsUncached();
+
+    const item = alerts.find((a) => a.id === 'leads_awaiting_contact');
+    expect(item).toMatchObject({ count: 1, label: '1 person waiting over 30m for first contact' });
+    expect(item.members).toEqual(['lead-a', 'lead-b']);
+  });
+
   test('estimates_expiring: warn action carrying the annualized at-stake amount, internal-test rows excluded', async () => {
     const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
     const capture = primeDb({

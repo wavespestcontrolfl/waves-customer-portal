@@ -18,7 +18,7 @@ const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 // The waiting-for-first-contact queue (SLA, fresh-start floor, internal-name
 // exclusion) is ONE definition shared with the nightly lead repeat sweep.
-const { LEAD_RESPONSE_SLA_MINUTES, applyLeadsAwaitingContactFilter } = require('./lead-waiting-queue');
+const { LEAD_RESPONSE_SLA_MINUTES, applyLeadsAwaitingContactFilter, countWaitingPeople } = require('./lead-waiting-queue');
 const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
@@ -608,11 +608,13 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   //    definition (Speed-to-Lead backlog: status='new', no first-response
   //    stamp, past the SLA, not deleted, not internal, after the fresh-start
   //    floor) lives in lead-waiting-queue.js, shared with the nightly lead
-  //    repeat sweep, so the sweep only settles rows this item counts.
+  //    repeat sweep, so the sweep only settles rows this item counts. The
+  //    item counts PEOPLE, not leads: leads on one phone line are one person
+  //    (countWaitingPeople).
   try {
     const waitingQuery = applyLeadsAwaitingContactFilter(db('leads'), db);
-    const waitingRows = (await waitingQuery.select('id')) || [];
-    const count = waitingRows.length;
+    const waitingRows = (await waitingQuery.select('id', 'phone')) || [];
+    const count = countWaitingPeople(waitingRows);
     if (count > 0) {
       alerts.push({
         id: 'leads_awaiting_contact',
@@ -622,8 +624,9 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         // Queue membership, not just size: a dismissal stores this so a NEW
         // lead crossing the SLA re-surfaces the alert even at an unchanged
         // (or lower) count, instead of hiding behind the count-only dismissal.
+        // Members stay per LEAD: a waiting person who asks again is new work.
         members: queueMembers(waitingRows.map((r) => r.id)),
-        label: `${count} lead${count === 1 ? '' : 's'} waiting over ${LEAD_RESPONSE_SLA_MINUTES}m for first contact`,
+        label: `${count} ${count === 1 ? 'person' : 'people'} waiting over ${LEAD_RESPONSE_SLA_MINUTES}m for first contact`,
         href: '/admin/leads',
       });
     }
