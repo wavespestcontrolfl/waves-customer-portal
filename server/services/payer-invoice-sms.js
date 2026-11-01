@@ -21,8 +21,9 @@
  * Identity: the policy purpose `payer_payment_link` proves the recipient is the
  * ACTIVE payer's ap_phone for this invoice's payer_id, read fresh from the DB at
  * the pipeline and again at the provider handoff (messaging/validators/
- * payer-recipient.js). STOP, quiet hours and the template kill switch for the
- * `payer_invoice` message type apply as for every customer SMS.
+ * payer-recipient.js). STOP, quiet hours and the invoice SMS template kill switch
+ * (message type `payer_invoice` maps to the `invoice_sent` row in admin-sms-templates.js, so
+ * disabling the homeowner invoice text disables this one) apply as for every customer SMS.
  */
 
 const db = require('../models/db');
@@ -207,6 +208,11 @@ async function sendPayerInvoiceText({ invoiceId, database, operatorInitiated, em
     // The claim in withBillingTextLegLock answers a concurrent or replayed call for this key with the first text's acceptance.
     if (outcome && outcome.sent === true && outcome.deduped === true) {
       return result(false, 'already_texted', 'The payer was already texted for this send');
+    }
+    // The provider reports a switched-off template as sent:true with deliveryOutcome 'not_sent' (twilio.js "template-disabled").
+    if (outcome && outcome.sent === true && outcome.deliveryOutcome !== 'accepted') {
+      const off = outcome.raw && outcome.raw.templateDisabled === true;
+      return result(false, off ? 'template_disabled' : 'not_sent', off ? 'The invoice text template is switched off' : 'The text was not accepted');
     }
     if (outcome && outcome.sent === true) {
       await stampLogRow(dbh, outcome, { payerId: payer.id, invoiceId: invoice.id });

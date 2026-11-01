@@ -429,6 +429,9 @@ const MSG_TYPE_TO_TEMPLATE = {
   service_complete_with_invoice: 'service_complete_with_invoice',
   missed_call_followup: 'missed_call',
   invoice: 'invoice_sent',
+  // The payer's pay-link text (GATE_PAYER_INVOICE_SMS) is the same invoice text to a different recipient: disabling the invoice
+  // template in the admin SMS Templates screen stops it too. No separate row, no separate toggle.
+  payer_invoice: 'invoice_sent',
   receipt: 'invoice_receipt',
   invoice_receipt: 'invoice_receipt',
   payment_expiry: 'payment_method_expiry',
