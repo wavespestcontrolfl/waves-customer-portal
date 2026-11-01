@@ -540,6 +540,13 @@ async function maintainMissingGeoNotices(nowDate = new Date()) {
   await retireMissingGeoNotices(close, nowDate);
 }
 
+// Quick Move "let the customer pick a day": a visit the customer is still picking
+// for (customer_pick_by in the future) is not unplaced yet, so it raises no alert
+// until the deadline passes. NULL = never handed over (every other row).
+function pickWindowClosed() {
+  this.whereNull('s.customer_pick_by').orWhereRaw('s.customer_pick_by <= now()');
+}
+
 // Include skipped/locked rows: unplaced due dates must not disappear behind
 // eligibility filters or the run cap. The existing bell dedupes repeated runs.
 async function flagUnplacedVisits(config, nowDate = new Date()) {
@@ -576,6 +583,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     .where('s.recurring_dispatch_due_date', '<=', cutoff)
     .where('c.active', true)
     .whereNull('c.deleted_at')
+    .where(pickWindowClosed)
     .select('s.id', 's.customer_id', 's.recurring_dispatch_due_date');
   const notifications = require('../notification-service');
   let flagged = 0;
@@ -591,6 +599,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
         .whereNull('c.deleted_at')
         .whereNull('s.window_start')
         .whereIn('s.status', ['pending', 'confirmed'])
+        .where(pickWindowClosed)
         .forNoKeyUpdate('s')
         .first('s.id');
       if (!current) return null;

@@ -3988,9 +3988,11 @@ router.get('/scheduled', async (req, res, next) => {
   try {
     // Queued recruiting texts carry the bearer interview link — owner-only
     // (utils/recruiting-thread-scope.js), same as every other reader.
+    // Held payer texts (GATE_PAYER_INVOICE_SMS) preview a payer's and customer's names and street: office only too.
     const scheduled = await db('sms_log')
       .where({ status: 'scheduled' })
       .modify((q) => hideRecruitingThreadsFromNonAdmin(q, req, 'sms_log.message_type'))
+      .modify((q) => require('../services/payer-invoice-sms').hidePayerHoldsFromNonAdmin(q, req, 'sms_log.message_type'))
       .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
       .select('sms_log.*', 'customers.first_name', 'customers.last_name')
       .orderBy('scheduled_for', 'asc');

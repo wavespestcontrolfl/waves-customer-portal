@@ -30,12 +30,27 @@ function techMoveSwitchLive() {
 }
 
 // null = allowed; otherwise { status, payload } for the route to send as is.
-async function techMoveRefusal(req, { conn = db } = {}) {
+// mode 'customer_pick' (GATE_QUICKMOVE_CUSTOMER_PICK, owner 2026-11-01): handing a
+// visit to the customer moves nothing by hand, so a technician whose switch is off
+// may use that one Quick Move option. Every other mode keeps the switch.
+async function techMoveRefusal(req, { conn = db, mode = 'move' } = {}) {
   if (!techMoveSwitchLive() || req?.techRole === 'admin') return null;
+  if (mode === 'customer_pick') return null;
   const refused = { status: 403, payload: { ...MOVE_NOT_ALLOWED } };
   if (!req?.technicianId) return refused;
   const row = await conn('technicians').where({ id: req.technicianId }).first('can_move_visits');
   return row && row.can_move_visits === true ? null : refused;
 }
 
-module.exports = { techMoveRefusal, techMoveSwitchLive, MOVE_NOT_ALLOWED };
+// The body a Quick Move options route sends with a refusal. While
+// GATE_QUICKMOVE_CUSTOMER_PICK is on, a technician whose switch is off keeps the
+// same status and { error, code } and is offered the one option they may use:
+// customerPickOnly plus the customer-pick offer. Gate off: the payload as it
+// was, and rain-out is never loaded.
+async function moveRefusalBody(refusal, serviceId) {
+  if (require('../../config/feature-gates').quickMoveCustomerPickLive?.() !== true) return refusal.payload;
+  const customerPick = await require('../rain-out').customerPickOffer(serviceId);
+  return { ...refusal.payload, customerPickOnly: true, customerPick };
+}
+
+module.exports = { techMoveRefusal, techMoveSwitchLive, moveRefusalBody, MOVE_NOT_ALLOWED };

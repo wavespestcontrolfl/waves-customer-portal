@@ -22,7 +22,7 @@ const crypto = require('crypto');
 const NO_SHOW_OCCURRENCE_FIELDS = ['scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'property_id'];
 const router = express.Router();
 const db = require('../models/db');
-const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
+const { techMoveRefusal, moveRefusalBody } = require('../services/scheduling/tech-move-permission');
 const { applyAssignable } = require('../services/technician-eligibility');
 const { seriesNoticeNameVars } = require('../services/placement-service-name');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -4757,10 +4757,11 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
       .first('id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
-    // why, not move choices the commit would refuse.
+    // why, not move choices the commit would refuse (plus the customer-pick
+    // offer while GATE_QUICKMOVE_CUSTOMER_PICK is on).
     {
       const refusal = await techMoveRefusal(req);
-      if (refusal) return res.status(refusal.status).json(refusal.payload);
+      if (refusal) return res.status(refusal.status).json(await moveRefusalBody(refusal, req.params.serviceId));
     }
 
     // Same stale-tap guard as the tech route: the moved-first rain-out
@@ -5478,6 +5479,92 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       `[admin-dispatch] rain-out service=${req.params.serviceId} actor=${req.technicianId} ` +
       `scope=${scope === 'route' ? 'route' : 'job'} moved=${result.movedCount} failed=${result.failedCount}`
     );
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/customer-pick
+// body: { reasonCode }
+//
+// Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK, owner
+// 2026-11-01), the dispatch twin of POST /api/tech/services/:id/customer-pick:
+// the visit leaves today's route and the customer gets one text with their
+// reschedule link (services/rain-out.js handOffToCustomer). Same ownership and
+// stale-tap checks as POST /rain-out above. The hand-off moves only this visit
+// (never its series) and texts only this customer, so the rain-out route's
+// admin-only scope and series refusals do not apply. A technician whose "Can
+// move visits" switch is off may use this option only.
+router.post('/:serviceId/customer-pick', async (req, res, next) => {
+  try {
+    if (require('../config/feature-gates').quickMoveCustomerPickLive?.() !== true) {
+      return res.status(404).json({ error: 'disabled' });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    {
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: svc.technician_id,
+      });
+      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    {
+      const refusal = await techMoveRefusal(req, { mode: 'customer_pick' });
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
+    }
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: "This job is scheduled for a future date — Quick Move applies to today's route.",
+        code: 'future_scheduled_date',
+      });
+    }
+    // Same late assignment re-check as POST /rain-out; the real fence is
+    // requireAssignedTechnicianId on the hand-off's own locked write.
+    if (req.techRole !== 'admin') {
+      try {
+        await db.transaction((trx) => lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id']));
+      } catch (err) {
+        if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+        throw err;
+      }
+    }
+
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.handOffToCustomer({
+      serviceId: req.params.serviceId,
+      reasonCode: req.body?.reasonCode,
+      initiatedBy: 'admin',
+      // Stamps sms_log.admin_user_id on the text.
+      actorUserId: req.technicianId,
+      requireAssignedTechnicianId: req.techRole !== 'admin' ? req.technicianId : null,
+      // An authenticated dispatch click: the text is exempt from the send window.
+      operatorInitiated: true,
+    });
+    if (!result.ok) {
+      // Every refusal wrote nothing. 409 = the visit's state, not the request.
+      const refused = RainOut.pickRefusalResponse(result.reason);
+      return res.status(refused.status).json(refused.body);
+    }
+
+    // The board update and one route-quality flush for both days, as above.
+    // No reminder sync: the hand-off pre-closed the visit's reminder itself.
+    // Best-effort: the hand-off already committed.
+    const qualityDates = new Set(result.qualityDates);
+    try {
+      await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId, qualityDates });
+    } catch (err) {
+      logger.error(`[dispatch] customer-pick board broadcast failed for ${req.params.serviceId}: ${err.message}`);
+    }
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (err) {
+      logger.error(`[dispatch] customer-pick route quality refresh failed: ${err.message}`);
+    }
+
+    logger.info(`[admin-dispatch] customer-pick service=${req.params.serviceId} actor=${req.technicianId} due=${result.dueDate} texted=${result.textSent}`);
     return res.json(result);
   } catch (err) { next(err); }
 });
@@ -7529,6 +7616,7 @@ router.get('/:serviceId/recap-video', async (req, res, next) => {
     }
     const recap = await recapPipeline.getRecap(req.params.serviceId);
     if (!recap) return res.json({ exists: false, status: 'none' });
+    const gates = require('../config/feature-gates');
     return res.json({
       exists: true,
       status: recap.status,
@@ -7537,6 +7625,9 @@ router.get('/:serviceId/recap-video', async (req, res, next) => {
       sent: Boolean(recap.sent_at),
       durationMs: recap.duration_ms || null,
       error: recap.last_error || null,
+      // GATE_RECAP_GLASSES_CLIPS: the card offers late clips (an add or a removal re-renders the
+      // recap) only while the server re-renders for them.
+      lateClips: typeof gates.recapGlassesClipsLive === 'function' && gates.recapGlassesClipsLive(),
     });
   } catch (err) { return next(err); }
 });
@@ -7625,12 +7716,15 @@ router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) =
     if (!(await recapOwnerOk(req, res))) return undefined;
     // Size/duration verified server-side (authoritative S3 size) in confirmUpload;
     // oversized/missing objects are dropped + rejected so they never hit the renderer.
-    const result = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.serviceId, durationMs: req.body?.durationMs });
+    // The recap's late-clip mark commits with the clip (GATE_RECAP_GLASSES_CLIPS; a no-op when off).
+    const result = await recapMedia.confirmUpload(req.params.mediaId, {
+      scheduledServiceId: req.params.serviceId,
+      durationMs: req.body?.durationMs,
+      onChange: (row, trx) => recapPipeline.markRecapClipsChanged(req.params.serviceId, row, { knex: trx }),
+    });
     if (!result.ok) {
-      if (result.reason === 'too_large') return res.status(413).json({ error: 'Clip too large — keep it under ~20 seconds.' });
-      if (result.reason === 'bad_duration') return res.status(422).json({ error: 'Couldn’t read the clip length — re-record a short clip and try again.' });
-      if (result.reason === 'not_uploaded') return res.status(409).json({ error: 'Upload not found — try again.' });
-      return res.status(404).json({ error: 'media not found' });
+      const failure = recapMedia.confirmFailure(result.reason);
+      return res.status(failure.status).json({ error: failure.error });
     }
     return res.json({ ok: true, id: result.row.id, status: result.row.status });
   } catch (err) { return next(err); }
@@ -7647,8 +7741,11 @@ router.get('/:serviceId/recap-media', async (req, res, next) => {
 router.delete('/:serviceId/recap-media/:mediaId', async (req, res, next) => {
   try {
     if (!(await recapOwnerOk(req, res))) return undefined;
-    const ok = await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.serviceId });
-    return res.json({ ok });
+    const removed = await recapMedia.deleteMedia(req.params.mediaId, {
+      scheduledServiceId: req.params.serviceId,
+      onChange: (row, trx) => recapPipeline.markRecapClipsChanged(req.params.serviceId, row, { knex: trx }),
+    });
+    return res.json({ ok: Boolean(removed) });
   } catch (err) { return next(err); }
 });
 

@@ -2356,6 +2356,37 @@ describe('rain-out service', () => {
       expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toBeNull();
     });
 
+    // GATE_QUICKMOVE_CUSTOMER_PICK: the customer-pick offer rides the payload only while the gate is on.
+    // Off, the JSON the sheets receive has no such key (byte-identical to before).
+    test('the customer-pick offer: no key while the gate is off, the offer while it is on', async () => {
+      const wire = () => {
+        SmartRebooker.findRescheduleOptions.mockReset().mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+        });
+      };
+      wire();
+      const off = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+      expect(JSON.parse(JSON.stringify(off))).not.toHaveProperty('customerPick');
+
+      process.env.GATE_QUICKMOVE_CUSTOMER_PICK = 'true';
+      try {
+        wire();
+        const on = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+        // SERVICE is a one-time visit: the offer says why, decided on the loaded row with no further read.
+        expect(on.customerPick).toEqual(expect.objectContaining({
+          available: false, unavailableReason: 'not_recurring_plan_visit', previewByReason: {}, segments: null,
+        }));
+        expect(on.days).toEqual(off.days);
+        expect(on.sameDay).toEqual(off.sameDay);
+      } finally {
+        delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
+      }
+    });
+
     test('each option carries the hourly rain chance for its own window; the day number is only the fallback', async () => {
       // 13:00Z = 09:00 ET → same-day presets at 11:00 and 13:00.
       jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });

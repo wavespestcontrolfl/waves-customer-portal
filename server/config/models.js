@@ -710,6 +710,15 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
   }),
+  recapClipPick: Object.freeze({
+    name: 'recapClipPick',
+    // Glasses-recap pilot (owner 2026-11-01; recap-clip-cut.js, laneId 'recap_clip_pick'): picks the
+    // start second of the 5-second window of a camera-glasses clip. Same shape as photoCaptions:
+    // Gemini vision first, Claude VISION only when Gemini returns nothing usable. Honors the shared
+    // GEMINI_VISION_MODEL override, so one env var moves every Gemini photo lane.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
+  }),
   lawnVisitAssessment: Object.freeze({
     name: 'lawnVisitAssessment',
     // One multimodal call per lawn visit (services/lawn-visit-assessment.js,

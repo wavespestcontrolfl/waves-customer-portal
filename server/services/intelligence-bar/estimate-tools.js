@@ -168,6 +168,21 @@ Use for: change-of-pricing context before drafting an estimate.`,
   },
   GET_ESTIMATE_DETAIL_TOOL,
   {
+    name: 'list_commercial_proposals',
+    // Kept to words only this tool needs: discover_capabilities loads the 12 best keyword matches with ties broken by
+    // name, so field names such as customer_id or estimate_id pushed save_customer_estimate out of a "customer
+    // estimate" search (CI on #7367). The row fields are in the result and in the MCP allow-list (mcp-admin.js).
+    description: `List live commercial proposals with their online signing and picker readiness, as ids, codes, dates and flags. Use for: which commercial proposals a change would hit, and which can sign online.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        scope: { type: 'string', enum: ['open', 'all'], description: 'open (default): status not accepted, declined or expired. all: every status.' },
+        limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Proposals per page (default 25, max 50)' },
+        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset' },
+      },
+    },
+  },
+  {
     name: 'find_similar_estimates',
     description: `Find recent estimates with similar monthly_total and/or service interest. Pulls calibration anchors so the agent can sanity-check ("we quoted a similar property last month at $X"). Returns up to 10 estimates.
 Use for: any quote where you want to compare your draft against historical comps.`,
@@ -366,6 +381,7 @@ async function executeEstimateTool(toolName, input, actionContext = {}) {
       case 'recent_pricing_changes': return await recentPricingChanges(input);
       case 'find_similar_estimates': return await findSimilarEstimates(input);
       case 'get_estimate_detail': return await getEstimateDetail(input);
+      case 'list_commercial_proposals': return await listCommercialProposals(input);
       case 'match_existing_customer': return await matchExistingCustomer(input, actionContext.readCustomerIds);
       case 'get_waveguard_tiers': return await getWaveGuardTiers();
       case 'get_neighborhood_grass_profile': return await getNeighborhoodGrassProfile(input);
@@ -383,6 +399,120 @@ async function executeEstimateTool(toolName, input, actionContext = {}) {
 }
 
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
+
+// ─── list_commercial_proposals ──────────────────────────────────
+// Read-only. One row per estimate with an AUTHORED proposal (enabled, not the synthesized fallback), as ids, codes,
+// dates and flags only: the owner's read-only MCP forbids free text. The signing and first-visit verdicts come from
+// the same functions GET /api/admin/estimates/:id/proposal calls for the builder's Readiness card.
+const PROPOSAL_LIST_DEFAULT_LIMIT = 25;
+const PROPOSAL_LIST_MAX_LIMIT = 50;
+const PROPOSAL_SCAN_CHUNK = 100;
+const PROPOSAL_CLOSED_STATUSES = ['accepted', 'declined', 'expired'];
+// What the proposal route's readers touch on the row: the status and expiry for estimateClosedOnline, estimate_data for
+// the proposal and the off-surface check, and the name, address and slug the signed-quote fingerprint is built from.
+const PROPOSAL_LIST_COLUMNS = [
+  'id', 'estimate_slug', 'status', 'customer_id', 'customer_name', 'address', 'created_at', 'sent_at', 'viewed_at',
+  'expires_at', 'archived_at', 'bill_by_invoice', 'estimate_data',
+];
+
+function authoredProposal(row) {
+  try {
+    const proposal = require('../estimate-proposal').normalizeProposal(row);
+    return proposal.enabled === true && proposal.synthesized !== true ? proposal : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function proposalClosedOnline(row) {
+  // A failed read reads as closed, as the builder's route does.
+  try { return require('../../routes/estimate-public').estimateClosedOnline(row) === true; } catch (_) { return true; }
+}
+
+async function proposalSigning(row, closed) {
+  if (!require('../../config/feature-gates').commercialProposalSignLive()) return null;
+  try {
+    const status = await require('../commercial-proposal-agreement').agreementAdminStatus(row, db, { closed });
+    return { state: status.state || 'unknown', blocked: status.signingBlocked || null };
+  } catch (_) {
+    return { state: 'unknown', blocked: null };
+  }
+}
+
+async function proposalFirstVisit(row, closed) {
+  if (!require('../../config/feature-gates').commercialFirstVisitLive()) return null;
+  try {
+    const found = await require('../commercial-first-visit').firstVisitReadiness(row, { conn: db, closed });
+    return {
+      state: found.state || 'unknown',
+      reason: found.reason || null,
+      ...(found.state === 'booked' ? { visit_date: found.visit?.date || null } : {}),
+    };
+  } catch (_) {
+    return { state: 'unknown', reason: null };
+  }
+}
+
+async function proposalListItem(row, proposal) {
+  const closed = proposalClosedOnline(row);
+  return {
+    estimate_id: row.id,
+    estimate_number: row.estimate_slug || null,
+    status: row.status,
+    customer_id: row.customer_id || null,
+    created_at: row.created_at,
+    sent_at: row.sent_at || null,
+    viewed_at: row.viewed_at || null,
+    expires_at: row.expires_at || null,
+    bill_by_invoice: row.bill_by_invoice === true,
+    payment_terms: proposal.commercialTerms?.paymentTerms || null,
+    building_use: proposal.buildingUse || null,
+    closed_online: closed,
+    signing: await proposalSigning(row, closed),
+    first_visit: await proposalFirstVisit(row, closed),
+  };
+}
+
+// Scans the stored-proposal rows newest first and keeps the authored ones, so the offset counts proposals, not rows.
+async function scanAuthoredProposals(scope, wanted) {
+  const found = [];
+  for (let at = 0; found.length < wanted; at += PROPOSAL_SCAN_CHUNK) {
+    let query = db('estimates')
+      .select(PROPOSAL_LIST_COLUMNS)
+      .whereNull('archived_at')
+      .whereRaw("estimate_data->'proposal'->>'enabled' = 'true'");
+    if (scope === 'open') query = query.whereNotIn('status', PROPOSAL_CLOSED_STATUSES);
+    const rows = await query.orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .limit(PROPOSAL_SCAN_CHUNK).offset(at);
+    for (const row of rows) {
+      const proposal = authoredProposal(row);
+      if (proposal) found.push({ row, proposal });
+    }
+    if (rows.length < PROPOSAL_SCAN_CHUNK) break;
+  }
+  return found;
+}
+
+async function listCommercialProposals(input = {}) {
+  const scope = input.scope === 'all' ? 'all' : 'open';
+  const rawLimit = Math.trunc(Number(input.limit));
+  const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : PROPOSAL_LIST_DEFAULT_LIMIT, 1), PROPOSAL_LIST_MAX_LIMIT);
+  const offset = Math.max(0, Math.trunc(Number(input.offset)) || 0);
+
+  const found = await scanAuthoredProposals(scope, offset + limit + 1);
+  const page = found.slice(offset, offset + limit);
+  const hasMore = found.length > offset + limit;
+  const proposals = [];
+  for (const { row, proposal } of page) proposals.push(await proposalListItem(row, proposal));
+  return {
+    scope,
+    proposals,
+    returned_count: proposals.length,
+    has_more: hasMore,
+    next_offset: hasMore ? offset + limit : null,
+  };
+}
+
 
 function normalizeFactName(value) {
   return String(value || '')

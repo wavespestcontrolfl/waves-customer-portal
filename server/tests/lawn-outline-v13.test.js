@@ -303,7 +303,7 @@ describe('the sections', () => {
       expect(steps.body).toBe('');
       const cards = section(result, 'treatment_categories');
       expect(cards.bullets).toEqual(cards.visual.items.map((c) => `${c.label}: ${c.text}`));
-      expect(section(result, 'program_year').bullets[9]).toBe('October: Fertilizer, Pre-emergent; as needed: Disease control, Insect control, Weed control');
+      expect(section(result, 'program_year').bullets[9]).toBe('October: Fertilizer, Pre-emergent; as needed: Disease control, Insect control, Weed control, Wetting agent');
       // The legacy outline draws nothing.
       await withGates({ GATE_LAWN_V13: 'true' }, async () => {
         expect((await build(ST_AUG_ESTIMATE, { month: 10 })).content.sections.some((s) => 'visual' in s)).toBe(false);
@@ -317,7 +317,8 @@ describe('the sections', () => {
       const byMonth = Object.fromEntries(visual.months.map((m) => [m.label, m]));
       expect(visual.months.map((m) => m.label)).toEqual(MONTH_ABBR);
       expect(byMonth.Jan).toMatchObject({ main: ['barrier', 'micros'], asNeeded: ['disease', 'weeds'], limited: false });
-      expect(byMonth.Feb).toMatchObject({ main: ['feeding'], asNeeded: ['weeds'] });
+      // Owner 2026-11-01 (fungus prevention): February carries the Velista large patch spring pass, so disease may be added (after the weed line, in recipe order).
+      expect(byMonth.Feb).toMatchObject({ main: ['feeding'], asNeeded: ['weeds', 'disease'] });
       // The 9x April bag (pre-emergent with fertilizer) is a plan-size variant: drawn as may-be-added.
       expect(byMonth.Apr.main).toEqual(['feeding']);
       expect(byMonth.Apr.asNeeded).toEqual(expect.arrayContaining(['barrier', 'disease', 'insects']));

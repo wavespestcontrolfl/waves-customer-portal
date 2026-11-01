@@ -97,6 +97,11 @@ const ALLOWLIST = [
     reason: 'queueContactReportTexts: existence check for THIS report\'s own queued or sent contact text (message_type contact_report_ready + its contact_report_key), the one-text-per-contact-per-report dedupe under the customer row lock. A review-ask or reply reservation never carries that message type or key, and a row in any state (in flight included) must count as already queued.',
   },
   {
+    file: 'services/payer-invoice-sms.js',
+    snippet: "const existing = await trx('sms_log')",
+    reason: 'queueHeldPayerText: existence check, under the episode\'s advisory lock, for THIS send episode\'s own held payer text (message_type payer_invoice + entry_point payer_invoice_sms_deferred + its notificationEventKey, status scheduled or sending). Nothing is presented as a message. A review-ask or reply reservation never carries that type, entry point or key, and a held row that is sending must count as already queued, so hiding in-flight rows would write a second hold.',
+  },
+  {
     file: 'services/sms-scheduling-act.js',
     snippet: "const newer = await trx('sms_log')",
     reason: 'buildMoveGuard newer-message fence: an existence check, under the move\'s locks, for ANY row on this phone-and-line conversation after the accepted reply. Nothing is presented as a message. A reply reservation in flight is Waves answering right now, which is exactly when the automatic move must stand down, so hiding reservations would weaken the fence; a placeholder can only refuse a move (staff handle it), never cause one.',

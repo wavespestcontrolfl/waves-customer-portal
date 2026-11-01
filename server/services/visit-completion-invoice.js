@@ -53,7 +53,10 @@ async function acceptanceTaxRefusal({ invoice, members, customer, trx }) {
   return null;
 }
 
-async function memberBillingEligibility(member, customer, trx) {
+// `payerSeen` (GATE_PAYER_PACKET_AUTOSEND, passed only by the packet mint): a Map this call fills with the Bill-To
+// payer of every member that reaches the payer check (null = self-pay). Given one, a payer-billed member is no
+// longer an office hand-off here; the mint decides on the whole packet (payerOwnerForPacket).
+async function memberBillingEligibility(member, customer, trx, payerSeen = null) {
   const notes = member.record_notes || {};
   if ([notes.backfill, notes.invoiceAlreadySent].some(Boolean)) {
     return office('special_completion_billing', member.id);
@@ -78,8 +81,24 @@ async function memberBillingEligibility(member, customer, trx) {
   const payer = await require('./payer').resolveForInvoice({
     database: trx, customerId: customer.id, customer, scheduledServiceId: member.id, throwOnError: true,
   });
+  if (payerSeen && require('../config/feature-gates').payerPacketAutosendLive()) {
+    payerSeen.set(member.id, payer.payerId || null);
+    return null;
+  }
   if (payer.payerId) return office('payer_billed_member', member.id);
   return null;
+}
+
+// GATE_PAYER_PACKET_AUTOSEND: the packet's Bill-To owner from the payer of each member that reached the payer check.
+// { payerId: null } = every such member is self-pay (the ordinary homeowner invoice); { payerId } = all of them
+// resolve to that ONE payer; { office } = self-pay and payer-billed members mixed, or two payers (never split).
+function payerOwnerForPacket(payerSeen) {
+  const entries = [...payerSeen.entries()];
+  const payers = new Set(entries.map(([, payerId]) => (payerId == null ? 'self' : String(payerId))));
+  if (![...payers].some((id) => id !== 'self')) return { payerId: null };
+  const [memberId, payerId] = entries.find(([, id]) => id != null);
+  if (payers.size > 1) return { office: office('payer_billed_member', memberId) };
+  return { payerId };
 }
 
 async function buildMemberLines(member, customer, trx, checkedEligibility = undefined, { deferMissingPrice = false } = {}) {
@@ -234,8 +253,9 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
   const feeReviewCandidates = [];
   const adoptionMembers = [];
   const deferredOffices = [];
+  const payerSeen = new Map();
   for (const member of members) {
-    const eligibility = await memberBillingEligibility(member, customer, trx);
+    const eligibility = await memberBillingEligibility(member, customer, trx, payerSeen);
     const adoptionEligible = !eligibility && !member.is_callback
       && !isAlwaysFreeServiceType(member.service_type);
     const built = await buildMemberLines(member, customer, trx, eligibility, {
@@ -249,6 +269,13 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
     if (adoptionEligible) adoptionMembers.push(member);
     if (built.lineItems.length) billed.push({ member, lineItems: built.lineItems });
     else if (built.feeReviewOnly) feeReviewCandidates.push(member);
+  }
+  const payerOwner = payerOwnerForPacket(payerSeen);
+  if (payerOwner.office) return payerOwner.office;
+  const payerId = payerOwner.payerId;
+  // The homeowner's own retention discount is never taken onto a payer's invoice: the office decides.
+  if (payerId && await trx('retention_offers').where({ customer_id: customer.id, status: 'granted' }).first('id')) {
+    return office('payer_billed_member', members[0].id);
   }
   const sourceIds = [...new Set(billed.map(({ member }) => member.source_estimate_id || null))];
   if (sourceIds.length > 1) return office('mixed_estimate_billing');
@@ -404,6 +431,8 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
   // against the committed packet invoice.
   if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
   const deposit = sourceEstimateId ? await pendingDepositCredit(sourceEstimateId, trx) : null;
+  // Likewise the homeowner's estimate deposit stays on its ledger for the office to apply.
+  if (payerId && deposit) return office('payer_billed_member', billed[0].member.id);
   // An invoice-mode commercial proposal's visits are due on the agreement's Net term (owner 2026-10-30), counted from the
   // visit day but never before today, as the single-visit completion does (a combined visit closed late is not born overdue).
   const proposalTermsDue = sourceEstimateId
@@ -414,7 +443,8 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
     title: 'Combined service visit', lineItems, trustedStoredDiscountSources: ['scheduled_service'],
     ...(deposit ? { depositCredit: { amount: deposit.amount, estimateId: sourceEstimateId } } : {}),
   }, { packetId: packet.id });
-  if (invoice.payer_id) throw new Error('Visit Bill-To changed during invoice creation');
+  // create() resolves Bill-To itself: it must land on the payer this mint decided on (none = self-pay).
+  if (String(invoice.payer_id || '') !== String(payerId || '')) throw new Error('Visit Bill-To changed during invoice creation');
   const applied = Number(invoice.applied_deposit_credit) || 0;
   if (applied > 0) {
     const consumed = await consumeDepositCredit({ estimateId: sourceEstimateId, amount: applied, invoiceId: invoice.id, trx });

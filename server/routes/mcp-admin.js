@@ -183,6 +183,15 @@ const TOOL_FIELDS = Object.freeze({
     ...fieldsOf('annual_prepay', ['role', 'term_id', 'term_status', 'term_start', 'term_end', 'prepay_amount']),
     'unknowns',
   ],
+  // Ids, codes, dates and flags only: no title, name, address, note or price (free text, typed by staff or customers).
+  list_commercial_proposals: [
+    'scope', 'returned_count', 'has_more', 'next_offset',
+    ...fieldsOf('proposals.*', [
+      'estimate_id', 'estimate_number', 'status', 'customer_id', 'created_at', 'sent_at', 'viewed_at', 'expires_at', 'bill_by_invoice',
+      'payment_terms', 'building_use', 'closed_online', 'signing.state', 'signing.blocked', 'first_visit.state', 'first_visit.reason',
+      'first_visit.visit_date',
+    ]),
+  ],
   list_gap_reports: [
     'window_days', 'total_matching', 'returned', 'has_more', 'groups.*.domain',
     ...['gap_id', 'source', 'kind', 'wanted', 'tried', 'tool', 'times_seen_in_window', 'times_seen_total', 'first_seen', 'last_seen', 'status', 'system_fault', 'quoted_words']

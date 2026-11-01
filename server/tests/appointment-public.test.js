@@ -782,3 +782,41 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     await expect(confirmGroupedOrSolo(trx, svc, { date: '2026-08-06', windowStart: '09:00' })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
   });
 });
+
+describe('a visit Quick Move handed to the customer (no time yet)', () => {
+  const express = require('express');
+  const TOKEN = 'a'.repeat(64);
+  const handedOff = {
+    id: 'svc-pick', status: 'pending', visit_id: null, customer_active: true, customer_deleted_at: null,
+    customer_pick_by: new Date('2026-11-04T01:00:00Z'), scheduled_date: '2026-11-11', window_start: null, window_end: null,
+  };
+
+  test('the confirm POST answers 409 PICK_A_TIME and writes nothing', async () => {
+    const prev = process.env.GATE_APPOINTMENT_PAGE;
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    const chain = { where: () => chain, leftJoin: () => chain, first: async () => ({ ...handedOff }) };
+    mockDb.mockReset();
+    mockDb.mockImplementation(() => chain);
+    mockDb.transaction = jest.fn();
+    const priorRaw = mockDb.raw;
+    mockDb.raw = jest.fn((sql) => sql); // loadByToken's computed select columns
+    const app = express();
+    app.use(express.json());
+    app.use('/api/public/appointment', appointmentRouter);
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+    const server = app.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/api/public/appointment/${TOKEN}/confirm`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ date: '2026-11-11', windowStart: null }),
+      });
+      const body = await res.json();
+      expect({ status: res.status, body }).toEqual({ status: 409, body: { error: expect.stringContaining('pick one'), code: 'PICK_A_TIME' } });
+      expect(mockDb).toHaveBeenCalledTimes(1); // the token read only
+      expect(mockDb.transaction).not.toHaveBeenCalled();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      mockDb.raw = priorRaw;
+      if (prev === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prev;
+    }
+  });
+});

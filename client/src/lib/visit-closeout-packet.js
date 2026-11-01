@@ -146,7 +146,7 @@ export async function rediscoverCloseout({ visitId, candidate, err, scope }) {
 const PAYMENT_LABELS = {
   paid: 'Paid', prepaid: 'Prepaid', no_charge: 'No charge', payment_needed: 'Invoice queued for delivery',
   payment_failed: 'Card declined; invoice queued for delivery', payment_pending: 'Awaiting confirmation',
-  processing: 'Awaiting confirmation', office_required: 'Office review',
+  processing: 'Awaiting confirmation', office_required: 'Office review', payer_billed: 'Invoice sent to the payer',
 };
 export const paymentLine = (result) => (result?.payment ? `Payment: ${PAYMENT_LABELS[result.payment.state] || 'Recorded'}.` : null);
 

@@ -200,7 +200,43 @@ const INVOICE_EMAIL_PAY_LINK_TOKEN = '[pay link]';
 //   expectedContentHash    the card's template content hash; sendTemplate refuses a different active template.
 //   verifyOwner            the card's live owner / plan / delivery-choice check, run again at the provider handoff.
 // A bar send never falls back to SMTP (the card showed the template's email).
+//   operatorInitiated      an office send (invoice.js passes it): the payer text below may go outside the 8 AM to 8 PM window.
+//
+// The ONE chokepoint of a payer invoice's email: the office send (invoice.js sendViaSMSAndEmail), the automatic visit-completion
+// send (complete-scheduled-service.js sendPayerInvoiceToApIfEligible) and every resend call this function. After the provider has
+// ACCEPTED the email (sendInvoiceEmailCore returned ok), a payer-billed invoice's pay link is also texted to the payer's AP phone
+// (GATE_PAYER_INVOICE_SMS, payer-invoice-sms.js). The text never changes this function's result.
 async function sendInvoiceEmail(invoiceId, options = {}) {
+  const emailResult = await sendInvoiceEmailCore(invoiceId, options);
+  if (emailResult && emailResult.ok === true && emailResult.preview !== true) {
+    await textPayerAfterAcceptedEmail(invoiceId, options, emailResult);
+  }
+  return emailResult;
+}
+
+// Best effort and silent to the caller: a refused or failed text is logged by the sender (a window-held automatic text is
+// queued by the sender for the window open), and nothing here throws.
+// A one-off recipient (recipientOverride: an operator naming a bookkeeper or realtor) did not receive the payer's email, so no
+// payer text follows it. The text's episode is the persisted email row (emailMessageId), the same value on a send and on its
+// provider-deduped replay. The SMTP fallback has no row or replay, so its episode is the acceptance time. A deduped replay with
+// neither a row id nor a stored time is not provably a new episode: no text.
+async function textPayerAfterAcceptedEmail(invoiceId, options, emailResult) {
+  if (options.previewOnly === true || options.recipientOverride) return;
+  if (emailResult.deduped && !emailResult.emailMessageId && !emailResult.sentAt) return;
+  try {
+    const { sendPayerInvoiceText } = require('./payer-invoice-sms');
+    await sendPayerInvoiceText({
+      invoiceId,
+      operatorInitiated: options.operatorInitiated === true,
+      emailMessageId: emailResult.emailMessageId || null,
+      emailAcceptedAt: emailResult.deduped ? emailResult.sentAt : new Date(),
+    });
+  } catch (err) {
+    logger.warn(`[invoice-email] payer text hook failed for invoice ${invoiceId}: ${err.message}`);
+  }
+}
+
+async function sendInvoiceEmailCore(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   const previewOnly = options.previewOnly === true;
@@ -749,8 +785,10 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       const evidence = acceptedInvoiceEmailEvidence(result);
       await markEmailDelivered(evidence);
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
-      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl,
-        ...(ccList.length ? { cc: ccList } : {}), ...evidence };
+      // emailMessageId: the persisted email_messages row. A provider-deduped replay returns the ORIGINAL row, so the id is the
+      // same on a send and on its replay: it is the payer text's episode key (payer-invoice-sms.js).
+      return { ok: true, messageId: result.message?.provider_message_id || null, emailMessageId: result.message?.id || null,
+        recipient: recipientPayload, payUrl, ...(ccList.length ? { cc: ccList } : {}), ...evidence };
     } catch (err) {
       // The bar's pinned template changed between its render check and the send's own resolve: nothing was sent.
       if (barApproved && /reviewed email content changed/i.test(err?.message || '')) {

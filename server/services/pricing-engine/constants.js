@@ -1061,11 +1061,18 @@ const MOSQUITO = {
   // lots grow rather than pricing big jobs out.
   priceStepSqFt: 500,
   productCosts: {
-    bifenthrinOz: 41.08 / 128,      // Bifen I/T 1 gal @ $41.08; Talak equivalent @ $41.57.
+    bifenthrinOz: 41.57 / 96,       // Atticus Talak 7.9 F 96 fl oz @ $41.57 (inventory best 2026-11-01; Bifen I/T is retired).
     tekkoProOz: 52.97 / 16,         // Tekko Pro IGR 16 oz @ $52.97.
     scionOz: 161.30 / 32,           // Scion 32 oz @ $161.30.
     in2CareStation: 13.14,
-    summitDunkTablet: 26.88 / 20,
+    summitDunkTablet: 26.88 / 20,   // Summit Mosquito Dunks 20 @ $26.88 (Amazon; SiteOne is by request only).
+  },
+  // Inventory link (owner 2026-11-01: "talak, summit should be in inventory", then "go"): these costs follow the
+  // inventory catalog's best approved price when it sits inside [0.5x, 2x] of the value above (db-bridge
+  // syncMosquitoProductCostsFromCatalog). 'oz' divides by the row's unit_size_oz; 'count' by its pack count.
+  productCostCatalog: {
+    bifenthrinOz: { catalogProductName: 'Atticus Talak 7.9 F', per: 'oz' },
+    summitDunkTablet: { catalogProductName: 'Summit Mosquito Dunk Tablets', per: 'count' },
   },
   productUsage: {
     bifenthrinBaseOz: 3,

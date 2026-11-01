@@ -83,6 +83,40 @@ describe('customer appointment confirmation race guard', () => {
 
     expect(logger.info).toHaveBeenCalledWith('Appointment confirmed by customer: svc-1');
   });
+
+  test('refuses a visit Quick Move handed to the customer that has no time yet, and writes nothing', async () => {
+    db.mockReturnValueOnce(readChain({
+      id: 'svc-1', status: 'pending', source_action: null,
+      customer_pick_by: new Date('2026-11-04T01:00:00Z'), scheduled_date: '2026-11-11', window_start: null,
+    }));
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/schedule/svc-1/confirm`, { method: 'POST' });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: expect.stringContaining('pick one'), code: 'PICK_A_TIME' });
+    });
+
+    expect(db).toHaveBeenCalledTimes(1); // the read only: no update
+    expect(logger.info).not.toHaveBeenCalled();
+  });
+
+  test('the confirm write never lands on a row handed off after the read', async () => {
+    const update = updateChain(1);
+    db.mockReturnValueOnce(readChain({ id: 'svc-1', status: 'pending', source_action: null }))
+      .mockReturnValueOnce(update);
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/schedule/svc-1/confirm`, { method: 'POST' });
+      expect(response.status).toBe(200);
+    });
+
+    // The hand-off keeps the status, so the write also requires: no marker, or a time.
+    const guard = update.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    const q = { whereNull: jest.fn(() => q), orWhereNotNull: jest.fn(() => q) };
+    guard(q);
+    expect(q.whereNull).toHaveBeenCalledWith('customer_pick_by');
+    expect(q.orWhereNotNull).toHaveBeenCalledWith('window_start');
+  });
 });
 
 describe('customer appointment reschedule race guard', () => {

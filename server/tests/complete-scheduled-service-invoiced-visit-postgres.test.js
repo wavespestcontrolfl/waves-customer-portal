@@ -165,6 +165,8 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
       expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
       const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
       expect(record).toBeTruthy();
+      // GATE_REVIEW_ASK_AT_VISIT off: no marker, so the payment still starts the ask.
+      expect(record.structured_notes.reviewAskedAtVisit).toBeUndefined();
       expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('completed');
     } finally { await cleanup(f); }
   });
@@ -180,6 +182,63 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
       expect(completionTexts()[0].metadata.templateKey).toBe('service_complete_with_invoice');
       expect(out.body.invoicePaymentActionRequired).toBe(true);
     } finally { await cleanup(f); }
+  });
+
+  test('GATE_REVIEW_ASK_AT_VISIT on (owner 2026-11-01): the unpaid invoice no longer holds the review ask, and once it answered the record carries the marker the payment reads', async () => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
+    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+    try {
+      const out = await complete(f, {});
+      expect(out.status).toBe(200);
+      // The customer still gets the one pay-link report text.
+      expect(textsWithPayLink()).toHaveLength(1);
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(record.structured_notes.reviewAskedAtVisit).toBe(true);
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+      expect(ReviewService.enrollPostService.mock.calls[0][0]).toMatchObject({ customerId: f.customerId, serviceRecordId: record.id });
+    } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
+  });
+
+  test.each([
+    ['a passing failure (plan_resolution_failed) writes no marker: the payment stays the recovery', { started: false, reason: 'plan_resolution_failed' }, undefined],
+    ['a final skip (recently asked) writes the marker: the payment asks nothing', { started: false, reason: 'manual_ask_recent' }, true],
+  ])('GATE_REVIEW_ASK_AT_VISIT on, the visit-time enrollment does not start: %s', async (_label, outcome, marker) => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
+    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+    ReviewService.enrollPostService.mockResolvedValueOnce(outcome);
+    try {
+      expect((await complete(f, {})).status).toBe(200);
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(record.structured_notes.reviewAskedAtVisit).toBe(marker);
+    } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
+  });
+
+  test('GATE_REVIEW_ASK_AT_VISIT on, a completion that posts no requestReview: no visit-time ask, so no marker and the payment keeps its ask', async () => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
+    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+    try {
+      expect((await complete(f, { requestReview: undefined })).status).toBe(200);
+      expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      // The stored intent still reads "ask" (the payment path's reading), and no marker skips it.
+      expect(record.structured_notes.requestReview).toBe(true);
+      expect(record.structured_notes.reviewAskedAtVisit).toBeUndefined();
+    } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
+  });
+
+  test.each([
+    ['the visit-time ask runs: the marker is written, so a later paid event asks nothing', {}, 1, true],
+    ['no requestReview posted: no visit-time ask, so no marker and a paid event keeps its old ask', { requestReview: undefined }, 0, undefined],
+  ])('GATE_REVIEW_ASK_AT_VISIT on, a paid invoice: %s', async (_label, fields, asks, marker) => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
+    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+    try {
+      expect((await complete(f, fields)).status).toBe(200);
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(asks);
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(record.structured_notes.reviewAskedAtVisit).toBe(marker);
+    } finally { delete process.env.GATE_REVIEW_ASK_AT_VISIT; await cleanup(f); }
   });
 
   test('a paid invoice (a charge taken at the door, no invoice field posted): it stays paid, no second invoice, no pay-link text', async () => {

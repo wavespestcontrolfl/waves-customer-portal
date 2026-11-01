@@ -115,6 +115,11 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // Custom Quick Move: the dispatcher's message, the new time, and the
   // link/reply clause are the three promises the flow makes.
   rain_out_moved_custom_v1: Object.freeze(['custom_message', 'new_option', 'link_clause']),
+  // Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK):
+  // the reschedule link and the pick-by deadline ARE the hand-off. A body
+  // without either would take the visit off the route and tell the customer
+  // nothing they can act on; rain-out.js renders with this same list.
+  rain_out_customer_pick_v1: Object.freeze(['pick_url', 'pick_by']),
   // Outbound voicemail text-back: the callback number and the STOP footer
   // for unlinked prospects are promises the lane makes (codex #4195 r1 P2).
   outbound_voicemail_missed_you: Object.freeze(['first_name', 'callback_clause', 'optout_clause']),
@@ -429,6 +434,9 @@ const MSG_TYPE_TO_TEMPLATE = {
   service_complete_with_invoice: 'service_complete_with_invoice',
   missed_call_followup: 'missed_call',
   invoice: 'invoice_sent',
+  // The payer's pay-link text (GATE_PAYER_INVOICE_SMS) is the same invoice text to a different recipient: disabling the invoice
+  // template in the admin SMS Templates screen stops it too. No separate row, no separate toggle.
+  payer_invoice: 'invoice_sent',
   receipt: 'invoice_receipt',
   invoice_receipt: 'invoice_receipt',
   payment_expiry: 'payment_method_expiry',

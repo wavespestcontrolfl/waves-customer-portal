@@ -45,6 +45,7 @@ const { checkLineType } = require('./validators/line-type');
 const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
 const { validateNoCustomerEmoji } = require('./validators/voice');
 const { checkSendWindow } = require('./validators/send-window');
+const { checkPayerRecipient } = require('./validators/payer-recipient');
 const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
 const { normalizeGsmPunctuation } = require('./gsm-normalize');
@@ -458,6 +459,20 @@ function normalizeRecipient(phone) {
  *   encoding?: 'GSM_7' | 'UCS_2',
  * }>}
  */
+// Purposes with policy.requireVerifiedSuppression (payer_payment_link): the phone-keyed suppression row is read AGAIN at the
+// provider handoff, so a STOP that committed while the send was prepared still stops it, and an unreadable row refuses
+// (retryable) instead of failing open. The read uses the handoff's held transaction when there is one.
+async function recheckVerifiedSuppression(sendInput, policy, dbh) {
+  if (policy.requireVerifiedSuppression !== true) return { ok: true };
+  try {
+    const state = await loadSuppressionState(sendInput, {}, dbh);
+    return await checkSuppression(sendInput, policy, state);
+  } catch (err) {
+    return { ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: `Suppression state could not be re-read: ${err.message}`,
+      retryable: true, deliveryOutcome: 'not_sent' };
+  }
+}
+
 async function sendCustomerMessage(input) {
   // The feature's canonical compound gate (this delivery gate AND
   // GATE_CALL_COMMITMENTS); live mode only — shadow observes, it never locks.
@@ -911,6 +926,9 @@ async function sendCustomerMessageCore(input) {
     { name: 'check_contact_compliance',   fn: () => checkContactCompliance(sendInput, policy) },
     { name: 'check_autopay_sms_gate',      fn: () => checkAutopayCustomerSmsGate(sendInput) },
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
+    // payer_payment_link only (policy.requirePayerPhoneMatch): the number must be the invoice payer's
+    // active AP phone. A no-op for every other purpose.
+    { name: 'check_payer_recipient',      fn: () => checkPayerRecipient(sendInput, policy) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
     // Last: only pay for a Twilio line-type Lookup when the message would
     // otherwise actually send (gated dark behind GATE_PROACTIVE_LINETYPE_LOOKUP).
@@ -1315,6 +1333,11 @@ async function sendCustomerMessageCore(input) {
     // the helper holds an unreadable row; a thrown read defers retryably.
     const { validator: contactValidator, ...contactVerdict } = await contactPrefsBoundaryVerdict();
     if (!contactVerdict.ok) return rememberBoundaryBlock(contactVerdict, contactValidator);
+    // payer_payment_link: the payer's AP phone and the invoice's state, re-read at the provider handoff.
+    const payerVerdict = await checkPayerRecipient(sendInput, policy, handoffDb || undefined);
+    if (!payerVerdict.ok) return rememberBoundaryBlock(payerVerdict, 'payer_recipient_boundary');
+    const suppressionBoundary = await recheckVerifiedSuppression(sendInput, policy, handoffDb || undefined);
+    if (!suppressionBoundary.ok) return rememberBoundaryBlock(suppressionBoundary, 'check_suppression_boundary');
     const callerVerdict = await runCallerPreSendCheck(handoffDb);
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();

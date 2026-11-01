@@ -232,7 +232,7 @@ function roundStepForVisit(row) {
 // The month (1-12) whose window supplies the weed and spot rows of a rounds visit (every as-needed row: lawn-program.js isAsNeededRow):
 // the real date's month, with ONE exception the approved page states. The St. Augustine green-up rule (Celsius alone, no Certainty;
 // February window data) covers all of round 2, real dates Feb 3 to Mar 14, so a St. Augustine round-2 visit dated in March reads
-// February's rows (February has no disease or insect spot rows; March's take-all line comes on the round-3 visit). `realMonth` is 1-12.
+// February's rows (February's only disease row is the Velista large patch spring pass and it has no insect spot rows; March's take-all line comes on the round-3 visit). `realMonth` is 1-12.
 function roundSpotMonth({ round, realMonth, grassTrack }) {
   if (Number(round) === 2 && Number(realMonth) === 3 && grassTrack === 'st_augustine') return 2;
   return Number(realMonth);

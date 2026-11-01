@@ -19334,6 +19334,14 @@ function firstVisitOpenFor(row) {
   return isEstimateCustomerViewable(row) && isEstimateAcceptActive(row);
 }
 
+// The builder's Readiness card (owner 2026-11-01): a published estimate the customer page offers nothing on (won,
+// declined, expired, archived, held off the customer surface), so neither online signing (the agreement card's
+// isEstimateAcceptActive condition) nor the first-visit picker (firstVisitOpenFor) applies. A draft or a scheduled send
+// is not published yet, so it is judged once it goes out.
+function estimateClosedOnline(row) {
+  return !UNPUBLISHED_ESTIMATE_STATUSES.includes(row.status) && !firstVisitOpenFor(row);
+}
+
 // The estimate a first-visit request may act on, or null (the generic 404): gate on, not a staff preview tap, a real
 // token, the durable call-side verdict, and an open, customer-viewable estimate.
 async function firstVisitEstimate(req) {
@@ -32500,6 +32508,7 @@ module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
+module.exports.estimateClosedOnline = estimateClosedOnline;
 module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;
 module.exports.estimateOffCustomerSurface = estimateOffCustomerSurface;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;

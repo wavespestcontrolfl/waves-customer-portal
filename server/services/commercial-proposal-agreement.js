@@ -298,14 +298,26 @@ async function signedQuoteMatches(estimate, conn = db) {
   return Boolean(signable && stored) && stored === currentFingerprint(estimate, signable, contract.document_template_version_id);
 }
 
-// The admin builder's read: the agreement state, plus why online signing is not offered when the proposal's payment
-// terms conflict with the agreement (signingBlocked + the field + a ready-to-show note), so the line can say what to change.
-async function agreementAdminStatus(estimate, conn = db) {
+// The admin builder's read: the agreement state, plus why online signing is not offered (signingBlocked + a
+// ready-to-show note), so the builder's Readiness card can say what to change (owner 2026-11-01, proposal readiness):
+// terms that conflict with the agreement (with the field), no recurring service (agreementCtaFor serves no card), or no
+// linked customer account (the customer page asks the customer to call); `closed` (the route's estimateClosedOnline
+// verdict: won, declined, expired, archived) comes first, since the customer page then offers no signing at all. A
+// signed agreement shows no block.
+const CLOSED_NOTE = 'Online signing is closed: the proposal is won, declined, expired or archived.';
+const NOT_SIGNABLE_NOTE = 'Online signing needs a recurring service. One-time work is signed with the office.';
+const NO_ACCOUNT_NOTE = 'Online signing needs a linked customer account. Until then the page asks the customer to call.';
+async function agreementAdminStatus(estimate, conn = db, { closed = false } = {}) {
   const state = await agreementStateForEstimate(estimate.id, conn);
+  if (state.state === 'signed') return state;
+  if (closed) return { ...state, signingBlocked: 'closed', note: CLOSED_NOTE };
   const eligibility = signEligibility(estimate);
-  return state.state !== 'signed' && eligibility.reason === 'terms_conflict'
-    ? { ...state, signingBlocked: 'terms_conflict', field: eligibility.field, note: eligibility.note }
-    : state;
+  if (eligibility.reason === 'terms_conflict') {
+    return { ...state, signingBlocked: 'terms_conflict', field: eligibility.field, note: eligibility.note };
+  }
+  if (eligibility.reason === 'not_signable') return { ...state, signingBlocked: 'not_signable', note: NOT_SIGNABLE_NOTE };
+  if (!estimate.customer_id) return { ...state, signingBlocked: 'no_account', note: NO_ACCOUNT_NOTE };
+  return state;
 }
 
 function refusal(status, code, error) {

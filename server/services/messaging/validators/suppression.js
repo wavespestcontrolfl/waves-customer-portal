@@ -58,22 +58,31 @@ function isBillingEmail(input) {
   return Boolean(require('../billing-channel-routing').billingDeliveryCategory(input));
 }
 
+// The refusal for suppression state that was not positively loaded, or null when the read is not required or succeeded.
+// policy.requireVerifiedSuppression: a purpose with no independent opt-out backup (payer_payment_link reads no notification
+// prefs for its recipient) must see the phone's suppression row POSITIVELY loaded, like push and billing email.
+function unverifiedSuppressionRefusal(input, policy, contactState) {
+  const policyRequires = policy?.requireVerifiedSuppression === true;
+  if (!(requiresVerifiedSuppression(input.channel) || policyRequires) || contactState?.suppressionLoaded === true) return null;
+  const unavailable = { ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: `Suppression state unavailable for ${input.channel} delivery`,
+    ...(policyRequires ? { retryable: true, deliveryOutcome: 'not_sent' } : {}) };
+  // An explicit billing leg is often a one-shot notice: still send nothing
+  // now, but return a schedulable hold its producer can queue for replay.
+  return input.metadata?.billingDeliveryLeg ? {
+    ...unavailable, retryable: true, deferred: true, deliveryOutcome: 'not_sent',
+    nextAllowedAt: new Date(Date.now() + SUPPRESSION_RETRY_MS).toISOString(),
+  } : unavailable;
+}
+
 /**
  * @param {import('../policy').SendCustomerMessageInput} input
- * @param {Object} _policy
+ * @param {Object} policy
  * @param {Object} contactState - augmented by loadSuppressionState before this validator runs
  * @returns {Promise<{ ok: boolean, code?: string, reason?: string }>}
  */
-async function checkSuppression(input, _policy, contactState) {
-  if (requiresVerifiedSuppression(input.channel) && contactState?.suppressionLoaded !== true) {
-    const unavailable = { ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: `Suppression state unavailable for ${input.channel} delivery` };
-    // An explicit billing leg is often a one-shot notice: still send nothing
-    // now, but return a schedulable hold its producer can queue for replay.
-    return input.metadata?.billingDeliveryLeg ? {
-      ...unavailable, retryable: true, deferred: true, deliveryOutcome: 'not_sent',
-      nextAllowedAt: new Date(Date.now() + SUPPRESSION_RETRY_MS).toISOString(),
-    } : unavailable;
-  }
+async function checkSuppression(input, policy, contactState) {
+  const unverified = unverifiedSuppressionRefusal(input, policy, contactState);
+  if (unverified) return unverified;
   const suppression = contactState && contactState.suppression;
   if (!suppression) return { ok: true };
   if (isBillingEmail(input) && !suppressionBlocksPaymentEmail(suppression.reason)) return { ok: true };

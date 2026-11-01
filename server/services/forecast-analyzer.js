@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
+const { classifyServiceSensitivity } = require('./service-sensitivity');
 const logger = require('./logger');
 const { getHourlyRainOutlook } = require('./weather-forecast');
 
@@ -124,16 +125,7 @@ class ForecastAnalyzer {
   }
 
   classifyServiceType(str) {
-    const s = (str || '').toLowerCase();
-    if (s.includes('mosquito')) return 'mosquito';
-    if (s.includes('termite') && (s.includes('bait') || s.includes('monitor'))) return 'termite_bait';
-    if (s.includes('rodent') || s.includes('rat')) return 'rodent';
-    if (s.includes('tree') && s.includes('inject')) return 'tree_injection';
-    if (s.includes('tree') || s.includes('shrub')) return 'tree_shrub_spray';
-    if ((s.includes('lawn') || s.includes('turf')) && s.includes('granular')) return 'lawn_granular';
-    if (s.includes('lawn') || s.includes('turf')) return 'lawn_spray';
-    if (s.includes('pest') && s.includes('interior')) return 'pest_interior';
-    return 'pest_exterior';
+    return classifyServiceSensitivity(str);
   }
 
   // `etDate` = the Eastern calendar date ('YYYY-MM-DD') to summarize.

@@ -7,6 +7,7 @@ const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteO
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../../models/db');
 const config = require('../../config');
+const gates = require('../../config/feature-gates');
 const logger = require('../logger');
 
 const s3 = new S3Client({
@@ -104,16 +105,52 @@ async function presignUpload({ scheduledServiceId, role, mediaType = 'video', co
 
 const RECAP_MAX_BYTES = 80 * 1024 * 1024; // ~80MB
 const RECAP_MAX_DURATION_MS = 20000; // ~20s
+// GATE_RECAP_GLASSES_CLIPS: a clip from the phone's photo library (camera glasses) may be longer.
+// Over RECAP_MAX_DURATION_MS it is kept as `processing`; the renderer reads `ready` rows only.
+const RECAP_LIBRARY_MAX_BYTES = 200 * 1024 * 1024; // ~200MB
+const RECAP_LIBRARY_MAX_DURATION_MS = 60000; // ~60s
+
+const glassesClipsOn = () => typeof gates.recapGlassesClipsLive === 'function' && gates.recapGlassesClipsLive();
+
+// Why a confirm was refused → the HTTP answer. Shared by the admin and tech confirm routes.
+function confirmFailure(reason) {
+  const library = glassesClipsOn();
+  if (reason === 'too_long') return { status: 413, error: 'Clip too long — keep glasses clips under 60 seconds.' };
+  if (reason === 'too_large') return { status: 413, error: library ? 'Clip too large — keep glasses clips under 60 seconds.' : 'Clip too large — keep it under ~20 seconds.' };
+  if (reason === 'bad_duration') return { status: 422, error: 'Couldn’t read the clip length — re-record a short clip and try again.' };
+  if (reason === 'not_uploaded') return { status: 409, error: 'Upload not found — try again.' };
+  return { status: 404, error: 'media not found' };
+}
+
+// Video must report a finite, in-range duration — a missing/null duration can't
+// be trusted as "short" (it would let an arbitrarily long clip under the byte cap
+// through to the renderer). Images carry no duration. With the glasses gate on, a
+// video may be longer (and bigger); one past the usual limit waits as `processing`
+// (`needsCutting`). Returns { reason } when refused, else { needsCutting }.
+function clipLimits(isVideo, realBytes, durationMs) {
+  const library = isVideo && glassesClipsOn();
+  const maxDurationMs = library ? RECAP_LIBRARY_MAX_DURATION_MS : RECAP_MAX_DURATION_MS;
+  const dur = Number(durationMs);
+  const unreadable = isVideo && (!Number.isFinite(dur) || dur <= 0);
+  const tooLong = isVideo && !unreadable && dur > maxDurationMs;
+  if (realBytes > (library ? RECAP_LIBRARY_MAX_BYTES : RECAP_MAX_BYTES)) return { reason: 'too_large' };
+  if (tooLong && library) return { reason: 'too_long' };
+  if (unreadable || tooLong) return { reason: 'bad_duration' };
+  return { needsCutting: library && dur > RECAP_MAX_DURATION_MS };
+}
 
 // Verifies the uploaded object exists + is within limits using AUTHORITATIVE S3
 // size (not the client-reported bytes, which can be spoofed/missing), then marks
 // it ready. Oversized/missing objects are dropped (row + S3) and rejected, so they
 // can never reach the renderer. Returns { ok, row } | { ok:false, reason }.
-async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = null } = {}, knex = db) {
+async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = null, onChange = null } = {}, knex = db) {
   const lookup = knex('service_media').where({ id: mediaId });
   if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
   const row = await lookup.first();
   if (!row) return { ok: false, reason: 'not_found' };
+  // A finished upload is final: a repeat confirm (a client retry) answers with the row as it is, so it
+  // can neither move a ready clip out of the recap's clips nor delete it behind the recap's back.
+  if (row.status !== 'uploading') return { ok: true, row };
 
   let realBytes = null;
   if (config.s3?.bucket) {
@@ -122,24 +159,28 @@ async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = 
       realBytes = Number(head.ContentLength) || 0;
     } catch { realBytes = null; }
   }
-  if (realBytes == null) { await deleteMedia(mediaId, { scheduledServiceId }, knex); return { ok: false, reason: 'not_uploaded' }; }
+  if (realBytes == null) { await deleteMedia(mediaId, { scheduledServiceId, onlyUploading: true }, knex); return { ok: false, reason: 'not_uploaded' }; }
 
-  // Video must report a finite, in-range duration — a missing/null duration can't
-  // be trusted as "short" (it would let an arbitrarily long clip under the byte cap
-  // through to the renderer). Images carry no duration.
-  const dur = Number(durationMs);
-  const tooBig = realBytes > RECAP_MAX_BYTES;
-  const badVideoDuration = row.media_type === 'video'
-    && (!Number.isFinite(dur) || dur <= 0 || dur > RECAP_MAX_DURATION_MS);
-  if (tooBig || badVideoDuration) {
-    await deleteMedia(mediaId, { scheduledServiceId }, knex);
-    return { ok: false, reason: (badVideoDuration && !tooBig) ? 'bad_duration' : 'too_large' };
+  const verdict = clipLimits(row.media_type === 'video', realBytes, durationMs);
+  if (verdict.reason) {
+    await deleteMedia(mediaId, { scheduledServiceId, onlyUploading: true }, knex);
+    return { ok: false, reason: verdict.reason };
   }
 
-  const [updated] = await knex('service_media').where({ id: row.id }).update({
-    status: 'ready', bytes: realBytes, duration_ms: durationMs, updated_at: new Date(),
-  }).returning('*');
-  return { ok: true, row: updated };
+  // In one transaction: lock the clip row and read it again (a concurrent confirm or removal may have
+  // won since the read above), run onChange (the routes mark the recap row, which locks it) with the
+  // clip's new status, then change the clip. An approval, send claim or render claim so waits for, or
+  // skips, the change and never sees one half of it; a failed mark rolls the clip change back. Lock
+  // order is the clip row, then the recap row, in both confirm and removal.
+  const patch = { status: verdict.needsCutting ? 'processing' : 'ready', bytes: realBytes, duration_ms: durationMs };
+  return knex.transaction(async (trx) => {
+    const current = await trx('service_media').where({ id: row.id }).forUpdate().first();
+    if (!current) return { ok: false, reason: 'not_found' };
+    if (current.status !== 'uploading') return { ok: true, row: current };
+    if (onChange) await onChange({ ...current, ...patch }, trx);
+    const [changed] = await trx('service_media').where({ id: row.id }).update({ ...patch, updated_at: new Date() }).returning('*');
+    return { ok: true, row: changed };
+  });
 }
 
 async function listMedia(scheduledServiceId, knex = db) {
@@ -149,17 +190,26 @@ async function listMedia(scheduledServiceId, knex = db) {
     .select('id', 'media_type', 'role', 'caption', 'status', 'duration_ms', 'created_at');
 }
 
-async function deleteMedia(mediaId, { scheduledServiceId = null } = {}, knex = db) {
-  const lookup = knex('service_media').where({ id: mediaId });
-  if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
-  const row = await lookup.first();
+// Returns the removed row (false when there was none). In one transaction, like confirmUpload: lock
+// the clip row and read it again, run onChange with that current row, then remove it; the S3 object
+// goes after the commit. onlyUploading (a refused confirm): remove the row only while it is still an
+// unconfirmed upload, never a clip another confirm finished meanwhile.
+async function deleteMedia(mediaId, { scheduledServiceId = null, onChange = null, onlyUploading = false } = {}, knex = db) {
+  const row = await knex.transaction(async (trx) => {
+    const lookup = trx('service_media').where({ id: mediaId });
+    if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
+    const current = await lookup.forUpdate().first();
+    if (!current || (onlyUploading && current.status !== 'uploading')) return null;
+    if (onChange) await onChange(current, trx);
+    await trx('service_media').where({ id: current.id }).del();
+    return current;
+  });
   if (!row) return false;
-  await knex('service_media').where({ id: row.id }).del();
   if (config.s3?.bucket && row.s3_key) {
     try { await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: row.s3_key })); }
     catch (err) { logger.warn(`[recap-media] S3 delete failed for ${row.s3_key}: ${err.message}`); }
   }
-  return true;
+  return row;
 }
 
 // Ready media → the composition's media[] (presigned GET srcs, beat role, caption).
@@ -195,4 +245,4 @@ async function getMediaForRecap(scheduledServiceId, knex = db) {
   return out;
 }
 
-module.exports = { ROLE_MAP, MEDIA_ROLE_IDS, roleInfo, presignUpload, confirmUpload, listMedia, deleteMedia, getMediaForRecap };
+module.exports = { ROLE_MAP, MEDIA_ROLE_IDS, roleInfo, presignUpload, confirmUpload, confirmFailure, listMedia, deleteMedia, getMediaForRecap };

@@ -1177,3 +1177,64 @@ describe('rodent bait brackets runtime sync — quarterly invariant (codex #3591
     expect(constants.RODENT.baitVisitsPerYear).toBe(4);
   });
 });
+
+describe('mosquito product costs follow the inventory catalog (owner 2026-11-01)', () => {
+  const DEFAULTS = { bifenthrinOz: 41.57 / 96, summitDunkTablet: 26.88 / 20 };
+  const catalogDb = (catalogRows, approvedIds = catalogRows.map((r) => r.best_vendor_pricing_id).filter(Boolean)) => {
+    const db = (table) => {
+      if (table === 'products_catalog' || table === 'vendor_pricing') {
+        const q = {
+          whereIn: jest.fn(() => q),
+          where: jest.fn(() => q),
+          whereRaw: jest.fn(() => q),
+          select: jest.fn(async () => (table === 'products_catalog' ? catalogRows : approvedIds.map((id) => ({ id })))),
+        };
+        return q;
+      }
+      // One real config row so the sync runs to the catalog links (an empty
+      // pricing_config returns early and keeps the defaults).
+      const rows = table === 'pricing_config' ? [{ config_key: 'global_labor_rate', data: { value: constants.GLOBAL.LABOR_RATE } }] : [];
+      const query = { select: jest.fn(async () => rows), orderBy: jest.fn(() => query), then: (resolve) => resolve([]) };
+      return query;
+    };
+    db.schema = { hasTable: jest.fn(async () => true) };
+    return db;
+  };
+  const talak = (best, oz = 96) => ({ name: 'Atticus Talak 7.9 F', best_price: best, unit_size_oz: oz, container_size: `${oz} fl oz`, best_vendor_pricing_id: 'vp-talak' });
+  const summit = (best, size = '20 count') => ({ name: 'Summit Mosquito Dunk Tablets', best_price: best, unit_size_oz: null, container_size: size, best_vendor_pricing_id: 'vp-summit' });
+  const costs = () => constants.MOSQUITO.productCosts;
+
+  afterEach(async () => {
+    await syncConstantsFromDB(catalogDb([]));
+  });
+
+  test('the code defaults are the inventory prices: Talak $41.57/96 fl oz, Summit $26.88/20', () => {
+    expect(constants.MOSQUITO.productCostCatalog.bifenthrinOz.catalogProductName).toBe('Atticus Talak 7.9 F');
+    expect(constants.MOSQUITO.productCostCatalog.summitDunkTablet.catalogProductName).toBe('Summit Mosquito Dunk Tablets');
+    expect(costs().bifenthrinOz).toBeCloseTo(0.433, 3);
+    expect(costs().summitDunkTablet).toBeCloseTo(1.344, 3);
+  });
+
+  test('approved catalog prices flow in per ounce and per tablet', async () => {
+    await expect(syncConstantsFromDB(catalogDb([talak(46.81, 128), summit(20.07)]))).resolves.toBe(true);
+    expect(costs().bifenthrinOz).toBe(0.3657);
+    expect(costs().summitDunkTablet).toBe(1.0035);
+  });
+
+  test('a refused row keeps the code value: unapproved, out of band, or not a count', async () => {
+    await syncConstantsFromDB(catalogDb([talak(46.81, 128), summit(20.07)], []));
+    expect(costs().bifenthrinOz).toBe(DEFAULTS.bifenthrinOz);
+    expect(costs().summitDunkTablet).toBe(DEFAULTS.summitDunkTablet);
+    await syncConstantsFromDB(catalogDb([talak(5, 96), summit(20.07, '1 box')]));
+    expect(costs().bifenthrinOz).toBe(DEFAULTS.bifenthrinOz);
+    expect(costs().summitDunkTablet).toBe(DEFAULTS.summitDunkTablet);
+  });
+
+  test('a later sync without the rows falls back to the code value, not the last catalog value', async () => {
+    await syncConstantsFromDB(catalogDb([talak(46.81, 128), summit(20.07)]));
+    expect(costs().summitDunkTablet).toBe(1.0035);
+    await syncConstantsFromDB(catalogDb([]));
+    expect(costs().bifenthrinOz).toBe(DEFAULTS.bifenthrinOz);
+    expect(costs().summitDunkTablet).toBe(DEFAULTS.summitDunkTablet);
+  });
+});

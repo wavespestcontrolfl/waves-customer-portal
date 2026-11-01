@@ -101,7 +101,7 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
     // below or starts after this move.
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
       .first('scheduled_date', 'window_start', 'window_end', 'status', 'customer_id', 'visit_id', 'source_action', 'customer_confirmed', 'office_move_approved_for',
-        'recurring_pattern', 'date_exception', 'date_exception_cadence_date');
+        'recurring_pattern', 'date_exception', 'date_exception_cadence_date', 'customer_pick_by');
     // The locked visit is still the one the decide step checked: an Edit
     // appointment save logs no move, and the series mover pins only date and
     // start, so the comparison is made here for both movers.

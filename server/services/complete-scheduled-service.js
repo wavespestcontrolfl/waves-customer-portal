@@ -13935,7 +13935,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Immediate/legacy review requests can be bundled into the completion SMS.
     // Explicit delayed timing skips the bundle and schedules a separate review
     // request below.
-    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
+    const invoiceUnpaidAtCompletion = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
+    // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): with the switch on, an unpaid invoice no longer holds the
+    // ask; it goes after the report text (enrollPostService below). The link still never rides inside the
+    // pay-link text: shouldBundleReview keeps refusing an unpaid invoice.
+    const reviewAskAtVisit = require('../config/feature-gates').reviewAskAtVisitLive();
+    const invoiceBlocksReview = invoiceUnpaidAtCompletion && !reviewAskAtVisit;
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms
@@ -14059,6 +14064,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       !completionSmsAlreadyHandled &&
       !recapSmsAlreadySentForVisit &&
       effectiveRequestReview &&
+      // An unpaid invoice's completion text carries its pay link: a review link never rides in it,
+      // the switch on or off (with GATE_REVIEW_ASK_AT_VISIT on, the ask follows as its own text).
+      !invoiceUnpaidAtCompletion &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
       // The fixed re-service text is final as built: a review ask never rides
@@ -15949,10 +15957,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // email-only customer must still reach enrollment (Codex P2, r1) — the
     // resolver stops the sequence with no_contact/opted_out when neither
     // channel is available.
+    // null = this completion made no visit-time review ask.
+    let reviewEnrollment = null;
     if (effectiveRequestReview && (svc.cust_phone || reviewCadenceEnabled) && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
-        await ReviewService.enrollPostService({
+        reviewEnrollment = await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           // GATE_REVIEW_ASK_AFTER_REPORT: what became of the report text (re-read
@@ -15971,7 +15981,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
           legacyDelayMinutes: ReviewService.LEGACY_REVIEW_DELAY_MINUTES,
           customerRequested: customerRequestedReview,
         });
-      } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
+      } catch (e) {
+        logger.error(`[dispatch] Review request schedule failed: ${e.message}`);
+        reviewEnrollment = { started: false, reason: 'error' };
+      }
+    }
+    // GATE_REVIEW_ASK_AT_VISIT: once the visit-time ask has answered (started, or a final skip such as
+    // recently asked), the record says so and a later payment starts no ask (enrollForPaidInvoice). Written
+    // only after the answer: a payment before it keeps today's path, and the per-record dedupe keeps that
+    // to one ask. No visit-time ask, or a passing failure (the two a combined visit retries): no marker,
+    // so the payment keeps the ask it gave before the switch.
+    if (reviewAskAtVisit && reviewEnrollment
+      && !(reviewEnrollment.started === false && ['plan_resolution_failed', 'error'].includes(reviewEnrollment.reason))) {
+      await mergeRecordNotesKeys(record.id, { reviewAskedAtVisit: true }).catch((markErr) => {
+        logger.error(`[dispatch] Review asked-at-visit marker for record ${record.id} not stored: ${markErr.message}`);
+      });
     }
 
     // The first complete transition wakes any already-open customer

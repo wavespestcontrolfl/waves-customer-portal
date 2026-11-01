@@ -91,6 +91,7 @@
  *   GATE_TRUCK_KIT=true (truck check, docs/tool-inventory-tracker-scope.md PR 1: a technician whose truck is an equipment row (category vehicle, assigned to them) gets a Truck check in the field workspace listing every equipment row kept on that truck (assigned_vehicle_id, set on Equipment → Assets) and a Today card once the last check is 7 or more days old; a check writes one equipment_checks row, a missing or damaged item opens a maintenance alert (tool_missing / tool_damaged, resolved on Equipment → Maintenance with Found / Lost or Repaired / Retired) and the check rings one office bell per truck that closes itself when every tool alert on the truck is resolved; with kit keys on rows and checklist items (PR 2) the Schedule readiness strip and the technician's Today page say which required tool a truck lacks. Read at call time via truckKitLive(), strict 'true', dark by default; off = GET and POST /api/tech/truck-check answer 404 { enabled: false }, the readiness poll reads nothing from the kit, nothing renders, nothing is written. Never contacts a customer, never changes an item's status by itself.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
  *   GATE_TRIP_LINK=true (trip link, owner "TRIP LINK" and "BOTH" 2026-10-26: a nightly job (01:40 ET, yesterday) and a backfill script link each Bouncie trip and truck stop to the completed visit it served, and store per-visit GPS arrival and departure, GPS minutes on site, drive minutes and drive miles in visit_gps_legs, plus where each trip ended and a business / personal SUGGESTION in trip_links. Shadow data only: it never writes mileage_log, scheduled_services, job_costs, pins or alerts and sends nothing. Read at call time via tripLinkLive(), strict 'true', dark by default; off = the job reads nothing and writes nothing and the summary route answers 404.)
+ *   GATE_ARRIVAL_ENGINE_OFF=true (GPS arrival tied to the truck's engine turning off, owner 2026-11-01: the Bouncie GPS arrival triggers early, so tie it to the truck turning off. On, the immediate-radius rule (55 m) keeps marking (October 2026: a median 12 s before the truck parked), a sample only the slow-radius rule (175 m) would have marked no longer marks and is recorded as the not-marked reason awaiting_engine_off (it fired a median 1 min early), and a Bouncie trip-end marks the arrival when the engine-off position is within the arrival radius (gps_arrival.radius_meters, 175 m default) of the visit destination; the position is the trip-end's own GPS, else the truck's last known location when it was reported at most 10 minutes before the engine-off and not after it. Outside the radius or with no usable position nothing is marked and the not-marked reason engine_off_outside_radius or engine_off_no_position is recorded once per visit attempt. Read at call time via arrivalEngineOffLive(), strict 'true', dark by default; off = the old speed and radius rules, unchanged.)
  *   GATE_BID_DESK=true (Bid Desk, PR 1: every 15 minutes a job reads new rows of the emails table and files bid invites (BuildingConnected, Procore, bid portals, government RFP/RFQ mail) as bid opportunities with their due dates read from the fixed provider templates only, posts ONE admin notification per new bid, one when an addendum arrives on an open bid, and reminders 7 and 2 days before a due date the operator CONFIRMED; the admin Bid Desk page lists them and lets the operator confirm the date and set bid / no bid / submitted / won / lost. No AI call, no change to leads or the classifier, and it sends nothing to a buyer, contractor or customer. Read at call time via bidDeskLive(), strict 'true', dark by default; off = no job work, the routes answer 404 and the nav entry is hidden.)
  *   GATE_BID_DESK_SAM=true (Bid Desk, PR 2: once a day at 7:25 AM ET a job reads new federal notices from the official SAM.gov Opportunities API (NAICS 561710 pest control and 561730 landscaping, Florida, solicitations, combined synopses, presolicitations and sources sought) whose place of performance is in the Tampa Bay to Southwest Florida ZIP areas, and files each as a bid opportunity (source sam_gov, one per notice id) with its SAM.gov link and response deadline (never confirmed until the operator confirms it), posting ONE admin notification per new bid. Needs GATE_BID_DESK and SAM_GOV_API_KEY. No AI call; it sends nothing to an agency, contractor or customer. Read at call time via bidDeskSamLive(), strict 'true', dark by default; off = the job returns before any request.)
  *   GATE_BID_CHECKLIST=true (Bid Desk PR B, needs GATE_BID_DESK: each bid also carries its solicitation type, scored or pass/fail, a questions-due date, a mandatory job walk, a link to its estimate and proposal, its documents (the attachments of its emails), a per-bid checklist built from templates, and a submission record; adds a 14-day reminder before a confirmed due date, one reminder 2 days before the questions date and one 2 days before the job walk. Admin bell only: nothing goes to a buyer, contractor or agency. Read at call time via bidChecklistLive(), strict 'true', dark by default; off = the new fields are hidden and refused, no new reminder fires, and the Bid Desk works as before.)
@@ -176,6 +177,7 @@
  *   GATE_PORTAL_CHAT_ANSWERED_CLOSE=shadow|true (owner 2026-10-31, approved Portal inbox plan: a portal chat hand-off bell closes once a person texted, called or emailed that customer after the hand-off; its own gate, rides on GATE_ALERT_CONTACT_CLOSE, read at call time via portalChatAnsweredCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true|charge (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release; `charge` (owner 2026-10-28, "Charge the saved card"; narrowed 2026-10-29, option B) = charge the customer's saved Auto Pay card or bank for a held VISIT bill only, and only inside the visit-completion rail's own authorization (completion-charge-verdict.js: the visit's agreed price cap, the same lanes; an issued-invoice closeout counts as a performed visit for this charge only). Keep the hold when the charge went through or its outcome is unclear (an office alert says check Stripe). Over the agreed price, no agreed price, a visit that was not performed, a payer, or any guard refusal = the hold is kept, nothing is charged or texted, one office alert asks for a review (it is looked at again only after the bill or visit price changes). Release the hold only when the card was really declined or there is no Auto Pay method; an invoice bound to no visit, an annual-prepay term rail invoice, or a bill no completion lane admits is released as `true` releases it, never charged (one office alert, one audit_log row per attempt, invoice_followup.autopay_hold_timeout_charge). `charge` MOVES MONEY: the owner flips it. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
  *   GATE_AUTO_DISPATCH_CATCH_UP=true (owner 2026-10-26 ("build A"): a 5:00 AM Eastern catch-up run of the auto-dispatch night tool. The 04:10 run is cut off when a deploy restarts the server mid-run (2026-09-03 and 2026-10-26: nothing moved, nothing re-ran it). On, a 05:00 job checks whether today already has a finished night run (cron or catch_up, completed or completed_with_errors); if not, it marks any cron run left 'running' by a dead process as failed and runs the night tool once more (triggered_by catch_up, at most one catch-up a day), under the same run lock. It uses the same mode and rules as the 04:10 run. Strict opt-in: exactly 'true', read at call time via autoDispatchCatchUpLive(). Ships DARK; off = the 05:00 job does nothing and reads nothing. Sends nothing to a customer.)
+ *   GATE_AUTO_DISPATCH_DRY_TIME_ORDER=shadow|true (owner 2026-11-01, rain backtest of 440 outdoor stops + D5, ruling "forget the pest-early rule": auto-dispatch orders the day by product dry time. The service-family default time window (pest 8-10 AM, lawn 10 AM-12 PM) is replaced by a dry-time window from the products the visit uses: 4 h or more dry time 8-10 AM, 1-3 h 8 AM-12 PM, rain-proof (granular, bait, gel, dust, water-in, rain-OK services) 1-5 PM. DRY_TIME_ORDER_SEASON ('MM-DD..MM-DD', wrap-around allowed) narrows the dates; default all year. Customer-set times, blackouts and the flex-tier freeze are unchanged. Values: shadow = live windows unchanged, each pass-1 audit row logs constraints_checked.dry_time (class, hours, source, the slot today's window picked and the slot the dry window would pick); true = the dry window replaces the family default as the soft default time window, and for the rain-sensitive classes (4 h or more, 1-3 h) the credit also counts in a placed visit's move gain on its CURRENT date only: a timed visit is re-timed into its dry window on the same date, never moved to another date (owner 2026-10-24: no automatic day moves for rain). A rain-proof visit never gains from its afternoon window (a soft default only), and the flex-tier freeze, the score bar, the drive floor and the road check are unchanged. When the dry window opens after the day's first hour (rain-proof 1-5 PM) the search also asks the same slot finder for starts at or after the window start (not in capacity or arrival-search mode; no new paid calls): true adds them to the live candidates after the route options, shadow scores them for shadow_best only. shadow_best is the slot true would pick under these move rules; would_move says it differs from the current slot. Strict: exactly 'shadow' or 'true', read at call time via autoDispatchDryTimeOrderMode(). Ships DARK; off = byte-identical, no extra database read. Sends nothing to a customer. Kill switch: unset.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; exactly 'live' (build 4, owner "DO THIS NOW" 2026-10-30) = record AND pick: /book offers, the phone booking recheck, the after-call booking, the office Auto choice, the estimate time offers and the estimate accept send a mapped line's new work to its home technician, else its gap technician; a line with no technician set keeps today's choice. Anything else, including 'true', = off, no resolver call and no query. Shadow never changes a booking; neither value sends anything to a customer or staff member.)
  *   GATE_TERRITORY_ROUTING=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page: each technician has a territory, drawn as a ZIP list in territory_zips. On, the service-line map (GATE_SERVICE_LINE_MAP) lays the territory over a pest, mosquito, rodent or termite / WDO line: the technician who owns the visit's ZIP is that line's home technician, and the line's own home (else gap) technician covers gaps. Lawn / tree & shrub keeps the line map. The ZIP comes from the visit's ZIP, else its map position (Census ZIP shapes), else the customer's row. A ZIP with no territory technician adds no rule. It acts only where the line map acts: shadow rows show it under 'shadow', picks follow it under 'live'. Strict opt-in: exactly 'true', read at call time via territoryRoutingLive(). Ships DARK; off = the line map exactly as before, no territory query. Sends nothing to a customer.)
  *   GATE_TERRITORY_NIGHT_RUN=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page, build 7: the auto-dispatch night run gives an UNASSIGNED pest, mosquito, rodent or termite / WDO visit only to the technician who owns the visit's ZIP (territory_zips): every other technician's slot is dropped as a candidate (drops.other_territory), so with no slot for that technician the visit keeps its place. The ZIP comes from the visit's service ZIP, else its map position, else the customer row. A visit with a technician, a lawn / tree & shrub visit, or a ZIP with no territory technician adds no rule. Strict opt-in: exactly 'true', read at call time via territoryNightRunLive(). Ships DARK; off = the night run byte-identical, no territory query. Sends nothing to a customer.)
@@ -458,6 +460,7 @@
  *   GATE_PAYROLL_MERCURY_PAY=true (basic payroll option A, owner plan 2026-10-30. Needs GATE_PAYROLL and GATE_PAYROLL_MERCURY_STATUS. Turns on Send to Mercury and Send again on a finalized pay run: for each bank-transfer paycheck with a Mercury recipient id the portal asks Mercury for an APPROVAL REQUEST (POST request-send-money); no money moves until a different Mercury user approves it in the Mercury app, and the portal never calls Mercury's direct send. A request is never sent twice by code: a lost answer becomes an 'unknown' payment the owner resolves. Read at call time via payrollMercuryPayLive(), strict 'true', dark by default; off = no request is ever made; rollback = unset (existing payment rows stay and still block a void).)
  *   GATE_BUG_ID_EXTENSION=true (owner 2026-10-31, "Let's do the insect identification": the Chrome extension's bug identifier, POST /api/public/bug-id-extension/identify. Anonymous and worldwide, so no lead capture, no pricing, no row and no stored photo; 1–3 photos go to the v2 species-catalog pest engine (identifyPestV2, Gemini-only ladder, as the customer app) and only its customer-facing v2 answer comes back. Paid vision per request, bounded by 6/hour and 15/day per IP plus one worldwide daily cap of its own (PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION, default 100, bucket bug-id-extension) that counts whatever GATE_PUBLIC_LLM_SHARED_CAP says and fails closed. Read at call time via bugIdExtensionLive(), strict 'true', dark by default; off = the whole /api/public/bug-id-extension surface answers 404 before cors(), any limiter or body parser. Sends nothing to anyone. Kill switch: unset.)
  *   GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ=true (owner 2026-11-01, Action inbox agents A, "yes do this": the 3:45 AM ET inventory unit sweep also converts a DRY product whose unit is a bare ounce (oz, Ounces) to g, or to lb from 16 oz of stock up, with its stock, low-stock level, reorder quantity and per-visit usage converted by the exact weight factor. A product counts as dry only when its formulation says so (WDG, WG, WSG, granular, powder, dust, paste, gel bait) and nothing says liquid or count (no liquid code or word, no liquid look on the Unit Review page, no volume rate or default unit, no station, cartridge, tablet or trap in the name, category or any unit field, no per-item rate unit) and its price has an explicit cost unit when it has a price, and any cost unit is a weight unit or a bare ounce, and it has no per-visit supplies usage. Everything else stays in the Unit Review queue as before. Needs GATE_INVENTORY_UNIT_AUTOFIX ON too. Every fix leaves a movement audit row (source inventory_unit_review_autofix_dry_oz) and rings no bell; the alias digest keeps its old wording. Strict opt-in, read at call time via inventoryUnitAutofixDryOzLive(); off = oz rows stay parked exactly as before. Kill switch: unset.)
+ *   GATE_QUICKMOVE_CUSTOMER_PICK=true (owner 2026-11-01: Quick Move gets a "let the customer pick a day" option for a recurring plan visit. The visit leaves its route, the customer gets one text with their reschedule link and picks a route-fit time by 8 PM the next day, and Auto-Dispatch books it if they do not. A technician whose Can move visits switch is off may use this option only. Nothing is sent until a person taps the option; off = the option does not appear and the routes answer disabled)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -4394,6 +4397,11 @@ const gates = {
   // unset - the 05:00 job returns at once, with no database read.
   autoDispatchCatchUp: process.env.GATE_AUTO_DISPATCH_CATCH_UP === 'true',
 
+  // Auto-dispatch orders the day by product dry time (owner 2026-11-01). Ships
+  // DARK: exactly 'shadow' or 'true'. Registered for logGateStatus only; the
+  // run reads autoDispatchDryTimeOrderMode() at call time. Kill switch: unset.
+  autoDispatchDryTimeOrder: ['shadow', 'true'].includes(String(process.env.GATE_AUTO_DISPATCH_DRY_TIME_ORDER || '').trim().toLowerCase()),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -6976,6 +6984,15 @@ function autoDispatchCatchUpLive() {
   return process.env.GATE_AUTO_DISPATCH_CATCH_UP === 'true';
 }
 
+// GATE_AUTO_DISPATCH_DRY_TIME_ORDER read at CALL time - strict: exactly
+// 'shadow' or 'true', anything else (unset is the kill) is 'off'. The one
+// reader for auto-dispatch/dry-time.js. The `autoDispatchDryTimeOrder`
+// gates-map entry above is for logGateStatus only.
+function autoDispatchDryTimeOrderMode() {
+  const value = process.env.GATE_AUTO_DISPATCH_DRY_TIME_ORDER;
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
 // same convention as leadInspectionLinkLive(). The `estimateConsultationOffer`
 // gates-map entry above is for logGateStatus only; this is the one canonical
@@ -7105,6 +7122,17 @@ function reviewNameMatchMode() {
 // services/review-click-guard.js). Covers the first-ask lock. Unset = today's guard, no redeploy.
 function reviewProbableReviewerGuardLive() {
   return String(process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD || '').trim().toLowerCase() === 'true';
+}
+
+// GATE_REVIEW_ASK_AT_VISIT read at CALL time (owner 2026-11-01, "every customer gets the review text 10
+// minutes after the visit report"): 'true' = an unpaid invoice no longer holds a visit's review ask; it goes
+// after the report text (or a combined visit's summary) like a paid visit's. Once that visit-time ask has
+// answered (started, or a final skip), the service record carries structured_notes.reviewAskedAtVisit and a
+// later payment starts no ask for it (services/review-request.js enrollForPaidInvoice). A visit with no such
+// marker keeps today's ask at payment. The review link still never rides inside the pay-link text. Off =
+// an unpaid invoice holds the ask until it is paid. Unset is the kill, no redeploy.
+function reviewAskAtVisitLive() {
+  return String(process.env.GATE_REVIEW_ASK_AT_VISIT || '').trim().toLowerCase() === 'true';
 }
 
 // GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
@@ -7602,6 +7630,14 @@ function billingEmailDetailsLive() {
   return process.env.GATE_BILLING_EMAIL_DETAILS === 'true';
 }
 
+// GATE_PAYER_INVOICE_SMS read at CALL time — ships DARK, off unless exactly 'true' (owner
+// 2026-11-01). On, a payer-billed invoice whose email the provider accepted for the payer's
+// AP inbox also texts the same pay link to that payer's ap_phone (services/payer-invoice-sms.js,
+// purpose payer_payment_link). Off, no payer text is ever built or sent.
+function payerInvoiceSmsLive() {
+  return process.env.GATE_PAYER_INVOICE_SMS === 'true';
+}
+
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The one canonical reader for both
 // entry points that need to know whether the Intelligence Bar may
@@ -8056,6 +8092,17 @@ function pinParkedCheckLive() {
 // and sends nothing. Kill: unset.
 function tripLinkLive() {
   return process.env.GATE_TRIP_LINK === 'true';
+}
+
+// GATE_ARRIVAL_ENGINE_OFF read at CALL time — strict `=== 'true'`, dark by default
+// (owner 2026-11-01: "triggers early; tie it to the truck turning off"). The
+// canonical reader for services/gps-arrival-detector.js and
+// routes/webhooks-bouncie.js. On: a trip-end (engine off) inside the arrival
+// radius marks the arrival and the immediate-radius rule keeps marking; a sample
+// only the slow-radius rule would mark records awaiting_engine_off. Off: the old
+// speed and radius rules, unchanged. Kill: unset.
+function arrivalEngineOffLive() {
+  return process.env.GATE_ARRIVAL_ENGINE_OFF === 'true';
 }
 
 // Auto lunch (services/time-tracking.js), read at CALL time. Strict
@@ -8873,11 +8920,21 @@ module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 module.exports.reviewNameMatchMode = reviewNameMatchMode;
 module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;
+// GATE_QUICKMOVE_CUSTOMER_PICK read at CALL time (so a flip needs no redeploy); strict 'true', dark.
+// Kept off the end-of-file append point, where gate PRs keep colliding.
+function quickMoveCustomerPickLive() {
+  return process.env.GATE_QUICKMOVE_CUSTOMER_PICK === 'true';
+}
+module.exports.quickMoveCustomerPickLive = quickMoveCustomerPickLive;
+// GATE_REVIEW_ASK_AT_VISIT reader, on its own line so gate PRs never conflict.
+module.exports.reviewAskAtVisitLive = reviewAskAtVisitLive;
 module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
 // GATE_LAWN_NO_SEASON_BOOST reader (kept off the end-of-file append point, where gate PRs keep colliding).
 module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
+// GATE_PAYER_INVOICE_SMS reader, on its own line so gate PRs never conflict.
+module.exports.payerInvoiceSmsLive = payerInvoiceSmsLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
@@ -9313,6 +9370,8 @@ module.exports.callLastNameLookupLive = callLastNameLookupLive;
 module.exports.pinParkedCheckLive = pinParkedCheckLive;
 // GATE_TRIP_LINK reader, on its own line so gate PRs never conflict.
 module.exports.tripLinkLive = tripLinkLive;
+// GATE_ARRIVAL_ENGINE_OFF reader, on its own line so gate PRs never conflict.
+module.exports.arrivalEngineOffLive = arrivalEngineOffLive;
 // GATE_AUTO_LUNCH reader, on its own line so gate PRs never conflict.
 module.exports.autoLunchLive = autoLunchLive;
 module.exports.truckKitLive = truckKitLive;
@@ -9721,6 +9780,22 @@ function staffEditLockStartOnlyLive() {
 function prepaySeedSeriesSlotLive() {
   return process.env.GATE_PREPAY_SEED_SERIES_SLOT === 'true';
 }
+// GATE_PAYER_PACKET_AUTOSEND read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, a grouped closeout
+// ("combined stop") whose every billed member resolves to the SAME active third-party payer mints ONE invoice billed to
+// that payer and emails it to the payer's AP inbox at the packet's effects phase, as a single-visit completion already
+// does (visit-completion-invoice.js, visit-completion-payer-delivery.js). Off = every payer-billed member sends the whole
+// packet to office review (`payer_billed_member`). Kill = unset.
+function payerPacketAutosendLive() {
+  return process.env.GATE_PAYER_PACKET_AUTOSEND === 'true';
+}
+// GATE_RECAP_GLASSES_CLIPS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the visit recap accepts
+// clips from the phone's photo library (camera glasses): a video may run up to 60 s and 200 MB, a clip over 20 s is
+// stored as `processing` (the renderer skips it until it is cut), and a clip added after the recap rendered, but
+// before it is sent, re-renders it (services/service-report/recap-media.js, recap-pipeline.js). Off = 20 s and 80 MB,
+// every clip `ready`, no rebuild on a late clip. Kill = unset.
+function recapGlassesClipsLive() {
+  return process.env.GATE_RECAP_GLASSES_CLIPS === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9899,3 +9974,9 @@ module.exports.routeOrderTimeFallbackLive = routeOrderTimeFallbackLive;
 module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
 // GATE_PREPAY_SEED_SERIES_SLOT reader, on its own line so gate PRs never conflict.
 module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;
+// GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
+module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
+// GATE_AUTO_DISPATCH_DRY_TIME_ORDER reader, on its own line so gate PRs never conflict.
+module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
+// GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
+module.exports.recapGlassesClipsLive = recapGlassesClipsLive;

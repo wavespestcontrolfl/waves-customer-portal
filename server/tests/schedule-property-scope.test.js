@@ -32,7 +32,7 @@ const scheduleRouter = require('../routes/schedule');
 // Records every predicate, including the nested where(fn) the property rule adds.
 function chain(rows) {
   const c = { calls: [] };
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'orWhereNull', 'whereRaw', 'leftJoin', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'orWhereNull', 'orWhereNotNull', 'whereRaw', 'leftJoin', 'select', 'orderBy', 'limit']) {
     c[m] = jest.fn((...args) => {
       if (typeof args[0] === 'function') { const inner = chain([]); args[0].call(inner, inner); c.calls.push([m + '(fn)', inner.calls]); }
       else c.calls.push([m, ...args]);
@@ -166,7 +166,9 @@ describe('saved-property scope on the customer schedule routes', () => {
       expect(res.status).toBe(409);
       const updateChain = db.mock.results[1].value;
       expect(updateChain.calls[0]).toEqual(['where', { id: 'svc-b', customer_id: 'cust-1', status: 'pending', visit_id: null, property_id: 'prop-b' }]);
-      expect(updateChain.calls[1][0]).toBe('update');
+      // Quick Move hand-off guard: never confirm a row now waiting for the customer's pick.
+      expect(updateChain.calls[1]).toEqual(['where(fn)', [['whereNull', 'customer_pick_by'], ['orWhereNotNull', 'window_start']]]);
+      expect(updateChain.calls[2][0]).toBe('update');
     });
   });
 

@@ -25,6 +25,7 @@ jest.mock('../config/feature-gates', () => ({
   commercialProposalSignLive: () => false,
   commercialAutopayLive: jest.fn(() => false),
   buildingUseTaxLive: jest.fn(() => false),
+  commercialFirstVisitLive: jest.fn(() => false),
   lawnSprayNoTaxLive: jest.fn(() => true),
   satellitePalmCountTypedLive: jest.fn(() => false),
 }));
@@ -88,6 +89,7 @@ jest.mock('../routes/estimate-public', () => ({
   findLinkedUpcomingAppointment: jest.fn(async () => null), adoptionServiceModesForContract: jest.fn(() => []),
   acceptanceServiceLists: jest.fn(), bookingServiceFor: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({ services: [] })),
+  estimateClosedOnline: jest.fn(() => false),
 }));
 jest.mock('../services/admin-estimate-persistence', () => ({
   ...jest.requireActual('../services/admin-estimate-persistence'),
@@ -266,7 +268,7 @@ describe('commercial bid authoring', () => {
     expect(mutations).toHaveLength(0);
   });
   beforeEach(() => gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER'));
-  const proposal = () => ({ enabled: true, validThrough: '2099-12-21', buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
+  const proposal = () => ({ enabled: true, buildingUse: 'nonresidential', validThrough: '2099-12-21', buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
   const costing = { revenueYears: 1, rows: [{ category: 'labor', phase: 'Phase A', description: 'PRIVATE CREW COST', quantity: 40, unit: 'hour', unitCost: 35, occurrences: 4 }] };
   test('the admin proposal read returns private costs beside the normalized customer proposal', async () => {
     row.estimate_data = { proposal: proposal(), proposalCosting: costing };
@@ -335,7 +337,7 @@ describe('commercial bid authoring', () => {
     entry.scheduleReview.reviewedOffer = reviewedOffer;
     row.status = 'scheduled'; row.scheduled_at = scheduledAt;
     row.estimate_data = { manualSendAttempts: [entry] };
-    const saved = await invoke('/:id/proposal', 'put', { proposal: { ...incoming, enabled: true, synthesized: false }, projectCosting: costing });
+    const saved = await invoke('/:id/proposal', 'put', { proposal: { ...incoming, enabled: true, synthesized: false, buildingUse: 'nonresidential' }, projectCosting: costing });
     expect(saved.statusCode).toBe(200);
     expect(dataOf().proposal.enabled).toBe(true);
     expect(dataOf().manualSendAttempts[0].scheduleReview.reviewedOffer).toBe(reviewedOffer);
@@ -894,7 +896,7 @@ describe('group publication navigation', () => {
 
     gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER');
     const saved = await invoke('/:id/proposal', 'put', { proposal: {
-      enabled: true, validThrough: '2099-12-31', buildings: [{ name: 'Synthetic building',
+      enabled: true, buildingUse: 'nonresidential', validThrough: '2099-12-31', buildings: [{ name: 'Synthetic building',
         lineItems: [{ id: 'synthetic-line', quantity: 1, unitPrice: 100, frequency: 'one_time' }] }],
     } });
     expect(saved.statusCode).toBe(200);
@@ -906,7 +908,7 @@ describe('group publication navigation', () => {
 
   test('the longest anchor keeps its own delivered floor when reconciliation fails and its hold is later shortened', async () => {
     const { older, sibling } = prepareGroup();
-    const authoredProposal = { enabled: true, validThrough: '2099-12-31', buildings: [{ name: 'Synthetic building',
+    const authoredProposal = { enabled: true, buildingUse: 'nonresidential', validThrough: '2099-12-31', buildings: [{ name: 'Synthetic building',
       lineItems: [{ id: 'synthetic-line', quantity: 1, unitPrice: 100, frequency: 'one_time' }] }] };
     row.estimate_data.proposal = authoredProposal;
     failReconciliation();
@@ -1145,7 +1147,7 @@ describe('annual provider delivery receipts', () => {
       lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 1, unitPrice: 299, frequency: 'one_time' }] }] } };
     expect((await invoke('/:id/send', 'post', { sendMethod: 'email' })).body.sent).toBe(true);
     if (!issued) {
-      const proposal = structuredClone(dataOf().proposal); proposal.buildings[0].lineItems[0].unitPrice = 399;
+      const proposal = { ...structuredClone(dataOf().proposal), buildingUse: 'nonresidential' }; proposal.buildings[0].lineItems[0].unitPrice = 399;
       expect((await invoke('/:id/proposal', 'put', { proposal })).statusCode).toBe(200);
       expect(dataOf().proposalDelivery).toBeUndefined();
     }
@@ -1952,9 +1954,68 @@ describe('GET /:id/proposal accountCommercial (a residential account\'s bills ca
   });
 });
 
+describe('GET /:id/proposal firstVisit (the builder Readiness card)', () => {
+  const firstVisitModule = require('../services/commercial-first-visit');
+  const { commercialFirstVisitLive } = require('../config/feature-gates');
+  afterEach(() => jest.restoreAllMocks());
+
+  test('GATE_COMMERCIAL_FIRST_VISIT on: serves the readiness of this estimate', async () => {
+    commercialFirstVisitLive.mockReturnValueOnce(true);
+    const readiness = jest.spyOn(firstVisitModule, 'firstVisitReadiness').mockResolvedValue({ state: 'office', reason: 'itemization' });
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.firstVisit).toEqual({ state: 'office', reason: 'itemization' });
+    expect(readiness).toHaveBeenCalledWith(expect.objectContaining({ id: row.id }), expect.objectContaining({ closed: false }));
+  });
+
+  test('gate off: no firstVisit key and no read', async () => {
+    const readiness = jest.spyOn(firstVisitModule, 'firstVisitReadiness');
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body).not.toHaveProperty('firstVisit');
+    expect(readiness).not.toHaveBeenCalled();
+  });
+});
+
+describe('PUT /:id/proposal needs a building use (owner 2026-11-01, proposal readiness PR B)', () => {
+  const body = (buildingUse) => ({
+    expectedEditVersion: persistence.estimateEditVersion(row),
+    proposal: {
+      enabled: true,
+      ...(buildingUse === undefined ? {} : { buildingUse }),
+      buildings: [{ name: 'Synthetic office', lineItems: [{ id: 'monthly', description: 'Synthetic monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly' }] }],
+    },
+  });
+  beforeEach(() => {
+    Object.assign(row, { status: 'draft', estimate_data: { proposal: { enabled: true, buildings: [] } } });
+  });
+
+  test.each([
+    ['missing', undefined],
+    ['null', null],
+    ['blank', '  '],
+  ])('a %s building use: 400 with the builder\'s own words, and nothing is saved', async (_label, buildingUse) => {
+    const res = await invoke('/:id/proposal', 'put', body(buildingUse));
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toBe('Pick the building use before saving: homes or residential community, or business building. It sets which rows carry sales tax.');
+    expect(dataOf().proposal.buildings).toEqual([]);
+  });
+
+  test('an unknown value: 400 naming the two choices', async () => {
+    const res = await invoke('/:id/proposal', 'put', body('warehouse'));
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toBe('Building use must be residential or nonresidential.');
+  });
+
+  test.each(['residential', 'nonresidential'])('%s: saved', async (buildingUse) => {
+    const res = await invoke('/:id/proposal', 'put', body(buildingUse));
+    expect(res.statusCode).toBe(200);
+    expect(dataOf().proposal.buildingUse).toBe(buildingUse);
+  });
+});
+
 describe('commercial Auto Pay payment term', () => {
   const recurring = (commercialTerms) => ({
     enabled: true,
+    buildingUse: 'nonresidential',
     buildings: [{ name: 'Synthetic office', lineItems: [{ id: 'monthly', description: 'Synthetic monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly' }] }],
     ...(commercialTerms ? { commercialTerms } : {}),
   });

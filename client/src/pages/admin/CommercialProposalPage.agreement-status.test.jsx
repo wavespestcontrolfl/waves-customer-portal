@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import CommercialProposalPage from './CommercialProposalPage';
 
 // GATE_COMMERCIAL_PROPOSAL_SIGN: GET /admin/estimates/:id/proposal carries `commercialAgreement` only with the gate on;
-// the builder shows it as one read-only line beside Sent / Viewed / Won, and shows nothing without it.
+// the builder shows it as the Online signing line of its Readiness card, and shows nothing without it.
 const makeFixture = (commercialAgreement) => ({
   bidToolsEnabled: false,
   suggestedTaxRate: 0,

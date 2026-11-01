@@ -42,6 +42,20 @@ describe('legacy (non-cadence) bundling', () => {
     const block = source.slice(start, source.indexOf(';', start));
     expect(block).toContain('completionReviewDelayMinutes === 0');
     expect(block).not.toContain('completionReviewDelayMinutes === undefined');
+    // An unpaid invoice's text carries its pay link: no review link rides in it, even when
+    // GATE_REVIEW_ASK_AT_VISIT lets the ask through as its own text.
+    expect(block).toContain('!invoiceUnpaidAtCompletion');
+  });
+
+  test('GATE_REVIEW_ASK_AT_VISIT: the asked-at-visit marker is written only after the visit-time ask answered', () => {
+    // A payment that lands first keeps its own ask (the per-record dedupe keeps it to one); a marker written
+    // ahead of the enrollment would let that payment skip an ask that then failed.
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const enroll = source.indexOf('reviewEnrollment = await ReviewService.enrollPostService(');
+    const marker = source.indexOf('{ reviewAskedAtVisit: true }');
+    expect(enroll).toBeGreaterThan(-1);
+    expect(marker).toBeGreaterThan(enroll);
+    expect(source).not.toContain('reviewAskAtVisit: true');
   });
 });
 

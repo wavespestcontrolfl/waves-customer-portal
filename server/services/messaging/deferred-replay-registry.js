@@ -1684,6 +1684,26 @@ const REGISTRY = {
     dispatch: (_meta, defaultDispatch) => defaultDispatch(),
   },
 
+  // The pay link texted to a payer's AP phone (GATE_PAYER_INVOICE_SMS, services/payer-invoice-sms.js), held by the
+  // send window on an automatic send (Codex #7357 P2). The row is the payer's phone, frozen; the recheck drops it when the
+  // gate is off, the invoice is no longer open with a balance (paid, void, withdrawn, on a statement), the payer is
+  // inactive or changed, or the AP phone changed. The dispatch never sends the frozen body: it re-runs the same checks
+  // and makes the live send again (fresh link, same purpose and episode key), so the pipeline's payer identity rule, the
+  // verified STOP read, the template switch and the billing text claim (one text per episode) all apply. Rows carry
+  // requires_registered_dispatch, so a worker that predates this entry refuses them. A failed read holds the row for a
+  // bounded retry (ids and an error code only in the log).
+  payer_invoice_sms_deferred: {
+    async recheck(meta) {
+      try {
+        return await require('../payer-invoice-sms').recheckHeldPayerText(meta);
+      } catch (err) {
+        logger.warn(`[deferred-replay] payer-text recheck failed for invoice ${meta.invoice_id || 'unknown'} (holding for retry): ${err.code || err.name || 'error'}`);
+        return { eligible: false, reason: 'recheck-failed', retryable: true };
+      }
+    },
+    dispatch: (meta) => require('../payer-invoice-sms').replayHeldPayerText(meta),
+  },
+
   appointment_tagger_prep_deferred: {
     async recheck(meta) {
       // Prep instructions are for an upcoming visit — a cancellation or

@@ -221,6 +221,9 @@ const LANE_RUNTIME = {
   turf_ocr: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   // draft_for_human + M2 (Codex r20): /photo-analysis/draft installs summary + captions into the tech's editable completion state; the later completion submits them.
   photo_scoring: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
+  // draft_for_human + offline: the cron cut job (scheduler recap tick) picks a window for a clip the tech approves inside the recap before the
+  // customer sees it; the tick passes no timeoutMs and a miss falls to the middle window, so no interactive hard timeout applies.
+  recap_clip_pick: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
   // offline + M3 (Codex r22): sweepUnscoredOutcomes is a scheduled batch that retries a pair up to 3 attempts, then applies the verdict,
   // score, attempt count and terminal stamp to treatment_outcomes with no human step.
   vision_delta: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },

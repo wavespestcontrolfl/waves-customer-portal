@@ -216,6 +216,11 @@ const AZOXYSTROBIN_NAME = /artavia|azoxy/i;
 const LARGE_PATCH_TRIGGER = /large_patch/;
 const isGroup11LargePatchRow = (row, candidate) => AZOXYSTROBIN_NAME.test(row.productName || row.product_name || candidate.raw?.product?.name || '') && LARGE_PATCH_TRIGGER.test(row.gates?.trigger || '');
 
+// A prevention pass on a mapped area (owner 2026-11-01: the February large patch spring pass, the May gray leaf spot pass) is the
+// technician's choice on a lawn whose map and history qualify (the February pass also needs the lawn's last large patch product to
+// be Artavia). The fungus card answers a fungus seen today, so it never offers these rows; they stay on the month's add-on list.
+const PREVENTION_ONLY_TRIGGERS = Object.freeze(['mapped_large_patch_spring', 'mapped_gray_leaf_spot_prevention']);
+
 // The one add-on each kind may suggest: the FIRST fungicide in program order, the others by trigger.
 function pickAddOns(candidates, rows, { takeAllMapped = false } = {}) {
   const order = [...rows.keys()];
@@ -225,7 +230,8 @@ function pickAddOns(candidates, rows, { takeAllMapped = false } = {}) {
     return row && test(row, candidate);
   });
   return {
-    fungus: withRole((row, candidate) => row.role === FUNGICIDE_ROLE && !(takeAllMapped && isGroup11LargePatchRow(row, candidate))).sort((a, b) => rank(a) - rank(b))[0] || null,
+    fungus: withRole((row, candidate) => row.role === FUNGICIDE_ROLE && !PREVENTION_ONLY_TRIGGERS.includes(row.gates?.trigger)
+      && !(takeAllMapped && isGroup11LargePatchRow(row, candidate))).sort((a, b) => rank(a) - rank(b))[0] || null,
     caterpillars: withRole((row) => row.gates?.trigger === CATERPILLAR_TRIGGER)[0] || null,
     dry_spots: withRole((row) => row.gates?.trigger === DRY_SPOT_TRIGGER)[0] || null,
   };
@@ -767,6 +773,7 @@ module.exports = {
   signalsFromAssessment,
   addOnOffers,
   pickAddOns,
+  PREVENTION_ONLY_TRIGGERS,
   group11HeldAddOns,
   takeAllAddOns,
   weedOffer,

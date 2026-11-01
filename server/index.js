@@ -272,6 +272,18 @@ app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, 
   next();
 });
 
+// Social series intake (routes/social-series-ingest.js): same unobservable-
+// when-dark mount as the ops-digest one above — while SOCIAL_SERIES_INGEST_TOKEN
+// is unset EVERY method and path under /api/social/series (OPTIONS included)
+// reads the generic unknown-route 404, above cors(), the global limiter and
+// the body parsers.
+app.use('/api/social/series', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (!process.env.SOCIAL_SERIES_INGEST_TOKEN) {
+    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
+  }
+  next();
+});
+
 // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
 // "E2: cookie-free read-depth counts") — routes/public-blog-read-depth.js.
 // The WHOLE router (no-store headers, dark-gate 404, its own per-IP limiter,
@@ -652,6 +664,11 @@ app.use('/api/admin/auth', ...staffAuthBodyParsers);
 // all BEFORE the global body parsers, so an unauthenticated caller can
 // never reach a 400/413 (routes/ops-digest-ingest.js ingestPreParsers).
 app.use('/api/ops/digest', ...require('./routes/ops-digest-ingest').ingestPreParsers);
+
+// Social series intake: dark 404 → limiter → bearer auth → the path's capped
+// parse (64 MB raw media, 256 KB JSON), all BEFORE the global body parsers
+// (routes/social-series-ingest.js ingestPreParsers).
+app.use('/api/social/series', ...require('./routes/social-series-ingest').ingestPreParsers);
 
 // MCP knowledge endpoint: authenticate (403/503/401 fail-closed) BEFORE any
 // body parsing, then parse with its own 256kb cap — same reason as staff
@@ -1041,6 +1058,9 @@ app.use('/api/mcp-admin', require('./routes/mcp-admin'));
 // External ops-cron findings → ops_digest bell rows — machine auth
 // (OPS_DIGEST_INGEST_TOKEN); 404 until the token is set.
 app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));
+// Weekly series posts from the owner's other Mac → scheduled FB/IG/GBP rows —
+// machine auth (SOCIAL_SERIES_INGEST_TOKEN); 404 until the token is set.
+app.use('/api/social/series', require('./routes/social-series-ingest'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));

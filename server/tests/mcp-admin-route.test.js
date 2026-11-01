@@ -281,6 +281,35 @@ describe('answers', () => {
     expect(quoted.tried).toBeNull();
   });
 
+  test('list_commercial_proposals keeps ids, codes, dates and flags, never a title, name, address, note, price or signing note', async () => {
+    mockExecute.mockResolvedValue({
+      scope: 'open',
+      proposals: [{
+        estimate_id: 'e-1', estimate_number: 'EST-1001', status: 'sent', customer_id: 'c-1',
+        created_at: new Date('2026-10-30T00:00:00Z'), sent_at: '2026-10-30T13:00:00.000Z', viewed_at: null, expires_at: '2026-11-30T13:00:00.000Z',
+        bill_by_invoice: false, payment_terms: 'autopay', building_use: 'nonresidential', closed_online: false,
+        signing: { state: 'awaiting', blocked: 'terms_conflict', note: 'Online signing needs the proposal terms to match the agreement: Sample detail.', field: 'paymentTerms' },
+        first_visit: { state: 'booked', reason: null, visit_date: '2026-11-12', visit: { windowStart: '08:00' } },
+        title: 'Sample Plaza plan', preparedFor: 'Sample Plaza LLC', propertyAddress: '1 Example Way', notes: 'gate code 4455', total: 4200, token: 'tok_secret',
+      }],
+      returned_count: 1, has_more: true, next_offset: 1,
+    });
+    const answer = toolResult((await callTool('list_commercial_proposals', { scope: 'open', limit: 1 })).body);
+    expect(answer.data).toEqual({
+      scope: 'open',
+      proposals: [{
+        estimate_id: 'e-1', estimate_number: 'EST-1001', status: 'sent', customer_id: 'c-1',
+        // A timestamp keeps its time, even at exactly midnight UTC.
+        created_at: '2026-10-30T00:00:00.000Z', sent_at: '2026-10-30T13:00:00.000Z', viewed_at: null, expires_at: '2026-11-30T13:00:00.000Z',
+        bill_by_invoice: false, payment_terms: 'autopay', building_use: 'nonresidential', closed_online: false,
+        signing: { state: 'awaiting', blocked: 'terms_conflict' },
+        first_visit: { state: 'booked', reason: null, visit_date: '2026-11-12' },
+      }],
+      returned_count: 1, has_more: true, next_offset: 1,
+    });
+    for (const needle of ['Sample', 'Example Way', '4455', '4200', 'tok_secret', 'paymentTerms', 'windowStart']) expect(JSON.stringify(answer)).not.toContain(needle);
+  });
+
   describe('customer, schedule, lead and invoice reads', () => {
     const run = async (name, result, args = {}) => {
       mockExecute.mockResolvedValue(result);
