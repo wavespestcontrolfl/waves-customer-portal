@@ -173,6 +173,18 @@ describe('technician Quick Move assignment fence', () => {
     expect(flushDispatchQualityDates.mock.calls[0][0]).toBe(emitDispatchJobUpdate.mock.calls[0][0].qualityDates);
   });
 
+  test('own visit: the writer and the moved text carry the acting technician, so the tech gets no "Moved by the office" card for their own move', async () => {
+    wireReads(ROW, ROW);
+    const r = await moveVisit();
+
+    expect(r.status).toBe(200);
+    // rebooker.js noticeActor = options.actorId || initiatedBy: the tech's own
+    // id lets the tech-visit-notifications self-skip match.
+    expect(SmartRebooker.reschedule.mock.calls[0][5].actorId).toBe('tech-1');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toEqual(expect.objectContaining({ adminUserId: 'tech-1' }));
+  });
+
   test('reassigned between the ownership read and the writer read: the move is refused with 409 and nothing is sent', async () => {
     // Route read sees tech-1; dispatch hands the visit to tech-2; commit()
     // reads the now-current tech-2 row and the live row is tech-2's.
@@ -205,7 +217,10 @@ describe('technician Quick Move assignment fence', () => {
       expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
       expect(SmartRebooker.rescheduleSeries.mock.calls[0][5].expectAnchor).toEqual(expect.objectContaining({ technician_id: 'tech-1' }));
+      // The series write and its effects pass carry the acting technician too.
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][5].actorId).toBe('tech-1');
       expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
+      expect(applySeriesMoveEffects.mock.calls[0][0]).toEqual(expect.objectContaining({ actorId: 'tech-1' }));
       // Series-handled stop: the route does not double-emit.
       expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
     });

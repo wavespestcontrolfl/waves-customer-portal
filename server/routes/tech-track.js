@@ -728,6 +728,13 @@ router.post('/:id/rain-out', async (req, res, next) => {
       scope: scope === 'route' ? 'route' : 'job',
       target,
       notifyCustomer: notifyCustomer !== false,
+      // The acting technician, as the admin-dispatch twin passes it. Without
+      // it the rebooker records the actor as 'tech', the tech-visit
+      // notification self-skip compares 'tech' with this technician's id and
+      // misses, and the technician gets a "Visit moved … Moved by the office"
+      // card for their own move. It also stamps sms_log.admin_user_id on the
+      // moved text (the rain-out keys are NON_HUMAN_REPLY_MESSAGE_TYPES).
+      actorUserId: req.technicianId,
       // Fences the WRITE itself, not just the ownsTrackedVisit pre-read above:
       // commit() merges this into the rebooker's options.expect (technician_id
       // is part of the atomic UPDATE predicate), so a dispatch reassignment
