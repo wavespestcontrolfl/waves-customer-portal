@@ -6539,6 +6539,25 @@ router.get('/held-visits', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/admin/schedule/held-visits/:callLogId/dismiss — Dismiss on a held row (owner
+// 2026-11-01): the office will not book it. The call stops showing on the strip and its open
+// booking-miss bells close as this person's Done. No visit, card or message changes.
+router.post('/held-visits/:callLogId/dismiss', requireAdmin, async (req, res) => {
+  const callLogId = String(req.params.callLogId || '');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callLogId)) {
+    return res.status(400).json({ error: 'callLogId must be a call id' });
+  }
+  if (!isEnabled('callHeldVisit')) return res.status(409).json({ error: 'Held visits are not enabled.' });
+  try {
+    const result = await require('../services/call-held-visits').dismissHeldVisit(callLogId, { by: req.technicianId });
+    if (!result.found) return res.status(404).json({ error: 'Call not found' });
+    return res.json({ success: true, closedBells: result.closedBells });
+  } catch (err) {
+    logger.error(`[held-visits] dismiss failed for call ${callLogId}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not dismiss. Try again.' });
+  }
+});
+
 // GET /api/admin/schedule — day view (board + dispatch)
 // GATE_NEW_CALLER_BOOKING: a visit booked by address before its customer
 // exists reads "New caller" and offers Link customer on the visit sheet (PUT

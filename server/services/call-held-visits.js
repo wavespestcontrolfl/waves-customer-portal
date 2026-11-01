@@ -51,14 +51,16 @@
  *   - the call's customer has a live visit on the promised day (for a confirmed slot, inside
  *     the watchdog's window tolerance of the agreed time);
  *   - a namesake account booked the confirmed slot after the call (the watchdog rule);
- *   - the office closed the call's triage cards.
+ *   - the office closed the call's triage cards;
+ *   - the office pressed Dismiss on the row (owner 2026-11-01): dismissHeldVisit stamps
+ *     call_log.metadata.held_visit_dismissed, and the call never shows again on any day.
  * "Live" is on the calendar or done, or a legacy row with no status; a skipped, cancelled or
  * rescheduled visit never counts. Nothing is inferred from a phone number or an address: a
  * shared number or a same-street address is not proof. Known limit: an UNLINKED call that staff
  * book by hand, outside "Book it", keeps its row until they close the call's cards or the day
  * passes.
  * Dates come from to_char in SQL, never a JS
- * Date round-trip. Dark behind GATE_CALL_HELD_VISIT; read-only.
+ * Date round-trip. Dark behind GATE_CALL_HELD_VISIT; read-only except dismissHeldVisit.
  */
 
 const db = require('../models/db');
@@ -321,6 +323,7 @@ function computeHeldVisits(calls, bookedRows, triageRows, {
   dateET, namesakes = new Map(), customerNames = new Map(), now = new Date(),
 } = {}) {
   return heldCandidates(calls, dateET, now)
+    .filter(({ call }) => !call.held_visit_dismissed_at)
     .filter((candidate) => !clearedByBooking(candidate, bookedRows, { dateET, namesakes }))
     .filter(({ call }) => !officeClosedCall(triageRows.filter((r) => r.call_log_id === call.id)))
     .map((candidate) => heldRow(candidate, { dateET, customerNames, bookedRows }))
@@ -346,7 +349,8 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
     .modify((qb) => whereNotSandboxCall(qb))
     .whereRaw('ai_extraction_enriched::text LIKE ANY(?)', [dateTexts])
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'answered_by',
-      'processing_status', 'v2_extraction_status', 'ai_extraction_enriched');
+      'processing_status', 'v2_extraction_status', 'ai_extraction_enriched',
+      db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   const candidates = heldCandidates(calls, dateET, now);
   if (!candidates.length) return [];
 
@@ -404,4 +408,24 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
   return computeHeldVisits(calls, bookedRows, triageRows, { dateET, namesakes, customerNames, now });
 }
 
-module.exports = { computeHeldVisits, listHeldVisits, heldCandidates, isRealConversation, parseExtraction };
+// Dismiss on the Dispatch strip (owner 2026-11-01): the office will not book this row. Stamps
+// the call once (a second press keeps the first stamp), so no day lists it again, and closes the
+// call's open booking-miss bells as that person's Done. It writes no visit, no card and no
+// message. `by` is the admin's id. Returns { found, closedBells }.
+async function dismissHeldVisit(callLogId, { by, now = new Date() } = {}) {
+  const stamp = JSON.stringify({ at: now.toISOString(), by: String(by) });
+  const updated = await db('call_log')
+    .where({ id: callLogId })
+    .update({
+      metadata: db.raw(
+        "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('held_visit_dismissed', COALESCE(metadata->'held_visit_dismissed', ?::jsonb))",
+        [stamp],
+      ),
+    }, ['id']);
+  if (!updated.length) return { found: false, closedBells: 0 };
+  const { closeBookingMissBellsForCall } = require('./call-booking-miss-watchdog');
+  const closedBells = await closeBookingMissBellsForCall(callLogId, { by });
+  return { found: true, closedBells };
+}
+
+module.exports = { computeHeldVisits, listHeldVisits, heldCandidates, isRealConversation, parseExtraction, dismissHeldVisit };
