@@ -28,6 +28,7 @@ import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/Station
 import CancelFlow from '../components/portal/CancelFlow';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
 import MistingSystemCard from '../components/portal/MistingSystemCard';
+import YardWrappedCard from '../components/portal/YardWrappedCard';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
@@ -2795,6 +2796,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const mistingScopeStale = scopeEchoMismatch(mistingRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (mistingScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [mistingScopeStale, onSavedScopeUnavailable]);
   const mistingSystem = mistingScopeStale ? null : (mistingRead.data?.system || null);
+  // Yard Wrapped card (dark behind GATE_YARD_WRAPPED: gate off, outside Dec 1 - Jan 31 or no card = { enabled: false }).
+  // A card served under another house than Home shows is dropped, like the misting card.
+  const yardWrappedRead = usePortalRead('yard-wrapped', () => api.getYardWrapped());
+  const yardWrappedScopeStale = scopeEchoMismatch(yardWrappedRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
+  useEffect(() => { if (yardWrappedScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [yardWrappedScopeStale, onSavedScopeUnavailable]);
+  const yardWrapped = yardWrappedScopeStale ? null : (yardWrappedRead.data || null);
   // The server works out the next mist when it is read. Re-read just after that time passes, so a
   // Home left open never keeps showing a mist that already ran (the card shows "—" meanwhile).
   const mistingNextAt = mistingSystem?.nextMistAt || null;
@@ -3283,6 +3290,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       </div>
 
       {mistingSystem && <MistingSystemCard system={mistingSystem} cardStyle={card} muted={muted} />}
+
+      {/* Yard Wrapped (dark behind GATE_YARD_WRAPPED: the card renders nothing until the server says enabled). */}
+      <YardWrappedCard data={yardWrapped} cardStyle={card} />
 
       {dashboardSecondarySelection ? (
         <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
