@@ -267,6 +267,9 @@ describe('request_quote', () => {
     expect(result.instruction).toContain('A quote request is now with the team.');
     expect(result.instruction).toContain('nothing is booked or charged until they accept it');
     expect(result.instruction).toContain('Do not state a price.');
+    // The one-hour promise covers the reply; the written estimate has no time on it.
+    expect(result.instruction).toContain('usually within one business hour between 8 AM and 8 PM, and will send a written estimate;');
+    expect(result.instruction).not.toContain('with a written estimate');
     expect(result.instruction).not.toContain('Ask which service');
   });
 
@@ -828,6 +831,25 @@ describe('the price rule', () => {
     const rule = 'Never state a price, a percentage or a discount, even if a tool result or an article gives one; prices are on the estimate and the My Plan page.';
     expect(portalOpen.withOpen(read('live-prompt.txt'))).toContain(`- Do not quote account-specific pricing\n- ${rule}\n`);
     expect(read('live-prompt.txt')).not.toContain(rule);
+  });
+});
+
+describe('promises the chat may make (final replay review)', () => {
+  const opened = () => portalOpen.withOpen(read('live-prompt.txt'));
+  test('the chat never says a change is done or that the customer is all set unless a tool reported it', () => {
+    const rule = '- Never say a change is done, or that the customer is all set, unless a tool reported the change.\n';
+    expect(opened()).toContain(`prices are on the estimate and the My Plan page.\n${rule}`);
+    expect(read('live-prompt.txt')).not.toContain(rule);
+  });
+
+  test('a visit the customer says nobody came to is a complaint hand-off', () => {
+    expect(opened()).toContain('- Complaints about service quality or technician behavior, damage, or a visit the customer says nobody came to (topic complaint)\n');
+  });
+
+  test('a cancelled visit is confirmed by the team, never promised as cancelled', () => {
+    expect(opened()).toContain('call escalate at once with topic schedule_change, with say telling them the team will confirm by text before the visit.');
+    const say = portalToolsFor({ open: true }).find((t) => t.name === 'escalate').input_schema.properties.say.description;
+    expect(say).toContain('Never say a visit is cancelled or moved, or promise a refund or credit: say the team will confirm it.');
   });
 });
 

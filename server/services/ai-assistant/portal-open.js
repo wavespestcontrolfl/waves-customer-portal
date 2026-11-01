@@ -46,6 +46,7 @@ const NEW_FACT_LINES = `- WaveGuard levels depend on how many qualifying recurri
 
 const PRICE_RULE_ANCHOR = '- Do not quote account-specific pricing\n';
 const PRICE_RULE = '- Never state a price, a percentage or a discount, even if a tool result or an article gives one; prices are on the estimate and the My Plan page.\n';
+const DONE_RULE = '- Never say a change is done, or that the customer is all set, unless a tool reported the change.\n';
 const PESTS_SENTENCE_ANCHOR = 'or reports damage, escalate instead. ';
 const PESTS_OPEN_SENTENCE = 'If you have shown the re-service button twice in this chat and the customer still writes about the pests, says they are scared or cannot sleep, or asks for a person, call escalate (the button stays). ';
 
@@ -57,7 +58,7 @@ const CANCEL_PARAGRAPH_LEGACY = `If the customer wants to cancel or pause their 
 const ESCALATE_HEADER = 'WHAT YOU MUST ESCALATE (use the escalate tool):';
 // The sections block, with the cancel paragraph for the flow that is live.
 const openSections = (cancelFlow) => `CANCEL OR PAUSE:
-If the customer names one visit to cancel (today, tomorrow, or a date), or says to cancel today's service, call escalate at once with topic schedule_change. Do not ask the reason, and do not offer Reschedule for a visit within 48 hours.
+If the customer names one visit to cancel (today, tomorrow, or a date), or says to cancel today's service, call escalate at once with topic schedule_change, with say telling them the team will confirm by text before the visit. Do not ask the reason, and do not offer Reschedule for a visit within 48 hours.
 ${cancelFlow ? CANCEL_PARAGRAPH_V2 : CANCEL_PARAGRAPH_LEGACY}
 
 ADDING A SERVICE:
@@ -68,7 +69,7 @@ When the customer is moving or wants to transfer service to a new home, call req
 
 `;
 const OPEN_ESCALATE_LIST = `${ESCALATE_HEADER}
-- Complaints about service quality or technician behavior, or damage
+- Complaints about service quality or technician behavior, damage, or a visit the customer says nobody came to (topic complaint)
 - A cancellation or pause for a chemical, health or damage reason
 - A billing dispute: the customer says a charge is wrong or asks for a refund
 - A worry about chemicals or health: a person or pet exposed, a reaction, or a medical question about a product
@@ -111,7 +112,7 @@ function withOpen(prompt, { cancelFlow = true } = {}) {
     insertBefore(prompt, '- Hand the conversation to the Waves team (escalate)', OPEN_CAN_DO)
       .replace(CHARGES_ESCALATE_SENTENCE, (kept) => `${kept}${CHARGES_OPEN_SENTENCE}`)
       .replace(PESTS_SENTENCE_ANCHOR, (kept) => `${kept}${PESTS_OPEN_SENTENCE}`)
-      .replace(PRICE_RULE_ANCHOR, (kept) => `${kept}${PRICE_RULE}`),
+      .replace(PRICE_RULE_ANCHOR, (kept) => `${kept}${PRICE_RULE}${DONE_RULE}`),
     ESCALATE_HEADER,
     openSections(cancelFlow),
   );
@@ -147,7 +148,7 @@ const REQUEST_MOVE_TOOL = {
 };
 const SAY_PROPERTY = {
   type: 'string',
-  description: 'Optional. One short sentence the fixed hand-off reply adds, saying what the team will do (for example: The team will turn our emails back on for you). No times, prices or promises beyond that.',
+  description: 'Optional. One short sentence the fixed hand-off reply adds, saying what the team will do (for example: The team will turn our emails back on for you). Never say a visit is cancelled or moved, or promise a refund or credit: say the team will confirm it. No times, prices or promises beyond that.',
 };
 // The escalate tool with the optional `say` field (this gate only).
 function escalateToolWithSay(tool) {
@@ -289,7 +290,7 @@ const QUOTE_LABELS = {
   not_stated: 'Service not stated',
 };
 const QUOTE_NOTE_MAX = 500;
-const QUOTE_INSTRUCTION = 'A quote request is now with the team. Tell the customer the team will reply by text or email, usually within one business hour between 8 AM and 8 PM, with a written estimate, and that nothing is booked or charged until they accept it. Do not state a price.';
+const QUOTE_INSTRUCTION = 'A quote request is now with the team. Tell the customer the team will reply by text or email, usually within one business hour between 8 AM and 8 PM, and will send a written estimate; nothing is booked or charged until they accept it. Do not state a price.';
 const QUOTE_NOT_STATED_INSTRUCTION = ' Ask which service they want; when they say, call request_quote again with it.';
 
 // The key service_requests.requested_service is saved under. A named service
