@@ -148,6 +148,9 @@ async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = 
   if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
   const row = await lookup.first();
   if (!row) return { ok: false, reason: 'not_found' };
+  // A finished upload is final: a repeat confirm (a client retry) answers with the row as it is, so it
+  // can neither move a ready clip out of the recap's clips nor delete it behind the recap's back.
+  if (row.status !== 'uploading') return { ok: true, row };
 
   let realBytes = null;
   if (config.s3?.bucket) {

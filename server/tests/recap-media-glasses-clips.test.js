@@ -47,8 +47,8 @@ function mediaKnex(row) {
   knex.transaction = async (work) => work(knex);
   return { knex, calls };
 }
-const videoRow = { id: 'm1', media_type: 'video', s3_key: 'k', scheduled_service_id: 'v1' };
-const imageRow = { id: 'm2', media_type: 'image', s3_key: 'k2', scheduled_service_id: 'v1' };
+const videoRow = { id: 'm1', media_type: 'video', s3_key: 'k', scheduled_service_id: 'v1', status: 'uploading' };
+const imageRow = { id: 'm2', media_type: 'image', s3_key: 'k2', scheduled_service_id: 'v1', status: 'uploading' };
 
 async function confirm(row, bytes, durationMs) {
   mockHeadBytes = bytes;
@@ -76,6 +76,24 @@ describe('confirmUpload with the glasses gate off', () => {
 
   test('says 20 seconds', () => {
     expect(recapMedia.confirmFailure('too_large')).toEqual({ status: 413, error: 'Clip too large — keep it under ~20 seconds.' });
+  });
+});
+
+describe('a repeat confirm of a finished clip', () => {
+  test.each(['ready', 'processing'])('a %s clip is answered as it is: no status change, no delete', async (status) => {
+    process.env.GATE_RECAP_GLASSES_CLIPS = 'true';
+    const row = { ...videoRow, status };
+    const { result, calls } = await confirm(row, 150 * MB, 45000);
+    expect(result).toEqual({ ok: true, row });
+    expect(calls.update).toBeNull();
+    expect(calls.deleted).toBe(false);
+  });
+
+  test('a refused repeat (too long) cannot delete a ready clip', async () => {
+    process.env.GATE_RECAP_GLASSES_CLIPS = 'true';
+    const { result, calls } = await confirm({ ...videoRow, status: 'ready' }, 1 * MB, 90000);
+    expect(result.ok).toBe(true);
+    expect(calls.deleted).toBe(false);
   });
 });
 
