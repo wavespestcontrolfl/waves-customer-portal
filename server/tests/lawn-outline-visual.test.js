@@ -106,9 +106,11 @@ const NEW_KEYS = ['year_bar', 'rounds', 'typical_visit', 'after_visit_timeline',
 const NEW_SECTIONS = ['year_bar', 'rounds', 'after_visit_timeline', 'after_visit', 'your_watering', 'your_mowing', 'problems', 'faq'];
 // Rounds 1 to 9 on the default track: what the protocol's own lines make of each round's step (round 2 takes April's 9x bag,
 // round 3 February's rounds bag), in the order the lines are written.
+// Owner 2026-11-01 (spot lines): dry spots March to October, Celsius alone June to September, caterpillars in October and November.
 const AS_NEEDED = [
-  ['disease', 'weeds'], ['weeds'], ['disease', 'insects', 'weeds'], ['disease', 'dry_spots', 'insects', 'weeds'],
-  ['disease', 'insects'], ['disease', 'insects'], ['disease', 'insects'], ['disease', 'insects', 'weeds'], ['disease', 'weeds'],
+  ['disease', 'weeds'], ['weeds'], ['disease', 'dry_spots', 'insects', 'weeds'], ['disease', 'dry_spots', 'insects', 'weeds'],
+  ['disease', 'dry_spots', 'insects', 'weeds'], ['disease', 'dry_spots', 'insects', 'weeds'], ['disease', 'dry_spots', 'insects', 'weeds'],
+  ['disease', 'dry_spots', 'insects', 'weeds'], ['disease', 'insects', 'weeds'],
 ];
 const DERIVED_MAIN = [['barrier', 'micros'], ['feeding', 'barrier'], ['feeding'], ['insects'], ['micros', 'barrier'], ['micros'], ['micros'], ['feeding', 'barrier'], ['feeding']];
 

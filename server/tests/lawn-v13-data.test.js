@@ -26,6 +26,7 @@ const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_f
 const finalPassMigration = require('../models/migrations/20261009150000_lawn_v13_final_pass');
 const advionMigration = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
 const moleCricketRows = require('../models/migrations/20261023141000_lawn_v13_mole_cricket_bait_staged_rows');
+const spotLinesMigration = require('../models/migrations/20261101170000_lawn_v13_spot_lines');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 // Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
@@ -343,6 +344,9 @@ describe('staged migration 20261005120000', () => {
       const moleCricketRemoved = windowKey === MC.AUG ? [migration.NAMES.TAL] : [];
       const spotsBefore = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name), ...finalPass];
       const spots = [...spotsBefore.filter((n) => !moleCricketRemoved.includes(n)), ...moleCricketAdded.filter((n) => !spotsBefore.includes(n))];
+      // 20261101170000 (spot lines): caterpillar rows in October and November, dry spot rows March to October, Celsius alone June to September.
+      const spotLinesAdded = ((spotLinesMigration.PLACEMENTS.find(([key]) => key === windowKey) || [null, []])[1]).map((spec) => spec.name).filter((n) => !spots.includes(n));
+      spots.push(...spotLinesAdded);
       // 20261029170000 adds the liquid potassium row (a whole-lawn tool) to the August and September windows.
       const potassiumRows = potassiumMigration.WINDOWS.filter((w) => w.key === windowKey).map(() => potassiumMigration.NAME);
       whole.push(...potassiumRows);
@@ -595,7 +599,10 @@ describe('migration 20261005140000: rollback order, EPA numbers, Blindside rows'
     const recipeMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith(BLINDSIDE)));
     // 20261009150000 gives November the December weed lines and a Blindside row of its own (tested in lawn-v13-final-pass.db.test.js), so the
     // staged chain before it still has none in November.
-    const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')) && m !== 11);
+    // 20261101170000 adds Celsius ALONE to June through September (owner 2026-11-01): those windows carry no Blindside row (Blindside is November through March).
+    const summerCelsiusMonths = spotLinesMigration.PLACEMENTS.filter(([, specs]) => specs.includes(spotLinesMigration.ROWS.CELSIUS)).map(([key]) => migration.WINDOWS.find((w) => w[1] === key)[0]);
+    expect(summerCelsiusMonths).toEqual([6, 7, 8, 9]);
+    const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')) && m !== 11 && !summerCelsiusMonths.includes(m));
     expect(recipeMonths).toEqual([1, 3, 11, 12]);
     const protocol = v13Protocols(db)[0];
     const monthsWithBlindside = db.lawn_protocol_windows.filter((w) => w.lawn_protocol_id === protocol.id && db.lawn_protocol_products.some((r) => r.lawn_protocol_window_id === w.id && r.product_name === BLINDSIDE)).map((w) => w.month).sort((a, b) => a - b);

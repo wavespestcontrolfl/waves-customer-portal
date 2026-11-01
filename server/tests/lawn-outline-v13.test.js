@@ -303,7 +303,7 @@ describe('the sections', () => {
       expect(steps.body).toBe('');
       const cards = section(result, 'treatment_categories');
       expect(cards.bullets).toEqual(cards.visual.items.map((c) => `${c.label}: ${c.text}`));
-      expect(section(result, 'program_year').bullets[9]).toBe('October: Fertilizer, Pre-emergent; as needed: Disease control, Insect control, Weed control');
+      expect(section(result, 'program_year').bullets[9]).toBe('October: Fertilizer, Pre-emergent; as needed: Disease control, Insect control, Weed control, Wetting agent');
       // The legacy outline draws nothing.
       await withGates({ GATE_LAWN_V13: 'true' }, async () => {
         expect((await build(ST_AUG_ESTIMATE, { month: 10 })).content.sections.some((s) => 'visual' in s)).toBe(false);
