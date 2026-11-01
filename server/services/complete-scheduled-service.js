@@ -12520,8 +12520,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // visit row lock (see refuseCoveredMemberMintInTrx).
         // Same shape gate as every other sibling-coverage check (pre-push P1
         // on 645ccccaee): a callback or always-free visit is never refused.
-        // A visit from an invoice-mode commercial proposal is due on the agreement's Net term (owner 2026-10-30): the
-        // win makes no invoice, so this one carries the terms. Counted from the visit date, never before today (a backfill or a
+        // A visit from a won commercial proposal on Net terms is due on that term (owner 2026-10-30; an Auto Pay proposal
+        // whose customer turned Auto Pay off is Net 30, owner 2026-11-01, proposalTermsNetDays): the win makes no
+        // invoice, so this one carries the terms. Counted from the visit date, never before today (a backfill or a
         // late form carries a backdated day, and its invoice is never minted overdue). A failed read mints nothing: the catch below releases the
         // closeout for resume, so no invoice is ever created due on the wrong date.
         let proposalTermsDue = null;
