@@ -6712,6 +6712,13 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     if (process.env.PEST_RECAP !== 'true') return;
+    // GATE_RECAP_GLASSES_CLIPS: cut waiting glasses clips to 5 s first; a cut failure never blocks the recap job.
+    try {
+      const cuts = await require('./service-report/recap-clip-cut').processPendingClipCuts();
+      if (cuts.claimed) logger.info(`Visit recap clip cuts: ${cuts.ready} ready, ${cuts.failed} failed, ${cuts.abandoned} abandoned`);
+    } catch (err) {
+      logger.error(`Visit recap clip cut failed: ${err.message}`);
+    }
     try {
       const { processDueRecaps } = require('./service-report/recap-pipeline');
       const result = await processDueRecaps();
