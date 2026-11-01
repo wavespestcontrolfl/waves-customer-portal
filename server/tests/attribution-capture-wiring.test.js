@@ -305,7 +305,7 @@ describe('lead-funnel-bridge call sites', () => {
 
   test('staleness sweep collapses flipped leads to the lost bucket in the same transaction', () => {
     const src = read('../services/lead-staleness.js');
-    expect(src).toMatch(/bridgeLeadsFunnelStage\(flipped\.map\(\(\{ id \}\) => id\), 'unresponsive', trx\)/);
+    expect(src).toMatch(/bridgeLeadsFunnelStage\(\[\.\.\.flipped, \.\.\.fromEstimate\]\.map\(\(\{ id \}\) => id\), 'unresponsive', trx\)/);
   });
 });
 

@@ -37,6 +37,7 @@
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_QUIET_OVERDUE_LIST=true (owner 2026-10-24: one standing Billing bell listing open self-pay invoices no reminder reaches (paused with no end, stopped, finished, Auto Pay hold 7+ days, never set up); weekday 11:47 ET cron; admin only, sends nothing to a customer)
+ *   GATE_LEAD_NO_RESPONSE_REASON=true (owner 2026-11-01 "go": the daily lead staleness sweep (6:35 ET, services/lead-staleness.js) writes lost_reason 'no_response' on every lead it parks as 'unresponsive' (only when the reason is blank), and also parks a lead still in estimate_sent / estimate_viewed as 'unresponsive' when its linked estimate expired with a lost-group disposition (estimate-disposition.js) and the lead passes every exemption the new-lead sweep applies, has no converted_at, no newer live estimate, and no estimate send or view inside the window; a short note "estimate <disposition>" is appended to lost_notes. It never sets status 'lost' and sends no text, email or call. With it on, GET /analytics/lost in admin-leads.js also counts 'unresponsive' leads so no_response shows as a reason. Read at call time via leadNoResponseReasonLive(), strict 'true', dark by default; off = byte-identical.)
  *   GATE_UNBILLED_VISITS_LIST=true (owner 2026-10-25, Air Jobs Plan step 3: one standing Billing bell listing visits done in the last 30 days with no invoice, read from the Billing recovery page's own list; replaces the c02 check on the owner's MacBook Air; daily 07:23 ET cron; admin only, sends nothing to a customer)
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_INVOICE_EDITS=true (the Intelligence Bar's invoice edit write tools, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan, edit-type Invoices page actions: edit_invoice (title, notes and due date only: PUT /admin/invoices/:id; line items and the tax rate stay on the Invoices page), archive_invoice and unarchive_invoice (POST /:id/archive, /:id/unarchive) and unvoid_invoice (POST /:id/unvoid), each on its own confirm card (admin only, never owner-direct) by running the Invoices page's own handler in process. None sends a message, moves money, charges a card or refunds. Needs GATE_IB_PLATFORM. Read at call time via ibInvoiceEditsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses with gate_off, changing nothing.)
@@ -7869,6 +7870,11 @@ function quietOverdueListLive() {
   return process.env.GATE_QUIET_OVERDUE_LIST === 'true';
 }
 
+// GATE_LEAD_NO_RESPONSE_REASON read at CALL time (so a flip needs no redeploy); strict 'true'.
+function leadNoResponseReasonLive() {
+  return process.env.GATE_LEAD_NO_RESPONSE_REASON === 'true';
+}
+
 // GATE_UNBILLED_VISITS_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
 function unbilledVisitsListLive() {
   return process.env.GATE_UNBILLED_VISITS_LIST === 'true';
@@ -8864,6 +8870,7 @@ module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+module.exports.leadNoResponseReasonLive = leadNoResponseReasonLive;
 // GATE_SMS_MAC_DRAFTS reader, on its own line so gate PRs never conflict.
 module.exports.smsMacDraftsLive = smsMacDraftsLive;
 // GATE_PUBLIC_WATERING_PLAN reader, on its own line so gate PRs never conflict.

@@ -12,10 +12,28 @@
  *   LEAD_STALENESS_DAYS=21
  * Setting it to 0 / empty / any non-numeric value disables the sweep
  * entirely (fail-safe off switch). Leave it unset for the default.
+ *
+ * GATE_LEAD_NO_RESPONSE_REASON (owner 2026-11-01, dark): the sweep also
+ * writes lost_reason 'no_response' on every lead it parks, and parks
+ * estimate_sent / estimate_viewed leads whose estimate expired with a
+ * lost-group disposition. An expired estimate means quiet (estimates expire
+ * after 7 idle days), not lost, so the status is 'unresponsive', never 'lost'.
+ * Sends nothing to a customer.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { bridgeLeadsFunnelStage } = require('./lead-funnel-bridge');
+const { DISPOSITIONS } = require('./estimate-disposition');
+const { leadNoResponseReasonLive } = require('../config/feature-gates');
+
+const NO_RESPONSE_REASON = 'no_response';
+// The estimate dispositions that count against the win rate. Read from the
+// disposition module's own group mapping so a new lost code joins here.
+const LOST_DISPOSITION_CODES = DISPOSITIONS.filter((d) => d.group === 'lost').map((d) => d.code);
+const ESTIMATE_LEAD_STATUSES = ['estimate_sent', 'estimate_viewed'];
+// leads.estimate_id is canonical; the public-quote mirror
+// estimate_data.lead_id is the fallback (services/estimate-lead-linkage.js).
+const LINKED_ESTIMATE_SQL = "(le.id = leads.estimate_id OR (leads.estimate_id IS NULL AND le.estimate_data->>'lead_id' = leads.id::text))";
 
 function getThresholdDays() {
   const raw = process.env.LEAD_STALENESS_DAYS;
@@ -37,9 +55,20 @@ function getThresholdDays() {
 // `excludeSoftDeleted` is passed by the caller only when leads.deleted_at
 // exists (the soft-delete lane ships separately) — a removed lead must not
 // be flipped or have activity written on it.
-function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
-  return qb('leads')
-    .where('leads.status', 'new')
+function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false, noResponseReason = false }) {
+  const changes = { status: 'unresponsive', updated_at: now };
+  // Only a blank reason is filled; a reason staff already wrote stays.
+  if (noResponseReason) changes.lost_reason = qb.raw('COALESCE(leads.lost_reason, ?)', [NO_RESPONSE_REASON]);
+  return staleLeadScope(qb('leads').where('leads.status', 'new'), { now, cutoff, excludeSoftDeleted })
+    .update(changes)
+    .returning('id');
+}
+
+// Every exemption the sweep applies, shared by the `new` flip and the
+// expired-estimate flip so the two never drift. `builder` already carries the
+// status filter.
+function staleLeadScope(builder, { now, cutoff, excludeSoftDeleted = false }) {
+  return builder
     .where('leads.created_at', '<=', cutoff)
     .modify((builder) => {
       if (excludeSoftDeleted) builder.whereNull('leads.deleted_at');
@@ -128,8 +157,53 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
       this.select(1).from('ad_service_attribution')
         .whereRaw('ad_service_attribution.lead_id = leads.id')
         .whereIn('ad_service_attribution.funnel_stage', ['booked', 'completed']);
+    });
+}
+
+// The lead's linked estimate: expired with a lost-group disposition, not sent
+// or opened inside the window (a customer who opened it 10 days ago is not
+// quiet for 21), and with no newer live estimate for the same lead or
+// customer (accepted, or sent/viewed, unarchived and unexpired: the lead is
+// being worked on a fresh quote). `sub` is a builder on `estimates as le`.
+function qualifyingLostEstimate(sub, { now, cutoff }) {
+  return sub
+    .whereRaw(LINKED_ESTIMATE_SQL)
+    .where('le.status', 'expired')
+    .whereIn('le.disposition', LOST_DISPOSITION_CODES)
+    .whereRaw('COALESCE(GREATEST(le.sent_at, le.viewed_at, le.last_viewed_at), le.created_at) <= ?', [cutoff])
+    .whereNotExists(function () {
+      this.select(1).from('estimates as ne')
+        .whereRaw('ne.id <> le.id')
+        .whereRaw('ne.created_at > le.created_at')
+        .whereRaw(
+          `(ne.id = leads.estimate_id OR ne.estimate_data->>'lead_id' = leads.id::text OR ne.customer_id = leads.customer_id)
+           AND (ne.status = 'accepted' OR (ne.status IN ('sent', 'viewed') AND ne.archived_at IS NULL AND (ne.expires_at IS NULL OR ne.expires_at > ?)))`,
+          [now],
+        );
+    });
+}
+
+// Set-based UPDATE for estimate_sent / estimate_viewed leads whose estimate
+// expired as a loss. Same exemptions as the `new` flip (staleLeadScope), plus
+// converted_at and the estimate checks above. Status becomes 'unresponsive',
+// never 'lost'. The note names the estimate's disposition and is appended to
+// any note staff already wrote.
+function buildExpiredEstimateLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
+  const noteSource = qualifyingLostEstimate(qb('estimates as le'), { now, cutoff })
+    .select(qb.raw("'estimate ' || le.disposition"))
+    .orderBy('le.created_at', 'desc')
+    .limit(1);
+  return staleLeadScope(qb('leads').whereIn('leads.status', ESTIMATE_LEAD_STATUSES), { now, cutoff, excludeSoftDeleted })
+    .whereNull('leads.converted_at')
+    .whereExists(function () {
+      qualifyingLostEstimate(this.select(1).from('estimates as le'), { now, cutoff });
     })
-    .update({ status: 'unresponsive', updated_at: now })
+    .update({
+      status: 'unresponsive',
+      updated_at: now,
+      lost_reason: qb.raw('COALESCE(leads.lost_reason, ?)', [NO_RESPONSE_REASON]),
+      lost_notes: qb.raw("COALESCE(NULLIF(leads.lost_notes, '') || chr(10), '') || COALESCE(?, 'estimate expired')", [noteSource]),
+    })
     .returning('id');
 }
 
@@ -148,32 +222,50 @@ async function runLeadStalenessSweep() {
   // leads are excluded; before it lands, the condition would 500 the query.
   const excludeSoftDeleted = await db.schema.hasColumn('leads', 'deleted_at').catch(() => false);
 
-  // One UPDATE + one batched activity INSERT inside a transaction, so a
+  const noResponseReason = leadNoResponseReasonLive();
+  const opts = { now, cutoff, excludeSoftDeleted };
+  let expiredEstimates = 0;
+
+  // The UPDATE(s) + one batched activity INSERT run inside a transaction, so a
   // failed insert rolls the flips back and the next run retries cleanly.
   const marked = await db.transaction(async (trx) => {
-    const flipped = await buildStaleLeadUpdate(trx, { now, cutoff, excludeSoftDeleted });
+    const flipped = await buildStaleLeadUpdate(trx, { ...opts, noResponseReason });
+    // Gate on: quiet leads whose estimate expired as a loss are parked too.
+    const fromEstimate = noResponseReason ? await buildExpiredEstimateLeadUpdate(trx, opts) : [];
+    expiredEstimates = fromEstimate.length;
 
-    if (flipped.length) {
-      await trx('lead_activities').insert(flipped.map(({ id }) => ({
-        lead_id: id,
+    if (flipped.length || fromEstimate.length) {
+      const activity = (row, extra) => ({
+        lead_id: row.id,
         activity_type: 'status_change',
         description: `Auto-marked unresponsive after ${thresholdDays} days with no contact`,
         performed_by: 'system',
-        metadata: JSON.stringify({ auto: true, threshold_days: thresholdDays }),
-      })));
+        metadata: JSON.stringify({ auto: true, threshold_days: thresholdDays, ...extra }),
+      });
+      await trx('lead_activities').insert([
+        ...flipped.map((row) => activity(row, noResponseReason ? { lost_reason: NO_RESPONSE_REASON } : {})),
+        ...fromEstimate.map((row) => activity(row, { lost_reason: NO_RESPONSE_REASON, source: 'estimate_expired' })),
+      ]);
 
       // Collapse the flipped leads' ad_service_attribution funnel rows to the
       // terminal 'lost' bucket (unresponsive is a closed status — leaving the
       // rows at an open stage would overstate active leads). Same transaction,
       // one set-based UPDATE via the shared monotonic bridge.
-      await bridgeLeadsFunnelStage(flipped.map(({ id }) => id), 'unresponsive', trx);
+      await bridgeLeadsFunnelStage([...flipped, ...fromEstimate].map(({ id }) => id), 'unresponsive', trx);
     }
 
-    return flipped.length;
+    return flipped.length + fromEstimate.length;
   });
 
-  logger.info(`[lead-staleness] thresholdDays=${thresholdDays} marked=${marked}`);
-  return { disabled: false, marked };
+  logger.info(`[lead-staleness] thresholdDays=${thresholdDays} marked=${marked}${noResponseReason ? ` expiredEstimates=${expiredEstimates}` : ''}`);
+  return noResponseReason
+    ? { disabled: false, marked, expiredEstimates }
+    : { disabled: false, marked };
 }
 
-module.exports = { runLeadStalenessSweep, getThresholdDays, buildStaleLeadUpdate };
+module.exports = {
+  runLeadStalenessSweep,
+  getThresholdDays,
+  buildStaleLeadUpdate,
+  buildExpiredEstimateLeadUpdate,
+};

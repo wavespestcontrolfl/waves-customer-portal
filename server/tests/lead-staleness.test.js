@@ -17,6 +17,12 @@
  *     soft-delete lane ships separately; either merge order must work)
  * Effects (activity rows, summary counts, env off switch) are covered with
  * the chain-mock style used by the other sweep tests.
+ *
+ * GATE_LEAD_NO_RESPONSE_REASON (dark): off = every assertion above is
+ * unchanged; on = lost_reason 'no_response' on each flip, plus a second
+ * UPDATE for estimate_sent / estimate_viewed leads whose estimate expired as
+ * a loss (same exemptions, no converted_at, no newer live estimate, quiet for
+ * the window). It never sets status 'lost'.
  */
 const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
@@ -37,7 +43,9 @@ const {
   runLeadStalenessSweep,
   getThresholdDays,
   buildStaleLeadUpdate,
+  buildExpiredEstimateLeadUpdate,
 } = require('../services/lead-staleness');
+const { DISPOSITIONS } = require('../services/estimate-disposition');
 
 const NOW = new Date('2026-07-01T12:00:00.000Z');
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -45,9 +53,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function makeUpdateChain(result) {
   const chain = {};
   chain.where = jest.fn(() => chain);
+  chain.whereIn = jest.fn(() => chain);
   chain.whereNull = jest.fn(() => chain);
   chain.modify = jest.fn((cb) => { cb(chain); return chain; });
   chain.whereNotExists = jest.fn(() => chain);
+  chain.whereExists = jest.fn(() => chain);
+  chain.select = jest.fn(() => chain);
+  chain.orderBy = jest.fn(() => chain);
+  chain.limit = jest.fn(() => chain);
   chain.whereRaw = jest.fn(() => chain);
   chain.update = jest.fn(() => chain);
   chain.returning = jest.fn(() => chain);
@@ -55,23 +68,31 @@ function makeUpdateChain(result) {
   return chain;
 }
 
-function installDb({ flipped = [], hasDeletedAt = false } = {}) {
+// The sweep builds the `new` UPDATE first, then (gate on only) the
+// expired-estimate UPDATE: the first trx('leads') call gets `flipped`, the
+// second gets `estimateFlipped`.
+function installDb({ flipped = [], estimateFlipped = [], hasDeletedAt = false } = {}) {
   const leadsChain = makeUpdateChain(flipped);
+  const estimateChain = makeUpdateChain(estimateFlipped);
   const activityInsert = jest.fn(async () => {});
+  let leadsCalls = 0;
   const trx = jest.fn((table) => {
-    if (table === 'leads') return leadsChain;
+    if (table === 'leads') return (leadsCalls++ === 0 ? leadsChain : estimateChain);
+    if (table === 'estimates as le') return makeUpdateChain([]);
     if (table === 'lead_activities') return { insert: activityInsert };
     throw new Error(`unexpected table ${table}`);
   });
+  trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   mockDb.transaction = jest.fn(async (cb) => cb(trx));
   mockDb.schema = { hasColumn: jest.fn(async () => hasDeletedAt) };
-  return { leadsChain, activityInsert, trx };
+  return { leadsChain, estimateChain, activityInsert, trx };
 }
 
 describe('lead staleness sweep', () => {
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(NOW);
     delete process.env.LEAD_STALENESS_DAYS;
+    delete process.env.GATE_LEAD_NO_RESPONSE_REASON;
     mockDb.mockReset();
     logger.info.mockClear();
   });
@@ -79,6 +100,7 @@ describe('lead staleness sweep', () => {
   afterEach(() => {
     jest.useRealTimers();
     delete process.env.LEAD_STALENESS_DAYS;
+    delete process.env.GATE_LEAD_NO_RESPONSE_REASON;
     jest.clearAllMocks();
   });
 
@@ -173,6 +195,112 @@ describe('lead staleness sweep', () => {
       expect(sql).toContain('r.deleted_at IS NULL');
       expect(sql).toContain('p.deleted_at IS NULL');
 
+      return knex.destroy();
+    });
+  });
+
+  describe('GATE_LEAD_NO_RESPONSE_REASON (compiled SQL)', () => {
+    const knexFor = () => require('knex')({ client: 'pg' });
+    const cutoff = new Date(NOW.getTime() - 21 * DAY_MS);
+    const lostCodes = DISPOSITIONS.filter((d) => d.group === 'lost').map((d) => d.code);
+    const norm = (sql) => sql.replace(/\s+/g, ' ');
+
+    test('gate off: the new-lead UPDATE is unchanged (no lost_reason)', () => {
+      const knex = knexFor();
+      const { sql } = buildStaleLeadUpdate(knex, { now: NOW, cutoff }).toSQL();
+      expect(sql).toContain('update "leads" set "status" = ?, "updated_at" = ? where');
+      expect(sql).not.toContain('lost_reason');
+      return knex.destroy();
+    });
+
+    test('gate on: the new-lead UPDATE fills a blank reason only', () => {
+      const knex = knexFor();
+      const { sql, bindings } = buildStaleLeadUpdate(knex, { now: NOW, cutoff, noResponseReason: true }).toSQL();
+      expect(sql).toContain('set "status" = ?, "updated_at" = ?, "lost_reason" = COALESCE(leads.lost_reason, ?) where');
+      expect(bindings.slice(0, 3)).toEqual(['unresponsive', NOW, 'no_response']);
+      // The WHERE is the same one gate off uses.
+      expect(bindings.slice(3)).toEqual(['new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed']);
+      return knex.destroy();
+    });
+
+    test('expired-estimate UPDATE: status unresponsive (never lost), reason, appended note', () => {
+      const knex = knexFor();
+      const { sql, bindings } = buildExpiredEstimateLeadUpdate(knex, { now: NOW, cutoff }).toSQL();
+      const text = norm(sql);
+      expect(text).toContain('update "leads" set "status" = ?, "updated_at" = ?, "lost_reason" = COALESCE(leads.lost_reason, ?), "lost_notes" = ');
+      expect(bindings.slice(0, 3)).toEqual(['unresponsive', NOW, 'no_response']);
+      expect(bindings).not.toContain('lost');
+      // Existing notes are kept: new text is appended after a newline.
+      expect(text).toContain("COALESCE(NULLIF(leads.lost_notes, '') || chr(10), '') || COALESCE((select 'estimate ' || le.disposition from");
+      expect(text).toContain("'estimate expired'");
+      return knex.destroy();
+    });
+
+    test('expired-estimate UPDATE: only estimate_sent / estimate_viewed leads', () => {
+      const knex = knexFor();
+      const { sql, bindings } = buildExpiredEstimateLeadUpdate(knex, { now: NOW, cutoff }).toSQL();
+      expect(norm(sql)).toContain('where "leads"."status" in (?, ?) and "leads"."created_at" <= ?');
+      expect(bindings).toEqual(expect.arrayContaining(['estimate_sent', 'estimate_viewed']));
+      expect(bindings).not.toContain('new');
+      return knex.destroy();
+    });
+
+    test('expired-estimate UPDATE carries every exemption the new-lead sweep applies', () => {
+      const knex = knexFor();
+      const estimateSql = norm(buildExpiredEstimateLeadUpdate(knex, { now: NOW, cutoff, excludeSoftDeleted: true }).toSQL().sql);
+      const newSql = norm(buildStaleLeadUpdate(knex, { now: NOW, cutoff, excludeSoftDeleted: true }).toSQL().sql);
+      // Everything after the status filter in the new-lead WHERE (created_at,
+      // soft delete, follow-up, activity, wizard repeats, booked service,
+      // booked funnel row) appears verbatim in the estimate WHERE.
+      const shared = newSql.slice(newSql.indexOf('and "leads"."created_at" <= ?'), newSql.indexOf(' returning "id"'));
+      expect(shared).toContain('"leads"."deleted_at" is null');
+      expect(shared).toContain('from "lead_activities"');
+      expect(shared).toContain('from "scheduled_services"');
+      expect(shared).toContain('from "ad_service_attribution"');
+      expect(estimateSql).toContain(shared);
+      return knex.destroy();
+    });
+
+    test('expired-estimate UPDATE: converted_at blank, lost-group disposition, expired, link via FK or mirror', () => {
+      const knex = knexFor();
+      const { sql, bindings } = buildExpiredEstimateLeadUpdate(knex, { now: NOW, cutoff }).toSQL();
+      const text = norm(sql);
+      expect(text).toContain('"leads"."converted_at" is null');
+      expect(text).toContain("(le.id = leads.estimate_id OR (leads.estimate_id IS NULL AND le.estimate_data->>'lead_id' = leads.id::text))");
+      expect(text).toContain('"le"."status" = ?');
+      // Disposition codes come from the module's own lost group: dead and
+      // won_elsewhere codes never appear.
+      expect(lostCodes.length).toBeGreaterThan(0);
+      expect(bindings).toEqual(expect.arrayContaining(lostCodes));
+      for (const d of DISPOSITIONS.filter((x) => x.group !== 'lost')) {
+        expect(bindings).not.toContain(d.code);
+      }
+      expect(bindings).not.toContain('expired_unsent');
+      expect(bindings).not.toContain('converted_other_path');
+      expect(bindings).not.toContain('invalid_lead');
+      return knex.destroy();
+    });
+
+    test('expired-estimate UPDATE: estimate quiet for the window, no newer live estimate', () => {
+      const knex = knexFor();
+      const { sql, bindings } = buildExpiredEstimateLeadUpdate(knex, { now: NOW, cutoff }).toSQL();
+      const text = norm(sql);
+      // Not sent or opened inside the window.
+      expect(text).toContain('COALESCE(GREATEST(le.sent_at, le.viewed_at, le.last_viewed_at), le.created_at) <= ?');
+      // Newer live estimate for the same lead or customer exempts.
+      expect(text).toContain('not exists (select 1 from "estimates" as "ne" where ne.id <> le.id and ne.created_at > le.created_at');
+      expect(text).toContain("ne.id = leads.estimate_id OR ne.estimate_data->>'lead_id' = leads.id::text OR ne.customer_id = leads.customer_id");
+      expect(text).toContain("ne.status = 'accepted' OR (ne.status IN ('sent', 'viewed') AND ne.archived_at IS NULL AND (ne.expires_at IS NULL OR ne.expires_at > ?))");
+      // The window cutoff and the clock both reach the estimate checks.
+      expect(bindings.filter((b) => b === cutoff).length).toBeGreaterThanOrEqual(4);
+      expect(bindings.filter((b) => b === NOW).length).toBeGreaterThanOrEqual(3);
+      return knex.destroy();
+    });
+
+    test('expired-estimate UPDATE: excludeSoftDeleted adds deleted_at IS NULL', () => {
+      const knex = knexFor();
+      const { sql } = buildExpiredEstimateLeadUpdate(knex, { now: NOW, cutoff, excludeSoftDeleted: true }).toSQL();
+      expect(sql).toContain('"leads"."deleted_at" is null');
       return knex.destroy();
     });
   });
@@ -277,6 +405,89 @@ describe('lead staleness sweep', () => {
 
       expect(mockDb).not.toHaveBeenCalled();
       expect(mockDb.transaction).not.toHaveBeenCalled();
+    });
+
+    describe('GATE_LEAD_NO_RESPONSE_REASON on', () => {
+      beforeEach(() => { process.env.GATE_LEAD_NO_RESPONSE_REASON = 'true'; });
+
+      test('new-lead flips carry the reason; no second UPDATE when the gate is off', async () => {
+        delete process.env.GATE_LEAD_NO_RESPONSE_REASON;
+        const { trx } = installDb({ flipped: [{ id: 'lead-1' }] });
+        const result = await runLeadStalenessSweep();
+        expect(result).toEqual({ disabled: false, marked: 1 });
+        // Only the lead UPDATE and the activity insert: no estimate flip.
+        expect(trx.mock.calls.map(([t]) => t)).toEqual(['leads', 'lead_activities']);
+        expect(trx.raw).not.toHaveBeenCalled();
+      });
+
+      test('writes lost_reason no_response on new-lead flips, status stays unresponsive', async () => {
+        const { leadsChain, activityInsert } = installDb({ flipped: [{ id: 'lead-1' }] });
+        const result = await runLeadStalenessSweep();
+
+        expect(result).toEqual({ disabled: false, marked: 1, expiredEstimates: 0 });
+        expect(leadsChain.update).toHaveBeenCalledWith({
+          status: 'unresponsive',
+          updated_at: NOW,
+          lost_reason: { sql: 'COALESCE(leads.lost_reason, ?)', bindings: ['no_response'] },
+        });
+        expect(activityInsert).toHaveBeenCalledWith([{
+          lead_id: 'lead-1',
+          activity_type: 'status_change',
+          description: 'Auto-marked unresponsive after 21 days with no contact',
+          performed_by: 'system',
+          metadata: JSON.stringify({ auto: true, threshold_days: 21, lost_reason: 'no_response' }),
+        }]);
+      });
+
+      test('expired-estimate leads flip too: one activity path, one funnel bridge call', async () => {
+        const { estimateChain, activityInsert } = installDb({
+          flipped: [{ id: 'lead-1' }],
+          estimateFlipped: [{ id: 'lead-7' }, { id: 'lead-8' }],
+        });
+        const result = await runLeadStalenessSweep();
+
+        expect(result).toEqual({ disabled: false, marked: 3, expiredEstimates: 2 });
+        expect(estimateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'unresponsive', updated_at: NOW }));
+        expect(estimateChain.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }));
+        expect(estimateChain.whereIn).toHaveBeenCalledWith('leads.status', ['estimate_sent', 'estimate_viewed']);
+        expect(estimateChain.whereNull).toHaveBeenCalledWith('leads.converted_at');
+
+        expect(activityInsert).toHaveBeenCalledTimes(1);
+        const rows = activityInsert.mock.calls[0][0];
+        expect(rows.map((r) => r.lead_id)).toEqual(['lead-1', 'lead-7', 'lead-8']);
+        expect(rows.every((r) => r.activity_type === 'status_change' && r.performed_by === 'system')).toBe(true);
+        expect(JSON.parse(rows[1].metadata)).toEqual({
+          auto: true, threshold_days: 21, lost_reason: 'no_response', source: 'estimate_expired',
+        });
+
+        // Same funnel bridge as today's flips, once, on the same transaction.
+        expect(bridgeLeadsFunnelStage).toHaveBeenCalledTimes(1);
+        expect(bridgeLeadsFunnelStage).toHaveBeenCalledWith(['lead-1', 'lead-7', 'lead-8'], 'unresponsive', expect.any(Function));
+        expect(logger.info).toHaveBeenCalledWith('[lead-staleness] thresholdDays=21 marked=3 expiredEstimates=2');
+      });
+
+      test('only expired-estimate leads flip: still writes activity and bridges', async () => {
+        const { activityInsert } = installDb({ flipped: [], estimateFlipped: [{ id: 'lead-7' }] });
+        const result = await runLeadStalenessSweep();
+        expect(result).toEqual({ disabled: false, marked: 1, expiredEstimates: 1 });
+        expect(activityInsert).toHaveBeenCalledTimes(1);
+        expect(bridgeLeadsFunnelStage).toHaveBeenCalledWith(['lead-7'], 'unresponsive', expect.any(Function));
+      });
+
+      test('nothing eligible: no activity, no bridge', async () => {
+        const { activityInsert } = installDb({ flipped: [], estimateFlipped: [] });
+        const result = await runLeadStalenessSweep();
+        expect(result).toEqual({ disabled: false, marked: 0, expiredEstimates: 0 });
+        expect(activityInsert).not.toHaveBeenCalled();
+        expect(bridgeLeadsFunnelStage).not.toHaveBeenCalled();
+      });
+
+      test('LEAD_STALENESS_DAYS off switch still wins over the gate', async () => {
+        installDb({ flipped: [{ id: 'x' }] });
+        process.env.LEAD_STALENESS_DAYS = '0';
+        expect(await runLeadStalenessSweep()).toEqual({ disabled: true, marked: 0 });
+        expect(mockDb.transaction).not.toHaveBeenCalled();
+      });
     });
   });
 });
