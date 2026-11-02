@@ -111,6 +111,19 @@ describe('Payment Methods row hierarchy', () => {
     expect(within(spare).queryByRole('button', { name: 'Replace card' })).not.toBeInTheDocument();
   });
 
+  it('a bank account in use says Replace bank account, not Replace card (UI audit 2026-11-02)', async () => {
+    api.getCards.mockResolvedValue({ cards: [
+      { id: 'pm-bank', processor: 'stripe', methodType: 'us_bank_account', brand: null, lastFour: '6789', bankName: 'Example Bank', achStatus: 'verified', isDefault: true, autopayEnabled: true },
+      cards[1],
+    ] });
+    api.getAutopay.mockResolvedValue(autopayPayload({ autopay_payment_method_id: 'pm-bank', autopay_selected_method_ids: ['pm-bank'] }));
+    render(<BillingTab customer={customer} />);
+    await screen.findByText(/Auto Pay method/);
+    const live = rowFor('6789');
+    expect(within(live).getByRole('button', { name: 'Replace bank account' })).toBeInTheDocument();
+    expect(within(live).queryByRole('button', { name: 'Replace card' })).not.toBeInTheDocument();
+  });
+
   it('identity comes from the server set, not the per-row flag', async () => {
     // Stale per-row flag on the spare card; server says only pm-live is in use.
     api.getCards.mockResolvedValue({ cards: cards.map((c) => ({ ...c, autopayEnabled: true })) });
