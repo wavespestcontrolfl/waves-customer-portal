@@ -181,6 +181,8 @@ function buildHotLeadPage(lead, ctx) {
     doneWhen: 'urgent_caller_called_back',
     who: 'person',
     contact: true,
+    // Call: the Call Log's own "Call back" for this call (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+    buttons: require('../alert-call-button').callButtons({ callSid: ctx.callSid, customerId: ctx.customerId }),
   });
   return {
     title: page.headline,

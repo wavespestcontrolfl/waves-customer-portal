@@ -295,6 +295,27 @@ describe('admin communications voice route', () => {
     });
   });
 
+  // The bell's Call button (services/alert-call-button.js) runs this same handler in-process, as the admin.
+  describe('placeCallFromAlert (the bell\'s Call button)', () => {
+    const { placeCallFromAlert } = communicationsRouter;
+
+    test('places the call the page would, answering as the route answers', async () => {
+      mockCallCreate.mockResolvedValue({ sid: 'CA_alert' });
+      const answer = await placeCallFromAlert({ body: { to: '+15551234567', source: 'call-log-callback' }, technicianId: 'admin-1' });
+      expect(answer).toEqual({ status: 200, json: { success: true, callSid: 'CA_alert', callLogId: 'call-log-1' } });
+      expect(mockCallCreate).toHaveBeenCalledTimes(1);
+      // The admin cell rings first, from the main line, exactly as for the page's button.
+      expect(mockCallCreate.mock.calls[0][0]).toMatchObject({ to: '+19415993489', from: '+19412975749' });
+    });
+
+    test('a refusal answers its status and message; a failure the route passes on rejects', async () => {
+      await expect(placeCallFromAlert({ body: { to: '+1 (941) 599-3489', source: 'call-log-callback' }, technicianId: 'admin-1' }))
+        .resolves.toEqual({ status: 400, json: { error: 'to must be a customer phone, not the admin bridge phone' } });
+      await expect(placeCallFromAlert({ body: { to: '+15551234567' }, technicianId: 'admin-1' })).rejects.toThrow('Twilio voice unavailable');
+      expect(alertTwilioFailure).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('GET /sender (staff texts, home-line PR 3)', () => {
     const get = (qs) => withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/communications/sender?${qs}`, { headers: { Authorization: 'Bearer admin' } });

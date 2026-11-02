@@ -30,6 +30,16 @@ describe('new_lead bell links the lead row (lead-webhook.js)', () => {
     expect(insertAt).toBeGreaterThan(-1);
     expect(notifyAt).toBeGreaterThan(insertAt);
   });
+
+  // The last-resort alert was a text to the owner's phone that reached nobody since about 2026-09-01. It is
+  // now a ringing owner alert (services/owner-alerts.js), still written only when the new_lead bell did not land.
+  test('the last-resort lead alert is a ringing owner alert, only when the new_lead bell did not land', () => {
+    const fallback = src.slice(src.indexOf('if (!leadBellDelivered) {'), src.indexOf('// Fire-and-forget AI triage'));
+    expect(fallback).toMatch(/recordOwnerAlert\('web-lead', \{/);
+    expect(fallback).toMatch(/dedupeKey: `owner-alert:web-lead:\$\{leadId \|\| customer\.id\}`/);
+    expect(src).not.toMatch(/sendSMS\(/);
+    expect(require('../services/owner-alerts').RINGING_KINDS.has('web-lead')).toBe(true);
+  });
 });
 
 describe('quote-promised bell dedupes on callSid (call-recording-processor.js)', () => {

@@ -10,8 +10,8 @@
  *                             (address extracted)   →  estimate_drafted
  *
  * On reaching estimate_drafted we create (or update) a draft estimate
- * on the `estimates` table and SMS Adam at ADAM_NOTIFY_PHONE so he
- * knows a quote is waiting to be priced. Estimate creation is blocked
+ * on the `estimates` table and write an owner alert (notifyAdam) so the
+ * office knows a quote is waiting to be priced. Estimate creation is blocked
  * until an address is on file — the owner's hard requirement.
  *
  *   handleIntakeReply(customer, body) -> { handled: boolean, next?: string }
@@ -24,15 +24,11 @@
 const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
-const TwilioService = require('./twilio');
 const { classifyServiceIntent, parseCallTextReply } = require('./sms-service-intent');
-const { publicPortalUrl } = require('../utils/portal-url');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
 } = require('./estimate-automation-duplicates');
-
-const ADAM_NOTIFY_PHONE = '+19415993489';
 
 const SERVICE_LABEL = {
   pest: 'Pest Control',
@@ -185,21 +181,36 @@ async function createOrUpdateDraftEstimate(customer, interest) {
   return result;
 }
 
+// A quiet owner alert (services/owner-alerts.js; Activity and the needs-me list): the lead's own text already
+// rang its thread bell. It was a text to the owner's phone that reached nobody since about 2026-09-01.
 async function notifyAdam(customer, interest, estimate) {
-  const serviceLabel = SERVICE_LABEL[interest] || interest;
+  const serviceLabel = String(SERVICE_LABEL[interest] || interest || 'a service').replace(/_/g, ' ');
   const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Lead';
   const address = customer.address_line1 || '(no address)';
-  const portalUrl = publicPortalUrl();
-  const estimateUrl = estimate ? `${portalUrl}/admin/estimates` : portalUrl;
-
-  const message = estimate?.automationBlockedDuplicate
-    ? `🟡 Duplicate estimate blocked by automation\n${name}\n📞 ${customer.phone}\n📍 ${address}\nService: ${serviceLabel}\nExisting estimate: ${estimate.existingEstimateId}\nCreate a new estimate manually in Waves admin if needed.`
-    : `🟢 New SMS lead ready to price!\n${name}\n📞 ${customer.phone}\n📍 ${address}\nService: ${serviceLabel}\nEstimate: ${estimateUrl}`;
-
+  const blocked = !!estimate?.automationBlockedDuplicate;
+  const estimateId = blocked ? estimate.existingEstimateId : estimate?.id;
   try {
-    await TwilioService.sendSMS(ADAM_NOTIFY_PHONE, message, { messageType: 'internal_alert' });
+    const { fitAction } = require('./admin-alert-names');
+    await require('./owner-alerts').recordOwnerAlert('sms-lead', {
+      action: fitAction('Leads', name, blocked
+        ? [(who) => `check ${who}'s existing estimate`]
+        : [(who) => `price ${who}'s draft estimate`]),
+      why: blocked
+        ? `Texted for ${serviceLabel}; an open estimate blocked a new draft.`
+        : `Texted for ${serviceLabel}; the draft estimate needs a price.`,
+      link: estimateId
+        ? `/admin/estimates?estimateId=${encodeURIComponent(estimateId)}`
+        : `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+      subject: estimateId ? { type: 'estimate', id: String(estimateId) } : { type: 'customer', id: String(customer.id) },
+      text: blocked
+        ? `Duplicate estimate blocked by automation: ${name}, ${address}. Service: ${serviceLabel}. Existing estimate: ${estimate.existingEstimateId}. Create a new estimate by hand if needed.`
+        : `New SMS lead ready to price: ${name}, ${address}. Service: ${serviceLabel}.`,
+      dedupeKey: `owner-alert:sms-lead:${customer.id}:${estimateId || interest}`,
+      itemKeys: [String(estimateId || customer.id)],
+      metadata: { customerId: customer.id },
+    });
   } catch (e) {
-    logger.error(`[lead-intake] Adam notification failed: ${e.message}`);
+    logger.error(`[lead-intake] owner alert failed: ${e.message}`);
   }
 }
 

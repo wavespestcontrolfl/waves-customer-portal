@@ -39,9 +39,14 @@ async function findAttentionItems(now = new Date()) {
   // sent_at IS NULL, not status='draft': the /close path permits closing a
   // signed WDO without a successful send, and that filing is exactly as
   // stalled as a draft one.
+  // A report an admin marked "sent another way" (sent_outside_portal_at, set
+  // by POST /api/admin/projects/:id/mark-sent-outside) left by some other
+  // route, so it is not stalled: sent_at stays NULL for it, and this sweep
+  // skips it.
   const signedUnsent = await db('projects')
     .where({ project_type: 'wdo_inspection' })
     .whereNull('sent_at')
+    .whereNull('sent_outside_portal_at')
     .whereNotNull('wdo_signature')
     .whereRaw("coalesce((wdo_signature->>'signed_at')::timestamptz, updated_at) < ?", [
       new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3),

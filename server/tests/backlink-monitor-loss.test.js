@@ -489,10 +489,14 @@ describe('BacklinkMonitor verified loss detection', () => {
       { id: 'c', source_domain: 'small.example', source_url: 'https://small.example/x', domain_rating: 12, severity: 'clean', lost_reason: 'link_removed' },
       { id: 'd', source_domain: 'flaky.example', source_url: 'https://flaky.example/x', domain_rating: 70, severity: 'clean', lost_reason: 'unreachable' },
       { id: 'e', source_domain: 'spam.example', source_url: 'https://spam.example/x', domain_rating: 70, severity: 'critical', lost_reason: 'link_removed' },
+      // the cloned spam directory page that rang a 7-domain bell on 2026-11-01
+      { id: 'f', source_domain: 'linkbuilder.shop', source_url: 'https://linkbuilder.shop/dir/backlink-building-services-229521', domain_rating: 39, severity: 'watch', lost_reason: 'link_removed' },
     ]);
     expect(out.map(d => [d.domain, d.alertable])).toEqual([
       ['veniceflpestcontrol.com', false], ['good.example', true], ['dir.example', false], ['small.example', false], ['flaky.example', false], ['spam.example', false],
+      ['linkbuilder.shop', false],
     ]);
+    expect(out.find(d => d.domain === 'linkbuilder.shop').link_type).toBe('directory');
 
     // several rows from one domain: the ALERTABLE row represents the domain, not the first/rotated one
     makeDb({ seo_backlinks: (op) => (op === 'first' ? null : []) });
@@ -508,6 +512,13 @@ describe('BacklinkMonitor verified loss detection', () => {
       { id: 'a', source_domain: 'good.example', source_url: 'https://good.example/p2', domain_rating: 40, severity: 'clean', lost_reason: 'page_gone' },
     ]);
     expect(still).toEqual([expect.objectContaining({ domain: 'good.example', stillLinking: true, alertable: false })]); // another page still links → not a domain loss, row deferred
+  });
+
+  test('the spam network endings (.website/.space/.shop/.store) score as spam_tld; a .com does not', () => {
+    for (const domain of ['backlinkservices.website', 'domaindachecker.space', 'freerankchecker.shop', 'linkbuildingservices.store']) {
+      expect(BacklinkMonitor.scoreToxicity({ domain_from: domain }).reasons).toContain('spam_tld');
+    }
+    expect(BacklinkMonitor.scoreToxicity({ domain_from: 'shopsarasota.com' }).reasons).not.toContain('spam_tld');
   });
 
   test('verifyLoss maps HTTP outcomes to reasons and gives unreachable hosts a longer window', async () => {
