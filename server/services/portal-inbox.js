@@ -6,6 +6,9 @@
  *      conversation is a `portal_chat` agent_sessions row;
  *   2. customer service requests that are not resolved / closed / cancelled and
  *      were not made by staff (source 'admin').
+ * With GATE_PORTAL_BOOKING_ITEMS on, a third kind joins them (3): the open admin bells for a visitor who
+ * started to book and left (portal-unfinished-bookings.js: dedupeKey `portal-unfinished-...`). They are bells,
+ * not requests: a person marks one handled with the bell's own Done, and `closeOlder` marks them Done too.
  * The Communications Portal tab lists the last 14 days (`items`). Open items at
  * or before the cutoff are listed one by one too (`olderItems`) and counted
  * (`older`); `closeOlder` still closes them and sends NOTHING to a customer.
@@ -17,6 +20,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { portalInboxLive } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
 const { requestProperty } = require('./service-request-property');
 
 const WINDOW_DAYS = 14;
@@ -27,6 +31,12 @@ const ALERT_KEYS = ['escalationId', 'requestId'];
 const CHAT_CLOSE_NOTE = 'Closed as older than 14 days from Communications → Portal. No customer message.';
 const REQUEST_CLOSE_NOTE = 'Closed as older than 14 days (Portal tab). No email sent.';
 const ALERT_CLOSE_RESOLUTION = 'Closed as older than 14 days (Portal tab)';
+// The dedupeKey prefix of the unfinished-booking bells (portal-unfinished-bookings.js KEY_PREFIX). Repeated,
+// not imported: that module reads the database at load. A test pins the two together.
+const BOOKING_KEY_PREFIX = 'portal-unfinished-';
+
+// GATE_PORTAL_BOOKING_ITEMS, read at call time. A test that mocks feature-gates without the reader reads off.
+const bookingsLive = () => Boolean(featureGates.portalBookingItemsLive?.());
 
 // An escalation's admin bell alert marked Done = somebody already dealt with
 // it. Hide the chat then. No alert at all (before Oct 2) = keep it listed.
@@ -75,17 +85,26 @@ function openRequests(conn = db) {
   return openRequestScope(conn('service_requests as r'));
 }
 
+// Open unfinished-booking bells: admin rows not done whose key carries the prefix.
+function openBookings(conn = db) {
+  return conn('notifications as n')
+    .where('n.recipient_type', 'admin')
+    .whereNull('n.done_at')
+    .whereRaw("left(COALESCE(n.metadata->>'dedupeKey', ''), ?) = ?", [BOOKING_KEY_PREFIX.length, BOOKING_KEY_PREFIX]);
+}
+
 async function countOf(query) {
   const row = await query.clone().count({ n: '*' }).first();
   return Number(row?.n || 0);
 }
 
 async function summary(cutoff = windowCutoff()) {
-  const [chats, requests] = await Promise.all([
+  const [chats, requests, bookings] = await Promise.all([
     countOf(openChats().where('e.created_at', '>', cutoff)),
     countOf(openRequests().where('r.created_at', '>', cutoff)),
+    bookingsLive() ? countOf(openBookings().where('n.created_at', '>', cutoff)) : 0,
   ]);
-  return { count: chats + requests };
+  return { count: chats + requests + bookings };
 }
 
 // The assistant's reply right after the customer's hand-off message: the first
@@ -149,6 +168,42 @@ function requestItem(row) {
   };
 }
 
+// A booking item: the bell, with its customer (or the contact the bell carries for a visitor with none).
+// `version` is the bell's content version, which the bell's Done route requires.
+function bookingItem(row) {
+  const meta = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const named = String(meta.contactName || '').trim();
+  const customer = row.customer_id
+    ? customerOf(row)
+    : { id: null, firstName: named, lastName: '', phone: String(meta.contactPhone || '').trim(), hasTexts: false };
+  return {
+    kind: 'booking',
+    id: row.id,
+    createdAt: row.created_at,
+    version: row.version,
+    customer,
+    service: String(meta.service || ''),
+    ...(meta.checkoutEstimateId ? { estimateId: String(meta.checkoutEstimateId) } : {}),
+  };
+}
+
+// The bell's content version (notification-service NOTIFICATION_VERSION_SQL), read on the `n` alias: the
+// customers join also has a metadata column. Same values, same md5, so the Done route accepts it.
+function bookingVersionSql() {
+  return require('./notification-service')._private.NOTIFICATION_VERSION_SQL.replace(/\b(title|body|link|detail|metadata)\b/g, 'n.$1');
+}
+
+async function listBookings(cutoff, op) {
+  const rows = await openBookings()
+    .joinRaw("LEFT JOIN customers c ON c.id::text = n.metadata->>'customerId'")
+    .where('n.created_at', op, cutoff)
+    .orderBy('n.created_at', 'desc')
+    .limit(LIST_CAP)
+    .select('n.id', 'n.created_at', 'n.metadata', db.raw(`${bookingVersionSql()} AS version`),
+      'c.id as customer_id', 'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL));
+  return rows.map(bookingItem);
+}
+
 // Open items on one side of the cutoff, newest first, at most LIST_CAP of each
 // kind: `recent` is strictly after it, otherwise at or before it.
 async function listOpen(cutoff, recent) {
@@ -167,7 +222,8 @@ async function listOpen(cutoff, recent) {
     .limit(LIST_CAP)
     .select('r.id', 'r.created_at', 'r.customer_id', 'r.category', 'r.subject', 'r.description',
       'r.requested_service', 'r.source', 'r.urgency', 'r.status', 'r.metadata', 'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL));
-  return [...chatRows.map(chatItem), ...requestRows.map(requestItem)]
+  const bookingItems = bookingsLive() ? await listBookings(cutoff, op) : [];
+  return [...chatRows.map(chatItem), ...requestRows.map(requestItem), ...bookingItems]
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
@@ -177,14 +233,19 @@ async function listOpen(cutoff, recent) {
 // `older` holds their true totals.
 async function list(now = new Date()) {
   const cutoff = windowCutoff(now);
-  const [items, olderItems, recent, chats, requests] = await Promise.all([
+  const withBookings = bookingsLive();
+  const [items, olderItems, recent, chats, requests, bookings] = await Promise.all([
     listOpen(cutoff, true),
     listOpen(cutoff, false),
     summary(cutoff),
     countOf(openChats().where('e.created_at', '<=', cutoff)),
     countOf(openRequests().where('r.created_at', '<=', cutoff)),
+    withBookings ? countOf(openBookings().where('n.created_at', '<=', cutoff)) : 0,
   ]);
-  return { cutoff: cutoff.toISOString(), items, olderItems, total: recent.count, older: { chats, requests } };
+  return {
+    cutoff: cutoff.toISOString(), items, olderItems, total: recent.count,
+    older: { chats, requests, ...(withBookings ? { bookings } : {}) },
+  };
 }
 
 // Close the open admin bell alerts raised for these ids. `key` is the metadata
@@ -295,6 +356,14 @@ async function closeRequestsOlder(trx, cutoff, now) {
   return rows.map((r) => r.id || r);
 }
 
+// The open unfinished-booking bells at or before the cutoff, marked Done (the bell's own writer, so a bell a
+// person closed meanwhile is not touched again). Returns the number closed.
+async function closeBookingsOlder(trx, cutoff, alertActor) {
+  const ids = await openBookings(trx).where('n.created_at', '<=', cutoff).pluck('n.id');
+  if (!ids.length) return 0;
+  return require('./notification-service').markAdminDone(ids, alertActor, trx);
+}
+
 // Close every open item at or before `cutoff` in ONE transaction. Sends no
 // email or text: it writes rows and marks the matching admin alerts Done.
 async function closeOlder(cutoff, actor, now = new Date()) {
@@ -304,16 +373,18 @@ async function closeOlder(cutoff, actor, now = new Date()) {
     const alertActor = { by: String(actor.technicianId), role: actor.role, technicianId: actor.technicianId, resolution: ALERT_CLOSE_RESOLUTION };
     await closeAlerts('escalationId', chatIds, alertActor, trx);
     await closeAlerts('requestId', requestIds, alertActor, trx);
+    const withBookings = bookingsLive();
+    const bookingsClosed = withBookings ? await closeBookingsOlder(trx, cutoff, alertActor) : 0;
     await require('./audit-log').recordAuditEvent({
       actor_type: 'technician',
       actor_id: actor.technicianId || null,
       action: 'portal_inbox.close_older',
       resource_type: 'portal_inbox',
-      metadata: { cutoff: cutoff.toISOString(), chats: chatIds.length, requests: requestIds.length },
+      metadata: { cutoff: cutoff.toISOString(), chats: chatIds.length, requests: requestIds.length, ...(withBookings ? { bookings: bookingsClosed } : {}) },
       critical: true,
       trx,
     });
-    return { chats: chatIds.length, requests: requestIds.length };
+    return { chats: chatIds.length, requests: requestIds.length, ...(withBookings ? { bookings: bookingsClosed } : {}) };
   });
 }
 
