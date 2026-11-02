@@ -67,10 +67,12 @@ only). Many rows still never name the customer (an older raw emitter, an ops che
 - "Show full text" becomes **What to do**: what happened, one to three steps, and whether the owner or Claude
   fixes it. `server/services/admin-alert-explainer.js` asks an AI for it the first time an admin opens it
   (`POST /api/admin/notifications/:id/explain`, `TEXT_POLICIES.routineAnswer`, lane `alert_explainer`), from the
-  row's title, body, detail, page and the customer's name, and saves it on the row (`notifications.explainer`)
+  row's title, body, detail and page (phone numbers, emails and street addresses masked, as in every bell body) and
+  the customer's name, and saves it on the row (`notifications.explainer`)
   for the content version it was written from. The summary is not part of the version, so saving it never
   fences a Done or a tap; a row whose text changes gets a new one. A stamped `who` decides the fixer. When both
-  providers fail the panel shows the row's own words, marked as such, and nothing is saved. The original text
+  providers fail the panel shows the row's own words, marked as such, nothing is saved, and the row is not asked
+  about again for a minute. The original text
   stays one tap further ("Show original text"). Emitters change nothing: a good headline and why still matter,
   because the bell is read before anything is opened.
 

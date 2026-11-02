@@ -83,15 +83,19 @@ function parseExplainer(json) {
 // The page a link opens, without its ids ("/admin/customers"): the model names the page, never the id.
 const pageOf = (link) => String(link || '').split(/[?#]/)[0] || '';
 
+// An alert's words with phone numbers, emails and street addresses masked, as every bell body is (the registry's
+// redactor, read at call time), line breaks kept. The customer's name is the one detail the summary needs.
+const redacted = (text) => require('./notification-triggers').__private.redactSensitiveText(String(text || '').trim());
+
 function promptText(row, customer) {
   const meta = metaOf(row.metadata);
   const createdAt = row.created_at ? new Date(row.created_at) : null;
   const raised = createdAt && !Number.isNaN(createdAt.getTime()) ? `${formatETDayDate(createdAt)} at ${formatETTime(createdAt)}` : '';
   const stamped = STAMPED_FIXER[meta.who];
-  const fullText = String(row.detail || '').trim();
+  const fullText = redacted(row.detail);
   return [
-    `Headline: ${row.title || ''}`,
-    `Short text: ${row.body || '(none)'}`,
+    `Headline: ${redacted(row.title)}`,
+    `Short text: ${redacted(row.body) || '(none)'}`,
     `Full text:\n${fullText ? fullText.slice(0, MAX_FULL_TEXT_CHARS) : '(none)'}`,
     `Customer: ${customer?.name || 'none named'}`,
     `Page it opens: ${pageOf(row.link) || '(none)'}`,
@@ -146,6 +150,15 @@ async function writeExplainer(row, customer) {
 
 // One write at a time per row and text: a double tap, or two admins opening the same alert, share one model call.
 const inflight = new Map();
+// A write that failed is not tried again for a minute: during a provider outage each open serves the alert's own
+// words at once instead of paying for, and waiting on, another failing call.
+const FAILURE_COOLDOWN_MS = 60_000;
+const recentFailures = new Map(); // `${id}:${version}` -> when the write failed
+
+function coolingDown(key, now) {
+  for (const [k, at] of recentFailures) if (now - at >= FAILURE_COOLDOWN_MS) recentFailures.delete(k);
+  return recentFailures.has(key);
+}
 
 // The bell's "What to do" for one admin row: { status, body }. 404 when the row is gone or out of the caller's scope.
 // body: { explainer: { happened, steps, fixer, fallback? }, customer: { id, name } | null }.
@@ -157,9 +170,11 @@ async function explainAdminAlert(id, { role, technicianId = null } = {}) {
   if (cached) return { status: 200, body: { explainer: cached, customer } };
 
   const key = `${row.id}:${row.version}`;
+  if (!inflight.has(key) && coolingDown(key, Date.now())) return { status: 200, body: { explainer: fallbackExplainer(row), customer } };
   if (!inflight.has(key)) {
     inflight.set(key, writeExplainer(row, customer)
       .catch((err) => { logger.warn(`[alert-explainer] model read failed: ${err.message}`); return null; })
+      .then((shown) => { if (!shown) recentFailures.set(key, Date.now()); return shown; })
       .finally(() => inflight.delete(key)));
   }
   const shown = await inflight.get(key);
@@ -193,5 +208,5 @@ module.exports = {
   explainerLive,
   withExplainerFields,
   servedExplainer,
-  _private: { parseExplainer, promptText, fallbackExplainer, SCHEMA, SYSTEM, STORE_VERSION },
+  _private: { parseExplainer, promptText, fallbackExplainer, recentFailures, FAILURE_COOLDOWN_MS, SCHEMA, SYSTEM, STORE_VERSION },
 };

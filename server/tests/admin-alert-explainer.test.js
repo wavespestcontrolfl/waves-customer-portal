@@ -41,6 +41,7 @@ const row = (over = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  explainer._private.recentFailures.clear();
   delete process.env.GATE_ALERT_EXPLAINER;
   customersForAlerts.mockResolvedValue(new Map([[ID, { id: CUSTOMER_ID, name: 'Jane Doe' }]]));
   dispatchWithFallback.mockResolvedValue({ ok: true, json: answer, provider: 'anthropic', model: 'routine-model' });
@@ -86,6 +87,19 @@ describe('promptText', () => {
     expect(text).toContain('Page it opens: /admin/customers');
     expect(text).not.toContain(CUSTOMER_ID);
     expect(text).toContain('Raised: Mon, Nov 2 at 6:40 AM');
+  });
+
+  test('masks phone numbers, emails and street addresses in the alert\'s words, keeping its line breaks', () => {
+    const text = promptText(row({
+      title: 'Comms — call back 941-555-0123',
+      body: 'Wrote from jane.doe@example.com about 421 Spring Ave.',
+      detail: 'First line.\nCall 941-555-0123 or jane.doe@example.com.',
+    }), { id: CUSTOMER_ID, name: 'Jane Doe' });
+    expect(text).not.toMatch(/555-0123|jane\.doe@example\.com|421 Spring Ave/);
+    expect(text).toContain('***0123');
+    expect(text).toContain('[address]');
+    expect(text).toContain('First line.\nCall');
+    expect(text).toContain('Customer: Jane Doe');
   });
 
   test('says when no customer is named, and passes a stamped who as the answer to give', () => {
@@ -155,6 +169,23 @@ describe('explainAdminAlert', () => {
       },
     });
     expect(NotificationService.saveAdminExplainer).not.toHaveBeenCalled();
+  });
+
+  test('a failed write is not tried again for a minute: opens in that minute get the alert\'s own words at once', async () => {
+    NotificationService.getAdminNotificationForExplainer.mockResolvedValue(row());
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
+    const start = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
+    expect((await explainer.explainAdminAlert(ID, { role: 'admin' })).body.explainer.fallback).toBe(true);
+    clock.mockReturnValue(start + explainer._private.FAILURE_COOLDOWN_MS - 1);
+    expect((await explainer.explainAdminAlert(ID, { role: 'admin' })).body.explainer.fallback).toBe(true);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+
+    clock.mockReturnValue(start + explainer._private.FAILURE_COOLDOWN_MS);
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: answer });
+    expect((await explainer.explainAdminAlert(ID, { role: 'admin' })).body.explainer).toEqual(answer);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(2);
+    clock.mockRestore();
   });
 
   test('two opens of the same alert at once share one model call', async () => {
