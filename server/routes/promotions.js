@@ -322,14 +322,20 @@ router.post('/:id/interest', async (req, res, next) => {
     const { serviceType, serviceName } = req.body;
     const customer = req.customer;
 
-    // Create service request
-    const [request] = await db('service_requests').insert({
-      customer_id: req.customerId,
-      category: 'add_service',
+    // The service request, through the shared add-service writer: one open request per customer and service
+    // across every customer surface, so a repeat tap (or a replayed request) refreshes or reuses the open row
+    // instead of minting another, and only a new or changed request rings the office below.
+    const { writeOrRefreshCtaRequest } = require('../services/cta-service-request');
+    const { normalizeRequestedServiceKey } = require('../services/estimate-add-service-request');
+    const outcome = await writeOrRefreshCtaRequest(db, {
+      customerId: req.customerId,
+      requestedService: normalizeRequestedServiceKey(serviceType) || String(serviceType || 'other').slice(0, 80),
+      source: 'promotion',
       subject: `Interested in adding ${serviceName || serviceType}`,
       description: `Customer expressed interest via promotion card: ${promoId}`,
-      status: 'new',
-    }).returning('*');
+      revisionSnapshot: { source: 'promotion', promoId: String(promoId), serviceType: serviceType || null },
+    });
+    const { request } = outcome;
 
     // The insert has committed before dispatch. App delivery is independent
     // of the existing office alert and customer confirmation text.
@@ -351,18 +357,18 @@ router.post('/:id/interest', async (req, res, next) => {
 
     // The office hears of it through the add-a-service bell (bundle_quote_requested, a customer contact: it
     // rings and pushes, and opens the customer's requests panel). It was a text to the owner's phone that
-    // reached nobody since about 2026-09-01 (services/owner-alerts.js). Rung after the durable row; a bell
-    // failure leaves the request actionable in the requests panel.
+    // reached nobody since about 2026-09-01 (services/owner-alerts.js). Rung after the durable row, and only
+    // for a new or changed request (a deduped repeat rings nothing); a bell failure leaves the request
+    // actionable in the requests panel.
     try {
-      const { triggerNotification } = require('../services/notification-triggers');
-      await triggerNotification('bundle_quote_requested', {
+      if (!outcome.deduped) await require('../services/notification-triggers').triggerNotification('bundle_quote_requested', {
         bundled: false,
         customerId: req.customerId,
         customerName: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null,
         suggestedService: serviceName || serviceType,
         relationship: currentCount > 0 ? 'add' : 'start',
         previousTier: customer.waveguard_tier || null,
-        refreshed: false,
+        refreshed: !!outcome.refreshed,
         // GATE_PORTAL_ITEM_CLOSE (bundleRequestAlert reads it): the request row this bell is about, so the
         // Portal tab's Mark handled closes it and the relevance sweep tracks it, as for every add-a-service ask.
         requestId: request.id,
