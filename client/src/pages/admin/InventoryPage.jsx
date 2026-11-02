@@ -272,6 +272,7 @@ export default function InventoryPage() {
   // history navigation to an invalid or restricted deep link.
   useRenderedTabBeacon("/admin/inventory", tab, [searchParams]);
   const [stats, setStats] = useState(null);
+  const [statsError, setStatsError] = useState(null);
   const [toast, setToast] = useState("");
   const [productFilter, setProductFilter] = useState("all");
   const [showAddForm, setShowAddForm] = useState(false);
@@ -280,10 +281,17 @@ export default function InventoryPage() {
     const sequence = ++statsSequence.current;
     return adminFetch("/admin/inventory/stats")
       .then((value) => {
-        if (sequence === statsSequence.current) setStats(value);
+        if (sequence !== statsSequence.current) return;
+        setStats(value);
+        setStatsError(null);
       })
-
-      .catch(() => {});
+      // A failed refresh drops the old counts instead of leaving them on
+      // screen as if current (metrics audit 2026-11-01).
+      .catch((e) => {
+        if (sequence !== statsSequence.current) return;
+        setStats(null);
+        setStatsError(e?.message || "Request failed");
+      });
   }, []);
   useEffect(() => {
     loadStats();
@@ -362,6 +370,11 @@ export default function InventoryPage() {
               </Button>
             );
           })}
+        </div>
+      )}
+      {statsError && (
+        <div className="mb-[20px]">
+          <LoadRetry what="inventory stats" error={statsError} onRetry={() => { setStatsError(null); loadStats(); }} />
         </div>
       )}
       {stats && (
@@ -445,7 +458,8 @@ export default function InventoryPage() {
                     s.tone === "alert" ? "text-alert-fg" : s.tone === "warn" ? "text-warn-fg" : "text-zinc-900",
                   )}
                 >
-                  {s.value ?? 0}
+                  {/* null = the server could not read this count */}
+                  {s.value ?? "—"}
                 </div>{" "}
                 <div className="text-ui-body text-ink-secondary mt-[2px]">
                   {s.label}
@@ -4791,39 +4805,77 @@ function VendorEditForm({ vendor, onSave, onCancel }) {
 // ══════════════════════════════════════════════════════════════
 // APPROVALS TAB
 // ══════════════════════════════════════════════════════════════
+// The pending queue pages 100 at a time; the header card counts all of them.
+const APPROVALS_PER_PAGE = 100;
 function ApprovalsTab({ showToast, onUpdate }) {
   const [approvals, setApprovals] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState(new Set());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const load = () =>
-    adminFetch("/admin/inventory/approvals?status=pending&limit=100")
+  // Only the newest read may paint: a reply for an earlier page or an earlier
+  // reload is dropped.
+  const loadSequence = useRef(0);
+  const load = () => {
+    const sequence = ++loadSequence.current;
+    return adminFetch(`/admin/inventory/approvals?status=pending&limit=${APPROVALS_PER_PAGE}&page=${page}`)
       .then((d) => {
-        setApprovals(d.approvals || []);
+        if (sequence !== loadSequence.current) return;
+        const rows = d.approvals || [];
+        const count = Number(d.total) || rows.length;
+        const last = Math.max(1, Math.ceil(count / APPROVALS_PER_PAGE));
+        // Decisions shrank the queue past this page: show its new last page.
+        if (!rows.length && page > last) {
+          goToPage(last);
+          return;
+        }
+        setApprovals(rows);
+        setTotal(count);
         setLoadError(null);
         setLoading(false);
       })
       // A failed read is a failure, not "No pending approvals".
       .catch((e) => {
+        if (sequence !== loadSequence.current) return;
         setLoadError(e?.message || "Request failed");
         setLoading(false);
       });
+  };
+  // A decision re-reads through the effect, so a POST that finishes after
+  // a page change refreshes the page on screen, not the one it started on.
+  const [reloadKey, setReloadKey] = useState(0);
+  const reload = () => setReloadKey((key) => key + 1);
   useEffect(() => {
     load();
-  }, []);
+    return () => {
+      loadSequence.current += 1;
+    };
+  }, [page, reloadKey]);
+  // A new page hides the old rows until it arrives, and a selection covers
+  // the rows on screen only.
+  const pageGeneration = useRef(0);
+  const goToPage = (next) => {
+    pageGeneration.current += 1;
+    setSelected(new Set());
+    setLoading(true);
+    setPage(next);
+  };
+  const lastPage = Math.max(1, Math.ceil(total / APPROVALS_PER_PAGE));
   const handleAction = async (id, action) => {
     try {
       await adminFetch(`/admin/inventory/approvals/${id}/${action}`, {
         method: "POST",
       });
       showToast(action === "approve" ? "Approved" : "Rejected");
-      load();
+      reload();
       onUpdate();
     } catch (e) {
       showToast(`Failed: ${e.message}`);
     }
   };
   const handleBulk = async (action) => {
+    const generation = pageGeneration.current;
     try {
       // Partial failures are real (codex GH r3 P2): the endpoint returns
       // 200 with per-id processed/skipped/failed — report them instead of
@@ -4836,18 +4888,21 @@ function ApprovalsTab({ showToast, onUpdate }) {
       const failed = result?.failed || [];
       const skipped = result?.skipped || [];
       const verb = action === "approve" ? "Approved" : "Rejected";
+      // The page changed while the POST ran: its rows (and any failed id to
+      // keep selected) are no longer on screen, so the selection stays as is.
+      const samePage = generation === pageGeneration.current;
       if (failed.length || skipped.length) {
         showToast(
           `${verb} ${result?.processed ?? 0} of ${selected.size}` +
             `${failed.length ? ` — ${failed.length} failed (kept selected)` : ""}` +
             `${skipped.length ? ` — ${skipped.length} already decided` : ""}`,
         );
-        setSelected(new Set(failed));
+        if (samePage) setSelected(new Set(failed));
       } else {
         showToast(`${verb} ${selected.size} items`);
-        setSelected(new Set());
+        if (samePage) setSelected(new Set());
       }
-      load();
+      reload();
       onUpdate();
     } catch (e) {
       showToast(`Failed: ${e.message}`);
@@ -4953,6 +5008,34 @@ function ApprovalsTab({ showToast, onUpdate }) {
               </Card>
             );
           })}
+        </div>
+      )}
+      {total > APPROVALS_PER_PAGE && (
+        <div className="flex justify-between items-center mt-[12px]">
+          <div className="text-ui-body text-ink-secondary">
+            Showing {(page - 1) * APPROVALS_PER_PAGE + 1}–
+            {(page - 1) * APPROVALS_PER_PAGE + approvals.length} of {total}{" "}
+            pending
+          </div>
+          <div className="flex gap-[6px]">
+            <Button
+              disabled={page <= 1}
+              onClick={() => goToPage(page - 1)}
+              variant="secondary"
+            >
+              ← Prev
+            </Button>
+            <span className="text-ui-body text-zinc-900">
+              {page} / {lastPage}
+            </span>
+            <Button
+              disabled={page >= lastPage}
+              onClick={() => goToPage(page + 1)}
+              variant="secondary"
+            >
+              Next →
+            </Button>
+          </div>
         </div>
       )}
     </div>

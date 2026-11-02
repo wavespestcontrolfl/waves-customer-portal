@@ -18,6 +18,26 @@ const EMAIL_COLUMNS = ['voe.status as email_status', 'voe.po as email_po', 'voe.
   'voe.item_number as email_item_number', 'voe.send_attempted_at as email_send_attempted_at', 'voe.claimed_at as email_claimed_at'];
 const EMAIL_SHOWN = new Set(['sent', 'sending']);
 
+// The active queue: open and ordered requests, plus a received request whose
+// automatic order landed after that receipt (evidence.landedAfterReceive): it
+// still needs the second Receive or a revoke, and its bell links here (Codex
+// r29 P2). The Restock badge counts the same rows (countActiveRestockRequests).
+function whereActiveRestock(query, hasOrders) {
+  if (!hasOrders) return query.whereIn('prr.status', ['open', 'ordered']);
+  return query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
+}
+
+// The Restock badge: how many requests the active queue lists, so the badge
+// never reads 0 while the tab still shows work (metrics audit 2026-11-01).
+async function countActiveRestockRequests() {
+  if (!(await db.schema.hasTable('product_restock_requests'))) return 0;
+  const hasOrders = await db.schema.hasTable('vendor_orders');
+  const query = db('product_restock_requests as prr')
+    .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); });
+  const row = await whereActiveRestock(query, hasOrders).countDistinct('prr.id as count').first();
+  return Number(row?.count || 0);
+}
+
 async function listRestockRequests({ status = 'active', limit = 100, showSpend = false, officeDetail = true, requestId, productId } = {}) {
     if (requestId && require('joi').string().guid().validate(requestId).error) throw Object.assign(new Error('Invalid restock request id'), { statusCode: 400, isOperational: true });
     if (productId && require('joi').string().guid().validate(productId).error) throw Object.assign(new Error('Invalid product id'), { statusCode: 400, isOperational: true });
@@ -56,11 +76,8 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
       .orderByRaw('prr.needed_by asc nulls last')
       .orderBy('prr.created_at', 'desc')
       .limit(Math.max(1, Math.min(200, Number(limit) || 100)));
-    // Active includes a received request whose automatic order landed after
-    // that receipt (evidence.landedAfterReceive): it still needs the second
-    // Receive or a revoke, and its bell links here (Codex r29 P2).
-    if (status === 'active' && hasOrders) query = query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
-    else if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
+    if (status === 'active') query = whereActiveRestock(query, hasOrders);
+    else if (status !== 'all') query = query.whereIn('prr.status', [status]);
     if (requestId) query = query.where('prr.id', requestId);
     if (productId) query = query.where('prr.product_id', productId);
     const rows = await query;
@@ -142,4 +159,4 @@ function restockOrderView(row, showSpend, officeDetail = true) {
   };
 }
 
-module.exports = { listRestockRequests, restockMeta };
+module.exports = { countActiveRestockRequests, listRestockRequests, restockMeta };
