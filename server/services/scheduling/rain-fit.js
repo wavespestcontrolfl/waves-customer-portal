@@ -92,9 +92,12 @@ const RAIN_OK_KEYS = new Set([
   // Trunk injection (reschedule-rules.js tree_injection needs no rain-free hours).
   'palm_injection', 'palm_injection_semiannual',
   // Bora-Care in an attic or crawl space, mud dauber nests scraped under the eaves, misting-system tank refills
-  // and nozzle / pump checks. Termite foam stays outdoor: the trace registry records it as product applied
-  // outside (a spray lane, see the test that pins this list).
+  // and nozzle / pump checks.
   'bora_care', 'mud_dauber_removal', 'mosquito_misting_refill', 'mosquito_misting_system',
+  // Termite foam into wall voids (owner 2026-11-01: "these can be done in the rain out"). The trace registry
+  // still lists foam as a product lane, so it is the one named exception in the test that keeps spray lanes
+  // off this list.
+  'foam_drill', 'foam_recurring',
 ]);
 // Not a visit's work at all: a billing rider (the registry's lane), or the
 // generic appointment whose work is unknown. Left out of the booking's

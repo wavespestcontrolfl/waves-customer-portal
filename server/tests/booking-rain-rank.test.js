@@ -77,8 +77,6 @@ describe('catalog identity beats the words in a name', () => {
     ['rodent_trapping_exclusion', 'rodent_trapping', 'outdoor'],
     ['rodent_exclusion_only', null, 'outdoor'],
     ['termite_liquid', 'termite_liquid', 'outdoor'],
-    ['foam_drill', null, 'outdoor'],
-    ['foam_recurring', null, 'outdoor'],
     ['mosquito_misting_install', null, 'outdoor'],
     ['rodent_general_one_time', 'rodent_inspection', 'outdoor'],
     ['waveguard_initial_setup', null, 'outdoor'],
@@ -112,6 +110,8 @@ describe('catalog identity beats the words in a name', () => {
     ['mud_dauber_removal', null, 'ok'],
     ['mosquito_misting_refill', null, 'ok'],
     ['mosquito_misting_system', null, 'ok'],
+    ['foam_drill', null, 'ok'],
+    ['foam_recurring', null, 'ok'],
     ['general_appointment', null, 'skip'],
     ['waveguard_membership', null, 'skip'],
   ])('key %s / type %s → %s', (key, type, cls) => {
@@ -138,10 +138,13 @@ describe('catalog identity beats the words in a name', () => {
 
   // None of them may be a spray / outline lane in the trace registry: that
   // registry says product goes down outside.
+  // The one named exception: termite foam goes into wall voids (owner 2026-11-01, "these can be done in the
+  // rain out"), though the trace registry keeps it a product lane. Any other spray lane still fails here.
+  const SPRAY_LANE_EXCEPTIONS = ['foam_drill', 'foam_recurring'];
   test('no rain-OK key is a spray lane in the trace registry', () => {
     const sprayed = [...RAIN_OK_KEYS].filter((key) => traceRules.SERVICE_KEY_RULES[key]?.eligible === true
       || traceRules.FINDINGS_TYPE_RULES[key]?.eligible === true);
-    expect(sprayed).toEqual([]);
+    expect(sprayed.sort()).toEqual([...SPRAY_LANE_EXCEPTIONS].sort());
   });
 });
 
