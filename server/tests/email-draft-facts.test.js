@@ -12,39 +12,25 @@ jest.mock('../services/twilio', () => ({
 jest.mock('../services/reservation-arrival', () => ({
   arrivalStartForService: jest.fn(async (conn, row) => row.window_start),
 }));
-jest.mock('../services/appointment-reminders', () => ({
-  resolveChannelPrefsRow: jest.fn(async (customerId, prefs) => prefs),
-  apptChannel: jest.fn((value) => (value === 'email' || value === 'both' ? value : 'sms')),
-  callbackNumberHoldActiveForVisit: jest.fn(async () => false),
-}));
 
 const logger = require('../services/logger');
 const twilio = require('../services/twilio');
 const { arrivalStartForService } = require('../services/reservation-arrival');
-const AppointmentReminders = require('../services/appointment-reminders');
 const { buildEmailDraftFacts } = require('../services/email/email-draft-facts');
 
 const CUSTOMER = { id: 'cust-1', first_name: 'Jane', phone: '+15555550100' };
 // 4:07 PM ET on Sun Nov 1 2026: daylight time ended at 2 AM that day, so ET is UTC-5
 const RECEIVED_AT = new Date('2026-11-01T21:07:00Z');
 
-// Prefs that let the en-route text go out as a text (the sender's own reads).
-const TEXT_PREFS = { tech_en_route: true, sms_enabled: true, en_route_channel: 'sms' };
-
-function makeConn({ visits = [], texts = [], visitsError = null, prefs = null, property = null } = {}) {
-  const calls = { scheduled: [], sms: [], prefs: [], property: [] };
+function makeConn({ visits = [], texts = [], visitsError = null } = {}) {
+  const calls = { scheduled: [], sms: [] };
   const conn = jest.fn((table) => {
-    let rows = texts;
-    let log = calls.sms;
-    let firstRow;
-    if (table.startsWith('scheduled_services')) { rows = visits; log = calls.scheduled; }
-    if (table === 'notification_prefs') { log = calls.prefs; firstRow = prefs; }
-    if (table === 'customer_properties') { log = calls.property; firstRow = property; }
+    const rows = table.startsWith('scheduled_services') ? visits : texts;
+    const log = table.startsWith('scheduled_services') ? calls.scheduled : calls.sms;
     const builder = {};
     for (const m of ['leftJoin', 'where', 'whereNot', 'orWhere', 'whereIn', 'whereBetween', 'whereRaw', 'orderBy', 'limit', 'select']) {
       builder[m] = jest.fn((...args) => { log.push({ m, args }); return builder; });
     }
-    builder.first = jest.fn(async (...args) => { log.push({ m: 'first', args }); return firstRow; });
     builder.then = (resolve, reject) => (visitsError && table.startsWith('scheduled_services')
       ? Promise.reject(visitsError)
       : Promise.resolve(rows)).then(resolve, reject);
@@ -70,8 +56,6 @@ afterEach(() => {
   jest.clearAllMocks();
   twilio.deriveOutboundNumber.mockImplementation(async () => '+19412972817');
   arrivalStartForService.mockImplementation(async (conn, row) => row.window_start);
-  AppointmentReminders.resolveChannelPrefsRow.mockImplementation(async (customerId, prefs) => prefs);
-  AppointmentReminders.callbackNumberHoldActiveForVisit.mockImplementation(async () => false);
 });
 
 describe('buildEmailDraftFacts', () => {
@@ -120,15 +104,12 @@ describe('buildEmailDraftFacts', () => {
     expect(facts).not.toMatch(/\| technician /);
   });
 
-  test('the Waves line shows in the listed format, and the tracking-link note needs a phone on file', async () => {
-    const { conn } = makeConn({ prefs: TEXT_PREFS });
-    const withPhone = await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
+  test('the Waves line shows in the listed format; no future contact promise is ever stated', async () => {
+    const { conn } = makeConn({ visits: [VISIT] });
+    const facts = await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
     expect(twilio.deriveOutboundNumber).toHaveBeenCalledWith({ customerId: 'cust-1' });
-    expect(withPhone).toContain('Phone for this customer to call or text Waves: (941) 297-2817');
-    expect(withPhone).toContain('When the technician heads out, Waves sends a text with a live tracking link.');
-    const noPhone = await buildEmailDraftFacts({ customer: { ...CUSTOMER, phone: null }, receivedAt: RECEIVED_AT, conn });
-    expect(noPhone).toContain('Phone for this customer to call or text Waves');
-    expect(noPhone).not.toContain('live tracking link');
+    expect(facts).toContain('Phone for this customer to call or text Waves: (941) 297-2817');
+    expect(facts).not.toMatch(/tracking link|will text|sends a text/i);
   });
 
   test('texts already sent: URLs removed, whitespace collapsed, capped at 240 characters, oldest first, reservations excluded', async () => {
@@ -197,13 +178,6 @@ describe('buildEmailDraftFacts', () => {
     expect(facts).not.toMatch(/gate code/i);
   });
 
-  test('the tracking-link note is left out for a known landline', async () => {
-    const { conn } = makeConn({ prefs: TEXT_PREFS });
-    const facts = await buildEmailDraftFacts({ customer: { ...CUSTOMER, line_type: 'landline' }, receivedAt: RECEIVED_AT, conn });
-    expect(facts).toContain('Phone for this customer to call or text Waves');
-    expect(facts).not.toContain('live tracking link');
-  });
-
   test('old cancellations are filtered IN THE QUERY, before the six-row limit', async () => {
     const { conn, calls } = makeConn({ visits: [VISIT] });
     await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
@@ -222,34 +196,4 @@ describe('buildEmailDraftFacts', () => {
     expect(order.indexOf('where', order.indexOf('whereBetween'))).toBeLessThan(order.indexOf('limit'));
   });
 
-  test.each([
-    ['en-route texts off', { prefs: { ...TEXT_PREFS, tech_en_route: false } }],
-    ['SMS off', { prefs: { ...TEXT_PREFS, sms_enabled: false } }],
-    ['no notification_prefs row (the sender sends nothing then)', { prefs: null }],
-    ['the en-route channel is email', { prefs: { ...TEXT_PREFS, en_route_channel: 'email' } }],
-    ['the next visit is at a non-primary saved property (own toggles not resolved)', { prefs: TEXT_PREFS, property: { is_primary: false, active: true } }],
-    ['the next visit names a property that cannot be read', { prefs: TEXT_PREFS, property: null }],
-  ])('no tracking-text promise when %s', async (_label, setup) => {
-    const { conn } = makeConn({ visits: [{ ...VISIT, property_id: setup.property !== undefined ? 'prop-1' : null }], ...setup });
-    const facts = await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
-    expect(facts).toContain('Quarterly Pest Control Service');
-    expect(facts).not.toContain('live tracking link');
-  });
-
-  test('no tracking-text promise when the channel owner read failed or the next visit has a callback-number hold', async () => {
-    AppointmentReminders.resolveChannelPrefsRow.mockImplementationOnce(async (id, prefs) => ({ ...prefs, __prefsUnavailable: true }));
-    const first = makeConn({ visits: [VISIT], prefs: TEXT_PREFS });
-    expect(await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn: first.conn })).not.toContain('live tracking link');
-    AppointmentReminders.callbackNumberHoldActiveForVisit.mockImplementationOnce(async () => true);
-    const second = makeConn({ visits: [VISIT], prefs: TEXT_PREFS });
-    expect(await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn: second.conn })).not.toContain('live tracking link');
-    expect(AppointmentReminders.callbackNumberHoldActiveForVisit).toHaveBeenCalledWith('v-1');
-  });
-
-  test('the tracking-text promise stays for channel both, and for a visit at the primary property', async () => {
-    const both = makeConn({ visits: [VISIT], prefs: { ...TEXT_PREFS, en_route_channel: 'both' } });
-    expect(await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn: both.conn })).toContain('live tracking link');
-    const primary = makeConn({ visits: [{ ...VISIT, property_id: 'prop-1' }], prefs: TEXT_PREFS, property: { is_primary: true, active: true } });
-    expect(await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn: primary.conn })).toContain('live tracking link');
-  });
 });

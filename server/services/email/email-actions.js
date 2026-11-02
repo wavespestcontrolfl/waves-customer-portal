@@ -1103,7 +1103,9 @@ function senderOwnsCustomerFacts(email, customer) {
   const from = normalizeAddress(email.from_address);
   if (!from || normalizeAddress(customer.email) !== from) return false;
   if (normalizeAddress(email.reply_to || email.from_address) !== from) return false;
-  return hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address));
+  // Strict reader whatever GATE_EMAIL_AUTH_STRICT says: the loose whole-string match accepts a forged result quoted
+  // inside an SMTP sender address, and these are customer records.
+  return hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address), { strict: true });
 }
 
 // GATE_EMAIL_DRAFT_FACTS (owner 2026-11-02): two SYSTEM entries, or none. The facts are computed from our records for
@@ -1117,7 +1119,7 @@ async function draftFactsSystemEntries(email, customer) {
   const now = new Date();
   return [
     `FACTS FROM WAVES RECORDS (current as of ${formatETDay(now)}, ${formatETDate(now)}, ${formatETTime(now)} ET):\n${facts}`,
-    'Use the FACTS for any visit date, arrival window, status, technician name, or phone number. Use service names exactly as written in the FACTS. Never leave a [BRACKETED PLACEHOLDER] for something the FACTS answer; use a placeholder only for what they do not cover. Stay consistent with the texts Waves already sent. Never write \'sorry we missed your call\'.',
+    'Use the FACTS for any visit date, arrival window, status, technician name, or phone number. Use service names exactly as written in the FACTS. Never leave a [BRACKETED PLACEHOLDER] for something the FACTS answer; use a placeholder only for what they do not cover. Stay consistent with the texts Waves already sent. Never promise how or when Waves will contact the customer (a call, a text, an email) unless the FACTS say so. Never write \'sorry we missed your call\'.',
   ];
 }
 

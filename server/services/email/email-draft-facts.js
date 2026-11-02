@@ -6,11 +6,11 @@
  * This module computes the answers from our own records, as plain text for the
  * TRUSTED system channel. The model writes sentences around the facts.
  *
- * Reads only (never writes): visits, the Waves line, texts Waves already sent,
- * and the en-route text settings (notification_prefs, the account channel, a
- * saved property's primary flag, the callback-number hold) that decide whether
- * the tracking-text promise holds. It never includes customer-written text
- * (notes, inbound texts, access or gate codes).
+ * Reads only (never writes): visits, the Waves line, and texts Waves already
+ * sent. It never includes customer-written text (notes, inbound texts, access or
+ * gate codes). It states no future contact promise ("we will text you"): whether
+ * a text reaches someone depends on the en-route sender's whole recipient chain,
+ * so the prompt rules forbid any contact promise the facts do not state.
  * Fail-soft: any error logs a warning and returns '' so the draft goes ahead
  * without facts.
  */
@@ -104,7 +104,7 @@ async function fetchVisits(conn, customerId, receivedAt) {
     .orderBy('ss.window_start')
     .limit(VISIT_LIMIT)
     .select(
-      'ss.id', 'ss.service_type', 'ss.scheduled_date', 'ss.window_start', 'ss.reservation_service_mix', 'ss.property_id',
+      'ss.id', 'ss.service_type', 'ss.scheduled_date', 'ss.window_start', 'ss.reservation_service_mix',
       'ss.status', 'ss.en_route_at', 'ss.arrived_at', 'ss.completed_at', 'ss.cancelled_at', 't.name as tech_name',
     );
   return rows.filter(isRelevantVisit);
@@ -129,47 +129,6 @@ async function visitLines(conn, rows) {
   const lines = [];
   for (const row of rows) lines.push(await visitLine(conn, row));
   return lines;
-}
-
-const OPEN_VISIT_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_site']);
-
-// The live-tracking text promise, only when the en-route text would really go out as a text: the same reads the
-// sender (twilio.js sendTechEnRoute) makes, all read-only. The customer's notification_prefs row (no row = no
-// en-route text there either) must have tech_en_route and sms_enabled on, the account-level channel must be sms or
-// both, the phone must not be a known landline, and the next visit must carry no callback-number hold. A visit at a
-// NON-primary saved property can carry its own toggles, which this does not resolve: no promise then. Any failed or
-// unknown read = no promise.
-// A visit at a NON-primary saved property can carry its own toggles, which this does not resolve (true = unknown).
-async function nextVisitHasOwnToggles(conn, customer, nextVisit) {
-  if (!nextVisit?.property_id) return false;
-  const property = await conn('customer_properties')
-    .where({ id: nextVisit.property_id, customer_id: customer.id })
-    .first('is_primary', 'active');
-  return !property || (property.active !== false && property.is_primary !== true);
-}
-
-// The customer row's toggles and the account-level channel, as the sender reads them.
-async function enRouteTextOn(customer, prefs) {
-  if (!prefs?.tech_en_route || !prefs?.sms_enabled) return false;
-  const AppointmentReminders = require('../appointment-reminders');
-  const channelRow = await AppointmentReminders.resolveChannelPrefsRow(customer.id, prefs, customer);
-  if (!channelRow || channelRow.__prefsUnavailable) return false;
-  const channel = AppointmentReminders.apptChannel(channelRow.en_route_channel);
-  return channel === 'sms' || channel === 'both';
-}
-
-async function trackingTextPromised(conn, customer, nextVisit) {
-  if (!customer.phone || String(customer.line_type || '').toLowerCase() === 'landline') return false;
-  try {
-    if (await nextVisitHasOwnToggles(conn, customer, nextVisit)) return false;
-    const prefs = await conn('notification_prefs').where({ customer_id: customer.id }).first();
-    if (!(await enRouteTextOn(customer, prefs))) return false;
-    const { callbackNumberHoldActiveForVisit } = require('../appointment-reminders');
-    return !(nextVisit?.id && await callbackNumberHoldActiveForVisit(nextVisit.id));
-  } catch (e) {
-    logger.warn(`[email-draft-facts] tracking-text eligibility unknown, leaving the promise out: ${e.message}`);
-    return false;
-  }
 }
 
 function formatPhone(number) {
@@ -237,10 +196,6 @@ async function buildEmailDraftFacts({ customer, receivedAt, conn = defaultDb } =
     blocks.push(await section('Visits:', () => visitLines(conn, visits)));
     const phone = await wavesLine(customer.id);
     if (phone) blocks.push(`Phone for this customer to call or text Waves: ${phone}`);
-    const nextVisit = visits.find((v) => OPEN_VISIT_STATUSES.has(String(v.status || '').toLowerCase())) || null;
-    if (await trackingTextPromised(conn, customer, nextVisit)) {
-      blocks.push('When the technician heads out, Waves sends a text with a live tracking link.');
-    }
     blocks.push(await section(
       `Texts Waves already sent this customer in the last ${SMS_LOOKBACK_HOURS} hours (oldest first, ET):`,
       () => sentTextLines(conn, customer.id),
