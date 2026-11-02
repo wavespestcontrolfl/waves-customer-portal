@@ -327,7 +327,7 @@ function AskCard({ onSearch, aiFiltered, onShowAll }) {
   };
 
   return (
-    <section data-glass="card" className="waves-ask-card" aria-label="Waves AI — search for a day or time" style={estimateCard({ display: 'grid', gap: 12 })}>
+    <section data-glass="card" className="waves-ask-card" data-schedule-ask="" aria-label="Waves AI — search for a day or time" style={estimateCard({ display: 'grid', gap: 12 })}>
       <div data-gt="eyebrow" className="waves-ask-eyebrow" style={{ ...DOC_EYEBROW, marginBottom: 0 }}>Waves AI</div>
       <h2 className="waves-ask-title" style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.2, color: S.text, margin: 0 }}>
         Search for a day or time
