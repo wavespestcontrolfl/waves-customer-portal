@@ -251,6 +251,25 @@ describeWithDatabase('recurring dispatch delivery and alert concurrency', () => 
     const reopened = await database('notifications').first();
     expect(reopened.id).toBe(first.id);
     expect(reopened.read_at).toBeNull();
-    expect(reopened.title).toBe('Recurring visit still needs a time');
+    expect(reopened.title).toBe('Schedule — find a time for a recurring visit');
+  });
+
+  test('a standing card in the old words takes the new words without ringing: its read and done stay', async () => {
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    const first = await database('notifications').first();
+    const readAt = new Date('2099-01-31T14:00:00Z');
+    await database('notifications').where({ id: first.id }).update({
+      title: 'Recurring visit still needs a time',
+      body: `A recurring visit due ${due} is still awaiting placement within three days of its due date.`,
+      read_at: readAt,
+    });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    const reworded = await database('notifications').first();
+    expect(await database('notifications')).toHaveLength(1);
+    expect(reworded.id).toBe(first.id);
+    expect(reworded.title).toBe('Schedule — find a time for a recurring visit');
+    expect(reworded.body).toBe('The visit is due Feb 4 and has no time yet; check availability and customer preferences in dispatch.');
+    expect(reworded.read_at).toEqual(readAt);
+    expect(reworded.done_at).toBeNull();
   });
 });

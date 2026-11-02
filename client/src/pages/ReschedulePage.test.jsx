@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import fs from 'fs';
+import path from 'path';
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -1363,5 +1365,24 @@ describe('ReschedulePage customer pick (Quick Move hand-off)', () => {
     expect(screen.queryByText('Scheduled for you')).not.toBeInTheDocument();
     expect(screen.queryByTestId('pick-by-note')).not.toBeInTheDocument();
     expect(screen.getByText('Search for a day or time')).toBeInTheDocument();
+  });
+});
+
+describe('the Waves AI card on the glass page', () => {
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  it('keeps the 16px gap below it that every card on the page has', async () => {
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: true }));
+      if (!opts.method || opts.method === 'GET') return Promise.resolve(jsonResponse(reschedulablePayload()));
+      return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+    }));
+    renderPage();
+    const card = await screen.findByRole('region', { name: 'Waves AI — search for a day or time' });
+    expect(card).toHaveAttribute('data-schedule-ask');
+    // The glass sheet sets every ask card's margin to 16px 0 0; this rule gives the bottom back.
+    const css = fs.readFileSync(path.resolve(process.cwd(), 'src/glass/glass-theme.css'), 'utf8');
+    expect(css).toMatch(/html\[data-glass-theme\] \.waves-ask-card\[data-schedule-ask\] \{ margin-bottom: 16px !important; \}/);
   });
 });
