@@ -626,6 +626,11 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     // gh-r24: an inline unit moved to line 2 is the same premise; a different inline unit is not.
     expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: '' }, { ...BEFORE, address_line1: '123 Main St', address_line2: 'Apt 4' })).toBe(false);
     expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: '' }, { ...BEFORE, address_line1: '123 Main St', address_line2: 'Apt 7' })).toBe(true);
+    // Both unit sources count, as in addressKey: another unit in the same building is another home (pre-push P1,
+    // 2026-11-02); the same unit given twice is still one.
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: 'Building A' }, { ...BEFORE, address_line1: '123 Main St Apt 5', address_line2: 'Building A' })).toBe(true);
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: 'Building A' }, { ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: 'Building A' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: 'Apt 4' }, { ...BEFORE, address_line1: '123 Main St', address_line2: 'Apt 4' })).toBe(false);
   });
 
   test('homesDiffer reads a street line that also holds its city and ZIP as that address saved in parts (owner 2026-11-02)', () => {

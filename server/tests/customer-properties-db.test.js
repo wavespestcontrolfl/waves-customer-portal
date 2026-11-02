@@ -282,6 +282,12 @@ suite('saved-property operations against isolated Postgres', () => {
     const moved = await prefs();
     expect(moved.irrigation_home_changed_at).toBeInstanceOf(Date);
     expect(moved.irrigation_confirmed_fields).toEqual([]);
+    // Another unit in the same building is another home, even with the same line 2 (pre-push P1).
+    await db('property_preferences').where({ customer_id: customerId }).update({ irrigation_home_changed_at: null, irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes']) });
+    await promote({ address_line1: '2205 Example Grove Apt 4', address_line2: 'Building A' });
+    await db('property_preferences').where({ customer_id: customerId }).update({ irrigation_home_changed_at: null, irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes']) });
+    await promote({ address_line1: '2205 Example Grove Apt 5', address_line2: 'Building A' });
+    expect((await prefs()).irrigation_home_changed_at).toBeInstanceOf(Date);
   }, 30000);
 
   test('address gap checks follow the review queue\'s effective pin: a pinned matching primary counts, a customer with no pin stays with the queue', async () => {
