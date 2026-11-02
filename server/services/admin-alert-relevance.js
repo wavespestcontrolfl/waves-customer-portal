@@ -1354,7 +1354,8 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (wouldClose) logger.info(`[alert-relevance] shadow: recorded ${wouldClose} alert(s) the customer-contact rules would close`);
   const anyShadow = [alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode, portalChatAnsweredCloseMode].some((mode) => mode() === 'shadow');
   const lateReRung = await lateReRingPass(now);
-  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}) };
+  const estimateReRung = await estimateReRingPass(now);
+  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}), ...(estimateReRung ? { estimateReRung } : {}) };
 }
 
 // GATE_PORTAL_LATE_RERING: portal items past their one business hour ring once more (portal-late-rering.js).
@@ -1366,6 +1367,19 @@ async function lateReRingPass(now) {
     return (await require('./portal-late-rering').runPortalLateRering({ now })).rung;
   } catch (err) {
     logger.warn(`[alert-relevance] the late re-ring pass failed: ${errSummary(err)}`);
+    return null;
+  }
+}
+
+// GATE_PORTAL_ESTIMATE_RERING: an add-service request still owed its estimate after 2 business days rings once
+// more (portal-late-rering.js), whatever a person has said since. After the late re-ring pass. Off: nothing is
+// read or written. A failure is logged and never fails the sweep.
+async function estimateReRingPass(now) {
+  if (!require('../config/feature-gates').portalEstimateReringLive?.()) return null;
+  try {
+    return (await require('./portal-late-rering').runPortalEstimateRering({ now })).rung;
+  } catch (err) {
+    logger.warn(`[alert-relevance] the estimate re-ring pass failed: ${errSummary(err)}`);
     return null;
   }
 }

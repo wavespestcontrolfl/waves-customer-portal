@@ -4,7 +4,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockDb = jest.fn(() => { throw new Error('the gate is off: nothing should be read'); });
 jest.mock('../models/db', () => mockDb);
 
-const { dueAtFor, runPortalLateRering } = require('../services/portal-late-rering');
+const { dueAtFor, runPortalLateRering, estimateDueAtFor, runPortalEstimateRering } = require('../services/portal-late-rering');
 
 // Eastern wall-clock times in November 2026 (EST, UTC-5): 8 AM-8 PM is 13:00-01:00 UTC.
 const est = (day, hhmm) => new Date(`2026-11-${day}T${hhmm}:00-05:00`);
@@ -33,5 +33,41 @@ describe('the gate', () => {
     if (value === undefined) delete process.env.GATE_PORTAL_LATE_RERING; else process.env.GATE_PORTAL_LATE_RERING = value;
     expect(await runPortalLateRering({ now: new Date() })).toEqual({ skipped: true, reason: 'gate_off' });
     expect(mockDb).not.toHaveBeenCalled();
+  });
+});
+
+describe('the owed-estimate due time: 24 business hours on the 8 AM-8 PM ET clock (owner 2026-11-02)', () => {
+  test.each([
+    ['10:00 AM Mon -> 10:00 AM Wed', est('02', '10:00'), est('04', '10:00')],
+    ['7:30 PM Mon -> 7:30 PM Wed (half an hour left Mon, all of Tue, the rest Wed)', est('02', '19:30'), est('04', '19:30')],
+    ['7:00 AM Mon (before opening) -> 8:00 PM Tue (the clock starts at 8:00 AM Mon)', est('02', '07:00'), est('03', '20:00')],
+    ['8:00 PM Mon sharp -> 8:00 PM Wed', est('02', '20:00'), est('04', '20:00')],
+    ['a Friday 10:00 AM -> Sunday 10:00 AM (weekends count)', est('06', '10:00'), est('08', '10:00')],
+  ])('%s', (_label, asked, due) => {
+    expect(estimateDueAtFor(asked).getTime()).toBe(due.getTime());
+  });
+
+  test('a bad time has no due time', () => {
+    expect(estimateDueAtFor(new Date('not a date'))).toBeNull();
+  });
+});
+
+describe('the owed-estimate gate', () => {
+  afterEach(() => { delete process.env.GATE_PORTAL_ESTIMATE_RERING; });
+  test.each([[undefined], [''], ['1'], ['on'], ['TRUE'], ['shadow'], [' true']])('GATE_PORTAL_ESTIMATE_RERING = %j reads and writes nothing', async (value) => {
+    if (value === undefined) delete process.env.GATE_PORTAL_ESTIMATE_RERING; else process.env.GATE_PORTAL_ESTIMATE_RERING = value;
+    expect(require('../config/feature-gates').portalEstimateReringLive()).toBe(false);
+    expect(await runPortalEstimateRering({ now: new Date() })).toEqual({ skipped: true, reason: 'gate_off' });
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+  test('exactly "true" is live', () => {
+    process.env.GATE_PORTAL_ESTIMATE_RERING = 'true';
+    expect(require('../config/feature-gates').portalEstimateReringLive()).toBe(true);
+  });
+  test('the late re-ring gate does not turn it on', async () => {
+    process.env.GATE_PORTAL_LATE_RERING = 'true';
+    try {
+      expect(await runPortalEstimateRering({ now: new Date() })).toEqual({ skipped: true, reason: 'gate_off' });
+    } finally { delete process.env.GATE_PORTAL_LATE_RERING; }
   });
 });
