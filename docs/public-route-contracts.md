@@ -6324,6 +6324,49 @@ authenticator without a second code. The `/mfa*` self-service
 routes require the staff bearer, are fenced on the session's credential
 version, and 404 while the gate is off. OAuth callbacks validate a one-time `state` nonce, never bearer (see
 the AGENTS.md admin OAuth rule).
+Staff Sign in with Google (`GATE_STAFF_GOOGLE_SIGNIN`, dark; logic in
+`server/services/staff-google-signin.js`, routes in `server/routes/admin-auth.js`):
+live only while the gate is exactly `true` AND `GOOGLE_STAFF_SIGNIN_CLIENT_ID` +
+`GOOGLE_STAFF_SIGNIN_CLIENT_SECRET` are set. Otherwise `GET /google/start`,
+`GET /google/callback` and `POST /google/finish` answer the generic 404 body
+before any other handler, and `GET /google/status` answers `{ "enabled": false }`
+(live `{ "enabled": true }`; no other field, no database read, no limiter beyond
+the global one). `/google/start` and `/google/callback` share a production-only
+limiter of 30 per 15 min and `/google/finish` has 15 per 15 min, both keyed on
+`unauthenticatedAuthLimitKey`; all three set no-store, noindex and
+`Referrer-Policy: no-referrer`. `GET /google/start?client=web|ios&challenge=<43
+base64url chars>` (any other input: 400 JSON) inserts one
+`staff_google_signin_attempts` row (SHA-256 hex of a random state, the nonce,
+the PKCE verifier, the page challenge, a 10-minute expiry; rows older than a
+day are deleted best-effort), sets the HttpOnly SameSite=Lax cookie
+`waves_google_signin=<state>` on path `/api/admin/auth/google` for 10 minutes,
+and redirects 302 to Google's authorization endpoint (scope `openid email
+profile`, S256 PKCE, `prompt=select_account`, an `hd` hint that decides nothing).
+`GET /google/callback` always clears that cookie and always answers a 302,
+never JSON, for a refusal: the web goes to `/admin/login#google_result=<one-time
+result>` or `#google_error=<reason>` (a fragment, so the result never reaches a
+server log), and an attempt started with `client=ios` goes to
+`wavespay://google-signin?result=` or `?error=` (Waves Admin 1.7+, read by
+ASWebAuthenticationSession). The `state` must equal the cookie and match an
+unexpired attempt whose `callback_at` is still null (stamped once, atomically),
+else `expired`; Google's `error=access_denied` is `canceled`; any other Google
+error, a missing code, a failed code exchange or ID token check
+(google-auth-library: signature, audience, issuer, expiry) or a nonce mismatch
+is `failed`; an unverified address, a missing or foreign `hd` claim, an address
+outside `GOOGLE_STAFF_SIGNIN_DOMAINS`, or no active admin/technician row whose
+`technicians.google_email` is that address is `not_allowed`; a linked row whose
+pinned `google_sub` differs is `relink_needed`. The first successful callback
+pins `google_sub` with a compare-and-set under the partial unique indexes.
+`POST /google/finish { result, verifier }` burns the result first (single use,
+valid 2 minutes after the callback), then compares SHA-256(verifier) with the
+page challenge and re-reads the staff row (still active, same pinned
+`google_sub`); it then answers exactly like `/login`: `{ mfaRequired,
+challengeToken }` for an account enrolled under `GATE_ADMIN_MFA`, else
+`{ token, refreshToken, user }` plus the `waves_admin` marker cookie. Every
+finish refusal is the same 401 `GOOGLE_SIGNIN_EXPIRED`, a deliberate exception
+to the generic-404 token baseline: the sign-in page restarts on it. The Team tab
+link `PUT /api/admin/timetracking/technicians/:id/google-signin` is not public
+(staff bearer + `requireAdmin`; 404 while dark).
 `/.well-known/apple-app-site-association` + `/.well-known/assetlinks.json`
 (static universal-link association JSON for the native app shell — no auth,
 no PII, no request-derived content. **Both 404 behind GATE_UNIVERSAL_LINKS**;
