@@ -107,7 +107,7 @@ describe('buildEmailDraftFacts', () => {
   test('the Waves line shows in the listed format; no future contact promise is ever stated', async () => {
     const { conn } = makeConn({ visits: [VISIT] });
     const facts = await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
-    expect(twilio.deriveOutboundNumber).toHaveBeenCalledWith({ customerId: 'cust-1' });
+    expect(twilio.deriveOutboundNumber).toHaveBeenCalledWith({ customerId: 'cust-1', customer: CUSTOMER });
     expect(facts).toContain('Phone for this customer to call or text Waves: (941) 297-2817');
     expect(facts).not.toMatch(/tracking link|will text|sends a text/i);
   });
@@ -133,6 +133,16 @@ describe('buildEmailDraftFacts', () => {
     expect(calls.sms.find((c) => c.m === 'whereIn').args).toEqual(['status', ['sent', 'delivered']]);
     expect(calls.sms.find((c) => c.m === 'limit').args).toEqual([5]);
     expect(calls.sms.some((c) => c.m === 'whereRaw' && /review_ask|sending/.test(String(c.args[0])))).toBe(true);
+  });
+
+  test('a bare-host link (no scheme, no www) leaves the text too: the form most Waves texts carry', async () => {
+    const { conn } = makeConn({
+      texts: [{ created_at: new Date('2026-11-01T19:45:00Z'), message_body: 'Hi Jane, your visit is tomorrow. Everything about your visit: portal.example.test/l/mkhzxf258j Reply STOP to opt out.' }],
+    });
+    const facts = await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
+    expect(facts).toContain('Hi Jane, your visit is tomorrow. Everything about your visit: Reply STOP to opt out.');
+    expect(facts).not.toContain('portal.example.test');
+    expect(facts).not.toContain('/l/');
   });
 
   test('a query error returns an empty string and warns', async () => {

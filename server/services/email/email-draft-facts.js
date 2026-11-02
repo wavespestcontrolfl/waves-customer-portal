@@ -141,9 +141,11 @@ function formatPhone(number) {
 }
 
 // Fail-soft on its own: a failed line lookup drops only this fact, never the visits or texts.
-async function wavesLine(customerId) {
+// The drafter passes the customer's full row: deriveOutboundNumber reads its location from that row instead of a
+// second read whose failure would silently answer the default office line.
+async function wavesLine(customer) {
   try {
-    const number = await require('../twilio').deriveOutboundNumber({ customerId });
+    const number = await require('../twilio').deriveOutboundNumber({ customerId: customer.id, customer });
     return formatPhone(number);
   } catch (e) {
     logger.warn(`[email-draft-facts] Waves line unavailable: ${e.message}`);
@@ -151,10 +153,17 @@ async function wavesLine(customerId) {
   }
 }
 
+// Links leave the facts in every form our texts use: with a scheme, www., or a bare host with a path
+// ("portal.wavespestcontrol.com/l/abc123", the form most Waves texts carry).
+const SCHEME_LINK_RE = /https?:\/\/\S+/gi;
+const WWW_LINK_RE = /\bwww\.\S+/gi;
+const BARE_HOST_PATH_RE = /\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\/\S*/gi;
+
 function cleanTextBody(body) {
   const text = String(body || '')
-    .replace(/https?:\/\/\S+/gi, '')
-    .replace(/\bwww\.\S+/gi, '')
+    .replace(SCHEME_LINK_RE, '')
+    .replace(WWW_LINK_RE, '')
+    .replace(BARE_HOST_PATH_RE, '')
     .replace(/\s+/g, ' ')
     .trim();
   return text.length > SMS_BODY_MAX ? `${text.slice(0, SMS_BODY_MAX - 1).trimEnd()}…` : text;
@@ -194,7 +203,7 @@ async function buildEmailDraftFacts({ customer, receivedAt, conn = defaultDb } =
     const blocks = [];
     const visits = await fetchVisits(conn, customer.id, when);
     blocks.push(await section('Visits:', () => visitLines(conn, visits)));
-    const phone = await wavesLine(customer.id);
+    const phone = await wavesLine(customer);
     if (phone) blocks.push(`Phone for this customer to call or text Waves: ${phone}`);
     blocks.push(await section(
       `Texts Waves already sent this customer in the last ${SMS_LOOKBACK_HOURS} hours (oldest first, ET):`,
