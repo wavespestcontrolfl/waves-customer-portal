@@ -304,4 +304,29 @@ describe('RainOutSheet: rest of route waits for the list of the new reason', () 
     expect(screen.getByRole('button', { name: /This \+ rest of route \(3\)/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Move appointment' })).toBeEnabled();
   });
+
+  it('drops a rest-of-route pick when the new list has no other stop, so This stop stays reachable', async () => {
+    await openWithRoute();
+    let rainFails = false;
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url) === NOT_RAIN_URL) {
+        return json({
+          sameDay: [], days: [{ kind: 'day', date: '2099-01-02', window: { start: '09:00', end: '10:00' }, display: 'Fri, Jan 2, 9:00 AM-10:00 AM' }],
+          service: { window: { start: '10:00', end: '11:00' } }, remainingRouteCount: 0, extraReasonsEnabled: true,
+        });
+      }
+      if (rainFails && String(url) === `${NOT_RAIN_URL}?reasonCode=weather_rain`) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+      return base(url, init);
+    });
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'tech_emergency' } });
+    await waitFor(() => expect(screen.queryByRole('button', { name: /This \+ rest of route/ })).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeEnabled();
+
+    // Back to rain with a failing refetch: the move is this stop alone, so it is not locked.
+    rainFails = true;
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'weather_rain' } });
+    expect(await screen.findByText(/Could not refresh the rest of the route/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeEnabled();
+  });
 });

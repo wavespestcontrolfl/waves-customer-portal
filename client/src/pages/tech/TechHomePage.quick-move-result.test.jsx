@@ -222,6 +222,30 @@ describe('Tech Home Quick Move: rest of route waits for the list of the new reas
     expect(screen.getByRole('button', { name: /^Rest of route \(3 stops\)/ })).toBeInTheDocument();
     expect(moveButton()).toBeEnabled();
   });
+
+  it('drops a rest-of-route pick when the new list has no other stop, so This stop stays reachable', async () => {
+    await openWithRoute();
+    let rainFails = false;
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (path, init) => {
+      if (String(path) === NOT_RAIN_URL) {
+        const list = newList();
+        return { ...list, json: async () => ({ ...(await list.json()), remainingRouteCount: 0 }) };
+      }
+      if (rainFails && String(path) === `${NOT_RAIN_URL}?reasonCode=weather_rain`) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+      return base(path, init);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Emergency' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^Rest of route/ })).not.toBeInTheDocument());
+    expect(moveButton()).toBeEnabled();
+    expect(moveButton()).toHaveTextContent(/^Move this stop/);
+
+    // Back to rain with a failing refetch: the move is this stop alone, so it is not locked.
+    rainFails = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Rain' }));
+    expect(await screen.findByText(/Could not refresh the rest of the route/)).toBeInTheDocument();
+    expect(moveButton()).toBeEnabled();
+  });
 });
 
 // "Let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): the one MOVE TO

@@ -415,6 +415,9 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
           if (!optionsLoaded.current) setSelectedKey(answer.selectedKey);
           optionsLoaded.current = true;
           setOptionsRain(rainReason);
+          // A rain list can drop every remaining stop (all rain-OK): the scope
+          // chips then hide, so a "rest of route" pick must not stay behind them.
+          if (!(answer.options?.remainingRouteCount > 0)) setScope('job');
         }
       } catch (err) {
         if (cancelled) return;

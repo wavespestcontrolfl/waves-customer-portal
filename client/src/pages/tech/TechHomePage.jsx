@@ -1708,6 +1708,9 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
           if (!optionsLoaded.current) setSelectedKey(loaded.selectedKey);
           optionsLoaded.current = true;
           setOptionsRain(rainReason);
+          // A rain list can drop every remaining stop (all rain-OK): the scope
+          // chips then hide, so a "rest of route" pick must not stay behind them.
+          if (!(loaded.options?.remainingRouteCount > 0)) setScope('job');
         }
       } catch (err) {
         if (cancelled) return;
