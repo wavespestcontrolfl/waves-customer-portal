@@ -13,27 +13,52 @@ const { INSTANT_ANSWER_KINDS, pickStop, answer, _test } = require('../services/t
 const NOW = new Date('2026-11-02T15:00:00Z');
 const TODAY = etDateString(NOW);
 
-// A fake knex conn over an in-memory scheduled_services table. It applies the
-// filters the service sends (equality, the NOT IN status clause) and the
-// day-plan sort, and records every call so a test can read the SQL it built.
+// A fake knex conn over an in-memory scheduled_services table. It evaluates
+// the filters the service sends — equality, NOT NULL, NOT IN, and the shared
+// live-stop groups (visit-tech-relay.js liveStops: OR'd whereNull / NOT IN /
+// "> now()") — applies the day-plan sort, and records each call so a test can
+// read the query it built.
+const NOW_MARK = { now: true };
+function cell(r, col) { return r[String(col).replace(/^[a-z_]+\./, '')]; }
+function orGroup(fn) {
+  const preds = [];
+  const q = {
+    whereNull: (col) => { preds.push((r) => cell(r, col) == null); return q; },
+    orWhereNotIn: (col, vals) => { preds.push((r) => cell(r, col) != null && !vals.includes(cell(r, col))); return q; },
+    orWhere: (col, op, val) => {
+      preds.push((r) => {
+        const v = cell(r, col);
+        if (op !== '>' || v == null) return false;
+        return new Date(v).getTime() > (val === NOW_MARK ? NOW.getTime() : new Date(val).getTime());
+      });
+      return q;
+    },
+  };
+  fn(q);
+  return (r) => preds.some((p) => p(r));
+}
 function fakeConn(table) {
-  const calls = { where: [], whereRaw: [], orderByRaw: [] };
+  const calls = { where: [], whereNotNull: [], whereNotIn: [], groups: 0, orderByRaw: [] };
   const conn = (name) => {
     expect(name).toBe('scheduled_services');
     let rows = table.slice();
-    const bare = (col) => String(col).replace(/^[a-z_]+\./, '');
     const chain = {
       leftJoin: () => chain,
       where: (col, val) => {
+        if (typeof col === 'function') {
+          calls.groups += 1;
+          const keep = orGroup(col);
+          rows = rows.filter(keep);
+          return chain;
+        }
         calls.where.push([col, val]);
-        rows = rows.filter((r) => String(r[bare(col)]) === String(val));
+        rows = rows.filter((r) => String(cell(r, col)) === String(val));
         return chain;
       },
-      whereRaw: (sql, bindings) => {
-        calls.whereRaw.push([sql, bindings]);
-        rows = /track_state/.test(sql)
-          ? rows.filter((r) => r.track_state == null || !bindings.includes(r.track_state))
-          : rows.filter((r) => !bindings.includes(r.status || 'pending'));
+      whereNotNull: (col) => { calls.whereNotNull.push(col); rows = rows.filter((r) => cell(r, col) != null); return chain; },
+      whereNotIn: (col, vals) => {
+        calls.whereNotIn.push([col, vals]);
+        rows = rows.filter((r) => cell(r, col) != null && !vals.includes(cell(r, col)));
         return chain;
       },
       orderByRaw: (sql) => {
@@ -50,6 +75,7 @@ function fakeConn(table) {
     return chain;
   };
   conn.raw = (sql) => sql;
+  conn.fn = { now: () => NOW_MARK };
   conn.calls = calls;
   return conn;
 }
@@ -83,12 +109,24 @@ beforeEach(() => {
 
 describe('pickStop', () => {
   test('a visit the tracker already finished is not the stop, even while its status still reads open', async () => {
-    const rows = [
-      { id: 'tracker-done', technician_id: 'tech-1', scheduled_date: TODAY, status: 'on_site', track_state: 'complete', route_order: 1, arrived_at: '2026-11-02T14:00:00Z' },
-      { id: 'tracker-cancelled', technician_id: 'tech-1', scheduled_date: TODAY, status: 'confirmed', track_state: 'cancelled', route_order: 2 },
-      { id: 'still-open', technician_id: 'tech-1', scheduled_date: TODAY, status: 'confirmed', track_state: 'en_route', route_order: 3 },
-    ];
-    expect((await pickStop(fakeConn(rows), 'tech-1', NOW)).id).toBe('still-open');
+    const conn = fakeConn([
+      visit({ id: 'tracker-done', status: 'on_site', track_state: 'complete', route_order: 1, arrived_at: '2026-11-02T14:00:00Z' }),
+      visit({ id: 'tracker-cancelled', track_state: 'cancelled', route_order: 2 }),
+      visit({ id: 'still-open', track_state: 'en_route', route_order: 3 }),
+    ]);
+    expect((await pickStop(conn, 'tech-1', NOW)).id).toBe('still-open');
+  });
+
+  test('a slot hold never answers: an uncommitted hold has no customer, and a lapsed hold is not live', async () => {
+    const conn = fakeConn([
+      visit({ id: 'live-hold', customer_id: null, reservation_expires_at: '2026-11-02T16:00:00Z', route_order: 1 }),
+      visit({ id: 'lapsed-hold', reservation_expires_at: '2026-11-02T14:00:00Z', route_order: 2 }),
+      visit({ id: 'booked', reservation_expires_at: null, route_order: 3 }),
+    ]);
+    expect((await pickStop(conn, 'tech-1', NOW)).id).toBe('booked');
+    expect(conn.calls.whereNotNull).toEqual(['scheduled_services.customer_id']);
+    // The shared live-stop groups ran on the qualified columns: track state, hold expiry.
+    expect(conn.calls.groups).toBe(2);
   });
 
   test('prefers the on_site stop over earlier route stops, and the newest arrival among on_site rows', async () => {
@@ -111,16 +149,14 @@ describe('pickStop', () => {
     expect(_test.DAY_PLAN_ORDER).toMatch(/^COALESCE\(scheduled_services\.route_order, 999\), COALESCE\(scheduled_services\.window_start, '23:59'\)/);
   });
 
-  test('ended statuses never count, and a null status reads as pending', async () => {
+  test('ended statuses never count (the shared not-a-stop list)', async () => {
     const ended = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
     const conn = fakeConn([
       ...ended.map((status, i) => visit({ id: `ended-${status}`, status, route_order: i + 1 })),
-      visit({ id: 'open-null-status', status: null, route_order: 9 }),
+      visit({ id: 'open', status: 'confirmed', route_order: 9 }),
     ]);
-    expect((await pickStop(conn, 'tech-1', NOW)).id).toBe('open-null-status');
-    const [sql, bindings] = conn.calls.whereRaw[0];
-    expect(sql).toContain("COALESCE(scheduled_services.status, 'pending') NOT IN");
-    expect(bindings).toEqual(ended);
+    expect((await pickStop(conn, 'tech-1', NOW)).id).toBe('open');
+    expect(conn.calls.whereNotIn).toEqual([['scheduled_services.status', ended]]);
   });
 
   test('filters to the technician id and to today in ET, for an admin technician too', async () => {
@@ -233,6 +269,10 @@ describe('answer', () => {
     deterministicVisitFacts.mockResolvedValueOnce({ access: null, last_visit: null });
     expect((await answer(conn, 'last_treatment', { technicianId: 'tech-1', now: NOW })).lines)
       .toEqual(['No earlier visit on this service line.']);
+    // A failed history read is "unknown", never the claim that no visit exists.
+    deterministicVisitFacts.mockResolvedValueOnce({ access: null, last_visit: null, history_unavailable: true });
+    expect((await answer(conn, 'last_treatment', { technicianId: 'tech-1', now: NOW })).lines)
+      .toEqual(['The visit history could not be read. Check the visit brief.']);
     deterministicVisitFacts.mockResolvedValueOnce({ access: null, last_visit: { date: '2026-08-04', type: 'Lawn Care', products: [] } });
     expect((await answer(conn, 'last_treatment', { technicianId: 'tech-1', now: NOW })).lines)
       .toEqual(['Last visit: 2026-08-04 — Lawn Care']);

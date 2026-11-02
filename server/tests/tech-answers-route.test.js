@@ -38,11 +38,14 @@ let wheres;
 function primeDb(rows) {
   wheres = [];
   db.raw = jest.fn((sql) => sql);
+  db.fn = { now: () => 'now()' };
   db.mockImplementation(() => {
+    // The service's own suite evaluates the stop filters; here they only chain.
     const chain = {
       leftJoin: () => chain,
-      where: (col, val) => { wheres.push([col, val]); return chain; },
-      whereRaw: () => chain,
+      where: (col, val) => { if (typeof col !== 'function') wheres.push([col, val]); return chain; },
+      whereNotNull: () => chain,
+      whereNotIn: () => chain,
       orderByRaw: () => chain,
       select: async () => rows,
     };

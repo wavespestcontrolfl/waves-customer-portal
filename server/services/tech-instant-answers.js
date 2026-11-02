@@ -17,9 +17,7 @@
 const { etDateString } = require('../utils/datetime-et');
 const { deterministicVisitFacts } = require('./previsit-brief');
 const { redactAccessCodes } = require('./context-aggregator');
-
-const ENDED_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
-const TRACKER_DONE_STATES = ['complete', 'cancelled'];
+const { liveStops } = require('./visit-tech-relay');
 
 // The tech day plan order: dispatch.js jobs, stops-ahead.js and
 // visit-tech-relay.js sort the same way (route_order, window start, created).
@@ -39,22 +37,18 @@ function arrivedMs(row) {
 
 // The stop the tech is at (newest arrival first), else the next open stop of
 // today's route. Returns the visit row (with customer name and address) or null.
+// A stop is what the tech day route counts as one: the shared live-stop
+// predicates (visit-tech-relay.js liveStops: not ended, not finished by the
+// tracker, no lapsed slot hold) plus a customer on the row, which leaves out a
+// booking's uncommitted slot hold (customer_id is set only when it books).
 async function pickStop(conn, technicianId, now = new Date()) {
   if (!technicianId) return null;
-  const rows = await conn('scheduled_services')
+  const query = conn('scheduled_services')
     .leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
     .where('scheduled_services.technician_id', technicianId)
     .where('scheduled_services.scheduled_date', etDateString(now))
-    .whereRaw(
-      `COALESCE(scheduled_services.status, 'pending') NOT IN (${ENDED_STATUSES.map(() => '?').join(', ')})`,
-      ENDED_STATUSES
-    )
-    // The tracker can finish a visit before its status moves; the same done
-    // states visit-tech-relay.js leaves out of a tech's current visits.
-    .whereRaw(
-      `(scheduled_services.track_state IS NULL OR scheduled_services.track_state NOT IN (${TRACKER_DONE_STATES.map(() => '?').join(', ')}))`,
-      TRACKER_DONE_STATES
-    )
+    .whereNotNull('scheduled_services.customer_id');
+  const rows = await liveStops(query, conn, 'scheduled_services.')
     .orderByRaw(DAY_PLAN_ORDER)
     .select(
       'scheduled_services.id',
@@ -130,6 +124,8 @@ function productNames(products) {
 
 function lastTreatmentLines(facts) {
   const last = facts && facts.last_visit;
+  // An unreadable history is "unknown", never "no earlier visit".
+  if (!last && (!facts || facts.history_unavailable)) return ['The visit history could not be read. Check the visit brief.'];
   if (!last) return ['No earlier visit on this service line.'];
   const names = productNames(last.products);
   return [
@@ -161,4 +157,4 @@ async function answer(conn, kind, { technicianId, now = new Date() } = {}) {
   return { kind, title: body.title, lines: body.lines, visitId: stop.id };
 }
 
-module.exports = { INSTANT_ANSWER_KINDS, pickStop, answer, _test: { DAY_PLAN_ORDER, ENDED_STATUSES, TRACKER_DONE_STATES } };
+module.exports = { INSTANT_ANSWER_KINDS, pickStop, answer, _test: { DAY_PLAN_ORDER } };
