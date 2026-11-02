@@ -3,6 +3,7 @@
  * runner's pure parts (ib-replay.js, ib-replay-export.js). Synthetic data only.
  */
 
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const lib = require('../../ops/agents/ib-replay-lib');
@@ -91,10 +92,27 @@ describe('replay safety', () => {
     expect(lib.replayEnv(caller, {}, { databaseUrl: 'postgresql://127.0.0.1:5432/ib_replay_b', apiKey: 'real' }).ANTHROPIC_API_KEY).toBe('real');
   });
 
-  test('only a localhost database named ib_replay* is accepted', () => {
-    for (const url of ['postgres://prod.example.com/ib_replay', 'postgresql://localhost/waves_test', 'not a url', undefined]) {
+  test('only a localhost database named ib_replay* is accepted, with no query string to redirect it', () => {
+    for (const url of ['postgres://prod.example.com/ib_replay', 'postgresql://localhost/waves_test', 'not a url', undefined,
+      'postgresql://localhost/ib_replay?host=remote.example.com', 'mysql://localhost/ib_replay']) {
       expect(() => lib.localDatabaseUrl(url)).toThrow(/ib_replay/);
     }
+    expect(lib.localDatabaseUrl('postgresql://owner@localhost:5432/ib_replay_dev')).toBe('postgresql://owner@localhost:5432/ib_replay_dev');
+  });
+
+  test('a written file is owner-only even when it replaces a readable one', () => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ib-replay-')), 'cases.json');
+    fs.writeFileSync(file, 'old', { mode: 0o644 });
+    lib.writePrivateFile(file, 'new');
+    expect(fs.readFileSync(file, 'utf8')).toBe('new');
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  test('a run refuses a budget or limit it could not enforce', () => {
+    for (const bad of [['--max-usd', 'oops'], ['--max-usd', 'Infinity'], ['--max-usd', '0'], ['--limit', '2.5'], ['--limit', '0']]) {
+      expect(() => replay.parseArgs(['run', ...bad])).toThrow(/--max-usd|--limit/);
+    }
+    expect(replay.parseArgs(['run', '--max-usd', '2.5', '--limit', '5'])).toMatchObject({ maxUsd: 2.5, limit: 5 });
   });
 
   test('case and result files must be outside the checkout', () => {

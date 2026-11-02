@@ -6,6 +6,7 @@
  * database, no network, no server modules (server/tests/ib-replay-lib.test.js).
  */
 
+const fs = require('fs');
 const path = require('path');
 
 // USD per million tokens. A cache write costs 1.25x input (5 minutes) or 2x
@@ -120,13 +121,15 @@ function profileFrom(env) {
 }
 
 // The replay writes its own task, thread and ledger rows, so it runs only on
-// a dedicated local database: localhost, named ib_replay*.
+// a dedicated local database: localhost, named ib_replay*. A query string is
+// refused outright: pg reads ?host= (and other settings) from it, over the host.
 function localDatabaseUrl(url) {
   let parsed;
   try { parsed = new URL(String(url || '')); } catch { parsed = null; }
   const name = parsed ? parsed.pathname.replace(/^\//, '') : '';
-  if (!parsed || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname) || !name.startsWith('ib_replay')) {
-    throw new Error('IB_REPLAY_DATABASE_URL must be a localhost database named ib_replay*');
+  if (!parsed || !['postgres:', 'postgresql:'].includes(parsed.protocol) || parsed.search
+      || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname) || !name.startsWith('ib_replay')) {
+    throw new Error('IB_REPLAY_DATABASE_URL must be postgresql://localhost/ib_replay* with no query string');
   }
   return parsed.toString();
 }
@@ -158,6 +161,19 @@ function assertOutsideRepo(file, repoRoot) {
   return abs;
 }
 
+// Owner-only (0600) even over an existing file: a new file is created
+// exclusively with that mode, then renamed over the target.
+function writePrivateFile(file, text) {
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const fd = fs.openSync(temp, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, text);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(temp, file);
+}
+
 // Two runs of the same cases side by side, and the cases whose verdict changed.
 function compareRuns(before, after) {
   const afterById = new Map(after.results.map((r) => [r.id, r]));
@@ -169,5 +185,5 @@ function compareRuns(before, after) {
 
 module.exports = {
   PRICES, costUsd, buildTape, caseFromTask, pickCases, scoreFirstTool, stableJson,
-  profileFrom, localDatabaseUrl, replayEnv, assertOutsideRepo, compareRuns, FORCED_OFF,
+  profileFrom, localDatabaseUrl, replayEnv, assertOutsideRepo, writePrivateFile, compareRuns, FORCED_OFF,
 };

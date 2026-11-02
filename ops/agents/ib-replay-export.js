@@ -84,7 +84,7 @@ async function main(argv) {
     const cases = lib.pickCases(all, args.limit);
     const file = { version: 1, exportedAt: new Date().toISOString(), days: args.days, profile: lib.profileFrom(process.env), roster, cases };
     fs.mkdirSync(path.dirname(args.out), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(args.out, `${JSON.stringify(file, null, 1)}\n`, { mode: 0o600 });
+    lib.writePrivateFile(args.out, `${JSON.stringify(file, null, 1)}\n`);
     const kinds = (kind) => cases.filter((c) => c.kind === kind).length;
     console.log(`${rows.length} saved requests read; ${all.length} usable; ${cases.length} saved`
       + ` (${kinds('card')} card, ${kinds('read')} read); ${Object.keys(file.profile).length} settings; roster ${roster.length}.`);

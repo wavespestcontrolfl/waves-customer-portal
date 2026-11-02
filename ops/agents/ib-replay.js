@@ -63,6 +63,9 @@ function parseArgs(argv) {
     else if (arg.startsWith('--')) throw new Error(`unknown option: ${arg}`);
     else args.files.push(arg);
   }
+  // A non-number budget would never be reached, so it would never stop a run.
+  if (!Number.isFinite(args.maxUsd) || args.maxUsd <= 0) throw new Error('--max-usd must be a number above 0');
+  if (!Number.isInteger(args.limit) || args.limit < 1) throw new Error('--limit must be a whole number above 0');
   return args;
 }
 
@@ -234,7 +237,7 @@ async function runCases(args) {
   }
   const spentUsd = Number(results.reduce((sum, r) => sum + (r.costUsd || 0), 0).toFixed(4));
   const report = { version: 1, mode: 'first-tool', ranAt: new Date().toISOString(), execute: args.execute, set, cases: path.resolve(args.cases), spentUsd, results };
-  fs.writeFileSync(out, `${JSON.stringify(report, null, 1)}\n`, { mode: 0o600 });
+  lib.writePrivateFile(out, `${JSON.stringify(report, null, 1)}\n`);
   for (const r of results) console.log(`${String(r.id).slice(0, 8)}  ${r.kind.padEnd(4)}  ${r.expected} -> ${r.actual || '-'}  ${r.verdict}${r.error ? `  (${r.status} ${r.error})` : ''}`);
   const count = (verdict) => results.filter((r) => r.verdict === verdict).length;
   console.log(args.execute
