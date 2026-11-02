@@ -100,7 +100,7 @@ function printPlan(plan) {
     + `${plan.oldWeekday}->${plan.newWeekday}${plan.flags.length ? ` flags=[${plan.flags.join(', ')}]` : ''}`
     + `${plan.held ? ` HELD=[${plan.heldReasons.join(', ')}]` : ''}`);
   for (const v of plan.visits) {
-    const text = v.kind === 'move' ? `${v.from} -> ${v.to} ${v.toWs || 'untimed'} (${v.shift > 0 ? '+' : ''}${v.shift}d)`
+    const text = v.kind === 'move' ? `${v.from} -> ${v.to} ${v.toWs || 'untimed'} (${v.shift > 0 ? '+' : ''}${v.shift}d)${v.closedFrom ? ` (round day ${v.closedFrom} is closed)` : ''}`
       : `keep ${v.from}${v.reason ? ` (${v.reason})` : v.kind === 'next' ? ' (next visit)' : ' (already on its round day)'}`;
     console.log(`  visit=${v.id} ${text}`);
   }
