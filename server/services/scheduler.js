@@ -5212,6 +5212,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 8:20AM — Follow-up due alerts (GATE_FOLLOWUP_DUE_ALERT; returns before
+  // any read when off). Owner 2026-11-02 (B1): a flagged follow-up that is due
+  // and has no later visit gets one Schedule bell on its due date (link to the
+  // customer page, where the owner books); the ones already more than 3 days
+  // past due share one catch-up bell. Each run closes the bells whose
+  // follow-up got booked. Admin notifications only: books nothing, sends
+  // nothing to a customer.
+  // =========================================================================
+  cron.schedule('20 8 * * *', async () => {
+    if (!require('../config/feature-gates').followupDueAlertLive()) return;
+    try {
+      await runExclusive('followup-due-alerts', async () => {
+        const result = await require('./followup-due-alerts').runFollowupDueAlerts();
+        logger.info(`Follow-up due alerts: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed, ${result.listed ?? 0} on the catch-up list (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Follow-up due alerts failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 7:23AM — Unbilled visits (GATE_UNBILLED_VISITS_LIST; returns before
   // any read when off). Owner 2026-10-25 (Air Jobs Plan step 3): one standing
   // Billing bell lists the visits done in the last 30 days with no invoice,
