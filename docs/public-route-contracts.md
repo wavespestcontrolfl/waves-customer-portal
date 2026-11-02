@@ -7337,7 +7337,8 @@ lockout after 5 wrong in a row with one admin alert) and then answers fixed
 commands with no model, always in the technician's own scope: next stop,
 access notes, last treatment, the stop's codes (only while
 `GATE_ACCESS_CODES_SECTION` is on; `listForVisit`, one `audit_log` row
-without the codes), the set-text reply, and a set text
+without the codes), the set-text reply (only while `GATE_TECH_SET_TEXTS`
+is on), and a set text
 only after a read-back of the name, street and wording and a spoken "yes"
 (`tech-line-texts.js sendSetText`, so `GATE_TECH_SET_TEXTS` and every send
 check apply). Nothing from the call is kept. `/voice` rejects the number

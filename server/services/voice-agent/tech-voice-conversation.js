@@ -32,7 +32,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { techVoiceLineLive } = require('../../config/feature-gates');
+const { techVoiceLineLive, techSetTextsLive } = require('../../config/feature-gates');
 const { TECH_VOICE_SOURCE } = require('./relay-protocol');
 const { applyAssignable } = require('../technician-eligibility');
 const { checkTechVoicePin } = require('../tech-voice-pin');
@@ -60,6 +60,7 @@ const SAY = Object.freeze({
   no_codes: 'There is no code on file for this stop.',
   codes_failed: 'I could not read the codes for this stop. Check the app.',
   codes_off: 'Access codes are turned off right now. Check the app or call the office.',
+  set_texts_off: 'Set texts are not turned on yet.',
   confirm_again: 'Say yes to send it, or no.',
   not_sent: 'Not sent. What next?',
   sent: 'Sent. What next?',
@@ -292,6 +293,9 @@ class TechVoiceConversation {
   }
 
   async _replies() {
+    // The set-text kill switch the reply card's route honors (GATE_TECH_SET_TEXTS):
+    // off, no customer message is read or spoken.
+    if (!techSetTextsLive()) return this.say(SAY.set_texts_off);
     const stop = await pickStop(db, this.tech.id, this._now());
     if (!stop) return this.say(SAY.no_stop);
     const ctx = await techLineContext(this.tech.id, { strict: true });

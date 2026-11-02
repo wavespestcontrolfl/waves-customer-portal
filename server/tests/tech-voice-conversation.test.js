@@ -5,7 +5,7 @@
  * set text back before it sends, and logs a code disclosure without the code.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ techVoiceLineLive: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ techVoiceLineLive: jest.fn(() => true), techSetTextsLive: jest.fn(() => true) }));
 jest.mock('../services/technician-eligibility', () => ({ applyAssignable: jest.fn((q) => q) }));
 jest.mock('../services/tech-voice-pin', () => ({ checkTechVoicePin: jest.fn() }));
 jest.mock('../services/tech-instant-answers', () => ({ pickStop: jest.fn(), answer: jest.fn() }));
@@ -26,7 +26,7 @@ jest.mock('../models/db', () => jest.fn((table) => {
   return chain;
 }));
 
-const { techVoiceLineLive } = require('../config/feature-gates');
+const { techVoiceLineLive, techSetTextsLive } = require('../config/feature-gates');
 const { checkTechVoicePin } = require('../services/tech-voice-pin');
 const { pickStop, answer } = require('../services/tech-instant-answers');
 const { techLineContext } = require('../services/tech-line');
@@ -247,6 +247,14 @@ describe('commands', () => {
     expect(setTextReply).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       customerId: 'cust-1', customerPhone: '+19415550123', lineNumber: '+19413529161', visitIds: ['visit-1'],
     }));
+  });
+
+  test('with the set-text kill switch off, "any replies" reads and speaks no customer message', async () => {
+    techSetTextsLive.mockReturnValueOnce(false);
+    const { say } = await session();
+    expect(await say('any replies')).toBe(SAY.set_texts_off);
+    expect(pickStop).not.toHaveBeenCalled();
+    expect(setTextReply).not.toHaveBeenCalled();
   });
 
   test('any replies on a grouped stop reads every member of the visit, so a text sent for a finished member still counts', async () => {
