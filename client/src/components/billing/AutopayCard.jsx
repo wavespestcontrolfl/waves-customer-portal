@@ -440,7 +440,12 @@ export default function AutopayCard({
       // while GATE_PORTAL_ACH_AUTOPAY is off; the echoed paymentMethodTypes
       // decides the bank affordances.
       const setupData = await api.createSetupIntent('card_or_bank');
-      setAchOffered((setupData.paymentMethodTypes || []).includes('us_bank_account'));
+      const bankOffered = (setupData.paymentMethodTypes || []).includes('us_bank_account');
+      setAchOffered(bankOffered);
+      // Bank first (owner 2026-11-01): the Payment Element lists the bank tab
+      // first, so the authorization shown at mount must be the bank (ACH) one
+      // — never rely on Stripe firing a 'change' event at mount.
+      setAddMethodType(bankOffered ? 'us_bank_account' : 'card');
       const stripe = await getStripe(setupData.publishableKey);
       stripeRef.current = stripe;
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
@@ -449,7 +454,7 @@ export default function AutopayCard({
         if (mountRef.current) {
           const pe = elements.create('payment', {
             layout: { type: 'tabs' },
-            paymentMethodOrder: ['apple_pay', 'google_pay', 'card', 'us_bank_account'],
+            paymentMethodOrder: ['us_bank_account', 'card', 'apple_pay', 'google_pay'],
           });
           pe.mount(mountRef.current);
           paymentElementRef.current = pe;
@@ -699,7 +704,7 @@ export default function AutopayCard({
                 })
               )}
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), alignSelf: 'flex-start' }} disabled={saving} onClick={startAddCard}>
-                Add new card
+                Add payment method
               </button>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>

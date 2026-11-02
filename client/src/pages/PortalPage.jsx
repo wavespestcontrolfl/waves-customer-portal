@@ -6451,7 +6451,14 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       // while GATE_PORTAL_ACH_AUTOPAY is off, and the echoed
       // paymentMethodTypes is what actually decides the bank affordances.
       const setupData = await api.createSetupIntent('card_or_bank');
-      setAchOffered((setupData.paymentMethodTypes || []).includes('us_bank_account'));
+      const bankOffered = (setupData.paymentMethodTypes || []).includes('us_bank_account');
+      setAchOffered(bankOffered);
+      // Bank-first (owner 2026-11-01): the first tab is bank whenever it is
+      // offered, so the authorization state starts on the FIRST tab, set here
+      // as soon as setupData arrives. Never rely on Stripe firing a 'change'
+      // event at mount (Codex #2706 r3: a stale 'card' default could show the
+      // CARD authorization while a bank account saves).
+      setAddMethodType(bankOffered ? 'us_bank_account' : 'card');
       const stripe = await getStripe(setupData.publishableKey);
       stripeRef.current = stripe;
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
@@ -6462,12 +6469,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         if (cardMountRef.current) {
           const pe = elements.create('payment', {
             layout: { type: 'tabs' },
-            // Card-first (Codex #2706 r3): the consent state initializes to
-            // 'card' and only follows change events — a bank-first default
-            // tab could show the CARD authorization while a bank account
-            // saves. Card-first makes the initial copy match the initial
-            // tab deterministically; picking the bank tab fires 'change'.
-            paymentMethodOrder: ['card', 'apple_pay', 'google_pay', 'us_bank_account'],
+            // Bank-first (owner 2026-11-01). The consent state was seeded
+            // from this same first tab when setupData arrived (see above);
+            // later tab picks fire 'change' and the handler below follows.
+            paymentMethodOrder: ['us_bank_account', 'card', 'apple_pay', 'google_pay'],
           });
           pe.mount(cardMountRef.current);
           paymentElementRef.current = pe;

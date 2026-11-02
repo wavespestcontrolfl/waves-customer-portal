@@ -92,7 +92,15 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // method) initializes to that captured tender — the customer never
   // re-enters it, so the rendered authorization must match what Stripe
   // holds, not a card default (Codex #3723 r1 P1).
-  const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
+  //
+  // Bank first (owner 2026-11-01): the Payment Element lists US bank account
+  // first whenever the intent offers it, so a fresh (non-replay) capture
+  // STARTS on bank — the heading, body copy, consent text and the tender the
+  // parent is told about must match the first tab at mount, without waiting
+  // for Stripe to fire a 'change' event. `bankOffered` is computed here, ahead
+  // of the state it seeds.
+  const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
+  const [methodType, setMethodType] = useState(intent?.capturedMethodType || (bankOffered ? 'us_bank_account' : 'card'));
   // A succeeded REPLAY renders as a saved-method panel — no Payment Element
   // is mounted on the finished intent (there is nothing to enter), and the
   // customer can continue with it or replace it. Before this, a re-tap on
@@ -107,7 +115,6 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const [staleReplay, setStaleReplay] = useState(false);
   const [replacing, setReplacing] = useState(false);
   const bank = methodType === 'us_bank_account';
-  const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
   // Refs mirror the two values the confirm gesture must judge SYNCHRONOUSLY
   // (pre-push Codex P1): a tender switch clears consent inside the change
   // handler itself — never only in a post-render effect — so a click landing
@@ -173,7 +180,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: NAVY, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
           : { theme: 'stripe', variables: { borderRadius: '8px' } },
       });
-      const paymentElement = elements.create('payment');
+      // Bank first (owner 2026-11-01); a card-only intent has no bank tab, so
+      // the order simply resolves to card.
+      const paymentElement = elements.create('payment', { paymentMethodOrder: ['us_bank_account', 'card'] });
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
       paymentElement.on('change', (event) => {

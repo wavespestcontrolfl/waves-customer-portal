@@ -30,6 +30,7 @@ import PublicLoadError from '../components/PublicLoadError';
 import DocumentActionBar from "../components/DocumentActionBar";
 import { getStripe } from "../lib/stripeLoader";
 import { microdepositDetailFromNextAction, microdepositGuidance } from "../lib/microdeposit";
+import { CARD_SURCHARGE_NOTICE } from "../lib/cardSurcharge";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -65,7 +66,10 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
   const mountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
-  const selectedMethodRef = useRef("card");
+  // Bank first (owner 2026-11-01): the Payment Element lists US bank account
+  // first, so its open row at mount is bank. Seed the ref + state to match —
+  // Stripe is not guaranteed to fire a 'change' event at mount.
+  const selectedMethodRef = useRef("us_bank_account");
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
   // Synchronous mirror of `processing` for the submit/finalize single-flight
@@ -79,7 +83,7 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
   };
   const [elementError, setElementError] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [selectedMethod, setSelectedMethod] = useState("card");
+  const [selectedMethod, setSelectedMethod] = useState("us_bank_account");
   const [quote, setQuote] = useState(null); // { quoteToken, base, surcharge, total, rateBps }
   const [awaitingConfirm, setAwaitingConfirm] = useState(false);
 
@@ -150,7 +154,7 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
         if (billingEmail) billingDetails.email = billingEmail;
         const paymentElement = elements.create("payment", {
           layout: { type: "accordion", defaultCollapsed: false, radios: true, spacedAccordionItems: true },
-          paymentMethodOrder: ["card", "us_bank_account"],
+          paymentMethodOrder: ["us_bank_account", "card"],
           wallets: { applePay: "never", googlePay: "never" },
           ...(Object.keys(billingDetails).length ? { defaultValues: { billingDetails } } : {}),
         });
@@ -305,6 +309,11 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
         <div style={{ marginTop: SP.md, padding: SP.md, borderRadius: RADIUS.input, background: DOC.soft }}>
           <SummaryRow label="Statement total" value={fmtCurrency(quote.base)} />
           {quote.surcharge > 0 && <SummaryRow label={`Card surcharge (${pct}%)`} value={fmtCurrency(quote.surcharge)} />}
+          {quote.surcharge > 0 && (
+            <p data-testid="card-surcharge-notice" style={{ fontSize: FS.body, color: DOC.muted, lineHeight: LH.body, margin: `0 0 ${SP.xs}px` }}>
+              {CARD_SURCHARGE_NOTICE}
+            </p>
+          )}
           <div style={{ borderTop: `1px solid ${DOC.border}`, marginTop: 6, paddingTop: 6 }}>
             <SummaryRow label="Amount to charge" value={fmtCurrency(quote.total)} strong />
           </div>
