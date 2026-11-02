@@ -5233,6 +5233,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONDAYS 9:20AM — Monday review bell (GATE_MONDAY_REVIEW_BELL; returns before
+  // any read when off). Owner 2026-11-02 ("build all", B2): one needs-you bell a
+  // week for the work that sits: needs-you alerts unread 14+ days, overdue
+  // promises, completed visits with only a draft invoice, open past visits. The
+  // key is the ET Monday date, so a rerun the same day writes nothing; last
+  // week's row closes first. Sends nothing to a customer.
+  // =========================================================================
+  cron.schedule('20 9 * * 1', async () => {
+    if (!require('../config/feature-gates').mondayReviewBellLive()) return;
+    try {
+      await runExclusive('monday-review-bell', async () => {
+        const result = await require('./monday-review-bell').runMondayReview();
+        logger.info(`Monday review bell: ${result.count ?? 0} list(s) (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Monday review bell failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 7:23AM — Unbilled visits (GATE_UNBILLED_VISITS_LIST; returns before
   // any read when off). Owner 2026-10-25 (Air Jobs Plan step 3): one standing
   // Billing bell lists the visits done in the last 30 days with no invoice,
