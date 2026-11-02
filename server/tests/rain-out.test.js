@@ -4671,3 +4671,126 @@ describe('checkSlots: paid road times are staff-only', () => {
     }
   });
 });
+
+// GATE_RAINOUT_KEEP_RAIN_OK (owner 2026-11-01, dark): the rest-of-route list leaves
+// out a stop whose services are all rain-OK, and the efficacy sentence skips a
+// rain-OK service.
+describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
+  const ANCHOR = { ...SERVICE, visit_id: null };
+  const stopRow = (id, serviceType, key, extra = {}) => ({
+    id, status: 'confirmed', scheduled_date: '2026-06-11', window_start: '12:00', window_end: '13:00',
+    customer_id: `cust-${id}`, service_type: serviceType, service_key_snapshot: key, visit_id: null, ...extra,
+  });
+  const OK_STOP = stopRow('svc-2', 'Rodent Trapping', 'rodent_trapping');
+  const OUTDOOR_STOP = stopRow('svc-3', 'Quarterly Pest Control', 'pest_control_quarterly');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_RAINOUT_KEEP_RAIN_OK;
+    SmartRebooker.findRescheduleOptions.mockReset().mockResolvedValue([]);
+  });
+  afterEach(() => {
+    delete process.env.GATE_RAINOUT_KEEP_RAIN_OK;
+    delete process.env.GATE_RAINOUT_EFFICACY_NOTE;
+  });
+
+  function wireOptions(rows, { addOns = [] } = {}) {
+    const routeChain = chain({ rows });
+    const queues = {
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR }) }), routeChain],
+    };
+    if (process.env.GATE_RAINOUT_KEEP_RAIN_OK === 'true') queues.scheduled_service_addons = [chain({ rows: addOns })];
+    wireDb(queues);
+    return routeChain;
+  }
+  const caller = { isAdmin: false, technicianId: 'tech-1' };
+
+  test('gate off: every row counts, the query selects no key and no add-on lookup runs', async () => {
+    const routeChain = wireOptions([OK_STOP, OUTDOOR_STOP]);
+    const options = await RainOut.getOptions('svc-1', { caller });
+    expect(options.remainingRouteCount).toBe(2);
+    expect(routeChain.select).toHaveBeenCalledTimes(1);
+    expect(routeChain.select.mock.calls[0]).not.toContain('service_key_snapshot');
+  });
+
+  test('gate on: an all-rain-OK stop is left out, an outdoor stop stays', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    const routeChain = wireOptions([OK_STOP, OUTDOOR_STOP]);
+    const options = await RainOut.getOptions('svc-1', { caller });
+    expect(options.remainingRouteCount).toBe(1);
+    expect(routeChain.select).toHaveBeenCalledWith('service_key_snapshot');
+  });
+
+  test('gate on: a grouped stop with one outdoor member stays whole; an all-rain-OK group leaves whole', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    wireOptions([
+      stopRow('svc-4', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-a' }),
+      stopRow('svc-5', 'Quarterly Pest Control', 'pest_control_quarterly', { visit_id: 'visit-a' }),
+      stopRow('svc-6', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-b' }),
+      stopRow('svc-7', 'Wildlife Trapping', 'wildlife_trapping', { visit_id: 'visit-b' }),
+    ]);
+    const options = await RainOut.getOptions('svc-1', { caller });
+    expect(options.remainingRouteCount).toBe(2);
+  });
+
+  test('gate on: an outdoor add-on keeps its stop; a stop with no key and an inspection name leaves', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    wireOptions(
+      [OK_STOP, stopRow('svc-8', 'WDO Inspection', null)],
+      { addOns: [{ scheduled_service_id: 'svc-2', service_name: 'Perimeter Spray', service_key_snapshot: 'pest_control_quarterly' }] },
+    );
+    const options = await RainOut.getOptions('svc-1', { caller });
+    expect(options.remainingRouteCount).toBe(1);
+  });
+
+  test('gate on: rows of the tapped stop\'s own visit group are never filtered', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    const routeChain = chain({ rows: [stopRow('svc-9', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-anchor' })] });
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR, visit_id: 'visit-anchor' }) }), routeChain],
+      scheduled_service_addons: [chain({ rows: [] })],
+    });
+    const options = await RainOut.getOptions('svc-1', { caller });
+    expect(options.remainingRouteCount).toBe(1);
+  });
+
+  test('commit, route scope, gate on: the rain-OK stop is not moved or texted', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR }) }),
+        chain({ rows: [OK_STOP, OUTDOOR_STOP] }),
+      ],
+      scheduled_service_addons: [chain({ rows: [] })],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-svc-3', phone: '+19415550003', first_name: 'Sam', zip: '34203' }) })],
+      reschedule_log: [chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) }), chain()],
+    });
+    const result = await RainOut.commit({
+      serviceId: 'svc-1', technicianId: 'tech-1', reasonCode: 'weather_rain', scope: 'route',
+      target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } }, notifyCustomer: true,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.movedCount).toBe(2);
+    const movedIds = SmartRebooker.reschedule.mock.calls.map((c) => c[0]);
+    expect(movedIds).toEqual(expect.arrayContaining(['svc-1', 'svc-3']));
+    expect(movedIds).not.toContain('svc-2');
+  });
+
+  describe('efficacy clause', () => {
+    const clause = RainOut._test.composeEfficacyClause;
+    test('gate off: a rain-OK key still gets the sentence (name pattern only)', () => {
+      process.env.GATE_RAINOUT_EFFICACY_NOTE = 'true';
+      expect(clause({ reasonCode: 'weather_rain', serviceType: 'Rodent Trapping', serviceKey: 'rodent_trapping' }))
+        .toContain('rain-free hours to bond');
+    });
+    test('gate on: a rain-OK service skips the sentence, a spray keeps it', () => {
+      process.env.GATE_RAINOUT_EFFICACY_NOTE = 'true';
+      process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+      expect(clause({ reasonCode: 'weather_rain', serviceType: 'Rodent Trapping', serviceKey: 'rodent_trapping' })).toBe('');
+      expect(clause({ reasonCode: 'weather_rain', serviceType: 'Quarterly Pest Control', serviceKey: 'pest_control_quarterly' }))
+        .toContain('rain-free hours to bond');
+      expect(clause({ reasonCode: 'weather_rain', serviceType: 'Quarterly Pest Control' }))
+        .toContain('rain-free hours to bond');
+    });
+  });
+});

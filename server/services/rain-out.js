@@ -703,12 +703,15 @@ function composeBetterDayClause({
 }
 
 // Explains WHY rain moves a spray visit. Dark until the owner flips
-// GATE_RAINOUT_EFFICACY_NOTE; skipped for work rain doesn't wash away.
+// GATE_RAINOUT_EFFICACY_NOTE; skipped for work rain doesn't wash away. With
+// GATE_RAINOUT_KEEP_RAIN_OK on, any rain-OK service (rain-fit) skips it too.
 const EFFICACY_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
-function composeEfficacyClause({ reasonCode, serviceType }) {
+function composeEfficacyClause({ reasonCode, serviceType, serviceKey = null }) {
   if (process.env.GATE_RAINOUT_EFFICACY_NOTE !== 'true') return '';
   if (reasonCode !== 'weather_rain') return '';
   if (EFFICACY_EXEMPT_SERVICE.test(String(serviceType || ''))) return '';
+  if (rainoutKeepRainOk()
+    && require('./scheduling/rain-fit').rainClassOf({ name: serviceType, serviceKey }) === 'ok') return '';
   return '\n\nWhy the move? Treatments need a few rain-free hours to bond - applying right before rain washes them away before they can work.';
 }
 
@@ -833,6 +836,11 @@ async function loadServiceWithCustomer(serviceId) {
     .first();
 }
 
+// GATE_RAINOUT_KEEP_RAIN_OK (dark; owner 2026-11-01): read at call time.
+function rainoutKeepRainOk() {
+  return require('../config/feature-gates').rainoutKeepRainOkLive?.() === true;
+}
+
 // Other not-yet-terminal jobs on this tech's plate today, ordered the
 // way the route actually runs: COALESCE(route_order, 999) then window_start
 // (the canonical dispatch order, admin-dispatch.js).
@@ -843,8 +851,13 @@ async function loadServiceWithCustomer(serviceId) {
 // there; but dispatch can rain-out an arbitrary mid-route stop, and a
 // window-only bound would wrongly sweep stops that share the anchor's
 // window or sit before it under a manual route_order.
+//
+// With GATE_RAINOUT_KEEP_RAIN_OK on, a stop whose services are all rain-OK is
+// left out, so a Move neither moves nor texts it; the anchor's own visit group
+// moves with the anchor and is never filtered.
 async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, anchor = null) {
   if (!technicianId) return [];
+  const keepRainOk = rainoutKeepRainOk();
   const query = db('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: todayStr })
     .whereIn('status', MOVABLE_STATUSES)
@@ -867,6 +880,7 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       // first member; later members of the same visit are skipped.
       'visit_id',
     );
+  if (keepRainOk) query.select('service_key_snapshot');
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
     const anchorOrder = anchor.route_order == null ? 999 : anchor.route_order;
@@ -880,7 +894,12 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       [anchorOrder, anchorWindow],
     );
   }
-  return query;
+  if (!keepRainOk) return query;
+  let keepVisitId = anchor?.visit_id;
+  if (keepVisitId === undefined && excludeServiceId) {
+    keepVisitId = (await db('scheduled_services').where({ id: excludeServiceId }).first('visit_id'))?.visit_id;
+  }
+  return require('./scheduling/rain-fit').outdoorStopRows(await query, db, { keepVisitId });
 }
 
 // "Later today" candidates: now + 2h and now + 4h, snapped to the nearest
@@ -1938,7 +1957,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
         reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
         windowChance, windowStart: chosen.window?.start,
       }),
-      efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
+      efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type, serviceKey: job.service_key_snapshot }),
     }, renderContext);
     if (body) renderedKey = 'rain_out_moved_v2';
   }

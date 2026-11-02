@@ -206,6 +206,43 @@ async function storedVisitServices(serviceId, { moveAlone = false } = {}, db) {
   }
 }
 
+// The rows of a day's stop list that stay on it when rain-OK stops stay put
+// (GATE_RAINOUT_KEEP_RAIN_OK, rain-out.js, and the storm-watch nudge). Each row
+// carries id, service_type, service_key_snapshot and visit_id. A stop leaves
+// the list only when every service at it (the row and its add-ons) is rain-OK;
+// a 'skip' service does not make it outdoor, but a stop of 'skip' services
+// alone has unknown work and stays. A grouped stop (one visit_id) is one stop:
+// any outdoor member keeps every member. `keepVisitId` names a visit that is
+// never filtered (the tapped stop's own group, which moves with it). An
+// add-on lookup that fails keeps every row.
+async function outdoorStopRows(rows, db, { keepVisitId = null } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return list;
+  let addOns;
+  try {
+    addOns = await db('scheduled_service_addons')
+      .whereIn('scheduled_service_id', list.map((r) => r.id))
+      .select('scheduled_service_id', 'service_name', 'service_key_snapshot');
+  } catch (err) {
+    logger.warn(`[rain-fit] add-on lookup failed (every stop kept): ${err.message}`);
+    return list;
+  }
+  const classesOf = (row) => [
+    { name: row.service_type, serviceKey: row.service_key_snapshot },
+    ...addOns
+      .filter((a) => String(a.scheduled_service_id) === String(row.id))
+      .map((a) => ({ name: a.service_name, serviceKey: a.service_key_snapshot })),
+  ].filter((svc) => String(svc.name ?? '').trim()).map(rainClassOf).filter((c) => c !== 'skip');
+  const stopKey = (row) => (row.visit_id ? `v:${row.visit_id}` : `r:${row.id}`);
+  const keepStop = new Set();
+  for (const row of list) {
+    const classes = classesOf(row);
+    if (!classes.length || classes.some((c) => c !== 'ok')) keepStop.add(stopKey(row));
+  }
+  return list.filter((row) => keepStop.has(stopKey(row))
+    || (keepVisitId && String(row.visit_id || '') === String(keepVisitId)));
+}
+
 function siblingSpan(row, others) {
   const ownStart = toMin(row.window_start);
   if (ownStart == null) return null;
@@ -371,4 +408,4 @@ function rainTierOf(fit, hourly, today, span = null) {
   return (chip) => rainTier(fit, isWetWindow(hourly, widenToSpan(chip, span), today), inRainHorizon(chip.date, today));
 }
 
-module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, bookingRainPlan, storedVisitServices, widenToSpan, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, bookingRainPlan, storedVisitServices, widenToSpan, outdoorStopRows, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };

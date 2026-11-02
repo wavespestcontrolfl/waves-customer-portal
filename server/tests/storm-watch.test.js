@@ -37,14 +37,15 @@ function hourlyAt(chance, when = NOON_ET) {
 // tech_notifications dedupe lookup + insert. `alertedTechIds` simulates
 // which technicians already received an alert today — the dedupe lookup
 // resolves a row only when the queried technician_id is in the set.
-function wireDb({ stops = [], alertedTechIds = [] } = {}) {
+function wireDb({ stops = [], alertedTechIds = [], addOns = [] } = {}) {
   const notifInsert = jest.fn().mockResolvedValue();
   const dedupeWhere = jest.fn();
+  const whereIn = jest.fn().mockReturnThis();
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
       const builder = {
         where: jest.fn().mockReturnThis(),
-        whereIn: jest.fn().mockReturnThis(),
+        whereIn,
         whereNotNull: jest.fn().mockReturnThis(),
         leftJoin: jest.fn().mockReturnThis(),
         select: jest.fn().mockResolvedValue(stops),
@@ -65,9 +66,12 @@ function wireDb({ stops = [], alertedTechIds = [] } = {}) {
       };
       return builder;
     }
+    if (table === 'scheduled_service_addons') {
+      return { whereIn: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue(addOns) };
+    }
     throw new Error(`Unexpected db('${table}') call`);
   });
-  return { notifInsert, dedupeWhere };
+  return { notifInsert, dedupeWhere, whereIn };
 }
 
 describe('storm-watch sweep', () => {
@@ -170,6 +174,56 @@ describe('storm-watch sweep', () => {
 
     expect(result).toEqual({ checked: 1, alerted: 0 });
     expect(notifInsert).not.toHaveBeenCalled();
+  });
+
+  describe('rain-OK stops (no gate, tech-facing)', () => {
+    const okStop = (overrides = {}) => stop({ id: 'svc-ok', service_type: 'Rodent Trapping', service_key_snapshot: 'rodent_trapping', visit_id: null, ...overrides });
+
+    test('a stop whose services are all rain-OK gets no probe and no alert', async () => {
+      const { notifInsert } = wireDb({ stops: [okStop()] });
+      getHourlyRainOutlook.mockResolvedValue(hourlyAt(90));
+
+      const result = await StormWatch.sweep(NOON_ET);
+
+      expect(result).toEqual({ checked: 0, alerted: 0 });
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+      expect(notifInsert).not.toHaveBeenCalled();
+    });
+
+    test('an outdoor stop beside it still alerts', async () => {
+      const { notifInsert } = wireDb({ stops: [okStop(), stop({ id: 'svc-spray', service_key_snapshot: 'pest_control_quarterly', visit_id: null })] });
+      getHourlyRainOutlook.mockResolvedValue(hourlyAt(90));
+
+      const result = await StormWatch.sweep(NOON_ET);
+
+      expect(result).toEqual({ checked: 1, alerted: 1 });
+      expect(JSON.parse(notifInsert.mock.calls[0][0].payload).job_id).toBe('svc-spray');
+    });
+
+    test('a grouped stop with one outdoor member keeps every member; an outdoor add-on keeps its stop', async () => {
+      wireDb({
+        stops: [
+          okStop({ id: 'svc-a', visit_id: 'v1' }),
+          stop({ id: 'svc-b', service_key_snapshot: 'pest_control_quarterly', visit_id: 'v1' }),
+          okStop({ id: 'svc-c', visit_id: null }),
+        ],
+        addOns: [{ scheduled_service_id: 'svc-c', service_name: 'Perimeter Spray', service_key_snapshot: 'pest_control_quarterly' }],
+      });
+      getHourlyRainOutlook.mockResolvedValue(hourlyAt(90));
+
+      const result = await StormWatch.sweep(NOON_ET);
+
+      expect(result).toEqual({ checked: 3, alerted: 3 });
+    });
+
+    test('a customer reschedule request (status rescheduled, stale window) is not nudged', async () => {
+      const { whereIn } = wireDb({ stops: [] });
+
+      await StormWatch.sweep(NOON_ET);
+
+      const statuses = whereIn.mock.calls.find(([col]) => col === 'scheduled_services.status')[1];
+      expect(statuses).toEqual(['pending', 'confirmed', 'en_route']);
+    });
   });
 
   test('peakRainChance only counts hours inside the 2h horizon', () => {
