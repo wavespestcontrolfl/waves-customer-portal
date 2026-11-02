@@ -3913,8 +3913,11 @@ consent at all and reaches the classifier like any other message (only a
 standalone carrier command such as a bare STOP bypasses the model for them
 too — natural-language phrasing and a footer never do). Shadow can still
 record deterministic pitch evidence via the regex fast path for any
-solicitation-shaped text, consent-related or not. The 3.5-second model
-budget uses the shared dispatcher.
+solicitation-shaped text, consent-related or not. The model read uses the
+interactive policy (`fastStructuredInteractive`) through the shared
+dispatcher with a 6-second budget for both legs, split evenly and enforced by
+the chain (`reserveFallbackBudget`, `hardDeadline`), so a stalled first model
+leaves the backup its share.
 Verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`, `enforced`)
 are stored under `metadata.spam_verdict` on unified messages and ordinary or
 natural-language opt-out `sms_log` rows. Read state, opt-out suppression,
