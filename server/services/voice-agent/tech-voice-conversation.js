@@ -295,7 +295,7 @@ class TechVoiceConversation {
     const target = await visitCustomer(this.actor, stop.id);
     if (target.error) return this.say('I could not read that customer. Check the app.');
     const out = await setTextReply(db, {
-      customerId: target.customer.id, customerPhone: target.to, lineNumber: ctx.line.number, visitIds: [stop.id], now: this._now(),
+      customerId: target.customer.id, customerPhone: target.to, lineNumber: ctx.line.number, visitIds: await this._stopVisitIds(stop), now: this._now(),
     });
     const name = firstName(target.customer);
     if (out.ambiguous) return this.say(`${name} has texts about another visit too. Check the thread in the app.`);
@@ -306,6 +306,18 @@ class TechVoiceConversation {
   }
 
   // `lead` prefixes a fresh read-back ("The details changed.").
+  // Every member of the stop's visit on this technician's route: a set text
+  // can belong to a member other than the one pickStop leads with (a member
+  // finished since), as the Visit Brief's reply card passes them all.
+  async _stopVisitIds(stop) {
+    const row = await db('scheduled_services').where({ id: stop.id }).first('visit_id');
+    if (!row || !row.visit_id) return [stop.id];
+    const ids = await db('scheduled_services')
+      .where({ visit_id: row.visit_id, technician_id: this.tech.id, customer_id: stop.customer_id })
+      .pluck('id');
+    return [...new Set([stop.id, ...ids])];
+  }
+
   async _readBackSetText(kind, lead = '') {
     const stop = await pickStop(db, this.tech.id, this._now());
     if (!stop) return this.say(`${lead}${SAY.no_stop} No one to text.`);

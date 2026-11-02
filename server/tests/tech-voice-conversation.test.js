@@ -16,8 +16,13 @@ jest.mock('../services/access-code-capture', () => ({ listForVisit: jest.fn() })
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 
 const mockRows = {};
+const mockPluck = {};
 jest.mock('../models/db', () => jest.fn((table) => {
-  const chain = { where: jest.fn(() => chain), first: jest.fn(async () => mockRows[table]) };
+  const chain = {
+    where: jest.fn(() => chain),
+    first: jest.fn(async () => mockRows[table]),
+    pluck: jest.fn(async () => mockPluck[table] || []),
+  };
   return chain;
 }));
 
@@ -224,6 +229,7 @@ describe('commands', () => {
   });
 
   test('any replies: the reply to this stop\'s set text on the technician\'s line', async () => {
+    mockRows.scheduled_services = undefined;
     techLineContext.mockResolvedValue({ line: { number: '+19413529161' } });
     visitCustomer.mockResolvedValue({ customer: CUSTOMER, to: '+19415550123' });
     setTextReply.mockResolvedValue({ setText: { kind: 'gate_locked' }, reply: { body: 'Unlocked it', mediaCount: 0 }, ambiguous: false });
@@ -232,6 +238,19 @@ describe('commands', () => {
     expect(setTextReply).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       customerId: 'cust-1', customerPhone: '+19415550123', lineNumber: '+19413529161', visitIds: ['visit-1'],
     }));
+  });
+
+  test('any replies on a grouped stop reads every member of the visit, so a text sent for a finished member still counts', async () => {
+    mockRows.scheduled_services = { visit_id: 'grp-1' };
+    mockPluck.scheduled_services = ['visit-0', 'visit-1'];
+    techLineContext.mockResolvedValue({ line: { number: '+19413529161' } });
+    visitCustomer.mockResolvedValue({ customer: CUSTOMER, to: '+19415550123' });
+    setTextReply.mockResolvedValue({ setText: { kind: 'dog_outside' }, reply: null, ambiguous: false });
+    const { say } = await session();
+    expect(await say('did they reply')).toBe('No reply from Sam yet.');
+    expect(setTextReply.mock.calls[0][1].visitIds).toEqual(['visit-1', 'visit-0']);
+    mockRows.scheduled_services = undefined;
+    mockPluck.scheduled_services = undefined;
   });
 
   test('no stop, an unknown phrase, help and goodbye', async () => {

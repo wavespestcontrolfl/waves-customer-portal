@@ -3615,7 +3615,9 @@ export function TeamTab({ showToast }) {
                 ))}
               </select>{" "}
             </div>{" "}
-            <TechVoicePinField technicianId={editingId} />
+            {/* Keyed by technician: switching to another tech's Edit remounts it
+                empty, so a PIN typed for one person never goes to another. */}
+            <TechVoicePinField key={editingId} technicianId={editingId} />
             {/* Start-of-day point. Edit only: the add form does not send it.
                 Empty = the office (today's routing). Home needs an address
                 picked from the list so it carries coordinates. */}
