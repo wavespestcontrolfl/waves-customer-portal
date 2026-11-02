@@ -305,6 +305,20 @@ async function readVisit(knex, scheduledServiceId) {
  *   | { ok: true, lane: 'pest'|'lawn', window: { from: string, to: string },
  *       items: object[] }>} The visit read may throw; a channel read never does.
  */
+// One ask per wording, judged on the SCRUBBED text (Codex P2 on #7464): a text that repeats the booking words, or
+// another channel's words, plus an off-topic sentence reads the same once the scrub drops that sentence, and a copy
+// would use up the item allowance. The booking item wins, then the oldest copy.
+function dedupeItems(items, bookingId) {
+  const rank = (item) => (item.id === bookingId ? -Infinity : Date.parse(item.at));
+  const seen = new Set();
+  return [...items].sort((a, b) => rank(a) - rank(b)).filter((item) => {
+    const key = normalizedWords(item.text);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date() } = {}) {
   const visit = await readVisit(knex, scheduledServiceId);
   if (!visit) return { ok: false, reason: 'not_found' };
@@ -336,7 +350,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
     ok: true,
     lane,
     window: { from: window.from.toISOString(), to: to.toISOString() },
-    items: limitItems(items, bookingId),
+    items: limitItems(dedupeItems(items, bookingId), bookingId),
   };
 }
 
@@ -350,6 +364,7 @@ module.exports = {
     bookingWords,
     legacyRequestText,
     buildItem,
+    dedupeItems,
     capWords,
     callDay,
     pestsIn,

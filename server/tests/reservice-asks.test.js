@@ -222,6 +222,30 @@ describe('texts', () => {
     expect(items.map((item) => item.id)).toEqual(['booking:visit-1', 'text:s2']);
   });
 
+  test('a copy is judged on the scrubbed words: the booking words plus an off-topic sentence is one ask', async () => {
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: 'Ants are back.', customer_request_source: 'picker' }),
+      sms: [sms('s1', 'Ants are back. See you Tuesday.'), sms('s2', 'Spiders on the lanai too.')],
+    });
+    expect(items.map((item) => item.id)).toEqual(['booking:visit-1', 'text:s2']);
+  });
+
+  test('the same words sent twice, or in two channels, keep only the oldest copy', async () => {
+    const { items } = await gather({
+      sms: [sms('s1', 'Roaches under the sink.', new Date(NOW - 4 * DAY)), sms('s2', 'Roaches under the sink. Thanks!', new Date(NOW - 2 * DAY))],
+      requests: [{ id: 'r1', created_at: new Date(NOW - DAY), source: null, subject: 'Pests', description: 'Roaches under the sink.' }],
+    });
+    expect(items.map((item) => item.id)).toEqual(['text:s1']);
+  });
+
+  test('copies do not use up the allowance: ten distinct asks survive twelve copies', async () => {
+    const distinct = Array.from({ length: 10 }, (_, i) => sms(`d${i}`, `Ants in room ${i}.`, new Date(NOW - (20 - i) * 3600 * 1000)));
+    const copies = Array.from({ length: 12 }, (_, i) => sms(`c${i}`, 'Ants in room 0. Call me.', new Date(NOW - i * 60 * 1000)));
+    const { items } = await gather({ sms: [...distinct, ...copies] });
+    expect(items).toHaveLength(10);
+    expect(new Set(items.map((item) => item.text)).size).toBe(10);
+  });
+
   test('a text with nothing about the problem is left out after the scrub', async () => {
     const { items } = await gather({ sms: [sms('s1', 'Thanks, see you Tuesday.')] });
     expect(items).toEqual([]);
