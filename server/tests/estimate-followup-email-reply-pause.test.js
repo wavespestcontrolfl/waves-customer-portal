@@ -91,7 +91,7 @@ function setGate(on) {
   featureGates.estimateFollowupEmailReplyPauseLive.mockReturnValue(on);
 }
 
-// rows: { messages: row|null, emails: rows[]|Error }
+// rows: { messages: row|null, customers: row|null|Error, emails: rows[]|Error }
 function setRows(rows) {
   db._rows = (table) => {
     const v = rows[table];
@@ -122,9 +122,9 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
     expect(emailCalls()).toHaveLength(0);
   });
 
-  test('gate on + authenticated inbound email linked by customer_id inside the window = true', async () => {
+  test('gate on + authenticated email from the customer\'s address inside the window = true', async () => {
     setGate(true);
-    setRows({ emails: [CUSTOMER_REPLY] });
+    setRows({ customers: { email: 'pat@example.com' }, emails: [CUSTOMER_REPLY] });
     const before = Date.now();
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(true);
     const [c] = emailCalls();
@@ -137,9 +137,18 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
     // 14-day window, same as the text arm
     expect(before - c.wheres[0][2].getTime()).toBeGreaterThanOrEqual(14 * 86400000 - 1000);
     expect(before - c.wheres[0][2].getTime()).toBeLessThan(14 * 86400000 + 5000);
-    expect(c.groupWheres).toContainEqual(['orWhere', 'emails.customer_id', 'cust-1']);
-    // and the from_address arm, lowercased and trimmed
-    expect(c.groupRaws).toContainEqual(['orWhereRaw', 'LOWER(emails.from_address) = ?', ['pat@example.com']]);
+    // the estimate's address and the address on file, lowercased, trimmed, deduped
+    expect(c.raws).toContainEqual(['whereRaw', 'LOWER(emails.from_address) = ANY(?)', [['pat@example.com']]]);
+  });
+
+  test('customer_id is never sender proof: the query keys on the expected addresses only', async () => {
+    setGate(true);
+    setRows({ customers: { email: 'owner@example.org' }, emails: [] });
+    expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
+    const [c] = emailCalls();
+    expect(JSON.stringify(c.wheres)).not.toContain('customer_id');
+    expect(c.groupWheres).toHaveLength(0);
+    expect(c.raws).toContainEqual(['whereRaw', 'LOWER(emails.from_address) = ANY(?)', [['pat@example.com', 'owner@example.org']]]);
   });
 
   test('a spoofed From never counts: the sender did not authenticate as its domain', async () => {
@@ -167,13 +176,13 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
     expect(await hasRepliedRecently(LEAD_EST)).toBe(true);
   });
 
-  test('a lead (no customer_id) matches by from_address only', async () => {
+  test('a lead (no customer_id) matches its estimate address only, with no customer read', async () => {
     setGate(true);
     setRows({ emails: [LEAD_REPLY] });
     expect(await hasRepliedRecently(LEAD_EST)).toBe(true);
+    expect(db._calls.filter((x) => x.table === 'customers')).toHaveLength(0);
     const [c] = emailCalls();
-    expect(c.groupWheres).toHaveLength(0);
-    expect(c.groupRaws).toEqual([['orWhereRaw', 'LOWER(emails.from_address) = ?', ['lead@example.com']]]);
+    expect(c.raws).toContainEqual(['whereRaw', 'LOWER(emails.from_address) = ANY(?)', [['lead@example.com']]]);
   });
 
   test('no email in the window = false', async () => {
@@ -188,23 +197,27 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
     setRows({ emails: [] });
     await hasRepliedRecently(CUSTOMER_EST);
     const [c] = emailCalls();
-    expect(c.raws).toHaveLength(1);
+    expect(c.raws).toHaveLength(2);
     expect(c.raws[0][1]).toBe(
       "NOT COALESCE((jsonb_exists(emails.label_ids::jsonb, 'SENT') AND NOT jsonb_exists(emails.label_ids::jsonb, 'INBOX')), false)",
     );
   });
 
-  test('one of our own addresses never matches by from_address', async () => {
+  test('one of our own addresses never counts as a reply address', async () => {
     setGate(true);
-    setRows({ emails: [CUSTOMER_REPLY] });
-    // Lead with an internal address: no usable arm, no query, false.
+    setRows({ customers: { email: 'pat@example.com' }, emails: [CUSTOMER_REPLY] });
+    // Lead with an internal address: no usable address, no email query, false.
     expect(await hasRepliedRecently({ ...LEAD_EST, customer_email: 'contact@wavespestcontrol.com' })).toBe(false);
     expect(emailCalls()).toHaveLength(0);
-    // Customer whose estimate email is internal: customer_id arm only.
+    // Customer whose estimate went to an internal address: the address on file only.
     expect(await hasRepliedRecently({ ...CUSTOMER_EST, customer_email: 'Contact@WavesPestControl.com' })).toBe(true);
     const [c] = emailCalls();
-    expect(c.groupRaws).toHaveLength(0);
-    expect(c.groupWheres).toEqual([['orWhere', 'emails.customer_id', 'cust-1']]);
+    expect(c.raws).toContainEqual(['whereRaw', 'LOWER(emails.from_address) = ANY(?)', [['pat@example.com']]]);
+    // Both internal: nothing to match, no email query.
+    db._calls.length = 0;
+    setRows({ customers: { email: 'contact@wavespestcontrol.com' }, emails: [CUSTOMER_REPLY] });
+    expect(await hasRepliedRecently({ ...CUSTOMER_EST, customer_phone: null, customer_email: 'contact@wavespestcontrol.com' })).toBe(false);
+    expect(emailCalls()).toHaveLength(0);
   });
 
   test('a lead with no usable email and no phone is false without any email query', async () => {
@@ -226,6 +239,13 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
     setRows({ emails: new Error('emails down') });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('emails down'));
+  });
+
+  test('a failed customer-address read fails open on cron and throws on replay', async () => {
+    setGate(true);
+    setRows({ customers: new Error('customers down'), emails: [CUSTOMER_REPLY] });
+    expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
+    await expect(hasRepliedRecently(CUSTOMER_EST, 14, { throwOnError: true })).rejects.toThrow('customers down');
   });
 
   test('email-read failure THROWS on the replay path', async () => {

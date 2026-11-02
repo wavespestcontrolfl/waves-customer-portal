@@ -131,15 +131,14 @@ async function hasInboundSmsSince(est, cutoff) {
 // emails went within 14 days after the same person emailed us back about the
 // estimate (11 people); the SMS-only check above never saw those replies.
 // An inbound row in the Gmail sync table (`emails`) inside the window counts
-// when the sync linked it to this customer (customer_id, set from the sender
-// at insert) OR its bare from_address equals the estimate's email (a lead has
-// no customer_id). Never a Gmail SENT row (personSentFilter, negated and
-// COALESCEd so a NULL label_ids row is not dropped by three-valued logic),
-// and never a match on one of OUR addresses: the from_address arm is skipped
-// when the estimate's own email is internal (self-addressed mail, digests).
-// A From header is attacker-typed text, and the sync links customer_id from
-// it, so a row counts only when Gmail's Authentication-Results show DKIM or
-// SPF aligned with the sender's domain (hasAlignedAuth, the check
+// when its bare from_address is one of the expected reply addresses
+// (expectedReplyAddresses: the estimate's own address, the customer's address
+// on file; never one of OUR addresses). Never a Gmail SENT row
+// (personSentFilter, negated and COALESCEd so a NULL label_ids row is not
+// dropped by three-valued logic).
+// A From header is attacker-typed text, so a row counts only when Gmail's
+// Authentication-Results show DKIM or SPF aligned with the sender's domain
+// (hasAlignedAuth, the check
 // email-reply-context.js runs on the same "is this a real customer reply"
 // question). Without it, anyone who knows a lead's address could pause that
 // lead's follow-ups (Codex security review, #7407). Always the strict reader
@@ -149,17 +148,29 @@ async function hasInboundSmsSince(est, cutoff) {
 // first; a spoofed flood can only push a real reply past the cap, which sends
 // the follow-up exactly as before this gate.
 const EMAIL_REPLY_SCAN_LIMIT = 25;
+
+// The addresses a real reply can come from: the address the estimate went to
+// and, for a customer, the address on file. emails.customer_id is never sender
+// proof: besides the sync's From match, the classifier links a row to a
+// customer by display NAME, so an authenticated stranger using a customer's
+// name would pass (Codex security review, #7407). Never one of OUR addresses.
+async function expectedReplyAddresses(est) {
+  const list = [est.customer_email];
+  if (est.customer_id) {
+    const customer = await db("customers").where("id", est.customer_id).first("email");
+    if (customer) list.push(customer.email);
+  }
+  const normalized = list.map((a) => String(a || "").trim().toLowerCase());
+  return [...new Set(normalized.filter((a) => a && !isInternalEmailRecipient(a)))];
+}
+
 async function hasInboundEmailSince(est, cutoff) {
-  const addr = String(est.customer_email || "").trim().toLowerCase();
-  const byAddress = !!addr && !isInternalEmailRecipient(addr);
-  if (!est.customer_id && !byAddress) return false;
+  const addresses = await expectedReplyAddresses(est);
+  if (!addresses.length) return false;
   const rows = await db("emails")
     .where("emails.received_at", ">=", cutoff)
     .whereRaw(`NOT COALESCE((${personSentFilter("emails")}), false)`)
-    .andWhere(function () {
-      if (est.customer_id) this.orWhere("emails.customer_id", est.customer_id);
-      if (byAddress) this.orWhereRaw("LOWER(emails.from_address) = ?", [addr]);
-    })
+    .whereRaw("LOWER(emails.from_address) = ANY(?)", [addresses])
     .orderBy("emails.received_at", "desc")
     .limit(EMAIL_REPLY_SCAN_LIMIT)
     .select("emails.from_address", "emails.authentication_results");
