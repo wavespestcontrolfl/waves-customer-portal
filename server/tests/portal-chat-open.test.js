@@ -267,9 +267,11 @@ describe('request_quote', () => {
     expect(result.instruction).toContain('A quote request is now with the team.');
     expect(result.instruction).toContain('nothing is booked or charged until they accept it');
     expect(result.instruction).toContain('Do not state a price.');
-    // The one-hour promise covers the reply; the written estimate has no time on it.
-    expect(result.instruction).toContain('usually within one business hour between 8 AM and 8 PM, and will send a written estimate;');
-    expect(result.instruction).not.toContain('with a written estimate');
+    // The written estimate has no time on it: a replay showed the model folds any reply-time promise
+    // into "a reply within the hour, with a written estimate".
+    expect(result.instruction).toContain('the team will send a written estimate by text or email');
+    expect(result.instruction).toContain('Do not give a time for the estimate');
+    expect(result.instruction).not.toMatch(/business hour|within/);
     expect(result.instruction).not.toContain('Ask which service');
   });
 
