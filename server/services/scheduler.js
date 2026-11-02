@@ -7616,7 +7616,13 @@ function initScheduledJobs() {
           () => googleAds.syncSearchTerms(30, opts),
           // The owner's negative word list (owner plan A, 2026-11-02; GATE_ADS_NEGATIVES): push new words, retry failed
           // ones, take removed words out of Google. Off = skipped.
-          () => (require('../config/feature-gates').adsNegativesLive() ? require('./ads/negative-keyword-actions').syncOwnerWords() : null),
+          async () => {
+            if (!require('../config/feature-gates').adsNegativesLive()) return;
+            const counts = await require('./ads/negative-keyword-actions').syncOwnerWords();
+            // A word held back because a search with it converted is the rule working, not a failure; Google not
+            // answering or refusing a word is, and it shows in job health like the read steps above.
+            if (counts && counts.googleFailed > 0) throw new Error(`negative keywords: Google did not take ${counts.googleFailed} change(s)`);
+          },
         ]) {
           try { await step(); } catch (err) { firstErr = firstErr || err; }
         }

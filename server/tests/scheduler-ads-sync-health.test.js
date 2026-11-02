@@ -17,7 +17,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'cronJobs'), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
   adsNegativesLive: jest.fn(() => false),
 }));
-jest.mock('../services/ads/negative-keyword-actions', () => ({ syncOwnerWords: jest.fn().mockResolvedValue({ pushed: 0, failed: 0, removed: 0 }) }));
+jest.mock('../services/ads/negative-keyword-actions', () => ({ syncOwnerWords: jest.fn().mockResolvedValue({ pushed: 0, failed: 0, removed: 0, googleFailed: 0 }) }));
 // Pass-through lock that (like the real runExclusive) records a failed body
 // by name and rethrows it.
 const mockJobOutcomes = {};
@@ -101,6 +101,23 @@ describe('Google Ads 6:00 cron', () => {
     await googleTick()();
     expect(googleAds.syncSearchTerms).toHaveBeenCalled();
     expect(mockJobOutcomes['google-ads-sync']).toBe('failed: db down');
+    gates.adsNegativesLive.mockReturnValue(false);
+  });
+
+  test('Google refusing a word fails the job, after the other steps ran', async () => {
+    gates.adsNegativesLive.mockReturnValue(true);
+    negativeActions.syncOwnerWords.mockResolvedValueOnce({ pushed: 1, failed: 2, removed: 0, googleFailed: 2 });
+    await googleTick()();
+    expect(googleAds.syncSearchTerms).toHaveBeenCalled();
+    expect(mockJobOutcomes['google-ads-sync']).toBe('failed: negative keywords: Google did not take 2 change(s)');
+    gates.adsNegativesLive.mockReturnValue(false);
+  });
+
+  test('a word held back because a search with it converted is not a failure', async () => {
+    gates.adsNegativesLive.mockReturnValue(true);
+    negativeActions.syncOwnerWords.mockResolvedValueOnce({ pushed: 0, failed: 2, removed: 0, googleFailed: 0 });
+    await googleTick()();
+    expect(mockJobOutcomes['google-ads-sync']).toBe('success');
     gates.adsNegativesLive.mockReturnValue(false);
   });
 

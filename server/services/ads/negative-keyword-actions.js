@@ -65,6 +65,9 @@ const linkedCampaigns = (conn = db) => conn('ad_campaigns')
 // One lock per word: a save, the bell tap and the 6 AM run never double-push the same word.
 const lockText = (trx, text) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`ads-negative:${text}`]);
 
+// Whether the word is on the owner's list now (not removed).
+const onLiveList = async (conn, text) => Boolean(await conn('ad_negative_words').where({ text, match_type: MATCH_TYPE }).whereNull('removed_at').first('id'));
+
 // A row that left "pending" has no more use for its bell: close it in the same transaction.
 const closeBell = (trx, id, resolution) => episodes.closeAdminAlertKeys(trx, [bellKey(id)], 'negative_decided', { resolution });
 
@@ -146,11 +149,17 @@ async function undoNegative(id, { by } = {}) {
   if (!UUID.test(String(id || ''))) return refuse('gone');
   const actor = who(by);
 
+  const seen = await db('ad_negative_keywords').where({ id }).first('text');
+  if (!seen) return refuse('gone');
   return db.transaction(async (trx) => {
+    // The word's lock first, as the sync takes it: a list change and this undo never cross.
+    await lockText(trx, seen.text);
     const row = await trx('ad_negative_keywords').where({ id }).forUpdate().first();
     if (!row) return refuse('gone');
     if (row.state !== 'active' || !row.google_resource_name) return refuse('not_active');
-    if (row.source === 'owner_list') return refuse('owner_list');
+    // A word on the owner's live list is his list's block, whoever added it first: the next sync would block it
+    // again, so it is undone by taking it off the list.
+    if (row.source === 'owner_list' || await onLiveList(trx, row.text)) return refuse('owner_list');
     const now = new Date();
     const removed = await google().removeCampaignNegativeKeyword(row.google_resource_name);
     if (!removed) {
@@ -175,6 +184,7 @@ async function pushRow(trx, row, campaign, readConverting, counts, now) {
   if (converting === null) {
     await update({ last_error: MESSAGES.google_unavailable });
     counts.failed += 1;
+    counts.googleFailed += 1;
     return;
   }
   if (hasConversion(converting, row.text)) {
@@ -187,6 +197,7 @@ async function pushRow(trx, row, campaign, readConverting, counts, now) {
   if (!added) {
     await update({ state: 'failed', last_error: MESSAGES.google_error });
     counts.failed += 1;
+    counts.googleFailed += 1;
     return;
   }
   await update({ state: 'active', google_resource_name: added.resourceName, pushed_at: now, last_error: null });
@@ -239,6 +250,7 @@ async function dropWord(trx, text, counts) {
       if (!removed) {
         await trx('ad_negative_keywords').where({ id: row.id }).update({ last_error: MESSAGES.google_error, updated_at: now });
         counts.failed += 1;
+        counts.googleFailed += 1;
         continue;
       }
       counts.removed += 1;
@@ -259,10 +271,12 @@ async function sweepRemovedWord(text, counts) {
 /**
  * Make Google match the owner's word list: every live word is an active phrase negative on every linked campaign, every
  * removed word is gone from Google. `texts` limits the run to those words (a save). Also the 6 AM step.
- * Returns { pushed, failed, removed } (plus skipped: 'off' with the gate off).
+ * Returns { pushed, failed, removed, googleFailed } (plus skipped: 'off' with the gate off). `failed` counts every word
+ * not sent, a word held back because a search with it converted included; `googleFailed` only the ones Google did not
+ * answer or refused, which the 6 AM job reports as a failure.
  */
 async function syncOwnerWords({ texts } = {}) {
-  const counts = { pushed: 0, failed: 0, removed: 0 };
+  const counts = { pushed: 0, failed: 0, removed: 0, googleFailed: 0 };
   if (!gateLive()) return { ...counts, skipped: 'off' };
   const only = Array.isArray(texts) ? texts : null;
   const wordsQuery = db('ad_negative_words').where({ match_type: MATCH_TYPE }).orderBy('text');
@@ -348,7 +362,7 @@ async function removeOwnerWord(wordId, { by } = {}) {
   const first = await db('ad_negative_words').where({ id: wordId }).first();
   if (!first) return refuse('gone');
 
-  const counts = { pushed: 0, failed: 0, removed: 0 };
+  const counts = { pushed: 0, failed: 0, removed: 0, googleFailed: 0 };
   const word = await db.transaction(async (trx) => {
     await lockText(trx, first.text);
     const current = await trx('ad_negative_words').where({ id: wordId }).forUpdate().first();
@@ -387,6 +401,7 @@ async function listNegatives() {
       .select('k.id', 'k.text', 'k.campaign_id', 'k.source', 'k.state', 'k.decided_at', 'k.pushed_at', 'k.removed_at', 'k.last_error', 'c.campaign_name'),
   ]);
   const words = (await buildWords(db, wordRows)).map((w) => ({ ...w, addedAt: iso(w.addedAt) }));
+  const listed = new Set(wordRows.map((w) => w.text));
   return {
     words,
     pending: pendingRows.map((r) => ({
@@ -410,7 +425,8 @@ async function listNegatives() {
       pushedAt: iso(r.pushed_at),
       removedAt: iso(r.removed_at),
       lastError: r.last_error || null,
-      canUndo: r.state === 'active' && r.source !== 'owner_list',
+      // A word on the live list is undone by taking it off the list (undoNegative refuses it).
+      canUndo: r.state === 'active' && r.source !== 'owner_list' && !listed.has(r.text),
     })),
   };
 }
