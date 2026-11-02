@@ -290,7 +290,7 @@ const QUOTE_LABELS = {
   not_stated: 'Service not stated',
 };
 const QUOTE_NOTE_MAX = 500;
-const QUOTE_INSTRUCTION = 'A quote request is now with the team. Tell the customer the team will reply by text or email, usually within one business hour between 8 AM and 8 PM, and will send a written estimate; nothing is booked or charged until they accept it. Do not state a price.';
+const QUOTE_INSTRUCTION = 'A quote request is now with the team. Tell the customer the team will send a written estimate by text or email, and that nothing is booked or charged until they accept it. Do not give a time for the estimate. Do not state a price.';
 const QUOTE_NOT_STATED_INSTRUCTION = ' Ask which service they want; when they say, call request_quote again with it.';
 
 // The key service_requests.requested_service is saved under. A named service
