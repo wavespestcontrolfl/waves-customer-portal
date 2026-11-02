@@ -183,4 +183,150 @@ async function runPortalLateRering({ now = new Date(), pageSize = PAGE_SIZE } = 
   return { skipped: false, ...total };
 }
 
-module.exports = { runPortalLateRering, dueAtFor, STILL_WAITING };
+
+// ---------------------------------------------------------------------------------------------------------
+// The owed-estimate re-ring (GATE_PORTAL_ESTIMATE_RERING, owner 2026-11-02, "remind").
+//
+// The first-reply re-ring above asks "has a person reached the customer?" and goes quiet at the first
+// "we're working on it". An add-service request is owed an ESTIMATE, which a text does not deliver. An OPEN
+// add-service request bell (class portal_add_service_request: trigger bundle_quote_requested with its
+// request id and customer on top) that is 2 business days past its ask and still has no estimate for the
+// requested service (admin-alert-relevance.js quoteAnswered, the close rule's own test) is rung ONE more
+// time on the same row, whatever a person has said to the customer since: person contact does not matter here.
+//
+// - Two business days is 24 hours of the follow-up SLA's clock (8 AM to 8 PM ET, no weekday carve-out):
+//   followUpDueAt(askedAt, OPEN_CALENDAR, 1440). The ask time is the relevance bellEventAt, as the
+//   first-reply pass reads it, never a created_at an earlier re-ring bumped.
+// - Only asks of the last 14 days (the Portal tab's window), so turning the gate on cannot burst the backlog.
+// - The ring rewrites the row like ringAgain: unread, DONE_CLEARED, created_at bumped, metadata.askedAt
+//   stamped first, metadata.estimateReRungAt, contact: true. estimateReRungAt makes it one per bell, ever. A bell
+//   the first-reply pass already rang (lateReRungAt) still gets this one; its "Still waiting" line is replaced.
+// - After this ring the first-reply pass never rings the row (it skips lateReRungAt rows, and an ask 2 days old
+//   is past its 24-hour window).
+// - Sends nothing to a customer. One admin row write, fenced on the row still being open and unchanged.
+// ---------------------------------------------------------------------------------------------------------
+const ESTIMATE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+const ESTIMATE_BUSINESS_MINUTES = 24 * 60; // 24 open hours: two full 12-hour days of the SLA clock
+const ESTIMATE_STILL_OWED = 'Estimate still owed: no estimate for this service after 2 business days.';
+const ESTIMATE_CLASS = 'portal_add_service_request';
+
+// When an add-service ask made at `askedAt` is two business days old, or null.
+function estimateDueAtFor(askedAt) {
+  const { followUpDueAt, OPEN_CALENDAR } = require('./followup-sla-watcher');
+  return followUpDueAt(askedAt, OPEN_CALENDAR, ESTIMATE_BUSINESS_MINUTES);
+}
+
+// Like candidateQuery, for add-service request bells only. A bell the first-reply pass rang (lateReRungAt) is
+// still read; one already estimate-rung is not. Any of created_at, rungAt or askedAt may be recent.
+function estimateCandidateQuery(since, cursor, pageSize) {
+  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
+  return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
+    .whereNull('done_at')
+    .whereRaw("metadata->'retired' IS NULL")
+    .whereRaw("metadata->>'triggerKey' = 'bundle_quote_requested'")
+    .whereRaw("metadata->>'estimateReRungAt' IS NULL")
+    .where((q) => q.where('created_at', '>', since)
+      .orWhereRaw("metadata->>'rungAt' > ?", [since.toISOString()])
+      .orWhereRaw("metadata->>'askedAt' > ?", [since.toISOString()]))
+    .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.createdAt, cursor.id]); })
+    .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .limit(pageSize)
+    .select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', db.raw('created_at::text AS created_at_token'));
+}
+
+// The add-service request bells among the rows that are two business days old: { row, meta, askedAt, customerId }.
+function estimateDueItems(rows, now) {
+  const { classify, bellEventAt, parseMeta } = relevance();
+  const floor = now.getTime() - ESTIMATE_WINDOW_MS;
+  const items = [];
+  for (const row of rows) {
+    if (classify(row, { anyMode: true })?.key !== ESTIMATE_CLASS) continue;
+    const meta = parseMeta(row.metadata);
+    const askedAt = bellEventAt(row);
+    const customerId = typeof meta.customerId === 'string' ? meta.customerId.trim().toLowerCase() : null;
+    if (!askedAt || !customerId || askedAt.getTime() <= floor) continue;
+    const dueAt = estimateDueAtFor(askedAt);
+    if (!dueAt || dueAt.getTime() > now.getTime()) continue;
+    items.push({ row, meta, askedAt, customerId });
+  }
+  return items;
+}
+
+// The items whose estimate is still owed. A person's contact is no answer: only the close rule's estimate test
+// counts. A read that fails for one item is no verdict: that item is not rung.
+async function stillOwed(items) {
+  const owed = [];
+  for (const item of items) {
+    try {
+      if (!await relevance().quoteAnswered(db, { meta: item.meta, customerId: item.customerId, bellAt: item.askedAt })) owed.push(item);
+    } catch (err) {
+      logger.warn(`[portal-late-rering] estimate check failed for notification ${item.row.id}, not rung: ${safeError(err)}`);
+    }
+  }
+  return owed;
+}
+
+// The one estimate ring: this row, still open and unchanged since it was read, rewritten with the "Estimate
+// still owed" line (replacing the first-reply line when it leads the body), unread, at the top, stamped.
+async function ringEstimateAgain({ row, meta, askedAt }, now) {
+  const notifications = require('./notification-service');
+  const lead = `${STILL_WAITING}. `;
+  const rest = String(row.body || '').startsWith(lead) ? String(row.body).slice(lead.length) : (row.body || '');
+  const text = notifications.normalizeAdminText({
+    category: row.category,
+    title: row.title,
+    body: `${ESTIMATE_STILL_OWED} ${rest}`.trim(),
+    detail: row.detail || null,
+  });
+  const rewritten = await db('notifications')
+    .where({ id: row.id, recipient_type: 'admin' })
+    .whereNull('done_at')
+    .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(meta)])
+    .update({
+      body: text.body,
+      detail: text.detail,
+      read_at: null,
+      ...notifications._private.DONE_CLEARED,
+      created_at: db.fn.now(),
+      // askedAt first: created_at is bumped above, and the close and contact checks must keep the ask as their boundary.
+      // `contact: true` declares a customer reaching us, which the bell policy rings (GATE_CUSTOMER_ALERTS_RING).
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ askedAt: askedAt.toISOString(), estimateReRungAt: now.toISOString(), contact: true })]),
+    });
+  return rewritten ? 1 : 0;
+}
+
+async function runEstimatePage(rows, now) {
+  const due = estimateDueItems(rows, now);
+  const owed = await stillOwed(due);
+  let rung = 0;
+  for (const item of owed) {
+    try {
+      rung += await ringEstimateAgain(item, now);
+    } catch (err) {
+      logger.warn(`[portal-late-rering] notification ${item.row.id} not rung for its estimate: ${safeError(err)}`);
+    }
+  }
+  return { due: due.length, rung };
+}
+
+async function runPortalEstimateRering({ now = new Date(), pageSize = PAGE_SIZE } = {}) {
+  if (!require('../config/feature-gates').portalEstimateReringLive?.()) return { skipped: true, reason: 'gate_off' };
+  const since = new Date(now.getTime() - ESTIMATE_WINDOW_MS);
+  let cursor = null;
+  const total = { due: 0, rung: 0 };
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const rows = await estimateCandidateQuery(since, cursor, pageSize);
+    if (!rows.length) break;
+    const last = rows[rows.length - 1];
+    cursor = { createdAt: last.created_at_token, id: last.id };
+    const done = await runEstimatePage(rows, now);
+    total.due += done.due;
+    total.rung += done.rung;
+    if (rows.length < pageSize) break;
+    if (page === MAX_PAGES - 1) logger.warn(`[portal-late-rering] estimate pass stopped after ${MAX_PAGES} pages; the next sweep reads the rest`);
+  }
+  if (total.rung) logger.info(`[portal-late-rering] rang ${total.rung} add-service request(s) once more: no estimate after 2 business days`);
+  return { skipped: false, ...total };
+}
+
+module.exports = { runPortalLateRering, dueAtFor, STILL_WAITING, runPortalEstimateRering, estimateDueAtFor, ESTIMATE_STILL_OWED };

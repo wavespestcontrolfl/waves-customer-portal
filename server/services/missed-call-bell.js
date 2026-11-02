@@ -15,7 +15,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isSentinelPhone, PHONE_SENTINELS } = require('./external-phone');
 const { whereNotBlockedCall, phoneKeySql } = require('../middleware/spam-block');
-const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { whereNotSandboxCall, isInternalCallSource } = require('./voice-agent/relay-protocol');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // A row with NO answered_by (the Studio-flow status_callback fallback in
@@ -53,7 +53,7 @@ function unknownCallerAllowed(row, opts) {
   if (!(Number(row.duration_seconds) >= UNKNOWN_CALLER_MIN_SECONDS)) return false;
   // Withheld caller ID ("anonymous") is not a number anyone can call back.
   if (isSentinelPhone(row.from_phone) || String(row.from_phone || '').replace(/\D/g, '').length < 10) return false;
-  if (String(row.source || '') === 'voice_relay_sandbox') return false;
+  if (isInternalCallSource(row.source)) return false;
   const meta = parseMeta(row.metadata);
   try {
     const nomo = meta.addons?.results?.nomorobo_spamscore;
@@ -730,7 +730,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
       .modify((q) => {
         if (!unknownCallers) q.whereNotNull('customer_id');
         else {
-          q.whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'");
+          whereNotSandboxCall(q);
           q.where(group => group.whereNotNull('customer_id').orWhere(unknown => unknown
             .where('duration_seconds', '>=', UNKNOWN_CALLER_MIN_SECONDS)
             .whereRaw("LENGTH(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g')) >= 10")

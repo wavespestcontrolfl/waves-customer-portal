@@ -6,6 +6,8 @@
  *     automated text, a text from before the bell and a text to someone else do not.
  *   GATE_PORTAL_LATE_RERING: an open portal item bell past its one business hour with no contact since is
  *     rung once more on the same row, never twice, never for an old ask, never over a reply.
+ *   GATE_PORTAL_ESTIMATE_RERING: an open add-service request bell 2 business days old with no estimate for its
+ *     service is rung once more whatever a person said, never twice, never for an old ask.
  * The rules themselves are covered by admin-alert-relevance.test.js and portal-late-rering.test.js.
  */
 const SKIP = !process.env.DATABASE_URL;
@@ -30,7 +32,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
     portalInbox = require('../services/portal-inbox');
   });
   afterEach(() => {
-    for (const key of ['GATE_ALERT_CONTACT_CLOSE', 'GATE_PORTAL_ITEM_CLOSE', 'GATE_PORTAL_LATE_RERING', 'GATE_PORTAL_CHAT_ANSWERED_CLOSE', 'GATE_PORTAL_INBOX']) delete process.env[key];
+    for (const key of ['GATE_ALERT_CONTACT_CLOSE', 'GATE_PORTAL_ITEM_CLOSE', 'GATE_PORTAL_LATE_RERING', 'GATE_PORTAL_ESTIMATE_RERING', 'GATE_PORTAL_CHAT_ANSWERED_CLOSE', 'GATE_PORTAL_INBOX']) delete process.env[key];
   });
   afterAll(async () => {
     for (const table of ['notifications', 'sms_log', 'call_log', 'emails', 'estimates', 'service_requests', 'customers']) {
@@ -463,5 +465,157 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       expect(await state(b)).toEqual(['relevance', 'Answered by text']);
       expect((await get(b.id)).body).not.toContain('Still waiting');
     }, 30000);
+  });
+
+  describe('GATE_PORTAL_ESTIMATE_RERING', () => {
+    // An ask at 15:00 UTC three days ago (10:00 or 11:00 ET): due 24 open hours later, 48 to 49 wall-clock
+    // hours on (the clocks change on 2026-11-01), so 44 hours is never due and 52 hours always is.
+    const base = new Date();
+    const ASK = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() - 3, 15, 0, 0));
+    const NOT_DUE = mins(ASK, 44 * 60);
+    const DUE = mins(ASK, 52 * 60);
+    const estimateOn = () => { process.env.GATE_PORTAL_ESTIMATE_RERING = 'true'; };
+    const addRequest = (customer, service = 'mosquito') => requestRow(customer, { category: 'add_service', requested_service: service, source: 'portal_home' });
+    const bundleFor = async (customer, at = ASK, service = 'mosquito') => bundleBell(customer, await addRequest(customer, service), at);
+    const rungText = 'Estimate still owed: no estimate for this service after 2 business days.';
+    // Every test sweeps all open bells in this database: close the fixtures of the last test so none rings in the next.
+    afterEach(async () => { await db('notifications').whereIn('id', made.notifications).whereNull('done_at').update({ done_at: new Date(), done_by: 'test' }); });
+
+    test('a request bell 2 business days old with a person\'s text but no estimate rings "Estimate still owed" exactly once: same row, unread, on top, stamped; not before it is due, not with the gate off', async () => {
+      const customer = await customerWith();
+      const b = await bundleFor(customer);
+      await db('notifications').where({ id: b.id }).update({ read_at: mins(ASK, 5) });
+      await staffText(customer, mins(ASK, 20)); // "we're working on it": no estimate
+      // The same customer's chat add-service bell and a portal request bell are not this class.
+      const chat = await chatBell(customer, ASK, { topic: 'add_service' });
+      const requested = await requestBell(customer, await requestRow(customer), ASK);
+
+      await sweep(DUE); // gate off
+      expect((await get(b.id)).metadata.estimateReRungAt).toBeUndefined();
+
+      estimateOn();
+      expect((await sweep(NOT_DUE)).estimateReRung).toBeUndefined();
+      expect((await get(b.id)).body).not.toContain(rungText);
+
+      // The close gates are on: a person's text still does not close or silence an add-service request.
+      process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
+      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+      const result = await sweep(DUE);
+      expect(result.estimateReRung).toBe(1);
+      expect(result.lateReRung).toBeUndefined();
+      const row = await get(b.id);
+      expect(row.body.startsWith(rungText)).toBe(true);
+      expect(row.body).toContain('Pat asked about adding a service');
+      expect(row.read_at).toBeNull();
+      expect(row.done_at).toBeNull();
+      expect(row.created_at.getTime()).toBeGreaterThan(DUE.getTime());
+      expect(row.metadata).toMatchObject({ contact: true, estimateReRungAt: DUE.toISOString(), askedAt: ASK.toISOString(), requestId: expect.any(String), customerId: customer.id });
+      expect(row.metadata.lateReRungAt).toBeUndefined();
+      for (const other of [chat, requested]) expect((await get(other.id)).metadata.estimateReRungAt).toBeUndefined();
+
+      // Never a second estimate re-ring.
+      const once = await get(b.id);
+      await db('notifications').where({ id: b.id }).update({ read_at: new Date() });
+      expect((await sweep(mins(DUE, 6 * 60))).estimateReRung).toBeUndefined();
+      const again = await get(b.id);
+      expect([again.body, again.created_at.getTime(), JSON.stringify(again.metadata)]).toEqual([once.body, once.created_at.getTime(), JSON.stringify(once.metadata)]);
+      expect(again.read_at).toBeInstanceOf(Date);
+    }, 60000);
+
+    test('a delivered estimate for the asked service stops it; a delivered estimate for ANOTHER service does not; the request\'s own minted estimate stops it', async () => {
+      const right = await customerWith();
+      const wrong = await customerWith();
+      const minted = await customerWith();
+      const rightBell = await bundleFor(right);
+      const wrongBell = await bundleFor(wrong);
+      const mintedRequest = await addRequest(minted, 'mosquito');
+      const mintedEstimate = await insert('estimates', { status: 'accepted', customer_id: minted.id, estimate_data: delivered(mins(ASK, 30 * 60)) });
+      await db('service_requests').where({ id: mintedRequest.id }).update({ pricing_revision: JSON.stringify({ mintedEstimate: { id: mintedEstimate.id } }) });
+      const mintedBell = await bundleBell(minted, mintedRequest, ASK);
+      await insert('estimates', { status: 'accepted', customer_id: right.id, estimate_data: deliveredFor(mins(ASK, 30 * 60)) });
+      await insert('estimates', { status: 'accepted', customer_id: wrong.id, estimate_data: deliveredFor(mins(ASK, 30 * 60), 'svcPest') });
+      estimateOn();
+      expect((await sweep(DUE)).estimateReRung).toBe(1);
+      expect((await get(wrongBell.id)).body).toContain(rungText);
+      expect((await get(rightBell.id)).body).not.toContain(rungText);
+      expect((await get(mintedBell.id)).body).not.toContain(rungText);
+    }, 60000);
+
+    test('an ask older than 14 days is left alone; one inside the window is rung; a closed bell is left alone', async () => {
+      const old = await customerWith();
+      const inside = await customerWith();
+      const closed = await customerWith();
+      const oldBell = await bundleFor(old, mins(DUE, -15 * 24 * 60));
+      const insideBell = await bundleFor(inside, mins(DUE, -13 * 24 * 60));
+      const closedBell = await bundleFor(closed);
+      await db('notifications').where({ id: closedBell.id }).update({ done_at: mins(ASK, 30), done_by: '1' });
+      estimateOn();
+      expect((await sweep(DUE)).estimateReRung).toBe(1);
+      expect((await get(oldBell.id)).body).not.toContain(rungText);
+      expect((await get(insideBell.id)).body).toContain(rungText);
+      expect((await get(closedBell.id)).body).not.toContain(rungText);
+    }, 60000);
+
+    test('a bell the first-reply pass already rang still gets the estimate re-ring once, replacing the "Still waiting" line; the first-reply pass never rings it again', async () => {
+      const { runPortalLateRering } = require('../services/portal-late-rering');
+      const customer = await customerWith();
+      const never = await customerWith();
+      const rungBell = await bundleFor(customer);
+      const neverFirstRung = await bundleFor(never);
+      process.env.GATE_PORTAL_LATE_RERING = 'true';
+      expect((await runPortalLateRering({ now: mins(ASK, 70) })).rung).toBe(2);
+      // The second bell is put back as one the first-reply pass never rang (a bell the gate was off for).
+      await db('notifications').where({ id: neverFirstRung.id }).update({
+        metadata: db.raw("metadata - 'lateReRungAt' - 'askedAt'"), body: 'Pat asked about adding a service', created_at: ASK });
+      expect((await get(rungBell.id)).body.startsWith('Still waiting:')).toBe(true);
+
+      estimateOn();
+      expect((await sweep(DUE)).estimateReRung).toBe(2);
+      const row = await get(rungBell.id);
+      expect(row.body.startsWith(rungText)).toBe(true);
+      expect(row.body).not.toContain('Still waiting');
+      expect(row.body).toBe(`${rungText} Pat asked about adding a service`);
+      expect(row.metadata).toMatchObject({ lateReRungAt: mins(ASK, 70).toISOString(), estimateReRungAt: DUE.toISOString(), askedAt: ASK.toISOString() });
+
+      // Past both rings: the first-reply pass reads the bumped created_at and the stamped ask, and rings neither row.
+      const bumped = await get(neverFirstRung.id);
+      expect(bumped.created_at.getTime()).toBeGreaterThan(DUE.getTime());
+      for (const at of [DUE, mins(DUE, 60), new Date()]) {
+        expect((await runPortalLateRering({ now: at })).rung).toBe(0);
+        expect((await sweep(at)).lateReRung).toBeUndefined();
+      }
+      const final = await get(neverFirstRung.id);
+      expect(final.metadata.lateReRungAt).toBeUndefined();
+      expect(final.body.startsWith(rungText)).toBe(true);
+    }, 60000);
+
+    test('the close rules still read askedAt after the bump: an estimate dated between the ask and the re-ring closes the bell', async () => {
+      const customer = await customerWith();
+      const request = await addRequest(customer);
+      const b = await bundleBell(customer, request, ASK);
+      estimateOn();
+      expect((await sweep(DUE)).estimateReRung).toBe(1);
+      expect((await get(b.id)).created_at.getTime()).toBeGreaterThan(DUE.getTime());
+      await insert('estimates', { status: 'accepted', customer_id: customer.id, estimate_data: deliveredFor(mins(ASK, 30 * 60)) });
+      process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
+      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+      const result = await sweep(mins(DUE, 30));
+      expect(result.estimateReRung).toBeUndefined();
+      expect(await state(b)).toEqual(['relevance', 'Estimate was sent']);
+      expect((await getRequest(request.id)).status).toBe('resolved');
+    }, 60000);
+
+    test('every due bell is considered even when they outnumber a page: pages keyed on created_at and id', async () => {
+      const { runPortalEstimateRering } = require('../services/portal-late-rering');
+      const rows = [];
+      for (let i = 0; i < 5; i += 1) rows.push(await bundleFor(await customerWith()));
+      const fresh = await bundleFor(await customerWith(), mins(DUE, -5 * 60));
+      estimateOn();
+      const result = await runPortalEstimateRering({ now: DUE, pageSize: 2 });
+      expect(result.rung).toBe(5);
+      for (const b of rows) expect((await get(b.id)).metadata.estimateReRungAt).toBe(DUE.toISOString());
+      expect((await get(fresh.id)).metadata.estimateReRungAt).toBeUndefined();
+      expect((await runPortalEstimateRering({ now: mins(DUE, 5), pageSize: 2 })).rung).toBe(0);
+    }, 60000);
   });
 });

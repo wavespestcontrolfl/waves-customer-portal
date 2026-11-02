@@ -18,6 +18,8 @@ jest.mock('../config/feature-gates', () => ({
   reviewAskAfterReportLive: () => mockGates.reviewAskAfterReport === true,
   // GATE_REVIEW_PROBABLE_REVIEWER_GUARD: the send guard's call-time reader (review-click-guard.js).
   reviewProbableReviewerGuardLive: () => mockGates.reviewProbableReviewerGuard === true,
+  // GATE_REVIEW_TAP_PAUSE: the 180-day pause's call-time reader (review-click-guard.js tapPauseActive).
+  reviewTapPauseLive: () => mockGates.reviewTapPause === true,
   gates: mockGates,
 }));
 // Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
@@ -195,6 +197,7 @@ beforeEach(() => {
   mockGates.reviewDirectLink = false;
   mockGates.reviewAskFixedDay0 = false;
   mockGates.reviewAskAfterReport = false;
+  mockGates.reviewTapPause = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
   mockDraftTechVoice.mockReset().mockResolvedValue(null);
@@ -8331,5 +8334,174 @@ describe('the drafter\'s date is the day the visit was worked (review-visit-day.
 
     expect(mockDraftEmailIntro).toHaveBeenCalledTimes(1);
     expect(etCalendarDayOf(mockDraftEmailIntro.mock.calls[0][0].serviceDate)).toBe(etCalendarDayOf(arrived));
+  });
+});
+
+// GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, reviews audit D3): a tracked review-link tap in the last 180 days pauses
+// automatic review asks, whatever visit it answered; staff-started cadences keep going.
+describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a tap', () => {
+  const DAY = 86400000;
+  // A tap on an earlier visit's ask: delivered 40 days ago (outside the 30-day supersede window), tapped the next day.
+  const tapRow = (customerId, tappedDaysAgo) => ({ id: `rr-tap-${customerId}`, customer_id: customerId, channel: 'sms', status: 'opened',
+    sms_sent_at: new Date(Date.now() - (tappedDaysAgo + 1) * DAY), redirected_at: new Date(Date.now() - tappedDaysAgo * DAY), redirected_to_google: true });
+  const cadence = (customerId, startedBy) => ({ id: `seq-tp-${customerId}`, customer_id: customerId, status: 'active', current_step: 0, touches_sent: 0,
+    started_by: startedBy, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+    started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) });
+
+  test('switch on: a visit enrolls no cadence when the customer tapped 39 days ago', async () => {
+    mockGates.reviewSequences = true;
+    mockGates.reviewTapPause = true;
+    const mock = makeMock({ customers: [{ id: 'tp-1', first_name: 'Ana', last_name: 'T', phone: '+19410000091', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-1', 39)] });
+    db.mockImplementation(mock);
+    const result = await ReviewService.enrollPostService({ customerId: 'tp-1', completedAt: new Date() });
+    expect(result).toEqual({ started: false, reason: 'tap_pause' });
+    expect(mock.__state.rows.review_sequences || []).toHaveLength(0);
+  });
+
+  test('switch on: a tap older than 180 days pauses nothing', async () => {
+    mockGates.reviewSequences = true;
+    mockGates.reviewTapPause = true;
+    const mock = makeMock({ customers: [{ id: 'tp-2', first_name: 'Bea', last_name: 'T', phone: '+19410000092', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-2', 200)] });
+    db.mockImplementation(mock);
+    const result = await ReviewService.enrollPostService({ customerId: 'tp-2', completedAt: new Date() });
+    expect(result.started).toBe(true);
+  });
+
+  test('switch off: a recent tap pauses nothing (a tap stops only the visit it answered)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({ customers: [{ id: 'tp-3', first_name: 'Cy', last_name: 'T', phone: '+19410000093', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-3', 39)] });
+    db.mockImplementation(mock);
+    const result = await ReviewService.enrollPostService({ customerId: 'tp-3', completedAt: new Date() });
+    expect(result.started).toBe(true);
+  });
+
+  test('switch on: an automatic cadence already running stops at its next step, with no send', async () => {
+    mockGates.reviewTapPause = true;
+    const mock = makeMock({ customers: [{ id: 'tp-4', first_name: 'Di', last_name: 'T', phone: '+19410000094', nearest_location_id: 'bradenton' }],
+      review_sequences: [cadence('tp-4', 'post_service')], review_requests: [tapRow('tp-4', 39)] });
+    db.mockImplementation(mock);
+    const out = await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('tap_pause');
+  });
+
+  test('switch on: a cadence a person started keeps going', async () => {
+    mockGates.reviewTapPause = true;
+    const mock = makeMock({ customers: [{ id: 'tp-5', first_name: 'Ed', last_name: 'T', phone: '+19410000095', nearest_location_id: 'bradenton' }],
+      review_sequences: [cadence('tp-5', 'tech-1')], review_requests: [tapRow('tp-5', 39)] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mock.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
+  });
+
+  test('switch on: a link the customer asked for still enrolls and its cadence keeps going', async () => {
+    mockGates.reviewSequences = true;
+    mockGates.reviewTapPause = true;
+    const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion' };
+    const mock = makeMock({ customers: [{ id: 'tp-6', first_name: 'Flo', last_name: 'T', phone: '+19410000096', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-6', 39)] });
+    db.mockImplementation(mock);
+    expect((await ReviewService.enrollPostService({ customerId: 'tp-6', completedAt: new Date(), customerRequested: asked })).started).toBe(true);
+    const running = makeMock({ customers: [{ id: 'tp-7', first_name: 'Gus', last_name: 'T', phone: '+19410000097', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ ...cadence('tp-7', 'post_service'), customer_requested: JSON.stringify(asked) }], review_requests: [tapRow('tp-7', 39)] });
+    db.mockImplementation(running);
+    await ReviewService.processReviewSequences();
+    expect(running.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
+  });
+
+  test('switch on, a combined visit: the visit record says the customer asked, so enrollment and its cadence go on', async () => {
+    mockGates.reviewSequences = true;
+    mockGates.reviewTapPause = true;
+    const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    const record = (id, customerId) => ({ id, customer_id: customerId, service_date: new Date().toISOString().slice(0, 10),
+      structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', customerRequestedReview: asked }) });
+    const mock = makeMock({ customers: [{ id: 'tp-11', first_name: 'Hal', last_name: 'T', phone: '+19410000101', nearest_location_id: 'bradenton' }],
+      service_records: [record('rec-tp11', 'tp-11')], review_requests: [tapRow('tp-11', 39)] });
+    db.mockImplementation(mock);
+    // The packet enrollment passes no customerRequested (visit-completion-packets.js); the record carries it.
+    expect((await ReviewService.enrollPostService({ customerId: 'tp-11', serviceRecordId: 'rec-tp11', completedAt: new Date() })).started).toBe(true);
+    mockSendCustomerMessage.mockClear();
+    const running = makeMock({ customers: [{ id: 'tp-12', first_name: 'Ida', last_name: 'T', phone: '+19410000102', nearest_location_id: 'bradenton' }],
+      service_records: [record('rec-tp12', 'tp-12')],
+      review_sequences: [{ ...cadence('tp-12', 'post_service'), service_record_id: 'rec-tp12' }], review_requests: [tapRow('tp-12', 39)] });
+    db.mockImplementation(running);
+    await ReviewService.processReviewSequences();
+    expect(running.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['an automatic queued ask stands down', 'auto', 0, 'suppressed'],
+    ['a staff ask still goes', 'admin', 1, undefined],
+  ])('switch on, a queued ask after a tap 39 days ago: %s', async (_label, triggeredBy, sends, status) => {
+    mockGates.reviewTapPause = true;
+    const customer = { id: 'tp-8', first_name: 'Synthetic', phone: '+12025550108', nearest_location_id: 'venice' };
+    const mock = makeMock({ customers: [customer], review_requests: [tapRow('tp-8', 39), { id: 'rr-queued-tp', customer_id: customer.id,
+      status: 'pending', channel: 'sms', template_key: 'friendly_ask', location_id: 'venice', token: 'tp-token', triggered_by: triggeredBy,
+      expires_at: new Date(Date.now() + 10 * DAY), scheduled_for: new Date(Date.now() - 60000), created_at: new Date(Date.now() - DAY) }] });
+    db.mockImplementation(mock);
+    await ReviewService.sendSMS('rr-queued-tp');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(sends);
+    if (status) expect(mock.__state.rows.review_requests.find((r) => r.id === 'rr-queued-tp').status).toBe(status);
+  });
+
+  test('switch on, legacy mode: a link the customer asked for is queued as auto and still delivered', async () => {
+    mockGates.reviewTapPause = true;
+    // The legacy queued row has no template_key: sendSMS renders the stored review_request SMS template.
+    jest.doMock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(async (_key, vars) => `Hi ${vars.first_name}, ${vars.review_url}`) }));
+    const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion' };
+    const customer = { id: 'tp-10', first_name: 'Synthetic', phone: '+12025550110', nearest_location_id: 'venice' };
+    const mock = makeMock({ customers: [customer], review_requests: [tapRow('tp-10', 39)],
+      service_records: [{ id: 'rec-tp10', customer_id: customer.id, service_date: new Date().toISOString().slice(0, 10),
+        structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', customerRequestedReview: asked }) }] });
+    db.mockImplementation(mock);
+    await ReviewService.enrollPostService({ customerId: customer.id, serviceRecordId: 'rec-tp10', completedAt: new Date(), delayMinutes: 0, customerRequested: asked });
+    const queued = mock.__state.rows.review_requests.find((r) => r.service_record_id === 'rec-tp10');
+    expect(queued).toMatchObject({ triggered_by: 'auto' });
+    if (queued.status === 'pending') {
+      queued.channel = queued.channel || 'sms'; // the column default the fake does not apply
+      queued.scheduled_for = new Date(Date.now() - 1000);
+      try {
+        await ReviewService.processScheduled();
+      } finally {
+        jest.dontMock('../routes/admin-sms-templates');
+      }
+    }
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mock.__state.rows.review_requests.find((r) => r.id === queued.id).status).not.toBe('suppressed');
+  });
+
+  test('a completion text\'s bundled ask: a tap before this visit drops the review line only with the switch on, and a requested link still rides', async () => {
+    const { withBundledAskGate } = require('../services/review-ask-dispatch');
+    const today = new Date().toISOString().slice(0, 10);
+    const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    const rows = (notes) => ({ customers: [{ id: 'tp-13', first_name: 'Jo', phone: '+12025550113', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'rec-tp13', customer_id: 'tp-13', service_date: today, structured_notes: JSON.stringify(notes) }],
+      review_requests: [tapRow('tp-13', 39), { id: 'rr-inline-tp13', customer_id: 'tp-13', service_record_id: 'rec-tp13', triggered_by: 'auto_inline',
+        status: 'pending', token: 'tp13', created_at: new Date(), scheduled_for: new Date(Date.now() + 7200000) }] });
+    const drops = [];
+    const send = async (drop) => { drops.push(drop); return { sent: true }; };
+    db.mockImplementation(makeMock(rows({ requestReview: true })));
+    await withBundledAskGate('tp-13', 'rr-inline-tp13', send); // switch off: the tap predates this visit
+    mockGates.reviewTapPause = true;
+    await withBundledAskGate('tp-13', 'rr-inline-tp13', send);
+    db.mockImplementation(makeMock(rows({ requestReview: true, customerRequestedReview: asked })));
+    await withBundledAskGate('tp-13', 'rr-inline-tp13', send);
+    expect(drops).toEqual([null, 'clicked', null]);
+  });
+
+  test.each([
+    ['switch on: the Day-3 follow-up of an older ask stands down after a tap 39 days ago', true, 0],
+    ['switch off: the same follow-up goes (control)', false, 1],
+  ])('%s', async (_label, on, sent) => {
+    mockGates.reviewTapPause = on;
+    const customer = { id: 'tp-9', first_name: 'Synthetic', phone: '+12025550109' };
+    const mock = makeMock({ customers: [customer], review_requests: [{ ...tapRow('tp-9', 39), followup_sent: true },
+      { id: 'legacy-tp', customer_id: customer.id, status: 'sent', followup_sent: false, sms_sent_at: new Date(Date.now() - 80 * 3600000), score: null, rated_at: null }] });
+    db.mockImplementation(mock);
+    mockRenderSmsTemplate.mockResolvedValue('Please leave a Google review: https://g.page/r/example/review');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-tp' });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(sent);
   });
 });

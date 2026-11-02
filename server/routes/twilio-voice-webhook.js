@@ -1232,6 +1232,17 @@ router.post('/voice', async (req, res) => {
   // lock below) has committed, after which we must not release the claim on error.
   let callLogged = false;
   try {
+    // The staff-only tech voice line answers on its own route (/tech-voice).
+    // Reaching /voice means the number's voice URL is wrong: refuse it first,
+    // before the voice gate's notice, the dedupe claim or the spam screen can
+    // answer it, and before anything rings, records or logs it as a customer
+    // call. A bare <Reject> is never billed.
+    if (TWILIO_NUMBERS.isTechVoiceLine(toE164(req.body.To))) {
+      logger.warn(`[voice] tech voice line reached /voice — check its Twilio voice URL (${maskSid(req.body.CallSid)})`);
+      const rejectTwiml = new VoiceResponse();
+      rejectTwiml.reject();
+      return res.type('text/xml').send(rejectTwiml.toString());
+    }
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
       logger.info(`[GATE BLOCKED] Voice call from ${maskPhone(req.body.From)} (gate: twilioVoice)`);
@@ -2225,6 +2236,90 @@ function refuseSandbox(req, res, why) {
   logger.warn(`[relay-sandbox] refused: ${why} (To=${maskPhone(req.body?.To)} ${maskSid(req.body?.CallSid)})`);
   return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
 }
+
+// =========================================================================
+// POST /api/webhooks/twilio/tech-voice — the "Waves Tech" voice line
+// (GATE_TECH_VOICE_LINE, dark). A technician calls TECH_VOICE_NUMBER from
+// their own cell. Admission (services/tech-voice-line.js) runs BEFORE Twilio
+// answers, so every refused call is a <Reject> Twilio does not bill: gate off,
+// another number, an unknown caller, a CallSid another source owns, or a
+// spent minute budget. No press-1 screen, no office ring, no voicemail, no
+// recording. An admitted call is handed to the voice relay's tech session
+// (services/voice-agent/tech-voice-conversation.js: PIN, then fixed
+// commands; relay-server.js routes it by the call's tech_voice source), with
+// keypad detection on for the PIN and a Twilio time limit of 3 minutes, the
+// call's whole reservation. Any error rejects (fail closed: an unchecked call
+// is never answered).
+// =========================================================================
+const TECH_VOICE_COMPLETE_ACTION = '/api/webhooks/twilio/tech-voice-complete';
+const TECH_VOICE_TIME_LIMIT_S = 180;
+const TECH_VOICE_GREETING = 'Waves Tech. Enter your PIN, then press pound.';
+
+// Twilio's own stop: the call ends at its 3 reserved minutes even if the
+// relay session never closes. Fail-soft: the relay's own cap, 150 seconds
+// from admission (relay-server.js), still ends it inside the reservation.
+// (relay-server.js) still ends it.
+function capTechVoiceCall(callSid) {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return;
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  void client.calls(callSid).update({ timeLimit: TECH_VOICE_TIME_LIMIT_S })
+    .catch((err) => logger.warn(`[tech-voice] time limit not set for ${maskSid(callSid)} (${String(err?.code || err?.status || 'error')})`));
+}
+
+function techVoiceRelayXml({ callSid, req }) {
+  const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
+  return buildRelayTwiML({
+    // The host rule /relay-sandbox uses: the socket opens on THIS deploy.
+    wsUrl: `wss://${sandboxRelayHost(req)}${RELAY_WS_PATH}`,
+    callSid,
+    action: TECH_VOICE_COMPLETE_ACTION,
+    welcomeGreeting: TECH_VOICE_GREETING,
+    relayAttrs: { dtmfDetection: 'true' },
+  });
+}
+
+router.post('/tech-voice', async (req, res) => {
+  const reject = () => {
+    const twiml = new VoiceResponse();
+    twiml.reject();
+    return res.type('text/xml').send(twiml.toString());
+  };
+  const { CallSid, From, To, CallStatus, StirVerstat } = req.body || {};
+  try {
+    const admitted = await require('../services/tech-voice-line').admitTechVoiceCall(db, {
+      callSid: CallSid, from: From, to: To, callStatus: CallStatus, stirVerstat: StirVerstat,
+    });
+    if (!admitted.ok) {
+      logger.info(`[tech-voice] rejected ${maskSid(CallSid)} (${admitted.reason})`);
+      return reject();
+    }
+    if (!require('../services/voice-agent/relay-server').isRelayAttached()) {
+      // Admitted but nothing can answer: say so and hang up. The call bills
+      // its first minute, settled from /call-status like any other.
+      logger.error(`[tech-voice] relay not attached — admitted call ${maskSid(CallSid)} gets the notice`);
+      const twiml = new VoiceResponse();
+      twiml.say({ voice: SAY_VOICE }, 'The Waves tech line is not available right now. Goodbye.');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+    const xml = techVoiceRelayXml({ callSid: CallSid, req });
+    capTechVoiceCall(CallSid);
+    return res.type('text/xml').send(xml);
+  } catch (err) {
+    logger.error(`[tech-voice] admission failed for ${maskSid(CallSid)} (${String(err?.code || err?.name || 'error')})`);
+    return reject();
+  }
+});
+
+// POST /api/webhooks/twilio/tech-voice-complete — the <Connect action> of a
+// tech voice line call: the relay session ended (the technician said goodbye,
+// a PIN step closed it, the time cap, or the socket dropped). Nothing
+// follows it: the call hangs up.
+router.post('/tech-voice-complete', (req, res) => {
+  const twiml = new VoiceResponse();
+  twiml.hangup();
+  res.type('text/xml').send(twiml.toString());
+});
 
 router.post('/relay-sandbox', async (req, res) => {
   try {
@@ -3492,6 +3587,26 @@ router.post('/outbound-dial-complete', async (req, res) => {
 // doesn't have a stable CallSid convention yet. Keep them separate — do not
 // add callLogId lookup here or the two code paths will drift.
 // =========================================================================
+// The internal line a call is on — the staff-only tech voice line or the
+// Sandy sandbox number — as its call_log source and metadata mark; null for
+// a customer line. An internal call is never a customer call, never a bell.
+function internalLine(req) {
+  const { TECH_VOICE_SOURCE, VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+  if (TWILIO_NUMBERS.isTechVoiceLine(toE164(req.body?.To || ''))) return { source: TECH_VOICE_SOURCE, mark: 'tech_voice' };
+  if (isSandboxCall(req)) return { source: VOICE_RELAY_SANDBOX_SOURCE, mark: 'relay_sandbox' };
+  return null;
+}
+
+// A tech voice line call's final status settles its billed minutes against
+// the reservation made before it answered (services/tech-voice-usage.js).
+function settleTechVoiceStatus(req) {
+  const { CallSid, CallStatus, CallDuration, To } = req.body || {};
+  if (!TWILIO_NUMBERS.isTechVoiceLine(toE164(To || ''))) return;
+  void require('../services/tech-voice-usage')
+    .settleTechVoiceCall(db, { callSid: CallSid, callStatus: CallStatus, durationSeconds: CallDuration })
+    .catch((err) => logger.warn(`[tech-voice] settle failed for ${maskSid(CallSid)} (${String(err?.code || err?.name || 'error')})`));
+}
+
 router.post('/call-status', async (req, res) => {
   try {
     const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage } = req.body;
@@ -3577,12 +3692,14 @@ router.post('/call-status', async (req, res) => {
       const fromPhone = toE164(From);
       const toPhone = toE164(To);
       const numberConfig = TWILIO_NUMBERS.findByNumber(toPhone);
-      // A status callback for the SANDBOX number that beats /relay-sandbox to
-      // the row writes the sandbox row itself: no customer link and no
-      // touchpoint — a bake-off call must never reach a customer's history
-      // (codex r10 P1). /relay-sandbox finds it already owned.
-      if (isSandboxCall(req)) {
-        const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+      // A status callback for an internal line with no row writes the
+      // internal row itself: no customer link and no touchpoint. The SANDBOX
+      // number's callback can beat /relay-sandbox to the row — a bake-off
+      // call must never reach a customer's history (codex r10 P1), and
+      // /relay-sandbox finds it already owned. A tech voice line call refused
+      // before admission is never a customer row either.
+      const internal = internalLine(req);
+      if (internal) {
         await trx('call_log').insert({
           direction: 'inbound',
           from_phone: fromPhone,
@@ -3590,8 +3707,8 @@ router.post('/call-status', async (req, res) => {
           twilio_call_sid: CallSid,
           status: CallStatus,
           duration_seconds: parseInt(CallDuration || 0),
-          source: VOICE_RELAY_SANDBOX_SOURCE,
-          metadata: JSON.stringify({ relay_sandbox: true, source: 'status_callback', inserted_on_status: CallStatus || null }),
+          source: internal.source,
+          metadata: JSON.stringify({ [internal.mark]: true, source: 'status_callback', inserted_on_status: CallStatus || null }),
         });
         return;
       }
@@ -3642,9 +3759,12 @@ router.post('/call-status', async (req, res) => {
       });
     });
 
+    settleTechVoiceStatus(req);
+
     // A sandbox call has no recording and must never be handed account-level
-    // recording audio by the CallSid-keyed recovery lookup (codex r12 P2).
-    if (!isOutbound && CallStatus === 'completed' && !isSandboxCall(req)) {
+    // recording audio by the CallSid-keyed recovery lookup (codex r12 P2);
+    // neither has a call to the tech voice line.
+    if (!isOutbound && CallStatus === 'completed' && !internalLine(req)) {
       scheduleRecordingRecovery(CallSid);
     }
 
@@ -3658,7 +3778,7 @@ router.post('/call-status', async (req, res) => {
     // A failed/busy/no-answer bake-off is its own artifact (the sandbox row),
     // never an admin bell (codex r14 P2). A lead call-reply ring that ends
     // unanswered raises its own "Missed call request" bell instead.
-    if (isFailureStatus(CallStatus) && !isSandboxCall(req) && !leadCallReplyRing) {
+    if (isFailureStatus(CallStatus) && !internalLine(req) && !leadCallReplyRing) {
       notifyTwilioFailure({
         channel: 'voice',
         direction: isOutbound ? 'outbound' : 'inbound',

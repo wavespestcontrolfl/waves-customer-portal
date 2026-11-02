@@ -27,6 +27,7 @@ jest.mock('../config/twilio-numbers', () => ({
   // A staff forward / CSR cell for the internal-caller test.
   isInternalNumber: (n) => n === '+19415550999',
   isTechLine: (n) => n === '+19413529161',
+  isTechVoiceLine: () => false,
   tollFree: { number: '+18559260203' },
   findByNumber: jest.fn((n) => (n === '+19412975749' ? { id: 'main' } : n === '+19413840224' ? { id: 'gbp', type: 'gbp_tracking' } : null)),
   gbpTracking: { parrish: { number: '+19413840224' } },

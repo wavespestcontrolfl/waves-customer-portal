@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE=true (owner 2026-11-02, option A: an email reply pauses the estimate follow-up emails the way a text already does. On, hasRepliedRecently also returns true when the customer emailed Waves inside the same 14 days: an inbound row in the Gmail sync table linked to the estimate's customer_id, or whose from_address equals the estimate's email (leads have no customer_id). Gmail SENT rows never count, and the address match is skipped when the estimate's email is one of ours. A failed read fails open on the cron path and holds the replay, same as the text check. Strict `=== 'true'`, read at call time via estimateFollowupEmailReplyPauseLive(); dark by default; off = the emails table is never queried and nothing changes. Sends nothing; it only holds back follow-up emails.)
  *   GATE_SOCIAL_STUDIO_SKIP_META=true (owner 2026-11-01, social audit "studio trim": from Sep 1 to Nov 1 the autonomous Social Studio's Instagram stills reached about 1.5 to 3 people each and gained no followers, so the autonomous studio stops posting to Facebook and Instagram and keeps LinkedIn and Google Business. On, an autonomous run (the 6:30 AM ET cron, the admin Run Draft and Run Publish buttons, and the approval of a queued autonomous draft) drops facebook and instagram from its channel list: no copy or image is made for them, no Veo clip is made, and an old queued draft publishes to its other channels only. A run whose channels were only facebook and instagram is skipped and logged. The manual Social Studio, Campaign Builder, Publish All, blog and RSS shares, testimonial graphics and scheduled posts are NOT touched. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialStudioSkipMetaLive().)
  *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
  *   GATE_MOVE_NOTICE_EMAIL=true (owner 2026-10-24 "reschedule email": the email version of a reschedule or cancellation text that reached nobody. A customer whose line cannot take texts (a landline, a carrier bounce) otherwise hears nothing when a visit moves or is cancelled. On, when the reschedule text (handleReschedule, sendRescheduleNoticeForVisit) or the cancellation text (handleCancellation) reached no recipient and was not held (send window, visit move, unreadable settings), or a carrier later bounced it (handleUndeliveredSms), the customer gets the same notice by email (appointment.rescheduled / appointment.cancelled, transactional). No usable email raises the no-channel admin alert. One email per notice. Off = today's behavior: no reschedule or cancellation email. Kill: unset)
@@ -112,6 +113,7 @@
  *   GATE_PORTAL_INBOX=true (owner 2026-10-31, option A: a Portal tab in Admin > Communications lists what customers asked for inside the customer portal and nobody answered: portal chat hand-offs (ai_escalations from a portal_chat session still pending) and customer service requests not yet resolved, closed or cancelled and not made by staff. Shows the last 14 days; older open items sit under one Older line with a Close all older button that closes them and sends nothing to customers. Mark handled on a row closes the item and the admin bell alerts raised for it. Admin only. Read at call time via portalInboxLive(), strict 'true', dark by default; off = the tab is hidden, the new routes answer enabled:false/404, and the escalation and request update routes close no alerts. Sends nothing to a customer.)
  *   GATE_PORTAL_ITEM_CLOSE=true (owner 2026-11-01, "do the fixes" after the inbound-requests audit: portal items close the way chat items do, and "Mark handled" in the Portal tab stops emailing the customer. (1) The Portal tab sends `quiet: true` on its request PATCH and the route then skips the customer's "Your Waves request was updated" email; Customer 360 sends no `quiet`, so its email is unchanged. (2) The admin bell raised for a portal request (doneWhen `request_answered`) closes once a person texted, called back, answered the call of, or emailed that customer after the bell. (3) The bell for an add-service request (trigger `bundle_quote_requested`) now carries its request id at the top of its metadata, so Mark handled closes it, and it closes once an estimate was handed to that customer after the bell. When the sweep closes a bell it also resolves that request row quietly (status resolved, an admin note such as "Answered by text"); it never sends the customer anything. Rides on GATE_ALERT_CONTACT_CLOSE for the contact close. Read at call time via portalItemCloseLive(), strict 'true', dark by default; off = today's behavior, byte for byte.)
  *   GATE_PORTAL_LATE_RERING=true (owner 2026-11-01, same audit: the portal tells the customer to expect a reply within one business hour (8 AM to 8 PM ET) and nothing rang when that hour passed. An open portal item bell (chat hand-off, portal request, add-service request) whose ask is past that hour with no person's contact since is rung ONE more time, on the same row: the body leads with "Still waiting: no reply after 1 business hour", it moves to the top, and it is stamped metadata.lateReRungAt so it never re-rings twice. Only asks from the last 24 hours. Sends nothing to a customer. Reuses the follow-up SLA clock (followUpDueAt) and runs inside the existing alert-relevance sweep. Read at call time via portalLateReringLive(), strict 'true', dark by default; off = the sweep does nothing extra.)
+ *   GATE_PORTAL_ESTIMATE_RERING=true (owner 2026-11-02, "remind", after an outside review of the late re-ring: GATE_PORTAL_LATE_RERING is a first-reply reminder, so any person's "we're working on it" silences it while the customer is still owed an estimate. An open add-a-service request bell (trigger bundle_quote_requested) that is 2 business days past its ask (24 hours of the 8 AM to 8 PM ET follow-up clock) and still has no estimate for the requested service, whatever a person has said since, is rung ONE more time on the same row: the body leads with "Estimate still owed: no estimate for this service after 2 business days.", it moves to the top, unread, and is stamped metadata.estimateReRungAt so it never re-rings twice. Only asks from the last 14 days. A bell the first-reply re-ring already rang still gets this one. Sends nothing to a customer. Runs inside the existing alert-relevance sweep. Read at call time via portalEstimateReringLive(), strict 'true', dark by default; off = the sweep does nothing extra.)
  *   GATE_MESSENGER_INBOX=true (owner 2026-10-31: a Messenger tab in Admin > Communications for the Facebook page's Messenger messages. Every 3 minutes the portal reads new messages from the Facebook page into the unified messages store (first run: last 6 months), rings one admin bell per thread with a new customer message, and closes it when someone replies. Staff reply from the tab through Facebook's Send API inside Meta's 24-hour window; past it the tab links to Facebook. Free API. Read at call time via messengerInboxLive(), strict 'true', dark by default; off = the poller does nothing, the routes answer enabled:false / 404 and the tab is hidden. The owner turns it on: it adds a customer-message path.)
  *   GATE_ROUTE_ENGINE_SUMMARY=true (owner 2026-10-31: the admin Day Scorecard payload also carries an `engine` block, a plain summary of the nightly auto-dispatch run over the last 7 ET nights: moves made, visits the per-run cap held back and how many of those moved later, and nights that failed or finished with errors; counts only, no drive-time estimate. Read-only over auto_dispatch_runs and auto_dispatch_audit_logs; sends nothing. Strict opt-in: exactly 'true', read at call time via routeEngineSummaryLive() by server/routes/admin-route-scorecard.js; dark by default; off = the scorecard payload is unchanged, with no engine key.)
  *   GATE_INSPECTION_REUSE_LEAD_SHELL=true (owner 2026-10-31: the public consultation page (routes/inspection-public.js) reuses the customer row the web form created for the lead, instead of minting a second customer row for the same person. Reused only when that row is still the lead's own untouched intake shell: stage new_lead, active, created at most 10 minutes before the lead, the lead is the first on it, no billing, login, visit, invoice or merge history, same phone and email as the lead, and no other lead's consultation provenance names it; a stored address that clearly differs falls back to a new prospect. A reused shell is booked as an outright prospect; the reuse changes nothing on its profile except to fill missing map coordinates. Read at call time via inspectionReuseLeadShellLive(), strict 'true', dark by default; off = the page creates the new prospect row exactly as before. Kill switch = unset the variable. Sends nothing to a customer.)
@@ -6282,6 +6284,20 @@ function ibToolSearchLive() {
   return process.env.GATE_IB_TOOL_SEARCH === 'true';
 }
 
+// GATE_IB_TOOL_ADDITIONS read at CALL time — strict `=== 'true'`, dark. Off
+// the tool search path (a model that thinks by default, or a login without
+// tool search), a discover_capabilities result no longer adds its tools to the
+// request's `tools` array, which the API renders first and which therefore
+// voided the whole prompt cache on every such round. The bar keeps `tools` as
+// sent and offers the found tools in a `role: "system"` message of
+// `tool_addition` blocks before the next round (tool-additions.js; beta header
+// inline-tools-2026-09-15). Has effect only on a model that accepts
+// mid-conversation tool changes (models.anthropicSupportsMidConversationTools).
+// Off = the found tools are merged into `tools`, as before. Kill: unset.
+function ibToolAdditionsLive() {
+  return process.env.GATE_IB_TOOL_ADDITIONS === 'true';
+}
+
 // GATE_IB_OPENAI_BACKUP read at CALL time — strict `=== 'true'`, dark. When the
 // Intelligence Bar's Anthropic call fails with a provider error (usage limit,
 // auth, overloaded, 5xx, timeout), the request finishes on OpenAI with tool
@@ -7035,6 +7051,15 @@ function estimateEmailConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER === 'true';
 }
 
+// GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE read at CALL time (so a flip needs no
+// redeploy); strict `=== 'true'`, dark by default. Owner 2026-11-02, option A: an
+// inbound email from the customer pauses the estimate follow-up emails like a
+// text already does (estimate-follow-up.js hasRepliedRecently). Off: the emails
+// table is never queried. Sends nothing.
+function estimateFollowupEmailReplyPauseLive() {
+  return process.env.GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE === 'true';
+}
+
 // GATE_RESERVICE_DETAILS_REQUIRED read at CALL time — the one canonical
 // reader (server/routes/reservice-public.js GET + POST). Strict 'true'.
 function reserviceDetailsRequiredLive() {
@@ -7163,6 +7188,15 @@ function reviewProbableReviewerGuardLive() {
 // an unpaid invoice holds the ask until it is paid. Unset is the kill, no redeploy.
 function reviewAskAtVisitLive() {
   return String(process.env.GATE_REVIEW_ASK_AT_VISIT || '').trim().toLowerCase() === 'true';
+}
+
+// GATE_REVIEW_TAP_PAUSE read at CALL time (owner 2026-11-02, reviews audit D3 "180 days"): 'true' = a customer who
+// tapped a tracked Google review link in the last 180 days gets no AUTOMATIC review ask: a visit enrolls no cadence
+// (enrollPostService, reason tap_pause) and an automatic cadence already running stands down at its next step. Staff
+// can still send the review link by hand (Quick Links, the composer, a cadence a person starts). Off = a tap stops
+// asks only for the visit it answered (services/review-click-guard.js). Unset is the kill, no redeploy.
+function reviewTapPauseLive() {
+  return String(process.env.GATE_REVIEW_TAP_PAUSE || '').trim().toLowerCase() === 'true';
 }
 
 // GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
@@ -8958,6 +8992,8 @@ function rainoutKeepRainOkLive() {
 module.exports.rainoutKeepRainOkLive = rainoutKeepRainOkLive;
 // GATE_REVIEW_ASK_AT_VISIT reader, on its own line so gate PRs never conflict.
 module.exports.reviewAskAtVisitLive = reviewAskAtVisitLive;
+// GATE_REVIEW_TAP_PAUSE reader, on its own line so gate PRs never conflict.
+module.exports.reviewTapPauseLive = reviewTapPauseLive;
 module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
@@ -8968,6 +9004,8 @@ module.exports.payerInvoiceSmsLive = payerInvoiceSmsLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+// GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE reader, on its own line so gate PRs never conflict.
+module.exports.estimateFollowupEmailReplyPauseLive = estimateFollowupEmailReplyPauseLive;
 
 // GATE_SOCIAL_STUDIO_SKIP_META read at CALL time (so a flip needs no redeploy); strict 'true'.
 // Owner 2026-11-01 "studio trim": the autonomous Social Studio stops drafting and posting to
@@ -9376,6 +9414,8 @@ module.exports.ibGeneralReadOfficeLive = ibGeneralReadOfficeLive;
 module.exports.ibGeneralEditLive = ibGeneralEditLive;
 // GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
 module.exports.ibToolSearchLive = ibToolSearchLive;
+// GATE_IB_TOOL_ADDITIONS reader, on its own line so gate PRs never conflict.
+module.exports.ibToolAdditionsLive = ibToolAdditionsLive;
 // GATE_IB_OPENAI_BACKUP reader, on its own line so gate PRs never conflict.
 module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
@@ -9789,6 +9829,11 @@ function portalItemCloseLive() {
 function portalLateReringLive() {
   return process.env.GATE_PORTAL_LATE_RERING === 'true';
 }
+// GATE_PORTAL_ESTIMATE_RERING read at CALL time, strict `=== 'true'`, dark in every environment.
+// Off, the alert-relevance sweep does not look for add-service requests still owed an estimate.
+function portalEstimateReringLive() {
+  return process.env.GATE_PORTAL_ESTIMATE_RERING === 'true';
+}
 // GATE_MESSENGER_INBOX read at CALL time, strict `=== 'true'`, dark in every environment.
 // Off, the Messenger poller does nothing and the Messenger tab and routes answer enabled:false / 404.
 function messengerInboxLive() {
@@ -9831,6 +9876,14 @@ function staffEditLockStartOnlyLive() {
 // the same service (services/annual-prepay-series-slot.js). Off = seeds carry no technician and no time. Kill = unset.
 function prepaySeedSeriesSlotLive() {
   return process.env.GATE_PREPAY_SEED_SERIES_SLOT === 'true';
+}
+// GATE_TECH_VOICE_LINE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01, hands-free field voice PR 3a). On,
+// POST /api/webhooks/twilio/tech-voice admits a call to TECH_VOICE_NUMBER from an active technician's own cell, after
+// reserving its billed minutes (services/tech-voice-usage.js: one call at a time, 3 a call, 15 a day, 150 a month per
+// technician); every other call is rejected before Twilio answers ($0). Off = every call to the line is rejected.
+// Kill = unset. Running it costs Twilio minutes: the owner's yes comes first.
+function techVoiceLineLive() {
+  return process.env.GATE_TECH_VOICE_LINE === 'true';
 }
 // GATE_PAYER_PACKET_AUTOSEND read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, a grouped closeout
 // ("combined stop") whose every billed member resolves to the SAME active third-party payer mints ONE invoice billed to
@@ -10025,6 +10078,8 @@ module.exports.portalInboxLive = portalInboxLive;
 module.exports.portalItemCloseLive = portalItemCloseLive;
 // GATE_PORTAL_LATE_RERING reader, on its own line so gate PRs never conflict.
 module.exports.portalLateReringLive = portalLateReringLive;
+// GATE_PORTAL_ESTIMATE_RERING reader, on its own line so gate PRs never conflict.
+module.exports.portalEstimateReringLive = portalEstimateReringLive;
 // GATE_MESSENGER_INBOX reader, on its own line so gate PRs never conflict.
 module.exports.messengerInboxLive = messengerInboxLive;
 // GATE_ROUTE_ENGINE_SUMMARY reader, on its own line so gate PRs never conflict.
@@ -10043,6 +10098,8 @@ module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
 module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;
 // GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
 module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
+// GATE_TECH_VOICE_LINE reader, on its own line so gate PRs never conflict.
+module.exports.techVoiceLineLive = techVoiceLineLive;
 module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER reader, on its own line so gate PRs never conflict.
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;

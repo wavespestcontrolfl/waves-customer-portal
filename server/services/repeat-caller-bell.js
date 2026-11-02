@@ -11,7 +11,7 @@ const { toE164, isLikelyE164 } = require('../utils/phone');
 const { isSentinelPhone } = require('./external-phone');
 const { outcomeUnanswered } = require('./missed-call-bell');
 const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
-const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
+const { whereNotSandboxCall, isInternalCallSource } = require('./voice-agent/relay-protocol');
 
 const REPEAT_THRESHOLD = 3;
 const REPEAT_WINDOW_MS = 3 * 60 * 60 * 1000;
@@ -53,7 +53,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
   try {
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call || call.direction !== 'inbound') return false;
-    if (String(call.source || '') === VOICE_RELAY_SANDBOX_SOURCE) return false;
+    if (isInternalCallSource(call.source)) return false;
     const key = callerKey(call.from_phone);
     if (!key) return false;
     const token = new Date().toISOString();

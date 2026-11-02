@@ -225,6 +225,8 @@ function fromNumberForDialed(dialed) {
   if (!dialed) return null;
   if (dialed === TWILIO_NUMBERS.tollFree?.number) return null;
   if (TWILIO_NUMBERS.isTechLine(dialed)) return null;
+  // The staff-only tech voice line never texts anyone back.
+  if (TWILIO_NUMBERS.isTechVoiceLine(dialed)) return null;
   // The internal-alert caller ID is never customer-facing (twilio-numbers.js)
   // — unless it is unset and falls back to the main line, which is.
   const alertCallerId = TWILIO_NUMBERS.internalAlertCallerId?.();

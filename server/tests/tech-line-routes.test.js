@@ -448,6 +448,22 @@ describe('POST /set-text', () => {
     expect(openSetTextVisit).toHaveBeenCalledWith(db, VISIT);
   });
 
+  test('the voice line\'s yes is bound to what it read back: a changed phone or wording sends nothing', async () => {
+    const { sendSetText } = require('../services/tech-line-texts');
+    const actor = { techRole: 'technician', technicianId: 'tech-1' };
+    const heard = { customerId: 'c1', to: '+19415550100', body: GATE_TEXT };
+    primeVisit();
+    for (const changed of [{ to: '+19415550999' }, { body: 'Hi Pat, an older wording.' }, { customerId: 'c2' }]) {
+      const out = await sendSetText({ actor, scheduledServiceId: VISIT, kind: 'gate_locked', expect: { ...heard, ...changed } });
+      expect(out).toMatchObject({ status: 409, json: { code: 'SET_TEXT_CHANGED' } });
+    }
+    expect(db.raw).not.toHaveBeenCalledWith(expect.stringMatching(CLAIM_SQL), expect.anything());
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const out = await sendSetText({ actor, scheduledServiceId: VISIT, kind: 'gate_locked', expect: heard });
+    expect(out.status).toBe(200);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test('a set text cannot overwrite the send\'s own metadata keys', async () => {
     primeVisit();
     await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'dog_outside' } });

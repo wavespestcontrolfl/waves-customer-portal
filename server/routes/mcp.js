@@ -45,6 +45,13 @@ const MAX_BATCH_TOOL_CALLS = 5;
 // bridge aborting the whole search.
 const EMBED_TIMEOUT_MS = 8000;
 const KNOWN_SOURCES = ['wiki', 'kb', 'service', 'protocol', 'lawn_module', 'jurisdiction', 'product_label', 'prep_guide', 'ops_rule', 'resolution', 'species', 'species_tech'];
+// A search snippet is one matching chunk cut to this length, so it is the
+// whole entry only for a one-chunk entry this short: `partial` says which,
+// and get_document reads the rest (a snippet once hid two products of a
+// four-product rotation).
+const SNIPPET_CHARS = 500;
+// get_document answers a long entry in parts of this size; `offset` pages on.
+const DOCUMENT_PART_CHARS = 20000;
 
 function mcpAuth(req, res, next) {
   if (!isEnabled('mcpReadTools')) return res.status(403).json({ error: 'mcp read tools disabled' });
@@ -85,16 +92,63 @@ async function searchIndex(query, { sources = null, limit = 10 } = {}) {
   const fused = rrfFuse([vectorList, ftsList])
     .map((d) => ({ ...d, score: applyRecencyDecay(d) }))
     .sort((a, b) => b.score - a.score);
+  const top = fused.slice(0, cap);
+  const chunkCounts = await countChunks(top);
   return {
     usedVector,
-    results: fused.slice(0, cap).map((d) => ({
-      source: d.source,
-      sourceId: d.sourceId,
-      title: d.title,
-      snippet: d.snippet ? String(d.snippet).slice(0, 500) : null,
-      score: Number(d.score.toFixed(5)),
-    })),
+    results: top.map((d) => {
+      const text = d.snippet ? String(d.snippet) : '';
+      return {
+        source: d.source,
+        sourceId: d.sourceId,
+        title: d.title,
+        snippet: text ? text.slice(0, SNIPPET_CHARS) : null,
+        // An unknown chunk count reads as partial: the safe side is "read more".
+        partial: text.length > SNIPPET_CHARS || chunkCounts.get(d.key) !== 1,
+        score: Number(d.score.toFixed(5)),
+      };
+    }),
   };
+}
+
+// Chunks per result entry, in one grouped read. A failed read returns an
+// empty map, so every result reads as partial.
+async function countChunks(docs) {
+  if (!docs.length) return new Map();
+  try {
+    const rows = await db('knowledge_embeddings')
+      .whereIn(['source', 'source_id'], docs.map((d) => [d.source, d.sourceId]))
+      .select('source', 'source_id')
+      .count('id as chunks')
+      .groupBy('source', 'source_id');
+    return new Map(rows.map((r) => [`${r.source}:${r.source_id}`, parseInt(r.chunks, 10)]));
+  } catch (err) {
+    logger.warn(`[mcp] chunk count failed: ${err.message}`);
+    return new Map();
+  }
+}
+
+// One whole entry, rebuilt from its chunks in order. The chunker starts every
+// chunk with the entry title, so the title is cut from each chunk and returned
+// once (a title cut to the stored 500 characters stays in the text).
+async function getDocument(source, sourceId, offset) {
+  if (!KNOWN_SOURCES.includes(source)) return { error: 'unknown source', knownSources: KNOWN_SOURCES };
+  const id = String(sourceId || '');
+  const rows = await db('knowledge_embeddings')
+    .where({ source, source_id: id })
+    .orderBy('chunk_index')
+    .select('title', 'content');
+  if (!rows.length) return { error: 'document not found' };
+  const title = rows[0].title || '';
+  const prefix = title ? `${title}\n\n` : '';
+  const text = rows
+    .map((r) => String(r.content || ''))
+    .map((content) => (prefix && content.startsWith(prefix) ? content.slice(prefix.length) : content))
+    .join('\n\n');
+  const start = Math.min(Math.max(0, Math.floor(Number(offset) || 0)), text.length);
+  const part = text.slice(start, start + DOCUMENT_PART_CHARS);
+  const end = start + part.length;
+  return { source, sourceId: id, title, totalChars: text.length, offset: start, text: part, nextOffset: end < text.length ? end : null };
 }
 
 async function getService(serviceKey) {
@@ -132,7 +186,7 @@ async function listSources() {
 const MCP_TOOLS = [
   {
     name: 'search_knowledge',
-    description: 'Hybrid (semantic + full-text) search over the Waves knowledge index: agronomic wiki, curated KB, services, protocols, product-label compliance summaries, county fertilizer rules, prep guides, ops rules, and past-resolution memory. Returns raw evidence rows.',
+    description: 'Hybrid (semantic + full-text) search over the Waves knowledge index: agronomic wiki, curated KB, services, protocols, product-label compliance summaries, county fertilizer rules, prep guides, ops rules, and past-resolution memory. Returns raw evidence rows. Each snippet is one matching passage of at most 500 characters. When partial is true the entry holds more text: read the whole entry with get_document before you state what Waves uses (products, rotations, timing, rates, rules).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -146,7 +200,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'search_resolutions',
-    description: 'Search ONLY the past-resolution memory (PII-redacted distillations of how Waves actually handled previous calls and visits). Answers "how did we handle X before".',
+    description: 'Search ONLY the past-resolution memory (PII-redacted distillations of how Waves actually handled previous calls and visits). Answers "how did we handle X before". Rows are shaped like search_knowledge rows: read a partial one whole with get_document.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -156,6 +210,20 @@ const MCP_TOOLS = [
       required: ['query'],
     },
     execute: (args) => searchIndex(args.query, { sources: ['resolution'], limit: args.limit || 10 }),
+  },
+  {
+    name: 'get_document',
+    description: 'Read one whole knowledge-index entry, every passage in order. Pass the source and sourceId of a search_knowledge or search_resolutions result. A long entry comes in parts of 20,000 characters: call again with offset set to nextOffset until nextOffset is null.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', enum: KNOWN_SOURCES },
+        source_id: { type: 'string', description: 'The sourceId of a search result' },
+        offset: { type: 'number', description: 'Character offset to start from (default 0): the nextOffset of the previous part' },
+      },
+      required: ['source', 'source_id'],
+    },
+    execute: (args) => getDocument(args.source, args.source_id, args.offset),
   },
   {
     name: 'get_service',

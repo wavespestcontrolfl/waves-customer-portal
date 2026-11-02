@@ -296,14 +296,36 @@ describe('auto-promote side', () => {
       // The hard rules the distiller is told are unchanged.
       expect(on).toMatch(/no prices, discounts or dollar amounts; no promised visits, refunds or credits/);
       expect(on).toMatch(/nothing about complaints, billing disputes, chemicals, health or legal matters/);
+      // Gate on: the promise words the guard refuses are named, so a stall rule is not refused for wording alone.
+      expect(on).toContain('Do not use these words anywhere in the rule, in any form, not even to forbid them: ');
+      for (const word of patchLib.PROMISE_WORDS) expect(on).toContain(word);
+      // The hand-off words stay unnamed (owner ruling 2026-09-27: the writer must not learn to phrase around them).
+      expect(on).not.toMatch(/team member|office staff|chargeback|attorney/);
       delete process.env.GATE_SMS_LEDGER_STALL_FEED;
       const off = auto._test.buildDistillPrompt(text);
       // Gate off: the restraint-only sentence exactly as it was before the stall feed.
       expect(off).toContain('characters, plain ASCII, one sentence, telling the assistant what NOT to state or when to stay with the facts it was given. HARD RULES: no prices');
       expect(off).not.toMatch(/plainly|instead of deferring/);
+      expect(off).not.toMatch(/not even to forbid them/);
     } finally {
       if (prior === undefined) delete process.env.GATE_SMS_LEDGER_STALL_FEED;
       else process.env.GATE_SMS_LEDGER_STALL_FEED = prior;
+    }
+  });
+
+  test('the promise words the rule writer is told to avoid stay in step with the promise guard', () => {
+    // Every listed word is refused...
+    for (const word of patchLib.PROMISE_WORDS) {
+      expect(patchLib.guardRuleText(`When the facts list the next visit date, never ${word} anything to the customer.`).ok).toBe(false);
+    }
+    // ...and every word the guard refuses has a listed spelling or stem ("in any form"), so a word added to
+    // PROMISE_RE without the list fails here.
+    const source = patchLib._test.PROMISE_RE.source;
+    const alternatives = source.slice(source.indexOf('(?:') + 3, source.lastIndexOf(')\\b')).split('|');
+    expect(alternatives.length).toBeGreaterThan(10);
+    for (const alt of alternatives) {
+      const re = new RegExp(`\\b(?:${alt})\\b`, 'i');
+      expect([alt, patchLib.PROMISE_WORDS.some((word) => re.test(word) || alt.toLowerCase().startsWith(word))]).toEqual([alt, true]);
     }
   });
 

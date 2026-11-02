@@ -87,6 +87,15 @@ function stampPatchVersion(promptVersion, tag) {
 // thing: the loop writes prompt text on its own, and the safe side is to refuse the topic.
 const PRICE_RE = /\$|\b(?:price|prices|priced|pricing|quote|quotes|quoted|discount|discounts|coupon|promo|promotion|cost|costs|fee|fees|free|rebate|cheaper|cheap|percent)\b|%/i;
 const PROMISE_RE = /\b(?:promise|promises|promised|guarantee|guarantees|guaranteed|refund|refunds|credit|credits|waive|waived|re-?treat(?:ment)?|re-?service|reschedule|come out|come back|send a tech|send someone|return visit|follow-?up visit|free visit)\b/i;
+// PROMISE_RE's words written out for the weekly loop's rule writer (sms-prompt-autopromote.js buildDistillPrompt),
+// so a stall rule is not refused for its wording alone: most stalls are about times and visits. A test keeps
+// this list and PROMISE_RE in step. The HANDOFF_RE and PRICE_RE words are deliberately NOT written out: a writer
+// that knew them could phrase around the net that holds complaints, billing and health for a person (owner
+// ruling 2026-09-27). Owner 2026-11-02 "ok fix" (weekly-loop review item 4).
+const PROMISE_WORDS = Object.freeze([
+  'promise', 'guarantee', 'refund', 'credit', 'waive', 're-treat', 'retreat', 're-service', 'reservice', 'reschedule',
+  'come out', 'come back', 'send a tech', 'send someone', 'return visit', 'follow-up visit', 'free visit',
+]);
 const HANDOFF_RE = /\b(?:complaint|complaints|complain|dispute|disputes|billing|invoice|chargeback|chemical|chemicals|medical|poison|toxic|allerg\w*|symptom\w*|sick|illness|pregnan\w*|legal|lawyer|attorney|sue|lawsuit|cancel\w*|escalat\w*|hand-?off|hand off|a person|a human|team member|office staff)\b/i;
 // Anything that tries to talk to the model instead of describing a reply rule.
 const INJECTION_RE = /\b(?:ignore|disregard|override|forget|previous instructions|system prompt|developer message|jailbreak|you are now|act as)\b|<\/?[a-z]|```|https?:|www\.|@|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/i;
@@ -247,4 +256,6 @@ module.exports = {
   startPatchRefresh,
   stopPatchRefresh,
   resolvePromptPatch,
+  PROMISE_WORDS,
+  _test: { PROMISE_RE },
 };
