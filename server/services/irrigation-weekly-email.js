@@ -856,15 +856,28 @@ function decideWeeklyEmail({
       waterSource,
       now,
     });
+    // A moved home's schedule is not quoted as last week's watering — the
+    // narrative is rain-only until the settings are re-saved.
+    // From the second plan week on, last week's irrigation is what the
+    // delivered plan prescribed — never the programmed schedule it
+    // superseded (codex gh-r31); no surplus/deficit claim is made from it.
+    // The CREDITED figure (the plan's rain rule said skip after ≥ ½" ⇒ 0),
+    // the same one the decision balanced from (codex gh-r34).
+    const priorPlanIrrig = !scheduleUnconfirmed && decisionInputs.priorWeekCreditedInches != null ? roundHundredth(decisionInputs.priorWeekCreditedInches) : null;
     // A derived schedule's provenance sentence (below) already names the
     // assumed head rate, the Weekly Inches ask AND — for a sensor system —
     // that last week's programmed total is only an upper bound; skip the
-    // renderer's generic copies so the note doesn't say them twice.
+    // renderer's generic copies so the note doesn't say them twice (the
+    // sensor copy prints only for a plan with a sensor). The sentence
+    // explains the derived figure, so it rides only an email that quotes it:
+    // beside last week's PLAN figure, "We worked that 0.67" out" would point
+    // at a number the email never prints (owner 2026-11-02).
     const sensorOn = rainSensor === true || rainSensor === 't';
+    const derivedNote = scheduleSource === 'portal_derived' && priorPlanIrrig == null;
     const planCopy = renderWeekPlanEmail(plan, {
       firstName, grassLabel, runMinutes: scheduleUnconfirmed ? null : runtimeInputs.runMinutes, restriction,
-      omitRateNote: scheduleSource === 'portal_derived',
-      omitSensorNote: scheduleSource === 'portal_derived' && sensorOn,
+      omitRateNote: derivedNote,
+      omitSensorNote: derivedNote,
       scheduleUnconfirmed,
       rateTable: table,
       // The gallons sentence reads the block this decision froze (or the replayed snapshot's), never the live gate.
@@ -886,14 +899,6 @@ function decideWeeklyEmail({
       const scheduleClause = scheduleSource === 'portal_derived'
         ? `your sprinkler schedule as entered in your portal (about ${irrigationFmt}" per week)`
         : `your irrigation schedule (${irrigationFmt}" per week)`;
-      // A moved home's schedule is not quoted as last week's watering — the
-      // narrative is rain-only until the settings are re-saved.
-      // From the second plan week on, last week's irrigation is what the
-      // delivered plan prescribed — never the programmed schedule it
-      // superseded (codex gh-r31); no surplus/deficit claim is made from it.
-      // The CREDITED figure (the plan's rain rule said skip after ≥ ½" ⇒ 0),
-      // the same one the decision balanced from (codex gh-r34).
-      const priorPlanIrrig = !scheduleUnconfirmed && decisionInputs.priorWeekCreditedInches != null ? roundHundredth(decisionInputs.priorWeekCreditedInches) : null;
       const priorPlanSkipped = priorPlanIrrig != null && decisionInputs.priorWeekRainOverride === true;
       // A multi-run plan skips ONE run after rain; the other run's depth is
       // still counted (codex gh-r35).
@@ -923,7 +928,7 @@ function decideWeeklyEmail({
       // rides the note, INCLUDING the sensor upper-bound disclosure — the
       // summary quotes the full programmed amount as "received", and a
       // sensor may have skipped some of it (codex #3478 r13 / #3565 r5).
-      const provenance = scheduleSource === 'portal_derived' && !scheduleUnconfirmed
+      const provenance = derivedNote && !scheduleUnconfirmed
         ? buildScheduleNote({ scheduleSource, derived, scheduleFmt: irrigationFmt, rainSensor: sensorOn, rateTable: table })
         : '';
       const planNote = [planCopy.plan_note, provenance].filter(Boolean).join(' ');

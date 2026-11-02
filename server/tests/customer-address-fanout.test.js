@@ -601,7 +601,7 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(Object.keys(up.row).sort()).toEqual(['customer_id', 'irrigation_confirmed_fields', 'irrigation_home_changed_at', ...NEW_SOD_COLUMNS].sort());
     const fs = require('fs');
     const path = require('path');
-    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx, \{ clearNewSod: !sameHomeFlip \}\)/);
+    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/if \(!sameHomeFlip\) await require\('\.\/customer-address-fanout'\)\.markSprinklerSettingsMoved\(customerId, trx\);/);
     expect(fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8')).toMatch(/fanout\.markSprinklerSettingsMoved\(winnerId, sp, \{ clearNewSod: false \}\)/);
     const src = fs.readFileSync(path.join(__dirname, '../services/customer-address-fanout.js'), 'utf8');
     expect(src.match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);
@@ -626,6 +626,21 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     // gh-r24: an inline unit moved to line 2 is the same premise; a different inline unit is not.
     expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: '' }, { ...BEFORE, address_line1: '123 Main St', address_line2: 'Apt 4' })).toBe(false);
     expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: '' }, { ...BEFORE, address_line1: '123 Main St', address_line2: 'Apt 7' })).toBe(true);
+  });
+
+  test('homesDiffer reads a street line that also holds its city and ZIP as that address saved in parts (owner 2026-11-02)', () => {
+    // The lead form's one-line address copied into line 1 (owner 2026-10-30): cleaning the copy up is not a move.
+    const { homesDiffer } = require('../services/customer-address-fanout');
+    const parts = { address_line1: '12 Sample Ct East', address_line2: null, city: 'Parrish', zip: '34219' };
+    const packed = { address_line1: '12 Sample Ct East, Parrish, FL 34219', address_line2: null, city: 'Parrish', zip: null };
+    expect(homesDiffer(packed, parts)).toBe(false);
+    expect(homesDiffer(parts, packed)).toBe(false);
+    // Still another home: another ZIP, another house number, another unit.
+    expect(homesDiffer(packed, { ...parts, zip: '34221' })).toBe(true);
+    expect(homesDiffer(packed, { ...parts, address_line1: '14 Sample Ct East' })).toBe(true);
+    expect(homesDiffer(packed, { ...parts, address_line2: 'Apt 2' })).toBe(true);
+    // A tail naming another city than the row's own is not split (it may be a unit word): no guessed match.
+    expect(homesDiffer({ ...packed, city: 'Sarasota' }, parts)).toBe(true);
   });
   test('a formatting-only correction of the same home (case, unit spelling) does not stamp', async () => {
     const conn = makeConn({ leads: [], estimates: [] });
