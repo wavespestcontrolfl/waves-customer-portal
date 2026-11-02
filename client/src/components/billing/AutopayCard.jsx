@@ -351,6 +351,12 @@ export default function AutopayCard({
   const activeCard = payment_methods.find((p) => p.id === data.autopay_payment_method_id)
     || payment_methods.find((p) => p.is_default)
     || payment_methods[0];
+  // The method picker's confirm button names the kind of method picked: a
+  // bank row confirmed with "Use this card" misled (UI audit 2026-11-02).
+  const pickedMethod = payment_methods.find((p) => p.id === selectedCard);
+  const useMethodLabel = !pickedMethod
+    ? 'Use this payment method'
+    : (isBankMethod(pickedMethod.method_type) ? 'Use this bank account' : 'Use this card');
 
   // Status dot is a live indicator (owner directive 2026-07-06): blinking
   // green = charges are running automatically, solid red = they are not.
@@ -641,7 +647,7 @@ export default function AutopayCard({
           modal === 'pause' ? 'Pause Auto Pay' :
           modal === 'card' ? (state === 'disabled' ? 'Set up Auto Pay' : 'Change Auto Pay method') :
           'Change billing day'
-        } onClose={() => { setModal(null); setErr(''); }}>
+        } dismissible={!saving} onClose={() => { setModal(null); setErr(''); }}>
           {errorBanner}
           {modal === 'manage' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -662,7 +668,7 @@ export default function AutopayCard({
                 placeholder="e.g. Out of town for the month"
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${PORTAL_BILLING.borderStrong}`, borderRadius: 8, fontFamily: FONTS.body }} />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} disabled={saving} onClick={() => setModal(null)}>Cancel</button>
                 <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving || !pauseUntil} onClick={submitPause}>
                   {saving ? 'Saving...' : 'Pause'}
                 </button>
@@ -674,7 +680,7 @@ export default function AutopayCard({
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {payment_methods.length === 0 ? (
                 <div style={{ fontSize: 14, color: PORTAL_BILLING.muted }}>
-                  No cards on file yet. Add a payment method before Auto Pay can run.
+                  No payment methods on file yet. Add one before Auto Pay can run.
                 </div>
               ) : (
                 payment_methods.map((pm) => {
@@ -707,14 +713,14 @@ export default function AutopayCard({
                 Add payment method
               </button>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} disabled={saving} onClick={() => setModal(null)}>Cancel</button>
                 {payment_methods.length > 0 && (
                   <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving || !selectedCard}
                     onClick={() => runUpdate({
                       autopay_payment_method_id: selectedCard,
                       ...(state === 'disabled' ? { autopay_enabled: true } : {}),
                     })}>
-                    {saving ? 'Saving...' : 'Use this card'}
+                    {saving ? 'Saving...' : useMethodLabel}
                   </button>
                 )}
               </div>
@@ -754,7 +760,7 @@ export default function AutopayCard({
                 Auto Pay runs on this day each month. Max is the 28th so every month is covered.
               </div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} disabled={saving} onClick={() => setModal(null)}>Cancel</button>
                 <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving || selectedDay < 1 || selectedDay > 28}
                   onClick={() => runUpdate({ billing_day: selectedDay })}>
                   {saving ? 'Saving...' : 'Save'}
@@ -799,14 +805,18 @@ export default function AutopayCard({
   );
 }
 
-function Modal({ title, children, onClose }) {
+// dismissible=false while a save runs: closing mid-save cleared the error and
+// hid the result while the save went on (UI audit 2026-11-02, UI-06).
+// Escape is still captured, so it cannot reach a handler behind the dialog.
+function Modal({ title, children, onClose, dismissible = true }) {
+  const close = dismissible ? onClose : () => {};
   // Mounted only while open, so lock unconditionally — the page behind the
   // scrim shouldn't scroll on iOS while the dialog is up.
   useLockBodyScroll(true);
   // Dialog contract for keyboard/AT users: focus is trapped, Escape closes,
   // and the overlay announces as a modal — click-the-scrim alone left
   // keyboard users stranded behind an unlabeled layer.
-  const dialogRef = useModalFocus(true, onClose);
+  const dialogRef = useModalFocus(true, close);
   // Portaled to <body>: under glass the host card carries backdrop-filter
   // (and a hover transform), which turns it into the containing block for
   // position:fixed children — the scrim would cover only the card.
@@ -815,7 +825,7 @@ function Modal({ title, children, onClose }) {
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       padding: 'calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))',
-    }} onClick={onClose}>
+    }} onClick={close}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={title} data-glass="modal" onClick={(e) => e.stopPropagation()} style={{
         background: PORTAL_BILLING.surface, borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
@@ -828,11 +838,12 @@ function Modal({ title, children, onClose }) {
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_BILLING.text }}>{title}</div>
-          <button type="button" aria-label="Close" onClick={onClose} data-glass="chip" style={{
+          <button type="button" aria-label="Close" onClick={close} disabled={!dismissible} data-glass="chip" style={{
             background: PORTAL_BILLING.surface,
             border: `1px solid ${PORTAL_BILLING.borderStrong}`,
             borderRadius: 8,
-            cursor: 'pointer',
+            cursor: dismissible ? 'pointer' : 'not-allowed',
+            opacity: dismissible ? 1 : 0.5,
             color: PORTAL_BILLING.muted,
             width: 36,
             height: 36,

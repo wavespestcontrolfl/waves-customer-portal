@@ -4409,22 +4409,57 @@ function nextVisitLabel(next) {
 // path, so every tab re-scopes. The listbox is portalled to <body> — rendered
 // inside a [data-glass="card"] it is clipped by the card and the glass theme
 // forces its surface translucent.
+// A pick re-keys the whole portal tree (propertyRenderKey), so the trigger the
+// customer used unmounts mid-switch and focus fell to <body> (UI audit
+// 2026-11-02, UI-04). The picker with the same id that mounts after the switch
+// takes focus back. Honored for a short time only, so a picker that mounts
+// much later never pulls focus.
+const pickerFocusReturn = { id: null, at: 0 };
+const PICKER_FOCUS_RETURN_MS = 15000;
+
 function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId, nextById, compact = false }) {
   const [open, setOpen] = useState(false);
   const [rect, setRect] = useState(null);
   const ref = useRef(null);
   const popRef = useRef(null);
+  const triggerRef = useRef(null);
   // Profile entries fall back to the first profile (today's rule). Saved-
   // property entries never do: an unknown selection (list reloading after a
   // switch) reads as "Select a property" rather than the wrong house.
   const savedEntries = properties.some((p) => p.key);
   const current = properties.find((p) => p.id === currentId) || (savedEntries ? null : properties[0]);
+  const busy = !!switchingId;
   const place = useCallback(() => { if (ref.current) setRect(ref.current.getBoundingClientRect()); }, []);
+  useEffect(() => {
+    if (pickerFocusReturn.id !== id) return;
+    if (Date.now() - pickerFocusReturn.at > PICKER_FOCUS_RETURN_MS) {
+      pickerFocusReturn.id = null;
+      return;
+    }
+    // Only when focus has nowhere better to be: an alert raised by a failed
+    // switch, or a control the customer moved to, keeps it.
+    const focused = document.activeElement;
+    if (!focused || focused === document.body || ref.current?.contains(focused)) triggerRef.current?.focus();
+    if (!busy) pickerFocusReturn.id = null;
+  }, [id, busy]);
+  // Keyboard: the open list takes focus on the selected option; arrows,
+  // Home and End move through it.
+  useEffect(() => {
+    if (!open || !rect || !popRef.current) return;
+    if (popRef.current.contains(document.activeElement)) return;
+    const options = popRef.current.querySelectorAll('[role="option"]');
+    const selected = popRef.current.querySelector('[role="option"][aria-selected="true"]');
+    (selected || options[0])?.focus({ preventScroll: true });
+  }, [open, rect]);
   useEffect(() => {
     if (!open) return undefined;
     place();
     const onDoc = (e) => { if (!ref.current?.contains(e.target) && !popRef.current?.contains(e.target)) setOpen(false); };
-    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('touchstart', onDoc);
     document.addEventListener('keydown', onKey);
@@ -4451,18 +4486,51 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
     ? (p.label || propertyRelationshipChip(p) || (isPrimaryEntry(p) ? 'Primary residence' : (p.isPrimaryProfile ? 'Property' : (p.profileLabel || 'Property'))))
     : (p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')));
   const subline = (p) => `${isPrimaryEntry(p) ? 'Primary residence · ' : ''}${formatPropertyAddress(p) || 'No address on file'}`;
-  const busy = !!switchingId;
+  const valueId = `${id}-value`;
+  const onListKeyDown = (e) => {
+    // Tab closes the list and continues from the trigger, so focus never
+    // walks into the portalled list's spot at the end of <body>.
+    if (e.key === 'Tab') {
+      setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
+    const options = Array.from(popRef.current?.querySelectorAll('[role="option"]') || []);
+    const at = options.indexOf(document.activeElement);
+    const target = {
+      ArrowDown: options[Math.min(at + 1, options.length - 1)],
+      ArrowUp: options[Math.max(at - 1, 0)],
+      Home: options[0],
+      End: options[options.length - 1],
+    }[e.key];
+    if (!target) return;
+    e.preventDefault();
+    target.focus();
+  };
+  const pick = (p, active) => {
+    setOpen(false);
+    triggerRef.current?.focus({ preventScroll: true });
+    if (active) return;
+    pickerFocusReturn.id = id;
+    pickerFocusReturn.at = Date.now();
+    onSelect(p.id);
+  };
   return (
     <div ref={ref} style={{ position: 'relative', minWidth: 0 }}>
+      {/* aria-disabled, not disabled, while switching: a disabled button
+          drops focus, and the trigger is where focus waits for the switch.
+          aria-describedby reads the selected property after the name. */}
       <button
+        ref={triggerRef}
         id={id}
         type="button"
         data-glass="chip"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Choose which property you are viewing"
-        disabled={busy}
-        onClick={() => setOpen((o) => !o)}
+        aria-describedby={valueId}
+        aria-disabled={busy || undefined}
+        onClick={() => { if (!busy) setOpen((o) => !o); }}
         className="waves-focus-ring"
         style={{
           width: '100%', display: 'flex', alignItems: 'center', gap: 12,
@@ -4476,7 +4544,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
         {/* The glass theme flattens every weight inside a button to 600, so the
             hierarchy here is size + colour only — same scale as the visit
             cards (16 navy name, 14 muted detail). */}
-        <span style={{ minWidth: 0, flex: 1 }}>
+        <span id={valueId} style={{ minWidth: 0, flex: 1 }}>
           <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>
             {busy ? 'Switching…' : (current ? label(current) : 'Select a property')}
           </span>
@@ -4493,6 +4561,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
           ref={popRef}
           role="listbox"
           aria-label="Your properties"
+          onKeyDown={onListKeyDown}
           style={{
             position: 'fixed', zIndex: 9999, top: rect.bottom + 8, left: rect.left, width: rect.width,
             background: 'rgba(255,255,255,0.96)',
@@ -4509,7 +4578,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
                 type="button"
                 role="option"
                 aria-selected={active}
-                onClick={() => { setOpen(false); if (!active) onSelect(p.id); }}
+                onClick={() => pick(p, active)}
                 className="waves-focus-ring"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '10px 12px',
@@ -6276,7 +6345,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
   useLockBodyScroll(showAddCard); // freeze the page behind the add-card modal
-  const addCardDialogRef = useModalFocus(showAddCard, () => setShowAddCard(false));
   const [autopayRefreshKey, setAutopayRefreshKey] = useState(0);
   // "Replace card" on the in-use row → open the AutopayCard method picker.
   const [autopayOpenRequest, setAutopayOpenRequest] = useState(null);
@@ -6309,6 +6377,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const paymentElementRef = useRef(null);
   const cardMountRef = useRef(null);
   const processedSetupReturnRef = useRef(false);
+  // Close, the scrim and Escape wait while a save runs: closing mid-save hid
+  // the result while the save went on (UI audit 2026-11-02, UI-06).
+  const closeAddCard = () => {
+    if (stripeLoading) return;
+    setShowAddCard(false);
+    paymentElementRef.current = null;
+    elementsRef.current = null;
+  };
+  const addCardDialogRef = useModalFocus(showAddCard, closeAddCard);
 
   // Monotonic sequence over card/autopay freshness: the setup-return save's
   // refreshCards() races the mount loadBilling() — a slow PRE-SAVE response
@@ -7470,7 +7547,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               )}
               {isAutopayRow(c) ? (
                 <>
-                  <button type="button" onClick={handleReplaceCard} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 44, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Replace card</button>
+                  <button type="button" onClick={handleReplaceCard} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 44, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>{isBankMethod(c.methodType) ? 'Replace bank account' : 'Replace card'}</button>
                   <button type="button" onClick={handleTurnOffAutopay} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 44, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Turn off</button>
                 </>
               ) : (
@@ -7584,7 +7661,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
           zIndex: 9999,
           padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
-        }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
+        }} onClick={(e) => { if (e.target === e.currentTarget) closeAddCard(); }}>
           <div ref={addCardDialogRef} role="dialog" aria-modal="true" aria-label="Add payment method" data-glass="modal" style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
             maxHeight: '100%', boxSizing: 'border-box', overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
@@ -7593,9 +7670,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
               <div style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Add Payment Method</div>
-              <button type="button" aria-label="Close" onClick={() => { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; }} style={{
-                background: 'transparent', border: 'none', cursor: 'pointer', color: muted, lineHeight: 1,
+              <button type="button" aria-label="Close" onClick={closeAddCard} disabled={stripeLoading} style={{
+                background: 'transparent', border: 'none', cursor: stripeLoading ? 'not-allowed' : 'pointer', color: muted, lineHeight: 1,
                 width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                opacity: stripeLoading ? 0.5 : 1,
               }}><Icon name="close" size={20} strokeWidth={2} /></button>
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
@@ -18325,4 +18403,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { buildArticles, useLearnArticles, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
