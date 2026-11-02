@@ -44,6 +44,7 @@ import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import { rowsShowSpray } from '../../lib/spray-evidence';
 import FastCompleteWrapUp, { WrapUpClock, useWrapUp } from './FastCompleteWrapUp';
+import FastCompleteReserviceAsks, { useReserviceAsks, withAsksHold } from './FastCompleteReserviceAsks';
 import {
   UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
@@ -549,6 +550,8 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     setField('issues', toggleInSet(form.issues, label));
   };
   const { rows } = products;
+  // GATE_RESERVICE_ASKS (the schedule row's reserviceAsksEnabled): "They told us" at the top of the sheet. Off, it reads and sends nothing.
+  const asks = useReserviceAsks({ service, request, rows });
   const [form, setForm] = useState({ note: '', issues: new Set(), pressure: '', condition: '' });
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -576,10 +579,10 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     onPick: products.addProduct,
   });
 
-  const missingReason = missingRequirement({
+  const missingReason = withAsksHold(missingRequirement({
     form, rows, ctx, dictationPending,
     voice: voice.enabled ? { filling: voice.filling, confirms: voice.confirms.length, checks: voice.checks.length } : null,
-  });
+  }), asks);
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the note and taps.
   const stockRow = !ctx.stockAdvisory && rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -605,7 +608,8 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) }),
+      // The tech's answer to each thing the customer told us rides last; absent unless the block loaded items.
+      () => ({ ...completionBody({ form, rows, ctx, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) }), ...asks.field() }),
       [names, inOptionOrder(TURF_ISSUE_OPTIONS, form.issues)].filter(Boolean).join(' · '),
     );
   };
@@ -615,6 +619,7 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
       <div className="tech-visit-body" {...picker.coverProps}>
         <WrapUpClock wrapUp={wrapUp} since={service.onSiteAt} />
         <fieldset className="tech-visit-form" disabled={locked}>
+          <FastCompleteReserviceAsks asks={asks} locked={locked} />
           <CustomerRequest request={ctx.customerRequest} />
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || voice.filling} onClip={noteClip.onClip} micInside />
           {noteClip.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{noteClip.error}</p>}
