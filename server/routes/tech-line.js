@@ -10,6 +10,12 @@
  *                   guard applies: consent, suppression, quiet hours — an
  *                   operator entry point, so a human's tap is not fenced as
  *                   automation). The office sees the thread on the line.
+ *   POST /set-text → { scheduledServiceId, kind } — one of the fixed set texts
+ *                   (services/tech-set-texts.js) to the visit's customer, the
+ *                   same send path as /sms. Today's open visits only; one
+ *                   duplicate check per visit and kind. GATE_TECH_SET_TEXTS.
+ *   GET  /replies?scheduledServiceId= → the customer's answer to the newest
+ *                   set text for that visit, when it clearly belongs to it.
  *   POST /call    → { scheduledServiceId } — click-to-call through the shared
  *                   bridge (services/call-bridge.js): Twilio rings the tech's
  *                   cell first, they press 1, the customer is dialed with the
@@ -33,7 +39,11 @@ const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/
 const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
 const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
-const { isEnabled } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+const { isEnabled } = featureGates;
+const {
+  isSetTextKind, setTextOptions, renderSetText, setTextClaimKey, openSetTextVisit, setTextReply,
+} = require('../services/tech-set-texts');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 
@@ -97,7 +107,11 @@ router.get('/', async (req, res) => {
   try {
     const ctx = await techLineContext(req.technicianId, { strict: true });
     if (!ctx) return res.json({ line: null });
-    res.json({ line: publicLine(ctx), canCall: Boolean(ctx.cell) });
+    res.json({
+      line: publicLine(ctx),
+      canCall: Boolean(ctx.cell),
+      ...(featureGates.techSetTextsLive() ? { setTexts: setTextOptions() } : {}),
+    });
   } catch (err) {
     logger.error(`[tech-line] line lookup failed (${String(err?.code || err?.name || 'error')})`);
     res.status(503).json({ error: 'Your line could not be checked', code: 'LINE_LOOKUP_FAILED' });
@@ -146,7 +160,7 @@ async function stampTechFirstResponse({ to, technicianId }) {
 // The reserve → send → settle → stamp sequence for one text, as the
 // { status, json, ambiguous } the handler answers with. Throws for the
 // sanitized 500 (an ambiguous throw carries err.providerOutcome).
-async function textFromLine({ req, ctx, target, body }) {
+async function textFromLine({ req, ctx, target, body, metadata }) {
   // The same human-reply lifecycle the admin composer runs: park the
   // thread's pending suggestions (and back off an autonomous reply mid-
   // send) before Twilio, settle after — so the tech's text counts as the
@@ -184,6 +198,7 @@ async function textFromLine({ req, ctx, target, body }) {
       entryPoint: 'tech_line_text',
       providerHandoffReservation,
       metadata: {
+        ...metadata,
         original_message_type: 'manual',
         tech_line: true,
         scheduled_service_id: target.visit.id,
@@ -238,6 +253,30 @@ async function textFromLine({ req, ctx, target, body }) {
   return { status: 200, json: { success: true, from: publicLine(ctx) } };
 }
 
+// One text under its durable claim: the claim is taken BEFORE the send and
+// released only when the text definitively never left (a refusal, a validator
+// block, a throw before acceptance); an ambiguous outcome keeps it. Shared by
+// /sms (claim on customer + body) and /set-text (claim on visit + kind).
+async function sendClaimedText({ req, ctx, target, body, claimKey, metadata = null }) {
+  if (!(await claimSend(claimKey, DUPLICATE_TEXT_WINDOW))) {
+    return { status: 409, json: { error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' } };
+  }
+  let out;
+  try {
+    out = await textFromLine({ req, ctx, target, body, metadata });
+  } catch (err) {
+    if (!isAmbiguousProviderOutcome(err?.providerOutcome)) await releaseClaim(claimKey);
+    throw err;
+  }
+  if (out.status !== 200 && !out.ambiguous) await releaseClaim(claimKey);
+  if (out.status === 200) {
+    // One row per delivered text — a daily horizon keeps the table trivial
+    // (weekly claims such as the BI briefing's are kept: sms-send-claims.js).
+    void require('../services/sms-send-claims').pruneSmsSendClaims().catch(() => {});
+  }
+  return out;
+}
+
 router.post('/sms', async (req, res, next) => {
   try {
     const body = String(req.body?.body || '').trim();
@@ -258,24 +297,48 @@ router.post('/sms', async (req, res, next) => {
     // before acceptance) releases the claim so a real retry can send; an
     // ambiguous outcome keeps it.
     const claimKey = `tech-line-text:${target.customer.id}:${sentBodyHash(body)}`;
-    if (!(await claimSend(claimKey, DUPLICATE_TEXT_WINDOW))) {
-      return res.status(409).json({ error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' });
-    }
-    let out;
-    try {
-      out = await textFromLine({ req, ctx, target, body });
-    } catch (err) {
-      if (!isAmbiguousProviderOutcome(err?.providerOutcome)) await releaseClaim(claimKey);
-      throw err;
-    }
-    if (out.status !== 200 && !out.ambiguous) await releaseClaim(claimKey);
-    if (out.status === 200) {
-      // One row per delivered text — a daily horizon keeps the table trivial
-      // (weekly claims such as the BI briefing's are kept: sms-send-claims.js).
-      void require('../services/sms-send-claims').pruneSmsSendClaims().catch(() => {});
-    }
+    const out = await sendClaimedText({ req, ctx, target, body, claimKey });
     res.status(out.status).json(out.json);
   } catch (err) { next(sanitized(err, 'text')); }
+});
+
+// A set text: fixed wording rendered here, never client text. The claim is on
+// (visit, kind), so a second tap — or the voice line asking for the same text
+// on the same visit — inside the window is a duplicate even though the body
+// is identical for two visits of one customer.
+router.post('/set-text', async (req, res, next) => {
+  try {
+    if (!featureGates.techSetTextsLive()) return res.status(404).json({ error: 'Not found' });
+    const kind = String(req.body?.kind || '');
+    if (!isSetTextKind(kind)) return res.status(400).json({ error: 'Unknown set text', code: 'UNKNOWN_SET_TEXT' });
+    const ctx = await techLineContext(req.technicianId, { strict: true });
+    if (!ctx) return res.status(409).json({ error: 'You have no tech line assigned', code: 'NO_TECH_LINE' });
+    const target = await visitCustomer(req, req.body?.scheduledServiceId);
+    if (target.error) return res.status(target.status).json({ error: target.error });
+    if (!(await openSetTextVisit(db, target.visit.id))) {
+      return res.status(409).json({ error: 'Set texts are for today\'s visits that are not finished', code: 'VISIT_NOT_OPEN' });
+    }
+    const body = renderSetText(kind, target.customer);
+    const out = await sendClaimedText({
+      req, ctx, target, body, claimKey: setTextClaimKey(target.visit.id, kind), metadata: { set_text_kind: kind },
+    });
+    res.status(out.status).json(out.status === 200 ? { ...out.json, kind, body } : out.json);
+  } catch (err) { next(sanitized(err, 'set text')); }
+});
+
+// The Visit Brief's Last reply card. Read-only; the tech's own line only.
+router.get('/replies', async (req, res, next) => {
+  try {
+    if (!featureGates.techSetTextsLive()) return res.status(404).json({ error: 'Not found' });
+    const ctx = await techLineContext(req.technicianId, { strict: true });
+    if (!ctx) return res.status(409).json({ error: 'You have no tech line assigned', code: 'NO_TECH_LINE' });
+    const target = await visitCustomer(req, req.query?.scheduledServiceId);
+    if (target.error) return res.status(target.status).json({ error: target.error });
+    const out = await setTextReply(db, {
+      customerId: target.customer.id, customerPhone: target.to, lineNumber: ctx.line.number, visitId: target.visit.id,
+    });
+    res.json(out);
+  } catch (err) { next(sanitized(err, 'reply lookup')); }
 });
 
 // A bridge whose call_log row is not yet inserted is invisible to

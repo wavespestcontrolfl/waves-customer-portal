@@ -9828,6 +9828,14 @@ function payerPacketAutosendLive() {
 function recapGlassesClipsLive() {
   return process.env.GATE_RECAP_GLASSES_CLIPS === 'true';
 }
+// GATE_TECH_SET_TEXTS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01, hands-free field voice PR 1). On,
+// the Visit Brief shows set-text buttons (back gate locked, dog outside, garage access) that text the visit's customer
+// fixed wording from the tech's own line, and a Last reply card with the customer's answer
+// (services/tech-set-texts.js, routes/tech-line.js POST /set-text + GET /replies). Off = no buttons, both routes 404.
+// Kill = unset. The owner approves the wording before it is turned on.
+function techSetTextsLive() {
+  return process.env.GATE_TECH_SET_TEXTS === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -10013,3 +10021,5 @@ module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
 // GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
 module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
+// GATE_TECH_SET_TEXTS reader, on its own line so gate PRs never conflict.
+module.exports.techSetTextsLive = techSetTextsLive;

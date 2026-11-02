@@ -300,6 +300,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/tech/lawn-diagnostic/analyze` | tech-lawn-diagnostic |
 | GET | `/api/tech/line` | tech-line |
 | POST | `/api/tech/line/call` | tech-line |
+| GET | `/api/tech/line/replies` | tech-line |
+| POST | `/api/tech/line/set-text` | tech-line |
 | POST | `/api/tech/line/sms` | tech-line |
 | GET | `/api/tech/notifications` | tech-notifications |
 | POST | `/api/tech/notifications/:id/dismiss` | tech-notifications |

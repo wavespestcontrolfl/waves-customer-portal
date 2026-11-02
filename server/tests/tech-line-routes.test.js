@@ -17,7 +17,14 @@ jest.mock('../services/call-bridge', () => ({
 jest.mock('../services/lead-estimate-link', () => ({ stampFirstResponseByContact: jest.fn(async () => 1) }));
 const mockAcceptedSid = `SM${'a'.repeat(32)}`;
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: mockAcceptedSid })) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvTimestamp: jest.fn(() => null) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvTimestamp: jest.fn(() => null), techSetTextsLive: jest.fn(() => false) }));
+// The set-text service's DB reads are its own suite (tech-set-texts.test.js);
+// here they are stubbed so the route's order of checks can be pinned.
+jest.mock('../services/tech-set-texts', () => ({
+  ...jest.requireActual('../services/tech-set-texts'),
+  openSetTextVisit: jest.fn(async () => true),
+  setTextReply: jest.fn(async () => ({ setText: null, reply: null, ambiguous: false })),
+}));
 jest.mock('../services/sms-suggest-mode', () => ({
   reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: ['dec-1'], reservationId: '22222222-2222-4222-8222-222222222222', autoSendInFlight: false })),
   settleHumanReply: jest.fn(async () => undefined),
@@ -29,7 +36,8 @@ const { techLineContext } = require('../services/tech-line');
 const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
 const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, techSetTextsLive } = require('../config/feature-gates');
+const { openSetTextVisit, setTextReply } = require('../services/tech-set-texts');
 const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const router = require('../routes/tech-line');
@@ -79,6 +87,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   techLineContext.mockResolvedValue(CTX);
   isEnabled.mockReturnValue(true);
+  techSetTextsLive.mockReturnValue(false);
+  openSetTextVisit.mockResolvedValue(true);
 });
 
 describe('GET /', () => {
@@ -87,6 +97,21 @@ describe('GET /', () => {
     expect(r.body).toEqual({ line: LINE, canCall: true });
     techLineContext.mockResolvedValue({ ...CTX, cell: null });
     expect((await call('get', '/', {})).body).toEqual({ line: LINE, canCall: false });
+    techLineContext.mockResolvedValue(null);
+    expect((await call('get', '/', {})).body).toEqual({ line: null });
+  });
+
+  test('lists the set texts only while GATE_TECH_SET_TEXTS is on', async () => {
+    techSetTextsLive.mockReturnValue(true);
+    expect((await call('get', '/', {})).body).toEqual({
+      line: LINE,
+      canCall: true,
+      setTexts: [
+        { kind: 'gate_locked', label: 'Back gate locked' },
+        { kind: 'dog_outside', label: 'Dog outside' },
+        { kind: 'garage_access', label: 'Need garage access' },
+      ],
+    });
     techLineContext.mockResolvedValue(null);
     expect((await call('get', '/', {})).body).toEqual({ line: null });
   });
@@ -393,5 +418,106 @@ describe('tech-click calls take the processor\'s tech follow-up seam (codex #407
     expect(proc).not.toContain("call.source !== 'tech-click'");
     const route = fs.readFileSync(path.join(__dirname, '../routes/tech-line.js'), 'utf8');
     expect(route).toContain("source: 'tech-click'");
+  });
+});
+
+describe('POST /set-text', () => {
+  const GATE_TEXT = "Hi Pat, your back gate is locked. If you can unlock it in the next few minutes, reply here and we'll treat the backyard before we leave.";
+  beforeEach(() => techSetTextsLive.mockReturnValue(true));
+
+  test('is not there while the gate is off', async () => {
+    techSetTextsLive.mockReturnValue(false);
+    primeVisit();
+    const r = await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'gate_locked' } });
+    expect(r.statusCode).toBe(404);
+    expect(techLineContext).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('sends the fixed wording from the line, tagged with its visit and kind, under a (visit, kind) claim', async () => {
+    primeVisit();
+    const r = await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'gate_locked', body: 'free text is ignored' } });
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual({ success: true, from: LINE, kind: 'gate_locked', body: GATE_TEXT });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415550100', body: GATE_TEXT, channel: 'sms', purpose: 'conversational', entryPoint: 'tech_line_text',
+      metadata: expect.objectContaining({ set_text_kind: 'gate_locked', scheduled_service_id: VISIT, tech_line: true, original_message_type: 'manual', fromNumber: LINE.number }),
+    }));
+    const [, claimBindings] = db.raw.mock.calls.find((c) => CLAIM_SQL.test(String(c[0])));
+    expect(claimBindings[0]).toBe(`tech-set-text:${VISIT}:gate_locked`);
+    expect(openSetTextVisit).toHaveBeenCalledWith(db, VISIT);
+  });
+
+  test('a set text cannot overwrite the send\'s own metadata keys', async () => {
+    primeVisit();
+    await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'dog_outside' } });
+    const { metadata } = sendCustomerMessage.mock.calls[0][0];
+    expect(metadata.original_message_type).toBe('manual');
+    expect(metadata.scheduled_service_id).toBe(VISIT);
+  });
+
+  test('a held (visit, kind) claim answers DUPLICATE_TEXT and sends nothing', async () => {
+    primeVisit();
+    db.raw.mockImplementationOnce(async () => ({ rows: [] }));
+    const r = await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'gate_locked' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body.code).toBe('DUPLICATE_TEXT');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a text that never left releases its (visit, kind) claim', async () => {
+    primeVisit();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+    const r = await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'gate_locked' } });
+    expect(r.statusCode).toBe(409);
+    expect(chains.sms_send_claims.where).toHaveBeenCalledWith({ claim_key: `tech-set-text:${VISIT}:gate_locked` });
+    expect(chains.sms_send_claims.del).toHaveBeenCalled();
+  });
+
+  test('refuses an unknown kind, no line, a visit not in scope, and a visit that is not today\'s or has ended', async () => {
+    primeVisit();
+    let r = await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'running_late' } });
+    expect(r.statusCode).toBe(400);
+    techLineContext.mockResolvedValueOnce(null);
+    r = await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'gate_locked' } });
+    expect(r.body.code).toBe('NO_TECH_LINE');
+    primeVisit({ visit: { id: VISIT, customer_id: 'c1', technician_id: 'tech-2', status: 'confirmed' } });
+    r = await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'gate_locked' } });
+    expect(r.statusCode).toBe(403);
+    primeVisit();
+    openSetTextVisit.mockResolvedValueOnce(false);
+    r = await call('post', '/set-text', { body: { scheduledServiceId: VISIT, kind: 'gate_locked' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body.code).toBe('VISIT_NOT_OPEN');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(db.raw.mock.calls.some((c) => CLAIM_SQL.test(String(c[0])))).toBe(false);
+  });
+});
+
+describe('GET /replies', () => {
+  beforeEach(() => techSetTextsLive.mockReturnValue(true));
+
+  test('is not there while the gate is off', async () => {
+    techSetTextsLive.mockReturnValue(false);
+    const r = await call('get', '/replies', { query: { scheduledServiceId: VISIT } });
+    expect(r.statusCode).toBe(404);
+    expect(setTextReply).not.toHaveBeenCalled();
+  });
+
+  test('asks for the reply on the caller\'s own line, for the visit\'s customer phone', async () => {
+    primeVisit();
+    const found = { setText: { kind: 'gate_locked', label: 'Back gate locked', sentAt: '2026-11-02T14:00:00Z' }, reply: { body: 'Unlocked!', receivedAt: '2026-11-02T14:03:00Z', mediaCount: 0 }, ambiguous: false };
+    setTextReply.mockResolvedValueOnce(found);
+    const r = await call('get', '/replies', { query: { scheduledServiceId: VISIT } });
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual(found);
+    expect(setTextReply).toHaveBeenCalledWith(db, { customerId: 'c1', customerPhone: '+19415550100', lineNumber: LINE.number, visitId: VISIT });
+  });
+
+  test('a visit outside the caller\'s scope reads nothing', async () => {
+    primeVisit({ visit: { id: VISIT, customer_id: 'c1', technician_id: 'tech-2', status: 'confirmed' } });
+    const r = await call('get', '/replies', { query: { scheduledServiceId: VISIT } });
+    expect(r.statusCode).toBe(403);
+    expect(setTextReply).not.toHaveBeenCalled();
   });
 });

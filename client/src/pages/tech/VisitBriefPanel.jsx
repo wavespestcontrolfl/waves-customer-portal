@@ -22,6 +22,9 @@
 // instead of the personal phone — POST /api/tech/line/call (press-1 bridge
 // to the tech's cell, then the customer) and POST /api/tech/line/sms (an
 // inline compose). Without a line the tel:/sms: links stay as they were.
+// With GATE_TECH_SET_TEXTS on, the line also lists set texts (fixed wording
+// the server renders) — POST /api/tech/line/set-text — and a Last reply card
+// reads the customer's answer — GET /api/tech/line/replies.
 //
 // Tech portal style rule (CLAUDE.md): inline styles, no Tailwind, no
 // components/ui.
@@ -31,7 +34,7 @@ import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { withPassLinks } from './passLinks';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
-import { formatETDateTime } from '../../lib/timezone';
+import { formatETDateTime, formatETTime } from '../../lib/timezone';
 import {
   fmtMoney,
   lawnGateLabels,
@@ -1010,6 +1013,102 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
   );
 }
 
+// Set texts (GATE_TECH_SET_TEXTS): one tap texts the visit's customer fixed
+// wording from the tech's line. The panel names only the kind; the server
+// renders the words and keeps one duplicate check per visit and kind. The
+// confirm names the customer and the text first, like the line Call does.
+const setTextBtnStyle = {
+  minHeight: 48, padding: '8px 12px', borderRadius: 4, border: `1px solid ${DARK.border}`,
+  background: 'transparent', color: DARK.text, fontSize: 14,
+};
+function SetTextRow({ options, line, customerName, onSend, onBusyChange, onSent }) {
+  const [state, setState] = useState({ busyKind: '', sent: '', error: '' });
+  async function send(option) {
+    if (state.busyKind) return;
+    if (!window.confirm(`Text ${customerName} "${option.label}" from ${line.formatted}?`)) return;
+    setState({ busyKind: option.kind, sent: '', error: '' });
+    onBusyChange?.(true);
+    try {
+      const out = await onSend(option.kind);
+      setState({ busyKind: '', sent: out?.body || option.label, error: '' });
+      onSent?.();
+    } catch (err) {
+      setState({ busyKind: '', sent: '', error: String(err?.message || err).slice(0, 160) });
+    } finally {
+      onBusyChange?.(false);
+    }
+  }
+  return (
+    <div data-testid="set-text-row" style={{ marginTop: 8 }}>
+      <div style={{ ...factMutedStyle, margin: '0 0 6px' }}>Set texts from your line</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {options.map((o) => (
+          <button key={o.kind} type="button" onClick={() => send(o)} disabled={Boolean(state.busyKind)} style={setTextBtnStyle}>
+            {state.busyKind === o.kind ? 'Sending…' : o.label}
+          </button>
+        ))}
+      </div>
+      {state.sent && <p role="status" style={{ ...factMutedStyle, color: DARK.ok, marginTop: 6 }}>Sent: {state.sent}</p>}
+      {state.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red, marginTop: 6 }}>{state.error}</p>}
+    </div>
+  );
+}
+
+// Last reply: the customer's answer to the newest set text for THIS visit.
+// The server shows a reply only when it cannot belong to another visit of the
+// same customer; otherwise it says so and the tech checks the thread.
+function SetTextReply({ request, visitId, customerName, refreshKey }) {
+  const [tick, setTick] = useState(0);
+  const [state, setState] = useState({ data: null, error: '' });
+  useEffect(() => {
+    let live = true;
+    request(`/tech/line/replies?scheduledServiceId=${encodeURIComponent(visitId)}`)
+      .then((data) => { if (live) setState({ data, error: '' }); })
+      .catch((err) => { if (live) setState({ data: null, error: String(err?.message || err).slice(0, 160) }); });
+    return () => { live = false; };
+  }, [request, visitId, refreshKey, tick]);
+  const again = <button type="button" onClick={() => setTick((t) => t + 1)} style={{ ...setTextBtnStyle, minHeight: 40, marginLeft: 8 }}>Check again</button>;
+  if (state.error) return <p role="alert" style={{ ...factMutedStyle, color: DARK.amber, marginTop: 6 }}>Couldn't check for a reply.{again}</p>;
+  const d = state.data;
+  if (!d?.setText) return null;
+  const sent = `${d.setText.label || 'Set text'} sent ${formatETTime(d.setText.sentAt)}.`;
+  if (d.ambiguous) {
+    return <p data-testid="set-text-reply" style={{ ...factMutedStyle, marginTop: 6 }}>{sent} A reply can't be matched to one visit — check your texts.</p>;
+  }
+  if (!d.reply) {
+    return <p data-testid="set-text-reply" style={{ ...factMutedStyle, marginTop: 6 }}>{sent} No reply yet.{again}</p>;
+  }
+  const photos = d.reply.mediaCount > 0 ? ` (${d.reply.mediaCount} photo${d.reply.mediaCount === 1 ? '' : 's'})` : '';
+  return (
+    <div data-testid="set-text-reply" style={{ marginTop: 6, padding: 10, borderRadius: 4, border: `1px solid ${DARK.border}`, background: DARK.bg }}>
+      <div style={{ ...factMutedStyle, margin: 0 }}>Reply from {customerName} · {formatETTime(d.reply.receivedAt)}{photos}</div>
+      <p style={{ ...factRowStyle, whiteSpace: 'pre-wrap' }}>{d.reply.body}</p>
+    </div>
+  );
+}
+
+// The set texts the line lists, for a visit still to be done, and the Last
+// reply card under them. Renders nothing while the gate is off (no list).
+function SetTextsSection({ line, service, request, onBusyChange }) {
+  const [sends, setSends] = useState(0);
+  const options = Array.isArray(line.setTexts) ? line.setTexts : [];
+  if (!options.length || TERMINAL_STATUSES.has(service.status)) return null;
+  const customerName = service.customer_name || service.customerName || 'the customer';
+  return (
+    <>
+      <SetTextRow
+        options={options}
+        line={line.line}
+        customerName={customerName}
+        onSend={(kind) => request('/tech/line/set-text', { method: 'POST', body: JSON.stringify({ scheduledServiceId: service.id, kind }) })}
+        onBusyChange={onBusyChange}
+        onSent={() => setSends((n) => n + 1)}
+      />
+      <SetTextReply request={request} visitId={service.id} customerName={customerName} refreshKey={sends} />
+    </>
+  );
+}
+
 // After Twilio accepts a bridge the tech's phone rings for up to ~40s and
 // only then is the customer dialed: Call stays locked for that window so a
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
@@ -1029,11 +1128,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const [composeOpen, setComposeOpen] = useState(false);
   const [textBusy, setTextBusy] = useState(false);
   const [callState, setCallState] = useState({ busy: false, note: '', error: '' });
+  const [presetBusy, setPresetBusy] = useState(false);
   const callLockTimer = useRef(null);
   useEffect(() => () => clearTimeout(callLockTimer.current), []);
   // The parent accordion must not unmount a panel with a text or a bridge
   // in flight (a fresh panel would let the same action go out twice).
-  const busy = textBusy || callState.busy;
+  const busy = textBusy || callState.busy || presetBusy;
   // …and the panel itself keeps the line mode the action started in while
   // it is in flight: a schedule refresh answering { line: null } (gate off,
   // assignment cleared) or a failed lookup mid-send must not unmount the
@@ -1149,6 +1249,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           onBusyChange={setTextBusy}
         />
       )}
+      {line && <SetTextsSection line={line} service={service} request={request} onBusyChange={setPresetBusy} />}
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       <VisitAccessCodes
         request={request}
