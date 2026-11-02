@@ -476,7 +476,8 @@ const ADDON_PROGRAMS = Object.freeze({
   lawn_care: {
     any: ['lawn'],
     fallback: 'lawn',
-    nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'],
+    // lawn_soil_test (20261102070000): a soil sample for the lab, no product.
+    nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing', 'lawn_soil_test'],
     keys: {
       area_addon_bed_pre_emergent: 'area_addon',
       area_addon_lawn_insect_spot: 'area_addon',

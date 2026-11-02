@@ -1,6 +1,6 @@
 const mockDispatch = jest.fn();
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mockDispatch(...args) }));
-jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'fast-structured-policy' } }));
+jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'fast-structured-policy', fastStructuredInteractive: 'fast-structured-interactive-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
 
 const { screenInboundSms, classifierMode } = require('../services/sms-solicitation-classifier');
@@ -83,9 +83,13 @@ test.each([
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
   expect(await screenInboundSms({ body })).toMatchObject({ solicitation: false, method: 'model', mode: 'shadow' });
   expect(mockDispatch).toHaveBeenCalledTimes(1);
-  expect(mockDispatch).toHaveBeenCalledWith('fast-structured-policy', expect.objectContaining({
-    laneId: 'sms_solicitation', jsonMode: true, timeoutMs: 3500,
-  }));
+  // The webhook waits on this read, so it must use the interactive policy,
+  // not fastStructured, and give each leg its own share of the budget,
+  // enforced by the chain, so a stalled first model cannot starve the
+  // backup (2 of 9 production screens timed out on 10-29).
+  expect(mockDispatch).toHaveBeenCalledWith('fast-structured-interactive-policy', expect.objectContaining({
+    laneId: 'sms_solicitation', jsonMode: true, timeoutMs: 6000,
+  }), expect.objectContaining({ reserveFallbackBudget: true, hardDeadline: true }));
 });
 
 test('model confidence is recorded without taking an enforcement action', async () => {

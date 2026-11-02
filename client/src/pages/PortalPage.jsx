@@ -10709,7 +10709,7 @@ const SERVICE_CATALOG = [
     // misstates someone's; variant-neutral until the panel reads the
     // matched service's real cadence.
     frequencies: ['Recurring lawn program'],
-    basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, thatch monitoring, soil testing when a lawn is not responding',
+    basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, thatch monitoring, soil testing when a lawn is not responding (any other soil test is an added fee)',
     // Lawn program v13 products (owner 2026-11-01): Stonewall 4FL is its prodiamine, and 24-0-11 its main
     // fertilizer, with no phosphorus (the old 16-4-8 chip named a phosphorus fertilizer v13 does not use).
     products: ['Stonewall 4FL', 'Celsius WG', '24-0-11 + Micros', 'Headway G'],
@@ -10800,7 +10800,7 @@ const TIER_SERVICE_NAMES = {
 // Coverage details for each included service
 const SERVICE_COVERAGE = {
   pest_control: { summary: 'Unlimited callbacks within 30 days. Interior re-treatment included.', details: ['Interior + exterior perimeter treatment', 'Granular bait band around foundation', 'Bait station monitoring', 'Cobweb sweep on all eaves', 'Free callback if pests return within 30 days'] },
-  lawn_care: { summary: 'Fertilization, weed control, fungicide. Callbacks for breakthrough weeds.', details: ['Custom fertilization for your turf type', 'Pre-emergent and post-emergent weed control', 'Fungicide treatments as needed', 'Thatch monitoring, plus soil testing when a lawn is not responding', 'Callback for breakthrough weeds between visits'] },
+  lawn_care: { summary: 'Fertilization, weed control, fungicide. Callbacks for breakthrough weeds.', details: ['Custom fertilization for your turf type', 'Pre-emergent and post-emergent weed control', 'Fungicide treatments as needed', 'Thatch monitoring, plus soil testing when a lawn is not responding (any other soil test is an added fee)', 'Callback for breakthrough weeds between visits'] },
   mosquito: { summary: 'Barrier treatments Apr-Oct. Re-spray within 14 days of heavy rain.', details: ['Monthly perimeter barrier spray (Apr-Oct)', 'Standing water treatment with larvicide', 'Foliage and shrub line application', 'Free re-spray within 14 days of heavy rain', 'Event spray available on request'] },
   tree_shrub: { summary: 'Deep root feeding, insect & disease treatment, palm injections.', details: ['Deep root fertilization', 'Insect and disease treatment', 'Palm trunk injections (Arborjet)', 'Seasonal monitoring and reporting'] },
   termite: { summary: 'Bait station installation and monitoring with damage warranty.', details: ['Bait station installation around perimeter', 'Quarterly monitoring inspections', 'Damage warranty (Premier tier)', 'Annual re-certification report'] },
@@ -16817,8 +16817,10 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
           }}>
             <a data-glass-accent="" href="tel:+19412975749" onClick={onClose} style={supportActionStyle}>Call</a>
             <a data-glass-accent="" href="sms:+19412975749" onClick={onClose} style={supportActionStyle}>Text</a>
-            {/* Request + Chat create work / need an active plan — a cancelled
-                account (C4) passes neither, so only Call / Text remain. */}
+            {/* Request + Ask Waves AI create work / need an active plan — a
+                cancelled account (C4) passes neither, so only Call / Text
+                remain. "Ask Waves AI", not "Chat", beside "Text": owner pick
+                1A (UI audit 2026-11-02, UI-07). */}
             {onRequest && (
               <button data-glass-accent="" type="button" onClick={() => { onRequest(); onClose(); }} style={supportActionStyle}>
                 Request
@@ -16826,7 +16828,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
             )}
             {onChat && (
               <button data-glass-accent="" type="button" onClick={() => { onChat(); onClose(); }} style={supportActionStyle}>
-                Chat
+                Ask Waves AI
               </button>
             )}
           </div>

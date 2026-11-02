@@ -25,15 +25,24 @@ const CLASS_ROWS = {
   'ops-reminder-broken': { category: 'system', metadata: { dedupeKey: 'ops-reminder-broken:tech-tips:2026-10-26', opsJob: null, opsKind: 'ask' } },
   'gbp-sync-degraded': { category: 'review', metadata: { locationId: 'venice', reason: 'gbp_sync_degraded', cause: 'no_client' } },
   'gbp-sync-health-escalation': { category: 'review', metadata: { opsKey: 'gbp-sync-health', observedAt: '2026-10-26T10:00:00Z' } },
+  'typed-decisions-review': { category: 'typed_decisions', metadata: { dedupeKey: 'typed-decisions-review:2026-11-02', lane: 'typed_decisions', severity: 'fyi', who: 'claude' } },
   'content-terminal-due': { category: 'content', metadata: { dedupeKey: 'content-terminal-due:2026-11-02', terminalDue: 'claude', area: 'Content', severity: 'needs-you', who: 'claude' } },
 };
+// A fault is broken; the AI-test list the Claude labeler grades and the website drafts list the
+// Mac's blog-run job writes are FYIs (owner 2026-11-02).
+const CLASS_SEVERITY = { 'typed-decisions-review': 'fyi', 'content-terminal-due': 'fyi' };
 
 describe('routing table', () => {
-  test('every class matches its emitter row; a fault is broken, the Mac-handled website drafts list is fyi', () => {
+  test('every class matches its emitter row, with its severity (a fault is broken)', () => {
     expect(Object.keys(CLASS_ROWS).sort()).toEqual(CLAUDE_QUEUE_CLASSES.map((c) => c.name).sort());
     for (const [name, row] of Object.entries(CLASS_ROWS)) {
-      expect(classifyClaudeQueue(row)).toEqual({ className: name, severity: name === 'content-terminal-due' ? 'fyi' : 'broken' });
+      expect(classifyClaudeQueue(row)).toEqual({ className: name, severity: CLASS_SEVERITY[name] || 'broken' });
     }
+  });
+
+  test('the AI-test list is matched by its own category and key only', () => {
+    expect(classifyClaudeQueue({ category: 'system', metadata: { dedupeKey: 'typed-decisions-review:2026-11-02' } })).toBeNull();
+    expect(classifyClaudeQueue({ category: 'typed_decisions', metadata: { dedupeKey: 'typed-decisions-other:2026-11-02' } })).toBeNull();
   });
 
   test('the website drafts list is Claude\'s only while its emitter stamps it; the stalled-list item stays in the bell', () => {
