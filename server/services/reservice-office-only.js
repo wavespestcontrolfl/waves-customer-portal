@@ -48,13 +48,14 @@ const SCREENS = [
     // A spill is our doing on a re-service; so is a fertilizer or chemical burn.
     '\\bspill(?:ed|s|ing)?\\b',
     '\\b(?:fertili[sz]er|chemical|herbicide|weed\\s*killer)\\s+burn\\b|\\bburn\\s+(?:marks?|spots?|patches?|lines?|stripes?)\\b',
-    // Stains on a hard surface ("stains on the patio"), never roach stains in a cabinet.
-    '\\bstain(?:s|ed)?\\s+(?:on|all\\s+over)\\s+(?:the|my|our)\\s+(?:\\w+\\s+)?(?:driveway|patio|pavers?|deck|lanai|pool|walls?|siding|house|cars?|sidewalk|walkway|concrete|floors?|carpets?|furniture|cushions?|screens?|doors?|windows?|fences?|paint)\\b',
     // "your tech broke my sprinkler head", "the treatment made my dog sick", "the spray turned my shrubs brown"
     `\\b${OURS}\\b${NEAR}\\b${HARM}\\s+${THING}\\b`,
     `\\b${OURS}\\b${NEAR}\\b${THING}\\b${NEAR}\\b${HARM}\\b`,
     // "the lawn looks burned after the last treatment", "my dog got sick after the spray"
     `\\b${THING}\\b${NEAR}\\b${HARM}\\b${NEAR}\\b(?:from|after|since|by|because\\s+of)\\s+${OURS}\\b`,
+    // "stains on the pool deck from the spray", "burn spots on the lawn after the treatment". Stains with nothing
+    // that points at us stay: roach stains on a wall are a pest sign.
+    `\\b${HARM}\\b${NEAR}\\b${THING}\\b${NEAR}\\b(?:from|after|since|by|because\\s+of)\\s+${OURS}\\b`,
   ].join('|'), 'i')],
   ['billing', new RegExp([
     '\\b(?:refunds?|refunded|charges?|charged|charging|overcharg\\w*|invoices?|invoiced|reimburs\\w*)\\b',
@@ -79,7 +80,7 @@ const SCREENS = [
   ].join('|'), 'i')],
   ['schedule', new RegExp([
     '\\bno[-\\s]?shows?\\b',
-    `\\b${PERSON}\\s+${NOT}\\s+(?:even\\s+)?(?:show(?:ed|n)?(?:\\s+up)?|c[oa]me(?:\\s+(?:out|by))?|arrive[d]?|been\\s+(?:here|out|by))\\b`,
+    `\\b${PERSON}\\s+${NOT}\\s+(?:even\\s+)?(?:show(?:ed|n)?(?:\\s+up)?|c[oa]me(?:\\s+(?:out|by))?(?!\\s+(?:in|inside|into|through|past|around|behind|to\\s+the)\\b)|arrive[d]?|been\\s+(?:here|out|by))\\b`,
     '\\b(?:no\\s*one|nobody)\\s+(?:came|showed|arrived)\\b',
     '\\bnever\\s+showed(?:\\s+up)?\\b',
     // A person late: "you're late", "the tech was running late again"
@@ -91,7 +92,9 @@ const SCREENS = [
     // "What happened?" on its own, or about the visit — never "what happened to the grass by the pool?"
     '\\bwhat\\s+happened\\s*[?!.]*\\s*$',
     '\\bwhat\\s+happened\\s+to\\s+(?:you|the\\s+(?:tech\\w*|appointment|visit)|(?:my|our)\\s+(?:appointment|visit))\\b',
-    '\\bwaiting\\s+all\\s+(?:day|morning|afternoon)\\b|\\bstill\\s+waiting\\b',
+    // Waiting on US: on its own ("Still waiting."), or for a person, a call or the visit; never "still waiting for the
+    // ants to go away".
+    '\\b(?:still\\s+waiting|waiting\\s+all\\s+(?:day|morning|afternoon))\\b(?:\\s*[.!?…]*\\s*$|\\s+(?:on|for)\\s+(?:you|your\\s+(?:guys?|tech\\w*|crew|call|reply|team)|the\\s+(?:tech\\w*|appointment|visit|call|reply|crew)|someone|somebody|anyone|anybody|a\\s+(?:call|reply|response|text|tech\\w*)|an\\s+(?:answer|update)|to\\s+hear))',
     '\\bwhere\\s+(?:are|is)\\s+(?:you|the\\s+tech\\w*|your\\s+(?:guys?|tech\\w*|crew))\\b',
   ].join('|'), 'i')],
 ];

@@ -42,6 +42,10 @@ describe('officeOnlyReason', () => {
     // Harm with nothing of the customer's named, stains that are a pest sign, the customer's own bleach, the sun.
     'Brown spots after your treatment',
     'There are roach stains in the cabinets',
+    'There are stains on the walls by the stove',
+    'There are stains on the patio now',
+    // A missed area is the re-service's own request, not a no-show.
+    "The tech didn't come inside the gate",
     'I used bleach on the ants',
     'My grass is burnt from the sun',
     'Our cat gets sick if we let her out on the lanai',
@@ -51,6 +55,8 @@ describe('officeOnlyReason', () => {
     "They're out late at night by the pool",
     'What happened to the grass by the pool?',
     'The ants did not come back after the last visit',
+    'I am still waiting for the ants to go away',
+    'Waiting all day for the bait to work',
     // A name, not a bill.
     'Bill said the roaches are in the garage',
     // The request the re-service is for: it prints, and the tech answers it.
@@ -62,8 +68,8 @@ describe('officeOnlyReason', () => {
   test.each([
     ['The technician spilled product on the lanai', 'damage'],
     ['Your guy spilled granules on my driveway', 'damage'],
-    ['There are stains on the patio now', 'damage'],
     ['Stains on the pool deck from the spray', 'damage'],
+    ['Burn spots on the lawn after the treatment', 'damage'],
     ['You burned my plants', 'damage'],
     ['The lawn looks burned after the last treatment', 'damage'],
     ['There is fertilizer burn by the walkway', 'damage'],
@@ -99,6 +105,9 @@ describe('officeOnlyReason', () => {
     ['What happened to my visit?', 'schedule'],
     ['Where is the tech?', 'schedule'],
     ['Still waiting for someone to come out', 'schedule'],
+    ['Still waiting.', 'schedule'],
+    ['Been waiting all day for your tech', 'schedule'],
+    ['Still waiting on a call back', 'schedule'],
   ])('a message about us: %j -> %s', (text, reason) => {
     expect(officeOnlyReason(text)).toBe(reason);
   });
