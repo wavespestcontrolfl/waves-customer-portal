@@ -161,14 +161,18 @@ describe('commands', () => {
   });
 
   test('a set text is read back with the name, the street and the full wording; only "yes" sends it', async () => {
-    prepareSetText.mockResolvedValue({ ok: true, target: { customer: CUSTOMER }, body: 'Hi Sam, your back gate is locked.' });
+    prepareSetText.mockResolvedValue({ ok: true, target: { customer: CUSTOMER, to: '+19415550123' }, body: 'Hi Sam, your back gate is locked.' });
     sendSetText.mockResolvedValue({ status: 200, json: { success: true } });
     const { say } = await session();
     expect(await say('text them the gate is locked')).toBe(`Text Sam at 12 Palm Way: Hi Sam, your back gate is locked. ${SAY.confirm_again}`);
     expect(sendSetText).not.toHaveBeenCalled();
     expect(await say('what')).toBe(SAY.confirm_again);
     expect(await say('yes send it')).toBe(SAY.sent);
-    expect(sendSetText).toHaveBeenCalledWith({ actor: { techRole: 'technician', technicianId: 'tech-1' }, scheduledServiceId: 'visit-1', kind: 'gate_locked' });
+    // The yes is bound to the customer, phone and wording that were read back.
+    expect(sendSetText).toHaveBeenCalledWith({
+      actor: { techRole: 'technician', technicianId: 'tech-1' }, scheduledServiceId: 'visit-1', kind: 'gate_locked',
+      expect: { customerId: 'cust-1', to: '+19415550123', body: 'Hi Sam, your back gate is locked.' },
+    });
     // "No" sends nothing.
     await say('dog is outside');
     expect(await say('no')).toBe(SAY.not_sent);
@@ -195,6 +199,18 @@ describe('commands', () => {
     const { say } = await session();
     expect(await say('garage code please')).toBe(SAY.no_codes);
     expect(prepareSetText).not.toHaveBeenCalled();
+  });
+
+  test('a recipient or wording changed after the read-back sends nothing and reads it back again', async () => {
+    prepareSetText.mockResolvedValueOnce({ ok: true, target: { customer: CUSTOMER, to: '+19415550123' }, body: 'Hi Sam, your garage.' });
+    prepareSetText.mockResolvedValueOnce({ ok: true, target: { customer: { id: 'cust-1', first_name: 'Samuel' }, to: '+19415550999' }, body: 'Hi Samuel, your garage.' });
+    sendSetText.mockResolvedValueOnce({ status: 409, json: { code: 'SET_TEXT_CHANGED' } });
+    const { say } = await session();
+    await say('garage');
+    expect(await say('yes')).toBe(`The details changed. Text Samuel at 12 Palm Way: Hi Samuel, your garage. ${SAY.confirm_again}`);
+    sendSetText.mockResolvedValueOnce({ status: 200, json: { success: true } });
+    expect(await say('yes')).toBe(SAY.sent);
+    expect(sendSetText.mock.calls[1][0].expect).toEqual({ customerId: 'cust-1', to: '+19415550999', body: 'Hi Samuel, your garage.' });
   });
 
   test('a refused send is said plainly', async () => {

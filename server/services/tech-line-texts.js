@@ -237,11 +237,17 @@ async function prepareSetText({ actor, scheduledServiceId, kind }) {
 // A set text: fixed wording rendered here, never client text. The claim is on
 // (visit, kind), so a second tap — or the voice line asking for the same text
 // on the same visit — inside the window is a duplicate even though the body
-// is identical for two visits of one customer.
-async function sendSetText({ actor, scheduledServiceId, kind }) {
+// is identical for two visits of one customer. `expect` (the voice line) is
+// the customer, phone and wording the technician heard read back: if any of
+// them changed since (an office edit), nothing is sent and the caller reads
+// it back again.
+async function sendSetText({ actor, scheduledServiceId, kind, expect = null }) {
   const prepared = await prepareSetText({ actor, scheduledServiceId, kind });
   if (!prepared.ok) return { status: prepared.status, json: prepared.json };
   const { ctx, target, body } = prepared;
+  if (expect && (expect.customerId !== target.customer.id || expect.to !== target.to || expect.body !== body)) {
+    return { status: 409, json: { error: 'The customer or the wording changed since it was read back', code: 'SET_TEXT_CHANGED' } };
+  }
   const out = await sendClaimedText({
     actor, ctx, target, body, claimKey: setTextClaimKey(target.visit.id, kind), metadata: { set_text_kind: kind },
   });

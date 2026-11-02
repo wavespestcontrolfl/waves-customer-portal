@@ -305,14 +305,19 @@ class TechVoiceConversation {
     return this.say(`${name} replied: ${out.reply.body || '(no words)'}.${media}`);
   }
 
-  async _readBackSetText(kind) {
+  // `lead` prefixes a fresh read-back ("The details changed.").
+  async _readBackSetText(kind, lead = '') {
     const stop = await pickStop(db, this.tech.id, this._now());
-    if (!stop) return this.say(`${SAY.no_stop} No one to text.`);
+    if (!stop) return this.say(`${lead}${SAY.no_stop} No one to text.`);
     const prepared = await prepareSetText({ actor: this.actor, scheduledServiceId: stop.id, kind });
-    if (!prepared.ok) return this.say(refusalSpeech(prepared));
-    this._pending = { kind, visitId: stop.id };
+    if (!prepared.ok) return this.say(`${lead}${refusalSpeech(prepared)}`);
+    // The yes is bound to exactly what was read back: this customer, phone
+    // and wording (sendSetText refuses anything else).
+    this._pending = {
+      kind, visitId: stop.id, customerId: prepared.target.customer.id, to: prepared.target.to, body: prepared.body,
+    };
     this.state = 'CONFIRM';
-    return this.say(`Text ${firstName(prepared.target.customer)} at ${stop.address_line1 || 'the address on file'}: ${prepared.body} ${SAY.confirm_again}`);
+    return this.say(`${lead}Text ${firstName(prepared.target.customer)} at ${stop.address_line1 || 'the address on file'}: ${prepared.body} ${SAY.confirm_again}`);
   }
 
   async _confirm(text) {
@@ -326,7 +331,13 @@ class TechVoiceConversation {
       const pending = this._pending;
       this._pending = null;
       this.state = 'READY';
-      const out = await sendSetText({ actor: this.actor, scheduledServiceId: pending.visitId, kind: pending.kind });
+      const out = await sendSetText({
+        actor: this.actor,
+        scheduledServiceId: pending.visitId,
+        kind: pending.kind,
+        expect: { customerId: pending.customerId, to: pending.to, body: pending.body },
+      });
+      if (out.json?.code === 'SET_TEXT_CHANGED') return this._readBackSetText(pending.kind, 'The details changed. ');
       return this.say(out.status === 200 ? SAY.sent : refusalSpeech(out));
     }
     return this.say(SAY.confirm_again);
