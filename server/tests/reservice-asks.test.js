@@ -218,6 +218,24 @@ describe('texts', () => {
     expect(items[0]).toMatchObject({ id: 'text:s3', officeOnly: 'billing' });
   });
 
+  test('a message for the office with no pest talk freezes with no words, for the bell only', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const { items } = await gather({ sms: [sms('s4', 'I want a refund.', at), sms('s5', 'Nobody came today.', new Date(NOW - DAY))] });
+    expect(items.map((item) => [item.id, item.text, item.officeOnly, item.pests])).toEqual([
+      ['text:s4', '', 'billing', []],
+      ['text:s5', '', 'schedule', []],
+    ]);
+  });
+
+  test('an office-only message is never folded into an item with the same pest words', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: 'The ants came back after the spray.', customer_request_source: 'picker' }),
+      sms: [sms('s6', 'The ants came back after the spray. I want a refund.', at)],
+    });
+    expect(items.map((item) => item.officeOnly || null)).toEqual([null, 'billing']);
+  });
+
   test('tapbacks, STOP and empty texts are dropped', async () => {
     const { items } = await gather({
       sms: [
@@ -394,6 +412,18 @@ describe('caps and order', () => {
     expect(items.some((item) => item.id === 'booking:visit-1')).toBe(true);
     const others = items.filter((item) => item.id !== 'booking:visit-1').map((item) => item.id);
     expect(others).toEqual(texts.slice(5).map((row) => `text:${row.id}`));
+    expect(items.map((item) => item.at)).toEqual([...items.map((item) => item.at)].sort());
+  });
+
+  test('office-only messages with no words never crowd out an ask: the cap counts asks, and the newest 5 of them ride along', async () => {
+    const asks = Array.from({ length: 14 }, (_, i) => sms(`a${i}`, `Ants again, sighting ${i}`, new Date(BOOKED.getTime() - 9 * DAY + i * DAY / 2)));
+    const office = Array.from({ length: 7 }, (_, i) => sms(`o${i}`, `I want a refund, note ${i}.`, new Date(BOOKED.getTime() - 9 * DAY + i * DAY / 3)));
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' }),
+      sms: [...asks, ...office],
+    });
+    expect(items.filter((item) => item.text)).toHaveLength(10);
+    expect(items.filter((item) => !item.text).map((item) => item.id)).toEqual(office.slice(2).map((row) => `text:${row.id}`));
     expect(items.map((item) => item.at)).toEqual([...items.map((item) => item.at)].sort());
   });
 
