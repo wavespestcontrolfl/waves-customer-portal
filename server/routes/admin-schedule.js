@@ -29702,6 +29702,8 @@ module.exports = router;
 // route-load cycle) by services/recurring-series-extend.js so the dispatch
 // completion routes run the same refill/alert logic as this route's step 4b.
 module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
+// The series maintenance lock, for scripts that change a series outside a request (lawn 9x re-date conversion).
+module.exports.acquireRecurringSeriesMaintenanceLock = acquireRecurringSeriesMaintenanceLock;
 // Shared nightly horizon top-up (writing wrapper + lock-held body) —
 // consumed lazily by services/recurring-series-topup.js (the cron + the
 // one-shot ops script), same avoid-a-route-load-cycle reason as above.
