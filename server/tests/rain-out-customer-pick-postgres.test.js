@@ -61,6 +61,8 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
       CREATE TEMP TABLE sms_templates AS SELECT * FROM public.sms_templates WITH NO DATA;
       CREATE TEMP TABLE notification_prefs AS SELECT * FROM public.notification_prefs WITH NO DATA;
       CREATE TEMP TABLE messaging_suppression AS SELECT * FROM public.messaging_suppression WITH NO DATA;
+      -- A copied table has no defaults; the missed-visit counter reads the stamp.
+      ALTER TABLE reschedule_log ALTER COLUMN created_at SET DEFAULT NOW();
     `);
   });
   afterAll(async () => {
@@ -149,7 +151,7 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     const logs = await trx('reschedule_log').where({ scheduled_service_id: serviceId });
     expect(logs).toHaveLength(1);
     expect(logs[0]).toEqual(expect.objectContaining({
-      customer_id: customerId, reason_code: 'customer_pick', initiated_by: 'tech', notes: 'weather_rain',
+      customer_id: customerId, reason_code: 'weather_rain', initiated_by: 'tech', notes: 'customer_pick',
       original_window: '09:00:00-10:00:00', new_window: null,
       occurrence_service_type: 'Quarterly Pest Control Service',
     }));
@@ -159,6 +161,20 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Maria - rain is moving through your area this (morning|afternoon|evening), so we need to move your Quarterly Pest Control Service\. Pick a new time here: portal\.wavespestcontrol\.com\/l\/k3j9m2x7qp\n\nPlease pick by /);
+  });
+
+  test('a "customer not home" hand-off counts once toward the 2-in-90 missed-visit outreach, like a no-show Quick Move', async () => {
+    process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+    try {
+      await insertVisit();
+      expect((await handOff({ reasonCode: 'customer_noshow' })).ok).toBe(true);
+      const [row] = await trx('reschedule_log').where({ scheduled_service_id: serviceId });
+      expect(row).toEqual(expect.objectContaining({ reason_code: 'customer_noshow', notes: 'customer_pick' }));
+      // The real counter (workflows/missed-appointment countMisses) sees it.
+      expect(await require('../services/workflows/missed-appointment').countMisses(customerId, trx)).toBe(1);
+    } finally {
+      delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
+    }
   });
 
   test('Auto-Dispatch skips the handed-off visit until the pick-by instant passes, then loads it as a due-date visit', async () => {
@@ -256,7 +272,7 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
 
     expect(await visitRow()).toEqual(before);
     // No hand-off row (a case's own setup may log earlier Auto-Dispatch moves).
-    expect(await trx('reschedule_log').where({ scheduled_service_id: serviceId, reason_code: 'customer_pick' })).toEqual([]);
+    expect(await trx('reschedule_log').where({ scheduled_service_id: serviceId, notes: 'customer_pick' })).toEqual([]);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });

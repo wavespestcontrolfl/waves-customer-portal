@@ -45,7 +45,8 @@ const PARKED_DATE = etDateString(addETDays(new Date(), 8));
 const PLACED_DATE = etDateString(addETDays(new Date(), 10));
 const PICK_BY = new Date('2026-11-05T01:00:00Z'); // Wed, Nov 4 at 8 PM ET
 const FAR_PICK_BY = new Date('2099-11-05T01:00:00Z'); // also a Wednesday, Nov 4 at 8 PM ET
-const PICK_LOG = { original_date: '2026-11-03', original_window: '09:00:00-11:00:00', notes: 'weather_rain' };
+// The hand-off's row as a Quick Move logs it: reason_code = why it moved, notes marks the hand-off.
+const PICK_LOG = { original_date: '2026-11-03', original_window: '09:00:00-11:00:00', reason_code: 'weather_rain', notes: 'customer_pick' };
 
 function svcRow(overrides = {}) {
   return {
@@ -113,8 +114,18 @@ describe('customerPickFields — the payload story for a handed-off visit', () =
         reasonCode: 'weather_rain',
       },
     });
-    // The newest hand-off row only: filtered on the visit and reason_code 'customer_pick'.
-    expect(logQueries).toEqual([{ scheduled_service_id: 'svc-1', reason_code: 'customer_pick' }]);
+    // The newest hand-off row only: the visit, then notes 'customer_pick' OR the first shape's reason_code.
+    expect(logQueries[0]).toEqual({ scheduled_service_id: 'svc-1' });
+    const calls = [];
+    const q = { where: (...a) => { calls.push(['where', ...a]); return q; }, orWhere: (...a) => { calls.push(['orWhere', ...a]); return q; } };
+    logQueries[1].call(q);
+    expect(calls).toEqual([['where', 'notes', 'customer_pick'], ['orWhere', 'reason_code', 'customer_pick']]);
+  });
+
+  test('a hand-off row in the first shape (reason_code customer_pick, the reason in notes) reads the same', async () => {
+    wireDb({ pickLog: { original_date: '2026-11-03', original_window: '09:00:00-11:00:00', reason_code: 'customer_pick', notes: 'gate_locked' } });
+    const fields = await customerPickFields(svcRow({ customer_pick_by: PICK_BY }), new Date('2026-11-04T15:00:00Z'));
+    expect(fields.customerPick).toEqual(expect.objectContaining({ originalDate: '2026-11-03', originalWindowStart: '09:00', reasonCode: 'gate_locked' }));
   });
 
   test('the deadline passes AT the pick-by instant, and stays passed after it', async () => {
@@ -136,13 +147,15 @@ describe('customerPickFields — the payload story for a handed-off visit', () =
     expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
-  test('reasonCode is a Quick Move reason code from notes, or null for any other text', async () => {
+  test('reasonCode is a Quick Move reason code (reason_code; notes on a first-shape row), or null for any other text', async () => {
     const cases = [['running_late', 'running_late'], [' weather_wind ', 'weather_wind'], ['custom', 'custom'],
       ['Moved by Quick Move: rain', null], ['', null], [null, null]];
-    for (const [notes, want] of cases) {
-      wireDb({ pickLog: { ...PICK_LOG, notes } });
-      const fields = await customerPickFields(svcRow({ customer_pick_by: PICK_BY }), new Date('2026-11-04T15:00:00Z'));
-      expect(fields.customerPick.reasonCode).toBe(want);
+    for (const [value, want] of cases) {
+      for (const shape of [{ reason_code: value, notes: 'customer_pick' }, { reason_code: 'customer_pick', notes: value }]) {
+        wireDb({ pickLog: { ...PICK_LOG, ...shape } });
+        const fields = await customerPickFields(svcRow({ customer_pick_by: PICK_BY }), new Date('2026-11-04T15:00:00Z'));
+        expect(fields.customerPick.reasonCode).toBe(want);
+      }
     }
   });
 

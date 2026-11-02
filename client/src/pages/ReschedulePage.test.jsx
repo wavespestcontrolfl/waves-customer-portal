@@ -1099,6 +1099,25 @@ describe('ReschedulePage customer pick (Quick Move hand-off)', () => {
     expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
   });
 
+  it('A: a gate-locked hand-off carries the portal gate-access note the text has no room for', async () => {
+    stubFetch({ get: jsonResponse(pickPayload({ reasonCode: 'gate_locked' })) });
+
+    renderPage();
+
+    const note = await screen.findByTestId('gate-access-note');
+    expect(note).toHaveTextContent('Add gate access for next time in your portal, so we can get in.');
+    expect(screen.getByRole('link', { name: 'your portal' })).toHaveAttribute('href', '/?tab=property');
+  });
+
+  it('A: no gate-access note for any other reason', async () => {
+    stubFetch({ get: jsonResponse(pickPayload()) });
+
+    renderPage();
+
+    await screen.findByTestId('pick-by-note');
+    expect(screen.queryByTestId('gate-access-note')).not.toBeInTheDocument();
+  });
+
   it('A: no reason, no original date and no first name: a neutral heading and no "was set for" clause', async () => {
     stubFetch({ get: jsonResponse(pickPayload({ reasonCode: null, originalDate: null }, { customerFirstName: null })) });
 

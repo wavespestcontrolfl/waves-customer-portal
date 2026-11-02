@@ -1052,11 +1052,15 @@ set and no `window_start` (handed to the customer, waiting) carries
 `customerPick: { pickBy, pickByLabel, deadlinePassed, originalDate,
 originalWindowStart, reasonCode }`: `pickBy` is the marker as an ISO instant,
 `pickByLabel` its ET wording ("Wed, Nov 4 at 8 PM"), `deadlinePassed` is
-`now >= pickBy`, and the other three come from the visit's newest
-`reschedule_log` row with `reason_code = 'customer_pick'` (`original_date`,
-`original_window`'s start as `HH:MM`, and the Quick Move reason code the
-hand-off writes in `notes`; a `notes` value that is not a Quick Move reason
-code reads as `null`). No such row, or a failed read: those three are `null`. For a waiting visit
+`now >= pickBy`, and the other three come from the visit's newest hand-off
+`reschedule_log` row, the row with `notes = 'customer_pick'` (`original_date`,
+`original_window`'s start as `HH:MM`, and the Quick Move reason code in
+`reason_code`, the column a Quick Move to a set time writes it to). A hand-off
+written before 2026-11-02 has `reason_code = 'customer_pick'` and the reason in
+`notes`; the read accepts both shapes. A reason that is not a Quick Move reason
+code reads as `null`. No such row, or a failed read: those three are `null`.
+The "moved for weather" banner (`weatherMove`) is never built from a hand-off
+row. For a waiting visit
 `buildAvailabilityForService` asks for up to 6 curated `availability.slots`
 (one per date, `curateSlots`' opt-in count) on the GET, `find-slots` and the
 `SLOT_TAKEN` refresh; every other visit and every other caller keeps 4, and

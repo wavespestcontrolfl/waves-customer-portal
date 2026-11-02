@@ -57,9 +57,10 @@ describeWithDatabase('reschedule page customer pick on PostgreSQL', () => {
     });
     const logRow = (fields) => ({ id: randomUUID(), scheduled_service_id: visitId, customer_id: customerId, initiated_by: 'tech', ...fields });
     await trx('reschedule_log').insert([
-      // An older hand-off of the same visit: superseded by the newer one.
+      // An older hand-off of the same visit, in the first row shape (reason in notes): superseded by the newer one.
       logRow({ reason_code: 'customer_pick', original_date: '2099-10-20', original_window: '13:00:00-15:00:00', notes: 'running_late', created_at: new Date('2099-10-19T15:00:00Z') }),
-      logRow({ reason_code: 'customer_pick', original_date: '2099-11-03', original_window: '09:00:00-11:00:00', notes: 'weather_rain', created_at: new Date('2099-11-03T15:00:00Z') }),
+      // The newest hand-off, as a Quick Move logs it: reason_code = why it moved, notes marks the hand-off.
+      logRow({ reason_code: 'weather_rain', original_date: '2099-11-03', original_window: '09:00:00-11:00:00', notes: 'customer_pick', created_at: new Date('2099-11-03T15:00:00Z') }),
       // A newer row with another reason is not the hand-off row.
       logRow({ reason_code: 'weather_rain', original_date: '2099-11-04', original_window: '10:00:00-12:00:00', created_at: new Date('2099-11-04T09:00:00Z') }),
     ]);

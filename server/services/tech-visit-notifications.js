@@ -46,6 +46,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { isAssignable } = require('./technician-eligibility');
 const { parseETDateTime, TZ, etParts, etDateString } = require('../utils/datetime-et');
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
+const { awaitingCustomerPick } = require('./scheduling/self-serve-notice');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
 // Auto-dispatch moves many visits in one nightly run. With this gate on, its
@@ -139,6 +140,16 @@ function clockLabel(hhmm) {
   return { text: `${hour12}${minutes}`, meridiem: h < 12 ? 'AM' : 'PM' };
 }
 
+// Quick Move "let the customer pick a day": a visit handed to the customer has a
+// placeholder date and no time until they pick, so its card says that instead
+// ("the customer picks a day by Wed 8 PM"), never the parking date.
+const PICK_WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function visitWhen(visit) {
+  if (!awaitingCustomerPick(visit)) return formatWhen(visit.scheduled_date, visit.window_start, visit.window_end);
+  const { dayOfWeek, hour } = etParts(new Date(visit.customer_pick_by));
+  return `the customer picks a day by ${PICK_WEEKDAY[dayOfWeek]} ${hour % 12 || 12} ${hour >= 12 ? 'PM' : 'AM'}`;
+}
+
 /** "Thu Sep 10, 9–11 AM" / "Thu Sep 10, 11 AM–1 PM" / "Thu Sep 10". */
 function formatWhen(date, windowStart, windowEnd) {
   const day = dateOnly(date);
@@ -230,7 +241,7 @@ function placeLabel(visit) {
  */
 function composeCard({ kind, visit, actorText, previous, newTechnicianName, ended = null }) {
   const who = customerLabel(visit);
-  const when = formatWhen(visit.scheduled_date, visit.window_start, visit.window_end);
+  const when = visitWhen(visit);
   const where = placeLabel(visit);
   const service = visit.service_type || 'Service';
   const lines = [];
@@ -301,7 +312,7 @@ async function loadVisit(visitId, conn, { lock = false } = {}) {
   if (lock) q = q.forShare('s');
   return q.first(
     's.id', 's.service_type', 's.scheduled_date', 's.window_start', 's.window_end', 's.technician_id', 's.status',
-    's.source_action', 's.service_address_line1', 's.service_address_city',
+    's.source_action', 's.service_address_line1', 's.service_address_city', 's.customer_pick_by',
     'c.first_name as cust_first_name', 'c.last_name as cust_last_name',
     'c.address_line1 as cust_address', 'c.city as cust_city',
     conn.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),

@@ -34,6 +34,7 @@ jest.mock('../services/appointment-reminders', () => ({
   smsServiceLabelStored: jest.requireActual('../services/appointment-reminders').smsServiceLabelStored,
 }));
 jest.mock('../services/not-closed-out', () => ({ resolveForService: jest.fn().mockResolvedValue({ resolved: 0 }) }));
+jest.mock('../services/workflows/missed-appointment', () => ({ evaluateThreshold: jest.fn().mockResolvedValue({ action: 'reschedule_system' }) }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitRescheduled: jest.fn().mockResolvedValue(null) }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
@@ -402,9 +403,9 @@ describe('handOffToCustomer writes and texts', () => {
       table: 'reschedule_log',
       row: {
         scheduled_service_id: 'svc-1', customer_id: 'cust-1', original_date: TODAY, new_date: DUE,
-        reason_code: 'customer_pick', initiated_by: 'tech',
-        // The pick page reads the bare Quick Move reason from notes.
-        notes: 'weather_rain',
+        // The row a Quick Move logs (reason_code = why it moved), marked as the hand-off.
+        reason_code: 'weather_rain', initiated_by: 'tech',
+        notes: 'customer_pick',
         original_window: '09:00:00-10:00:00', new_window: null,
         occurrence_service_type: 'Quarterly Pest Control Service', occurrence_service_id: 'catalog-1', occurrence_property_id: 'prop-1',
       },
@@ -450,6 +451,26 @@ describe('handOffToCustomer writes and texts', () => {
       movedCount: 1, coveredCount: 0, failedCount: 0, overlapCount: 0, overlapWarnings: [],
       results: [{ id: 'svc-1', ok: true, newDate: DUE, newWindow: null, smsSent: true, smsReason: null }],
     });
+  });
+
+  test('a "customer not home" hand-off is a missed visit: it logs customer_noshow and weighs the 2-in-90 outreach', async () => {
+    const MissedAppointment = require('../services/workflows/missed-appointment');
+    process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+    try {
+      const result = await handOff({ reasonCode: 'customer_noshow' });
+      expect(result.ok).toBe(true);
+      const logRow = state.writes.find((w) => w.op === 'insert' && w.table === 'reschedule_log').row;
+      expect(logRow).toMatchObject({ reason_code: 'customer_noshow', notes: 'customer_pick', new_date: DUE });
+      expect(MissedAppointment.evaluateThreshold).toHaveBeenCalledWith('cust-1', 'quick_move_no_show');
+    } finally {
+      delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
+    }
+  });
+
+  test('a weather hand-off runs no missed-visit check', async () => {
+    const MissedAppointment = require('../services/workflows/missed-appointment');
+    expect((await handOff()).ok).toBe(true);
+    expect(MissedAppointment.evaluateThreshold).not.toHaveBeenCalled();
   });
 
   test('a live (en route) visit lands on confirmed with its tracker rewound, a status history row, and the technician released', async () => {

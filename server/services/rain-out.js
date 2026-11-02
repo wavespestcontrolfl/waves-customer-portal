@@ -2999,7 +2999,8 @@ const PICK_BY_HOUR = 20;
 const PICK_STATUSES = new Set(['pending', 'confirmed', 'en_route']);
 // The one sentence the text drops when it is what bills a third segment.
 const PICK_OPTIONAL_TAIL = ' Questions? Reply here.';
-const PICK_LOG_REASON = 'customer_pick';
+// The hand-off's reschedule_log marker (in notes; reason_code is why the visit moved).
+const PICK_LOG_MARKER = 'customer_pick';
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 function customerPickLive() {
@@ -3237,11 +3238,13 @@ function handOffLogRow(locked, dueDate, initiatedBy, reasonCode) {
     customer_id: locked.customer_id,
     original_date: locked.scheduled_date,
     new_date: dueDate,
-    reason_code: PICK_LOG_REASON,
+    // The row a Quick Move to a set time writes: reason_code is why the visit
+    // moved, so every reader of that code sees the hand-off too ("customer not
+    // home" counts toward the 2-in-90 missed-visit outreach like a no-show Quick
+    // Move). notes marks it as the hand-off for the pick page and its reports.
+    reason_code: reasonCode,
     initiated_by: initiatedBy,
-    // The bare Quick Move reason (e.g. weather_rain): the customer's pick page
-    // reads it from here to word its "Moved for weather" / schedule heading.
-    notes: reasonCode,
+    notes: PICK_LOG_MARKER,
     original_window: locked.window_start ? `${locked.window_start}-${locked.window_end}` : null,
     new_window: null,
     occurrence_service_type: locked.service_type || null,
@@ -3293,7 +3296,7 @@ async function writeHandOff({ service, dueDate, pickBy, initiatedBy, reasonCode,
 // technician still pinned to a rewound visit and refresh its open tracker, and
 // tell the assigned technician the visit left the route (skipped for their own
 // hand-off). Best-effort: the hand-off already committed.
-async function afterHandOffCommit({ written, dueDate, actorUserId, initiatedBy }) {
+async function afterHandOffCommit({ written, dueDate, actorUserId, initiatedBy, reasonCode }) {
   const { locked, status, rewound } = written;
   try {
     if (rewound) {
@@ -3313,6 +3316,15 @@ async function afterHandOffCommit({ written, dueDate, actorUserId, initiatedBy }
     }
   } catch (err) {
     logger.warn(`[rain-out] customer-pick follow-up effects failed for ${locked.id} (hand-off committed): ${err.message}`);
+  }
+  // A "customer not home" hand-off is a missed visit, as a no-show Quick Move is
+  // (commit() runs the same check): its row counts, so weigh the 2-in-90 outreach.
+  if (reasonCode === 'customer_noshow') {
+    try {
+      await require('./workflows/missed-appointment').evaluateThreshold(locked.customer_id, 'quick_move_no_show');
+    } catch (err) {
+      logger.warn(`[rain-out] no-show outreach evaluation failed for ${locked.id} (hand-off committed): ${err.message}`);
+    }
   }
 }
 
@@ -3438,7 +3450,7 @@ async function handOffToCustomer({ serviceId, reasonCode, initiatedBy = 'tech', 
   if (!prepared.ok) return prepared;
   const written = await writeHandOff({ service, dueDate, pickBy, initiatedBy, reasonCode, requireAssignedTechnicianId, now });
   if (!written.ok) return written;
-  await afterHandOffCommit({ written, dueDate, actorUserId, initiatedBy });
+  await afterHandOffCommit({ written, dueDate, actorUserId, initiatedBy, reasonCode });
   let text;
   try {
     text = await sendPickText({
