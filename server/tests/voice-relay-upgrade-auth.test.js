@@ -512,15 +512,22 @@ describe('ws upgrade — collections-source resolution', () => {
     expect(req.authenticatedCollectionsCall).toBe(false);
   });
 
-  test('a tech_voice row stamps authenticatedTechVoiceCall and caps the session at the 3 reserved minutes', async () => {
+  test('a tech_voice row stamps authenticatedTechVoiceCall and ends the session 150 s after admission, inside the 3 reserved minutes', async () => {
     mockCallLogRow = { source: 'tech_voice', created_at: new Date() };
-    const token = mintCallToken(CALL_SID, { secret: SECRET });
+    let token = mintCallToken(CALL_SID, { secret: SECRET });
     await upgrade(httpServer, `/ws/voice-agent?callSid=${CALL_SID}&t=${token}`);
     const [req] = handleUpgrade.mock.calls[0];
     expect(req.authenticatedTechVoiceCall).toBe(true);
     expect(req.authenticatedSandboxCall).toBe(false);
     expect(req.authenticatedCollectionsCall).toBe(false);
-    expect(req.authenticatedSessionBudgetMs).toBeLessThanOrEqual(3 * 60 * 1000);
+    expect(req.authenticatedSessionBudgetMs).toBeLessThanOrEqual(150 * 1000);
+    expect(req.authenticatedSessionBudgetMs).toBeGreaterThan(140 * 1000);
+    // Measured from admission, not from the socket: a socket that opens 100 s
+    // after admission gets what is left.
+    mockCallLogRow = { source: 'tech_voice', created_at: new Date(Date.now() - 100 * 1000) };
+    token = mintCallToken('CA-upgrade-2', { secret: SECRET });
+    await upgrade(httpServer, `/ws/voice-agent?callSid=CA-upgrade-2&t=${token}`);
+    expect(handleUpgrade.mock.calls[1][0].authenticatedSessionBudgetMs).toBeLessThanOrEqual(50 * 1000);
   });
 
   test('an unreadable source REJECTS the upgrade (fail closed, same envelope as the burn)', async () => {

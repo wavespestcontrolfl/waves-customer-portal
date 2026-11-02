@@ -2256,7 +2256,8 @@ const TECH_VOICE_TIME_LIMIT_S = 180;
 const TECH_VOICE_GREETING = 'Waves Tech. Enter your PIN, then press pound.';
 
 // Twilio's own stop: the call ends at its 3 reserved minutes even if the
-// relay session never closes. Fail-soft: the relay's own 3-minute session cap
+// relay session never closes. Fail-soft: the relay's own cap, 150 seconds
+// from admission (relay-server.js), still ends it inside the reservation.
 // (relay-server.js) still ends it.
 function capTechVoiceCall(callSid) {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return;
@@ -2312,7 +2313,7 @@ router.post('/tech-voice', async (req, res) => {
 
 // POST /api/webhooks/twilio/tech-voice-complete — the <Connect action> of a
 // tech voice line call: the relay session ended (the technician said goodbye,
-// a PIN step closed it, the 3-minute cap, or the socket dropped). Nothing
+// a PIN step closed it, the time cap, or the socket dropped). Nothing
 // follows it: the call hangs up.
 router.post('/tech-voice-complete', (req, res) => {
   const twiml = new VoiceResponse();

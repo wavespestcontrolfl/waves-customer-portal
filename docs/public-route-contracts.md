@@ -7324,7 +7324,8 @@ reserves nothing. An admitted call gets `<Connect action="/api/webhooks/
 twilio/tech-voice-complete"><ConversationRelay>` with `dtmfDetection="true"`
 and a per-call minted token (the same `/ws/voice-agent` door), and the
 handler sets a Twilio `TimeLimit` of 180 s on the call (fail-soft; the
-socket for a `tech_voice` row is also capped at 3 minutes). No `<Dial>`,
+relay also ends a `tech_voice` session 150 s after admission, so the call
+stays inside its 3 reserved minutes either way). No `<Dial>`,
 `<Record>` or `<Gather>`; the relay not attached ⇒ a spoken notice and
 `<Hangup/>`. On the socket, `relay-server.js` routes a `tech_voice` row
 (proven at the upgrade, never a frame label) to

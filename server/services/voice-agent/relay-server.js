@@ -50,10 +50,18 @@ const WS_MAX_SESSION_MS = 15 * 60 * 1000; // hard cap on a single call
 // The least a RESUMED socket gets of the call's remaining budget — enough for
 // the resumed greeting and one exchange, never a zero timer.
 const WS_RESUMED_MIN_SESSION_MS = 30 * 1000;
-// A call to the staff-only tech voice line gets 3 minutes: its whole minute
-// reservation (services/tech-voice-usage.js RESERVE_MINUTES) and the TimeLimit
-// /tech-voice sets on the call.
-const TECH_VOICE_SESSION_MS = 3 * 60 * 1000;
+// A call to the staff-only tech voice line ends 150 seconds after its
+// admission (the call_log row's created_at, written in the admission
+// transaction): its 3 reserved minutes (services/tech-voice-usage.js) less a
+// 30-second margin for the teardown, /tech-voice-complete and the hangup. So
+// even when the TimeLimit /tech-voice sets on the call did not take, the call
+// never bills a fourth minute.
+const TECH_VOICE_SESSION_MS = 150 * 1000;
+function techVoiceSessionBudgetMs(row, now = Date.now()) {
+  const admittedAt = row && row.created_at ? new Date(row.created_at).getTime() : NaN;
+  const elapsed = Number.isFinite(admittedAt) ? Math.max(0, now - admittedAt) : 0;
+  return Math.max(1000, TECH_VOICE_SESSION_MS - elapsed);
+}
 
 /**
  * A reconnected call's socket budget: the hard cap minus what the call has
@@ -241,7 +249,7 @@ function attachVoiceRelay(httpServer) {
         // written at admission, before Twilio answered): the tech session,
         // never a customer one, whatever the setup frame says.
         techVoiceCall = Boolean(row && row.source === TECH_VOICE_SOURCE);
-        if (techVoiceCall) sessionBudgetMs = Math.min(sessionBudgetMs, TECH_VOICE_SESSION_MS);
+        if (techVoiceCall) sessionBudgetMs = Math.min(sessionBudgetMs, techVoiceSessionBudgetMs(row));
       } catch (e) {
         logger.warn(`[voice-relay] rejected ws upgrade: source resolution failed callSid=${callSid}: ${e.message}`);
         try { socket.destroy(); } catch { /* socket already gone */ }
