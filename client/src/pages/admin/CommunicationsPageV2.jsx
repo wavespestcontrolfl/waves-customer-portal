@@ -676,7 +676,11 @@ function spamTagState(thread, { spamTagOn, canAct }) {
   const spamTagged = spamTagOn && Array.isArray(thread.messages)
     && thread.messages.some((m) => m.senderSpamTagged === true
       || (m.direction === "inbound" && m.spamEnforced === true));
-  return { spamTagged, canNotSpam: spamTagged && canAct && !thread.customerId && !thread.customerName };
+  // Not spam is offered even once the number belongs to a customer (Codex P2 on
+  // #7457): the webhook stops silencing a customer's new texts, but texts
+  // silenced before the link stay silenced until someone undoes them. Only
+  // Mark spam is limited to threads with no customer.
+  return { spamTagged, canNotSpam: spamTagged && canAct };
 }
 
 function ConversationViewV2({

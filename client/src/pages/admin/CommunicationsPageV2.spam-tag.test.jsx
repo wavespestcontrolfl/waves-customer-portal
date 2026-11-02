@@ -138,3 +138,20 @@ it("a photo-only thread can be tagged and then undone", async () => {
   await vi.waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.path.endsWith(`/spam-senders/${encodeURIComponent(spammer)}`))).toBe(true));
   expect(calls.some((c) => c.path.endsWith("/blocked-numbers") && c.method === "POST")).toBe(false);
 });
+
+// Codex P2 on #7457: a tagged sender who later became a customer keeps the
+// texts silenced before the link; the thread must still offer Not spam (and
+// never Mark spam, which the server refuses for a customer).
+it("a customer-linked thread with silenced texts still offers Not spam", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  const calls = stubServer({
+    gateOn: true,
+    messages: [pitch({ spamEnforced: true, isRead: true, customerId: "cust-synthetic-1", customerName: "Synthetic Customer" })],
+  });
+  vi.stubGlobal("confirm", vi.fn(() => true));
+  render(<SmsTab active />, { wrapper: MemoryRouter });
+  fireEvent.click((await screen.findAllByText("Unsolicited pitch"))[0]);
+  expect(screen.queryByRole("button", { name: /Mark spam/ })).not.toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: /Not spam/ }));
+  await vi.waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.path.includes("/spam-senders/"))).toBe(true));
+});
