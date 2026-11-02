@@ -172,7 +172,14 @@ async function deterministicVisitFacts(svc, dbh = db) {
       logger.warn(`[previsit-brief] visit-facts customerFlagged unreadable for service ${svc.id}: ${err.message}`);
     }
   }
-  return { access, last_visit: lastVisit, ...(customerFlagged ? { customerFlagged } : {}) };
+  // history_unavailable: the service-history read failed, so a null last_visit
+  // means "unknown", never "no earlier visit" (readers must not claim one).
+  return {
+    access,
+    last_visit: lastVisit,
+    ...(history.available ? {} : { history_unavailable: true }),
+    ...(customerFlagged ? { customerFlagged } : {}),
+  };
 }
 
 // Order-independent stringify (visit-summary-narrative precedent) so the
