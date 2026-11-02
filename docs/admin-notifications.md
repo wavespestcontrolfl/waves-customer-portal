@@ -311,7 +311,9 @@ that back to terminal, open a terminal session, to have Claude fix that"; scope 
 `GATE_ALERT_SEND_TO_CLAUDE`, with `GATE_ALERT_EXPLAINER`). The bell's "What to do" panel carries a **Send to Claude**
 button only on an alert whose words our own code wrote (owner 2026-11-02, "A": a Claude terminal tab can change code, and
 a customer's words had reached alerts with no contact mark, such as a service request typed in the portal). Offered on:
-a system alert (`system`, `ops_digest`, `inventory`, `llm_cost`, `agents`, `token_alert`) that names no customer record;
+a system alert (`system`, `inventory`, `llm_cost`, `agents`, `token_alert`) or a Mac ops check digest (`ops_digest` with
+`source` `ops-crons`; the portal's own owner digests can quote customers, such as the unworked-comms digest) that names
+no customer record;
 an alert the code marks Claude's (`who = 'claude'`, severity `broken`, or a registry rule that says who `claude`); and the
 reviewed checks on a customer's records in `CHECK_CLASSES` (`admin-alert-send-to-claude.js`, by dedupe-key class: a visit
 auto-dispatch cannot place, a recurring visit with no slot or window or map location, an accepted plan whose visits do not

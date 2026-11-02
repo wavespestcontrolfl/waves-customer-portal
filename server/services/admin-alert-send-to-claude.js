@@ -47,8 +47,12 @@ function declaredContact(meta) {
   } catch { return false; }
 }
 
-// System alerts: their words come from our code and the Mac ops checks. Offered only when no customer record is named.
-const SYSTEM_CATEGORIES = new Set(['system', 'ops_digest', 'inventory', 'llm_cost', 'agents', 'token_alert']);
+// System alerts: their words come from our code. Offered only when no customer record is named.
+const SYSTEM_CATEGORIES = new Set(['system', 'inventory', 'llm_cost', 'agents', 'token_alert']);
+// A digest is offered only from the Mac ops checks (metadata.source 'ops-crons', owner 2026-11-02 "A": "Mac ops checks").
+// The portal's own owner digests are to-do lists that can quote customers (the unworked-comms digest copies each unanswered
+// text into its detail: Codex security review on #7498), so they stay with the owner.
+const MAC_CHECKS_SOURCE = 'ops-crons';
 // Checks on a customer's records, by dedupe-key class. Each emitter was read on 2026-11-02: its headline, why and detail
 // come from record fields (the customer's name, dates, services, prices, products), never from a note, a message or a
 // request the customer wrote. A new class joins only after the same read. The AI schedule proofreader is left out: a model
@@ -90,10 +94,12 @@ const registryRule = (meta) => {
   try { return require('./notification-triggers').TRIGGER_REGISTRY?.[meta.triggerKey]?.rule || null; } catch { return null; }
 };
 
-// The allow-list (see the header): the code marks it Claude's, or it is a system alert with no customer, or a reviewed check.
+// The allow-list (see the header): the code marks it Claude's, or it is a system alert or a Mac ops check digest with no
+// customer, or a reviewed check.
 function writtenByOurCode(row, meta) {
   if (meta.who === 'claude' || meta.severity === 'broken' || registryRule(meta)?.who === 'claude') return true;
-  if (SYSTEM_CATEGORIES.has(row.category) && !namesCustomer(meta)) return true;
+  const systemRow = SYSTEM_CATEGORIES.has(row.category) || (row.category === 'ops_digest' && meta.source === MAC_CHECKS_SOURCE);
+  if (systemRow && !namesCustomer(meta)) return true;
   const key = String(meta.dedupeKey || '');
   return CHECK_CLASSES.some((prefix) => key.startsWith(prefix));
 }

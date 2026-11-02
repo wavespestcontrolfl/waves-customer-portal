@@ -102,9 +102,14 @@ describe('the allow-list: only alerts our own code writes (owner 2026-11-02, "A"
   });
 
   test('a system alert is offered with no customer record, and not with one', () => {
-    for (const category of ['system', 'ops_digest', 'inventory', 'llm_cost', 'agents', 'token_alert']) {
+    for (const category of ['system', 'inventory', 'llm_cost', 'agents', 'token_alert']) {
       expect([category, sendRefusal(row({ category, metadata: {} }))]).toEqual([category, null]);
     }
+    // A Mac ops check digest is offered; the portal's own owner digests are not (the unworked-comms digest quotes
+    // customers' unanswered texts: Codex security review).
+    expect(sendRefusal(row({ category: 'ops_digest', metadata: { source: 'ops-crons', kind: 'FIX', opsKey: 'e22-schedule-integrity:overlaps' } }))).toBeNull();
+    expect(sendRefusal(row({ category: 'ops_digest', metadata: { kind: 'ACT', opsKey: 'unworked-comms', audience: 'owner' } }))).toBe('not_system_written');
+    expect(sendRefusal(row({ category: 'ops_digest', metadata: { source: 'ops-crons', customerId: CUSTOMER_ID } }))).toBe('not_system_written');
     expect(sendRefusal(row({ category: 'system', metadata: { customerId: CUSTOMER_ID } }))).toBe('not_system_written');
     expect(sendRefusal(row({ category: 'system', metadata: { payload: { customer_id: CUSTOMER_ID } } }))).toBe('not_system_written');
     expect(sendRefusal(row({ category: 'system', metadata: { subject: { type: 'customer', id: CUSTOMER_ID } } }))).toBe('not_system_written');
