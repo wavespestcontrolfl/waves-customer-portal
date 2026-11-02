@@ -245,7 +245,11 @@ export default function PortalInboxTabV2({ onCount }) {
   const openCount = data ? data.total : null;
   useEffect(() => { if (openCount !== null) onCount?.(openCount); }, [openCount, onCount]);
   useEffect(() => {
-    if (data && data.items.length === 0 && data.total > 0 && handledSinceLoad.current > 0) load();
+    if (!data || handledSinceLoad.current === 0) return;
+    const recentOut = data.items.length === 0 && data.total > 0;
+    // The older list is capped too: once its listed rows are all handled, load the next ones.
+    const olderOut = data.olderItems.length === 0 && data.older.chats + data.older.requests > 0;
+    if (recentOut || olderOut) load();
   }, [data, load]);
 
   const rowKey = (item) => `${item.kind}:${item.id}`;

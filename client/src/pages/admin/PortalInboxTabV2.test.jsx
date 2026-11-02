@@ -290,6 +290,23 @@ describe("Portal inbox tab", () => {
     expect(screen.queryByText(/Older than 14 days/)).not.toBeInTheDocument();
   });
 
+  it("loads the next older rows once the listed ones are all handled (the older list is capped)", async () => {
+    let lists = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url !== "/admin/portal-inbox") return updated(url);
+      lists += 1;
+      // First load: 1 of 2 older requests listed. Second load: the next one.
+      return lists === 1
+        ? listing({ olderItems: [olderRequest], older: { chats: 0, requests: 2 } })
+        : listing({ olderItems: [{ ...olderRequest, id: "req-next", subject: "Next one" }], older: { chats: 0, requests: 1 } });
+    });
+    mount();
+    const row = within(await screen.findByTestId("portal-older-list")).getByText("Rey Archive").closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    expect(await screen.findByText("Next one")).toBeInTheDocument();
+    expect(lists).toBe(2);
+  });
+
   it("keeps an older row when its resolve lost a race", async () => {
     adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox"
       ? listing()
