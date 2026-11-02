@@ -137,19 +137,33 @@ async function hasInboundSmsSince(est, cutoff) {
 // COALESCEd so a NULL label_ids row is not dropped by three-valued logic),
 // and never a match on one of OUR addresses: the from_address arm is skipped
 // when the estimate's own email is internal (self-addressed mail, digests).
+// A From header is attacker-typed text, and the sync links customer_id from
+// it, so a row counts only when Gmail's Authentication-Results show DKIM or
+// SPF aligned with the sender's domain (hasAlignedAuth, the check
+// email-reply-context.js runs on the same "is this a real customer reply"
+// question). Without it, anyone who knows a lead's address could pause that
+// lead's follow-ups (Codex security review, #7407). The newest rows are read
+// first; a spoofed flood can only push a real reply past the cap, which sends
+// the follow-up exactly as before this gate.
+const EMAIL_REPLY_SCAN_LIMIT = 25;
 async function hasInboundEmailSince(est, cutoff) {
   const addr = String(est.customer_email || "").trim().toLowerCase();
   const byAddress = !!addr && !isInternalEmailRecipient(addr);
   if (!est.customer_id && !byAddress) return false;
-  const q = db("emails")
+  const rows = await db("emails")
     .where("emails.received_at", ">=", cutoff)
     .whereRaw(`NOT COALESCE((${personSentFilter("emails")}), false)`)
-    .first("emails.id");
-  q.andWhere(function () {
-    if (est.customer_id) this.orWhere("emails.customer_id", est.customer_id);
-    if (byAddress) this.orWhereRaw("LOWER(emails.from_address) = ?", [addr]);
-  });
-  return !!(await q);
+    .andWhere(function () {
+      if (est.customer_id) this.orWhere("emails.customer_id", est.customer_id);
+      if (byAddress) this.orWhereRaw("LOWER(emails.from_address) = ?", [addr]);
+    })
+    .orderBy("emails.received_at", "desc")
+    .limit(EMAIL_REPLY_SCAN_LIMIT)
+    .select("emails.from_address", "emails.authentication_results");
+  // Lazy: inbox-hygiene loads the Gmail client, and only the gate-on path needs it.
+  const { hasAlignedAuth } = require("./email/inbox-hygiene");
+  const { domainFromAddress } = require("./email/spam-blocker");
+  return (rows || []).some((row) => hasAlignedAuth(row.authentication_results, domainFromAddress(row.from_address)));
 }
 
 // Reply-pause: if the customer has SMS'd Waves in the last N days (via

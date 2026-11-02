@@ -12,6 +12,9 @@ jest.mock('../models/db', () => {
     const chain = (name, store) => jest.fn((...args) => { rec[store].push([name, ...args]); return q; });
     q.join = jest.fn(() => q);
     q.first = jest.fn(() => q);
+    q.orderBy = jest.fn((...a) => { rec.orderBy = a; return q; });
+    q.limit = jest.fn((n) => { rec.limit = n; return q; });
+    q.select = jest.fn((...a) => { rec.select = a; return q; });
     q.where = jest.fn((...args) => {
       if (typeof args[0] === 'function') { args[0].call({ whereNull: () => ({ orWhere: () => ({}) }) }, { whereNull() { return this; }, orWhere() { return this; } }); return q; }
       rec.wheres.push(args); return q;
@@ -57,6 +60,8 @@ jest.mock('../services/email-template-library', () => ({
   redactEmailAddresses: jest.fn((s) => s),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The real aligned-auth reader decides; only its module's Gmail client is stubbed.
+jest.mock('../services/email/gmail-client', () => ({}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -73,11 +78,17 @@ const LEAD_EST = { id: 'est-2', customer_id: null, customer_phone: null, custome
 
 const emailCalls = () => db._calls.filter((c) => c.table === 'emails');
 
+// Gmail Authentication-Results values as the sync stores them.
+const ALIGNED = (domain) => `mx.google.com; dkim=pass header.i=@${domain} header.s=s1 header.b=abc; spf=pass (google.com: domain designates 192.0.2.1 as permitted sender) smtp.mailfrom=reply@${domain}`;
+const SPOOFED = 'mx.google.com; dkim=pass header.i=@attacker.example header.s=s1; spf=fail (google.com: domain does not designate) smtp.mailfrom=bounce@attacker.example';
+const CUSTOMER_REPLY = { from_address: 'pat@example.com', authentication_results: ALIGNED('example.com') };
+const LEAD_REPLY = { from_address: 'lead@example.com', authentication_results: ALIGNED('example.com') };
+
 function setGate(on) {
   featureGates.estimateFollowupEmailReplyPauseLive.mockReturnValue(on);
 }
 
-// rows: { messages: row|null, emails: row|null|Error }
+// rows: { messages: row|null, emails: rows[]|Error }
 function setRows(rows) {
   db._rows = (table) => {
     const v = rows[table];
@@ -108,12 +119,16 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
     expect(emailCalls()).toHaveLength(0);
   });
 
-  test('gate on + inbound email linked by customer_id inside the window = true', async () => {
+  test('gate on + authenticated inbound email linked by customer_id inside the window = true', async () => {
     setGate(true);
-    setRows({ emails: { id: 'e1' } });
+    setRows({ emails: [CUSTOMER_REPLY] });
     const before = Date.now();
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(true);
     const [c] = emailCalls();
+    // newest rows first, bounded, reading the sender + its Authentication-Results
+    expect(c.orderBy).toEqual(['emails.received_at', 'desc']);
+    expect(c.limit).toBe(25);
+    expect(c.select).toEqual(['emails.from_address', 'emails.authentication_results']);
     expect(c.wheres[0][0]).toBe('emails.received_at');
     expect(c.wheres[0][1]).toBe('>=');
     // 14-day window, same as the text arm
@@ -124,9 +139,28 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
     expect(c.groupRaws).toContainEqual(['orWhereRaw', 'LOWER(emails.from_address) = ?', ['pat@example.com']]);
   });
 
+  test('a spoofed From never counts: the sender did not authenticate as its domain', async () => {
+    setGate(true);
+    setRows({ emails: [{ from_address: 'lead@example.com', authentication_results: SPOOFED }] });
+    expect(await hasRepliedRecently(LEAD_EST)).toBe(false);
+    expect(emailCalls()).toHaveLength(1);
+  });
+
+  test('a row with no Authentication-Results never counts', async () => {
+    setGate(true);
+    setRows({ emails: [{ from_address: 'pat@example.com', authentication_results: null }] });
+    expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
+  });
+
+  test('one authenticated reply among spoofed rows counts', async () => {
+    setGate(true);
+    setRows({ emails: [{ from_address: 'lead@example.com', authentication_results: SPOOFED }, LEAD_REPLY] });
+    expect(await hasRepliedRecently(LEAD_EST)).toBe(true);
+  });
+
   test('a lead (no customer_id) matches by from_address only', async () => {
     setGate(true);
-    setRows({ emails: { id: 'e2' } });
+    setRows({ emails: [LEAD_REPLY] });
     expect(await hasRepliedRecently(LEAD_EST)).toBe(true);
     const [c] = emailCalls();
     expect(c.groupWheres).toHaveLength(0);
@@ -135,14 +169,14 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
 
   test('no email in the window = false', async () => {
     setGate(true);
-    setRows({ emails: null });
+    setRows({ emails: [] });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
     expect(emailCalls()).toHaveLength(1);
   });
 
   test('a Gmail SENT row never counts: the query excludes personSentFilter rows (NULL labels kept)', async () => {
     setGate(true);
-    setRows({ emails: null });
+    setRows({ emails: [] });
     await hasRepliedRecently(CUSTOMER_EST);
     const [c] = emailCalls();
     expect(c.raws).toHaveLength(1);
@@ -153,7 +187,7 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
 
   test('one of our own addresses never matches by from_address', async () => {
     setGate(true);
-    setRows({ emails: { id: 'e3' } });
+    setRows({ emails: [CUSTOMER_REPLY] });
     // Lead with an internal address: no usable arm, no query, false.
     expect(await hasRepliedRecently({ ...LEAD_EST, customer_email: 'contact@wavespestcontrol.com' })).toBe(false);
     expect(emailCalls()).toHaveLength(0);
@@ -166,14 +200,14 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
 
   test('a lead with no usable email and no phone is false without any email query', async () => {
     setGate(true);
-    setRows({ emails: { id: 'e4' } });
+    setRows({ emails: [CUSTOMER_REPLY] });
     expect(await hasRepliedRecently({ id: 'x', customer_id: null, customer_phone: null, customer_email: '  ' })).toBe(false);
     expect(emailCalls()).toHaveLength(0);
   });
 
   test('the SMS arm is checked first: a text short-circuits the email query', async () => {
     setGate(true);
-    setRows({ messages: { id: 'm1' }, emails: { id: 'e1' } });
+    setRows({ messages: { id: 'm1' }, emails: [CUSTOMER_REPLY] });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(true);
     expect(emailCalls()).toHaveLength(0);
   });
