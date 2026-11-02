@@ -94,6 +94,10 @@ describe('requireAdmin on spend/state-mutating endpoints', () => {
     ['post', '/api/admin/ads/call-bridge/apply'],
     ['post', '/api/admin/ads/advisor/generate'],
     ['post', '/api/admin/ads/advisor/apply'],
+    ['post', '/api/admin/ads/negatives/words'],
+    ['post', '/api/admin/ads/negatives/words/w-1/remove'],
+    ['post', '/api/admin/ads/negatives/n-1/decide'],
+    ['post', '/api/admin/ads/negatives/n-1/undo'],
     ['post', '/api/admin/ads/fixed-costs'],
     ['put', '/api/admin/ads/targets'],
   ];

@@ -8,6 +8,8 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The brief's search step (lazily required by the builder); the pure helpers below never reach it.
+jest.mock('../services/seo/serp-profiler', () => ({ profile: jest.fn() }));
 
 const {
   REQUIRED_SECTIONS,
@@ -1536,5 +1538,19 @@ describe('citability backfill consumer — brief composition', () => {
     expect(generic.required_sections).toContain('add 1+ new section reflecting current data');
     expect(generic.required_sections.some((l) => l.startsWith('citability ('))).toBe(false);
     expect(generic.gsc_signal.citability_gaps).toBeNull();
+  });
+});
+
+describe('_gatherSignals: the search step retries a transient DataForSEO error once (owner 2026-11-02, "retry")', () => {
+  test('profile() is asked for one transient retry, and its answer is the brief\'s search data', async () => {
+    const profiler = require('../services/seo/serp-profiler');
+    profiler.profile.mockResolvedValue({ dominant_intent: 'informational' });
+    const builder = new ContentBriefBuilder();
+    builder._matchCustomerCluster = jest.fn().mockResolvedValue(null);
+    const out = await builder._gatherSignals({ id: 'opp-1', query: 'palm fronds touching the roof and rats', bucket: 'operator_intercept' }, { skipSerp: false });
+    expect(profiler.profile).toHaveBeenCalledWith({
+      query: 'palm fronds touching the roof and rats', city: null, device: 'mobile', persist: false, transientRetries: 1,
+    });
+    expect(out.serp_profile).toEqual({ dominant_intent: 'informational' });
   });
 });

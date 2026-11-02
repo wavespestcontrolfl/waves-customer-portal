@@ -13,6 +13,12 @@
  *     customer skips — pending won-conversion, not unresponsive; a
  *     cancelled/rescheduled/skipped/no_show visit or the customer's
  *     historical pre-lead services do NOT exempt)
+ *   - NOT EXISTS an open Portal ask of the linked customer: an open portal
+ *     chat hand-off or customer service request (portal-inbox.js scopes), or
+ *     an inbound non-STOP text from the last 90 days with no person contact
+ *     after it (a person's text, a call a person placed or a human answered,
+ *     a person's Gmail send). Unlinked leads (customer_id NULL) pass. The
+ *     behavior matrix runs on live Postgres in lead-staleness-owed-reply-postgres.test.js.
  *   - deleted_at IS NULL, gated on the column existing (the leads
  *     soft-delete lane ships separately; either merge order must work)
  * Effects (activity rows, summary counts, env off switch) are covered with
@@ -49,6 +55,19 @@ const { DISPOSITIONS } = require('../services/estimate-disposition');
 
 const NOW = new Date('2026-07-01T12:00:00.000Z');
 const DAY_MS = 24 * 60 * 60 * 1000;
+// The owed-reply exemption's bindings, in clause order: the Portal chat and
+// request scopes, the inbound-text window (90 days before the clock), then the
+// person-contact witnesses (the sandbox call sources are excluded by the shared
+// helper), and the window again for the Gmail sends.
+const SINCE_90D = new Date(NOW.getTime() - 90 * DAY_MS);
+const OWED_REPLY_BINDINGS = [
+  'portal_chat', 'pending', 'resolved', 'closed', 'cancelled',
+  'inbound', SINCE_90D,
+  'outbound',
+  'voice_relay_sandbox', 'tech_voice', 'outbound', 'completed',
+  'voice_relay_sandbox', 'tech_voice', 'inbound', 'completed', 'human',
+  SINCE_90D,
+];
 
 function makeUpdateChain(result) {
   const chain = {};
@@ -87,6 +106,69 @@ function installDb({ flipped = [], estimateFlipped = [], hasDeletedAt = false } 
   mockDb.schema = { hasColumn: jest.fn(async () => hasDeletedAt) };
   return { leadsChain, estimateChain, activityInsert, trx };
 }
+
+// The owed-reply clause, from `ai_escalations` on. The pieces that other
+// modules own (the Portal scopes' NOT-done text, the staff-contact predicates,
+// the call-end expression, the reservation filter) come from those modules, so
+// this pin follows them and fails only when the sweep's own wiring changes.
+const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('../services/staff-contact');
+const { callEndedAtSql } = require('../services/sms-pending-conversations');
+const { personSentFilter } = require('../services/email/email-customer-link');
+const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
+const squash = (text) => text.replace(/\s+/g, ' ').trim();
+const RESERVATION_FILTER = (() => {
+  const knex = require('knex')({ client: 'pg' });
+  const { sql } = excludeUnresolvedSendReservations(knex('sms_log as os'), 'os').toSQL();
+  knex.destroy();
+  return squash(sql.slice(sql.indexOf('where ') + 'where '.length));
+})();
+const CHAT_NOT_DONE = squash(`NOT (
+  EXISTS (
+    SELECT 1 FROM notifications n
+    WHERE n.recipient_type = 'admin' AND n.metadata->>'escalationId' = e.id::text
+  ) AND NOT EXISTS (
+    SELECT 1 FROM notifications n
+    WHERE n.recipient_type = 'admin' AND n.metadata->>'escalationId' = e.id::text AND n.done_at IS NULL
+  )
+)`);
+const AFTER_INBOUND_CALL = () => `cl.created_at > inb.created_at - interval '1 day' and ${squash(callEndedAtSql('cl'))} > inb.created_at`;
+const OWED_REPLY_CLAUSE_TAIL = [
+  // 1. an open Portal chat hand-off (portal-inbox.js openChatScope)
+  'inner join "agent_sessions" as "s" on "s"."id" = "e"."conversation_id" '
+  + `where "s"."channel" = ? and "e"."status" = ? and ${CHAT_NOT_DONE} and e.customer_id = leads.customer_id) `,
+  // 2. an open customer service request (portal-inbox.js openRequestScope)
+  'and not exists (select 1 from "service_requests" as "r" '
+  + "where coalesce(r.status, 'new') not in (?, ?, ?) and coalesce(r.source, '') <> 'admin' and r.customer_id = leads.customer_id) ",
+  // 3. an inbound text, not a STOP, in the window...
+  'and not exists (select 1 from "sms_log" as "inb" '
+  + 'where inb.customer_id = leads.customer_id and "inb"."direction" = ? and "inb"."created_at" >= ? '
+  + "and inb.message_type IS DISTINCT FROM 'opt_out' "
+  + 'and not exists (select 1 from "inbound_sms_optout_receipts" as "oo" where oo.message_sid = inb.twilio_sid) ',
+  // ...with no person contact after it
+  'and not (exists (select 1 from "sms_log" as "os" '
+  + `where ${RESERVATION_FILTER} and "os"."direction" = ? and os.customer_id = leads.customer_id `
+  + `and ${squash(operatorReplySql('os'))} and ${squash(smsDeliveredSql('os'))} `
+  + 'and not exists (select 1 from "message_drafts" as "mdx" where "mdx"."sms_log_id" is null '
+  + "and (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10))) "
+  + "and mdx.sent_at BETWEEN os.created_at - interval '2 minutes' AND os.created_at + interval '2 minutes') "
+  + 'and os.created_at > inb.created_at) ',
+  // a call a person placed that reached the customer
+  'or exists (select 1 from "call_log" as "cl" '
+  + `where COALESCE("cl"."source", '') <> ? and COALESCE("cl"."source", '') <> ? and "cl"."direction" = ? and "cl"."status" = ? and cl.customer_id = leads.customer_id `
+  + `and ${squash(personCallBackSql('cl'))} and ${AFTER_INBOUND_CALL()}) `,
+  // a call in that a human answered
+  'or exists (select 1 from "call_log" as "cl" '
+  + `where COALESCE("cl"."source", '') <> ? and COALESCE("cl"."source", '') <> ? and "cl"."direction" = ? and "cl"."status" = ? and "cl"."answered_by" = ? and cl.customer_id = leads.customer_id `
+  + `and ${AFTER_INBOUND_CALL()}) `,
+  // a person's Gmail send naming the customer's address
+  'or exists (select 1 from "emails" as "er" '
+  + `where ${squash(personSentFilter('er'))} and "er"."received_at" >= ? and er.received_at > inb.created_at `
+  + "and strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), (SELECT LOWER(NULLIF(BTRIM(cu.email), '')) FROM customers cu WHERE cu.id = leads.customer_id)) > 0 "
+  // ...and the customer's address is one of the send's mailboxes (equality, not substring)
+  + "and (SELECT LOWER(NULLIF(BTRIM(cu.email), '')) FROM customers cu WHERE cu.id = leads.customer_id) IN "
+  + "(SELECT btrim(m[1]) FROM regexp_matches(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), '<\\s*([^<>\\s]+@[^<>\\s]+)\\s*>', 'g') AS m "
+  + "UNION SELECT btrim(m[1]) FROM regexp_matches(regexp_replace(regexp_replace(regexp_replace(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), '\"([^\"\\\\]|\\\\.)*\"', ' ', 'g'), '\\([^)]*\\)', ' ', 'g'), '<[^>]*>', ' ', 'g'), '([^\\s,;:<>\"()]+@[^\\s,;:<>\"()]+)', 'g') AS m))))",
+].join('');
 
 describe('lead staleness sweep', () => {
   beforeEach(() => {
@@ -178,11 +260,71 @@ describe('lead staleness sweep', () => {
         + 'and not exists (select 1 from "ad_service_attribution" '
         + 'where ad_service_attribution.lead_id = leads.id '
         + 'and "ad_service_attribution"."funnel_stage" in (?, ?)) '
-        + 'returning "id"'
+        // The customer's own unanswered ask (the clause is pinned in full below).
+        + 'and not exists (select 1 from "ai_escalations" as "e" '
+        + OWED_REPLY_CLAUSE_TAIL
+        + ' returning "id"'
       );
-      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed']);
+      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed', ...OWED_REPLY_BINDINGS]);
 
       return knex.destroy();
+    });
+
+    describe('owed-reply exemption: a customer ask still waiting on us', () => {
+      const cutoff = new Date(NOW.getTime() - 21 * DAY_MS);
+      const flips = {
+        'new-lead flip': (knex) => buildStaleLeadUpdate(knex, { now: NOW, cutoff }).toSQL(),
+        'expired-estimate flip': (knex) => buildExpiredEstimateLeadUpdate(knex, { now: NOW, cutoff }).toSQL(),
+      };
+
+      test.each(Object.keys(flips))('%s carries the whole clause', (name) => {
+        const knex = require('knex')({ client: 'pg' });
+        const { sql, bindings } = flips[name](knex);
+        const text = squash(sql);
+        expect(text).toContain(`and not exists (select 1 from "ai_escalations" as "e" ${OWED_REPLY_CLAUSE_TAIL}`);
+        for (const b of OWED_REPLY_BINDINGS) expect(bindings).toContainEqual(b);
+        return knex.destroy();
+      });
+
+      test('every arm is correlated on the lead\'s own customer_id, so an unlinked lead matches none', () => {
+        const knex = require('knex')({ client: 'pg' });
+        const text = squash(flips['new-lead flip'](knex).sql);
+        const clause = text.slice(text.indexOf('from "ai_escalations"'));
+        // chat, request, inbound text, then the person's text and the two calls; the
+        // email arm correlates through the customers lookup checked below
+        expect(clause.match(/customer_id = leads\.customer_id/g)).toHaveLength(6);
+        expect(clause).toContain('strpos(');
+        expect(clause).toContain('WHERE cu.id = leads.customer_id');
+        return knex.destroy();
+      });
+
+      test('a STOP is not an ask: the message type and an opt-out receipt both exclude it', () => {
+        const knex = require('knex')({ client: 'pg' });
+        const text = squash(flips['new-lead flip'](knex).sql);
+        expect(text).toContain("inb.message_type IS DISTINCT FROM 'opt_out'");
+        expect(text).toContain('from "inbound_sms_optout_receipts" as "oo" where oo.message_sid = inb.twilio_sid');
+        return knex.destroy();
+      });
+
+      test('the text window is 90 days before the clock; a closed bell and a staff-made request do not count', () => {
+        const knex = require('knex')({ client: 'pg' });
+        const { sql, bindings } = flips['new-lead flip'](knex);
+        expect(bindings).toContainEqual(SINCE_90D);
+        const text = squash(sql);
+        expect(text).toContain(`${CHAT_NOT_DONE} and e.customer_id = leads.customer_id`);
+        expect(text).toContain("coalesce(r.source, '') <> 'admin'");
+        expect(bindings).toEqual(expect.arrayContaining(['resolved', 'closed', 'cancelled']));
+        return knex.destroy();
+      });
+
+      test('the exemption has no gate: it compiles the same with GATE_LEAD_NO_RESPONSE_REASON on or off', () => {
+        const knex = require('knex')({ client: 'pg' });
+        const off = squash(buildStaleLeadUpdate(knex, { now: NOW, cutoff }).toSQL().sql);
+        const on = squash(buildStaleLeadUpdate(knex, { now: NOW, cutoff, noResponseReason: true }).toSQL().sql);
+        const tail = (t) => t.slice(t.indexOf('and not exists (select 1 from "ai_escalations"'));
+        expect(tail(on)).toBe(tail(off));
+        return knex.destroy();
+      });
     });
 
     test('excludeSoftDeleted adds deleted_at IS NULL', () => {
@@ -219,7 +361,7 @@ describe('lead staleness sweep', () => {
       expect(sql).toContain('set "status" = ?, "updated_at" = ?, "lost_reason" = COALESCE(leads.lost_reason, ?) where');
       expect(bindings.slice(0, 3)).toEqual(['unresponsive', NOW, 'no_response']);
       // The WHERE is the same one gate off uses.
-      expect(bindings.slice(3)).toEqual(['new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed']);
+      expect(bindings.slice(3)).toEqual(['new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed', ...OWED_REPLY_BINDINGS]);
       return knex.destroy();
     });
 
@@ -257,6 +399,9 @@ describe('lead staleness sweep', () => {
       expect(shared).toContain('from "lead_activities"');
       expect(shared).toContain('from "scheduled_services"');
       expect(shared).toContain('from "ad_service_attribution"');
+      expect(shared).toContain('from "ai_escalations"');
+      expect(shared).toContain('from "service_requests"');
+      expect(shared).toContain('from "sms_log" as "inb"');
       expect(estimateSql).toContain(shared);
       return knex.destroy();
     });

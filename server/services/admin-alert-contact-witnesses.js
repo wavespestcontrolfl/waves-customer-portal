@@ -28,6 +28,10 @@
  *     only): the voicemail's customer, by customer id and never by phone, has a visit
  *     in a status that ran with completed_at after the call's start on the same
  *     Eastern day. Loaded only when the caller asks (`visitRan`).
+ *   - a visit done after a text-note bell (text_note_checked class, customer items): the
+ *     customer's own visit (by customer id, never by phone) with completed_at after the bell,
+ *     in a status that ran, on ANY Eastern day (visitsCompletedAfterBell, which shares the
+ *     predicate above; read-only, called by the relevance loader for that class only).
  *   - a staff action after a text (GATE_SMS_STAFF_ACTION_ANSWERS, sms items only): a visit
  *     a person booked in the admin, or a payment a person recorded, for the text's customer
  *     (by customer id, never by phone) within 24 hours after the text
@@ -272,22 +276,55 @@ async function visitsThatRan(conn, voiceIdents) {
   const ran = new Map();
   const withCustomer = voiceIdents.filter((i) => i.customerId);
   if (!withCustomer.length) return ran;
+  const rows = await completedVisitRows(conn, withCustomer);
+  for (const ident of withCustomer) {
+    const day = etDateString(ident.anchor);
+    const best = latestCompletion(rows, ident, (at) => etDateString(at) === day);
+    if (best) ran.set(String(ident.item.id), best);
+  }
+  return ran;
+}
+
+// The visits that ran (completed_at set, a status that is not one that never ran) for these
+// items' customers, completed after the earliest anchor: one query for the batch.
+async function completedVisitRows(conn, withCustomer) {
   const since = new Date(Math.min(...withCustomer.map((i) => i.anchor.getTime())));
-  const rows = await conn('scheduled_services as ss')
+  return conn('scheduled_services as ss')
     .whereIn('ss.customer_id', unique(withCustomer.map((i) => i.customerId)))
     .whereNotNull('ss.completed_at').where('ss.completed_at', '>', since)
     .where((w) => w.whereNull('ss.status').orWhereNotIn('ss.status', VISIT_NEVER_RAN_STATUSES))
     .select('ss.customer_id', 'ss.completed_at');
-  for (const ident of withCustomer) {
-    const day = etDateString(ident.anchor);
-    let best = null;
-    for (const row of rows) {
-      const at = asDate(row.completed_at);
-      if (String(row.customer_id) === ident.customerId && at && at.getTime() > ident.anchor.getTime() && etDateString(at) === day) best = later(best, at);
-    }
-    if (best) ran.set(String(ident.item.id), best);
+}
+
+// The newest (or, with `newest` false, the earliest) completion after an ident's anchor that `keep` accepts.
+function latestCompletion(rows, ident, keep, newest = true) {
+  let best = null;
+  for (const row of rows) {
+    const at = asDate(row.completed_at);
+    if (!at || String(row.customer_id) !== ident.customerId || at.getTime() <= ident.anchor.getTime() || !keep(at)) continue;
+    best = best == null ? at : (newest ? later(best, at) : (at.getTime() < best.getTime() ? at : best));
   }
-  return ran;
+  return best;
+}
+
+// A visit done after a bell (the text_note_checked class): the customer's own visit (by customer
+// id only) that completed after the bell, in a status that ran, on ANY Eastern day (no same-day
+// rule: the text note is about the property, and the next visit may be days away). The same
+// predicate as visitsThatRan, read-only. Items are { id, customerId, bellAt }; answers
+// Map(notification id -> the earliest such completed_at). One query for the batch; an item with
+// no customer id or no bell time has none.
+async function visitsCompletedAfterBell(conn, items) {
+  const done = new Map();
+  const idents = items
+    .map((item) => ({ item, customerId: item.customerId ? String(item.customerId) : null, anchor: asDate(item.bellAt) }))
+    .filter((i) => i.customerId && i.anchor);
+  if (!idents.length) return done;
+  const rows = await completedVisitRows(conn, idents);
+  for (const ident of idents) {
+    const first = latestCompletion(rows, ident, () => true, false);
+    if (first) done.set(String(ident.item.id), first);
+  }
+  return done;
 }
 
 // The earliest staff action (sms-staff-action-answers.js) after each sms item's text and
@@ -455,4 +492,4 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false,
   return bundles;
 }
 
-module.exports = { loadContactBundles };
+module.exports = { loadContactBundles, visitsCompletedAfterBell };

@@ -152,6 +152,27 @@ describe('NotificationBell panel', () => {
     expect(band).toHaveStyle({ fontSize: '14px', backgroundColor: '#F1F5F9' });
   });
 
+  it('shows an SMS review bell\'s source text in quotes on the office panel, and never on the customer bell', async () => {
+    const noteBell = {
+      id: 7, category: 'alert', title: "Comms — check Synthetic Fixture's text note",
+      body: 'Wanted to save as special instructions; it is not clear if this is lasting or just for one visit.',
+      source_text: 'Skip the shed please', created_at: new Date().toISOString(), read_at: null, link: null,
+    };
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/push/status')) return jsonResponse({ available: true });
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+      return jsonResponse({ notifications: [noteBell] });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    expect(await screen.findByText('\u201cSkip the shed please\u201d')).toHaveStyle({ fontSize: '14px' });
+    cleanup();
+    render(<NotificationBell type="customer" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText(noteBell.title);
+    expect(screen.queryByText(/Skip the shed please/)).toBeNull();
+  });
+
   it('refetches the authoritative badge after marking one notification read', async () => {
     native.enabled = true;
     let count = 2;

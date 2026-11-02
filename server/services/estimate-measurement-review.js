@@ -295,14 +295,18 @@ async function sendOfficeNotification(database, { subject, description, customer
   // sees its bell and stamps without inserting; a crashed sender's lock
   // releases automatically and its bell (if inserted) is found by the check.
   // suppressed:true stays POLICY (terminal success, no retry, no loud error).
+  // `rang`: this send wrote a fresh bell row (not the crash-recovery find of an earlier sender's row, not a
+  // policy-withheld bell). Only then does GATE_PORTAL_ASK_PUSH page the phones, below, after the stamp.
+  let rang = false;
   const deliver = async () => {
     const first = await attempt();
     if (first?.suppressed) {
       logger.info(`[${kind.tag}] admin notification suppressed by policy for request ${requestId}`);
       return true;
     }
-    if (first?.id) return true;
+    if (first?.id) { rang = true; return true; }
     const second = await attempt();
+    if (second?.id && !second.suppressed) rang = true;
     return !!(second?.suppressed || second?.id);
   };
 
@@ -326,11 +330,36 @@ async function sendOfficeNotification(database, { subject, description, customer
     delivered = await deliver();
   }
 
-  if (delivered) { await markDelivered(); return; }
+  if (delivered) {
+    await markDelivered();
+    // Not awaited: the customer's request must not wait on a push provider. pushOfficeAsk never throws.
+    if (rang && kind.pushAsk) void pushOfficeAsk(database, { subject, customerId, requestId });
+    return;
+  }
   await releaseLease();
   logger.error(`[${kind.tag}] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; customer retries will re-arm the send`);
 }
 
+
+// GATE_PORTAL_ASK_PUSH: the phone page for a customer's change or call request on an estimate. Runs after the bell
+// row exists and the delivery stamp is written, outside the lock transaction, without holding the caller. Never
+// throws.
+async function pushOfficeAsk(database, { subject, customerId, requestId }) {
+  try {
+    const { pushPortalAsk, customerShortName } = require('./portal-ask-push');
+    if (!require('../config/feature-gates').portalAskPushLive?.()) return;
+    const calling = /^call requested/i.test(String(subject || ''));
+    await pushPortalAsk({
+      itemKey: `estimate-request:${requestId}`,
+      title: calling ? 'Call a customer about an estimate' : 'Change an estimate for a customer',
+      body: `${await customerShortName(customerId, database)} ${calling ? 'asked for a call about an estimate' : 'asked for a change to an estimate'}`,
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      customerId,
+    });
+  } catch (err) {
+    logger.warn(`[portal-ask-push] estimate request push failed for request ${requestId}: ${err.message}`);
+  }
+}
 
 // Outcome for a deduped submission: success, plus a re-armed notification
 // payload when the existing open request has NO delivery stamp — both

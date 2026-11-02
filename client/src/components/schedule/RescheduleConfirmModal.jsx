@@ -5,8 +5,15 @@
 //
 // The parent grid is responsible for optimistic UI (moving the block
 // visually) — this modal only confirms and commits via onConfirm
-// (called with { notificationType, scope, seriesAck?, seriesAckIds? }), or
-// tells the parent to revert via onCancel.
+// (called with { notificationType, scope, seriesAck?, seriesAckIds?, target? }),
+// or tells the parent to revert via onCancel.
+//
+// Tapping an open time (owner 2026-11-02, "i cannot click the times"):
+// with `pickTimes` the listed times are takeable, as on every other picker.
+// A tap only re-aims the move: the summary, the series line and the checks
+// follow the tapped time, and nothing saves until the confirm button.
+// onConfirm then carries `target` ({ date, window }), which the grid saves
+// in place of the drop.
 //
 // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE, owner ruling
 // 2026-08-28): with the gate on, a date move of a recurring visit shifts its
@@ -50,6 +57,18 @@ function formatTimeFromMinutes(min) {
   return `${h12}:${String(m).padStart(2, '0')} ${ap}`;
 }
 
+const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+// What a tapped open time books: its hour for the visit's length, the same
+// window a drop on that hour makes. null = no length to book it with.
+function pickedTarget(hour, durationMinutes) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hour?.start || ''));
+  const duration = Number(durationMinutes);
+  if (!m || !hour.date || !(duration > 0)) return null;
+  const startMin = Number(m[1]) * 60 + Number(m[2]);
+  return { date: hour.date, startMin, window: `${hhmm(startMin)}-${hhmm(startMin + duration)}` };
+}
+
 export default function RescheduleConfirmModal({
   open,
   customerName,
@@ -64,6 +83,7 @@ export default function RescheduleConfirmModal({
   customerId, // optional — enables the advisory best-times hint
   durationMinutes, // optional — best-times hint duration (engine defaults 60)
   technicianId, // optional — scope the hint to the landing tech's route
+  pickTimes = false, // optional — the grid saves onConfirm's `target`
   onConfirm,
   onCancel,
 }) {
@@ -72,6 +92,10 @@ export default function RescheduleConfirmModal({
   // Server message from a refused ack — the previewed set changed under
   // the operator; the refreshed preview replaces the line.
   const [staleAck, setStaleAck] = useState('');
+  // The open time tapped in the list ({ date, startMin, window, unmoved }),
+  // or null: the move goes where the block was dropped.
+  const [picked, setPicked] = useState(null);
+  const land = picked || { date: toDate, startMin: toMinutes, window: toWindow, unmoved: false };
 
   // Collective-move disclosure: the server's preview of what a date move of
   // this recurring visit touches. Every recurring drag previews — including
@@ -80,7 +104,7 @@ export default function RescheduleConfirmModal({
   // known and the gate-off chooser below never vanishes on a same-day drag.
   const seriesPreview = useSeriesMovePreview({
     serviceId,
-    newDate: toDate,
+    newDate: land.date,
     enabled: open && !!isRecurring,
   });
   const collective = isCollectivePreview(seriesPreview.preview);
@@ -96,27 +120,29 @@ export default function RescheduleConfirmModal({
   // of the preview would only bounce off the server's ack check.
   const awaitingPreview = !!isRecurring && seriesPreview.loading && !seriesPreview.preview;
 
-  // Advisory overlap check on the fixed drag-drop target — warn-only, the
-  // confirm buttons never key off it. On a series reschedule the check only
-  // covers this first occurrence (copy stays singular by design).
-  const [toStart, toEnd] = String(toWindow || '').split('-');
+  // Advisory overlap check on the landing target (the drop, or the tapped
+  // time) — warn-only, the confirm buttons never key off it. On a series
+  // reschedule the check only covers this first occurrence (copy stays
+  // singular by design).
+  const [toStart, toEnd] = String(land.window || '').split('-');
   const { conflicts } = useSlotConflicts({
     serviceId,
     technicianId,
     durationMinutes,
-    date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
+    date: /^\d{4}-\d{2}-\d{2}$/.test(String(land.date || '')) ? land.date : null,
     windowStart: toStart || null,
     windowEnd: toEnd || null,
     excludeServiceIds: serviceId != null ? [serviceId] : [],
     enabled: open && !!toStart,
   });
 
-  // Availability strip for the landing day (days around the landing date) —
-  // display-only by design: the landing window is fixed by the drop, so the
-  // chips carry no onPick (cancel and re-drop to take a suggestion).
+  // Availability strip for the landing day (days around the landing date).
+  // With `pickTimes` a tapped time re-aims the move; without it the chips
+  // carry no onPick (display only). The open-times list is held while the
+  // modal stays open, so a tap searches nothing.
   const { availability } = useBestTimes({
     arrivalWindows: true,
-    date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
+    date: /^\d{4}-\d{2}-\d{2}$/.test(String(land.date || '')) ? land.date : null,
     serviceId: serviceId != null ? serviceId : undefined,
     customerId,
     durationMinutes,
@@ -124,7 +150,7 @@ export default function RescheduleConfirmModal({
     excludeServiceIds: serviceId != null ? [serviceId] : undefined,
     // No landing tech (unassigned-rail drops, unassigned visits) means the
     // all-tech detours would advertise a route the confirm can't take —
-    // display-only chips can't adopt a technician. No tech, no hint.
+    // a tapped time never changes the technician. No tech, no hint.
     enabled: open && technicianId != null,
     pickedStart: toStart || undefined,
     pickedEnd: toEnd || undefined,
@@ -143,10 +169,23 @@ export default function RescheduleConfirmModal({
     if (open) {
       setNotificationType('none');
       setStaleAck('');
+      setPicked(null);
     }
   }, [open]);
 
   if (!open) return null;
+
+  // A tap re-aims the move and saves nothing. The list is the landing
+  // technician's route, so a time scored for anyone else is not taken.
+  const pickTime = (hour) => {
+    if (hour?.technicianId && String(hour.technicianId) !== String(technicianId ?? '')) return;
+    const target = pickedTarget(hour, durationMinutes);
+    if (!target) return;
+    // The visit's own time: nothing would move.
+    const unmoved = !technicianChange && target.date === fromDate && target.startMin === fromMinutes;
+    setPicked({ ...target, unmoved });
+    setStaleAck('');
+  };
 
   const submit = async (scope) => {
     setBusy(true);
@@ -157,6 +196,7 @@ export default function RescheduleConfirmModal({
         // The ack is bound to the previewed occurrence set; an explicit
         // "Reschedule series" needs none (scope 'series' is its own path).
         ...(scope === 'series' ? {} : seriesAckPayload(seriesPreview.preview)),
+        ...(picked ? { target: { date: picked.date, window: picked.window } } : {}),
       });
     } catch (err) {
       const ack = parseSeriesAckError(err);
@@ -174,7 +214,7 @@ export default function RescheduleConfirmModal({
   };
 
   const fromText = `${formatDateLong(fromDate)} at ${formatTimeFromMinutes(fromMinutes)}`;
-  const toText = `${formatDateLong(toDate)} at ${formatTimeFromMinutes(toMinutes)}`;
+  const toText = `${formatDateLong(land.date)} at ${formatTimeFromMinutes(land.startMin)}`;
   const who = customerName || 'this client';
 
   return createPortal(
@@ -271,13 +311,23 @@ export default function RescheduleConfirmModal({
           <SlotConflictNotice
             // The strip states the route problem itself; the
             // double-booking notice (no `warning`) always stays.
-            conflicts={stripCoversRouteWarning(availability, { currentDate: toDate, currentStart: toStart })
+            conflicts={stripCoversRouteWarning(availability, { currentDate: land.date, currentStart: toStart })
               ? (conflicts || []).filter((conflict) => !conflict.warning)
               : conflicts}
           />
-          {/* Display-only: the drop fixes the window, so the chips carry no
-              onPick (cancel and re-drop to take one). */}
-          <AvailabilityStrip availability={availability} currentDate={toDate} currentStart={toStart} currentTechnicianId={technicianId} bestRows showRain />
+          {land.unmoved && (
+            <p className="text-14 text-ink-secondary">That is the visit&rsquo;s current time.</p>
+          )}
+          {/* A tap re-aims the move (pickTimes); without it the list is display only. */}
+          <AvailabilityStrip
+            availability={availability}
+            currentDate={land.date}
+            currentStart={toStart}
+            currentTechnicianId={technicianId}
+            onPick={pickTimes && !busy ? pickTime : undefined}
+            bestRows
+            showRain
+          />
         </div>
 
         {/* Footer */}
@@ -291,7 +341,7 @@ export default function RescheduleConfirmModal({
           <Button
             variant="primary"
             onClick={() => submit('this_only')}
-            disabled={busy || awaitingPreview}
+            disabled={busy || awaitingPreview || land.unmoved}
           >
             {busy ? 'Saving…' : (collective ? 'Move visit + later visits' : 'Reschedule appointment')}
           </Button>
@@ -303,7 +353,7 @@ export default function RescheduleConfirmModal({
             <Button
               variant="secondary"
               onClick={() => submit('series')}
-              disabled={busy}
+              disabled={busy || land.unmoved}
             >
               Reschedule series
             </Button>

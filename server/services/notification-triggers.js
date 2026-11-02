@@ -664,6 +664,25 @@ const TRIGGER_REGISTRY = {
       link: p.link || '/admin/customers',
     }),
   },
+  // The phone page for a customer's ask inside the app (GATE_PORTAL_ASK_PUSH, owner 2026-11-02): a portal chat
+  // hand-off, a service-request form, the late "Still waiting" re-ring, an estimate page's change or call request.
+  // Each of those writes its own admin bell row (raiseAdminAlert, bell:true) and, until now, never rang a phone,
+  // so a customer could ask ten times and nobody saw it. services/portal-ask-push.js sends this one pushOnly:
+  // the bell keeps one row per ask and this is the page. The text carries the customer's first name and last
+  // initial and the ask in a few words, never a phone number or an email.
+  portal_ask: {
+    label: 'Customer asked in the app',
+    category: 'service',
+    priority: 'high',
+    group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.title || 'Comms - answer a customer who asked in the app',
+      body: p.body || null,
+      link: p.link || '/admin/communications',
+    }),
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -1158,6 +1177,11 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'relay_reservice_filed') {
     return `waves-relay_reservice_filed-${payload.requestId || crypto.randomUUID()}`;
   }
+  // One banner per ask: a customer who asks again in the same chat replaces their own banner, and a
+  // second customer's ask never replaces the first one's.
+  if (triggerKey === 'portal_ask') {
+    return `waves-portal_ask-${payload.itemKey || crypto.randomUUID()}`;
+  }
   if (triggerKey === 'customer_missed_call') {
     return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
   }
@@ -1584,7 +1608,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
-              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
+              // portal_ask: every push is an ask that is new or rang again (portal-ask-push.js callers), so a repeat on
+              // the same tag (the customer asked again in the same chat) must alert again, not silently replace the
+              // banner. The admin's sound preference still holds (silent/vibrate above).
+              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)) || triggerKey === 'portal_ask',
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
               ...(pushCall && adminRoleIds.has(adminUserId) ? pushCall : {}),
             };
