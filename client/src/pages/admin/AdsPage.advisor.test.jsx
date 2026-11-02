@@ -45,6 +45,7 @@ function stubFetch({ report, onApply, onGenerate, loadFails, historyFails } = {}
     if (url === "/api/admin/ads/advisor/history") return json({ reports: [] });
     if (url === "/api/admin/ads/advisor/apply") return onApply ? onApply(options) : json({ applied: true, result: {} });
     if (url === "/api/admin/ads/advisor/generate") return onGenerate ? onGenerate(options) : json({ report: REPORT_DATA });
+    if (url === "/api/admin/ads/negatives") return json({ error: "not_found" }, false, 404);
     throw new Error(`Unexpected request: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
