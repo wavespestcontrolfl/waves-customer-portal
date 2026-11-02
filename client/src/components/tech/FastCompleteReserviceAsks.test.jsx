@@ -13,8 +13,8 @@ const ITEM = { id: 'form:1', source: 'request_form', at: '2026-10-06T14:00:00.00
 const ROWS = [{ productId: 'taurus', name: 'Taurus SC', active: true, product: {} }];
 
 let latest = null;
-function Harness({ enabled = true, request, rows = ROWS }) {
-  const asks = useReserviceAsks({ service: { id: 'svc-1', reserviceAsksEnabled: enabled }, request, rows });
+function Harness({ enabled = true, request, rows = ROWS, readTimeoutMs }) {
+  const asks = useReserviceAsks({ service: { id: 'svc-1', reserviceAsksEnabled: enabled }, request, rows, readTimeoutMs });
   latest = asks;
   return (
     <div>
@@ -50,6 +50,21 @@ describe('useReserviceAsks', () => {
     release({ items: [] });
     await waitFor(() => expect(screen.getByTestId('hold').textContent).toBe(''));
     expect(screen.queryByText(/They told us/)).toBeNull();
+  });
+
+  test('a read that never answers stops holding Complete: the notice with Retry, and its late answer is ignored', async () => {
+    let release;
+    const request = vi.fn(() => new Promise((resolve) => { release = resolve; }));
+    render(<Harness request={request} readTimeoutMs={20} />);
+    expect(screen.getByTestId('hold').textContent).toBe('Loading what the customer told us…');
+    await screen.findByText('Could not load what the customer told us.');
+    expect(screen.getByTestId('hold').textContent).toBe('');
+    expect(latest.field()).toEqual({});
+    release({ items: [ITEM] });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    expect(screen.queryByText(/They told us ·/)).toBeNull();
+    expect(screen.getByTestId('hold').textContent).toBe('');
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
   });
 
   test('the sheet\'s own reason wins over the block\'s', async () => {

@@ -11,7 +11,9 @@
 // field) are lib/fast-complete-reservice-asks.js, mirroring server/services/reservice-answers.js.
 //
 // A read that fails for any reason but "gate off" (404) or "not a re-service" (409) shows a notice with Retry and
-// never holds Complete: the server gathers the asks again at Complete and the answers are optional there.
+// never holds Complete: the server gathers the asks again at Complete and the answers are optional there. A read
+// still out after ASKS_READ_TIMEOUT_MS (a stalled phone connection; the sheets' request helper has no timeout of its
+// own) counts as failed the same way, and its late answer is ignored.
 import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import {
   ASKS_LOADING_HOLD, ASKS_LOAD_FAILED, NEEDS_PRODUCT_HINT, MAX_ANSWER_TEXT, MAX_REASON_TEXT, NOT_ABOUT_ANSWER, PROBLEM_ANSWERS,
@@ -23,11 +25,12 @@ import { Chip } from './FastCompleteParts';
 import '../../styles/tech-workflow.css';
 
 const NO_ITEMS = [];
+export const ASKS_READ_TIMEOUT_MS = 12000;
 const NO_ANSWER = Object.freeze({ answer: null, productIds: [], reason: '', text: '' });
 
 // `service`: the schedule row; its `reserviceAsksEnabled` is the flag. `rows`: the sheet's product rows (the active
 // ones are what "Treated" offers).
-export function useReserviceAsks({ service, request, rows }) {
+export function useReserviceAsks({ service, request, rows, readTimeoutMs = ASKS_READ_TIMEOUT_MS }) {
   const on = service?.reserviceAsksEnabled === true;
   const base = `/admin/dispatch/${service?.id}`;
   const [load, setLoad] = useState({ status: on ? 'loading' : 'off', items: NO_ITEMS });
@@ -38,6 +41,11 @@ export function useReserviceAsks({ service, request, rows }) {
     if (!on) return undefined;
     let alive = true;
     setLoad({ status: 'loading', items: NO_ITEMS });
+    const timer = setTimeout(() => {
+      if (!alive) return;
+      alive = false;
+      setLoad({ status: 'error', items: NO_ITEMS });
+    }, readTimeoutMs);
     Promise.resolve()
       .then(() => request(`${base}/reservice-asks`))
       .then((data) => {
@@ -49,9 +57,10 @@ export function useReserviceAsks({ service, request, rows }) {
         if (!alive) return;
         // 404 {enabled:false}: the gate is off. 409: no longer a re-service. Either way, no block.
         setLoad({ status: err?.status === 404 || err?.status === 409 ? 'none' : 'error', items: NO_ITEMS });
-      });
-    return () => { alive = false; };
-  }, [on, base, request, attempt]);
+      })
+      .finally(() => clearTimeout(timer));
+    return () => { alive = false; clearTimeout(timer); };
+  }, [on, base, request, attempt, readTimeoutMs]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
   const choices = useMemo(() => productChoicesFrom(rows), [rows]);
