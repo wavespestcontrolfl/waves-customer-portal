@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/alert-call-button.js',
+    snippet: "const text = await db('sms_log').where({ twilio_sid: sid, direction: 'inbound' }).first('from_phone', 'customer_id');",
+    reason: 'The bell Call on a new-lead alert for an unknown sender\'s text: one inbound row keyed by its twilio_sid, reading only the sender\'s number and customer; a send reservation is an outbound placeholder with no sid, so it can never match.',
+  },
+  {
     file: 'services/one-text-per-day.js',
     snippet: "const log = await db('sms_log').where({ twilio_sid: sid }).first('message_type');",
     reason: 'isTrackerText: keyed by twilio_sid (the text Twilio reports undelivered) and reads only its message type; a send reservation has no sid until it is promoted to a real send, so no placeholder can match.',
