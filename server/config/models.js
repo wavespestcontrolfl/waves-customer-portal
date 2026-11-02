@@ -150,6 +150,19 @@ function anthropicSupportsToolSearch(model) {
   return ANTHROPIC_TOOL_SEARCH_RE.test(String(model || ''));
 }
 
+// Does `model` accept a `role: "system"` message carrying `tool_addition`
+// blocks (mid-conversation tool changes)? The list is the "supportedModels" of
+// platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages
+// (read 2026-11-02). Claude Sonnet 5 is NOT on it. Exact ids: an unknown id is
+// NOT supported (fail closed: the caller merges new tools into `tools`).
+const ANTHROPIC_MID_CONVERSATION_TOOLS = new Set([
+  'claude-fable-5-1', 'claude-mythos-5-1', 'claude-fable-5', 'claude-mythos-5', 'claude-mythos-preview',
+  'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-4-8',
+]);
+function anthropicSupportsMidConversationTools(model) {
+  return ANTHROPIC_MID_CONVERSATION_TOOLS.has(String(model || ''));
+}
+
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
 // `thinking: { type: 'disabled' }` — the voice-relay override tests and the
@@ -850,6 +863,7 @@ module.exports = {
   ANTHROPIC_THINKING_FLOOR_RE,
   anthropicThinksByDefault,
   anthropicSupportsToolSearch,
+  anthropicSupportsMidConversationTools,
   ANTHROPIC_THINKING_REQUIRED_RE,
   anthropicThinkingAlwaysOn,
   DEEP,

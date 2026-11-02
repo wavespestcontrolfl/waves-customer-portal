@@ -99,6 +99,7 @@ const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
 const ToolSearch = require('../services/intelligence-bar/tool-search');
+const ToolAdditions = require('../services/intelligence-bar/tool-additions');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -3878,6 +3879,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // stripped on load and the request runs on the ordinary list (tool-search.js).
     const searchQueries = new Map();
     if (req.ibResumedTask) {
+      currentMessages = ToolAdditions.withoutTrailingAddition(currentMessages);
       currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext: ModelContext.modelContext(taskContext) })}` });
     }
     // Once the general admin read returned data, nothing after it runs without
@@ -3905,6 +3907,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         .filter(Boolean).filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
     }
+    // GATE_IB_TOOL_ADDITIONS (tool-additions.js): a found tool is offered by a
+    // system message before the next round, so `tools` (rendered first, the
+    // start of the cached prefix) stays as sent. A saved history that holds
+    // such messages, on a model that cannot read them, gets them back in `tools`.
+    ({ tools, messages: currentMessages } = ToolAdditions.forModel({ tools, messages: currentMessages, model }));
+    const toolAdditions = ToolAdditions.createRequestState({
+      enabled: ToolAdditions.toolAdditionsWanted({ platformEnabled, toolSearch, model }),
+      messages: currentMessages,
+    });
     let finalResponse = null;
     const toolCalls = [];
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
@@ -3969,8 +3980,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // call finishes this request on OpenAI (ib-openai-backup.js owns the switch).
     const modelCaller = IbOpenaiBackup.createModelCaller({
       context, actionScope, task: req.ibResumedTask, finalMessages: finalRoundMessages,
-      read: () => ({ tools, messages: currentMessages, systemPrompt }),
-      apply: next => { tools = next.tools; currentMessages = next.messages; toolSearch = next.toolSearch; systemPrompt = next.systemPrompt; },
+      read: () => ({ tools, messages: currentMessages, systemPrompt, pendingTools: toolAdditions.pending() }),
+      apply: next => { tools = next.tools; currentMessages = next.messages; toolSearch = next.toolSearch; systemPrompt = next.systemPrompt; toolAdditions.stop(); },
       markTask: async () => activeTask && IbTasks.markModelProvider(activeTask.id, getAdminActorId(req), activeTask.runner_token, IbOpenaiBackup.BACKUP_PROVIDER),
     });
     await modelCaller.startFromTask();
@@ -3981,6 +3992,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const finalRound = round === MAX_TOOL_ROUNDS - 1;
       stepLimitReached = finalRound;
+      currentMessages = toolAdditions.beforeCall(currentMessages, finalRound);
+      const requestMessages = withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages);
       const response = await modelCaller.call({ finalRound, ask: () => ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
         ...anthropicEffortConfig(model),
@@ -3994,8 +4007,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
         tools,
         ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
-        messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
-      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' })
+        messages: requestMessages,
+      }, ToolAdditions.requestOptions(requestMessages)), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' })
         // Tagged here so the catch below can tell a failed MODEL call from any other
         // error. The tag rides the error object: when the OpenAI backup answers, the
         // error is swallowed; when the backup fails too, this same error comes back.
@@ -4079,9 +4092,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         } else if (platformEnabled && toolUse.name === ActionRegistry.DISCOVERY_TOOL.name) {
           const discovered = ActionRegistry.discover(toolUse.input, actionScope);
           result = discovered.result;
-          tools = ToolSearch.mergeDiscoveredTools(tools, discovered.definitions.map(apiToolDefinition), toolSearch);
+          const definitions = discovered.definitions.map(apiToolDefinition);
+          if (!toolAdditions.queue(definitions, tools)) tools = ToolSearch.mergeDiscoveredTools(tools, definitions, toolSearch);
           gapCollector?.discovery(toolUse.input, result);
-        } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
+        } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name) && !toolAdditions.offers(toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
           failed = true;
           errorMessage = result.error;

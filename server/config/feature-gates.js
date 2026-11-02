@@ -6270,6 +6270,20 @@ function ibToolSearchLive() {
   return process.env.GATE_IB_TOOL_SEARCH === 'true';
 }
 
+// GATE_IB_TOOL_ADDITIONS read at CALL time — strict `=== 'true'`, dark. Off
+// the tool search path (a model that thinks by default, or a login without
+// tool search), a discover_capabilities result no longer adds its tools to the
+// request's `tools` array, which the API renders first and which therefore
+// voided the whole prompt cache on every such round. The bar keeps `tools` as
+// sent and offers the found tools in a `role: "system"` message of
+// `tool_addition` blocks before the next round (tool-additions.js; beta header
+// inline-tools-2026-09-15). Has effect only on a model that accepts
+// mid-conversation tool changes (models.anthropicSupportsMidConversationTools).
+// Off = the found tools are merged into `tools`, as before. Kill: unset.
+function ibToolAdditionsLive() {
+  return process.env.GATE_IB_TOOL_ADDITIONS === 'true';
+}
+
 // GATE_IB_OPENAI_BACKUP read at CALL time — strict `=== 'true'`, dark. When the
 // Intelligence Bar's Anthropic call fails with a provider error (usage limit,
 // auth, overloaded, 5xx, timeout), the request finishes on OpenAI with tool
@@ -9356,6 +9370,8 @@ module.exports.ibGeneralReadOfficeLive = ibGeneralReadOfficeLive;
 module.exports.ibGeneralEditLive = ibGeneralEditLive;
 // GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
 module.exports.ibToolSearchLive = ibToolSearchLive;
+// GATE_IB_TOOL_ADDITIONS reader, on its own line so gate PRs never conflict.
+module.exports.ibToolAdditionsLive = ibToolAdditionsLive;
 // GATE_IB_OPENAI_BACKUP reader, on its own line so gate PRs never conflict.
 module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
