@@ -101,9 +101,15 @@ test('unplaced visits are escalated before the lock window through the existing 
   expect(query.where).toHaveBeenCalledWith('s.recurring_dispatch_due_date', '<=', '2026-08-23');
   expect(query.whereNull).toHaveBeenCalledWith('s.window_start');
   expect(notifications.notifyAdmin).toHaveBeenCalledWith(
-    'schedule_conflict', expect.any(String), expect.stringContaining('2026-08-20'),
+    'schedule_conflict', 'Schedule — find a time for a recurring visit',
+    'The visit is due Aug 20 and has no time yet; check availability and customer preferences in dispatch.',
     expect.objectContaining({ bell: true, dedupeKey: 'recurring-dispatch:s1:2026-08-20', refreshOnDedupe: true, trx: db }),
   );
+  // A card still in the old words takes the new ones quietly; any other change rings.
+  const { ringOnRefresh } = notifications.notifyAdmin.mock.calls[0][3];
+  expect(ringOnRefresh({ title: 'Recurring visit still needs a time' })).toBe(false);
+  expect(ringOnRefresh({ title: 'Recurring placement alert resolved' })).toBe(true);
+  expect(ringOnRefresh({ title: 'Schedule — find a time for a recurring visit' })).toBe(true);
   // A failed notification must fail the pass, rather than reporting a clean run.
   notifications.notifyAdmin.mockResolvedValue(null);
   query.select = jest.fn()

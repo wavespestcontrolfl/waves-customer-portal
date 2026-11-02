@@ -530,6 +530,8 @@ html[data-glass-theme] .waves-ask-intro { margin: 0 !important; font-size: 16px 
 html[data-glass-theme] .waves-ask-form { display: grid !important; grid-template-columns: minmax(0, 1fr) auto !important; gap: 12px !important; align-items: center !important; }
 /* Portal assistance starts compact so each tab leads with its own task. */
 html[data-glass-theme] .waves-ask-card[data-portal-ask] { padding: 8px 12px !important; margin: 0 !important; }
+/* Reschedule page: the card keeps the 16px gap every card there has below it. */
+html[data-glass-theme] .waves-ask-card[data-schedule-ask] { margin-bottom: 16px !important; }
 html[data-glass-theme] [data-portal-ask] summary::-webkit-details-marker { display: none; }
 html[data-glass-theme] [data-portal-ask] details[open] > summary { margin-bottom: 12px; }
 html[data-glass-theme] [data-portal-ask] .waves-ask-chevron { transition: transform 160ms ease; }

@@ -356,7 +356,7 @@ const SOCIALS = [
 // audit "follow link"). Only networks whose profile URL is in SOCIALS above;
 // built here so the report sender never types a handle of its own.
 const FOLLOW_LINE_SLUGS = ['facebook', 'instagram', 'tiktok'];
-const FOLLOW_LINE_LEAD = 'Follow Waves for local pest and lawn tips:';
+const FOLLOW_LINE_LEAD = 'Follow Waves on social:';
 
 function followUsLine() {
   const picked = SOCIALS.filter(([slug]) => FOLLOW_LINE_SLUGS.includes(slug));

@@ -208,10 +208,13 @@ const NEW_NOTICES_PER_RUN = 10;
 // pin notice, and its counter lives in one run of another process.
 const WATCHDOG_BELL_KEYS = ['unpriced-series:', 'lawn-email-gap:', 'prepay-coverage:', 'accepted-schedule:', 'churned-live-work:', 'combined-booking-check:'];
 // The due-date notice ('recurring-dispatch:', flagUnplacedVisits' first loop)
-// is counted and NOT capped: it is for a visit within three days of its due
-// date with no time, the time-critical field work the budget rule exempts
-// (docs/admin-notifications.md). The lanes below run after it and see its rings.
+// is counted and NOT capped: it is for a recurring visit due soon (the cutoff in
+// flagUnplacedVisits) with no time, the time-critical field work the budget rule
+// exempts (docs/admin-notifications.md). The lanes below run after it and see its rings.
 const DUE_DATE_KEY = 'recurring-dispatch:';
+// The due-date notice's title before its words changed (2026-11-02): a standing
+// notice still carrying it takes the new words without ringing again.
+const DUE_DATE_OLD_TITLE = 'Recurring visit still needs a time';
 // The move-check-down notice (check-down-notice.js) is counted and NOT capped
 // either: one ring per outage, for a tool that has stopped moving visits.
 const CHECK_DOWN_KEY = 'auto-dispatch-check-down';
@@ -552,6 +555,7 @@ function pickWindowClosed() {
 async function flagUnplacedVisits(config, nowDate = new Date()) {
   const { etDateString, addETDays } = require('../../utils/datetime-et');
   const { toDateStr } = require('./dates');
+  const { shortDateET } = require('../admin-alert-names');
   await retireResolvedNotices({
     keyPattern: 'recurring-dispatch:%',
     stillOpen: (sub) => sub
@@ -585,7 +589,6 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     .whereNull('c.deleted_at')
     .where(pickWindowClosed)
     .select('s.id', 's.customer_id', 's.recurring_dispatch_due_date');
-  const notifications = require('../notification-service');
   let flagged = 0;
   for (const row of rows) {
     const due = toDateStr(row.recurring_dispatch_due_date);
@@ -603,21 +606,31 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
         .forNoKeyUpdate('s')
         .first('s.id');
       if (!current) return null;
-      const inserted = await notifications.notifyAdmin(
-        'schedule_conflict',
-        'Recurring visit still needs a time',
-        `A recurring visit due ${due} is still awaiting placement within three days of its due date. Review availability and customer preferences in dispatch.`,
-        {
-          bell: true,
-          link: `/admin/dispatch?tab=schedule&date=${due}`,
-          dedupeKey: `recurring-dispatch:${row.id}:${due}`,
-          // Reopen a previously resolved card if this due date becomes unplaced
-          // again; the shared deduper leaves acknowledged, unchanged cards alone.
-          refreshOnDedupe: true,
-          metadata: { scheduledServiceId: row.id, customerId: row.customer_id, dueDate: due },
-          trx,
-        },
-      );
+      // The words name the due date and nothing else: the notice fires from the
+      // cutoff above, so "within three days" misread as how soon it was due.
+      const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+        area: 'Schedule',
+        action: await namedVisitAction(row.customer_id,
+          [(who) => `find a time for ${who}'s recurring visit`, (who) => `find a time for ${who}'s visit`],
+          'find a time for a recurring visit', trx),
+        why: `The visit is due ${shortDateET(`${due}T12:00:00Z`)} and has no time yet; check availability and customer preferences in dispatch.`,
+        severity: 'needs-you',
+        link: `/admin/dispatch?tab=schedule&date=${due}`,
+        subject: { type: 'visit', id: String(row.id) },
+        doneWhen: 'visit_has_time',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey: `recurring-dispatch:${row.id}:${due}`,
+        // Reopen a previously resolved card if this due date becomes unplaced
+        // again; the shared deduper leaves acknowledged, unchanged cards alone.
+        refreshOnDedupe: true,
+        // A card still in the old words changed only its words: no ring, and its
+        // read and done stay as they are.
+        ringOnRefresh: (existing) => existing.title !== DUE_DATE_OLD_TITLE,
+        metadata: { scheduledServiceId: row.id, customerId: row.customer_id, dueDate: due },
+        trx,
+      });
       if (!inserted) throw new Error(`Recurring placement exception could not be recorded for ${row.id}`);
       return inserted;
     });
