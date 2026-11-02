@@ -160,7 +160,7 @@ Kinds today:
   emission carries Call, the next text's emission drops it, and an older late text keeps the row's own.
 - `negative_keyword` (`server/services/ads/negative-keyword-buttons.js`, `GATE_ADS_NEGATIVES`; owner plan A,
   2026-11-02): **Add** and **Decline** on one ads-advisor word's row (`ads-negative:<id>`, area Leads, category
-  `system`, link `/admin/ads?tab=advisor&negative=<id>`). Both are stored at raise; `visibleItems` serves them only
+  `system`, link `/admin/ppc?tab=advisor&negative=<id>`). Both are stored at raise; `visibleItems` serves them only
   while the word is still pending on the Ads page. A tap is the Ads page's own decide step
   (`decideSuggestion` in `server/services/ads/negative-keyword-actions.js`, the route
   `POST /api/admin/ads/negatives/:id/decide`) with its checks again under the row lock: the campaign is still a linked
