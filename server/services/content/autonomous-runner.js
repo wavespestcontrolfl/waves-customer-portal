@@ -247,7 +247,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null, terminalHoldPass = false } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -444,8 +444,12 @@ class AutonomousRunner {
     // claimNext() re-serves it when the window reopens and it publishes
     // autonomously then. The step-7 guard remains as the race backstop.
     // Shadow runs are exempt: they exist to exercise drafting and never
-    // publish, so the cap doesn't constrain them.
-    const capDeferral = run.shadow_mode ? null : await this._capDeferralFor(run.action_type);
+    // publish, so the cap doesn't constrain them. So is the batch's pass over
+    // rows whose terminal hold is pushed (terminalHoldPass): a hold publishes
+    // nothing, and deferring it to the next cap window would keep the row on
+    // the list while the caps stay full. Should the file have become a draft
+    // since the listing, the step-7 guard still holds the cap.
+    const capDeferral = run.shadow_mode || terminalHoldPass ? null : await this._capDeferralFor(run.action_type);
     if (capDeferral) {
       const finalized = await finalize(run, t0, {
         outcome: 'deferred_publish_cap',
@@ -2059,7 +2063,7 @@ class AutonomousRunner {
       const run = await this.runNext({
         excludeIds: [...failedOppIds],
         ...(scopedActionType ? { actionType: scopedActionType } : {}),
-        ...(scope ? { onlyIds: [...scope.ids] } : {}),
+        ...terminalScopeArgs(scope),
         ...(reserve ? { bucket: CITABILITY_BACKFILL_BUCKET } : {}),
       });
       if (scope) {
@@ -5329,6 +5333,13 @@ function terminalFirstScope(lists) {
   if (lists.written.length) return { kind: 'written', ids: lists.written };
   if (lists.held.length) return { kind: 'held', ids: lists.held };
   return null;
+}
+
+// The claim args for a scope: its ids, and for the held rows the pass flag
+// (runNext skips the pre-draft cap check: a hold publishes nothing).
+function terminalScopeArgs(scope) {
+  if (!scope) return {};
+  return scope.kind === 'held' ? { onlyIds: [...scope.ids], terminalHoldPass: true } : { onlyIds: [...scope.ids] };
 }
 
 // After a scoped claim: drop the row it took, or the whole list when none of

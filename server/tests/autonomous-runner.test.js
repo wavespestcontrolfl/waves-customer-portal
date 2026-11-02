@@ -1701,10 +1701,11 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     await runner.runDaily({ limit: 3 });
     // The draft first; then both holds, neither using a slot; then two score-order slots.
     expect(order).toEqual(['written_50', 'held_95', 'held_60', 'no_draft_90', 'no_draft_85']);
+    // The held pass tells runNext so: a hold publishes nothing, so no pre-draft cap check.
     expect(runner.runNext.mock.calls.slice(0, 4).map(([args]) => args)).toEqual([
       { excludeIds: [], onlyIds: ['written_50'] },
-      { excludeIds: [], onlyIds: ['held_95', 'held_60'] },
-      { excludeIds: [], onlyIds: ['held_60'] },
+      { excludeIds: [], onlyIds: ['held_95', 'held_60'], terminalHoldPass: true },
+      { excludeIds: [], onlyIds: ['held_60'], terminalHoldPass: true },
       { excludeIds: [] },
     ]);
   });
@@ -1716,7 +1717,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     ];
     const { runner, order } = queueRunner(rows, { held: ['held_deferred', 'held_cap'] });
     await runner.runDaily({ limit: 2 });
-    // held_cap was capped before its hold was read: a normal run, a slot used.
+    // held_cap's run did not park it (its file became a draft and the publish guard held the cap): a slot used.
     expect(order).toEqual(['held_cap', 'no_draft_80']);
   });
 
@@ -5607,6 +5608,24 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
       expect(onward).not.toHaveBeenCalled();
       expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
       expect(briefBuilder.compose).not.toHaveBeenCalled();
+    });
+
+    test('the held pass skips the pre-draft publish cap (a hold publishes nothing); any other claim still defers to the cap window', async () => {
+      const hold = { reason: 'duplicate', detail: 'The live termite swarmers post covers this topic.' };
+      process.env.SHADOW_MODE_CREATE_OR_REFRESH_CITY_SERVICE_PAGE = 'false';
+      try {
+        const capped = { reason: 'canary_daily_publish_cap', notes: 'Daily publish cap already full.', availableAt: new Date(Date.now() + 864e5) };
+        const pass = setup({ source: held(hold), handed: city('brief_handed') });
+        const capCheck = jest.spyOn(pass.runner, '_capDeferralFor').mockResolvedValue(capped);
+        await expect(pass.runner.runNext({ terminalHoldPass: true })).resolves.toMatchObject({ outcome: 'deferred_terminal_hold' });
+        expect(capCheck).not.toHaveBeenCalled();
+
+        const other = setup({ source: held(hold), handed: city('brief_handed') });
+        jest.spyOn(other.runner, '_capDeferralFor').mockResolvedValue(capped);
+        await expect(other.runner.runNext()).resolves.toMatchObject({ outcome: 'deferred_publish_cap', skip_reason: 'canary_daily_publish_cap' });
+      } finally {
+        delete process.env.SHADOW_MODE_CREATE_OR_REFRESH_CITY_SERVICE_PAGE;
+      }
     });
 
     test('a needs_owner hold stores its question on the run; the run itself raises nothing (the batch end does)', async () => {
