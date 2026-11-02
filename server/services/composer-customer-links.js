@@ -1248,6 +1248,8 @@ async function immediateOnlyLinkSendCheck(body) {
   // ...and a consultation credential anywhere in a FOREIGN URL (Codex #4709
   // r12–r15 P1): parked here so the send-time check refuses it.
   if (await strayConsultationCredentialPresent(runs, hosts)) return { present: true, label: 'Consultation link' };
+  // ...and a live moving token outside a canonical moving link (#7486).
+  if (await strayMovingTokenPresent(runs, hosts)) return { present: true, label: 'Moving' };
   return { present: false };
 }
 
@@ -1595,13 +1597,44 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
 // is not closed (else its link is a 404). A look-alike host is not a Waves
 // link and is not judged. A gates module without the reader (a test mock)
 // reads as off: fail closed.
+function movingGateOn() {
+  const gates = require('../config/feature-gates');
+  return typeof gates.movingFlowLive === 'function' && gates.movingFlowLive();
+}
+// A live moving token ANYWHERE in the message other than a canonical owned
+// /moving/<token> link (GH Codex security review on #7486): a foreign host
+// that redirects to the real page, a query parameter, a percent-encoded or
+// nested copy would all skip the owner binding. Every run that is not a
+// canonical moving link is fully decoded, and every 48-hex window is looked
+// up against moves that still open. Gate off: every moving page is a 404, so
+// nothing is looked up.
+async function strayMovingTokenPresent(runs, hosts, conn = db) {
+  if (!movingGateOn()) return false;
+  const windows = new Set();
+  for (const raw of runs) {
+    const run = raw.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, '');
+    if (canonicalPortalToken(run, hosts, MOVING_PATH_RE, ANY_SCHEME)) continue;
+    const decoded = fullyDecoded(ownedHostStripped(run, hosts)).toLowerCase();
+    for (const m of decoded.matchAll(/[a-f0-9]{48,}/g)) {
+      for (let i = 0; i + 48 <= m[0].length; i += 1) windows.add(m[0].slice(i, i + 48));
+    }
+  }
+  const all = [...windows];
+  for (let i = 0; i < all.length; i += 500) {
+    if (await conn('customer_moves').whereIn('token', all.slice(i, i + 500)).whereNot({ status: 'closed' }).first('id')) return true;
+  }
+  return false;
+}
+
 async function checkMovingLinks(ctx, moveIds) {
+  if (await strayMovingTokenPresent(ctx.runs, ctx.hosts)) {
+    return refuseSend('This text carries a moving link outside the Waves portal address — remove it and insert the moving link as itself.');
+  }
   const onRecipientAccount = recipientAccountBinder(ctx);
   for (const run of linkRuns(ctx.runs, /\/moving\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, MOVING_PATH_RE, ANY_SCHEME);
     if (!token) continue;
-    const gates = require('../config/feature-gates');
-    if (!(typeof gates.movingFlowLive === 'function' && gates.movingFlowLive())) {
+    if (!movingGateOn()) {
       return refuseSend('Moving links are switched off (GATE_MOVING_FLOW) — remove the moving link before sending.');
     }
     const move = await db('customer_moves').where({ token: token.toLowerCase() }).first('id', 'customer_id', 'status');
