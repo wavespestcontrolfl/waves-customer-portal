@@ -4715,6 +4715,10 @@ const gates = {
   // service reads process.env directly (strict '==='), so a flip needs no
   // redeploy; this entry is for logGateStatus.
   techOpenVisitNudge: process.env.GATE_TECH_OPEN_VISIT_NUDGE === 'true',
+  // Owner 2026-11-02: the same 7 PM text also lists re-services still open
+  // from earlier days (last 30). Strict 'true'; the nudge service reads
+  // process.env directly at call time; this entry is for logGateStatus.
+  reserviceOpenCarryover: process.env.GATE_RESERVICE_OPEN_CARRYOVER === 'true',
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
