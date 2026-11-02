@@ -89,18 +89,17 @@ jest.setTimeout(60000);
     expect(await load(id)).toMatchObject({ contactPhone: '+15557654321', ourEndpoint: '+19415550000', peer: '5557654321' });
   });
 
-  test('an earlier text does not block the like; any later text does, and only a customer text counts at the provider boundary', async () => {
+  test('an earlier text does not block the like; a later text in either direction does', async () => {
     const convo = await thread();
     await text(convo.id, { direction: 'outbound', body: 'Your technician arrives Tuesday.', minute: 2 });
     const target = await load(await text(convo.id));
     expect(await officeLike.newerThreadMessageExists(database, target)).toBe(false);
 
+    await text(convo.id, { minute: 17, body: 'Actually, can you check the garage?' });
+    expect(await officeLike.newerThreadMessageExists(database, target)).toBe(true);
+    await database('messages').where({ body: 'Actually, can you check the garage?' }).del();
     await text(convo.id, { direction: 'outbound', body: 'Anything else?', minute: 16 });
     expect(await officeLike.newerThreadMessageExists(database, target)).toBe(true);
-    expect(await officeLike.newerThreadMessageExists(database, target, { inboundOnly: true })).toBe(false);
-
-    await text(convo.id, { minute: 17, body: 'Actually, can you check the garage?' });
-    expect(await officeLike.newerThreadMessageExists(database, target, { inboundOnly: true })).toBe(true);
   });
 
   test('a later text with the same phone on another of our lines counts', async () => {
@@ -118,11 +117,26 @@ jest.setTimeout(60000);
     await logRow({ direction: 'inbound', sid: 'SM-liked', minute: 15 });
     expect(await officeLike.newerThreadMessageExists(database, target)).toBe(false);
 
+    await logRow({ direction: 'inbound', minute: 18, phone: '9415551234' });
+    expect(await officeLike.newerThreadMessageExists(database, target)).toBe(false);
     await logRow({ direction: 'outbound', minute: 16 });
     expect(await officeLike.newerThreadMessageExists(database, target)).toBe(true);
-    expect(await officeLike.newerThreadMessageExists(database, target, { inboundOnly: true })).toBe(false);
-    await logRow({ direction: 'inbound', minute: 18, phone: '9415551234' });
-    expect(await officeLike.newerThreadMessageExists(database, target, { inboundOnly: true })).toBe(false);
+  });
+
+  test('at the provider boundary only the like\'s own reservation row is left out', async () => {
+    const convo = await thread();
+    const target = await load(await text(convo.id));
+    const reservation = randomUUID();
+    await database('sms_log').insert({
+      id: reservation, direction: 'outbound', twilio_sid: null, status: 'sending', message_body: 'thumbs-up',
+      from_phone: OUR_LINE, to_phone: PHONE, created_at: at(16),
+    });
+    expect(await officeLike.newerThreadMessageExists(database, target)).toBe(true);
+    expect(await officeLike.newerThreadMessageExists(database, target, { excludeLogIds: [reservation] })).toBe(false);
+
+    // Another staff reply that landed between the route's check and the send still counts.
+    await logRow({ direction: 'outbound', minute: 17 });
+    expect(await officeLike.newerThreadMessageExists(database, target, { excludeLogIds: [reservation] })).toBe(true);
   });
 
   test('a historical backfill with no provider id: its own linked log twin does not block the like', async () => {
