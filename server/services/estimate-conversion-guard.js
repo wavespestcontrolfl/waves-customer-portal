@@ -27,12 +27,16 @@
  *     record, or an established-customer row — predating the estimate
  *     (whereNoConversionBeforeEstimate). Narrower than (1) so a live upsell
  *     estimate sent to a long-standing customer is never archived out from
- *     under Virginia.
+ *     under Virginia. A completed Waves Assessment is NOT a conversion
+ *     signal (owner ruling 2026-09-08, assessment-booking.js): it is a free
+ *     consultation, not a sale, so an estimate whose only completed visit is
+ *     an assessment stays open.
  */
 
 const db = require("../models/db");
 const logger = require("./logger");
 const { CUSTOMER_STAGES } = require("./customer-stages");
+const { excludeAssessmentBookings } = require("./assessment-booking");
 
 // Appointment rows that leave NO live booking behind — the repo's terminal
 // convention (waveguard-existing-services TERMINAL_STATUSES) minus
@@ -112,10 +116,20 @@ function whereConversionEligibilitySignal(query) {
         // completed_at would leave a legacy-only customer permanently
         // ineligible, so their converted estimate would fall through to
         // expiration instead of being archived.
-        this.select(db.raw("1"))
+        //
+        // A completed Waves Assessment is NOT a conversion (owner ruling
+        // 2026-09-08, assessment-booking.js): it is a free consultation, not
+        // a sale. Catalog identity wins and legacy rows with no service_id
+        // fall back to the service_type snapshot (excludeAssessmentBookings).
+        // The sibling whereNoConversionBeforeEstimate stays deliberately
+        // broad and still counts an assessment that PREDATES the estimate:
+        // that fails toward KEEPING the estimate, never toward archiving it.
+        const completedVisit = this.select(db.raw("1"))
           .from("scheduled_services")
+          .leftJoin("services", "services.id", "scheduled_services.service_id")
           .whereRaw("scheduled_services.customer_id = estimates.customer_id")
           .where("scheduled_services.status", "completed");
+        excludeAssessmentBookings(completedVisit);
       }),
   );
 }

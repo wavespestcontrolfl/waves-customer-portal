@@ -66,7 +66,7 @@ function makeBuilder(table, cfg = {}, calls = []) {
   for (const m of [
     'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot',
     'whereRaw', 'select', 'from', 'groupBy', 'max', 'as', 'join', 'andWhere',
-    'orWhereNull',
+    'orWhereNull', 'leftJoin',
   ]) {
     b[m] = jest.fn(record(m));
   }
@@ -353,6 +353,58 @@ describe('archiveConvertedOpenEstimates', () => {
           c.args?.[0] === 'scheduled_services.completed_at',
       ),
     ).toBeUndefined();
+
+    // A completed Waves Assessment is a free consultation, not a sale (owner
+    // ruling 2026-09-08): the completed-visit signal left-joins services and
+    // applies the assessment SQL twin (catalog identity wins, NULL-safe for
+    // legacy rows with no service_id). The paid-invoice signal is untouched.
+    const completedVisitFrom = calls.findIndex(
+      (c) => c.m === 'from' && c.args?.[0] === 'scheduled_services',
+    );
+    const servicesJoin = calls.findIndex(
+      (c) =>
+        c.m === 'leftJoin' &&
+        c.args[0] === 'services' &&
+        c.args[1] === 'services.id' &&
+        c.args[2] === 'scheduled_services.service_id',
+    );
+    const assessmentExclusion = calls.findIndex(
+      (c) =>
+        c.m === 'whereRaw' &&
+        typeof c.args?.[0] === 'string' &&
+        c.args[0].includes('NOT (CASE WHEN ?? IS NOT NULL') &&
+        c.args[1].includes('scheduled_services.service_type') &&
+        c.args[1].includes('services.service_key') &&
+        c.args[1].includes('lawn_inspection') &&
+        c.args[1].includes('waves assessment'),
+    );
+    expect(completedVisitFrom).toBeGreaterThanOrEqual(0);
+    expect(servicesJoin).toBeGreaterThan(completedVisitFrom);
+    expect(assessmentExclusion).toBeGreaterThan(servicesJoin);
+    // Exactly one join and one exclusion: the none-before disqualifiers stay
+    // deliberately broad (an assessment BEFORE the estimate keeps it).
+    expect(calls.filter((c) => c.m === 'leftJoin')).toHaveLength(1);
+    expect(
+      calls.filter(
+        (c) =>
+          c.m === 'whereRaw' &&
+          typeof c.args?.[0] === 'string' &&
+          c.args[0].includes('NOT (CASE WHEN ?? IS NOT NULL'),
+      ),
+    ).toHaveLength(1);
+    // Paid-invoice signal still archives on its own.
+    const paidInvoiceSignal = calls.findIndex(
+      (c) =>
+        c.m === 'where' &&
+        c.args?.[0] === 'invoices.status' &&
+        c.args?.[1] === 'paid',
+    );
+    const invoiceFrom = calls.findIndex(
+      (c) => c.m === 'from' && c.args?.[0] === 'invoices',
+    );
+    expect(invoiceFrom).toBeGreaterThanOrEqual(0);
+    expect(paidInvoiceSignal).toBeGreaterThan(invoiceFrom);
+    expect(paidInvoiceSignal).toBeLessThan(completedVisitFrom);
 
     // Money guard: a received (unconsumed) acceptance deposit blocks the
     // archive — archived rows never expire, and the terminal-deposit refund
