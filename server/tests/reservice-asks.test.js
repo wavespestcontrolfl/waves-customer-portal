@@ -1,0 +1,394 @@
+/**
+ * gatherReserviceAsks (GATE_RESERVICE_ASKS, step S1 of the consolidated
+ * re-service report): every message in which a customer described the problem
+ * behind a pest or lawn re-service, from 10 days before the booking to now.
+ * A fake knex serves each table's rows; synthetic names only.
+ */
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const logger = require('../services/logger');
+const {
+  gatherReserviceAsks, ASKS_LOOKBACK_DAYS, MAX_ITEMS, _test,
+} = require('../services/reservice-asks');
+
+const DAY = 24 * 60 * 60 * 1000;
+const NOW = new Date('2026-11-02T15:00:00Z');
+const BOOKED = new Date('2026-10-28T14:00:00Z');
+
+function baseVisit(over = {}) {
+  return {
+    id: 'visit-1',
+    customer_id: 'cust-1',
+    service_type: 'Pest Control Re-Service',
+    is_callback: true,
+    service_key: 'pest_re_service',
+    created_at: BOOKED,
+    notes: null,
+    customer_request: null,
+    customer_request_source: null,
+    customer_request_pests: null,
+    ...over,
+  };
+}
+
+// Chainable stand-in: the visit read ends in first(); every other read is
+// awaited as a list. `fail` makes a table's read reject with that error.
+function fakeKnex({
+  visit = baseVisit(), sms = [], calls = [], emails = [], requests = [], fail = {},
+} = {}) {
+  const rowsByTable = {
+    sms_log: sms, call_log: calls, emails, service_requests: requests,
+  };
+  const seen = [];
+  const knex = (table) => {
+    seen.push(table);
+    const q = {};
+    for (const m of ['where', 'whereRaw', 'leftJoin', 'select', 'orderBy', 'limit', 'modify']) q[m] = (...args) => { if (m === 'modify' && typeof args[0] === 'function') args[0](q); return q; };
+    q.first = async () => visit;
+    q.then = (resolve, reject) => (fail[table]
+      ? Promise.reject(fail[table])
+      : Promise.resolve(rowsByTable[table] || [])).then(resolve, reject);
+    return q;
+  };
+  knex.seen = seen;
+  return knex;
+}
+
+const gather = (opts = {}, visitId = 'visit-1') => gatherReserviceAsks(visitId, { knex: fakeKnex(opts), now: NOW });
+
+const sms = (id, body, at = new Date(NOW - 2 * DAY), extra = {}) => ({
+  id, message_body: body, message_type: 'sms_inbound', created_at: at, ...extra,
+});
+
+function v2Call(id, quote, at = new Date(NOW - 3 * DAY), extra = {}) {
+  return {
+    id,
+    created_at: at,
+    v2_extraction_status: 'valid',
+    processing_status: 'completed',
+    call_outcome: null,
+    answered_by: null,
+    ai_extraction: null,
+    ai_extraction_enriched: { evidence: [{ speaker: 'caller', field_path: 'service_request.description', quote }] },
+    ...extra,
+  };
+}
+
+beforeEach(() => jest.clearAllMocks());
+
+describe('visit gate', () => {
+  test('no row is not_found', async () => {
+    expect(await gather({ visit: null })).toEqual({ ok: false, reason: 'not_found' });
+  });
+
+  test('an ordinary visit is not_reservice', async () => {
+    expect(await gather({ visit: baseVisit({ is_callback: false, service_key: 'pest_quarterly' }) }))
+      .toEqual({ ok: false, reason: 'not_reservice' });
+  });
+
+  test('the rodent trapping follow-up is refused even as a callback', async () => {
+    expect(await gather({ visit: baseVisit({ is_callback: true, service_key: 'rodent_trapping_followup' }) }))
+      .toEqual({ ok: false, reason: 'not_reservice' });
+  });
+
+  test.each([
+    [{ is_callback: false, service_key: 'lawn_re_service' }, 'lawn'],
+    [{ is_callback: false, service_key: 'pest_re_service' }, 'pest'],
+    [{ is_callback: true, service_key: null, service_type: 'Lawn Care Re-Service' }, 'lawn'],
+    [{ is_callback: true, service_key: null, service_type: 'Pest Control Re-Service' }, 'pest'],
+  ])('a re-service %j has lane %s', async (over, lane) => {
+    const out = await gather({ visit: baseVisit(over) });
+    expect(out.ok).toBe(true);
+    expect(out.lane).toBe(lane);
+  });
+
+  test('the window runs from 10 days before the booking to now', async () => {
+    const out = await gather();
+    expect(ASKS_LOOKBACK_DAYS).toBe(10);
+    expect(out.window).toEqual({
+      from: new Date(BOOKED.getTime() - 10 * DAY).toISOString(),
+      to: NOW.toISOString(),
+    });
+    expect(out.items).toEqual([]);
+  });
+
+  test('a visit read failure throws', async () => {
+    const knex = () => { throw new Error('db down'); };
+    await expect(gatherReserviceAsks('visit-1', { knex, now: NOW })).rejects.toThrow('db down');
+  });
+});
+
+describe('booking words', () => {
+  test('picker words are quoted and carry the request_form source', async () => {
+    const { items } = await gather({ visit: baseVisit({ customer_request: 'Ants are back in the kitchen.', customer_request_source: 'picker' }) });
+    expect(items).toEqual([{
+      id: 'booking:visit-1',
+      source: 'request_form',
+      at: BOOKED.toISOString(),
+      text: 'Ants are back in the kitchen.',
+      quoted: true,
+      lead: null,
+      kind: 'problem',
+      pests: ['Ants'],
+    }]);
+  });
+
+  test('picker words win over the chips', async () => {
+    const { items } = await gather({ visit: baseVisit({ customer_request: 'Ants in the pantry', customer_request_source: 'picker', customer_request_pests: ['spiders'] }) });
+    expect(items).toHaveLength(1);
+    expect(items[0].text).toBe('Ants in the pantry');
+  });
+
+  test('chips only read "Picked: ..." and are not quoted', async () => {
+    const { items } = await gather({ visit: baseVisit({ customer_request_source: 'picker', customer_request_pests: ['ants', 'roaches', 'bogus'] }) });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      text: 'Picked: Ants, Roaches', quoted: false, lead: null, source: 'request_form', kind: 'problem',
+    });
+    expect(items[0].pests).toEqual(expect.arrayContaining(['Ants', 'Cockroaches']));
+  });
+
+  test('lawn chips use the lawn labels', async () => {
+    const { items } = await gather({ visit: baseVisit({ service_key: 'lawn_re_service', customer_request_pests: ['weeds', 'brown_patches'] }) });
+    expect(items[0].text).toBe('Picked: Weeds, Brown or dead patches');
+  });
+
+  test.each([
+    ['text', { source: 'text', quoted: true, lead: null }],
+    ['call', { source: 'call', quoted: false, lead: 'On your call, you mentioned' }],
+    ['office', { source: 'office', quoted: false, lead: 'As reported to our office:' }],
+  ])('a %s booking source follows its quote and lead rule', async (source, expected) => {
+    const { items } = await gather({ visit: baseVisit({ customer_request: 'Roaches under the sink.', customer_request_source: source }) });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ text: 'Roaches under the sink.', ...expected });
+  });
+
+  test('words with an unknown source are not shown', async () => {
+    const { items } = await gather({ visit: baseVisit({ customer_request: 'Roaches under the sink.', customer_request_source: 'mystery' }) });
+    expect(items).toEqual([]);
+  });
+
+  test('a legacy booking falls back to its "Re-service request: " notes line', async () => {
+    const { items } = await gather({
+      visit: baseVisit({ notes: 'Self-booked. Notes: Re-service request: wasps are back at the porch — Unit: 5' }),
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: 'booking:visit-1', source: 'request_form', quoted: true, text: 'wasps are back at the porch', lead: null,
+    });
+  });
+
+  test('the notes fallback needs a request line, not the plain self-serve note', async () => {
+    const { items } = await gather({ visit: baseVisit({ notes: 'Self-booked. Notes: Re-service requested via self-serve link' }) });
+    expect(items).toEqual([]);
+  });
+
+  test('legacyRequestText reads the chip form too', () => {
+    expect(_test.legacyRequestText('Re-service request (Ants, Wasps): ants are back')).toBe('ants are back');
+    expect(_test.legacyRequestText('nothing here')).toBeNull();
+  });
+});
+
+describe('texts', () => {
+  test('an inbound text is quoted and keeps its id and time', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const { items } = await gather({ sms: [sms('s1', 'The ants came back after the spray.', at)] });
+    expect(items).toEqual([{
+      id: 'text:s1', source: 'text', at: at.toISOString(), text: 'The ants came back after the spray.', quoted: true, lead: null, kind: 'problem', pests: ['Ants'],
+    }]);
+  });
+
+  test('tapbacks, STOP and empty texts are dropped', async () => {
+    const { items } = await gather({
+      sms: [
+        sms('s1', 'Liked "Your visit is confirmed for Tuesday"'),
+        sms('s2', 'STOP'),
+        sms('s3', '   '),
+        sms('s4', 'Roaches in the garage again', undefined, { message_type: 'sms_reaction' }),
+        sms('s5', 'Still seeing ants by the door'),
+      ],
+    });
+    expect(items.map((item) => item.id)).toEqual(['text:s5']);
+  });
+
+  test('a text that repeats the booking words is dropped', async () => {
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: 'Ants are back in the kitchen', customer_request_source: 'text' }),
+      sms: [sms('s1', 'ants are BACK in the kitchen!'), sms('s2', 'Also some spiders by the window')],
+    });
+    expect(items.map((item) => item.id)).toEqual(['booking:visit-1', 'text:s2']);
+  });
+
+  test('a text with nothing about the problem is left out after the scrub', async () => {
+    const { items } = await gather({ sms: [sms('s1', 'Thanks, see you Tuesday.')] });
+    expect(items).toEqual([]);
+  });
+});
+
+describe('calls', () => {
+  test('a validated V2 caller quote is paraphrased with the Eastern call day', async () => {
+    const at = new Date('2026-10-26T01:30:00Z'); // 9:30 PM ET on Oct 25
+    const { items } = await gather({ calls: [v2Call('c1', 'There are ants all over the kitchen counter', at)] });
+    expect(items).toEqual([{
+      id: 'call:c1',
+      source: 'call',
+      at: at.toISOString(),
+      text: 'There are ants all over the kitchen counter',
+      quoted: false,
+      lead: 'On your call on Oct 25, you mentioned',
+      kind: 'problem',
+      pests: ['Ants'],
+    }]);
+  });
+
+  test('a call without a valid V2 extraction, or a voicemail, adds nothing', async () => {
+    const { items } = await gather({
+      calls: [
+        v2Call('c1', 'Ants in the kitchen', undefined, { v2_extraction_status: 'invalid' }),
+        v2Call('c2', 'Ants in the kitchen', undefined, { processing_status: 'voicemail' }),
+        { id: 'c3', created_at: new Date(NOW - DAY), call_summary: 'Customer reports ants.', v2_extraction_status: null },
+      ],
+    });
+    expect(items).toEqual([]);
+  });
+
+  test('callDay uses the Eastern calendar day', () => {
+    expect(_test.callDay('2026-10-26T01:30:00Z')).toBe('Oct 25');
+    expect(_test.callDay('2026-10-26T12:00:00Z')).toBe('Oct 26');
+  });
+});
+
+describe('emails and portal requests', () => {
+  test('an email keeps only the customer reply, not the quoted thread or signature', async () => {
+    const { items } = await gather({
+      emails: [{
+        id: 'e1',
+        received_at: new Date(NOW - 4 * DAY),
+        from_address: 'customer@example.com',
+        label_ids: ['INBOX'],
+        body_text: 'We still see ants near the sink.\n\nThanks,\nSam\n\nOn Mon, Oct 26, 2026 at 9:00 AM Waves <hello@wavespestcontrol.com> wrote:\n> Your technician will arrive Tuesday for roaches.',
+      }],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 'email:e1', source: 'email', quoted: true, lead: null });
+    expect(items[0].text).toContain('We still see ants near the sink.');
+    expect(items[0].text).not.toMatch(/technician will arrive|roaches/i);
+  });
+
+  test('mail Waves sent is dropped', async () => {
+    const { items } = await gather({
+      emails: [
+        { id: 'e1', received_at: new Date(NOW - DAY), from_address: 'x@example.com', label_ids: ['SENT'], body_text: 'Ants are handled.' },
+        { id: 'e2', received_at: new Date(NOW - DAY), from_address: 'Office <office@wavespestcontrol.com>', label_ids: [], body_text: 'Ants are handled.' },
+      ],
+    });
+    expect(items).toEqual([]);
+  });
+
+  test('a portal request uses the description, else the subject', async () => {
+    const at = new Date(NOW - 5 * DAY);
+    const { items } = await gather({
+      requests: [
+        { id: 'r1', created_at: at, subject: 'Pest question', description: 'Spiders in the lanai every night.' },
+        { id: 'r2', created_at: new Date(NOW - DAY), subject: 'Wasps at the front door', description: null },
+      ],
+    });
+    expect(items.map((item) => [item.id, item.text, item.source, item.quoted])).toEqual([
+      ['portal_request:r1', 'Spiders in the lanai every night.', 'portal_request', true],
+      ['portal_request:r2', 'Wasps at the front door', 'portal_request', true],
+    ]);
+  });
+});
+
+describe('scrub in the reservice lane', () => {
+  test('keeps product and household talk, drops scheduling talk', async () => {
+    const { items } = await gather({
+      sms: [sms('s1', 'Do you know when you will be here? Used Bifenthrin before? Our cat gets sick if we let her out on the lanai.')],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].text).toBe('Used Bifenthrin before? Our cat gets sick if we let her out on the lanai.');
+    expect(items[0].kind).toBe('question');
+  });
+
+  test('access details and codes never come through', async () => {
+    const { items } = await gather({
+      sms: [sms('s1', 'The gate code is 4821. The ants are by the side gate.')],
+    });
+    expect(JSON.stringify(items)).not.toContain('4821');
+  });
+
+  test('booking words pass the scrub too', async () => {
+    const { items } = await gather({ visit: baseVisit({ customer_request: 'Please come after lunch. Ants in the bathroom.', customer_request_source: 'picker' }) });
+    expect(items[0].text).toBe('Ants in the bathroom.');
+  });
+
+  test('words with nothing relevant are dropped whole', async () => {
+    const { items } = await gather({ visit: baseVisit({ customer_request: 'Call me first.', customer_request_source: 'office' }) });
+    expect(items).toEqual([]);
+  });
+});
+
+describe('caps and order', () => {
+  test('items come oldest first', async () => {
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' }),
+      sms: [sms('s1', 'More ants today', new Date(NOW - DAY)), sms('s2', 'Ants last week', new Date(BOOKED.getTime() - 4 * DAY))],
+    });
+    expect(items.map((item) => item.id)).toEqual(['text:s2', 'booking:visit-1', 'text:s1']);
+  });
+
+  test('over 10 items keeps the booking item and the 9 newest others, oldest first', async () => {
+    const texts = Array.from({ length: 14 }, (_, i) => sms(`s${i}`, `Ants again, sighting ${i}`, new Date(BOOKED.getTime() - 9 * DAY + i * DAY / 2)));
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' }),
+      sms: texts,
+    });
+    expect(MAX_ITEMS).toBe(10);
+    expect(items).toHaveLength(10);
+    expect(items.some((item) => item.id === 'booking:visit-1')).toBe(true);
+    const others = items.filter((item) => item.id !== 'booking:visit-1').map((item) => item.id);
+    expect(others).toEqual(texts.slice(5).map((row) => `text:${row.id}`));
+    expect(items.map((item) => item.at)).toEqual([...items.map((item) => item.at)].sort());
+  });
+
+  test('a long text is cut at a word boundary within 280 characters', async () => {
+    const long = `${'The ants keep coming back into the kitchen and the pantry '.repeat(8)}end.`;
+    const { items } = await gather({ sms: [sms('s1', long)] });
+    expect(items[0].text.length).toBeLessThanOrEqual(280);
+    expect(items[0].text.endsWith('…')).toBe(true);
+    expect(items[0].text).not.toMatch(/\s…$/);
+  });
+
+  test('a question mark makes the item a question', async () => {
+    const { items } = await gather({ sms: [sms('s1', 'Are the ants gone for good?'), sms('s2', 'The ants are gone.')] });
+    expect(Object.fromEntries(items.map((item) => [item.id, item.kind]))).toEqual({ 'text:s1': 'question', 'text:s2': 'problem' });
+  });
+});
+
+describe('failed channel', () => {
+  test('one failed read leaves the other channels intact and logs its code', async () => {
+    const err = Object.assign(new Error('relation missing'), { code: '42P01' });
+    const out = await gather({
+      visit: baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' }),
+      sms: [sms('s1', 'Ants again today')],
+      emails: [{ id: 'e1', received_at: new Date(NOW - DAY), from_address: 'c@example.com', label_ids: [], body_text: 'Spiders on the porch' }],
+      fail: { call_log: err },
+    });
+    expect(out.ok).toBe(true);
+    expect(out.items.map((item) => item.id).sort()).toEqual(['booking:visit-1', 'email:e1', 'text:s1']);
+    expect(logger.warn).toHaveBeenCalledWith('[reservice-asks] call unavailable: 42P01');
+  });
+
+  test('an error without a code logs its name', async () => {
+    await gather({ fail: { service_requests: new TypeError('boom') } });
+    expect(logger.warn).toHaveBeenCalledWith('[reservice-asks] portal_request unavailable: TypeError');
+  });
+});
+
+describe('pestsIn', () => {
+  test('finds whole picker names and families, singular or plural', () => {
+    expect(_test.pestsIn('Fire ants by the mailbox')).toEqual(['Fire ants']);
+    expect(_test.pestsIn('an ant and a roach')).toEqual(expect.arrayContaining(['Ants', 'Cockroaches']));
+    expect(_test.pestsIn('Nothing to see')).toEqual([]);
+  });
+});

@@ -417,6 +417,7 @@
  *   GATE_LEAD_SERVICE_DISPLAY=true (Lead service names, owner 2026-10-09: the lead list and lead detail responses carry `service_display`, the lead's service named the way the booking catalog names it, and the Leads screen shows it with the stored text as a tooltip; lead search also matches the shown name. Display only: `leads.service_interest` is never rewritten and nothing is sent to a customer. Strict opt-in: exactly 'true', read at call time via leadServiceDisplayLive(). Ships DARK; off = the screen shows the stored text.)
  *   GATE_TS_NEONIC_CAP=true (Tree & Shrub yearly neonicotinoid cap per property, owner 2026-10-09, tech-facing; server/services/tree-shrub-neonic-ledger.js, server/config/tree-shrub-neonic-caps.js: Zylam and Safari share one dinotefuran cap, Merit has its own imidacloprid cap, each a label amount per acre per calendar year scaled to the property's bed area (customer_properties.bed_sqft); dinotefuran counts from any visit at the property, imidacloprid from tree & shrub visits only. GET /:serviceId/tree-shrub/fast-context adds `neonicCap`, the Fast Complete sheet shows how much of each capped product is left this year and holds Complete when an entered amount passes it. Like the live-insect check the hold is the sheet's; /complete does not refuse. No bed area = the yearly amount cannot be computed and the amount check blocks nothing; the application-count hold and the no-limit-on-file hold need no bed area and still apply. Nothing reaches the customer. Strict opt-in: exactly 'true' in every environment, read at call time via tsNeonicCapLive(). Ships DARK; off = fast-context has no neonicCap key and /complete never checks.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
+ *   GATE_RESERVICE_ASKS=true (Re-service asks, step S1 of the consolidated re-service report, owner 2026-11-02: GET /:serviceId/reservice-asks answers every message in which the customer described the problem behind a pest or lawn re-service (booking words, texts, calls, emails, portal requests, 10 days before the booking to now) through services/reservice-asks.js, and the AI report writer's one-time window on a re-service opens 10 days before the booking instead of at it. Read-only. Strict opt-in: exactly 'true' in every environment, read at call time via reserviceAsksLive(). Ships DARK; off = the route answers 404 {enabled:false} and the writer's window is as before.)
  *   GATE_FAST_COMPLETE_VOICE_FILL=true (Fast Complete voice fill, server half: POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip transcribes the sheet's recording with our own transcriber and maps what the technician said onto the pest re-service sheet's own product, pest, where, how and activity choices through one structured model call (services/fast-complete-voice-fill.js), validated server-side so anything off-list or unspoken, including any amount without a spoken number, comes back as an `unclear` item, and splits the note into a customer note and an office note. Nothing is stored; the audit line carries counts only, never the audio, the transcript or notes. Strict opt-in: exactly 'true' in every environment, read at call time via fastCompleteVoiceFillLive(). The report flow (GATE_FAST_COMPLETE_REPORT: any untyped pest visit, and any specialty visit the sheet reads a lane or typed record for) has its own two reads under the same gate: .../voice-fill/dictation answers one clip as words for the note box, and .../voice-fill/products reads the products the note names when the report is written; the sheet lands them as rows the technician confirms. The lawn re-service sheet (GATE_LAWN_RESERVICE_FAST_COMPLETE also on) uses the same two reads against its own catalog and ways. Ships DARK; off = each route answers 404 {enabled:false}.)
  *   GATE_FAST_COMPLETE_INVOICED_VISITS=true (Fast Complete for a visit already invoiced or returning from the payment flow, owner 2026-10-09: admin Dispatch opens the visit's one-screen sheet instead of the full form, and the sheet posts invoiceAlreadySent: true exactly when the full form does (the visit carries completionInvoiceAlreadySent), so /complete takes the same branch: no second pay-link text, the existing invoice reused, a paid invoice left paid. The schedule row's `invoicedVisitFastCompleteEnabled` carries the gate. Strict opt-in: exactly 'true', read at call time via fastCompleteInvoicedVisitsLive(). Ships DARK; off = the full form, as before.)
  *   GATE_NOTE_BOX_PHOTOS=true (Photos in the notes box, owner "ok go" 2026-10-02 on the Fast Complete mockup v8: the office Complete Service form puts the visit's photos inside the notes box, each with a short description typed or dictated that rides as the photo's caption to the report writer and the customer's report, and the separate photo section goes away. The schedule payload carries `noteBoxPhotosEnabled` per service, never for lawn or tree, shrub & palm. Strict opt-in: exactly 'true', read at call time via noteBoxPhotosLive(). Ships DARK; off = the form's photo section exactly as before.)
@@ -5282,6 +5283,12 @@ const gates = {
   // and admin-schedule.js read GATE_LAWN_RESERVICE_FAST_COMPLETE at call time via
   // lawnReserviceFastCompleteLive().
   lawnReserviceFastComplete: process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE === 'true',
+  // Re-service asks (owner 2026-11-02, step S1 of the consolidated re-service
+  // report): the customer's own words about the problem behind a re-service.
+  // Ships DARK in every environment. This entry is for logGateStatus only:
+  // admin-dispatch.js and completion-comms-context.js read GATE_RESERVICE_ASKS
+  // at call time via reserviceAsksLive().
+  reserviceAsks: process.env.GATE_RESERVICE_ASKS === 'true',
   // Lawn Fast Complete (lawn report rebuild, PR-C1): the one-screen completion
   // sheet for a regular recurring lawn program visit. Ships DARK in every
   // environment. This entry is for logGateStatus only: admin-dispatch.js,
@@ -5900,6 +5907,13 @@ function tsTechParagraphLive() {
 // fast-context route and the schedule payload's `lawnReserviceFastCompleteEnabled`.
 function lawnReserviceFastCompleteLive() {
   return process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE === 'true';
+}
+
+// GATE_RESERVICE_ASKS read at CALL time — strict `=== 'true'`, dark in every
+// environment. The canonical reader for the re-service asks route and the
+// report writer's wider one-time window on a re-service.
+function reserviceAsksLive() {
+  return process.env.GATE_RESERVICE_ASKS === 'true';
 }
 
 // GATE_LAWN_FAST_COMPLETE read at CALL time — strict `=== 'true'`, dark in every
@@ -10178,3 +10192,5 @@ module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 module.exports.techSetTextsLive = techSetTextsLive;
 // GATE_EMAIL_DRAFT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.emailDraftFactsLive = emailDraftFactsLive;
+// GATE_RESERVICE_ASKS reader, on its own line so gate PRs never conflict.
+module.exports.reserviceAsksLive = reserviceAsksLive;

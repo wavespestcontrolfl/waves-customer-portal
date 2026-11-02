@@ -100,6 +100,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | PUT | `/api/admin/dispatch/:serviceId/reorder` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/reschedule` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/reschedule-options` | admin-dispatch |
+| GET | `/api/admin/dispatch/:serviceId/reservice-asks` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/schedule-followup` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/series-move-preview` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/standard-wording` | admin-dispatch |

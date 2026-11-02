@@ -79,7 +79,7 @@ const {
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive, lawnFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, reserviceAsksLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 const { resolveSeriesTextRelease, COALESCE_SURFACES: SERIES_TEXT_COALESCE_SURFACES, SERIES_TEXT_HOLD_MS, SERIES_TEXT_HELD_WINDOW_MS } = require('../services/series-move-text-coalesce');
 
@@ -4934,6 +4934,28 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
       return res.status(status).json({ error: ctx.reason, code: ctx.reason });
     }
     const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/reservice-asks
+// Every message in which the customer described the problem behind a pest or
+// lawn re-service: the booking words, texts, calls, emails and portal requests
+// from 10 days before the booking to now, each scrubbed and marked quoted or
+// paraphrased (step S1 of the consolidated re-service report). Read-only; dark
+// behind GATE_RESERVICE_ASKS (404 {enabled:false}, nothing read). A visit that
+// is not a re-service is refused (409 not_reservice). See
+// services/reservice-asks.js.
+router.get('/:serviceId/reservice-asks', async (req, res, next) => {
+  try {
+    if (!reserviceAsksLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const asks = await require('../services/reservice-asks').gatherReserviceAsks(req.params.serviceId);
+    if (!asks.ok) {
+      const status = asks.reason === 'not_reservice' ? 409 : recapStatusForReason(asks.reason);
+      return res.status(status).json({ error: asks.reason, code: asks.reason });
+    }
+    const { ok, ...body } = asks;
     res.json({ enabled: true, ...body });
   } catch (err) { next(err); }
 });

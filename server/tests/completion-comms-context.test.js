@@ -560,3 +560,121 @@ describe('scrubCustomerText: bites without a pest word', () => {
     expect(scrubCustomerText('I will be a bit late today.')).toBe('');
   });
 });
+
+describe("scrubCustomerText: lane 'reservice' (GATE_RESERVICE_ASKS)", () => {
+  const { scrubCustomerText } = require('../services/completion-comms-context');
+
+  test('keeps product and household talk, drops scheduling talk', () => {
+    const text = 'Do you know when you will be here? Used Bifenthrin before? Our cat gets sick if we let her out on the lanai.';
+    expect(scrubCustomerText(text, { lane: 'reservice' }))
+      .toBe('Used Bifenthrin before? Our cat gets sick if we let her out on the lanai.');
+  });
+
+  test.each([
+    'They sprayed last week and it did nothing.',
+    'Is the treatment safe around the baby?',
+    'My toddler has asthma.',
+    'Do you use Talstar or Termidor?',
+    'The granules washed away.',
+    'We are pregnant and worried about the chemicals.',
+  ])('keeps %p', (sentence) => {
+    expect(scrubCustomerText(sentence, { lane: 'reservice' })).toBe(sentence);
+  });
+
+  test('still pest and lawn talk, and still drops access sentences and masks credentials', () => {
+    expect(scrubCustomerText('Weeds all over the lawn.', { lane: 'reservice' })).toBe('Weeds all over the lawn.');
+    expect(scrubCustomerText('The gate code is 4821. Ants by the pet bowl.', { lane: 'reservice' })).toBe('Ants by the pet bowl.');
+    expect(scrubCustomerText('My dog saw it at 4821.', { lane: 'reservice' })).toBe('My dog saw it at [redacted].');
+  });
+
+  test('the default and the lawn lane do not take the new words', () => {
+    const text = 'Our cat gets sick. Used Bifenthrin before? Is the product safe?';
+    expect(scrubCustomerText(text)).toBe('');
+    expect(scrubCustomerText(text, { lane: 'lawn' })).toBe('');
+    expect(scrubCustomerText('Weeds in the lawn. Thanks!', { lane: 'lawn' })).toBe('Weeds in the lawn.');
+    expect(scrubCustomerText('Ants in the lawn. Thanks!')).toBe('Ants in the lawn.');
+  });
+});
+
+describe('resolveContextWindow: re-service window (GATE_RESERVICE_ASKS)', () => {
+  const saved = process.env.GATE_RESERVICE_ASKS;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_RESERVICE_ASKS; else process.env.GATE_RESERVICE_ASKS = saved;
+  });
+
+  const booked = new Date(NOW - 20 * DAY);
+  const tenBefore = new Date(booked.getTime() - 10 * DAY);
+  const reserviceKnex = (over = {}, services = []) => stubKnex({
+    scheduled_services: [
+      { id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Re-Service', service_id: 'cat-1', is_callback: true, created_at: booked, ...over },
+    ],
+    services,
+    service_completion_profiles: [],
+  });
+
+  test('gate on: a callback opens the window 10 days before the booking', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    const win = await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex: reserviceKnex() });
+    expect(win.floor.getTime()).toBe(tenBefore.getTime());
+    expect(win.reason).toBe(`since 10 days before the booking (${tenBefore.toISOString().slice(0, 10)})`);
+  });
+
+  test('gate on: the catalog re-service keys count without the callback flag', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    for (const key of ['pest_re_service', 'lawn_re_service']) {
+      const win = await resolveContextWindow({
+        customerId: 'c1', scheduledServiceId: 'svc-1', knex: reserviceKnex({ is_callback: false }, [{ service_key: key }]),
+      });
+      expect(win.floor.getTime()).toBe(tenBefore.getTime());
+    }
+  });
+
+  test('gate on: an ordinary visit, and the rodent follow-up key, keep the booking origin', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    for (const knex of [
+      reserviceKnex({ is_callback: false }, [{ service_key: 'rodent_exclusion' }]),
+      reserviceKnex({ is_callback: false }, [{ service_key: 'rodent_trapping_followup' }]),
+      reserviceKnex({ is_callback: false, service_id: null }),
+    ]) {
+      const win = await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex });
+      expect(win.floor.getTime()).toBe(booked.getTime());
+      expect(win.reason).toContain('since the booking');
+    }
+  });
+
+  test('gate off: a callback keeps the booking origin and the select is unchanged', async () => {
+    delete process.env.GATE_RESERVICE_ASKS;
+    const firstArgs = [];
+    const base = reserviceKnex();
+    const knex = (table) => {
+      const q = base(table);
+      const first = q.first;
+      q.first = (...args) => { firstArgs.push([table, args]); return first(...args); };
+      return q;
+    };
+    const win = await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex });
+    expect(win.floor.getTime()).toBe(booked.getTime());
+    expect(win.reason).toBe(`since the booking (${booked.toISOString().slice(0, 10)})`);
+    expect(firstArgs[0]).toEqual(['scheduled_services', ['id', 'customer_id', 'service_type', 'service_id', 'recurring_parent_id', 'is_recurring', 'source_estimate_id', 'created_at', 'scheduled_date']]);
+    // No re-service catalog lookup (the profile resolver's own reads ask for more columns).
+    expect(firstArgs.filter(([table, args]) => table === 'services' && args.length === 1)).toEqual([]);
+  });
+
+  test('gate on: an accepted estimate still anchors first, and the cap still applies', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    const accepted = new Date(NOW - 5 * DAY);
+    const withEstimate = stubKnex({
+      scheduled_services: [{ id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Re-Service', is_callback: true, source_estimate_id: 'est-1', created_at: booked }],
+      estimates: [{ accepted_at: accepted }],
+      service_completion_profiles: [],
+    });
+    expect((await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex: withEstimate })).floor.getTime()).toBe(accepted.getTime());
+
+    const old = stubKnex({
+      scheduled_services: [{ id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Re-Service', is_callback: true, created_at: new Date(NOW - 400 * DAY) }],
+      service_completion_profiles: [],
+    });
+    const win = await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex: old });
+    expect(Math.abs(win.floor.getTime() - (NOW - ONE_TIME_CAP_DAYS * DAY))).toBeLessThan(60 * 1000);
+  });
+});
