@@ -102,6 +102,16 @@ const endSentence = (text) => (/[.?!…]["”')\]]?$/.test(text) ? text : `${tex
 // Customer words in quotation marks, then the sentence's end: “Ants are back.” takes no second period.
 const quotedEnd = (words) => (words ? ` “${words}”${/[.?!…]$/.test(words) ? '' : '.'}` : '.');
 
+// Where the whole office-only message is (the report and this row carry only its pest words): a text opens the
+// customer's text thread; a call or an email opens its Communications tab (neither has a per-message link); a request
+// form or an office note is on the visit itself.
+function messageLink(entry, customerId, visit) {
+  if (entry.source === 'text' && customerId) return `/admin/communications?thread=${encodeURIComponent(customerId)}`;
+  if (entry.source === 'call') return '/admin/communications#tab=calls';
+  if (entry.source === 'email') return '/admin/communications#tab=email';
+  return visit;
+}
+
 // The why covers the first row and counts the rest. One sentence, 110 characters.
 function whyFor(first, more) {
   const { cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
@@ -167,11 +177,9 @@ async function raiseReserviceOfficeBell({ freeze, customer, scheduledServiceId, 
       action,
       why: whyFor(rows[0], rows.length - 1),
       severity: 'needs-you',
-      // A visit to follow up opens the visit; office-only messages alone open the customer's messages, where the
-      // whole text is (the report and this row carry only the pest words).
-      link: area === 'Schedule' || !customer?.id
+      link: area === 'Schedule'
         ? visitLink(scheduledServiceId, scheduledDate)
-        : `/admin/communications?thread=${encodeURIComponent(customer.id)}`,
+        : messageLink(rows[0].entry, customer?.id, visitLink(scheduledServiceId, scheduledDate)),
       subject: { type: 'visit', id: String(scheduledServiceId) },
       doneWhen: 'visit_checked',
       who: 'person',

@@ -117,8 +117,19 @@ describe('raiseReserviceOfficeBell', () => {
     expect(opts.metadata.area).toBe('Customers');
     expect(opts.detail).toBe('Office only: a call on Nov 2 about damage to their things. Read the whole message; it is not on the report.');
     expect(opts.metadata.itemIds).toEqual(['a']);
-    // The whole message is in the customer's messages, not on the visit: the row opens their thread.
-    expect(opts.link).toBe(`/admin/communications?thread=${CUSTOMER.id}`);
+    // The whole call is on the Calls tab, not on the visit (calls have no per-call link).
+    expect(opts.link).toBe('/admin/communications#tab=calls');
+  });
+
+  test.each([
+    ['text', `/admin/communications?thread=00000000-0000-4000-8000-000000000803`],
+    ['email', '/admin/communications#tab=email'],
+    ['request_form', `/admin/dispatch?tab=schedule&date=2026-11-02&appointment=${VISIT_ID}`],
+    ['office', `/admin/dispatch?tab=schedule&date=2026-11-02&appointment=${VISIT_ID}`],
+  ])('an office-only %s opens where its whole message is', async (source, link) => {
+    await raise(freezeOf([item('a', { source, officeOnly: 'complaint' })]));
+
+    expect(sent().opts.link).toBe(link);
   });
 
   test('a two-sentence reason: the why keeps its first sentence (one-sentence rule), the detail keeps it all', async () => {
