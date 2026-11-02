@@ -87,7 +87,10 @@ function convertInventoryQuantity(amount, fromUnit, toUnit) {
   const fromDef = unitDefinition(from);
   const toDef = unitDefinition(to);
   if (!conversionBasis(fromDef, toDef)) return null;
-  return Number(((n * fromDef.factor) / toDef.factor).toFixed(4));
+  // Twelve significant digits, not four decimals: 1 ml is 0.000264 gal, and
+  // rounding each dose to 0.0003 gal overstated small-volume demand and cost
+  // by 13.6% once summed. toPrecision only drops float noise.
+  return Number(((n * fromDef.factor) / toDef.factor).toPrecision(12));
 }
 
 function describeInventoryConversion(amount, fromUnit, toUnit) {
