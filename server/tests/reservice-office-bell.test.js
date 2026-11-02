@@ -18,7 +18,7 @@ const CUSTOMER = { id: '00000000-0000-4000-8000-000000000803', first_name: 'Dana
 const AT = '2026-11-02T17:00:00.000Z';
 
 const item = (id, over = {}) => ({ id, source: 'text', at: AT, text: 'Ants in the kitchen', quoted: true, lead: null, kind: 'pest', pests: [], printable: true, ...over });
-const freezeOf = (items, answers = {}, officeNotes = {}) => ({ version: 1, gatheredAt: AT, lane: 'pest', items, answers, officeNotes });
+const freezeOf = (items, answers = {}, officeNotes = {}) => ({ version: 2, gatheredAt: AT, lane: 'pest', items, answers, officeNotes });
 
 describe('reserviceOfficeItems', () => {
   test('an office-only item is listed whatever its answer, even none or hidden', () => {
@@ -53,9 +53,9 @@ describe('reserviceOfficeItems', () => {
   });
 
   test.each([
-    ['a version 2 block', { ...freezeOf([item('a', { officeOnly: 'damage' })]), version: 2 }],
+    ['a version 3 block', { ...freezeOf([item('a', { officeOnly: 'damage' })]), version: 3 }],
     ['no freeze', null],
-    ['a block with no items', { version: 1 }],
+    ['a block with no items', { version: 2 }],
     ['a string', 'x'],
   ])('%s: nothing', (_name, freeze) => {
     expect(reserviceOfficeItems(freeze)).toEqual({ officeOnly: [], notToday: [] });
@@ -238,7 +238,7 @@ describe('raiseReserviceOfficeBell', () => {
 
   test.each([
     ['only answered-and-done items', freezeOf([item('a'), item('b')], { a: { answer: 'treated', productIds: ['p'] }, b: { answer: 'noted' } })],
-    ['a version 2 block', { ...freezeOf([item('a', { officeOnly: 'damage' })]), version: 2 }],
+    ['a version 3 block', { ...freezeOf([item('a', { officeOnly: 'damage' })]), version: 3 }],
     ['no freeze', null],
   ])('%s: nothing raised, nothing written', async (_name, freeze) => {
     expect(await raise(freeze)).toBeNull();

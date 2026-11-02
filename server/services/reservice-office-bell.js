@@ -51,7 +51,9 @@ const entryOf = (item, reason) => ({
  */
 function reserviceOfficeItems(freeze) {
   const none = { officeOnly: [], notToday: [] };
-  if (!freeze || typeof freeze !== 'object' || freeze.version !== 1 || !Array.isArray(freeze.items)) return none;
+  // The office may read any freeze the completion wrote (version 1 before the property marker, version 2 after):
+  // the bell is internal, so the property scope that keeps a version-1 freeze off the customer's report does not apply.
+  if (!freeze || typeof freeze !== 'object' || ![1, 2].includes(freeze.version) || !Array.isArray(freeze.items)) return none;
   const answers = freeze.answers && typeof freeze.answers === 'object' ? freeze.answers : {};
   const notes = freeze.officeNotes && typeof freeze.officeNotes === 'object' ? freeze.officeNotes : {};
   const out = { officeOnly: [], notToday: [] };
