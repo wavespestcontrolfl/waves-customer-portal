@@ -29,6 +29,11 @@ const REPLAY_VERSION = `${VERSION}:replay`;
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const smsCommitmentsEnabled = () => enabled() && gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP');
+// The reader writes a text's facts only while its gate is on and the text came at or after the activation time.
+const readerWritesTextFrom = (createdAt) => {
+  const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
+  return enabled() && Boolean(since) && new Date(createdAt) >= since;
+};
 const HUMAN_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status', 'twilio_sid', 'admin_user_id'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
@@ -531,6 +536,11 @@ function isQuietTemporaryFact(f) {
     || (f.field === 'access_notes' && f.outcome === 'temporary_instruction');
 }
 
+// The facts a review bell rings for: not settled, and not quiet (the rulings above). The bell's Save button
+// (sms-text-note-buttons.js) reads the same set back from the source text.
+const SETTLED_OUTCOMES = Object.freeze(['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied']);
+const bellExceptions = (facts) => facts.filter((f) => !SETTLED_OUTCOMES.includes(f.outcome) && !isQuietTemporaryFact(f));
+
 // Plain words for the review bell (owner ruling 2026-10-21). The title names
 // the customer; the body says what the reader wanted to save and why it
 // stopped. It NEVER quotes the customer's text (title, body, detail or
@@ -543,6 +553,7 @@ const REVIEW_FIELD_LABELS = Object.freeze({
   neighborhood_gate_code: 'neighborhood gate code', property_gate_code: 'gate code', lockbox_code: 'lockbox code',
   garage_code: 'garage code', irrigation_controller_location: 'irrigation controller location',
 });
+const reviewFieldLabel = (field) => REVIEW_FIELD_LABELS[field] || String(field).replaceAll('_', ' ');
 const REVIEW_REASONS = Object.freeze({
   existing_value_conflict: 'it conflicts with the note on file',
   temporary_instruction: 'the text sounds like a one-time instruction',
@@ -576,10 +587,7 @@ function reviewBellCopy({ customer, exceptions }) {
   const action = name
     ? fitAction('Comms', name, [(n) => `check ${n}'s text note`, (n) => `check ${n}'s note`])
     : 'check a customer text note';
-  const lines = exceptions.map((f, i) => {
-    const label = REVIEW_FIELD_LABELS[f.field] || String(f.field).replaceAll('_', ' ');
-    return `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${label}; ${reviewReason(f)}.`;
-  });
+  const lines = exceptions.map((f, i) => `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${reviewFieldLabel(f.field)}; ${reviewReason(f)}.`);
   const more = lines.length > 1 ? ` (+${lines.length - 1} more)` : '';
   const first = lines[0].replace(/\.$/, '');
   const room = MAX_WHY_CHARS - more.length - 1;
@@ -587,6 +595,43 @@ function reviewBellCopy({ customer, exceptions }) {
   let why = `${lead}${more}`;
   if (breaksAlertRules(why)) why = 'Part of a customer text needs a person to check it.';
   return { action, why, detail: [...lines, 'Open the conversation to check.'].join('\n') };
+}
+
+// The bell list (GET /api/admin/notifications) shows a review bell's source text, read from the text itself
+// while the list is served (owner 2026-11-02 "do all": show the words the way the "SMS from" alert does). The
+// words are never stored on the bell (title, body, detail or metadata): a text can hold a code or a word that
+// opens a door, and no screen catches every form (Codex #6414 r1/r2, #7466 r1/r2), so what the bell keeps, rings
+// on a phone and hands to needs_me stays the reader's own copy above. Admin role only, one read per page, by the
+// bell's own text and customer; masked the way every bell body is (redactedWords), like the "SMS from" row that
+// already shows the same text. A failed read serves the list without it.
+const SOURCE_TEXT_MAX_CHARS = 1600;
+async function withTextNoteSources(rows, { role } = {}, conn = db) {
+  if (role !== 'admin' || !Array.isArray(rows)) return rows;
+  const metaOf = (row) => {
+    if (row?.metadata && typeof row.metadata === 'object') return row.metadata;
+    try { return JSON.parse(row?.metadata || '{}') || {}; } catch { return {}; }
+  };
+  const wanted = rows.map((row) => {
+    const meta = metaOf(row);
+    const ok = meta.triggerKey === 'sms_operational_exception' && isUuid(String(meta.sms_log_id || '')) && isUuid(String(meta.customerId || ''));
+    return ok ? meta : null;
+  });
+  const ids = [...new Set(wanted.filter(Boolean).map((meta) => String(meta.sms_log_id)))];
+  if (!ids.length) return rows;
+  let texts;
+  try {
+    texts = await excludeUnresolvedSendReservations(conn('sms_log').whereIn('id', ids)).select('id', 'customer_id', 'message_body');
+  } catch (err) {
+    logger.warn(`[sms-operations] review bell source texts not read: ${err.message}`);
+    return rows;
+  }
+  const { redactedWords } = require('./admin-alert-names');
+  return rows.map((row, i) => {
+    const meta = wanted[i];
+    const source = meta && texts.find((t) => String(t.id) === String(meta.sms_log_id) && String(t.customer_id) === String(meta.customerId));
+    const text = source ? redactedWords(source.message_body) : '';
+    return text ? { ...row, source_text: cutAtWord(text, SOURCE_TEXT_MAX_CHARS) } : row;
+  });
 }
 
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
@@ -687,9 +732,8 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // definition not a profile write. Narrow on purpose: the field is named,
     // so a gate/lockbox code, a pet or irrigation report held back the same
     // way (the r10/r26/r27 cases above) still rings.
-    const settled = ['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'];
     const temporaryFacts = facts.filter(isQuietTemporaryFact);
-    const exceptions = facts.filter((f) => !settled.includes(f.outcome) && !temporaryFacts.includes(f));
+    const exceptions = bellExceptions(facts);
     let notification = null;
     // Owner ruling 2026-09-24: dropped model proposals (rejected by the
     // grounding filter) are not, on their own, a real exception — only a
@@ -702,6 +746,8 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         area: 'Comms', action: copy.action, why: copy.why, severity: 'needs-you',
         link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
         subject: { type: 'customer', id: String(customer.id) }, doneWhen: 'text_note_checked', who: 'person',
+        // Owner 2026-11-02 "C": Save to profile / One visit only (sms-text-note-buttons.js).
+        buttons: require('./sms-text-note-buttons').textNoteButtons(),
       }, { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`, detail: copy.detail,
         metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
           fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped + temporaryFacts.length,
@@ -1829,4 +1875,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, reviewBellCopy, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, readerWritesTextFrom, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

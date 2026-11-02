@@ -1,7 +1,9 @@
 // GATE_LAWN_COST_PLUS_LIST on the customer estimate page (buildPricingBundle):
 // a saved cost-plus quote shows the list price as the anchor and the
-// floor-stopped price as what the customer pays, and a later gate or knob
-// change does not move a quote that was already sent.
+// discounted price as what the customer pays (the full WaveGuard discount
+// since owner 2026-11-02; a quote saved while the 35% floor was armed keeps
+// its floor price), and a later gate or knob change does not move a quote
+// that was already sent.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),
@@ -62,12 +64,22 @@ describe('a saved cost-plus quote on the customer estimate page', () => {
     expect(row.displayPrice).toBe(77);
   });
 
-  test('Platinum: the anchor is the list price and the 20% discount stops at the 35% floor', async () => {
+  test('Platinum: the anchor is the list price and the full 20% discount applies', async () => {
     const engineInputs = inputs(FOUR);
     const { bundle, row } = await pageLawnRow(engineInputs, generateEstimate(engineInputs), 'Platinum');
     expect(bundle.combinedRecurring.waveGuardTierLabel).toBe('Platinum');
     expect(row.perTreatment).toBe(77);
-    // 20% off would be $61.60; the floor is $584.71 a year = $64.97 a visit.
+    // 20% off $77 = $61.60 a visit ($554.40 a year), below the $584.71 floor.
+    expect(row.displayPrice).toBe(61.6);
+    expect(row.monthly).toBe(46.2);
+  });
+
+  test('Platinum saved while the 35% floor was armed keeps the floor price', async () => {
+    const engineInputs = inputs(FOUR);
+    const sentUnderFloor = generateEstimate({ ...engineInputs, useLawnCostFloor: true });
+    const { row } = await pageLawnRow(engineInputs, sentUnderFloor, 'Platinum');
+    expect(row.perTreatment).toBe(77);
+    // The floor is $584.71 a year = $64.97 a visit.
     expect(row.displayPrice).toBe(64.97);
     expect(row.monthly).toBe(48.73);
   });
@@ -75,10 +87,13 @@ describe('a saved cost-plus quote on the customer estimate page', () => {
   test('a later gate-off or knob edit does not move the sent quote', async () => {
     const engineInputs = inputs(FOUR);
     const saved = generateEstimate(engineInputs);
+    const sentUnderFloor = generateEstimate({ ...engineInputs, useLawnCostFloor: true });
     delete process.env[GATE];
     LAWN_PRICING_V2.costPlusList.listMargin = 0.6;
     const { row } = await pageLawnRow(engineInputs, saved, 'Platinum');
     expect(row.perTreatment).toBe(77);
-    expect(row.displayPrice).toBe(64.97);
+    expect(row.displayPrice).toBe(61.6);
+    const floored = await pageLawnRow(engineInputs, sentUnderFloor, 'Platinum');
+    expect(floored.row.displayPrice).toBe(64.97);
   });
 });

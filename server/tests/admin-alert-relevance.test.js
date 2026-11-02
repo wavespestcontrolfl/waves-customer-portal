@@ -17,7 +17,13 @@ jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomer
 // hands back whatever bundles a test sets, and the shadow audit writer records what it is given.
 let mockBundles;
 const mockLoadContactBundles = jest.fn(async () => (typeof mockBundles === 'function' ? mockBundles() : mockBundles));
-jest.mock('../services/admin-alert-contact-witnesses', () => ({ loadContactBundles: (...args) => mockLoadContactBundles(...args) }));
+// The text-note bell's visit witness: notification id -> the earliest completed_at after the bell.
+let mockNoteVisits;
+const mockVisitsCompletedAfterBell = jest.fn(async (...args) => (typeof mockNoteVisits === 'function' ? mockNoteVisits(...args) : mockNoteVisits));
+jest.mock('../services/admin-alert-contact-witnesses', () => ({
+  loadContactBundles: (...args) => mockLoadContactBundles(...args),
+  visitsCompletedAfterBell: (...args) => mockVisitsCompletedAfterBell(...args),
+}));
 const mockAuditWouldClose = jest.fn(async ({ items }) => items.length);
 jest.mock('../services/audit-log', () => ({ auditAlertWouldClose: (...args) => mockAuditWouldClose(...args) }));
 // The quiet request resolve the portal item classes run after a close (its SQL runs in the Postgres suite).
@@ -187,6 +193,7 @@ beforeEach(() => {
   delete process.env.GATE_PORTAL_ITEM_CLOSE;
   delete process.env.GATE_PORTAL_LATE_RERING;
   mockBundles = new Map();
+  mockNoteVisits = new Map();
   mockTables = { notifications: [], scheduled_services: [], 'scheduled_services as ss': [], leads: [], estimates: [] };
   mockQueries = [];
   mockHooks = {};
@@ -2110,6 +2117,151 @@ describe('customer-contact classes', () => {
         expect((await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).rearmed).toBe(0);
         mockBundles = new Map([[String(row.id), bundle()]]);
         expect((await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).rearmed).toBe(1);
+      });
+    });
+
+    describe('text-note bells close once answered AND a visit is done (owner 2026-11-02, option B)', () => {
+      // The bell sms-operational-actions.js recordMessageOperations raises: category alert, dedupeKey
+      // sms-property-instructions:<sms_log id>, doneWhen text_note_checked, customerId in metadata.
+      const SMS_LOG = uid(71);
+      const textNote = (over = {}) => note({
+        category: 'alert', link: `/admin/customers?customerId=${CUST}&tab=comms`,
+        metadata: { triggerKey: 'sms_operational_exception', dedupeKey: `sms-property-instructions:${SMS_LOG}`, doneWhen: 'text_note_checked', customerId: CUST, sms_log_id: SMS_LOG, ...over },
+      });
+      const failureBell = () => note({
+        category: 'alert', metadata: { triggerKey: 'sms_operational_failure', dedupeKey: `sms-operations-failed:${SMS_LOG}`, customerId: CUST, sms_log_id: SMS_LOG },
+      });
+      // Judge a text-note bell against the contact witnesses and the visit witness a test sets.
+      const noted = async (row, bundleOver = null, visitAt = null, opts = {}) => {
+        mockNoteVisits = new Map(visitAt ? [[String(row.id), visitAt]] : []);
+        return judged(row, bundleOver, opts);
+      };
+
+      test('the class matches only the text-note bell, and only while GATE_ALERT_CONTACT_CLOSE is shadow or true (the re-arm pass asks in every mode)', () => {
+        const row = textNote();
+        expect(classify(row)).toBeNull();
+        expect(classify(row, { anyMode: true }).key).toBe('text_note_checked');
+        for (const mode of ['shadow', 'true']) {
+          gate(mode);
+          expect(classify(row).key).toBe('text_note_checked');
+          // the older failure bell, an alert with no doneWhen, another doneWhen and another prefix never match
+          expect(classify(failureBell(), { anyMode: true })).toBeNull();
+          expect(classify(textNote({ doneWhen: undefined }))).toBeNull();
+          expect(classify(textNote({ doneWhen: 'customer_answered' }))).toBeNull();
+          expect(classify(textNote({ dedupeKey: `sms-other:${SMS_LOG}` }))).toBeNull();
+          expect(classify({ ...row, category: 'inbound_sms' })?.key).not.toBe('text_note_checked');
+        }
+        // The portal chat gate is not this class's gate.
+        gate(undefined);
+        process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';
+        expect(classify(row)).toBeNull();
+      });
+
+      test('the emitter\'s dedupe prefix and doneWhen are the ones this class reads', () => {
+        const source = require('fs').readFileSync(require.resolve('../services/sms-operational-actions'), 'utf8');
+        expect(source).toContain("doneWhen: 'text_note_checked'");
+        expect(source).toContain('dedupeKey: `sms-property-instructions:${message.id}`');
+      });
+
+      test('the loader reads the customer\'s witnesses (bell time as the boundary) with the portal chat gate OFF, and the visit witness for this class only', async () => {
+        gate('true');
+        const row = textNote();
+        const other = { ...failureBell(), id: uid(97) };
+        await loadSubjects([row, other]);
+        const items = mockLoadContactBundles.mock.calls[0][0];
+        expect(items.map((i) => [i.id, i.kind, i.refs, i.bellAt])).toEqual([[row.id, 'customer', { customerId: CUST }, T0]]);
+        expect(mockVisitsCompletedAfterBell.mock.calls[0][1]).toEqual([{ id: row.id, customerId: CUST, bellAt: T0 }]);
+        // a bell with no customer id is not judged and asks for nothing
+        mockLoadContactBundles.mockClear();
+        mockVisitsCompletedAfterBell.mockClear();
+        await loadSubjects([textNote({ customerId: undefined })]);
+        expect(mockLoadContactBundles).not.toHaveBeenCalled();
+        expect(mockVisitsCompletedAfterBell).not.toHaveBeenCalled();
+      });
+
+      test('the gate off reads nothing; every other customer-kind class still needs its own gate (the portal chat classes need the chat gate)', async () => {
+        const row = textNote();
+        expect(await noted(row, { textAt: at(20) }, at(30))).toMatchObject({ cls: null, reason: null, would: null });
+        await loadSubjects([row]);
+        expect(mockLoadContactBundles).not.toHaveBeenCalled();
+        expect(mockVisitsCompletedAfterBell).not.toHaveBeenCalled();
+        // the gate off but a re-arm-style look (anyMode): still nothing read and nothing judged
+        expect(await noted(row, { textAt: at(20) }, at(30), { anyMode: true })).toMatchObject({ cls: 'text_note_checked', reason: null, would: null });
+        expect(mockVisitsCompletedAfterBell).not.toHaveBeenCalled();
+        // a portal chat bell with the chat gate off and the contact gate true: no witness read for it
+        gate('true');
+        const chat = note({
+          category: 'alert', link: `/admin/customers?customerId=${CUST}`,
+          metadata: { dedupeKey: 'portal-chat-escalation:esc-9', doneWhen: 'customer_answered', customerId: CUST, escalationId: 'esc-9' },
+        });
+        await loadSubjects([chat]);
+        expect(mockLoadContactBundles).not.toHaveBeenCalled();
+      });
+
+      test('closes only with a person\'s answer AND a visit done, both after the bell', async () => {
+        gate('true');
+        const reason = 'Answered, and a visit after the text is done';
+        for (const answer of [{ textAt: at(20) }, { backAt: at(20) }, { inAt: at(20) }, { replyAt: at(20) }]) {
+          expect(await noted(textNote(), answer, at(30))).toMatchObject({ cls: 'text_note_checked', reason, would: null });
+        }
+        // the visit may come any day after the bell, not only the same Eastern day
+        expect(await noted(textNote(), { textAt: at(20) }, at(60 * 24 * 9))).toMatchObject({ reason });
+        // answered but no visit done; visit done but not answered
+        expect(await noted(textNote(), { textAt: at(20) }, null)).toMatchObject({ reason: null, would: null });
+        expect(await noted(textNote(), {}, at(30))).toMatchObject({ reason: null, would: null });
+        expect(await noted(textNote(), null, at(30))).toMatchObject({ reason: null, would: null });
+        // contact before the bell, or at the bell, is no answer
+        expect(await noted(textNote(), { textAt: at(-20), backAt: at(-20), inAt: at(-20), replyAt: at(-20) }, at(30))).toMatchObject({ reason: null });
+        expect(await noted(textNote(), { textAt: T0, replyAt: T0 }, at(30))).toMatchObject({ reason: null });
+        // a visit done before the bell (or at it) is no visit
+        expect(await noted(textNote(), { textAt: at(20) }, at(-30))).toMatchObject({ reason: null });
+        expect(await noted(textNote(), { textAt: at(20) }, T0)).toMatchObject({ reason: null });
+        // a booking, a quote and a bare call are not answers
+        expect(await noted(textNote(), { visitAt: at(20), quote: true, visitRanAt: at(20), staffActionAt: at(20) }, at(30))).toMatchObject({ reason: null });
+      });
+
+      test('shadow records what would close and changes nothing', async () => {
+        gate('shadow');
+        expect(await noted(textNote(), { textAt: at(20) }, at(30))).toMatchObject({ cls: 'text_note_checked', reason: null, would: 'Answered, and a visit after the text is done' });
+        expect(await noted(textNote(), { textAt: at(20) }, null)).toMatchObject({ reason: null, would: null });
+      });
+
+      test('a visit witness that fails to load is no verdict: the bell stays open and the re-arm pass leaves a closed one alone', async () => {
+        gate('true');
+        mockVisitsCompletedAfterBell.mockRejectedValueOnce(new Error('boom'));
+        const row = textNote();
+        mockBundles = new Map([[String(row.id), bundle({ textAt: at(20) })]]);
+        const data = await loadSubjects([row]);
+        expect(data.contactFailed).toBe(true);
+        expect(judge(classify(row), subjectFor(row, data, TODAY))).toMatchObject({ reason: null, would: null });
+        const closed = closedRow(textNote(), 'Answered, and a visit after the text is done');
+        mockTables.notifications = [closed];
+        mockBundles = new Map([[String(closed.id), bundle({ textAt: at(20) })]]);
+        mockVisitsCompletedAfterBell.mockRejectedValueOnce(new Error('boom'));
+        expect((await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).rearmed).toBe(0);
+        expect(closed.done_at).toBeTruthy();
+      });
+
+      test('the sweep: shadow audits, true closes with the reason; the failure bell is never touched; re-arm puts the bell back when a witness stops holding', async () => {
+        const row = textNote();
+        const failure = failureBell();
+        mockTables.notifications = [row, failure];
+        mockBundles = new Map([[String(row.id), bundle({ textAt: at(20) })], [String(failure.id), bundle({ textAt: at(20) })]]);
+        mockNoteVisits = new Map([[String(row.id), at(30)], [String(failure.id), at(30)]]);
+        gate('shadow');
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 0, wouldClose: 1 });
+        expect(mockAuditWouldClose.mock.calls[0][0].items).toEqual([
+          { notification_id: row.id, alert_class: 'text_note_checked', reason: 'Answered, and a visit after the text is done', judged_at: NOW_AFTER.toISOString() },
+        ]);
+        expect(row.done_at ?? null).toBeNull();
+        gate('true');
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 1, byClass: { text_note_checked: 1 } });
+        expect(row).toMatchObject({ done_by: 'relevance', resolution: 'Answered, and a visit after the text is done' });
+        expect(failure.done_at ?? null).toBeNull();
+        // the visit is later found not to hold (e.g. reopened): the bell comes back
+        mockNoteVisits = new Map();
+        expect((await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).rearmed).toBe(1);
+        expect(row.done_at ?? null).toBeNull();
       });
     });
   });

@@ -582,7 +582,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // derived write of every confirmed reschedule, so the exact-effects
     // card must carry it, and the executor surfaces a failed append as a
     // warning instead of a bare Done.
-    push('operational', "A reschedule audit entry is appended to the visit's history after the move (a failed append surfaces as a warning)");
+    if (preview.series_move) {
+      // GATE_IB_SERIES_MOVE (gap #22): every visit of the recurring plan that moves, from the rebooker's own
+      // preview; the plan rides the contract too (params._series_move), so the hash binds each line.
+      const { seriesCardLines } = require('./series-move');
+      for (const line of seriesCardLines(preview.series_move, { reason: params?.reason })) {
+        push('operational', line.text, line.before !== undefined ? { before: line.before, after: line.after } : undefined);
+      }
+    } else {
+      push('operational', "A reschedule audit entry is appended to the visit's history after the move (a failed append surfaces as a warning)");
+    }
     // A LIVE visit (tech en route / on site) is more than a date move: the
     // executor resets it to confirmed, releases tech/tracker state, and
     // appends lifecycle history — the active field workflow ends.

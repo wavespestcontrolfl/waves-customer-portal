@@ -4806,7 +4806,7 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
 // so seasonal prepay fails closed on every acceptance path, matching the
 // prepay-on-book and /secure lanes (prepayCoverageCadenceForPattern → null).
 //
-// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the term must also record the pattern
+// Lawn 9x rounds: the term must also record the pattern
 // the series is WRITTEN with. A residential lawn 9x series seeds as
 // lawn_rounds_9, so the cadence derived below comes back as lawn_rounds_9 (via
 // the seeder's lawnRoundsSeriesPattern, the same decision the seeder makes
@@ -4967,7 +4967,7 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
   const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
     pattern,
-    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the seeder writes a residential
+    // Lawn 9x rounds: the seeder writes a residential
     // lawn 9x series as lawn_rounds_9 (parent mark and every child); an accept
     // with annual prepay mints a lawn_rounds_9 term for it
     // (annualPrepayCoverageCadence).
@@ -8581,7 +8581,7 @@ const EstimateConverter = {
               coverageServiceType = annualPrepayCoverageOverride.serviceType;
               coverageVisitCount = annualPrepayCoverageOverride.visitCount;
               coverageCadence = annualPrepayCoverageOverride.cadence;
-              // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): this accept writes the
+              // Lawn 9x rounds: this accept writes the
               // series as lawn_rounds_9, so a caller's 9-visit every-6-weeks
               // (or unspecified, which infers every_6_weeks from 9 visits)
               // coverage cadence is the same plan under the quote's name. The

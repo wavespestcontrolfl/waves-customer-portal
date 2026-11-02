@@ -620,14 +620,14 @@ describe('applySeries', () => {
 });
 
 describe('the identity rule', () => {
-  test('is the app rule and does not need the gate', () => {
-    delete process.env.GATE_LAWN_9X_ROUNDS;
+  test('is the app rule', () => {
     expect(seeder.isLawn9xRoundsSeries({ pattern: 'custom', intervalDays: 42, service_type: 'Lawn Care' })).toBe(true);
     expect(seeder.isLawn9xRoundsSeries({ pattern: 'every_6_weeks', service_type: 'Commercial Lawn Care' })).toBe(false);
     expect(seeder.isLawn9xRoundsSeries({ pattern: 'custom', intervalDays: 42, service_type: 'Lawn Care', isCommercial: true })).toBe(false);
     expect(seeder.isLawn9xRoundsSeries({ pattern: 'custom', intervalDays: 42, service_type: 'Tree & Shrub Care' })).toBe(false);
+    // The write rule (always on since the rounds went live) turns the same series into rounds.
     expect(seeder.lawnRoundsSeriesPattern({ pattern: 'custom', intervalDays: 42, service_type: 'Lawn Care' }))
-      .toEqual({ pattern: 'custom', intervalDays: 42 });
+      .toEqual({ pattern: 'lawn_rounds_9', intervalDays: null });
   });
 });
 

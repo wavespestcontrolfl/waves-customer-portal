@@ -1,6 +1,5 @@
 /**
- * Annual prepay coverage for a lawn 9x rounds series (GATE_LAWN_9X_ROUNDS, owner
- * 2026-10-28). A term that covers a lawn_rounds_9 series stores coverage_cadence
+ * Annual prepay coverage for a lawn 9x rounds series (owner 2026-10-28). A term that covers a lawn_rounds_9 series stores coverage_cadence
  * 'lawn_rounds_9', and its covered visits are placed on the round calendar:
  * lawnRoundDate(anchor, i) for i = 0..count-1, the same dates the series is
  * seeded with, so attach-by-date matches the seeded rows and no duplicate
