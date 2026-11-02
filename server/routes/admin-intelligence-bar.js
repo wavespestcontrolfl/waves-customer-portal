@@ -3891,6 +3891,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     OwnerDirect.noteSameNameContext(requestTaint, taskContext);
     // Text pasted or dropped into the message: every write shows its card (owner-direct.js, PASTED TEXT).
     if (req.body.pasted_text === true) OwnerDirect.notePastedText(requestTaint);
+    // GATE_IB_TOOL_ADDITIONS (tool-additions.js): a found tool is offered by a
+    // system message before the next round, so `tools` (rendered first, the
+    // start of the cached prefix and of every thinking block's checked prefix)
+    // stays as sent. A saved history that holds such messages, on a model that
+    // cannot read them, gets them back in `tools`.
+    ({ tools, messages: currentMessages } = ToolAdditions.forModel({ tools, messages: currentMessages, model }));
+    const toolAdditions = ToolAdditions.createRequestState({
+      enabled: ToolAdditions.toolAdditionsWanted({ platformEnabled, toolSearch, model }),
+      messages: currentMessages,
+    });
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
       // ones a completed discovery round loaded but never reached (the
@@ -3905,17 +3915,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const searchedNames = ToolSearch.searchReferencedNames(req.ibResumedTask.checkpoint);
       const previouslyLoaded = [...invokedNames, ...discoveredNames, ...searchedNames].map(name => ActionRegistry.actions.get(name))
         .filter(Boolean).filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
-      tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
+      // With tool additions they come in a system message after the continuation
+      // turn and `tools` stays as the saved thinking blocks saw it (tool-additions.js restore).
+      tools = toolAdditions.restore(previouslyLoaded, tools);
     }
-    // GATE_IB_TOOL_ADDITIONS (tool-additions.js): a found tool is offered by a
-    // system message before the next round, so `tools` (rendered first, the
-    // start of the cached prefix) stays as sent. A saved history that holds
-    // such messages, on a model that cannot read them, gets them back in `tools`.
-    ({ tools, messages: currentMessages } = ToolAdditions.forModel({ tools, messages: currentMessages, model }));
-    const toolAdditions = ToolAdditions.createRequestState({
-      enabled: ToolAdditions.toolAdditionsWanted({ platformEnabled, toolSearch, model }),
-      messages: currentMessages,
-    });
     let finalResponse = null;
     const toolCalls = [];
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values

@@ -83,9 +83,10 @@ function foldAdditions({ tools, messages, pending = [] }) {
 // A request that ended on a plain answer right after an addition message is
 // saved ending on that system message (the final answer is not part of the
 // saved messages), and a resume adds a user turn, which may not follow one
-// (400). The resume drops it: nothing after it is saved, so no later turn is
-// edited, and the tools it offered come back with the resume's restoration of
-// discovered tools. Any other history comes back as the same array.
+// (400). The resume drops it: nothing after it is saved, so no saved thinking
+// block's prefix changes, and the tools it offered come back in a new
+// addition after the continuation turn (restore). Any other history comes
+// back as the same array.
 function withoutTrailingAddition(messages) {
   return isAdditionMessage(messages[messages.length - 1]) ? messages.slice(0, -1) : messages;
 }
@@ -105,6 +106,11 @@ function forModel({ tools, messages, model }) {
  *   queue(defs, tools)    on: keeps the definitions `tools` and the earlier
  *                         additions do not hold, for the next round, and returns
  *                         true; off: false (the caller merges into `tools`)
+ *   restore(defs, tools)  a resume's tools to restore: on, queued like a find,
+ *                         so `tools` stays as the original request sent it (the
+ *                         saved thinking blocks were checked against it); off,
+ *                         merged into `tools`, all but the ones a saved addition
+ *                         message already offers. Returns the tools to send.
  *   beforeCall(h, final)  the messages for the next model call: the waiting
  *                         definitions appended as one addition message when
  *                         the history lets one follow
@@ -116,17 +122,23 @@ function createRequestState({ enabled, messages }) {
   let on = enabled === true;
   let waiting = [];
   const added = new Set(addedDefinitions(messages).map(definition => definition.name));
+  function queue(definitions, tools) {
+    if (!on) return false;
+    const present = new Set((tools || []).map(tool => tool.name));
+    for (const definition of definitions) {
+      if (present.has(definition.name) || added.has(definition.name)) continue;
+      added.add(definition.name);
+      waiting.push(definition);
+    }
+    return true;
+  }
   return {
     offers: name => added.has(name),
-    queue(definitions, tools) {
-      if (!on) return false;
-      const present = new Set((tools || []).map(tool => tool.name));
-      for (const definition of definitions) {
-        if (present.has(definition.name) || added.has(definition.name)) continue;
-        added.add(definition.name);
-        waiting.push(definition);
-      }
-      return true;
+    queue,
+    restore(definitions, tools) {
+      if (queue(definitions, tools)) return tools;
+      const missing = definitions.filter(definition => !added.has(definition.name));
+      return [...new Map([...tools, ...missing].map(tool => [tool.name, tool])).values()];
     },
     beforeCall(history, finalRound) {
       if (!on || finalRound || !waiting.length || history[history.length - 1]?.role !== 'user') return history;

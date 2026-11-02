@@ -57,6 +57,7 @@ const intelligenceRouter = require('../routes/admin-intelligence-bar');
 const registry = require('../services/intelligence-bar/action-registry');
 const apiToolDefinition = require('../services/intelligence-bar/tool-definition');
 const IbTasks = require('../services/intelligence-bar/tasks');
+const ToolAdditions = require('../services/intelligence-bar/tool-additions');
 
 // The same route on a model that takes no mid-conversation tool changes.
 let sonnetRouter;
@@ -157,17 +158,27 @@ describe('without GATE_IB_TOOL_ADDITIONS, or on a model that takes no additions'
   });
 });
 
-// A saved task resumes with a continuation user turn after its checkpoint.
+// A saved task resumes with a continuation user turn after its checkpoint. On
+// Opus 5.5 every saved thinking block was checked against the `tools` the
+// original request sent, so a resume must send that same list.
 describe('a resumed task with saved additions', () => {
   const TASK_ID = '7e1c2f7a-1111-2222-3333-deadbeef0019';
   const SESSION = '7e1c2f7a-1111-2222-3333-deadbeef0018';
   const scope = { role: 'admin', context: 'dashboard', fullAccess: true };
-  const discoverJson = () => JSON.stringify(registry.discover({ query: 'review stats' }, scope).result);
-  const saved = () => [
+  const discoverResult = () => registry.discover({ query: 'review stats' }, scope);
+  let pageTools;
+  beforeAll(async () => { [{ request: { tools: pageTools } }] = await ask([answer]); });
+  // What the original request offered by message: every found tool its page list lacked.
+  const addedByOriginal = () => discoverResult().definitions.map(apiToolDefinition).filter(d => !names(pageTools).includes(d.name));
+  const savedRound = () => [
     { role: 'user', content: 'review stats, then block that sender' },
     { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_disc', name: 'discover_capabilities', input: { query: 'review stats' } }] },
-    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_disc', content: discoverJson() }] },
-    { role: 'system', content: [{ type: 'tool_addition', tool: { type: 'tool_definition', definition: found() } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_disc', content: JSON.stringify(discoverResult().result) }] },
+    ToolAdditions.additionMessage(addedByOriginal()),
+  ];
+  const calledFound = [
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_found', name: 'get_review_stats', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_found', content: '{}' }] },
   ];
   const resumeWith = (checkpoint, router) => {
     const task = {
@@ -182,34 +193,43 @@ describe('a resumed task with saved additions', () => {
     IbTasks.get.mockResolvedValue(task);
     return ask([answer], router, { path: `/tasks/${TASK_ID}/resume`, body: { session_id: SESSION } });
   };
+  const isContinuation = message => message.role === 'user' && JSON.stringify(message).includes('Continue the original request');
 
-  beforeEach(() => { process.env.GATE_IB_TOOL_ADDITIONS = 'true'; });
   afterEach(() => { delete process.env.GATE_IB_TOOL_ADDITIONS; });
 
-  test('a history that ends on an addition: it is dropped before the continuation turn, and the found tool is back in tools', async () => {
-    const [resumed] = await resumeWith(saved());
+  test('ends on an addition: it is dropped, `tools` is the page list as sent, and the found tools come back after the continuation', async () => {
+    process.env.GATE_IB_TOOL_ADDITIONS = 'true';
+    const [resumed] = await resumeWith(savedRound());
+    expect(resumed.request.tools).toEqual(pageTools);
     const messages = resumed.request.messages;
-    expect(messages.some(m => m.role === 'system')).toBe(false);
-    expect(messages[messages.length - 1].role).toBe('user');
-    expect(JSON.stringify(messages[messages.length - 1])).toContain('Continue the original request');
-    expect(resumed.request.tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
-    expect(resumed.options).toBeUndefined();
+    expect(messages.map(m => m.role)).toEqual(['user', 'assistant', 'user', 'user', 'system']);
+    expect(isContinuation(messages[3])).toBe(true);
+    expect(withoutMarkers(messages[4])).toEqual(ToolAdditions.additionMessage(addedByOriginal()));
+    expect(resumed.options).toEqual(BETA);
   });
 
-  test('an addition inside the history stays where it is, unchanged, and the request sends the header', async () => {
-    const history = [...saved(),
-      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_found', name: 'get_review_stats', input: {} }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_found', content: '{}' }] }];
+  test('an addition inside the history stays where it is, unchanged; `tools` is the page list as sent; nothing is offered twice', async () => {
+    process.env.GATE_IB_TOOL_ADDITIONS = 'true';
+    const history = [...savedRound(), ...calledFound];
     const [resumed] = await resumeWith(history);
+    expect(resumed.request.tools).toEqual(pageTools);
+    expect(withoutMarkers(resumed.request.messages.slice(0, history.length))).toEqual(history);
+    expect(resumed.request.messages.filter(m => m.role === 'system')).toHaveLength(1);
+    expect(isContinuation(resumed.request.messages[resumed.request.messages.length - 1])).toBe(true);
+    expect(resumed.options).toEqual(BETA);
+  });
+
+  test('gate off: the saved additions still offer their tools; `tools` gains none of them', async () => {
+    const history = [...savedRound(), ...calledFound];
+    const [resumed] = await resumeWith(history);
+    expect(resumed.request.tools).toEqual(pageTools);
     expect(withoutMarkers(resumed.request.messages[3])).toEqual(history[3]);
     expect(resumed.options).toEqual(BETA);
   });
 
-  test('on a model that cannot read additions, the saved one is folded into tools', async () => {
-    const history = [...saved(),
-      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_found', name: 'get_review_stats', input: {} }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_found', content: '{}' }] }];
-    const [resumed] = await resumeWith(history, sonnetRouter);
+  test('on a model that cannot read additions, the saved ones are folded into tools', async () => {
+    process.env.GATE_IB_TOOL_ADDITIONS = 'true';
+    const [resumed] = await resumeWith([...savedRound(), ...calledFound], sonnetRouter);
     expect(resumed.request.messages.some(m => m.role === 'system')).toBe(false);
     expect(resumed.request.tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
     expect(resumed.options).toBeUndefined();

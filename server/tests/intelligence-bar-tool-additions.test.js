@@ -22,7 +22,7 @@ describe('toolAdditionsWanted', () => {
     expect(ToolAdditions.toolAdditionsWanted({ ...base, platformEnabled: false })).toBe(false);
     expect(ToolAdditions.toolAdditionsWanted({ ...base, toolSearch: true })).toBe(false);
     // Claude Sonnet 5 is not on the docs' list; an unknown or dated id fails closed.
-    for (const model of ['claude-sonnet-5', 'test-model', 'claude-opus-5-5-20260101', undefined]) {
+    for (const model of ['claude-sonnet-5', 'claude-mythos-preview', 'test-model', 'claude-opus-5-5-20260101', undefined]) {
       expect(ToolAdditions.toolAdditionsWanted({ ...base, model })).toBe(false);
     }
     process.env.GATE_IB_TOOL_ADDITIONS = 'TRUE';
@@ -76,6 +76,22 @@ describe('createRequestState', () => {
     const state = ToolAdditions.createRequestState({ enabled: true, messages: saved });
     expect(state.offers('cancel_plan')).toBe(true);
     state.queue([tool('cancel_plan')], []);
+    expect(state.pending()).toEqual([]);
+  });
+
+  test('restore, on: the tools to restore wait for the next call and `tools` comes back as the same array', () => {
+    const saved = [question, call, results, ToolAdditions.additionMessage([tool('cancel_plan')])];
+    const state = ToolAdditions.createRequestState({ enabled: true, messages: saved });
+    const tools = [tool('discover_capabilities')];
+    expect(state.restore([tool('discover_capabilities'), tool('cancel_plan'), tool('get_review_stats')], tools)).toBe(tools);
+    expect(state.pending().map(d => d.name)).toEqual(['get_review_stats']);
+  });
+
+  test('restore, off: the tools join `tools`, all but the ones a saved addition already offers', () => {
+    const saved = [question, call, results, ToolAdditions.additionMessage([tool('cancel_plan')])];
+    const state = ToolAdditions.createRequestState({ enabled: false, messages: saved });
+    const restored = state.restore([tool('cancel_plan'), tool('get_review_stats')], [tool('discover_capabilities')]);
+    expect(restored.map(t => t.name)).toEqual(['discover_capabilities', 'get_review_stats']);
     expect(state.pending()).toEqual([]);
   });
 

@@ -86,8 +86,10 @@ after the tool results, just before the next call (not in the final round, not a
 turn), with the `inline-tools-2026-09-15` beta header on every request whose messages hold one.
 A sent addition message is never edited or removed: it is part of the cached prefix, and an edit
 voids the later thinking blocks. The OpenAI backup, and a resume on a model without support, fold
-the additions back into `tools` (`foldAdditions`); a resume drops a trailing addition before its
-continuation turn (`withoutTrailingAddition`). Gate off: the merge described above. Free live
+the additions back into `tools` (`foldAdditions`). A resume keeps `tools` as the original request
+sent it (every saved thinking block was checked against it): it drops a trailing addition before its
+continuation turn (`withoutTrailingAddition`) and offers the tools it restores in a new addition
+after that turn (`restore`). Gate off: the merge described above. Free live
 shape check: `ops/agents/ib-tool-additions-smoke.js` (token counting, no model call).
 
 ## Context → Tools Mapping

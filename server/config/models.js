@@ -151,12 +151,14 @@ function anthropicSupportsToolSearch(model) {
 }
 
 // Does `model` accept a `role: "system"` message carrying `tool_addition`
-// blocks (mid-conversation tool changes)? The list is the "supportedModels" of
-// platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages
-// (read 2026-11-02). Claude Sonnet 5 is NOT on it. Exact ids: an unknown id is
-// NOT supported (fail closed: the caller merges new tools into `tools`).
+// blocks (mid-conversation tool changes)? The list is the one the tool-changes
+// beta names in platform.claude.com/docs/en/build-with-claude/
+// mid-conversation-system-messages (read 2026-11-02). Claude Sonnet 5 and
+// Claude Mythos Preview are NOT on it (Preview is in that page's metadata,
+// not in the feature's model list). Exact ids: an unknown id is NOT supported
+// (fail closed: the caller merges new tools into `tools`).
 const ANTHROPIC_MID_CONVERSATION_TOOLS = new Set([
-  'claude-fable-5-1', 'claude-mythos-5-1', 'claude-fable-5', 'claude-mythos-5', 'claude-mythos-preview',
+  'claude-fable-5-1', 'claude-mythos-5-1', 'claude-fable-5', 'claude-mythos-5',
   'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-4-8',
 ]);
 function anthropicSupportsMidConversationTools(model) {
