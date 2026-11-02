@@ -351,6 +351,24 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     expect(visitedAfter.resolution).toBe('A visit was booked');
   });
 
+  test('a card-step bell closes when its estimate is declined or archived', async () => {
+    const declined = await estimate(await customer());
+    const archived = await estimate(await customer());
+    for (const e of [declined, archived]) await cardStep(e, ago(90));
+    await run();
+    expect(await bellsFor(estimateKey(declined))).toHaveLength(1);
+    expect(await bellsFor(estimateKey(archived))).toHaveLength(1);
+    await db('estimates').where({ id: declined.id }).update({ status: 'declined' });
+    await db('estimates').where({ id: archived.id }).update({ archived_at: ago(5) });
+    await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
+    const [declinedAfter] = await bellsFor(estimateKey(declined));
+    const [archivedAfter] = await bellsFor(estimateKey(archived));
+    expect(declinedAfter).toEqual(expect.objectContaining({ resolution: 'Estimate was declined' }));
+    expect(declinedAfter.done_at).not.toBeNull();
+    expect(archivedAfter).toEqual(expect.objectContaining({ resolution: 'Estimate was archived' }));
+    expect(archivedAfter.done_at).not.toBeNull();
+  });
+
   test('the sweep closes the bell on a person\'s text after it, and when the booking was finished', async () => {
     process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
     const texted = await customer();

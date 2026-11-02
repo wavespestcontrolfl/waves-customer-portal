@@ -440,20 +440,23 @@ async function loadUnfinishedBookings(rows, data, conn) {
   const estimateIds = pick('checkoutEstimateId');
   const customerIds = pick('customerId');
   const intents = intentIds.length ? await conn('booking_intents').whereIn('id', intentIds).select('id', 'converted_at') : [];
-  const estimates = estimateIds.length ? await conn('estimates').whereIn('id', estimateIds).select('id', 'accepted_at', 'status') : [];
+  const estimates = estimateIds.length ? await conn('estimates').whereIn('id', estimateIds).select('id', 'accepted_at', 'status', 'archived_at') : [];
   const converted = new Set(intents.filter((r) => r.converted_at).map((r) => String(r.id)));
-  const accepted = new Set(estimates.filter((r) => r.accepted_at || r.status === 'accepted').map((r) => String(r.id)));
+  // The estimate's end, in words: the same three states estimateCardQuery never raises a bell for.
+  const estimateEnded = new Map(estimates.map((r) => [String(r.id), (r.accepted_at || r.status === 'accepted') ? 'Estimate was accepted'
+    : (r.status === 'declined' ? 'Estimate was declined' : (r.archived_at ? 'Estimate was archived' : null))]).filter(([, reason]) => reason));
   const booked = await bookedVisitsByCustomer(conn, customerIds);
   for (const { row, meta } of bells) {
-    const reason = unfinishedBookingReason(meta, bookingBoundaryAt(row, meta), { converted, accepted, booked });
+    const reason = unfinishedBookingReason(meta, bookingBoundaryAt(row, meta), { converted, estimateEnded, booked });
     if (reason) data.bookingMovedOn.set(String(row.id), reason);
   }
 }
 
 // The first fact, in order, that the booking was finished or the customer booked another way.
-function unfinishedBookingReason(meta, bellAt, { converted, accepted, booked }) {
+function unfinishedBookingReason(meta, bellAt, { converted, estimateEnded, booked }) {
   if (converted.has(String(uuidOrNull(meta.bookingIntentId)))) return 'Booking was finished';
-  if (accepted.has(String(uuidOrNull(meta.checkoutEstimateId)))) return 'Estimate was accepted';
+  const ended = estimateEnded.get(String(uuidOrNull(meta.checkoutEstimateId)));
+  if (ended) return ended;
   const customerId = uuidOrNull(meta.customerId);
   const visitAt = customerId && bellAt ? booked.get(customerId) : null;
   return visitAt && new Date(visitAt).getTime() > new Date(bellAt).getTime() ? 'A visit was booked' : null;
