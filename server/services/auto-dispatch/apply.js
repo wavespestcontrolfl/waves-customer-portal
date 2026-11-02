@@ -790,10 +790,10 @@ async function syncMovedReminders(service, best, moveResult, siblingMembers) {
 // placement to auto-dispatch and skew drift/cooldown). A fence miss skips ALL
 // bookkeeping for the row. Resolves with the status the row holds: the
 // landed status, or 'pending' only after a restore that wrote the row. A row
-// whose landed status is unknown cannot be fenced: no bookkeeping, null.
+// whose landed slot or status is unknown cannot be fenced: no bookkeeping, null.
 async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, label }) {
-  if (!landedStatus) {
-    logger.warn(`[auto-dispatch] post-move bookkeeping skipped for ${label}: the move reported no landed status to fence on`);
+  if (!slot || !landedStatus) {
+    logger.warn(`[auto-dispatch] post-move bookkeeping skipped for ${label}: the move reported no landed slot or status to fence on`);
     return null;
   }
   // keepStatus lands the pre-move status inside the move transaction; only a
@@ -841,19 +841,21 @@ async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, la
  * transaction as well). Throws SLOT_TAKEN (or any other rebooker refusal)
  * exactly as before this lane's retry wrapper was added.
  */
-async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config = {}) {
+async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
   // Remaining per-run change budget (orchestrator): a grouped visit whose
   // LOCKED member count exceeds it is refused inside the unit move before
   // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.
   if (Number.isFinite(config.remainingChanges)) options.maxUnitSize = Math.max(0, config.remainingChanges);
-  const techChanged = !!best.technician_id
-    && String(best.technician_id) !== String(service.technician_id || '');
-  // GATE_AUTO_DISPATCH_KEEP_TECH (config.keepTech): a visit that has a
-  // technician never changes it here; refused before any write (keep-tech.js).
-  if (techChanged && config.keepTech === true && service.technician_id) throw techChangeBlocked();
-  if (techChanged) options.technicianId = best.technician_id;
+  const techChanged = Boolean(best.technician_id)
+    && String(best.technician_id) !== String(service.technician_id ?? '');
+  if (techChanged) {
+    // GATE_AUTO_DISPATCH_KEEP_TECH (config.keepTech): a visit that has a
+    // technician never changes it here; refused before any write (keep-tech.js).
+    if (config.keepTech === true && service.technician_id) throw techChangeBlocked();
+    options.technicianId = best.technician_id;
+  }
   // Every grouped member re-passes the apply-time hard guards under the
   // unit mover's stop lock, or the grouped move is refused (codex r13 P1).
   options.memberGuard = makeMemberGuard({ service, best, config, techChanged });
@@ -882,11 +884,12 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
-    recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
-    // Pinned for every visit (owner 2026-10-09): a confirmation that lands
-    // between the read above and the move fails the atomic match.
-    customer_confirmed: fresh.customer_confirmed ?? null,
-    ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
+    // recurring_dispatch_due_date and customer_confirmed are pinned with the
+    // location fields, null when absent. customer_confirmed for every visit
+    // (owner 2026-10-09): a confirmation that lands between the read above
+    // and the move fails the atomic match.
+    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS]
+      .map((field) => [field, fresh[field] ?? null])),
   };
 
   // Canonical move — transactional, overlap-checked, silent. ALWAYS a
@@ -898,7 +901,10 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   // The visit keeps its own status inside the move transaction (pending
   // stays pending), so no write after the commit has to put it back.
   options.keepStatus = true;
-  const moveResult = await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
+  const moveResult = (await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options)) || {};
+  // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit) reports its
+  // members here; a single-row move has none.
+  const visitMove = moveResult.visitMove || {};
 
   // Stamp auto-dispatch bookkeeping (+ restore pending after a lifecycle
   // rewind). The pre-move status is the FRESH one (options.expect made it
@@ -908,7 +914,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     // The complete landed slot (end too) is part of the fence.
     slot: { scheduled_date: best.date, window_start: best.start_time, window_end: best.end_time },
     previousStatus: fresh.status,
-    landedStatus: moveResult && moveResult.landedStatus,
+    landedStatus: moveResult.landedStatus,
     runId,
     label: service.id,
   });
@@ -919,20 +925,16 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   // must not report the optimization as applied. Bookkeeping for the rows
   // that DID move still runs below; the throw carries movedCount so the
   // orchestrator's change count and cap stay honest.
-  const partialFailed = Array.isArray(moveResult?.visitMove?.failed) ? moveResult.visitMove.failed : [];
+  const partialFailed = visitMove.failed || [];
 
-  // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit): every
-  // sibling went through the same reschedule() with keepStatus. Apply the
-  // identical bookkeeping per moved sibling from its pre-move and landed
-  // status, so a pending recurring sibling keeps counting toward plan
-  // extension (codex #3609 r4). A mover that reports no landed slot cannot
-  // be fenced ⇒ skipped (fail closed). Best-effort, like the tapped row.
-  const siblingMembers = (moveResult?.visitMove?.members || []).filter((m) => m && !m.isPrimary && String(m.id) !== String(service.id));
+  // Every grouped sibling went through the same reschedule() with
+  // keepStatus. Apply the identical bookkeeping per moved sibling from its
+  // pre-move and landed status, so a pending recurring sibling keeps
+  // counting toward plan extension (codex #3609 r4). A mover that reports no
+  // landed slot cannot be fenced ⇒ skipped (fail closed, in stampMovedRow).
+  // Best-effort, like the tapped row.
+  const siblingMembers = (visitMove.members || []).filter((m) => m && !m.isPrimary && String(m.id) !== String(service.id));
   for (const sib of siblingMembers) {
-    if (!sib.landed) {
-      logger.warn(`[auto-dispatch] post-move bookkeeping skipped for grouped sibling ${sib.id}: no landed slot to fence on`);
-      continue;
-    }
     await stampMovedRow({
       id: sib.id, slot: sib.landed, previousStatus: sib.previousStatus, landedStatus: sib.landedStatus, runId, label: `grouped sibling ${sib.id}`,
     });
@@ -950,7 +952,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   // Every member moved but the visit record could not follow (codex r8):
   // the cleanup seam may detach/dissolve the group against a parent that
   // still names the old stop — an escalation, not a success.
-  if (moveResult?.visitMove?.parentRetargetFailed) {
+  if (visitMove.parentRetargetFailed) {
     throw Object.assign(
       new Error(`grouped visit moved but its visit record could not be retargeted — ${(moveResult.warnings || []).join('; ')}`),
       { code: 'VISIT_PARENT_RETARGET_FAILED', movedCount },
