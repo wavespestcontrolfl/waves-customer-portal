@@ -26,7 +26,7 @@
 'use strict';
 
 // Words that point the damage at us: our people, our products, our visit ("the last treatment" too).
-const OURS = '(?:you|your\\s+(?:guys?|tech\\w*|crew|team|worker|man|company|spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison)|(?:the|that|this)\\s+(?:last\\s+|recent\\s+|latest\\s+|first\\s+|second\\s+)?(?:tech\\w*|spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison))';
+const OURS = '(?:you|your\\s+(?:guys?|tech\\w*|crew|team|worker|man|company|spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison|bait\\w*|stations?|traps?|dust|powder|gel|pellets?)|(?:the|that|this)\\s+(?:last\\s+|recent\\s+|latest\\s+|first\\s+|second\\s+)?(?:tech\\w*|spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison|bait\\w*|stations?|traps?|dust|powder|gel|pellets?))';
 // What we can harm: the customer's property, plants, pets and people. Never a pest or a weed: "the spray killed the
 // weeds" and "the spray did not kill the ants" are the treatment's result, the re-service's own subject.
 const THINGS = '(?:grass|lawn|yard|turf|sod|plants?|shrubs?|bushes|flowers?|trees?|hedges?|palms?|garden|landscap\\w*|roses?|hibiscus|crotons?|sprinklers?|sprinkler\\s+heads?|irrigation|pipes?|hoses?|fences?|gates?|doors?|windows?|screens?|siding|paint|cars?|truck|driveway|patio|pavers?|deck|lanai|pool|furniture|carpets?|floors?|walls?|cushions?|sidewalk|walkway|concrete|house|mailbox|lights?|grill|dogs?|cats?|pets?|puppy|kitten|kids?|child|children|son|daughter|baby|wife|husband|family|fish|birds?|chickens?|horses?)';
@@ -49,10 +49,20 @@ const PET = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|fish|birds?|chickens?|h
 const PERSON_OR_PET = `(?:I|we|my\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|son|daughter|baby|wife|husband|family)|our\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|baby|family))`;
 const PERSON_OR_PET_OBJECT = `(?:me|us|my\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|son|daughter|baby|wife|husband|family)|our\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|baby|family))`;
 const SYMPTOM = '(?:sick|ill|nause\\w*|dizzy|rash\\w*|a\\s+rash|headaches?|a\\s+headache|itch\\w*|cough\\w*|vomit\\w*|throwing\\s+up|trouble\\s+breathing|died|dead)';
+// Contact with our product (Codex security review on #7502: "My dog ate your bait" survived every screen). The product
+// is named, never just "you": "I got to talk to your tech" is not contact. The actor is the subject itself, with only
+// helper words between ("my dog may have eaten your bait"), so "we watched the ants eating the bait" is not contact.
+const OURS_PRODUCT = '(?:(?:your|the|that|this|some\\s+of\\s+(?:your|the))\\s+(?:last\\s+|recent\\s+|latest\\s+|new\\s+)?(?:spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison|bait\\w*|stations?|traps?|dust|powder|gel|pellets?)|(?:where|what|the\\s+(?:\\w+\\s+)?(?:grass|lawn|yard|area|spot|stuff))\\s+(?:you|your\\s+(?:guys?|tech\\w*|crew|team))\\s+(?:just\\s+)?(?:sprayed|treated|put\\s+down|spread|applied|left))';
+const HELPERS = '(?:\\s+(?:may|might|must|could|would|should|can|has|have|had|did|does|do|was|were|is|are|been|just|also|then|somehow|accidentally|probably|possibly|definitely|already|actually|apparently))*';
+const CONTACT = '(?:ate|eaten|eating|eats|licked|licking|licks|chewed|chewing|chews|swallowed|swallowing|drank|drinking|touched|touching|sniffed|got\\s+(?:into|in)|gets\\s+(?:into|in)|getting\\s+(?:into|in)|get\\s+(?:into|in)|walked\\s+(?:in|through|on|over)|walking\\s+(?:in|through|on|over)|stepped\\s+(?:in|on)|stepping\\s+(?:in|on)|rolled\\s+(?:around\\s+)?in|rolling\\s+(?:around\\s+)?in|played\\s+with|playing\\s+with|picked\\s+up|(?:was|were|got|been)\\s+exposed\\s+to)';
+// A pet or a child can also "get to" a bait; a person "getting to" something is not contact.
+const REACH = '(?:get|gets|got|getting)\\s+(?:to|at)';
+const PET_OR_CHILD = `(?:(?:the|a|my|our)\\s+(?:\\w+\\s+)?)?(?:${PET}|kids?|child|children|son|daughter|baby|babies|toddler)`;
+const NEAR_SHORT = "(?:(?!\\b(?:not|never|no)\\b|n['’]t\\b)[^.?!]){0,25}?";
 // Any health word in the same sentence as a word for our treatment or us is a health concern, whatever the sentence's
 // shape or a "not" inside it ("I could not breathe after your spray", "is the spray ok for my son's asthma?"). A
 // health question goes to the office too. Never "sick of these ants", "dead roaches" or "the ants ate the poison".
-const HEALTH = "(?:sick(?!\\s+(?:of|and\\s+tired))|ill(?:ness)?|nause\\w*|dizz\\w*|rash\\w*|hives|headaches?|migraines?|cough\\w*|vomit\\w*|throw(?:ing)?\\s+up|threw\\s+up|breath\\w*|breathe|asthma\\w*|allerg\\w*|wheez\\w*|chok\\w*|swell\\w*|swollen|seizures?|faint\\w*|passed\\s+out|hospital\\w*|emergency\\s+room|urgent\\s+care|doctors?|vets?|veterinar\\w*|poison\\s+control|toxic|(?:eyes|throat|skin|nose|lungs?)\\s+(?:(?:were|was|are|is|kept|started|been|felt|feel)\\s+)?(?:burn\\w*|itch\\w*|sting\\w*|hurt\\w*|water\\w*)|burn\\w*\\s+(?:eyes|throat|skin|nose))";
+const HEALTH = "(?:exposed|exposure|fumes|irritat\\w*|symptoms?|reactions?|sick(?!\\s+(?:of|and\\s+tired))|ill(?:ness)?|nause\\w*|dizz\\w*|rash\\w*|hives|headaches?|migraines?|cough\\w*|vomit\\w*|throw(?:ing)?\\s+up|threw\\s+up|breath\\w*|breathe|asthma\\w*|allerg\\w*|wheez\\w*|chok\\w*|swell\\w*|swollen|seizures?|faint\\w*|passed\\s+out|hospital\\w*|emergency\\s+room|urgent\\s+care|doctors?|vets?|veterinar\\w*|poison\\s+control|toxic|(?:eyes|throat|skin|nose|lungs?)\\s+(?:(?:were|was|are|is|kept|started|been|felt|feel)\\s+)?(?:burn\\w*|itch\\w*|sting\\w*|hurt\\w*|water\\w*)|burn\\w*\\s+(?:eyes|throat|skin|nose))";
 
 // Order matters: the first match names the reason. Each entry is [reason, regex].
 const SCREENS = [
@@ -61,6 +71,12 @@ const SCREENS = [
     `\\b${PERSON_OR_PET}\\b${NEAR}\\b${SYMPTOM}\\b${NEAR}\\b(?:from|after|since|by|because\\s+of)\\s+${OURS}\\b`,
     // "the treatment made me sick", "your spray gave our cat a rash"
     `\\b${OURS}\\b${NEAR}\\b(?:made|makes|making|gave|gives|giving|got)\\s+${PERSON_OR_PET_OBJECT}\\s+(?:\\w+\\s+)?${SYMPTOM}\\b`,
+    // A person or a pet that ate, licked, touched, walked through or got into our product: "my dog ate your bait", "the
+    // kids got into the bait station", "our dog can get to the granules", "I stepped in what you sprayed".
+    `\\b${PERSON_OR_PET}${HELPERS}\\s+${CONTACT}\\b${NEAR_SHORT}\\b${OURS_PRODUCT}\\b`,
+    `\\b${PET_OR_CHILD}${HELPERS}\\s+(?:${CONTACT}|${REACH})\\b${NEAR_SHORT}\\b${OURS_PRODUCT}\\b`,
+    // We or our product killed, poisoned, hurt or sprayed a person or a pet: "your tech sprayed my dog".
+    `\\b${OURS}\\b${NEAR}\\b(?:killed|poisoned|hurt|harmed|injured|burned|sprayed|splashed)\\s+${PERSON_OR_PET_OBJECT}\\b`,
     // Any health word beside a word for our treatment or us, in either order, within one sentence.
     `\\b${OURS}\\b[^.?!]{0,80}?\\b${HEALTH}\\b`,
     `\\b${HEALTH}\\b[^.?!]{0,80}?\\b${OURS}\\b`,

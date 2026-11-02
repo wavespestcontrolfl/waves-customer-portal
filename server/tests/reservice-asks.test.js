@@ -244,6 +244,39 @@ describe('texts', () => {
     expect(items.map((item) => [item.id, item.officeOnly])).toEqual([['text:s8', 'health'], ['text:s9', 'health']]);
   });
 
+  test('end to end: a pet that ate our bait is office-only at gather, and the public report never prints it', async () => {
+    const prior = process.env.GATE_RESERVICE_ASKS;
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    try {
+      const { buildReserviceAsksFreeze } = require('../services/reservice-answers');
+      const { buildReserviceAsksReport } = require('../services/service-report/reservice-asks-report');
+      const gathered = await gather({ sms: [
+        sms('s10', 'My dog ate your bait. Ants are still in the kitchen.'),
+        sms('s11', 'Our dog walked through the granules. Roaches are back in the garage.', new Date(NOW - DAY)),
+      ] });
+      expect(gathered.items.map((item) => [item.id, item.officeOnly])).toEqual([['text:s10', 'health'], ['text:s11', 'health']]);
+      const { freeze } = buildReserviceAsksFreeze({
+        gathered,
+        answers: gathered.items.map((item) => ({ itemId: item.id, answer: 'treated', productIds: ['prod-1'] })),
+        gatheredAt: NOW,
+      });
+      const record = {
+        id: 'svc-e2e', customer_id: 'cust-1', service_line: 'pest', service_type: 'Pest Control Re-Service', service_date: '2026-11-02',
+        is_callback: true, service_data: JSON.stringify({ reserviceAsks: freeze }),
+      };
+      const products = [{ id: 'sp1', product_id: 'prod-1', product_name: 'Taurus SC', application_area: 'Outside', targets: JSON.stringify(['Ants']) }];
+      const block = { serviceLine: 'pest', outcome: 'treated', expectation: 'Treatments can take several days.' };
+      expect(buildReserviceAsksReport(record, { block, products })).toBeNull();
+      // With the screen's verdict lost, the render rule alone still keeps the pet and the product off the page.
+      const unflagged = { ...freeze, items: freeze.items.map(({ officeOnly, ...item }) => item) };
+      const report = buildReserviceAsksReport({ ...record, service_data: JSON.stringify({ reserviceAsks: unflagged }) }, { block, products });
+      expect(JSON.stringify(report || {})).not.toMatch(/dog|bait|granules/i);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_RESERVICE_ASKS;
+      else process.env.GATE_RESERVICE_ASKS = prior;
+    }
+  });
+
   test('tapbacks, STOP and empty texts are dropped', async () => {
     const { items } = await gather({
       sms: [

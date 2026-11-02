@@ -262,7 +262,8 @@ words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
 - Which items: an item shows only with a technician answer that is not
   `hidden`, and only when `officeOnlyReason`
   (`server/services/reservice-office-only.js`: a health complaint after a
-  treatment, damage we caused, money, a
+  treatment or a person or pet that ate, licked, touched or got into our
+  product, damage we caused, money, a
   complaint about the service, a missed or late visit) passes it: the verdict
   on the customer's ORIGINAL words is frozen as the item's `officeOnly` (the
   scrub keeps only pest talk, so it would hide "I want a refund"), and the
@@ -279,8 +280,12 @@ words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
   call / office lead plus the words. At render they pass the card's own
   egress screens (a sentence saying where a key, lockbox, remote or fob is, or
   making any pesticide-safety claim, is dropped; a third-person paraphrase
-  never sits under a lead) and then `customerCopyViolations`; `null` (label
-  only) when the frozen item is not `printable` or nothing passes.
+  never sits under a lead), then a private-topic rule (a sentence that names a
+  pet or another person, a bait, poison, granule, dust, gel, station or trap,
+  or a health or safety word is dropped, whatever the office-only screen
+  found), and then `customerCopyViolations`; `null` (label only) when the
+  frozen item is not `printable` or nothing passes. The technician's own
+  answer keeps only the card's screens.
 - `did`: one row per shown item, in card 1's order. `subject` names the
   message: card 1's label plus its first six printed words ("Text · Oct 30 ·
   “Ants are back in the kitchen”"; a label-only message keeps its label).

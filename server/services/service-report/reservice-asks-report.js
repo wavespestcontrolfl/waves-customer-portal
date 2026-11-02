@@ -169,11 +169,25 @@ function withoutAccessOrClaims(text) {
     .join(' ').trim();
 }
 
+// The customer's quoted words print only where they describe the pest problem. A sentence that names a pet or another
+// person, a product a pet or a child could take (bait, poison, granules, dust, gel, a station or a trap), or a health
+// or safety word stays on the tech's sheet and never prints on this public page, whatever the office-only screen
+// found: that screen judges phrasings, and this rule needs none (Codex security review on #7502, six rounds of new
+// phrasings). The tech's own answer is the tech's, so it keeps only the card's screens.
+const PRIVATE_TOPIC_RE = new RegExp([
+  '\\b(?:dogs?|cats?|pets?|pupp(?:y|ies)|kittens?|fish|birds?|chickens?|horses?|kids?|child(?:ren)?|sons?|daughters?|bab(?:y|ies)|toddlers?|grandkids|grandchildren|wife|husband|family|mom|mother|dad|father|parents?|grand(?:ma|pa|mother|father)|roommates?|guests?|tenants?|neighbou?rs?)\\b',
+  '\\b(?:bait\\w*|poison\\w*|pesticides?|chemicals?|granules?|pellets?|dust|powder|gel|stations?|traps?)\\b',
+  '\\b(?:safe(?:ty|ly)?|unsafe|toxic|harm\\w*|dangerous|hazard\\w*|sick|ill(?:ness)?|unwell|nause\\w*|dizz\\w*|rash\\w*|hives|headaches?|migraines?|cough\\w*|vomit\\w*|throw(?:ing|s)?\\s+up|threw\\s+up|breath\\w*|breathe|asthma\\w*|allerg\\w*|wheez\\w*|chok\\w*|swell\\w*|swollen|seizures?|faint\\w*|passed\\s+out|light-?headed|itch\\w*|burn\\w*|irritat\\w*|exposed|exposure|fumes|symptoms?|reactions?|throat|lungs?|chest|stomach|eyes|hospital\\w*|doctors?|vets?|veterinar\\w*|medical|medicine|clinic|emergency\\s+room|urgent\\s+care|poison\\s+control|pregnan\\w*|(?:felt|feel|feels|feeling)\\s+(?:\\w+\\s+)?(?:awful|terrible|horrible|bad|sick|off|weird|funny|gross|ill|dizzy))\\b',
+].join('|'), 'i');
+function pestProblemSentences(text) {
+  return text.split(/(?<=[.!?])\s+/).filter((sentence) => !PRIVATE_TOPIC_RE.test(sentence)).join(' ').trim();
+}
+
 // The customer's words as the card prints them, or '' (label only).
 function wordsOf(item) {
   const raw = String(item.text || '').replace(/\s+/g, ' ').trim();
   if (!raw || item.printable === false) return '';
-  const text = withoutAccessOrClaims(raw);
+  const text = pestProblemSentences(withoutAccessOrClaims(raw));
   if (!text) return '';
   const lead = typeof item.lead === 'string' ? item.lead.trim() : '';
   // A paraphrase written about the customer ("Customer says the ants are back") cannot sit under a lead addressed to
@@ -190,7 +204,7 @@ const SUBJECT_WORDS = 6;
 function subjectOf(item) {
   const label = labelOf(item);
   if (!wordsOf(item)) return label;
-  const words = withoutAccessOrClaims(String(item.text || '').replace(/\s+/g, ' ').trim()).split(' ');
+  const words = pestProblemSentences(withoutAccessOrClaims(String(item.text || '').replace(/\s+/g, ' ').trim())).split(' ');
   const cut = words.slice(0, SUBJECT_WORDS).join(' ').replace(/[\s.,;:!?…]+$/, '');
   const short = words.length > SUBJECT_WORDS ? `${cut}…` : cut;
   return `${label} · ${item.quoted === true ? `“${short}”` : short}`;
