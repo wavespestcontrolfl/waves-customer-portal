@@ -1451,6 +1451,17 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck('Here is your latest service report: wavespest.co/l/rep1')).toEqual({ present: true, label: 'Service report' });
   });
 
+  test('a moving page link (long, http, or the short form) is immediate-only; a look-alike host is not', async () => {
+    const MOVE = 'ab'.repeat(24);
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE}`)).toEqual({ present: true, label: 'Moving' });
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/moving/${MOVE}/`)).toEqual({ present: true, label: 'Moving' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'mv1', kind: 'moving', target_url: `https://portal.wavespestcontrol.com/moving/${MOVE}` } }) };
+    expect(await immediateOnlyLinkSendCheck('Moving? wavespest.co/l/mv1')).toEqual({ present: true, label: 'Moving' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`Tips: https://example.com/moving/${MOVE}`)).toEqual({ present: false });
+  });
+
   test('a project report link (vanity or full-token form) is immediate-only; the project form is not mistaken for a service report', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
     expect(await immediateOnlyLinkSendCheck(`Here is your report: portal.wavespestcontrol.com/report/project/dana-lee-${'f'.repeat(12)}`)).toEqual({ present: true, label: 'Project report' });

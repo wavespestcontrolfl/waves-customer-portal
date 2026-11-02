@@ -860,6 +860,17 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     applies: async () => true,
   },
   {
+    // A moving page (GATE_MOVING_FLOW) shows the customer's first name, plan
+    // services and move details, and its holder can change the move. Only /sms
+    // binds it to the recipient (checkMovingLinks); a queued text keeps the old
+    // phone and replays later, so it never carries one (GH Codex security
+    // review on #7486). Short forms arrive expanded (expandedRuns).
+    label: 'Moving',
+    fragment: /\/moving\//i,
+    token: (run, host) => canonicalPortalToken(run, host, MOVING_PATH_RE, ANY_SCHEME),
+    applies: async () => true,
+  },
+  {
     label: 'Statement pay',
     fragment: /\/pay\/statement\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i, ANY_SCHEME),
