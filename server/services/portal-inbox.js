@@ -85,12 +85,18 @@ function openRequests(conn = db) {
   return openRequestScope(conn('service_requests as r'));
 }
 
-// Open unfinished-booking bells: admin rows not done whose key carries the prefix.
-function openBookings(conn = db) {
-  return conn('notifications as n')
+// Open unfinished-booking bells (portal-unfinished-bookings.js), as a scope over a
+// builder on `notifications as n`: admin rows not done whose key carries the
+// prefix. openBookings below and the lead staleness sweep both go through it.
+function openBookingScope(builder) {
+  return builder
     .where('n.recipient_type', 'admin')
     .whereNull('n.done_at')
     .whereRaw("left(COALESCE(n.metadata->>'dedupeKey', ''), ?) = ?", [BOOKING_KEY_PREFIX.length, BOOKING_KEY_PREFIX]);
+}
+
+function openBookings(conn = db) {
+  return openBookingScope(conn('notifications as n'));
 }
 
 async function countOf(query) {
@@ -392,6 +398,7 @@ module.exports = {
   WINDOW_DAYS,
   openChatScope,
   openRequestScope,
+  openBookingScope,
   windowCutoff,
   summary,
   list,

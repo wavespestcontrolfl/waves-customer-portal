@@ -168,6 +168,30 @@ maybeDescribe('lead staleness: the customer\'s own unanswered ask (live Postgres
     expect(await parked(staffMade.lead)).toBe(true);
   });
 
+  // The bell portal-unfinished-bookings.js raises when they leave the card step of our estimate.
+  const bookingBell = (customer, { done = false, key = `portal-unfinished-checkout:${randomUUID()}` } = {}) => insert('notifications', {
+    recipient_type: 'admin', category: 'alert', title: `Booking - ${RUN}`, body: 'x',
+    metadata: JSON.stringify({ dedupeKey: key, customerId: customer.id, doneWhen: 'customer_answered' }), done_at: done ? new Date() : null,
+  });
+
+  test('an open "Booking not finished" bell keeps the lead; a Done one, another customer\'s or another kind of bell does not', async () => {
+    const open = await scene();
+    await bookingBell(open.customer);
+    expect(await parked(open.lead)).toBe(false);
+
+    const handled = await scene();
+    await bookingBell(handled.customer, { done: true });
+    expect(await parked(handled.lead)).toBe(true);
+
+    // The open bell above is on another customer.
+    const other = await scene();
+    expect(await parked(other.lead)).toBe(true);
+
+    const otherKind = await scene();
+    await bookingBell(otherKind.customer, { key: `portal-ask:${randomUUID()}` });
+    expect(await parked(otherKind.lead)).toBe(true);
+  });
+
   test('an inbound text nobody answered keeps the lead', async () => {
     const { customer, lead, phone } = await scene();
     await inboundText(customer, phone, ago(20));

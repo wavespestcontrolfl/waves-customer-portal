@@ -62,6 +62,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const SINCE_90D = new Date(NOW.getTime() - 90 * DAY_MS);
 const OWED_REPLY_BINDINGS = [
   'portal_chat', 'pending', 'resolved', 'closed', 'cancelled',
+  'admin', 'portal-unfinished-'.length, 'portal-unfinished-',
   'inbound', SINCE_90D,
   'outbound',
   'voice_relay_sandbox', 'tech_voice', 'outbound', 'completed',
@@ -139,7 +140,11 @@ const OWED_REPLY_CLAUSE_TAIL = [
   // 2. an open customer service request (portal-inbox.js openRequestScope)
   'and not exists (select 1 from "service_requests" as "r" '
   + "where coalesce(r.status, 'new') not in (?, ?, ?) and coalesce(r.source, '') <> 'admin' and r.customer_id = leads.customer_id) ",
-  // 3. an inbound text, not a STOP, in the window...
+  // 3. an open "Booking not finished" bell (portal-inbox.js openBookingScope)
+  'and not exists (select 1 from "notifications" as "n" '
+  + 'where "n"."recipient_type" = ? and "n"."done_at" is null '
+  + "and left(COALESCE(n.metadata->>'dedupeKey', ''), ?) = ? and n.metadata->>'customerId' = leads.customer_id::text) ",
+  // 4. an inbound text, not a STOP, in the window...
   'and not exists (select 1 from "sms_log" as "inb" '
   + 'where inb.customer_id = leads.customer_id and "inb"."direction" = ? and "inb"."created_at" >= ? '
   + "and inb.message_type IS DISTINCT FROM 'opt_out' "
