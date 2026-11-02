@@ -20,7 +20,7 @@ const KEY_STEPS = Object.freeze(['feeding', 'barrier', 'micros', 'insects']);
 const ROUND_SHORT = Object.freeze(['Barrier + color', 'Feed + barrier', 'Spring feed', 'Insects', 'Color + barrier', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Potassium feed']);
 const MONTH_SHORT = Object.freeze(['Barrier + color', 'Feed', 'Barrier + color', 'Feed', 'Insects', 'Color + barrier', 'Inspection', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Feed', 'Potassium feed']);
 const PLAN_LABELS = Object.freeze({ rounds: '9 visits a year, one per round', months12: '12 visits a year, one a month' });
-// The month bar's words. A plan that is not known (a 6-visit plan, a 9-visit plan while GATE_LAWN_9X_ROUNDS is off, several lawn
+// The month bar's words. A plan that is not known (a 6-visit plan, several lawn
 // lines) gets no visit count: its words are the month list's own approved line plus the 12-visit body without "One visit a month".
 const MONTH_BAR_WORDS = Object.freeze({
   months12: { title: 'Your Year In Twelve Visits', body: 'One visit a month. Each month has one main job. Tap a month to read about it.' },
@@ -416,8 +416,8 @@ function lawnLineName(svc) {
 }
 
 // The estimate's lawn plan, by the decision the seeder makes when the estimate books: exactly one residential lawn line, its
-// seeding cadence from the converter's own inference, then the seeder's lawnRoundsSeriesPattern (which needs
-// GATE_LAWN_9X_ROUNDS). 'rounds' = it seeds as lawn_rounds_9; 'months12' = monthly; anything else (no lawn line, several,
+// seeding cadence from the converter's own inference, then the seeder's lawnRoundsSeriesPattern.
+// 'rounds' = it seeds as lawn_rounds_9; 'months12' = monthly; anything else (no lawn line, several,
 // another cadence, or a failed read) = 'unknown', which draws the 12-month bar and names no plan.
 function resolveLawnPlan(estimateData) {
   try {
