@@ -356,8 +356,10 @@ async function loadContact(rows, data, conn) {
     if (PORTAL_CHAT_CLASSES.has(cls.key) && portalChatAnsweredCloseMode() === 'off') continue;
     const refs = cls.contact ? contactRefs(cls.contact, row, data) : null;
     if (!refs) continue;
-    // A lead_contacted or portal chat bell can be refreshed and rung again: its boundary is its latest event.
-    const bellAt = BELL_EVENT_CLASSES.has(cls.key) ? bellEventAt(row) : (row.created_at ? new Date(row.created_at) : null);
+    // A lead_contacted or portal chat bell can be refreshed and rung again: its boundary is its latest event. An
+    // unfinished-booking bell's is the drop-off (bookingBoundaryAt).
+    const bellAt = BELL_EVENT_CLASSES.has(cls.key) ? bellEventAt(row)
+      : (cls.key === 'portal_unfinished_booking' ? bookingBoundaryAt(row) : (row.created_at ? new Date(row.created_at) : null));
     items.push({ id: row.id, kind: cls.contact, bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null, refs });
   }
   if (!items.length) return;
@@ -421,6 +423,14 @@ async function loadQuoteHandoffs(rows, data, conn) {
 // reason in plain words); a read that fails throws and the sweep skips the batch.
 const isUnfinishedBookingBell = (meta) => String(meta.dedupeKey || '').startsWith(UNFINISHED_BOOKING_PREFIX);
 
+// An unfinished-booking bell's evidence boundary is the drop-off itself (metadata.dropOffAt), the boundary the
+// detection read used: a person's reply or a visit that lands between that read and the bell's insert must still
+// close it. A bell with no readable dropOffAt falls back to its ask time.
+function bookingBoundaryAt(row, meta = parseMeta(row.metadata)) {
+  const dropOff = meta.dropOffAt ? new Date(meta.dropOffAt) : null;
+  return dropOff && !Number.isNaN(dropOff.getTime()) ? dropOff : new Date(askedAtOf(row, meta));
+}
+
 async function loadUnfinishedBookings(rows, data, conn) {
   if (portalBookingGate() === 'off') return;
   const bells = rows.map((row) => ({ row, meta: parseMeta(row.metadata) })).filter(({ meta }) => isUnfinishedBookingBell(meta));
@@ -435,7 +445,7 @@ async function loadUnfinishedBookings(rows, data, conn) {
   const accepted = new Set(estimates.filter((r) => r.accepted_at || r.status === 'accepted').map((r) => String(r.id)));
   const booked = await bookedVisitsByCustomer(conn, customerIds);
   for (const { row, meta } of bells) {
-    const reason = unfinishedBookingReason(meta, askedAtOf(row, meta), { converted, accepted, booked });
+    const reason = unfinishedBookingReason(meta, bookingBoundaryAt(row, meta), { converted, accepted, booked });
     if (reason) data.bookingMovedOn.set(String(row.id), reason);
   }
 }
@@ -986,8 +996,8 @@ function portalItemAnswered(s) {
 }
 
 // An unfinished-booking bell (GATE_PORTAL_BOOKING_ITEMS): finished once the booking converted, a visit was booked
-// for the customer or the estimate was accepted, all after the bell (loadUnfinishedBookings). A person's contact
-// closes it too, by the portal request class's contactRule (portalItemAnswered).
+// for the customer or the estimate was accepted, all after the drop-off (loadUnfinishedBookings, bookingBoundaryAt).
+// A person's contact after the drop-off closes it too, by the portal request class's contactRule (portalItemAnswered).
 function unfinishedBookingSettled(s) {
   return isUnfinishedBookingBell(s.meta) ? s.bookingMovedOn : null;
 }

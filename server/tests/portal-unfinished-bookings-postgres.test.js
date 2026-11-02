@@ -307,6 +307,25 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     expect(await NotificationService.markAdminDone([bell.id], { by: 'portal-unfinished-bookings-test', role: 'admin', expectedVersion: item.version })).toBe(1);
   });
 
+  test('a reply or a visit between the drop-off and the bell still closes it: the boundary is the drop-off', async () => {
+    process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
+    const texted = await customer();
+    const textedIntent = await intent(texted, { last_activity_at: ago(90) });
+    const visited = await customer();
+    const visitedIntent = await intent(visited, { last_activity_at: ago(90) });
+    await run();
+    expect(await bellsFor(intentKey(textedIntent))).toHaveLength(1);
+    expect(await bellsFor(intentKey(visitedIntent))).toHaveLength(1);
+    // Both land after the drop-off but before the bell's insert: the race between the detection read and the insert.
+    await staffText(texted, ago(30));
+    await visit(visited, ago(30));
+    await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
+    expect((await bellsFor(intentKey(textedIntent)))[0].done_at).not.toBeNull();
+    const [visitedAfter] = await bellsFor(intentKey(visitedIntent));
+    expect(visitedAfter.done_at).not.toBeNull();
+    expect(visitedAfter.resolution).toBe('A visit was booked');
+  });
+
   test('the sweep closes the bell on a person\'s text after it, and when the booking was finished', async () => {
     process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
     const texted = await customer();
