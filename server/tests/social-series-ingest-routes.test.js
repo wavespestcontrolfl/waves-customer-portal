@@ -7,9 +7,21 @@ const mockInserts = [];
 const mockConflictArgs = [];
 const mockExisting = { row: null };
 const mockInsertResult = { skip: false, error: null };
+// GET /numbers reads: rows per table, plus every where/limit call it made.
+const mockReads = { social_media_posts: [], social_post_engagement: [], error: null, calls: [] };
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     const b = {};
+    const note = (name) => jest.fn((...args) => { mockReads.calls.push({ table, name, args }); return b; });
+    b.whereIn = note('whereIn');
+    b.whereNotNull = note('whereNotNull');
+    b.orderBy = note('orderBy');
+    b.limit = note('limit');
+    b.select = jest.fn(async (...args) => {
+      mockReads.calls.push({ table, name: 'select', args });
+      if (mockReads.error) throw mockReads.error;
+      return mockReads[table] || [];
+    });
     b.insert = jest.fn((row) => {
       if (mockInsertResult.error) throw mockInsertResult.error;
       b.row = row;
@@ -22,7 +34,7 @@ jest.mock('../models/db', () => {
       mockInserts.push({ table, row: b.row });
       return [{ id: 'row-1', scheduled_for: new Date(b.row.scheduled_for) }];
     });
-    b.where = jest.fn(() => b);
+    b.where = jest.fn((...args) => { mockReads.calls.push({ table, name: 'where', args }); return b; });
     b.first = jest.fn(async () => mockExisting.row);
     return b;
   });
@@ -77,6 +89,10 @@ beforeEach(() => {
   mockExisting.row = null;
   mockInsertResult.skip = false;
   mockInsertResult.error = null;
+  mockReads.social_media_posts = [];
+  mockReads.social_post_engagement = [];
+  mockReads.error = null;
+  mockReads.calls = [];
   mockUploadImage.mockReset();
   mockUploadVideo.mockReset();
   Object.assign(mockFlags, { automationEnabled: true, scheduledPosts: true, facebookEnabled: true, instagramEnabled: true, gbpEnabled: true });
@@ -116,7 +132,7 @@ const good = (over = {}) => ({
 describe('auth and the dark route', () => {
   test('every method and path is the generic 404 while the token is unset', async () => {
     delete process.env.SOCIAL_SERIES_INGEST_TOKEN;
-    for (const [method, path] of [['POST', '/posts'], ['POST', '/media'], ['OPTIONS', '/posts'], ['GET', '/anything']]) {
+    for (const [method, path] of [['POST', '/posts'], ['POST', '/media'], ['OPTIONS', '/posts'], ['GET', '/anything'], ['GET', '/numbers']]) {
       const res = await fetch(`${baseUrl}/api/social/series${path}`, { method });
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: `Route not found: ${method} /api/social/series${path}` });
@@ -435,5 +451,80 @@ describe('POST /media', () => {
     expect(mismatch.status).toBe(400);
     expect(mismatch.json.reason).toBe('content_type_mismatch');
     expect(mockUploadImage).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /numbers', () => {
+  const get = (query = '', opts = {}) => call(`/numbers${query}`, { method: 'GET', type: null, ...opts });
+
+  test('401 on a wrong or missing bearer', async () => {
+    expect((await get('', { token: 'nope' })).json).toEqual({ ok: false, reason: 'invalid_token' });
+    expect((await get('', { token: null })).status).toBe(401);
+    expect(mockReads.calls).toHaveLength(0);
+  });
+
+  test('days must be a whole number from 1 to 60 (default 14); anything else is 400 and reads nothing', async () => {
+    for (const bad of ['0', '61', '-1', 'abc', '1.5', '', '7&days=8', '1e1', '1000']) {
+      const res = await get(`?days=${bad}`);
+      expect(res.status).toBe(400);
+      expect(res.json.reason).toBe('invalid_days');
+    }
+    expect(mockReads.calls).toHaveLength(0);
+    expect((await get()).json.days).toBe(14);
+    expect((await get('?days=60')).json.days).toBe(60);
+    expect((await get('?days=1')).json.days).toBe(1);
+  });
+
+  test('200 lists series posts newest first with per-platform numbers; not-measured reach and views stay null', async () => {
+    mockReads.social_media_posts = [
+      { id: 'p2', source_guid: 'series:week-13-ants', title: 'Week 13: ants', published_at: new Date('2026-11-01T14:00:00Z'), video_url: `https://${CDN}/social-media/series-v.mp4` },
+      { id: 'p1', source_guid: 'series:week-12-pest-myths', title: 'Week 12: pest myths', published_at: new Date('2026-10-25T14:00:00Z'), video_url: null },
+    ];
+    mockReads.social_post_engagement = [
+      { post_id: 'p1', platform: 'facebook', likes_count: 12, comments_count: 2, shares_count: 1, reach: 940, views: 1310, last_success_at: new Date('2026-11-02T09:15:00Z') },
+      { post_id: 'p1', platform: 'instagram', likes_count: 30, comments_count: 4, shares_count: null, reach: 0, views: null, last_success_at: new Date('2026-11-02T09:15:00Z') },
+    ];
+    const { status, json } = await get('?days=14');
+    expect(status).toBe(200);
+    expect(json).toEqual({
+      ok: true,
+      days: 14,
+      count: 2,
+      posts: [
+        { id: 'week-13-ants', title: 'Week 13: ants', publishedAt: '2026-11-01T14:00:00.000Z', isVideo: true, platforms: [] },
+        {
+          id: 'week-12-pest-myths',
+          title: 'Week 12: pest myths',
+          publishedAt: '2026-10-25T14:00:00.000Z',
+          isVideo: false,
+          platforms: [
+            { platform: 'facebook', likes: 12, comments: 2, shares: 1, reach: 940, views: 1310, syncedAt: '2026-11-02T09:15:00.000Z' },
+            { platform: 'instagram', likes: 30, comments: 4, shares: null, reach: 0, views: null, syncedAt: '2026-11-02T09:15:00.000Z' },
+          ],
+        },
+      ],
+    });
+    const call0 = (table, name) => mockReads.calls.filter((c) => c.table === table && c.name === name);
+    const wheres = call0('social_media_posts', 'where').map((c) => c.args);
+    expect(wheres).toContainEqual([{ source_type: 'series' }]);
+    expect(wheres).toContainEqual(['published_at', '>=', new Date(NOW - 14 * 86400000)]);
+    expect(call0('social_media_posts', 'limit')[0].args).toEqual([200]);
+    expect(call0('social_media_posts', 'orderBy')[0].args).toEqual(['published_at', 'desc']);
+    expect(call0('social_post_engagement', 'whereNotNull')[0].args).toEqual(['last_success_at']);
+    expect(call0('social_post_engagement', 'whereIn')[0].args).toEqual(['post_id', ['p2', 'p1']]);
+  });
+
+  test('no series posts in the window: 200 with an empty list and no engagement read', async () => {
+    const { status, json } = await get('?days=3');
+    expect(status).toBe(200);
+    expect(json).toEqual({ ok: true, days: 3, count: 0, posts: [] });
+    expect(mockReads.calls.filter((c) => c.table === 'social_post_engagement')).toHaveLength(0);
+  });
+
+  test('a database failure is a retryable 503', async () => {
+    mockReads.error = new Error('db down');
+    const { status, json } = await get();
+    expect(status).toBe(503);
+    expect(json).toEqual({ ok: false, reason: 'read_failed' });
   });
 });

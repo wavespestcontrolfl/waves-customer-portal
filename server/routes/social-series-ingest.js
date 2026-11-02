@@ -1,5 +1,5 @@
 /**
- * Social series ingest — POST /api/social/series/media and /posts (machine auth).
+ * Social series ingest — POST /api/social/series/media and /posts, GET /numbers (machine auth).
  *
  * The weekly "series" job on the owner's other Mac used to push its numbered
  * Facebook, Instagram and Google Business posts through Zernio, a paid posting
@@ -23,12 +23,17 @@
  *   503  media_hosting_unavailable (the S3/CDN helper returned null)
  *   201  /media { ok, url, kind }; /posts { ok, id, deduped:false, scheduledFor }
  *   200  /posts deduped row, or a dry run
+ *   GET /numbers?days=N (read-only, the same dark/limiter/bearer chain, no body): the
+ *        series posts published in the last N days (1-60, default 14; anything else is
+ *        400 invalid_days) with the engagement the daily sweep stored, so the Sunday
+ *        numbers job reads reach there instead of from Zernio.
  *
  * Logs carry item ids only, never the token, a caption or a media URL.
  */
 const crypto = require('crypto');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const db = require('../models/db');
 const logger = require('../services/logger');
 const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
@@ -172,6 +177,75 @@ router.post('/posts', darkUnlessConfigured, ingestAuth, async (req, res) => {
   }
 });
 
+const NUMBERS_DEFAULT_DAYS = 14;
+const NUMBERS_MAX_DAYS = 60;
+const NUMBERS_MAX_POSTS = 200;
+
+// days: absent = 14; otherwise a plain integer 1-60 (a repeated or non-numeric
+// value is refused, never coerced).
+function parseNumbersDays(raw) {
+  if (raw === undefined) return NUMBERS_DEFAULT_DAYS;
+  if (typeof raw !== 'string' || !/^\d{1,3}$/.test(raw)) return null;
+  const days = Number(raw);
+  return days >= 1 && days <= NUMBERS_MAX_DAYS ? days : null;
+}
+
+function numberOrNull(value) {
+  return value == null ? null : Number(value);
+}
+
+function numbersPlatform(row) {
+  return {
+    platform: row.platform,
+    likes: numberOrNull(row.likes_count),
+    comments: numberOrNull(row.comments_count),
+    shares: numberOrNull(row.shares_count),
+    reach: numberOrNull(row.reach),
+    views: numberOrNull(row.views),
+    syncedAt: row.last_success_at ? new Date(row.last_success_at).toISOString() : null,
+  };
+}
+
+// Newest first, at most 200 series rows. Rows the sweep never fetched
+// successfully carry default-zero counts that are not data, so only rows with
+// last_success_at are listed; reach / views stay null where Meta gave none.
+router.get('/numbers', darkUnlessConfigured, ingestAuth, async (req, res) => {
+  const days = parseNumbersDays(req.query.days);
+  if (days === null) return res.status(400).json({ ok: false, reason: 'invalid_days', detail: `days must be a whole number from 1 to ${NUMBERS_MAX_DAYS}` });
+  try {
+    const since = new Date(Date.now() - days * 86400000);
+    const posts = await db('social_media_posts')
+      .where({ source_type: 'series' })
+      .where('published_at', '>=', since)
+      .orderBy('published_at', 'desc')
+      .limit(NUMBERS_MAX_POSTS)
+      .select('id', 'source_guid', 'title', 'published_at', 'video_url');
+    const engagement = posts.length
+      ? await db('social_post_engagement')
+        .whereIn('post_id', posts.map((p) => p.id))
+        .whereNotNull('last_success_at')
+        .orderBy('platform')
+        .select('post_id', 'platform', 'likes_count', 'comments_count', 'shares_count', 'reach', 'views', 'last_success_at')
+      : [];
+    const byPost = new Map();
+    for (const row of engagement) {
+      if (!byPost.has(row.post_id)) byPost.set(row.post_id, []);
+      byPost.get(row.post_id).push(numbersPlatform(row));
+    }
+    const out = posts.map((p) => ({
+      id: String(p.source_guid || '').replace(/^series:/, ''),
+      title: p.title,
+      publishedAt: new Date(p.published_at).toISOString(),
+      isVideo: p.video_url != null,
+      platforms: byPost.get(p.id) || [],
+    }));
+    return res.status(200).json({ ok: true, days, count: out.length, posts: out });
+  } catch (err) {
+    logger.error(`[social-series-ingest] numbers read failed: ${err.message}`);
+    return res.status(503).json({ ok: false, reason: 'read_failed' });
+  }
+});
+
 // Parser failures after auth: plain JSON, never the HTML default. Only
 // reachable once ingestAuth passed (the chain below).
 function ingestBodyErrorHandler(err, req, res, next) {
@@ -210,5 +284,5 @@ const ingestPreParsers = [
 module.exports = router;
 module.exports.ingestPreParsers = ingestPreParsers;
 module.exports._private = {
-  ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, matchesSignature, MEDIA_TYPES,
+  ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, matchesSignature, MEDIA_TYPES, parseNumbersDays,
 };
