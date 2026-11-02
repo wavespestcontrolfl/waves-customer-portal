@@ -750,23 +750,35 @@ function paragraphForVisit(facts) {
 // The Waves rain rule of a product (GATE_SPRAY_RAIN_RULES, owner 2026-10-26, D2 = A), for a tank spray whose label
 // has no rain rule: the weather rebooker's own classifier and table (reschedule-rules.js serviceSensitivity), the
 // strictest among the services whose lines name the product on the visit (a Tree & Shrub add-on's product on a pest
-// visit takes the add-on's 3 h, not the visit's 2 h). Null when none needs rain-free time (granular lawn, interior pest).
+// visit takes the add-on's 3 h, not the visit's 2 h). A service is a name or { name, serviceKey }; one the booking
+// ranker classes rain-OK (rain-fit.js: Bora-Care, termite foam, palm injection, rodent checks ...) needs no dry hours,
+// so it adds no rule (owner 2026-11-01). Null when none needs rain-free time (granular lawn, interior pest).
 function wavesRainRule(serviceTypes) {
+  const { rainClassOf } = require('./scheduling/rain-fit');
   let strictest = null;
-  for (const serviceType of serviceTypes) {
-    const key = require('./service-sensitivity').classifyServiceSensitivity(serviceType);
+  for (const service of serviceTypes) {
+    if (rainClassOf(service) === 'ok') continue;
+    const key = require('./service-sensitivity').classifyServiceSensitivity(service?.name ?? service, service?.serviceKey);
     const sensitivity = RESCHEDULE_RULES.serviceSensitivity[key];
     if (sensitivity?.needs_rain_free && sensitivity.rain_free_hours > (strictest?.hours ?? 0)) strictest = { key, hours: sensitivity.rain_free_hours };
   }
   return strictest;
 }
 
+// The service a card line belongs to, with its catalog key: the visit's own, or the add-on the line's source names.
+// A source that matches neither stays a bare name.
+function lineService(line, facts) {
+  if (!line.source) return { name: facts.serviceType, serviceKey: facts.serviceKey || null };
+  const addon = (facts.addons || []).find((a) => a.name === line.source);
+  return addon ? { name: addon.name, serviceKey: addon.serviceKey || null } : line.source;
+}
+
 // The rain rules' inputs, on the card and in the tank search alike: each product's Waves rule and the services whose
-// lines name it (a label line for one kind of job, Cyper TC's termite wind line, reads the same services).
+// lines name it (a label line for one kind of job, Cyper TC's termite wind line, reads the same services, by name).
 function rainRulesFor(products, servicesOf) {
   return {
     waves: Object.fromEntries(products.map((p) => [p.id, wavesRainRule(servicesOf(p))])),
-    services: Object.fromEntries(products.map((p) => [p.id, servicesOf(p)])),
+    services: Object.fromEntries(products.map((p) => [p.id, servicesOf(p).map((s) => s?.name ?? s)])),
   };
 }
 
@@ -1926,7 +1938,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   // every caution stay countable (owner 2026-10-29). A product's Waves rule comes from the services whose
   // lines name it (an add-on's line is its add-on's).
   const rainMode = sprayRainRulesMode();
-  const rainRules = rainMode === 'off' ? null : rainRulesFor(products, (p) => lines.filter((l) => l.product.id === p.id).map((l) => l.source || facts.serviceType));
+  const rainRules = rainMode === 'off' ? null : rainRulesFor(products, (p) => lines.filter((l) => l.product.id === p.id).map((l) => lineService(l, facts)));
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules: rainMode === 'true' ? rainRules : null });
   if (rainMode !== 'off' && isToday && lines.length) {
     const shadow = rainMode === 'true' ? sprayCheck : buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
@@ -2143,7 +2155,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     const labelSources = await checkReviewedWeatherSources([product]);
     // The Waves rule of the services whose lines name the product, as on the card: a lawn plan's
     // product is the visit's, and so is a product no line names.
-    const services = planned || !owners.length ? [svc.service_type, ...owners] : owners;
+    const services = planned || !owners.length ? [{ name: svc.service_type, serviceKey: svc.service_key || null }, ...owners] : owners;
     const rainRules = sprayRainRulesMode() === 'true' ? rainRulesFor([product], () => services) : null;
     const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, rainRules, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
     sprayCheck = { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason, ...(sprayVerdict.level ? { level: sprayVerdict.level } : {}), ...(sprayVerdict.action ? { action: sprayVerdict.action } : {}) };
@@ -2252,7 +2264,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const hits = candidates
     .map((c) => ({ c, hit: resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null }).lines.find((l) => l.product.id === product.id) }))
     .filter(({ hit }) => hit);
-  const owners = hits.map(({ c }) => c.name);
+  const owners = hits.map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
   const selected = hits.find(({ hit }) => hit.selected !== false);
   if (selected) return found({ addon: selected.c.addon, selected: true, rate: lineRate(selected.hit.raw), governed: Boolean(selected.hit.governed) }, owners);
   const [conditional] = hits;
@@ -2336,5 +2348,5 @@ module.exports = {
   resolveVisitProducts,
   mergeProductLines,
   resolveVisitLines,
-  _test: { heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };
