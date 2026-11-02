@@ -382,7 +382,8 @@ function MoreText({ n, type, color, marginTop, onExplain }) {
   return fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null;
 }
 
-export default function NotificationBell({ type = 'admin', customerId }) {
+// sessionReady (admin layout): false while the staff session is still being verified.
+export default function NotificationBell({ type = 'admin', customerId, sessionReady = true }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
   // For customer: polls /api/notifications/unread-count
@@ -796,9 +797,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   };
 
   // The push's Call, inside the Waves Admin app only: the same POST as the row's Call button, on the row and version
-  // the push showed. The panel opens with the server's answer and the list read again.
+  // the push showed. The panel opens with the server's answer and the list read again. Only once the staff session
+  // is verified: the layout mounts its bell again when verification ends (AdminLayoutV2's navigation key), and a
+  // bell that ran the call before that would take its answer away with it.
   useEffect(() => {
-    if (type !== 'admin' || !isWavesAdminApp()) return undefined;
+    if (type !== 'admin' || !sessionReady || !isWavesAdminApp()) return undefined;
     const runCall = ({ id, version }) => {
       setOpen(true);
       loadNotifications();
@@ -821,7 +824,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     };
     window.addEventListener(ALERT_CALL_EVENT, onAppCall);
     return () => window.removeEventListener(ALERT_CALL_EVENT, onAppCall);
-  }, []);
+  }, [sessionReady]);
 
   const doneSeqRef = useRef(0);
   // more: append the page after the last one read (keyset cursor), so every

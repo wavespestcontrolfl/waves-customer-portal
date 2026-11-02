@@ -1489,6 +1489,18 @@ describe('NotificationBell push Call (Waves Admin app)', () => {
     expect(posts()).toHaveLength(1);
   });
 
+  it('waits for the verified staff session: nothing is taken while it is checked, then the Call runs once', async () => {
+    setup(() => ({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }));
+    const { rerender } = render(<NotificationBell type="admin" sessionReady={false} />);
+    await act(async () => {});
+    expect(posts()).toHaveLength(0);
+    expect(window.location.search).toContain('alertCall=');
+    rerender(<NotificationBell type="admin" sessionReady />);
+    expect(await screen.findByRole('status')).toHaveTextContent('Calling your phone now. Press 1 to connect.');
+    expect(posts()).toHaveLength(1);
+    expect(window.location.search).toBe('?tab=x');
+  });
+
   it('a changed row says so; any other failure says the call did not start', async () => {
     setup(() => ({ ok: false, status: 409, json: async () => ({ error: 'changed' }) }));
     render(<NotificationBell type="admin" />);
