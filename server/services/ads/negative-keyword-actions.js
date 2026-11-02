@@ -15,7 +15,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const episodes = require('../admin-alert-episodes');
 const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('../admin-alert-compose');
 const { fitAction } = require('../admin-alert-names');
-const { normalizeNegative, protectedReason, phraseMatches } = require('./negative-keywords');
+const { normalizeNegative, protectedReason, competitorName, phraseMatches } = require('./negative-keywords');
 const { negativeButtons } = require('./negative-keyword-buttons');
 
 const AREA = 'Leads';
@@ -28,7 +28,8 @@ const CONVERSION_DAYS = 90;
 const REASON_CHARS = 500;
 const LOG_LIMIT = 100;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const BELL_FALLBACK_WHY = 'Suggested by the ads advisor; no conversions in 30 days.';
+// No claim about conversions here: the fallback is used exactly when the numbers behind the word are missing.
+const BELL_FALLBACK_WHY = 'Suggested by the ads advisor from the last 30 days of search terms.';
 
 const gateLive = () => require('../../config/feature-gates').adsNegativesLive() === true;
 const google = () => require('./google-ads');
@@ -519,7 +520,8 @@ async function queueAdvisorNegatives(advice, { now = new Date() } = {}) {
   for (const rec of Array.isArray(advice?.recommendations) ? advice.recommendations : []) {
     if (!rec || rec.apply_action !== 'add_negative' || !rec.apply_value || !rec.campaign_id) continue;
     const text = normalizeNegative(rec.apply_value);
-    if (!text || protectedReason(text)) continue;
+    // The advisor's validation already drops these; checked again so a stale report can never queue one.
+    if (!text || protectedReason(text) || competitorName(text)) continue;
     try {
       const metrics = await bestTerm(db, rec.campaign_id, text);
       const inserted = await db('ad_negative_keywords').insert({

@@ -9,14 +9,8 @@
 //
 // The same migration gives ad_negative_keywords the two columns the bell needs: notified_at (the day the advisor
 // word's bell rang, for the 3-a-day cap) and last_error (why Google refused it, shown on the Ads page).
+// Schema only: the approved starter words are seeded by 20261102120100_ad_negative_words_starter.
 // A pushed migration is frozen: edit nothing here after the first push, add a new migration instead.
-const STARTER_WORDS = [
-  'squirrel', 'squirrels', 'raccoon', 'raccoons', 'opossum', 'armadillo', 'snake', 'snakes',
-  'bat removal', 'wildlife', 'jobs', 'careers', 'hiring', 'salary', 'license', 'training',
-];
-
-exports.STARTER_WORDS = STARTER_WORDS;
-
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('ad_negative_words'))) {
     await knex.schema.createTable('ad_negative_words', (t) => {
@@ -40,11 +34,6 @@ exports.up = async function up(knex) {
       t.text('last_error').nullable();
     });
   }
-  // The approved starter list. The owner left free / diy / how to out on purpose.
-  await knex('ad_negative_words')
-    .insert(STARTER_WORDS.map((text) => ({ text, added_by: 'starter-list' })))
-    .onConflict('text')
-    .ignore();
 };
 
 exports.down = async function down(knex) {

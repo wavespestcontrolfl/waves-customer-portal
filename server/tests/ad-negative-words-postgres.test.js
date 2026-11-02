@@ -1,7 +1,7 @@
 const SKIP = !process.env.DATABASE_URL;
 // CI's DB-gated pass runs this against PostgreSQL (skips without DATABASE_URL). The tables live in a unique schema with
-// minimal ad_campaigns / ad_search_terms, dropped after the suite. It covers the PR 2 migration (new table, starter words,
-// new columns, up / down / up) and the parts mocks cannot prove: the row lock on a decision, the per-word advisory lock on a
+// minimal ad_campaigns / ad_search_terms / audit_log, dropped after the suite. It covers the PR 2 migrations (new table,
+// new columns, up / down / up; the audited starter words with a no-op down) and the parts mocks cannot prove: the row lock on a decision, the per-word advisory lock on a
 // sync, the daily bell cap by Eastern date, and the unique key an advisor insert runs into. Google and the bell are stubs.
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -29,6 +29,7 @@ const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const gates = require('../config/feature-gates');
 const frozen = require('../models/migrations/20261102110000_ad_negative_keywords');
 const migration = require('../models/migrations/20261102120000_ad_negative_words');
+const starter = require('../models/migrations/20261102120100_ad_negative_words_starter');
 const actions = require('../services/ads/negative-keyword-actions');
 
 jest.setTimeout(60000);
@@ -48,8 +49,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), campaign_name text, platform text, platform_campaign_id text, status text)`, [schema]);
     await database.raw(`CREATE TABLE ??.ad_search_terms (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), campaign_id uuid, search_term text, clicks int, cost numeric, conversions numeric)`, [schema]);
+    await database.raw(`CREATE TABLE ??.audit_log (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_type varchar(32), actor_id uuid, action varchar(96),
+      resource_type text, resource_id text, metadata jsonb, ip_address text, user_agent text,
+      created_at timestamptz NOT NULL DEFAULT now())`, [schema]);
     await frozen.up(database);
     await migration.up(database);
+    await starter.up(database);
   });
   afterAll(async () => {
     await database.raw('DROP SCHEMA ?? CASCADE', [schema]);
@@ -78,15 +84,47 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }).returning('*').then(([r]) => r);
 
   describe('the migration', () => {
+    const STARTER_ACTION = 'migration:20261102120100_ad_negative_words_starter:insert';
+
     test('the starter list is the approved 16 words, added by starter-list, and not free / diy / how to', async () => {
       await database('ad_negative_words').del();
-      await migration.down(database);
-      await migration.up(database);
+      await database('audit_log').del();
+      await starter.up(database);
       const rows = await database('ad_negative_words').orderBy('text');
-      expect(rows.map((r) => r.text)).toEqual([...migration.STARTER_WORDS].sort());
+      expect(rows.map((r) => r.text)).toEqual([...starter.STARTER_WORDS].sort());
       expect(rows).toHaveLength(16);
       expect(rows.every((r) => r.added_by === 'starter-list' && r.match_type === 'phrase' && r.removed_at === null)).toBe(true);
-      expect(rows.map((r) => r.text)).not.toEqual(expect.arrayContaining(['free', 'diy', 'how to']));
+      for (const word of ['free', 'diy', 'how to']) expect(rows.map((r) => r.text)).not.toContain(word);
+    });
+
+    test('the seed writes one audit row per word it adds, and none for a word already on the list', async () => {
+      await database('ad_negative_words').del();
+      await database('audit_log').del();
+      await database('ad_negative_words').insert({ text: 'jobs', added_by: 'someone', removed_at: new Date() });
+      await starter.up(database);
+      const audits = await database('audit_log').where({ action: STARTER_ACTION });
+      expect(audits).toHaveLength(15);
+      const words = await database('ad_negative_words').whereNot({ text: 'jobs' }).select('id', 'text');
+      expect(audits.map((a) => a.resource_id).sort()).toEqual(words.map((w) => String(w.id)).sort());
+      expect(audits.every((a) => a.actor_type === 'system' && a.resource_type === 'ad_negative_words')).toBe(true);
+      expect(audits.find((a) => a.resource_id === String(words[0].id)).metadata).toMatchObject({
+        migration: '20261102120100_ad_negative_words_starter', text: words[0].text, before: null,
+      });
+      // The owner's own state for a word wins: still removed, still his.
+      const jobs = await database('ad_negative_words').where({ text: 'jobs' }).first();
+      expect(jobs).toMatchObject({ added_by: 'someone' });
+      expect(jobs.removed_at).not.toBeNull();
+    });
+
+    test('the seed is safe to run twice and its down changes nothing', async () => {
+      await database('ad_negative_words').del();
+      await database('audit_log').del();
+      await starter.up(database);
+      await starter.up(database);
+      expect(await database('ad_negative_words').count({ n: '*' }).then(([r]) => Number(r.n))).toBe(16);
+      expect(await database('audit_log').where({ action: STARTER_ACTION }).count({ n: '*' }).then(([r]) => Number(r.n))).toBe(16);
+      await starter.down(database);
+      expect(await database('ad_negative_words').count({ n: '*' }).then(([r]) => Number(r.n))).toBe(16);
     });
 
     test('a row gets its defaults and the text is unique', async () => {
@@ -107,8 +145,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       expect(after.last_error).toBe('x');
     });
 
-    test('up is safe to run twice, keeps a word the owner removed, and down drops the table and the two columns', async () => {
-      await migration.up(database); // the starter list was cleared by beforeEach: seeds it again
+    test('the schema up is safe to run twice, keeps the list rows, and down drops the table and the two columns', async () => {
+      await starter.up(database); // the starter list was cleared by beforeEach: seeds it again
       await database('ad_negative_words').where({ text: 'jobs' }).update({ removed_at: new Date() });
       await migration.up(database);
       expect((await database('ad_negative_words').where({ text: 'jobs' }).first()).removed_at).not.toBeNull();

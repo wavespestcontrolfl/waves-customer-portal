@@ -72,6 +72,7 @@ describe('addCampaignNegativeKeyword', () => {
     expect(gaql).toContain('campaign_criterion.negative = TRUE');
     expect(gaql).toContain("campaign_criterion.keyword.text = 'bob\\'s snake'");
     expect(gaql).toContain("campaign_criterion.keyword.match_type = 'PHRASE'");
+    expect(gaql).toContain("campaign_criterion.status != 'REMOVED'");
   });
 
   test('"already exists" with nothing found by the lookup is a failure', async () => {
@@ -80,11 +81,23 @@ describe('addCampaignNegativeKeyword', () => {
     expect(await GoogleAds.addCampaignNegativeKeyword('9000000001', 'squirrel')).toBeNull();
   });
 
-  test('any other Google error returns null and logs; no lookup', async () => {
+  test('any other refusal: the lookup finds no block, so it returns null and logs', async () => {
     mockCustomer.mutateResources.mockRejectedValue(failure({ campaign_criterion_error: errors.CampaignCriterionErrorEnum.CampaignCriterionError.CANNOT_EXCLUDE_CRITERIA_TYPE }));
+    mockCustomer.query.mockResolvedValue([]);
     expect(await GoogleAds.addCampaignNegativeKeyword('9000000001', 'squirrel')).toBeNull();
-    expect(mockCustomer.query).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalled();
+  });
+
+  test('a refusal under any code is taken as done when the block is already on the campaign', async () => {
+    mockCustomer.mutateResources.mockRejectedValue(failure({ campaign_criterion_error: errors.CampaignCriterionErrorEnum.CampaignCriterionError.CANNOT_EXCLUDE_CRITERIA_TYPE }));
+    mockCustomer.query.mockResolvedValue([{ campaign_criterion: { resource_name: RESOURCE } }]);
+    expect(await GoogleAds.addCampaignNegativeKeyword('9000000001', 'squirrel')).toEqual({ success: true, resourceName: RESOURCE, existed: true });
+  });
+
+  test('a refusal whose lookup also fails is a failure', async () => {
+    mockCustomer.mutateResources.mockRejectedValue(new Error('UNAVAILABLE'));
+    mockCustomer.query.mockRejectedValue(new Error('UNAVAILABLE'));
+    expect(await GoogleAds.addCampaignNegativeKeyword('9000000001', 'squirrel')).toBeNull();
   });
 
   test('a campaign id that is not a number is never put in the lookup query', async () => {
@@ -115,13 +128,24 @@ describe('removeCampaignNegativeKeyword', () => {
     ]);
   });
 
-  test('a "not found" answer counts as removed', async () => {
+  test('a refused remove counts as removed when Google no longer has the criterion', async () => {
     mockCustomer.mutateResources.mockRejectedValue(failure({ mutate_error: errors.MutateErrorEnum.MutateError.RESOURCE_NOT_FOUND }));
+    mockCustomer.query.mockResolvedValue([]);
     expect(await GoogleAds.removeCampaignNegativeKeyword(RESOURCE)).toEqual({ success: true, resourceName: RESOURCE, alreadyGone: true });
+    const gaql = mockCustomer.query.mock.calls[0][0];
+    expect(gaql).toContain(`campaign_criterion.resource_name = '${RESOURCE}'`);
+    expect(gaql).toContain("campaign_criterion.status != 'REMOVED'");
   });
 
-  test('any other error returns null', async () => {
+  test('a refused remove whose criterion is still there returns null', async () => {
     mockCustomer.mutateResources.mockRejectedValue(new Error('PERMISSION_DENIED'));
+    mockCustomer.query.mockResolvedValue([{ campaign_criterion: { resource_name: RESOURCE } }]);
+    expect(await GoogleAds.removeCampaignNegativeKeyword(RESOURCE)).toBeNull();
+  });
+
+  test('a refused remove whose check also fails is a failure, never read as removed', async () => {
+    mockCustomer.mutateResources.mockRejectedValue(new Error('UNAVAILABLE'));
+    mockCustomer.query.mockRejectedValue(new Error('UNAVAILABLE'));
     expect(await GoogleAds.removeCampaignNegativeKeyword(RESOURCE)).toBeNull();
   });
 

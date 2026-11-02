@@ -109,6 +109,11 @@ describe('queueAdvisorNegatives: rows', () => {
     expect(mockDb.tables.ad_negative_keywords[0].state).toBe('declined');
   });
 
+  test('a competitor name is never queued, even if a stale rec carries it', async () => {
+    const out = await actions.queueAdvisorNegatives({ recommendations: [rec('home team')] }, { now: DAY1 });
+    expect(out.queued).toBe(0);
+  });
+
   test('a word that is protected is never queued, even if a rec carries it', async () => {
     const out = await actions.queueAdvisorNegatives({ recommendations: [rec('ant control')] }, { now: DAY1 });
     expect(out.queued).toBe(0);
@@ -247,7 +252,7 @@ describe('the bell row', () => {
       // cleaned of the code-shaped part, or replaced by the fallback; never a rule break
       expect(composed.why.length).toBeLessThanOrEqual(110);
     } else {
-      expect(composed.why).toBe('Suggested by the ads advisor; no conversions in 30 days.');
+      expect(composed.why).toBe('Suggested by the ads advisor from the last 30 days of search terms.');
     }
   });
 
