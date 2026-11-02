@@ -316,6 +316,15 @@ describe('Codex #6371 r5 audit findings', () => {
     // A series beside a wait: the series code.
     expect(refuse([busy], [series]).code).toBe('collective_move_unsupported');
     expect(refuse([], [series]).code).toBe('collective_move_unsupported');
+    // GATE_IB_SERIES_MOVE (gap #22): a recurring-plan visit moves on its own card; the batch refusal says so.
+    expect(refuse([], [series]).error).not.toMatch(/reschedule_appointment/);
+    process.env.GATE_IB_SERIES_MOVE = 'true';
+    try {
+      expect(refuse([], [series]).error).toMatch(/Move each recurring-plan visit on its own with reschedule_appointment/);
+      expect(refuse([frozen]).error).not.toMatch(/reschedule_appointment/);
+    } finally {
+      delete process.env.GATE_IB_SERIES_MOVE;
+    }
     for (const r of [onlyFrozen, mixed, busyFrozen, groupedBusy, refuse([grouped])]) {
       expect(recordableRefusalCode({ error: r.error, code: r.code })).toBe(r.code);
     }

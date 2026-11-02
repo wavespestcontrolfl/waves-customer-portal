@@ -211,10 +211,11 @@ const propertyEditRule = input => !String(input?.label ?? '').trim();
 
 // reschedule_appointment on a grouped visit detaches the service or recomputes the
 // parent visit window (the card discloses it; Codex r4), so the pinned appointment the
-// proposal verified must carry no visit_id.
+// proposal verified must carry no visit_id. A recurring-plan move (GATE_IB_SERIES_MOVE)
+// moves every later visit of the plan too: a bulk change, so it keeps its card.
 function rescheduleRule(input, preview) {
   const pin = preview?.pinned_appointment;
-  return Boolean(pin && typeof pin === 'object' && !pin.visit_id);
+  return Boolean(pin && typeof pin === 'object' && !pin.visit_id && !preview.series_move);
 }
 
 function customerUpdateRule(input, preview) {
