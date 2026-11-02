@@ -325,6 +325,7 @@
  *   GATE_ALERT_CLOSE_BUTTONS=true (owner 2026-10-29 "ok go", PR 2 of the bell buttons: close-only buttons the server sets on three admin bell rows, Handled on a customer's texts and Called back on a call-back follow-up and a missed call; a tap is the bell's own Done with that note and sends no reply and places no call. Read at call time via alertCloseButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button keeps following GATE_ALERT_CLOSE_BUTTONS.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
+ *   GATE_ADS_NEGATIVES=true (owner plan A 2026-11-02: the owner's negative word list goes to Google Ads as phrase negatives on every linked campaign, each ads-advisor word arrives as one bell row with Add and Decline (3 a day at most), and every block can be undone on the Ads page; sends nothing to a customer and moves no money, but changes where the ads can show. Read at call time via adsNegativesLive(), strict 'true', dark by default; off = the /negatives routes answer 404, the bell rows serve no buttons, the advisor writes no rows, the 6 AM sync skips the step and no Google write runs.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
@@ -2976,6 +2977,8 @@ const gates = {
   alertCallButton: process.env.GATE_ALERT_CALL_BUTTON === 'true',
   // GATE_BID_ALERT_BUTTONS (No bid / Bid buttons on a new bid invite's bell row, dark trial). Boot-log entry only; the call-time reader is bidAlertButtonsLive().
   bidAlertButtons: process.env.GATE_BID_ALERT_BUTTONS === 'true',
+  // GATE_ADS_NEGATIVES (negative keywords: owner word list to Google, bell Add / Decline, Undo, dark). Boot-log entry only; the call-time reader is adsNegativesLive().
+  adsNegatives: process.env.GATE_ADS_NEGATIVES === 'true',
 
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
@@ -7124,6 +7127,15 @@ function bidAlertButtonsLive() {
   return process.env.GATE_BID_ALERT_BUTTONS === 'true';
 }
 
+// GATE_ADS_NEGATIVES read at CALL time, strict `=== 'true'`, dark by default. The one reader for the negative keyword
+// work (owner plan A, 2026-11-02): the owner's word list pushed to Google Ads, the advisor's words as bell rows with
+// Add / Decline (kind negative_keyword), Undo, and the Ads page's /negatives routes. Off: those routes answer 404, the
+// bell rows serve no button and a tap answers 409, the advisor writes no rows, the 6 AM sync skips the step and no
+// Google write runs. Kill: unset.
+function adsNegativesLive() {
+  return process.env.GATE_ADS_NEGATIVES === 'true';
+}
+
 // GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
 // (server/routes/reservice-public.js). Strict 'true', and only alongside
 // GATE_VISIT_PREP_PHOTOS (the storage and tech surfaces it rides).
@@ -9321,6 +9333,8 @@ module.exports.alertCloseButtonsLive = alertCloseButtonsLive;
 module.exports.alertCallButtonLive = alertCallButtonLive;
 // GATE_BID_ALERT_BUTTONS reader, on its own line so gate PRs never conflict.
 module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
+// GATE_ADS_NEGATIVES reader, on its own line so gate PRs never conflict.
+module.exports.adsNegativesLive = adsNegativesLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 // GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
