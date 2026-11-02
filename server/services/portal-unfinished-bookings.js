@@ -26,7 +26,8 @@
  *   again.
  * - The bell is closed by admin-alert-relevance.js (class portal_unfinished_booking) and listed on the
  *   Communications Portal tab by portal-inbox.js.
- * - Sends nothing to a customer: no text, email, call or app notice. Admin bell rows only.
+ * - A new bell also pages the admin phones once (GATE_PORTAL_ASK_PUSH, portal-ask-push.js), like the app's other asks.
+ * - Sends nothing to a customer: no text, email, call or app notice. Admin bell rows and admin phone pages only.
  *
  * Runs inside the alert-relevance sweep (every 10 minutes), only while the gate is on. Read-only apart from the
  * bell writes. Never throws into the sweep.
@@ -247,14 +248,36 @@ async function raiseBell(item) {
   return { id: result.id, isNew: result.deduped === false, why, action };
 }
 
-// Phone push for an app ask (portal-ask-push.js) is added by another change; this module rings the bell alone.
+// GATE_PORTAL_ASK_PUSH: a new bell also pages the admin phones, once (a dedupe never pages). This waits for the
+// name read only; the page goes out from portal-ask-push.js's queue, never awaited, so it cannot hold the sweep.
+// First name and last initial, no phone: a push shows on a lock screen. Never throws.
+async function pushNewBell(item) {
+  try {
+    if (!require('../config/feature-gates').portalAskPushLive?.()) return;
+    const { pushPortalAsk, customerShortName, shortName } = require('./portal-ask-push');
+    const [first, ...rest] = require('./admin-alert-names').tidyName(item.name).split(' ');
+    const name = item.customerId ? await customerShortName(item.customerId) : shortName(first, rest.pop());
+    void pushPortalAsk({
+      itemKey: item.key,
+      title: 'Booking not finished',
+      body: whyWords(item, name),
+      link: linkFor(item),
+      customerId: item.customerId,
+    });
+  } catch (err) {
+    logger.warn(`[portal-unfinished-bookings] push for estimate ${item.sourceId} failed: ${safeError(err)}`);
+  }
+}
 
 async function raiseAll(items) {
   let raised = 0;
   for (const item of items) {
     try {
       const done = await raiseBell(item);
-      if (done?.isNew) raised += 1;
+      if (done?.isNew) {
+        raised += 1;
+        await pushNewBell(item);
+      }
     } catch (err) {
       logger.warn(`[portal-unfinished-bookings] bell for estimate ${item.sourceId} not raised: ${safeError(err)}`);
     }

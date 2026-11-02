@@ -65,7 +65,7 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
   };
   beforeEach(() => { process.env.GATE_PORTAL_BOOKING_ITEMS = 'true'; });
   afterEach(async () => {
-    for (const key of ['GATE_PORTAL_BOOKING_ITEMS', 'GATE_PORTAL_INBOX', 'GATE_ALERT_CONTACT_CLOSE']) delete process.env[key];
+    for (const key of ['GATE_PORTAL_BOOKING_ITEMS', 'GATE_PORTAL_INBOX', 'GATE_ALERT_CONTACT_CLOSE', 'GATE_PORTAL_ASK_PUSH']) delete process.env[key];
     if (db) await cleanUp();
   }, 120000);
   afterAll(async () => { if (db) await cleanUp(); }, 120000);
@@ -206,6 +206,45 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     expect(rows[0].link).toBe(`/admin/estimates?estimateId=${e.id}`);
     expect(meta(rows[0])).toEqual(expect.objectContaining({ checkoutEstimateId: e.id, contactPhone: e.customer_phone }));
     expect(meta(rows[0]).customerId).toBeUndefined();
+  });
+
+  // GATE_PORTAL_ASK_PUSH (portal-ask-push.js): the page is spied, so nothing reaches a device.
+  describe('the phone page', () => {
+    let push;
+    beforeEach(() => { push = jest.spyOn(require('../services/portal-ask-push'), 'pushPortalAsk').mockResolvedValue({ sent: true }); });
+    afterEach(() => { push.mockRestore(); });
+    const pagesFor = (...estimates) => push.mock.calls.map(([page]) => page)
+      .filter((page) => estimates.some((e) => page.itemKey === estimateKey(e)));
+
+    test('a new bell pages the admin phones once, first name and last initial; the next run does not page again', async () => {
+      process.env.GATE_PORTAL_ASK_PUSH = 'true';
+      const c = await customer();
+      const linked = await officeEstimate(c);
+      const visitor = await officeEstimate(null);
+      await cardStep(linked, ago(90));
+      await cardStep(visitor, ago(90));
+      await run();
+      const [bell] = await bellsFor(estimateKey(linked));
+      const words = (who) => `${who} opened the card step on a ${meta(bell).service} estimate and did not finish`;
+      expect(pagesFor(linked)).toEqual([{
+        itemKey: estimateKey(linked), title: 'Booking not finished', body: words('Pat S.'),
+        link: `/admin/customers?customerId=${c.id}`, customerId: c.id,
+      }]);
+      expect(pagesFor(visitor)).toEqual([{
+        itemKey: estimateKey(visitor), title: 'Booking not finished', body: words('Jordan F.'),
+        link: `/admin/estimates?estimateId=${visitor.id}`, customerId: null,
+      }]);
+      await run();
+      expect(pagesFor(linked, visitor)).toHaveLength(2);
+    });
+
+    test('push gate off: the bell rings and no phone is paged', async () => {
+      const e = await officeEstimate(await customer());
+      await cardStep(e, ago(90));
+      await run();
+      expect(await bellsFor(estimateKey(e))).toHaveLength(1);
+      expect(pagesFor(e)).toEqual([]);
+    });
   });
 
   test('a bell a person marked Done never rings again for the same drop-off', async () => {
