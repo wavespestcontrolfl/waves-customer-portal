@@ -11,7 +11,10 @@ jest.mock('../services/notification-service', () => ({
   markAdminSentToClaude: jest.fn(async () => 1),
   safeErrorSummary: jest.fn((err) => (err && err.code) || 'error'),
 }));
-jest.mock('../services/admin-alert-customer', () => ({ customersForAlerts: jest.fn(async () => new Map()) }));
+jest.mock('../services/admin-alert-customer', () => ({
+  alertRecordRefs: jest.requireActual('../services/admin-alert-customer').alertRecordRefs,
+  customersForAlerts: jest.fn(async () => new Map()),
+}));
 
 const NotificationService = require('../services/notification-service');
 const { customersForAlerts } = require('../services/admin-alert-customer');
@@ -210,11 +213,23 @@ describe('sendAdminAlertToClaude', () => {
     expect(NotificationService.markAdminSentToClaude.mock.calls[0][2].sentToClaude.summary).toBeNull();
   });
 
-  test('a failed name read still sends, naming nobody', async () => {
+  test('a row linked to no record sends after a failed name read, naming nobody', async () => {
     customersForAlerts.mockRejectedValue(Object.assign(new Error('boom'), { code: '57014' }));
     const out = await send();
     expect(out.status).toBe(200);
     expect(NotificationService.markAdminSentToClaude.mock.calls[0][2].sentToClaude.customer).toBeNull();
+  });
+
+  test.each([
+    ['a thrown read', () => customersForAlerts.mockRejectedValue(Object.assign(new Error('boom'), { code: '57014' }))],
+    ['a read that found no name', () => customersForAlerts.mockResolvedValue(new Map())],
+  ])('fails closed on a row linked to a record when its customer\'s name is missing (%s): the raw name could not be masked', async (_label, arrange) => {
+    arrange();
+    for (const metadata of [{ customerId: CUSTOMER_ID }, { scheduledServiceId: '00000000-0000-4000-8000-0000000000d1', dedupeKey: 'rain-pass:x' }]) {
+      NotificationService.getAdminNotificationForExplainer.mockResolvedValueOnce(row({ category: 'system', metadata: { ...metadata, severity: 'broken' } }));
+      expect(await send()).toEqual({ status: 503, body: { error: 'customer_unresolved' } });
+    }
+    expect(NotificationService.markAdminSentToClaude).not.toHaveBeenCalled();
   });
 
   test('a missing row is 404, customer contact is 422, other text is 409; none of them writes', async () => {

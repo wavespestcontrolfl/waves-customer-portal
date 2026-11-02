@@ -327,7 +327,8 @@ saw, and the row's own who and severity before the send. What a Claude tab reads
 the stamp's `alert` is the row's title, body and detail with phones, emails and street addresses masked and the customer's
 name replaced by `[customer]`; the stamped name keeps only letters, spaces, apostrophes, hyphens and periods (at most four
 words, 40 characters), since a customer sets their own name; the summary is masked the same way. `needs-me` shows a sent row
-through that copy, and the launcher's tab gets only it. A reviewed check still names its customer, in that form. While the
+through that copy, and the launcher's tab gets only it. A row linked to any record is sent only once its customer's name was
+read (503 `customer_unresolved` otherwise: an unread name cannot be masked). A reviewed check still names its customer, in that form. While the
 row is open, a refresh of the same alert updates its text but keeps it in Claude's queue (`keepSentToClaude` in
 `admin-alert-routing.js`); a refresh that rings after it was closed brings it back to the bell without the stamp. The
 write takes the alert's dedupe lock, so a refresh in flight can never undo the send. On the owner's Mac, the

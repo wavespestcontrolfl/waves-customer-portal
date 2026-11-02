@@ -22,7 +22,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { CUSTOMER_CONTACT_CATEGORIES, SENT_TO_CLAUDE_CLASS } = require('./admin-alert-routing');
-const { customersForAlerts } = require('./admin-alert-customer');
+const { alertRecordRefs, customersForAlerts } = require('./admin-alert-customer');
 
 // Beyond the contact categories: a review alert quotes the customer's review, and the general internal alert can carry a
 // forwarded customer text.
@@ -170,7 +170,7 @@ function sentPatch(row, { by, customer, summary, at = new Date() }) {
 
 // The send for one row the admin saw at `version`: { status, body }. 404 when the row is gone or out of scope, 422 when
 // it cannot be sent (customer contact, not written by our code, done, already off the bell), 409 when its text changed
-// since the bell read it.
+// since the bell read it, 503 when the row is linked to a record whose customer's name could not be read.
 async function sendAdminAlertToClaude(id, { version, by, role, technicianId = null } = {}) {
   const row = await NotificationService.getAdminNotificationForExplainer(id, { role, technicianId });
   if (!row) return { status: 404, body: { error: 'not_found' } };
@@ -180,6 +180,12 @@ async function sendAdminAlertToClaude(id, { version, by, role, technicianId = nu
   let customer = null;
   try { customer = (await customersForAlerts(db, [row])).get(String(row.id)) || null; } catch (err) {
     logger.warn(`[send-to-claude] customer not read: ${NotificationService.safeErrorSummary(err)}`);
+  }
+  // Fail closed: the name is what the inert copy masks, so a row linked to any record (a customer, visit, estimate,
+  // invoice, lead or call) is sent only once its customer's name was read. A failed read (customersForAlerts turns a
+  // database error into no name) or a record with no name answers 503 and the bell says to try again.
+  if (Object.values(alertRecordRefs(row)).some(Boolean) && !customer?.name) {
+    return { status: 503, body: { error: 'customer_unresolved' } };
   }
   const { servedExplainer } = require('./admin-alert-explainer');
   const summary = servedExplainer(row.explainer, row.version);
