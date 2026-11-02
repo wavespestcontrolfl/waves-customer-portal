@@ -461,6 +461,24 @@ html[data-glass-theme] [data-glass-motion-state],
     transform: none !important;
   }
 }
+/* Reduce Motion reaches every element on a glass page, not only the
+   [data-glass] surfaces above (motion audit 2026-11-02, M03/M04/M07): inline
+   transitions (the lawn score ring and bars, the station-map reveal, toggle
+   knobs) went on moving, and scrolling stayed smooth. State changes now land
+   at once. 0.01ms rather than 0 so transitionend still fires. Keyframe
+   animations keep their own reduce rules where they are declared. */
+@media (prefers-reduced-motion: reduce) {
+  html[data-glass-theme],
+  html[data-glass-theme] * {
+    scroll-behavior: auto !important;
+  }
+  html[data-glass-theme] *,
+  html[data-glass-theme] *::before,
+  html[data-glass-theme] *::after {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+  }
+}
 
 
 /* ===== Geometry + controls (owner ruling 2026-09-03, DECISIONS 2026-09-04):

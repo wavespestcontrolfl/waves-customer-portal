@@ -123,6 +123,7 @@ import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_FONT, docTransition } from '../theme-doc';
 import { CustomerColumn } from '../components/brand';
+import { scrollBehavior } from '../lib/scrollMotion';
 
 const FONT_BODY = DOC_FONT; // the one customer body stack (theme-doc alias)
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -195,17 +196,17 @@ const REVIEW_SECTION_ID = 'estimate-review-section';
 
 function scrollToPriceSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(PRICE_SECTION_ID) : null;
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
 }
 
 function scrollToBookingSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(BOOKING_SECTION_ID) : null;
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
 }
 
 function scrollToAskSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(ASK_SECTION_ID) : null;
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
 }
 
 // Once a slot is picked the approve CTAs land on the payment step (the actual
@@ -216,7 +217,7 @@ function scrollToAskSection() {
 function scrollToPaymentSection() {
   if (typeof document === 'undefined') return;
   const el = document.getElementById(PAYMENT_SECTION_ID);
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
   else scrollToBookingSection();
 }
 
@@ -8796,9 +8797,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   useEffect(() => {
     if (ctaPhase === 'review' && reservation) {
       const el = document.getElementById(REVIEW_SECTION_ID);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
     } else if (ctaPhase === 'success') {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo({ top: 0, behavior: scrollBehavior() });
     }
   }, [ctaPhase, reservation]);
 

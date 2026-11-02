@@ -46,6 +46,7 @@ import {
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
 } from '../constants/business';
+import { scrollBehavior } from '../lib/scrollMotion';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -2337,7 +2338,7 @@ export default function ScheduleFlowPage({ flow }) {
             showError={bookedFromTop}
             submitting={submitting}
             onBook={() => confirm(emailPick, true)}
-            onPickAnother={() => pickerRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })}
+            onPickAnother={() => pickerRef.current?.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' })}
           />
         )}
         selectedPests={selectedPests}

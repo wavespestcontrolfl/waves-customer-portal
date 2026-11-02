@@ -57,6 +57,7 @@ import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
 import useSheetViewport from '../hooks/useSheetViewport';
 import { celsiusCapTip } from '../lib/celsiusCapCopy';
 import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES, OWNER_HEAD_RATE_IN_PER_HR } from '@waves/irrigation-runtime';
+import { scrollBehavior } from '../lib/scrollMotion';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -6714,7 +6715,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const handleReplaceCard = () => {
     setAutopayOpenRequest({ modal: 'card', seq: Date.now() });
     // Bring the picker into view — it lives in the Auto Pay card above.
-    document.getElementById('billing-autopay')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    document.getElementById('billing-autopay')?.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' });
   };
 
   const handleTurnOffAutopay = async () => {
@@ -7868,7 +7869,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                       link above still works — /pay is tokenized). */}
                   {!cancelledAccount && (
                   <button type="button" onClick={() => {
-                    document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
                     handleAddCard();
                   }} style={{
                     minHeight: 44, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
@@ -13896,7 +13897,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const handleEmailShare = () => {
     const el = document.getElementById('portal-referral-email');
     if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
     window.setTimeout(() => el.focus(), 350);
   };
   const handleEmailSubmit = async (e) => {
@@ -16464,7 +16465,7 @@ function MyRequestsCard({ focusRequestId } = {}) {
 
   useEffect(() => {
     if (!loading && focusRequestId) {
-      cardRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      cardRef.current?.scrollIntoView?.({ block: 'center', behavior: scrollBehavior() });
       cardRef.current?.focus({ preventScroll: true });
     }
   }, [loading, focusRequestId]);
