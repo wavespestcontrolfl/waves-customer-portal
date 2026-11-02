@@ -1396,6 +1396,38 @@ postgres('SMS operations on PostgreSQL', () => {
       expect((await mockPg('notifications').where({ id: bell.id }).first()).done_at).toBeNull();
     });
 
+    // A pending suggestion for the bell's field, from a text `gapMs` after the bell's text (negative = before it).
+    const pendingSuggestion = (gapMs, twilioSid = 'SM_other') => mockPg('data_hygiene_proposals').insert({
+      rule_id: 'extract.sms_profile', rule_version: 'sms-profile-v5', resource_type: 'property_preferences',
+      scope_type: 'customer', scope_id: message.customer_id, field: 'special_instructions', source: 'message-extraction',
+      proposed_value: JSON.stringify({ masked: 'S***.', length: 12 }), confidence: 0.9, tier: 'medium', is_sensitive: true,
+      status: 'pending', idempotency_key: randomUUID(), evidence: JSON.stringify({ evidence_source_type: 'message',
+        evidence_source_id: randomUUID(), source_at: new Date(message.created_at.getTime() + gapMs).toISOString(), twilio_sid: twilioSid }) })
+      .returning('id').then(([row]) => row.id);
+
+    test('a later text\'s pending suggestion for the field: Save is not offered, refuses, and the suggestion stays (Codex Security r2)', async () => {
+      const bell = await raiseBell('Skip the shed please', { field: 'special_instructions', value: 'Skip the shed please', duration: 'uncertain' });
+      const newer = await pendingSuggestion(60_000);
+      expect(await served(bell)).toEqual(['one_visit']);
+      const refused = await tap(bell, 'save');
+      expect(refused).toMatchObject({ status: 409, body: { error: 'newer_text' } });
+      expect(refused.body.message).toMatch(/newer text about the special instructions/);
+      expect(await mockPg('property_preferences')).toHaveLength(0);
+      expect(await mockPg('data_hygiene_proposals').where({ id: newer }).first('status')).toEqual({ status: 'pending' });
+      expect((await mockPg('notifications').where({ id: bell.id }).first()).done_at).toBeNull();
+    });
+
+    test('an older text\'s pending suggestion, or the same text\'s twin, is retired by Save; the bell\'s text is saved', async () => {
+      const bell = await raiseBell('Skip the shed please', { field: 'special_instructions', value: 'Skip the shed please', duration: 'uncertain' });
+      const older = await pendingSuggestion(-60_000);
+      const twin = await pendingSuggestion(5_000, message.twilio_sid);
+      expect(await served(bell)).toEqual(['save', 'one_visit']);
+      expect(await tap(bell, 'save')).toMatchObject({ status: 200, body: { success: true } });
+      expect((await mockPg('property_preferences').first()).special_instructions)
+        .toBe(`[text ${etDateString(message.created_at)}] Skip the shed please`);
+      expect((await mockPg('data_hygiene_proposals').whereIn('id', [older, twin]).select('status')).map((r) => r.status)).toEqual(['stale', 'stale']);
+    });
+
     test('a tap on a bell that changed since it was served saves nothing', async () => {
       const bell = await raiseBell('Skip the shed please', { field: 'special_instructions', value: 'Skip the shed please', duration: 'uncertain' });
       expect(await tap(bell, 'save', 'f'.repeat(32))).toEqual({ status: 409, body: { error: 'changed' } });

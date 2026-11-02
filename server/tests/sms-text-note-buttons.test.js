@@ -69,6 +69,13 @@ describe('text-note bell buttons (owner 2026-11-02 "C")', () => {
     expect(writes(plan([held()]))).toHaveLength(1);
   });
 
+  test('a later text\'s pending suggestion for the field refuses Save; one for another field does not (Codex Security r2)', () => {
+    const facts = [held()];
+    const base = { meta: meta(['special_instructions']), source: source(facts), prefs: {}, properties: ['p1'] };
+    expect(planSave({ ...base, newer: new Set(['special_instructions']) })).toEqual({ refusal: 'newer_text', field: 'special_instructions' });
+    expect(writes(planSave({ ...base, newer: new Set(['pet_details']) }))).toHaveLength(1);
+  });
+
   test.each(['conflicting_facts', 'mixed_topics', 'value_too_long', 'changed_during_extraction'])(
     'a fact the reader could not pin down (%s) is left for the profile', (outcome) => {
       expect(plan([held({ outcome })])).toEqual({ refusal: 'open_profile' });

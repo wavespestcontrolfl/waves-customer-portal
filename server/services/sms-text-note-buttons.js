@@ -75,8 +75,9 @@ const tiedToTheOneProperty = (facts, properties) => properties.length === 1
   && facts.every((f) => !f.property_id || String(f.property_id) === String(properties[0]));
 
 // What Save would write: { writes: [{ field, value, fact }] } or { refusal, field? }. Pure; the tap runs it again
-// under the lock on what it reads there. `properties`: the customer's active property ids.
-function planSave({ meta, source, prefs, properties = [] }) {
+// under the lock on what it reads there. `properties`: the customer's active property ids; `newer`: the fields with a
+// pending suggestion from a later text.
+function planSave({ meta, source, prefs, properties = [], newer = new Set() }) {
   if (!source) return { refusal: 'gone' };
   // Save writes what the reader held back, so the reader's own off switch and activation time stop it too: the tap
   // reruns this under the lock, inside the save transaction (Codex Security r1 on #7494).
@@ -85,6 +86,10 @@ function planSave({ meta, source, prefs, properties = [] }) {
   if (!facts.length) return { refusal: 'nothing_to_save' };
   if (facts.some((f) => NO_SAVE_OUTCOMES.has(f.outcome))) return { refusal: 'open_profile' };
   if (!tiedToTheOneProperty(facts, properties)) return { refusal: 'property' };
+  // A later text's suggestion for the same field waits in Data hygiene: the customer's newest word wins there, as
+  // in the reader (Codex Security r2 on #7494).
+  const superseded = facts.find((f) => newer.has(f.field));
+  if (superseded) return { refusal: 'newer_text', field: superseded.field };
   const { validatePrefsBody, PREFS_FIELD_SCHEMAS, snakeToCamel, transformKeys, camelToSnake, normalizeUpdatesForStorage }
     = require('./property-preferences-schema');
   const writes = [];
@@ -110,22 +115,36 @@ const REFUSALS = {
   open_profile: () => ({ message: 'This text needs a person to pick what to save. Open the profile to save it.' }),
   property: () => ({ message: 'This note is not tied to the customer\'s one property. Open the profile to save it there.' }),
   on_file: (field) => ({ message: `The profile already has a ${label(field)}. Open the profile to change it.` }),
+  newer_text: (field) => ({ message: `A newer text about the ${label(field)} is waiting in Data hygiene. Review that one first.` }),
   invalid: (field) => ({ message: `The ${label(field)} cannot take this text. Open the profile to edit it.` }),
 };
 const refuse = ({ refusal, field }) => ({ ok: false, code: refusal, ...REFUSALS[refusal](field) });
 
+// findPendingExtractionProposal's `newerThan` rule (data-hygiene/proposal-store.js): a suggestion from a text sent
+// after this one, never the same text's twin (the same Twilio identity).
+const fromLaterText = (proposal, source) => proposal.source_at != null
+  && new Date(proposal.source_at) > new Date(source.created_at)
+  && (!source.twilio_sid || proposal.message_sid !== source.twilio_sid);
+
 // The inputs planSave reads, for every bell on a page at once.
 async function loadPlanInputs(conn, metas) {
+  const { EXTRACTION_MESSAGE_SID } = require('./data-hygiene/proposal-store');
   const smsIds = [...new Set(metas.map((m) => m.sms_log_id).filter(Boolean).map(String))];
   const customerIds = [...new Set(metas.map((m) => m.customerId).filter(Boolean).map(String))];
-  const [sources, prefs, properties] = await Promise.all([
+  const [sources, prefs, properties, pending] = await Promise.all([
     smsIds.length ? excludeUnresolvedSendReservations(conn('sms_log').whereIn('id', smsIds))
-      .select('id', 'customer_id', 'created_at', 'operational_analysis') : [],
+      .select('id', 'customer_id', 'created_at', 'twilio_sid', 'operational_analysis') : [],
     customerIds.length ? conn('property_preferences').whereIn('customer_id', customerIds).select('*') : [],
     customerIds.length ? conn('customer_properties').whereIn('customer_id', customerIds).where({ active: true })
       .select('id', 'customer_id') : [],
+    customerIds.length ? conn('data_hygiene_proposals')
+      .where({ resource_type: 'property_preferences', scope_type: 'customer', source: 'message-extraction', status: 'pending' })
+      .whereIn('scope_id', customerIds)
+      .select('scope_id', 'field', conn.raw("evidence->>'source_at' AS source_at"), conn.raw(`${EXTRACTION_MESSAGE_SID} AS message_sid`)) : [],
   ]);
   return {
+    newer: (m, source) => new Set(source ? pending.filter((p) => String(p.scope_id) === String(m.customerId)
+      && fromLaterText(p, source)).map((p) => p.field) : []),
     source: (m) => sources.find((s) => String(s.id) === String(m.sms_log_id) && String(s.customer_id) === String(m.customerId)) || null,
     prefs: (m) => prefs.find((p) => String(p.customer_id) === String(m.customerId)) || null,
     properties: (m) => properties.filter((p) => String(p.customer_id) === String(m.customerId)).map((p) => String(p.id)),
@@ -138,7 +157,8 @@ async function visibleItems(rows) {
   const inputs = await loadPlanInputs(db, metas);
   return new Map(rows.map((row, i) => {
     const meta = metas[i];
-    const plan = planSave({ meta, source: inputs.source(meta), prefs: inputs.prefs(meta), properties: inputs.properties(meta) });
+    const source = inputs.source(meta);
+    const plan = planSave({ meta, source, prefs: inputs.prefs(meta), properties: inputs.properties(meta), newer: inputs.newer(meta, source) });
     return [row.id, plan.writes?.length ? ['save', 'one_visit'] : ['one_visit']];
   }));
 }
@@ -166,7 +186,7 @@ async function save({ row, technicianId, claimedVersion }) {
       const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
       const inputs = await loadPlanInputs(trx, [meta]);
       const source = customer ? inputs.source(meta) : null;
-      const plan = planSave({ meta, source, prefs: inputs.prefs(meta), properties: inputs.properties(meta) });
+      const plan = planSave({ meta, source, prefs: inputs.prefs(meta), properties: inputs.properties(meta), newer: inputs.newer(meta, source) });
       if (plan.refusal) return refuse(plan);
       let before = inputs.prefs(meta);
       for (const write of plan.writes) {
@@ -174,8 +194,10 @@ async function save({ row, technicianId, claimedVersion }) {
           proposal: { scope_id: customerId, field: write.field, resource_id: before?.id || null },
           currentRaw: before?.[write.field] ?? null });
         await applyPropertyPreferenceValue({ trx, proposal: { scope_id: customerId, field: write.field }, target, proposedRaw: write.value });
-        // A pending proposal for this field would fail its before-value check now (the reader's own step).
-        await stalePendingExtractionProposals({ trx, scope_id: customerId, field: write.field });
+        // A pending proposal from this text or an older one would fail its before-value check now (the reader's own
+        // step); one from a later text cannot be pending here (planSave refused), and is never retired.
+        await stalePendingExtractionProposals({ trx, scope_id: customerId, field: write.field,
+          notNewerThan: source.created_at, sameMessageSid: source.twilio_sid || null });
         await recordAuditEvent({ trx, critical: true, actor_type: 'technician', actor_id: String(technicianId),
           action: 'sms.property_preference.updated', resource_type: 'property_preferences', resource_id: target.id,
           metadata: { sms_log_id: String(meta.sms_log_id), customer_id: customerId, property_id: write.fact.property_id || null,

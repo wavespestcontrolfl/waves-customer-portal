@@ -170,7 +170,10 @@ Kinds today:
   file is never overwritten. The profile row is the customer's, so Save writes only for a customer
   with exactly one active property, read at the tap, and only facts that name no property or that one;
   a fact the reader could not pin to one value or topic, or a "no" / "not sure" pet or irrigation report
-  it held for a person to read, is left for the profile too. Each write is audited as
+  it held for a person to read, is left for the profile too. Save follows the reader's own rules: it is off
+  while `GATE_SMS_OPERATIONAL_ACTIONS` is off or for a text from before `GATE_SMS_OPERATIONAL_ACTIONS_SINCE`,
+  it refuses while a later text's suggestion for the same field waits in Data hygiene, and it retires only
+  suggestions from this text or older ones. Each write is audited as
   `sms.property_preference.updated` (field names only), and the bell closes on the version the tap
   claimed; a bell that changed rolls the write back. One visit only is the bell's own Done, fenced the
   same way. Neither sends anything to a customer.
