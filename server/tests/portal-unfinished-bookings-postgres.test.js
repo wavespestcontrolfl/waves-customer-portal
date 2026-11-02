@@ -7,6 +7,8 @@
  *   - portal-inbox.js: the Communications Portal tab lists the bell as a booking item whose version the bell's
  *     Done accepts.
  *   - admin-alert-relevance.js: the bell closes on a person's text after it, and when the booking was finished.
+ *   - the day's cap: past MAX_BELLS_PER_DAY the rest are held and one summary bell rings, once a day. Each test
+ *     removes the bells it raised, so the next one starts the day's count from zero.
  * Every row is synthetic and removed after the run. It refuses any database but a private QA one or CI's.
  */
 const { randomUUID } = require('crypto');
@@ -46,17 +48,24 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     relevance = require('../services/admin-alert-relevance');
     NotificationService = require('../services/notification-service');
   });
-  beforeEach(() => { process.env.GATE_PORTAL_BOOKING_ITEMS = 'true'; });
-  afterEach(() => {
-    for (const key of ['GATE_PORTAL_BOOKING_ITEMS', 'GATE_PORTAL_INBOX', 'GATE_ALERT_CONTACT_CLOSE']) delete process.env[key];
-  });
-  afterAll(async () => {
-    if (!db) return;
+  const burstKey = (at = new Date()) => `${mod.BURST_KEY_PREFIX}${require('../utils/datetime-et').etDateString(at)}`;
+  // This run's bells only: one per synthetic intent or estimate, and today's summary bell.
+  const removeBells = async () => {
     const keys = [
       ...made.booking_intents.map((id) => `${mod.BOOKING_KEY_PREFIX}${id}`),
       ...made.estimates.map((id) => `${mod.CHECKOUT_KEY_PREFIX}${id}`),
+      burstKey(),
     ];
-    if (keys.length) await db('notifications').whereIn(db.raw("metadata->>'dedupeKey'"), keys).del();
+    await db('notifications').whereIn(db.raw("metadata->>'dedupeKey'"), keys).del();
+  };
+  beforeEach(() => { process.env.GATE_PORTAL_BOOKING_ITEMS = 'true'; });
+  afterEach(async () => {
+    for (const key of ['GATE_PORTAL_BOOKING_ITEMS', 'GATE_PORTAL_INBOX', 'GATE_ALERT_CONTACT_CLOSE']) delete process.env[key];
+    if (db) await removeBells();
+  });
+  afterAll(async () => {
+    if (!db) return;
+    await removeBells();
     for (const table of ['notifications', 'sms_log', 'scheduled_services', 'estimate_checkout_events', 'booking_intents', 'estimates', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
     }
@@ -153,6 +162,25 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     await run(new Date(), 2);
     expect(await bellsFor(intentKey(older))).toHaveLength(1);
     for (const i of contacted) expect(await bellsFor(intentKey(i))).toHaveLength(0);
+  });
+
+  test('past the day\'s cap the rest are held and one summary bell rings, once a day', async () => {
+    const now = new Date();
+    const intents = [];
+    for (let k = 0; k < mod.MAX_BELLS_PER_DAY + 2; k += 1) {
+      intents.push(await intent(await customer(), { captured_at: ago(120 + k), last_activity_at: ago(90 + k) }));
+    }
+    expect(await run(now)).toEqual(expect.objectContaining({ raised: mod.MAX_BELLS_PER_DAY, held: 2 }));
+    let rung = 0;
+    for (const i of intents) rung += (await bellsFor(intentKey(i))).length;
+    expect(rung).toBe(mod.MAX_BELLS_PER_DAY);
+    const [summary] = await bellsFor(burstKey(now));
+    expect(summary).toEqual(expect.objectContaining({ category: 'alert', link: '/admin/communications#tab=portal' }));
+    // The summary is not a booking item, and a later run that holds again rings no second one.
+    process.env.GATE_PORTAL_INBOX = 'true';
+    expect((await portalInbox.list()).items.some((row) => row.id === summary.id)).toBe(false);
+    expect(await run(now)).toEqual(expect.objectContaining({ raised: 0, held: 2 }));
+    expect(await bellsFor(burstKey(now))).toHaveLength(1);
   });
 
   test('a visit booked after the drop-off stops the bell', async () => {

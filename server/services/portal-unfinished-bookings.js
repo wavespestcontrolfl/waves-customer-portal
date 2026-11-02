@@ -34,6 +34,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 const WINDOW_DAYS = 14;
 const QUIET_MINUTES = 60;
@@ -43,6 +44,12 @@ const QUIET_MINUTES = 60;
 // the next sweep starts again from the newest.
 const PAGE_SIZE = 200;
 const MAX_PAGES = 10;
+// Bells a day from this module, both sources together (Codex #7489 security review). Nothing proves a visitor owns
+// the phone they typed: the booking page links a customer by that phone alone, and a script can start many
+// bookings. Real days had at most three drop-offs (Jul-Nov 2026), so the cap does not bind in normal use. Past it,
+// one summary bell a day goes to the office instead of a bell per start; the rest wait for a later day's room.
+const MAX_BELLS_PER_DAY = 5;
+const BURST_KEY_PREFIX = 'portal-booking-burst:';
 const KEY_PREFIX = 'portal-unfinished-';
 const BOOKING_KEY_PREFIX = 'portal-unfinished-booking:';
 const CHECKOUT_KEY_PREFIX = 'portal-unfinished-checkout:';
@@ -167,9 +174,11 @@ function estimateItem(row) {
   };
 }
 
+// The estimate card step first: an estimate is mostly one the office made and sent, so under the day's cap its
+// drop-offs come before booking-page starts, which anyone can make.
 const SOURCES = [
-  { name: SOURCE_BOOKING_PAGE, query: bookingPageQuery, item: bookingItem },
   { name: SOURCE_ESTIMATE_CARD, query: estimateCardQuery, item: estimateItem },
+  { name: SOURCE_BOOKING_PAGE, query: bookingPageQuery, item: bookingItem },
 ];
 
 // One page of one source's drop-offs that could ring now, before the person-contact check, and the cursor of the
@@ -335,12 +344,21 @@ async function raiseBell(item) {
 
 // Phone push for an app ask (portal-ask-push.js) is added by another change; this module rings the bell alone.
 
-async function raiseAll(items) {
+// Raises each drop-off's bell while the day's room lasts (`room.left`). A drop-off past it is held, not raised; a
+// later run reads it again.
+async function raiseAll(items, room) {
   let raised = 0;
   for (const item of items) {
+    if (room.left <= 0) {
+      room.held += 1;
+      continue;
+    }
     try {
       const done = await raiseBell(item);
-      if (done?.isNew) raised += 1;
+      if (done?.isNew) {
+        raised += 1;
+        room.left -= 1;
+      }
     } catch (err) {
       logger.warn(`[portal-unfinished-bookings] bell for ${item.source} ${item.sourceId} not raised: ${safeError(err)}`);
     }
@@ -350,14 +368,14 @@ async function raiseAll(items) {
 
 // Every page of one source, up to MAX_PAGES: each page's unanswered drop-offs ring before the next page is read.
 // A witness read that fails is no verdict: it throws, nothing more rings this run, and the next sweep reads again.
-async function sweepSource(source, now, conn, pageSize) {
+async function sweepSource(source, now, conn, pageSize, room) {
   let cursor = null;
   let found = 0;
   let raised = 0;
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const { items, next } = await findDropOffPage(source, now, { conn, cursor, pageSize });
     found += items.length;
-    if (items.length) raised += await raiseAll(await withoutPersonContact(items, conn));
+    if (items.length) raised += await raiseAll(await withoutPersonContact(items, conn), room);
     if (!next) return { found, raised };
     cursor = next;
   }
@@ -365,21 +383,62 @@ async function sweepSource(source, now, conn, pageSize) {
   return { found, raised };
 }
 
+// This ET day's bells from this module, open or done. The cap reads the table, so a restart cannot reset it.
+async function bellsRaisedToday(conn, now) {
+  const since = parseETDateTime(`${etDateString(now)}T00:00`);
+  const row = await conn('notifications').where({ recipient_type: 'admin' }).where('created_at', '>=', since)
+    .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [KEY_PREFIX.length, KEY_PREFIX])
+    .count({ n: '*' }).first();
+  return Number(row?.n || 0);
+}
+
+// The day's one summary bell once the cap held a drop-off back. No count in the words: the first bell of the day
+// stands (dedupe), and a count would go stale.
+function burstAlertSpec(day) {
+  return {
+    area: 'Customers',
+    action: 'Check for fake booking starts',
+    why: 'More bookings than usual were left unfinished today, so the rest were not raised',
+    severity: 'needs-you',
+    link: '/admin/communications#tab=portal',
+    subject: { type: 'check', id: `${BURST_KEY_PREFIX}${day}` },
+    doneWhen: 'person_checked',
+    who: 'person',
+  };
+}
+
+async function raiseBurstBell(now, held) {
+  const day = etDateString(now);
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    await raiseAdminAlert('alert', burstAlertSpec(day), { bell: true, dedupeKey: `${BURST_KEY_PREFIX}${day}`, metadata: { day, held } });
+  } catch (err) {
+    logger.warn(`[portal-unfinished-bookings] summary bell not raised: ${safeError(err)}`);
+  }
+}
+
 async function runPortalUnfinishedBookings({ now = new Date(), conn = db, pageSize = PAGE_SIZE } = {}) {
   if (!require('../config/feature-gates').portalBookingItemsLive?.()) return { skipped: true, reason: 'gate_off' };
   let found = 0;
   let raised = 0;
+  let room = null;
   try {
+    room = { left: Math.max(0, MAX_BELLS_PER_DAY - await bellsRaisedToday(conn, now)), held: 0 };
     for (const source of SOURCES) {
-      const result = await sweepSource(source, now, conn, pageSize);
+      const result = await sweepSource(source, now, conn, pageSize, room);
       found += result.found;
       raised += result.raised;
     }
   } catch (err) {
     logger.warn(`[portal-unfinished-bookings] stopped, nothing more raised this run: ${safeError(err)}`);
   }
+  const held = room?.held || 0;
+  if (held) {
+    logger.warn(`[portal-unfinished-bookings] day's cap of ${MAX_BELLS_PER_DAY} bells reached: ${held} drop-off(s) held`);
+    await raiseBurstBell(now, held);
+  }
   if (raised) logger.info(`[portal-unfinished-bookings] raised ${raised} bell(s) for bookings not finished`);
-  return { skipped: false, found, raised };
+  return { skipped: false, found, raised, held };
 }
 
 module.exports = {
@@ -391,6 +450,9 @@ module.exports = {
   SOURCE_BOOKING_PAGE,
   SOURCE_ESTIMATE_CARD,
   SOURCES,
+  MAX_BELLS_PER_DAY,
+  BURST_KEY_PREFIX,
+  burstAlertSpec,
   findDropOffPage,
   withoutPersonContact,
   slotWords,

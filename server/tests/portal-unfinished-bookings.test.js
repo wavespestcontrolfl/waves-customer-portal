@@ -43,6 +43,19 @@ describe('unfinished-booking bell words', () => {
   });
 });
 
+describe('the day\'s summary bell (past MAX_BELLS_PER_DAY)', () => {
+  test('passes the alert rules, and its key is never a drop-off\'s (not listed, not counted, not classed)', () => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    expect(() => composeAdminAlert(mod.burstAlertSpec('2026-11-02'))).not.toThrow();
+    expect(mod.BURST_KEY_PREFIX.startsWith(mod.KEY_PREFIX)).toBe(false);
+    expect(mod.burstAlertSpec('2026-11-02').doneWhen).not.toBe('customer_answered');
+  });
+
+  test('the estimate card step is read before the booking page, so the cap serves it first', () => {
+    expect(mod.SOURCES.map((source) => source.name)).toEqual([mod.SOURCE_ESTIMATE_CARD, mod.SOURCE_BOOKING_PAGE]);
+  });
+});
+
 describe('the off switch', () => {
   afterEach(() => { delete process.env.GATE_PORTAL_BOOKING_ITEMS; });
 
