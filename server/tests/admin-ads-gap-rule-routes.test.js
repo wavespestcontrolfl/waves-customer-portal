@@ -265,13 +265,53 @@ describe('POST /campaigns/:id/hold', () => {
 });
 
 describe('DELETE /campaigns/:id/hold', () => {
-  test('removes only the hold and keeps the other metadata', async () => {
+  test('removes the hold, records its release, and keeps the other metadata', async () => {
     campaignRow.metadata = { keep: 'me', budget_hold: { mode: 'base', until: inDays(3) } };
     const res = await call('DELETE', `/campaigns/${CAMPAIGN_ID}/hold`);
     expect(res.status).toBe(200);
     expect(res.body.hold).toBeNull();
-    expect(JSON.parse(campaignWrites[0].metadata)).toEqual({ keep: 'me' });
+    expect(JSON.parse(campaignWrites[0].metadata)).toEqual({
+      keep: 'me',
+      budget_hold_cleared: { at: expect.any(String), by: 'admin-1', mode: 'base', until: inDays(3) },
+    });
     expect(BudgetManager.setMode).not.toHaveBeenCalled();
+  });
+
+  test('leaves a release record with who, when, and the old hold; no budget log row', async () => {
+    const before = Date.now();
+    campaignRow.metadata = { keep: 'me', budget_hold: { mode: 'stop', until: inDays(3), set_by: 'someone-else' } };
+    const res = await call('DELETE', `/campaigns/${CAMPAIGN_ID}/hold`);
+    expect(res.status).toBe(200);
+    expect(res.body.hold).toBeNull();
+    const saved = JSON.parse(campaignWrites[0].metadata);
+    expect(saved.budget_hold).toBeUndefined();
+    expect(saved.keep).toBe('me');
+    expect(saved.budget_hold_cleared).toEqual({ at: expect.any(String), by: 'admin-1', mode: 'stop', until: inDays(3) });
+    expect(Date.parse(saved.budget_hold_cleared.at)).toBeGreaterThanOrEqual(before);
+    expect(res.body.campaign.metadata.budget_hold_cleared.by).toBe('admin-1');
+    expect(mockDb).not.toHaveBeenCalledWith('ad_budget_log');
+  });
+
+  test('a newer release record replaces an older one', async () => {
+    campaignRow.metadata = {
+      budget_hold: { mode: 'base', until: inDays(2) },
+      budget_hold_cleared: { at: '2026-01-01T00:00:00.000Z', by: 'old', mode: 'stop', until: '2026-01-02' },
+    };
+    await call('DELETE', `/campaigns/${CAMPAIGN_ID}/hold`);
+    expect(JSON.parse(campaignWrites[0].metadata).budget_hold_cleared).toEqual({ at: expect.not.stringMatching(/^2026-01-01/), by: 'admin-1', mode: 'base', until: inDays(2) });
+  });
+
+  test('with no hold, writes no release record and keeps an older one', async () => {
+    const older = { at: '2026-01-01T00:00:00.000Z', by: 'old', mode: 'stop', until: '2026-01-02' };
+    campaignRow.metadata = { keep: 'me', budget_hold_cleared: older };
+    const res = await call('DELETE', `/campaigns/${CAMPAIGN_ID}/hold`);
+    expect(res.status).toBe(200);
+    expect(res.body.hold).toBeNull();
+    expect(JSON.parse(campaignWrites[0].metadata)).toEqual({ keep: 'me', budget_hold_cleared: older });
+
+    campaignRow.metadata = { keep: 'me' };
+    await call('DELETE', `/campaigns/${CAMPAIGN_ID}/hold`);
+    expect(JSON.parse(campaignWrites[1].metadata)).toEqual({ keep: 'me' });
   });
 
   test('404 for an unknown campaign', async () => {

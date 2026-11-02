@@ -70,3 +70,9 @@ test('a run that returns nothing (older shape) still succeeds', async () => {
   await budgetTick()();
   expect(mockJobOutcomes['ads-budget-adjust']).toBe('success');
 });
+
+test('a run whose gap-rule record was not saved fails the job_health tick', async () => {
+  mockAdjustBudgets.mockResolvedValue({ evaluated: 1, changed: 1, failed: 0, recordFailed: true });
+  await budgetTick()();
+  expect(mockJobOutcomes['ads-budget-adjust']).toBe('failed: ad budget adjustment: the gap-rule record was not saved');
+});

@@ -302,10 +302,14 @@ router.post('/campaigns/:id/pause', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: `Pause isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
     }
 
-    // Pause on Google Ads if linked
+    // Pause on Google Ads if linked. A linked campaign changes locally ONLY when
+    // Google confirms (a null result is a failed call); otherwise nothing changes.
     let googleAdsResult = null;
     if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
       googleAdsResult = await getGoogleAds().pauseCampaign(campaign.platform_campaign_id);
+      if (!googleAdsResult) {
+        return res.status(502).json({ error: 'Google Ads did not confirm the pause. Nothing changed.' });
+      }
     }
 
     // Update local DB
@@ -327,10 +331,13 @@ router.post('/campaigns/:id/enable', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: `Enable isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
     }
 
-    // Enable on Google Ads if linked
+    // Enable on Google Ads if linked. Same rule as pause: no confirmation, no change.
     let googleAdsResult = null;
     if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
       googleAdsResult = await getGoogleAds().enableCampaign(campaign.platform_campaign_id);
+      if (!googleAdsResult) {
+        return res.status(502).json({ error: 'Google Ads did not confirm the restart. Nothing changed.' });
+      }
     }
 
     // Update local DB
@@ -516,10 +523,18 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
 router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
   try {
     if (!requireGapRule(res)) return undefined;
+    // When a hold existed, the same metadata write leaves a release record
+    // (budget_hold_cleared) so "who lifted it and when" survives. No ad_budget_log
+    // row: a no-change row would trip assertNoChangeSince and the advisor's
+    // recent-change checks. With no hold there is nothing to record.
+    const clearedAt = new Date().toISOString();
+    const clearedBy = req.technicianId || null;
     const updated = UUID_RE.test(req.params.id)
       ? await updateCampaignMetadata(req.params.id, (meta) => {
-        const { budget_hold: _removed, ...rest } = meta;
-        return rest;
+        const { budget_hold: removed, ...rest } = meta;
+        if (!removed) return rest;
+        // Replaces any older budget_hold_cleared.
+        return { ...rest, budget_hold_cleared: { at: clearedAt, by: clearedBy, mode: removed.mode || null, until: removed.until || null } };
       })
       : null;
     if (!updated) return res.status(404).json({ error: 'Campaign not found' });
