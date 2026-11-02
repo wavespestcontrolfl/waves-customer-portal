@@ -310,7 +310,9 @@ launcher opens one Claude tab per `broken` queue row.
 that back to terminal, open a terminal session, to have Claude fix that"; scope "All but customer contact";
 `GATE_ALERT_SEND_TO_CLAUDE`, with `GATE_ALERT_EXPLAINER`). The bell's "What to do" panel carries a **Send to Claude**
 button on every open bell row except customer contact: the five customer-contact categories, `review` (it quotes the
-customer's review), a row that declares `contact: true`, and `internal_admin_alert` (it can forward a customer's text).
+customer's review), `internal_admin_alert` (it can forward a customer's text), and a row whose own metadata or whose
+registry type's `rule` declares `contact: true` or `promise: true` (a self-booked re-service request, a reschedule
+request, an overdue call commitment), whatever its category.
 Those stay with the owner. One tap (`POST /api/admin/notifications/:id/send-to-claude`, admin only, fenced on the
 version the bell served like Done) moves the row into Claude's queue: Activity-only, `who = 'claude'`, `claudeQueue` =
 `sent-to-claude`, severity `broken` if it was broken and `needs-you` otherwise, and a `sentToClaude` stamp with when, who

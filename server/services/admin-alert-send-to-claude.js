@@ -12,8 +12,8 @@
 // queue while it is open (admin-alert-routing.js keepSentToClaude).
 //
 // Never offered on customer contact: a row a customer reached us through or that carries a customer's own words (texts,
-// emails, calls, voicemails, new leads, reviews, a declared contact, the general internal alert that can forward a text).
-// Those stay with the owner. Sends nothing to anyone; the one write is the row's own metadata.
+// emails, calls, voicemails, new leads, reviews, the general internal alert that can forward a text), or a contact or a
+// follow-up we owe a customer that the row or its registry type declares. Those stay with the owner. Sends nothing to anyone; the one write is the row's own metadata.
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
@@ -24,6 +24,19 @@ const { customersForAlerts } = require('./admin-alert-customer');
 // forwarded customer text.
 const CONTACT_CATEGORIES = new Set([...CUSTOMER_CONTACT_CATEGORIES, 'review']);
 const CONTACT_TRIGGERS = new Set(['internal_admin_alert']);
+
+// A customer contact or a follow-up we owe a customer, as the row or its registry type declares it (docs/admin-notifications.md,
+// "Customer declaration"). A registry event's row stores only its trigger key, so the type's own rule is read too: a
+// self-booked re-service request is category `schedule`, but its rule says contact. Read at call time; an unreadable
+// registry refuses nothing extra (the categories above still hold).
+function declaredContact(meta) {
+  if (meta.contact === true || meta.promise === true) return true;
+  if (!meta.triggerKey) return false;
+  try {
+    const rule = require('./notification-triggers').TRIGGER_REGISTRY?.[meta.triggerKey]?.rule;
+    return rule?.contact === true || rule?.promise === true;
+  } catch { return false; }
+}
 
 const metaOf = (value) => {
   if (typeof value === 'string') {
@@ -36,7 +49,7 @@ const metaOf = (value) => {
 function sendRefusal(row) {
   if (!row || String(row.id || '').startsWith('live:')) return 'not_found';
   const meta = metaOf(row.metadata);
-  if (CONTACT_CATEGORIES.has(row.category) || CONTACT_TRIGGERS.has(meta.triggerKey) || meta.contact === true) return 'customer_contact';
+  if (CONTACT_CATEGORIES.has(row.category) || CONTACT_TRIGGERS.has(meta.triggerKey) || declaredContact(meta)) return 'customer_contact';
   if (row.done_at != null) return 'done';
   // Already off the bell: sent before, routed to Claude's queue, or an Activity-only report.
   if (meta.feed === 'activity') return 'not_in_bell';

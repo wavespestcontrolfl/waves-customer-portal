@@ -60,9 +60,23 @@ describe('sendRefusal', () => {
     ['a new lead', { category: 'new_lead' }],
     ['a review', { category: 'review' }],
     ['a declared customer contact', { metadata: { contact: true } }],
+    ['a declared follow-up we owe a customer', { metadata: { promise: true } }],
     ['the general internal alert', { metadata: { triggerKey: 'internal_admin_alert' } }],
+    // Registry types whose rule declares contact or a promise, under an ordinary category: the row stores only the key.
+    ['a self-booked re-service request', { category: 'schedule', metadata: { triggerKey: 'reservice_self_booked' } }],
+    ['a reschedule request', { category: 'schedule', metadata: { triggerKey: 'appointment_reschedule_intent' } }],
+    ['an overdue call commitment', { category: 'alert', metadata: { triggerKey: 'call_commitment_overdue' } }],
   ])('%s is customer contact and is never sent', (_label, over) => {
     expect(sendRefusal(row(over))).toBe('customer_contact');
+  });
+
+  test('every registry type that declares contact or a promise is refused under its own category', () => {
+    const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
+    const declared = Object.entries(TRIGGER_REGISTRY).filter(([, t]) => t.rule?.contact === true || t.rule?.promise === true);
+    expect(declared.length).toBeGreaterThan(0);
+    for (const [key, t] of declared) expect([key, sendRefusal(row({ category: t.category, metadata: { triggerKey: key } }))]).toEqual([key, 'customer_contact']);
+    // A registry fault with no such declaration can be sent.
+    expect(sendRefusal(row({ metadata: { triggerKey: 'property_lookup_canary_failed' } }))).toBeNull();
   });
 
   test('a done row, a row already off the bell and a live alert are refused; an open bell row is not', () => {
