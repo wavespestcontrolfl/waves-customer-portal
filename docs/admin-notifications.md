@@ -165,10 +165,12 @@ Kinds today:
   serves right after the write). The Waves Admin iPhone app (1.8 and later) registers that category
   with a **Call** action, shown when the notification is pressed or pulled down. The action hands
   `<row id>.<version>` to the open staff page as a cancelable `wavesadmin:alertcall` window event, or,
-  with no page to take it, loads `/admin?alertCall=<row id>.<version>`; either way the bell runs that
+  with no page to take it, loads `/admin/dashboard?alertCall=<row id>.<version>` (`/admin` redirects and
+  drops the query); either way the bell runs that
   row's Call through `POST /api/admin/notifications/:id/actions/call` with that version (only inside
-  the app; the address loses the param first). A row that changed since the push answers 409 and the
-  bell shows its list. Alerts raised through `raiseAdminAlert` ring the bell only and send no push.
+  the app, once the staff session is verified; the address loses the param first). The answer waits outside
+  the bell for whichever bell is on screen when it lands, so a bell the layout or a route change mounts again
+  still shows it. A row that changed since the push answers 409 and the bell shows its list. Alerts raised through `raiseAdminAlert` ring the bell only and send no push.
 
 ## 3. Never in a headline or a why
 

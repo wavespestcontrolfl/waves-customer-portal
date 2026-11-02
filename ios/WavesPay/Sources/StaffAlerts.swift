@@ -98,9 +98,10 @@ final class StaffAlerts {
     var runCall: ((String, URL) -> Void)?
 
     // The push's Call. The open staff page runs it itself; before the portal is ready, its link waits like a
-    // tapped alert's, and the page runs it when it loads (?alertCall=).
+    // tapped alert's, and the page runs it when it loads (?alertCall=). The dashboard, not /admin: /admin
+    // redirects there and drops the query.
     func call(value: String) {
-        guard let url = URL(string: "/admin?alertCall=\(value)", relativeTo: Portal.origin)?.absoluteURL else { return }
+        guard let url = URL(string: "/admin/dashboard?alertCall=\(value)", relativeTo: Portal.origin)?.absoluteURL else { return }
         if let runCall {
             runCall(value, url)
         } else {

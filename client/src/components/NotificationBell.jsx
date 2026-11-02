@@ -167,6 +167,21 @@ const CHANGED_NOTE = 'That alert changed \u2014 the list was refreshed.';
 // cancels it, so the app does not load a page. Otherwise the app loads ?alertCall=<value>, and the first bell on the
 // page takes it out of the address before anything runs, so a second bell, a reload or Back never calls again.
 const ALERT_CALL_EVENT = 'wavesadmin:alertcall';
+// The Call's answer outlives the bell that asked: the layout and the routes mount the bell again on their own (the
+// session check ending, a route change), so the answer waits here, for two minutes at most, until a bell on screen
+// shows it, and that bell's own panel opens with it.
+const ALERT_CALL_ANSWER_EVENT = 'waves:alertcall-answer';
+const ALERT_CALL_ANSWER_MS = 2 * 60 * 1000;
+let alertCallAnswer = null;
+function settleAlertCall(note) {
+  alertCallAnswer = { note, at: Date.now() };
+  window.dispatchEvent(new Event(ALERT_CALL_ANSWER_EVENT));
+}
+function takeAlertCallAnswer() {
+  const answer = alertCallAnswer;
+  alertCallAnswer = null;
+  return answer && Date.now() - answer.at <= ALERT_CALL_ANSWER_MS ? answer.note : null;
+}
 const ALERT_CALL_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([0-9a-f]{32})$/i;
 const CALL_FAILED_NOTE = 'Couldn\u2019t start that call. Open the alert to call.';
 function takeAlertCall() {
@@ -798,10 +813,16 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
 
   // The push's Call, inside the Waves Admin app only: the same POST as the row's Call button, on the row and version
   // the push showed. The panel opens with the server's answer and the list read again. Only once the staff session
-  // is verified: the layout mounts its bell again when verification ends (AdminLayoutV2's navigation key), and a
-  // bell that ran the call before that would take its answer away with it.
+  // is verified (the call needs it), and the answer goes to whichever bell is on screen when it lands.
   useEffect(() => {
     if (type !== 'admin' || !sessionReady || !isWavesAdminApp()) return undefined;
+    const showAnswer = () => {
+      const note = takeAlertCallAnswer();
+      if (!note) return;
+      setOpen(true);
+      setActionNote(note);
+      loadNotifications();
+    };
     const runCall = ({ id, version }) => {
       setOpen(true);
       loadNotifications();
@@ -812,8 +833,10 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
           if (err.data?.error === 'changed') return CHANGED_NOTE;
           return typeof err.data?.message === 'string' && err.data.message ? err.data.message : 'That alert was already handled.';
         })
-        .then((note) => { setActionNote(note); loadNotifications(); });
+        .then(settleAlertCall);
     };
+    window.addEventListener(ALERT_CALL_ANSWER_EVENT, showAnswer);
+    showAnswer();
     const fromAddress = takeAlertCall();
     if (fromAddress) runCall(fromAddress);
     const onAppCall = (event) => {
@@ -823,7 +846,10 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
       runCall({ id: match[1], version: match[2] });
     };
     window.addEventListener(ALERT_CALL_EVENT, onAppCall);
-    return () => window.removeEventListener(ALERT_CALL_EVENT, onAppCall);
+    return () => {
+      window.removeEventListener(ALERT_CALL_EVENT, onAppCall);
+      window.removeEventListener(ALERT_CALL_ANSWER_EVENT, showAnswer);
+    };
   }, [sessionReady]);
 
   const doneSeqRef = useRef(0);

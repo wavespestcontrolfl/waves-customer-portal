@@ -1501,6 +1501,30 @@ describe('NotificationBell push Call (Waves Admin app)', () => {
     expect(window.location.search).toBe('?tab=x');
   });
 
+  it('the answer reaches the bell on screen when the bell that asked was mounted again meanwhile', async () => {
+    let answer;
+    setup(() => new Promise((resolve) => { answer = () => resolve({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }); }));
+    const first = render(<NotificationBell type="admin" />);
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    first.unmount();
+    // The route or the layout mounts a new bell; the address no longer holds the Call.
+    render(<NotificationBell type="admin" />);
+    await act(async () => { answer(); });
+    expect(await screen.findByRole('status')).toHaveTextContent('Calling your phone now. Press 1 to connect.');
+    expect(posts()).toHaveLength(1);
+  });
+
+  it('an answer that landed while no bell was on screen shows on the next bell', async () => {
+    let answer;
+    setup(() => new Promise((resolve) => { answer = () => resolve({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }); }));
+    const first = render(<NotificationBell type="admin" />);
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    first.unmount();
+    await act(async () => { answer(); });
+    render(<NotificationBell type="admin" />);
+    expect(await screen.findByRole('status')).toHaveTextContent('Calling your phone now. Press 1 to connect.');
+  });
+
   it('a changed row says so; any other failure says the call did not start', async () => {
     setup(() => ({ ok: false, status: 409, json: async () => ({ error: 'changed' }) }));
     render(<NotificationBell type="admin" />);
