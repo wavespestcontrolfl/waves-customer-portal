@@ -172,12 +172,12 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   const oneMessage = buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
   const { system } = buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
 
-  test('this is the v34 cohort, one hash per layout', () => {
-    expect(PROMPT_VERSION).toBe('v34');
-    expect(PROMPT_HASH).toMatch(/^v34-[a-f0-9]{12}$/);
-    expect(APS_PROMPT_HASH).toMatch(/^v34a-[a-f0-9]{12}$/);
-    expect(SYSTEM_PROMPT_HASH).toMatch(/^v34s-[a-f0-9]{12}$/);
-    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v34b-[a-f0-9]{12}$/);
+  test('this is the v33 cohort, one hash per layout', () => {
+    expect(PROMPT_VERSION).toBe('v33');
+    expect(PROMPT_HASH).toMatch(/^v33-[a-f0-9]{12}$/);
+    expect(APS_PROMPT_HASH).toMatch(/^v33a-[a-f0-9]{12}$/);
+    expect(SYSTEM_PROMPT_HASH).toMatch(/^v33s-[a-f0-9]{12}$/);
+    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v33b-[a-f0-9]{12}$/);
     expect(new Set([PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH]).size).toBe(4);
   });
 
@@ -209,19 +209,5 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   test('the output contract the model is given carries billing_choice', () => {
     const schema = require('../schemas/call-extraction.model-output.schema.json');
     expect(JSON.stringify(schema)).toContain('"billing_choice"');
-  });
-});
-
-describe('prompt v34: an initial is not a dot, in both layouts', () => {
-  const RULE = 'That period is punctuation, not a spoken dot: in the email the letter joins the next word with no dot, unless the caller said "dot"';
-
-  test('the rule is in the one-message prompt, the system part and the gate-on prompts, never the user message', () => {
-    for (const text of [buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-11-02', CALL_OPTS),
-      buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-11-02', CALL_OPTS).system,
-      buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-11-02', { agentProposedSlotCommitment: true }),
-      buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-11-02', { agentProposedSlotCommitment: true }).system]) {
-      expect(text).toContain(RULE);
-    }
-    expect(buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-11-02', CALL_OPTS).user).not.toContain(RULE);
   });
 });

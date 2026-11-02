@@ -349,12 +349,3 @@ describe('early finalization keeps the backup provider record', () => {
     }
   });
 });
-
-describe('V1 prompt email rules', () => {
-  test('a transcribed initial\'s period is punctuation, not a dot (the same rule the V2 prompt carries)', async () => {
-    installFetch({ gemini: () => geminiOk(GOOD) });
-    await extractCallData(TRANSCRIPT, PHONE, {});
-    const [, init] = geminiCalls()[0];
-    expect(String(init.body)).toContain('That period is punctuation, not a spoken dot: in the email the letter joins the next word with no dot');
-  });
-});

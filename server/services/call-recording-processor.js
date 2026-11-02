@@ -10082,7 +10082,6 @@ IMPORTANT — spelled-out names and emails are authoritative over how they sound
 - When an email is described relative to the name (e.g. "first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
 - Transcription often CONCATENATES a phonetic spelling into nonsense tokens: "blikenboy, vlikenvictor" is "B like in boy, V like in Victor" — decode each such token to its letter (B, V). A run of these tokens ending in digits is a spelled email local part ("blikenboy vlikenvictor 42 at gmail.com" → bv42@gmail.com). Decode the letters even when the words are jammed together.
 - The decoded spelled letters ALSO beat the caller's own read-back of the finished email as transcribed — the read-back is one more chance for the transcriber to mishear. A transcribed local part that looks like a URL fragment ("www.", "http") is a mis-hearing, never a real mailbox: reconstruct it from the spelled letters, and if you cannot reconstruct it confidently, return null.
-- A transcript writes a letter said on its own as an initial, with a period and a space ("J. Doe" for a spoken "J Doe"). That period is punctuation, not a spoken dot: in the email the letter joins the next word with no dot, unless the caller said "dot" (or "period", "point") between them. Illustrative only — never copy this example into the output.
 
 IMPORTANT — customer contact rules:
 - Do not invent email addresses. Only return email when the caller clearly says or spells the complete address.

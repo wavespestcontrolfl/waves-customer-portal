@@ -194,13 +194,7 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // called the day contested and nothing was booked. On a call from 12:00 AM up to 4:00 AM, a said
 // weekday or date decides what "tomorrow" names (the call date or the day after); a bare "tomorrow"
 // is not guessed (ambiguous; a reschedule day stays null). Extraction only: no judge has the clock.
-// v34: AN INITIAL IS NOT A DOT (email). 2026-11-02: a caller dictated an initial and a surname with
-// no "dot" between them, then said "dot" before each domain part. Both transcribers wrote the
-// initial as "J.", the extraction and the contact decoder saved j.doe@... with a dot, and the
-// address hard-bounced. A period after a letter said on its own is the transcript's initial mark;
-// only a said "dot" puts a dot there. The same rule is in the contact decoder prompt
-// (contact-dictation.js). New instruction: a new cohort.
-const PROMPT_VERSION = 'v34';
+const PROMPT_VERSION = 'v33';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -376,7 +370,6 @@ EMAIL:
 - Only extract when the caller clearly says or spells the complete email address.
 - Uncertain, partial, or malformed emails must be null.
 - A transcribed local part that looks like a URL fragment ("www.", "http") is a mis-hearing, never a real mailbox: reconstruct it from the spelled letters, and if you cannot reconstruct it confidently, set null.
-- A transcript writes a letter said on its own as an initial, with a period and a space ("J. Doe" for a spoken "J Doe"). That period is punctuation, not a spoken dot: in the email the letter joins the next word with no dot, unless the caller said "dot" (or "period", "point") between them. Illustrative only — never copy this example into the output.
 - ATTRIBUTION: an email the caller relays FOR another named person ("the buyer is Joseph — his email is ...", "her email is ...") is THAT person's email. It goes on that person's secondary-contact entry and NEVER into caller.email, even though the caller is the one speaking it. The same rule applies to phone numbers and caller.phone_e164.
 
 CALLER RELATIONSHIP (relationship_to_property) AND on_site_authorization:
