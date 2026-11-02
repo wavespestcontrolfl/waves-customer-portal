@@ -156,7 +156,11 @@ describe('gate on: the prompt and the tools', () => {
     expect(prompt).toContain('request_quote');
     expect(prompt).toContain('request_move');
     expect(prompt).toContain('Bronze 1, Silver 2, Gold 3, Platinum 4 or more');
-    expect(prompt).toContain('Never promise a soil test on request');
+    // Owner 2026-11-02: any customer can order a paid soil test; the free trigger test still sends no lab report.
+    expect(prompt).toContain('Any customer can also order a soil test for an added fee');
+    expect(prompt).toContain('call request_quote with service lawn_care and the words soil test in the note');
+    expect(prompt).toContain('Never promise a copy of the lab report from a test we took at no charge.');
+    expect(prompt).not.toContain('Never promise a soil test on request');
     expect(prompt).toContain('topic account_change and say the team will turn them back on');
     expect(prompt).toContain('Only on a residential general pest plan that includes inside service');
     expect(prompt).toContain('State every fact with its condition');

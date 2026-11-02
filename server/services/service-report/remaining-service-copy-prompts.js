@@ -337,6 +337,9 @@ const SERVICE_KEY_BINDINGS = Object.freeze({
   dethatching: ['physical_lawn', null],
   plugging: ['physical_lawn', null],
   top_dressing: ['physical_lawn', null],
+  // Lawn soil test (20261102070000): a sample for the UF/IFAS soil lab. The assessment module keeps a collected sample
+  // apart from a finished lab result.
+  lawn_soil_test: ['assessment', null],
   palm_injection: ['palm_care', 'palm_injection'],
   palm_injection_semiannual: ['palm_care', 'palm_injection'],
 });
