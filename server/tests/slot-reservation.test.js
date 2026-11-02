@@ -85,6 +85,30 @@ describe('slot reservation helpers', () => {
       .toBe('Lawn Dethatching Service');
   });
 
+  test('a pest specialty catalog name replaces the generic one-time "Pest Control" label; renames still cannot downgrade classification', () => {
+    const { classifierStableServiceType } = slotReservation._internals;
+    for (const name of [
+      'German Roach Cleanout Service',
+      'Cockroach Treatment Service',
+      'Bed Bug Treatment Service',
+      'Flea Control Service',
+      'Vehicle German Roach Treatment (2 Visits)',
+    ]) {
+      expect(classifierStableServiceType(name, 'Pest Control')).toBe(name);
+    }
+    // A renamed specialty row that dropped its family tokens classifies
+    // 'general' — the generic label stays so classification cannot degrade.
+    expect(classifierStableServiceType('Kitchen Cleanout', 'Pest Control')).toBe('Pest Control');
+    expect(classifierStableServiceType('Bee / Wasp Nest Removal Service', 'Pest Control')).toBe('Pest Control');
+    // The WDO r20 protection is unchanged.
+    expect(classifierStableServiceType('Real Estate Report', 'WDO Inspection')).toBe('WDO Inspection');
+    expect(classifierStableServiceType('Complete WDO Inspection Service', 'WDO Inspection'))
+      .toBe('Complete WDO Inspection Service');
+    // A specialty canonical is never swapped for a different specialty link.
+    expect(classifierStableServiceType('Flea Control Service', 'Bed Bug Treatment Service'))
+      .toBe('Bed Bug Treatment Service');
+  });
+
   test('canonicalizes rodent trapping reservations to the trapping service type', () => {
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       { serviceMode: 'one_time', services: [] },
@@ -422,6 +446,59 @@ describe('slot reservation helpers', () => {
 
       expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
         service_type: 'Pest Control',
+        is_recurring: false,
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot stamps the catalog specialty name on a one-time german roach accept (not the generic "Pest Control")', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'one_time',
+        serviceLabel: 'German Roach Cleanout Service',
+        durationMinutes: 60,
+        services: [{ service: 'pest_control', engineKey: 'german_roach', durationMinutes: 60 }],
+      });
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-790',
+        status: 'sent',
+        service_interest: 'Pest Control',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const insertBuilder = makeInsertBuilder({
+        id: 'scheduled-790',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      });
+      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      // Catalog lookup: engine-key containment resolves exactly one row.
+      const servicesBuilder = {
+        whereRaw: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue([
+          { id: 'svc-german-roach', name: 'German Roach Cleanout Service', service_key: 'german_roach' },
+        ]),
+      };
+      // The same savepoint hook also serves the occupancy raw read (no
+      // interview conflicts here) — give the savepoint both shapes.
+      const savepoint = Object.assign(() => servicesBuilder, { raw: jest.fn().mockResolvedValue({ rows: [] }) });
+      trx.transaction = jest.fn(async (callback) => callback(savepoint));
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await slotReservation.reserveSlot({
+        estimateId: 'estimate-790',
+        slotId: signedSlotId({ estimateId: 'estimate-790', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 60 }),
+        serviceMode: 'one_time',
+      });
+
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
+        service_id: 'svc-german-roach',
+        service_type: 'German Roach Cleanout Service',
         is_recurring: false,
       }));
     } finally {
