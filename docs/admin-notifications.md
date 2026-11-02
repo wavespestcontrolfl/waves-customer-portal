@@ -169,7 +169,8 @@ Kinds today:
   the controller location, the contact preference) is filled only while it is empty, so a value on
   file is never overwritten. The profile row is the customer's, so Save writes only for a customer
   with exactly one active property, read at the tap, and only facts that name no property or that one;
-  a fact the reader could not pin to one value or topic is left for the profile too. Each write is audited as
+  a fact the reader could not pin to one value or topic, or a "no" / "not sure" pet or irrigation report
+  it held for a person to read, is left for the profile too. Each write is audited as
   `sms.property_preference.updated` (field names only), and the bell closes on the version the tap
   claimed; a bell that changed rolls the write back. One visit only is the bell's own Done, fenced the
   same way. Neither sends anything to a customer.

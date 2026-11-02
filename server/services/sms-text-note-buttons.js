@@ -25,8 +25,10 @@ const textNoteButtons = () => ({ kind: KIND, items: Object.entries(ITEMS).map(([
 // codes, the controller location, the contact preference) holds one value, so Save never overwrites one on file.
 const LONG_TEXT_FIELDS = new Set(['special_instructions', 'access_notes', 'pet_details', 'parking_notes',
   'irrigation_schedule_notes', 'irrigation_issues']);
-// A fact the reader could not pin to one value or one topic: a person picks in the profile instead.
-const NO_SAVE_OUTCOMES = new Set(['conflicting_facts', 'mixed_topics', 'value_too_long', 'changed_during_extraction']);
+// A fact the reader could not pin to one value or one topic, or a "no" / "not sure" pet or irrigation report it held
+// for a person to read (saving an irrigation note would also turn the system on): a person decides in the profile.
+const NO_SAVE_OUTCOMES = new Set(['conflicting_facts', 'mixed_topics', 'value_too_long', 'changed_during_extraction',
+  'pet_needs_review', 'irrigation_needs_review']);
 
 function parseMetadata(value) {
   if (value && typeof value === 'object') return value;

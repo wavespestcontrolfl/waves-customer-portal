@@ -44,13 +44,21 @@ describe('text-note bell buttons (owner 2026-11-02 "C")', () => {
       expect(plan([held({ outcome })])).toEqual({ refusal: 'open_profile' });
     });
 
+  test('a "no" or "not sure" pet or irrigation report held for a person is left for the profile (pre-push P1)', () => {
+    // Saving "We no longer have sprinklers" would also turn irrigation_system on (applyPropertyPreferenceValue).
+    expect(plan([held({ field: 'irrigation_issues', value: 'We no longer have sprinklers', outcome: 'irrigation_needs_review' })]))
+      .toEqual({ refusal: 'open_profile' });
+    expect(plan([held({ field: 'pet_details', value: 'Not sure the dog is still here', outcome: 'pet_needs_review' })]))
+      .toEqual({ refusal: 'open_profile' });
+  });
+
   test('Save needs the customer\'s one active property, whatever the outcome; a note naming another property is left', () => {
     const loose = held({ outcome: 'property_ambiguous', property_id: null });
     expect(writes(plan([loose], {}, ['p1']))).toHaveLength(1);
     expect(writes(plan([held()], {}, ['p1']))).toHaveLength(1);
     expect(plan([loose], {}, ['p1', 'p2'])).toEqual({ refusal: 'property' });
-    // Pre-push P1: a pet review with no property, on a two-property customer, is not saved either.
-    expect(plan([held({ field: 'pet_details', outcome: 'pet_needs_review', property_id: null })], {}, ['p1', 'p2'])).toEqual({ refusal: 'property' });
+    // Pre-push P1: a fact with no property, whatever its outcome, on a two-property customer, is not saved either.
+    expect(plan([held({ field: 'pet_details', property_id: null })], {}, ['p1', 'p2'])).toEqual({ refusal: 'property' });
     expect(plan([held({ property_id: 'p9' })], {}, ['p1'])).toEqual({ refusal: 'property' });
     expect(plan([held()], {}, [])).toEqual({ refusal: 'property' });
   });
