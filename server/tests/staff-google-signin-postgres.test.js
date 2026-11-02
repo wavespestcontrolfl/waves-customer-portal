@@ -289,13 +289,22 @@ postgres('staff Google sign-in on migrated PostgreSQL', () => {
     expect((await callback(flow)).location).toBe('/admin/login#google_error=relink_needed');
   });
 
-  test('a staff member with an authenticator still enters its code after Google', async () => {
+  test('a staff member with an authenticator skips its code after Google, and the session passes the two-step check', async () => {
     const tech = await addStaff({ mfa_enabled_at: new Date() });
     process.env.GATE_ADMIN_MFA = 'true';
     try {
       const { flow, result } = await signedResult(tech);
       const done = await finish(result, flow.secret);
-      expect(done).toEqual({ status: 200, body: { mfaRequired: true, challengeToken: expect.any(String) } });
+      expect(done.status).toBe(200);
+      expect(done.body).not.toHaveProperty('mfaRequired');
+      expect(done.body.user).toMatchObject({ id: tech.id, twoStep: { enabled: true } });
+      expect(JSON.parse(Buffer.from(done.body.token.split('.')[1], 'base64url').toString())).toMatchObject({ mfa: true });
+      const req = { headers: { authorization: `Bearer ${done.body.token}` }, baseUrl: '/api/admin/auth', path: '/me' };
+      const res = { status: jest.fn(() => res), json: jest.fn(() => res) };
+      const next = jest.fn();
+      await realAdminAuthenticate(req, res, next);
+      expect(res.status).not.toHaveBeenCalled();
+      expect(next).toHaveBeenCalledTimes(1);
     } finally {
       delete process.env.GATE_ADMIN_MFA;
     }

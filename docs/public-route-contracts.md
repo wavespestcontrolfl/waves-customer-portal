@@ -6363,9 +6363,10 @@ pins `google_sub` with a compare-and-set under the partial unique indexes.
 `POST /google/finish { result, verifier }` burns the result first (single use,
 valid 2 minutes after the callback), then compares SHA-256(verifier) with the
 page challenge and re-reads the staff row (still active, same pinned
-`google_sub`); it then answers exactly like `/login`: `{ mfaRequired,
-challengeToken }` for an account enrolled under `GATE_ADMIN_MFA`, else
-`{ token, refreshToken, user }` plus the `waves_admin` marker cookie. Every
+`google_sub`); it then answers `{ token, refreshToken, user }` plus the
+`waves_admin` marker cookie. It never asks for the `GATE_ADMIN_MFA` code: a
+Google sign-in stands in for it (owner 2026-11-02), and while that gate is on
+the access token carries the `mfa` mark. Every
 finish refusal is the same 401 `GOOGLE_SIGNIN_EXPIRED`, a deliberate exception
 to the generic-404 token baseline: the sign-in page restarts on it. The Team tab
 link `PUT /api/admin/timetracking/technicians/:id/google-signin` is not public

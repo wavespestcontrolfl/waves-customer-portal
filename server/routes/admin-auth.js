@@ -105,9 +105,9 @@ function staffUser(tech) {
   };
 }
 
-// `mfa: true` marks an access token issued after the two-step code passed
-// (GATE_ADMIN_MFA); the claim is omitted otherwise, so gate-off tokens are
-// unchanged.
+// `mfa: true` marks an access token issued after the two-step code passed, or
+// after a Google sign-in, which stands in for the code (GATE_ADMIN_MFA); the
+// claim is omitted otherwise, so gate-off tokens are unchanged.
 function mintStaffTokens(tech, { mfa = false, mfaRecoveryUntil = null } = {}) {
   const tokenVersion = staffTokenVersion(tech);
   return {
@@ -213,11 +213,15 @@ async function login(req, res, next) {
 }
 
 // The end of every staff sign-in that proved who the person is (the password
-// here, or Google through /google/finish).
-async function respondWithStaffSession(req, res, tech) {
-  // Two-step sign-in: the first factor alone issues no session for an
-  // enrolled staff member — only a short-lived challenge for POST /login/mfa.
-  if (adminMfaLive() && staffMfa.mfaEnabled(tech)) {
+// here, or Google through /google/finish). A Google sign-in skips the
+// authenticator code and its session carries the two-step mark (owner
+// 2026-11-02, "skip it"): Google's own 2-Step Verification on the company
+// account is the second check. Changing two-step settings still asks for the
+// code (mfaSetup / mfaDisable).
+async function respondWithStaffSession(req, res, tech, { viaGoogle = false } = {}) {
+  // Two-step sign-in: a password alone issues no session for an enrolled
+  // staff member — only a short-lived challenge for POST /login/mfa.
+  if (!viaGoogle && adminMfaLive() && staffMfa.mfaEnabled(tech)) {
     // The challenge is a short-lived bearer: same privacy headers as
     // /login/mfa (gate-off answers keep their headers unchanged).
     noStore(req, res, () => {});
@@ -231,7 +235,7 @@ async function respondWithStaffSession(req, res, tech) {
     });
   }
 
-  const { token, refreshToken } = mintStaffTokens(tech);
+  const { token, refreshToken } = mintStaffTokens(tech, { mfa: viaGoogle && adminMfaLive() });
 
   await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
   setAdminMarkerCookie(res, tech.id);
@@ -312,7 +316,7 @@ async function googleFinish(req, res, next) {
     if (!tech) {
       return res.status(401).json({ error: 'Your Google sign-in expired. Try again.', code: 'GOOGLE_SIGNIN_EXPIRED' });
     }
-    return await respondWithStaffSession(req, res, tech);
+    return await respondWithStaffSession(req, res, tech, { viaGoogle: true });
   } catch (err) { return next(err); }
 }
 
