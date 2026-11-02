@@ -2587,6 +2587,13 @@ class SmartRebooker {
         occurrence_service_id: service.service_id || null,
         occurrence_property_id: service.property_id || null,
       });
+      // An unassigned visit that gains a technician here closes its open
+      // unassigned_overdue alerts in this transaction, as assignDispatchJob
+      // does (the CAS above pinned the prior technician, so "unassigned" is
+      // the committed starting point). Removing a technician resolves nothing.
+      if (techChangeRequested && !service.technician_id && updates.technician_id) {
+        await require('./dispatch-alerts').autoResolveUnassignedAlertsForJob({ jobId: serviceId, resolvedBy: options.actorId || null, trx });
+      }
       // A flagged ("not closed out") visit that is moved to a new time is rebooked:
       // settle its open flagged rows — the one just written included, when this move
       // is itself a no-show Quick Move — and close its card. Savepoint-confined and
