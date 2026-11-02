@@ -326,6 +326,33 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('bodyAppend reaches the sent html and text; without it the send is unchanged', async () => {
+    const run = async (extra) => {
+      const queuedMessage = { id: 'msg-ba', status: 'queued', subject_snapshot: 'S' };
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [chain({ returning: [queuedMessage] }), chain({ returning: [{ ...queuedMessage, status: 'sent' }] })],
+      });
+      sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-ba' });
+      await EmailTemplates.sendTemplate({
+        templateKey: 'estimate.expiring_notice',
+        to: 'sam@example.com',
+        payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12', company_name: 'Waves' },
+        ...extra,
+      });
+      return sendgrid.sendOne.mock.calls.at(-1)[0];
+    };
+    const plain = await run({});
+    const appended = await run({ bodyAppend: { html: 'Follow <a href="https://example.com/f">us</a>', text: 'Follow us: https://example.com/f' } });
+    expect(plain.html).not.toContain('Follow <a');
+    expect(plain.text).not.toContain('Follow us');
+    expect(appended.html).toContain('Follow <a href="https://example.com/f">us</a>');
+    expect(appended.text.endsWith('Follow us: https://example.com/f')).toBe(true);
+    expect(appended.html.replace(/\n<p class="dm-muted"[^>]*>Follow <a href="https:\/\/example.com\/f">us<\/a><\/p>/, '')).toBe(plain.html);
+  });
+
   describe('lead / estimate linkage on the queued row', () => {
     const EST = '11111111-1111-4111-8111-111111111111';
     const LEAD = '22222222-2222-4222-8222-222222222222';

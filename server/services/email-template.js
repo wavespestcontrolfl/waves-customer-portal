@@ -352,6 +352,20 @@ const SOCIALS = [
   ['x', 'https://x.com/wavespest', 'X'],
 ];
 
+// One "Follow Waves" line for the visit report email (owner 2026-11-01, social
+// audit "follow link"). Only networks whose profile URL is in SOCIALS above;
+// built here so the report sender never types a handle of its own.
+const FOLLOW_LINE_SLUGS = ['facebook', 'instagram', 'tiktok'];
+const FOLLOW_LINE_LEAD = 'Follow Waves for local pest and lawn tips:';
+
+function followUsLine() {
+  const picked = SOCIALS.filter(([slug]) => FOLLOW_LINE_SLUGS.includes(slug));
+  return {
+    html: `${FOLLOW_LINE_LEAD} ${picked.map(([, url, name]) => `<a class="dm-link" href="${url}" target="_blank" rel="noopener" style="color:#0A7EC2;text-decoration:underline;">${name}</a>`).join(' &middot; ')}`,
+    text: [FOLLOW_LINE_LEAD, ...picked.map(([, url, name]) => `${name}: ${url}`)].join('\n'),
+  };
+}
+
 function socialRowHtml() {
   return `<div style="margin:14px 0 0 0;text-align:center;">${SOCIALS.map(([slug, url, name]) => `<a href="${url}" style="display:inline-block;margin:0 3px;padding:4px;text-decoration:none;border:0;"><img src="https://portal.wavespestcontrol.com/app-email/social/${slug}.png" alt="${name}" width="20" height="20" style="width:20px;height:20px;border:0;vertical-align:middle;opacity:0.9;" /></a>`).join('')}</div>`;
 }
@@ -724,6 +738,7 @@ function ensureLegalTextFooter(text, opts = {}) {
 
 module.exports = {
   bodyIsDarkAware,
+  followUsLine,
   wrapEmail,
   wrapServiceEmail,
   wrapNewsletter,

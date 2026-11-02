@@ -773,7 +773,9 @@ function payloadWithNameFallback(payload = {}) {
   return { ...payload, first_name: 'there' };
 }
 
-function renderTemplate({ template, version, payload: rawPayload = {}, unsubscribeUrl = null, modeOverride = null } = {}) {
+// bodyAppend ({ html, text }): one caller-supplied closing line, added after the
+// template body and before the Waves footer in both parts. Null = untouched.
+function renderTemplate({ template, version, payload: rawPayload = {}, unsubscribeUrl = null, modeOverride = null, bodyAppend = null } = {}) {
   if (!template || !version) throw new Error('template and version required');
   const missingPayload = requiredPayloadMissing(template, rawPayload);
   const payload = payloadWithNameFallback(rawPayload);
@@ -785,6 +787,10 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
     defaultCta = renderDefaultCta(template, payload);
     bodyHtml = [bodyHtml, defaultCta.bodyHtml].filter(Boolean).join('\n');
     bodyText = [bodyText, defaultCta.bodyText].filter(Boolean).join('\n\n');
+  }
+  if (bodyAppend?.html) {
+    const B = blockPalette();
+    bodyHtml = [bodyHtml, `<p class="dm-muted" style="margin:18px 0 0 0;font-family:${B.font};font-size:13px;line-height:1.58;color:${B.mutedText};">${bodyAppend.html}</p>`].filter(Boolean).join('\n');
   }
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   // Billing-family templates carry the Stripe trust line (owner scope
@@ -830,8 +836,8 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined, darkAwareBody })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote, darkAwareBody });
   const textBody = version.text_body
-    ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText].filter(Boolean).join('\n\n')
-    : bodyText;
+    ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText, bodyAppend?.text].filter(Boolean).join('\n\n')
+    : [bodyText, bodyAppend?.text].filter(Boolean).join('\n\n');
   const text = (mode === 'marketing' || unsubscribeUrl)
     ? ensureLegalTextFooter(textBody, { unsubscribeUrl: unsubscribeUrl || null }) || bodyText
     : textBody;
@@ -1293,7 +1299,7 @@ const LEDGER_REQUIRED_CODE = 'EMAIL_DIVISION_LEDGER_REQUIRED';
 // the send classifies as marketing by the library's own isMarketingSend —
 // set by the automation executor, which is not the ledger.
 function prepareTemplateSend({
-  template, version, payload, suppressionGroupKey, unsubscribeUrl = null, test = false, marketingRequiresLedger = false,
+  template, version, payload, suppressionGroupKey, unsubscribeUrl = null, test = false, marketingRequiresLedger = false, bodyAppend = null,
 } = {}) {
   const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   if (marketingRequiresLedger && isMarketingSend(template, effectiveSuppressionGroupKey)) {
@@ -1330,6 +1336,7 @@ function prepareTemplateSend({
     template,
     version,
     payload,
+    bodyAppend,
     unsubscribeUrl: effectiveUnsubscribeUrl,
     modeOverride: pinsServiceChrome
       ? 'service'
@@ -1449,6 +1456,9 @@ async function sendTemplate({
   // the send before dispatch (the row is marked failed, pre-provider); a
   // throw is logged and the send proceeds.
   onQueued = null,
+  // One closing line ({ html, text }) rendered after the template body, before
+  // the Waves footer. Null = the email is unchanged.
+  bodyAppend = null,
   // The email twin of the SMS sender's locked handoff: called with a
   // `dispatch` that performs the actual provider request. The caller holds
   // whatever authority rows it needs and awaits `dispatch()` while they are
@@ -1542,7 +1552,7 @@ async function sendTemplate({
   let prepared;
   try {
     prepared = prepareTemplateSend({
-      template, version, payload, suppressionGroupKey, unsubscribeUrl, test, marketingRequiresLedger,
+      template, version, payload, suppressionGroupKey, unsubscribeUrl, test, marketingRequiresLedger, bodyAppend,
     });
   } catch (err) {
     await auditRefusal(err);

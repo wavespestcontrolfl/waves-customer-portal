@@ -171,6 +171,32 @@ describe('service report email recipient delivery', () => {
     expect(result.attachedPdf).toBe(true);
   });
 
+  describe('follow line gate (GATE_REPORT_EMAIL_FOLLOW_LINK)', () => {
+    afterEach(() => { delete process.env.GATE_REPORT_EMAIL_FOLLOW_LINK; });
+
+    test('gate off: sendTemplate gets no bodyAppend key at all', async () => {
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+      for (const [args] of EmailTemplateLibrary.sendTemplate.mock.calls) {
+        expect(Object.keys(args)).not.toContain('bodyAppend');
+      }
+    });
+
+    test('gate on: every recipient gets the one follow line', async () => {
+      process.env.GATE_REPORT_EMAIL_FOLLOW_LINK = 'true';
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+      for (const [args] of EmailTemplateLibrary.sendTemplate.mock.calls) {
+        expect(args.bodyAppend.html).toContain('Follow Waves for local pest and lawn tips:');
+        expect(args.bodyAppend.text).toContain('https://tiktok.com/@wavespestcontrol');
+      }
+    });
+  });
+
   // Wraps the default table mocks: the record row gets `overrides`, and the
   // customers table (the account primary read) answers with `primaryRow`.
   function withRecord(overrides, primaryRow) {
