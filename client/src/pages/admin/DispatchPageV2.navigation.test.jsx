@@ -247,9 +247,8 @@ it('discards a refresh response after its date is no longer displayed', async ()
 
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
 vi.mock('../../components/dispatch/RevenuePanelV2', () => ({ default: () => <div>Job Scores tools</div> }));
-vi.mock('../../components/dispatch/InsightsPanelV2', () => ({ default: () => <div>Insights tools</div> }));
 
-it.each([['revenue', 'Job Scores tools'], ['insights', 'Insights tools']])('keeps board-only view switches out of mobile %s', async (tab, content) => {
+it.each([['revenue', 'Job Scores tools']])('keeps board-only view switches out of mobile %s', async (tab, content) => {
   vi.stubGlobal('innerWidth', 390);
   vi.mocked(adminFetch).mockResolvedValue({ services: [], technicians: [], products: [], types: [] });
   render(<MemoryRouter><DispatchPageV2 activeTab={tab} /></MemoryRouter>);

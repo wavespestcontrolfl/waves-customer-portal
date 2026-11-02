@@ -1,13 +1,21 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TimeGridDay from './TimeGridDay';
 
 let mockActive = null;
+const dnd = vi.hoisted(() => ({ props: null }));
+const modal = vi.hoisted(() => ({ props: null }));
+vi.mock('./RescheduleConfirmModal', () => ({
+  default: (props) => {
+    modal.props = props;
+    return props.open ? <div>Move confirmation</div> : null;
+  },
+}));
 vi.mock('@dnd-kit/core', () => ({
-  DndContext: ({ children }) => <div>{children}</div>,
+  DndContext: (props) => { dnd.props = props; return <div>{props.children}</div>; },
   useDndContext: () => ({ active: mockActive }),
   PointerSensor: function PointerSensor() {},
   useSensor: () => ({}),
@@ -192,6 +200,47 @@ describe('TimeGridDay bulk move (date-only)', () => {
     expect(byId['svc-anytime']).toMatchObject({ newDate: '2026-07-20', newWindow: null });
     expect(byId['svc-1']).toMatchObject({ newDate: '2026-07-20', newWindow: '08:00-09:00' });
     expect(window.alert).not.toHaveBeenCalled();
+  });
+});
+
+// Owner 2026-11-02: a time tapped in the confirm's open-times list is the move.
+describe('TimeGridDay drag-drop confirm: a tapped time', () => {
+  const TECHS = [{ id: 'tech-1', name: 'Alex Tech' }, { id: 'tech-2', name: 'Blair Tech' }];
+  const writes = [];
+  beforeEach(() => {
+    writes.length = 0;
+    global.fetch = vi.fn(async (url, opts = {}) => {
+      if (opts.method === 'POST' || opts.method === 'PUT') writes.push({ url, method: opts.method, body: JSON.parse(opts.body) });
+      return { ok: true, json: async () => ({}) };
+    });
+  });
+  // First Customer (8 AM, Alex) dropped at 9 AM in Blair's column.
+  const dropOnBlair = async () => {
+    render(<TimeGridDay date="2026-07-15" services={SERVICES} technicians={TECHS} onChange={vi.fn()} />);
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service: SERVICES[0] } } },
+      over: { data: { current: { techId: 'tech-2', slotMin: 9 * 60 } } },
+    }));
+    expect(modal.props.pickTimes).toBe(true);
+  };
+  const confirm = (target) => act(async () => {
+    await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only', target });
+  });
+
+  it('moves the visit to the tapped day and hour, on the dropped technician', async () => {
+    await dropOnBlair();
+    await confirm({ date: '2026-07-17', window: '13:00-14:00' });
+    expect(writes).toHaveLength(1);
+    expect(writes[0].url).toContain('/admin/dispatch/svc-1/reschedule');
+    expect(writes[0].body).toMatchObject({ newDate: '2026-07-17', newWindow: '13:00-14:00', technicianId: 'tech-2' });
+  });
+
+  it("a tapped time at the visit's own hour only changes the technician", async () => {
+    await dropOnBlair();
+    await confirm({ date: '2026-07-15', window: '08:00-09:00' });
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ method: 'PUT', body: { technicianId: 'tech-2' } });
+    expect(writes[0].url).toContain('/admin/schedule/svc-1/assign');
   });
 });
 

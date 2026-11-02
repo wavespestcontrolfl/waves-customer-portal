@@ -943,6 +943,83 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       for (const c of all) expect(await state(c)).toBeNull();
     }, 30000);
 
+    test('text-note bells (owner 2026-11-02, GATE_ALERT_CONTACT_CLOSE alone): a person\'s text that reached the customer AND a visit of theirs completed after the bell close it, on any ET day; either alone, contact or a visit from before the bell, a visit that never ran, another customer\'s visit on the same phone and the older failure bell do not', async () => {
+      const now = new Date();
+      const bellAt = mins(now, -60 * 24 * 10);
+      const WENT = 'Answered, and a visit after the text is done';
+      let phoneN = 8701;
+      const noteFor = async (over = {}) => {
+        const phone = `+1555555${phoneN += 1}`;
+        const customer = await customerWith(phone);
+        const smsLog = await insert('sms_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer.id, message_body: 'The gate code changed.',
+          message_type: 'customer_reply', status: 'received', twilio_sid: sid('SMN'), created_at: mins(bellAt, -1) });
+        const row = await bell({ category: 'alert', link: `/admin/customers?customerId=${customer.id}&tab=comms`, created_at: bellAt,
+          metadata: { triggerKey: 'sms_operational_exception', dedupeKey: `sms-property-instructions:${smsLog.id}`, doneWhen: 'text_note_checked', customerId: customer.id, sms_log_id: smsLog.id, ...over } });
+        return { customer, phone, row };
+      };
+      const visitFor = (c, completedAt, status = 'completed') => insert('scheduled_services', { customer_id: c.customer.id, scheduled_date: etDateString(completedAt),
+        service_type: 'General Pest Control', status, completed_at: completedAt, created_at: mins(bellAt, -60 * 24 * 7) });
+      const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
+
+      const both = await noteFor();
+      const bothLater = await noteFor();
+      const textOnly = await noteFor();
+      const visitOnly = await noteFor();
+      const textBefore = await noteFor();
+      const visitBefore = await noteFor();
+      const cancelled = await noteFor();
+      const automated = await noteFor();
+      const sharedPhone = await noteFor();
+      const failure = await noteFor({ doneWhen: undefined, triggerKey: 'sms_operational_failure' });
+      failure.row = await bell({ category: 'alert', created_at: bellAt, metadata: { triggerKey: 'sms_operational_failure', dedupeKey: `sms-operations-failed:${failure.row.id}`, customerId: failure.customer.id } });
+      const all = [both, bothLater, textOnly, visitOnly, textBefore, visitBefore, cancelled, automated, sharedPhone, failure];
+
+      await staffText(both.customer, both.phone, mins(bellAt, 20));
+      await visitFor(both, mins(bellAt, 60 * 24 * 3));
+      await staffText(bothLater.customer, bothLater.phone, mins(bellAt, 60 * 24 * 4));
+      await visitFor(bothLater, mins(bellAt, 60 * 24 * 5));
+      await staffText(textOnly.customer, textOnly.phone, mins(bellAt, 20));
+      await visitFor(visitOnly, mins(bellAt, 60 * 24 * 3));
+      await staffText(textBefore.customer, textBefore.phone, mins(bellAt, -20));
+      await visitFor(textBefore, mins(bellAt, 60 * 24 * 3));
+      await staffText(visitBefore.customer, visitBefore.phone, mins(bellAt, 20));
+      await visitFor(visitBefore, mins(bellAt, -60 * 24));
+      await staffText(cancelled.customer, cancelled.phone, mins(bellAt, 20));
+      await visitFor(cancelled, mins(bellAt, 60 * 24 * 3), 'cancelled');
+      // An automated text is not a person's answer.
+      await staffText(automated.customer, automated.phone, mins(bellAt, 20), { message_type: 'appointment_reminder', metadata: JSON.stringify({}) });
+      await visitFor(automated, mins(bellAt, 60 * 24 * 3));
+      // Another customer on the same phone: their visit and the text to this customer's id are judged by customer id only.
+      await staffText(sharedPhone.customer, sharedPhone.phone, mins(bellAt, 20));
+      await visitFor({ customer: await customerWith(sharedPhone.phone) }, mins(bellAt, 60 * 24 * 3));
+      await staffText(failure.customer, failure.phone, mins(bellAt, 20));
+      await visitFor(failure, mins(bellAt, 60 * 24 * 3));
+
+      // Off: not judged. The portal chat gate is not this class's gate: it stays off through the rest.
+      await sweep();
+      for (const c of all) expect(await state(c)).toBeNull();
+      // Shadow: only what WOULD close is recorded.
+      gate('shadow');
+      await sweep();
+      for (const c of all) expect(await state(c)).toBeNull();
+      expect((await wouldClose(both.row.id))[0].metadata).toMatchObject({ class: 'text_note_checked', reason: WENT });
+      expect(await wouldClose(textOnly.row.id)).toHaveLength(0);
+      // True: closes the two with both facts, leaves every other open.
+      gate('true');
+      await sweep();
+      expect(await state(both)).toEqual(['relevance', WENT]);
+      expect(await state(bothLater)).toEqual(['relevance', WENT]);
+      for (const open of [textOnly, visitOnly, textBefore, visitBefore, cancelled, automated, sharedPhone, failure]) expect(await state(open)).toBeNull();
+      // The visit completes later for the text-only customer: that closes it on the next sweep.
+      await visitFor(textOnly, mins(now, -5));
+      await sweep();
+      expect(await state(textOnly)).toEqual(['relevance', WENT]);
+      // Rollback: the gate off puts back, unread, what it closed.
+      delete process.env.GATE_ALERT_CONTACT_CLOSE;
+      await sweep();
+      for (const c of all) expect(await state(c)).toBeNull();
+    }, 60000);
+
     describe('a staff action answers a text (GATE_SMS_STAFF_ACTION_ANSWERS)', () => {
       const f1 = (mode) => { if (mode === undefined) delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS; else process.env.GATE_SMS_STAFF_ACTION_ANSWERS = mode; };
       let phoneN = 8301;

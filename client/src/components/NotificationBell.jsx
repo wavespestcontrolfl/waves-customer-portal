@@ -135,6 +135,13 @@ function fullTextFor(n, type) {
   return typeof n.detail === 'string' && n.detail.trim() ? n.detail : null;
 }
 
+// An SMS review bell's source text in quotes, or nothing: the server reads it from the text itself while it
+// serves the list (sms-operational-actions.js withTextNoteSources) and never stores it on the row. Admin rows only.
+function SourceText({ n, type, style }) {
+  const text = type === 'admin' && typeof n?.source_text === 'string' && n.source_text.trim() ? n.source_text : null;
+  return text ? <div title={text} style={style}>&ldquo;{text}&rdquo;</div> : null;
+}
+
 // "Show full text" / "Hide full text": its own click and key handling, never
 // the row's — the row still navigates to its link and marks itself read only
 // on its own tap. `pre-wrap` keeps a list body's line breaks.
@@ -258,6 +265,109 @@ function FullText({ text, color, marginTop }) {
       )}
     </div>
   );
+}
+
+// The customer an admin row is about (GATE_ALERT_EXPLAINER; the server reads it from the record behind the alert).
+// Shown under the title unless the title already carries the whole name.
+function customerNameFor(n, type) {
+  const name = type === 'admin' && typeof n?.customer?.name === 'string' ? n.customer.name.trim() : '';
+  if (!name) return null;
+  return String(n.title || '').toLowerCase().includes(name.toLowerCase()) ? null : name;
+}
+
+// "What to do" (GATE_ALERT_EXPLAINER): replaces "Show full text" on a row the server marked `explainable`. The first
+// open asks the server for the row's plain-words summary (onExplain resolves it, or null); a summary the list already
+// carried shows at once. The alert's own long text stays one tap further, under "Show original text". Its own click
+// and key handling, never the row's (the row navigates to its link and marks itself read only on its own tap).
+function WhatToDo({ n, color, marginTop, onExplain }) {
+  const [shown, setShown] = useState(false);
+  // The server checked the shape: a summary has its text and a steps list. The customer is on the row's own line.
+  const [summary, setSummary] = useState(n.explainer);
+  const [status, setStatus] = useState(null); // null | 'loading' | 'failed'
+  const [originalShown, setOriginalShown] = useState(false);
+  const original = n.detail?.trim() ? n.detail : null;
+
+  const load = async () => {
+    setStatus('loading');
+    const next = await onExplain(n);
+    setSummary(next);
+    setStatus(next ? null : 'failed');
+  };
+  // Opening asks the server when there is no summary yet, or only the fallback built from the alert's own words.
+  const toggle = () => {
+    setShown(!shown);
+    if (!shown && (!summary || summary.fallback) && status !== 'loading') load();
+  };
+  const linkStyle = { padding: 0, border: 0, background: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 600, textDecoration: 'underline', color };
+  const text = { fontSize: 14, lineHeight: 1.4, color };
+
+  return (
+    <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <button type="button" aria-expanded={shown} onClick={toggle} style={{ ...linkStyle, marginTop }}>
+        {shown ? 'Hide what to do' : 'What to do'}
+      </button>
+      {shown && (
+        <div style={{ marginTop: 6 }}>
+          {status === 'loading' && <div role="status" style={text}>Writing a short summary…</div>}
+          {status === 'failed' && (
+            <div role="alert" style={text}>
+              Couldn&apos;t write a summary.{' '}
+              <button type="button" onClick={load} style={linkStyle}>Try again</button>
+            </div>
+          )}
+          {summary && (
+            <>
+              <div style={{ ...text, fontWeight: 600 }}>What happened</div>
+              <div style={{ ...text, marginBottom: 6 }}>{summary.happened}</div>
+              <div style={{ ...text, fontWeight: 600 }}>{summary.fixer === 'claude' ? 'What to do (Claude can fix this)' : 'What you need to do'}</div>
+              <ol style={{ ...text, margin: '2px 0 0', paddingLeft: 20 }}>
+                {summary.steps.map((step, i) => <li key={i}>{step}</li>)}
+              </ol>
+              {summary.fallback && (
+                <div style={{ ...text, marginTop: 6 }}>A summary couldn&apos;t be written right now, so this is the alert&apos;s own text.</div>
+              )}
+            </>
+          )}
+          {original && (
+            <div style={{ marginTop: 8 }}>
+              <button type="button" aria-expanded={originalShown} onClick={() => setOriginalShown((v) => !v)} style={linkStyle}>
+                {originalShown ? 'Hide original text' : 'Show original text'}
+              </button>
+              {originalShown && (
+                <div style={{ ...text, marginTop: 4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{original}</div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// "Customer: Name" under a row's text (customerNameFor), on the phone and desktop rows alike. The name opens the
+// customer's page when the server knows their id: its own click and key handling, never the row's.
+function CustomerLine({ n, type, color, marginTop }) {
+  const name = customerNameFor(n, type);
+  if (!name) return null;
+  const stop = (e) => e.stopPropagation();
+  return (
+    <div style={{ fontSize: 14, color, marginTop, lineHeight: 1.4 }}>
+      Customer:{' '}
+      {n.customer.id
+        ? <a href={`/admin/customers?customerId=${encodeURIComponent(n.customer.id)}`} onClick={stop} onKeyDown={stop} style={{ color, textDecoration: 'underline' }}>{name}</a>
+        : name}
+    </div>
+  );
+}
+
+// A row's longer text: "What to do" on a row the server marked explainable, else "Show full text" when the row has a
+// detail (fullTextFor), else nothing.
+// The panel is keyed on the row's content version: an alert whose text changed (a refreshed list) starts a fresh panel,
+// so a summary of the old text never stays on screen.
+function MoreText({ n, type, color, marginTop, onExplain }) {
+  if (type === 'admin' && n.explainable) return <WhatToDo key={n.version} n={n} marginTop={marginTop} color={color} onExplain={onExplain} />;
+  const fullText = fullTextFor(n, type);
+  return fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null;
 }
 
 export default function NotificationBell({ type = 'admin', customerId }) {
@@ -613,8 +723,39 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     fetchCount();
   };
 
+  // "What to do" (WhatToDo): the server writes the row's summary on its first open and saves it; a real summary is
+  // kept on the row in this list so reopening the panel shows it at once (a fallback built from the alert's own words
+  // is shown but not kept, so the next open asks again). A summary written for other text (the alert changed since
+  // this list was read) is never shown on this row: the list is read again with a note. Resolves the summary, or
+  // null on any failure.
+  const explainRow = async (n) => {
+    let d;
+    try {
+      d = await requestJson(`${basePath}/${encodeURIComponent(n.id)}/explain`, { method: 'POST' });
+    } catch { return null; }
+    const summary = d?.explainer;
+    if (!summary || typeof summary.happened !== 'string' || !Array.isArray(summary.steps)) return null;
+    if (d.version !== n.version) {
+      loadNotifications();
+      setActionNote(CHANGED_NOTE);
+      return null;
+    }
+    setNotifications(prev => prev.map(x => (x.id === n.id
+      ? { ...x, ...(summary.fallback ? {} : { explainer: summary }), ...(d.customer ? { customer: d.customer } : {}) }
+      : x)));
+    return summary;
+  };
+
+  // A row a button closed leaves the list, and the badge is re-read.
+  const removeDoneRow = (n) => {
+    setNotifications(prev => prev.filter(x => x.id !== n.id));
+    if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
+    fetchCount();
+  };
+
   // A row button the server set on this row (RowActions): same content fence
-  // as Done. Success removes the row like Done and shows the server's message;
+  // as Done. Success removes the row like Done and shows the server's message
+  // (a step that leaves the row open keeps it and re-reads the list);
   // a 409 re-reads the list with a note; any other failure keeps the row and
   // RowActions shows the inline error. Resolves 'done' | 'refreshed' | 'failed'.
   const runAction = async (e, n, action) => {
@@ -635,9 +776,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       return 'refreshed';
     }
     if (d?.success === false) return 'failed';
-    setNotifications(prev => prev.filter(x => x.id !== n.id));
-    if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
-    fetchCount();
+    // A button that leaves the row open (Call): the row stays and the list is re-read for its new version.
+    if (d?.open === true) loadNotifications();
+    else removeDoneRow(n);
     if (typeof d?.message === 'string' && d.message) setActionNote(d.message);
     return 'done';
   };
@@ -970,7 +1111,6 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 const href = linkFor(n);
                 const chip = digestKindChip(n);
                 const report = reportLinkFor(n);
-                const fullText = fullTextFor(n, type);
                 const actions = actionsFor(n, type);
                 return (
                 <div key={n.id}
@@ -1017,6 +1157,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                         }}>{chip.label}</span>
                       )}
                     </div>
+                    <SourceText n={n} type={type} style={{ fontSize: 14, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, marginTop: 4, lineHeight: 1.4 }} />
                     {n.body && (
                       <div style={{
                         fontSize: 14, color: isDark ? '#52525B' : CUSTOMER_SURFACE.body, marginTop: 4, lineHeight: 1.4,
@@ -1028,6 +1169,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                           : {}),
                       }}>{n.body}</div>
                     )}
+                    <CustomerLine n={n} type={type} marginTop={4} color={isDark ? '#52525B' : CUSTOMER_SURFACE.body} />
                     {report && (
                       <button type="button"
                         onClick={(e) => openReport(e, n, report)}
@@ -1038,7 +1180,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                           color: isDark ? '#18181B' : CUSTOMER_SURFACE.text,
                         }}>Full report</button>
                     )}
-                    {fullText && <FullText text={fullText} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} />}
+                    <MoreText n={n} type={type} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onExplain={explainRow} />
                     {actions.length > 0 && <RowActions tall marginTop={8} actions={actions} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onRun={(e, a) => runAction(e, n, a)} />}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                       <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted }}>
@@ -1145,7 +1287,6 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     const href = linkFor(n);
                     const chip = digestKindChip(n);
                     const report = reportLinkFor(n);
-                    const fullText = fullTextFor(n, type);
                     const title = displayTitle(n);
                     const actions = actionsFor(n, type);
                     return (
@@ -1189,6 +1330,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                             }}>{chip.label}</span>
                           )}
                         </div>
+                        <SourceText n={n} type={type} style={{
+                          fontSize: 14, color: colors.text, marginTop: 2, lineHeight: 1.4,
+                          overflow: 'hidden', textOverflow: 'ellipsis',
+                          display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+                        }} />
                         {n.body && (
                           <div title={n.body} style={{
                             fontSize: 14, color: colors.muted, marginTop: 2, lineHeight: 1.4,
@@ -1196,6 +1342,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                             display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
                           }}>{n.body}</div>
                         )}
+                        <CustomerLine n={n} type={type} marginTop={2} color={colors.muted} />
                         {report && (
                           <button type="button"
                             onClick={(e) => openReport(e, n, report)}
@@ -1205,7 +1352,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                               fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.teal,
                             }}>Full report</button>
                         )}
-                        {fullText && <FullText text={fullText} marginTop={4} color={colors.text} />}
+                        <MoreText n={n} type={type} marginTop={4} color={colors.text} onExplain={explainRow} />
                         {actions.length > 0 && <RowActions marginTop={6} actions={actions} color={colors.text} onRun={(e, a) => runAction(e, n, a)} />}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
                           <div style={{ fontSize: 11, color: colors.muted }}>
@@ -1284,4 +1431,4 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
 
 // Pure helpers, exported for focused unit tests (avoids a full component
 // render just to pin the prefix strip / chip / focus-link logic).
-export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor, actionsFor };
+export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor, actionsFor, customerNameFor };

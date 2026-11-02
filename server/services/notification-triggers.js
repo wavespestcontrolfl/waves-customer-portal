@@ -125,6 +125,12 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
 // #tab=calls&call=<call_log id> (CallLogTabV2 pins a call outside its loaded
 // window). No id in the payload keeps the bare tab.
 const callLink = (p) => `/admin/communications#tab=calls${p.callLogId ? `&call=${encodeURIComponent(p.callLogId)}` : ''}`;
+// The Call button for a row about one caller (alert-call-button.js, GATE_ALERT_CALL_BUTTON), as the built row's
+// `alert`; nothing when the payload names no call or customer, so such a row is written as before.
+const callButtonAlert = (ids) => {
+  const buttons = require('./alert-call-button').callButtons(ids);
+  return buttons ? { alert: { buttons } } : {};
+};
 
 // bundle_quote_requested's `alert` (GATE_PORTAL_ITEM_CLOSE): the request row and its customer at the top of the
 // bell's metadata. Gate off, or a bell with no request row (a self-applied bundle): nothing, as before.
@@ -179,6 +185,8 @@ const TRIGGER_REGISTRY = {
       link: p.customerId
         ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}`
         : '/admin/customers',
+      // Call: the customer page's own Call (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+      ...callButtonAlert({ customerId: p.customerId }),
     }),
   },
   new_lead: {
@@ -413,7 +421,11 @@ const TRIGGER_REGISTRY = {
         ? `/admin/communications?thread=${p.threadId}${p.twilioSid ? `&message=${encodeURIComponent(p.twilioSid)}` : ''}`
         : (p.twilioSid ? `/admin/communications?message=${encodeURIComponent(p.twilioSid)}` : '/admin/communications'),
       // Handled: the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS). No reply.
-      alert: { buttons: require('./admin-alert-buttons').closeNoteButtons('handled') },
+      // A lead's bare CALL reply also gets Call first, for the text that carried it: the next text's emission sets
+      // the row's buttons again (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+      alert: { buttons: p.leadPreference === 'call' && p.threadId
+        ? require('./alert-call-button').callButtons({ customerId: p.threadId, close: 'handled' })
+        : require('./admin-alert-buttons').closeNoteButtons('handled') },
     }),
   },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
@@ -499,6 +511,8 @@ const TRIGGER_REGISTRY = {
         // Voicemail recordings render under the Calls tab (hash-routed);
         // ?thread= would open the SMS view instead.
         link: callLink(p),
+        // Call: the Call Log's own "Call back" for this call (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+        ...callButtonAlert({ callLogId: p.callLogId }),
       };
     },
   },
@@ -536,8 +550,9 @@ const TRIGGER_REGISTRY = {
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
       link: callLink(p),
-      // Called back: the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS). No call.
-      alert: { buttons: require('./admin-alert-buttons').closeNoteButtons('called_back') },
+      // Call: the Call Log's own "Call back" for this call (alert-call-button.js, GATE_ALERT_CALL_BUTTON). Called back:
+      // the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS); it places no call.
+      alert: { buttons: require('./alert-call-button').callButtons({ callLogId: p.callLogId, close: 'called_back' }) },
     }),
   },
   // Staff alert for a repeat window, gated by GATE_REPEAT_CALLER_BELL.
@@ -552,6 +567,7 @@ const TRIGGER_REGISTRY = {
       title: `Repeat caller — ${p.name || 'unknown number'}`,
       body: `${p.phone || 'unknown number'} has called ${p.count} times in the last 3 hours (${p.unanswered} unanswered)${p.line ? ` on ${p.line}` : ''}.`,
       link: callLink(p),
+      ...callButtonAlert({ callLogId: p.callLogId }),
     }),
   },
   // A lead calls back while a Waves promise from an earlier unbooked call
@@ -579,6 +595,7 @@ const TRIGGER_REGISTRY = {
         title: `${headlineWho} called back — we still owe a ${p.what || 'follow-up'}`,
         body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
         link: callLink(p),
+        ...callButtonAlert({ callLogId: p.callLogId }),
       };
     },
   },
@@ -600,6 +617,7 @@ const TRIGGER_REGISTRY = {
       body: [p.phone ? `Caller: ${p.phone}` : null, p.summary ? String(p.summary).slice(0, 400) : `The caller spoke with ${agentName()}, then the call ended.`]
         .filter(Boolean).join(' - '),
       link: callLink(p),
+      ...callButtonAlert({ callLogId: p.callLogId }),
     }),
   },
   // Sandy flagged a caller HOT on capture_lead (an emergency, a swarm, a
@@ -640,6 +658,25 @@ const TRIGGER_REGISTRY = {
       title: p.title || `Schedule — book the re-service ${agentName()} took`,
       body: p.body || null,
       link: p.link || '/admin/customers',
+    }),
+  },
+  // The phone page for a customer's ask inside the app (GATE_PORTAL_ASK_PUSH, owner 2026-11-02): a portal chat
+  // hand-off, a service-request form, the late "Still waiting" re-ring, an estimate page's change or call request.
+  // Each of those writes its own admin bell row (raiseAdminAlert, bell:true) and, until now, never rang a phone,
+  // so a customer could ask ten times and nobody saw it. services/portal-ask-push.js sends this one pushOnly:
+  // the bell keeps one row per ask and this is the page. The text carries the customer's first name and last
+  // initial and the ask in a few words, never a phone number or an email.
+  portal_ask: {
+    label: 'Customer asked in the app',
+    category: 'service',
+    priority: 'high',
+    group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.title || 'Comms - answer a customer who asked in the app',
+      body: p.body || null,
+      link: p.link || '/admin/communications',
     }),
   },
   // Fired by estimate-converter when a paid acceptance deposit could not be
@@ -1136,6 +1173,11 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'relay_reservice_filed') {
     return `waves-relay_reservice_filed-${payload.requestId || crypto.randomUUID()}`;
   }
+  // One banner per ask: a customer who asks again in the same chat replaces their own banner, and a
+  // second customer's ask never replaces the first one's.
+  if (triggerKey === 'portal_ask') {
+    return `waves-portal_ask-${payload.itemKey || crypto.randomUUID()}`;
+  }
   if (triggerKey === 'customer_missed_call') {
     return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
   }
@@ -1378,7 +1420,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             if (r.keepContent) {
               const kept = { ...base, ...r.payload };
               const rebuilt = sanitizeBuiltNotification(trigger.build(kept), trigger);
-              return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept }, quiet: true };
+              // The row keeps the buttons of the text it still shows, rebuilt from its own payload like its title: an
+              // older emission's own buttons (a late CALL text's Call) must not land on it. Always set, because
+              // notifyAdmin merges this over the older emission's metadata.
+              return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept, buttons: rebuilt.alert?.buttons ?? null }, quiet: true };
             }
             const merged = { ...payload, ...r.payload };
             const rebuilt = sanitizeBuiltNotification(trigger.build(merged), trigger);
@@ -1548,7 +1593,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
-              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
+              // portal_ask: every push is an ask that is new or rang again (portal-ask-push.js callers), so a repeat on
+              // the same tag (the customer asked again in the same chat) must alert again, not silently replace the
+              // banner. The admin's sound preference still holds (silent/vibrate above).
+              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)) || triggerKey === 'portal_ask',
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           },

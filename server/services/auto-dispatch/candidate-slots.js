@@ -1255,8 +1255,9 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // rankSurvivorsForSharedModel). Gate on: SLOT_TAKEN candidates dropped and
   // every survivor re-scored on the shared model.
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
-  const withDry = await withDryWindowCandidates(scored, { prefs, findTimeArgs, slots, flexRules, hard, geo });
-  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing) };
+  const run = { prefs, findTimeArgs, slots, flexRules, hard, geo };
+  const withDry = await withDryWindowCandidates(scored, run);
+  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing, await mowingShadowCandidates(admitted, run)) };
 }
 
 // The unit's mowing rule (mowing-days.js unitRule): the visit and, when it is
@@ -1269,8 +1270,34 @@ async function unitMowingRule(service, prefs, ctx) {
   return mowingDays.unitRule(prefs, [service, ...siblings]);
 }
 
-// The evaluation result's `mowing` (index.js audits it); none when null.
-const mowingField = (mowing) => (mowing ? { mowing } : {});
+// GATE_AUTO_DISPATCH_MOWING_DAYS='shadow': the candidates mode 'true' would
+// rank, from the SAME pipeline the live list takes (the HARD filters with the
+// rule live, the ranking and its cap, the dry-window additions), under the
+// conflict 'true' would read for this visit (ctx.evalConflict, else the
+// simulated mowing_day one, mowing-days.js simulatedConflict). Codex #7472
+// r2-r4 each found a place where a partial copy of this pipeline drifted from
+// live (the legacy cap, the grouped-window checks, the dry-window slots), so
+// shadow runs the pipeline itself. Its drops go to a scratch tally; live
+// decisions never read the pool.
+async function mowingShadowCandidates(admitted, run) {
+  const { hard, geo } = run;
+  const { service, ctx, mowing } = hard;
+  if (!mowing || mowing.mode !== 'shadow') return null;
+  const evalConflict = ctx.evalConflict || mowingDays.simulatedConflict(mowing, {
+    service, dateStr: toDateStr(service.scheduled_date), conflictMoves: ctx.conflictMoves, existing: null,
+  });
+  const shadowCtx = { ...ctx, evalConflict };
+  const asTrue = { ...hard, ctx: shadowCtx, drops: { ...hard.drops, mowing_day: 0 }, mowing: { ...mowing, mode: 'true' } };
+  const candidates = admitted.map((slot) => candidateFromSlot(slot, asTrue)).filter(Boolean);
+  const ranked = await rankSurvivorsForSharedModel(service, geo, candidates, shadowCtx, asTrue.drops);
+  return (await withDryWindowCandidates(ranked, { ...run, hard: asTrue })).candidates;
+}
+
+// The evaluation result's `mowing` (index.js audits it), with the shadow
+// pool when there is one; none when the rule is null.
+const mowingField = (mowing, shadowCandidates = null) => (mowing
+  ? { mowing, ...(shadowCandidates ? { mowing_shadow_candidates: shadowCandidates } : {}) }
+  : {});
 
 module.exports = {
   SCORE_CAP,

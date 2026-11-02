@@ -2323,9 +2323,10 @@ function priceLawnCare(property, options = {}) {
     // The highest one sets it; on a tie the earlier one names it. A price
     // that is not the market's is charged in whole dollars per application.
     // Cost-plus mode adds list = cost / (1 - listMargin) and the per-visit
-    // minimum, and always arms the collected-margin floor: a listMargin set
-    // under the floor margin must not list a line below the price its
-    // discounts stop at.
+    // minimum, and keeps the collected-margin floor as a list candidate: a
+    // listMargin set under the floor margin must not list a line below a 35%
+    // margin. Discounts no longer stop at it (owner 2026-11-02); the engine
+    // reports a discounted line that lands under it.
     const costPlusListAnnual = costPlusKnobs
       ? Math.ceil(roundMoney(costFloorDetails.annualCost / (1 - costPlusKnobs.listMargin)) / tc.freq) * tc.freq
       : null;

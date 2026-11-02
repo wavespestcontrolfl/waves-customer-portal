@@ -29,7 +29,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
-const { etParts, etDateString, deriveWindowEnd, dateOnlyString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etParts, etDateString, deriveWindowEnd, dateOnlyString, addETDays } = require('../utils/datetime-et');
 const { DAY_START_HOUR, DAY_END_HOUR } = require('./scheduling/find-time');
 const { arrivalWindowRange, formatSmsTimeRange, ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
@@ -3005,11 +3005,12 @@ function summarizeCommitResults(results) {
 // today's route (scheduled_date moves to the due date, today + 8 days ET, with
 // no window, and Auto-Dispatch's recurring_dispatch_due_date is that date),
 // and the customer gets ONE text with their /reschedule/:token link. They may
-// pick a route-fit time until customer_pick_by (8 PM ET tomorrow); until then
-// Auto-Dispatch skips the visit (migration 20261101163000). After it, the
-// 04:10 ET run books the visit in [due - 3, due + 3] from tomorrow, every day
-// of which is more than 72 hours out, so the existing 72-hour reminder still
-// tells the customer.
+// pick a route-fit time until customer_pick_by (24 hours after the hand-off,
+// rounded up to the quarter hour); until then Auto-Dispatch skips the visit
+// (migration 20261101163000). After it, the next 04:10 ET run (tomorrow's or
+// the day after's) books the visit in [due - 3, due + 3], every day of which
+// is more than 72 hours out, so the existing 72-hour reminder still tells the
+// customer.
 //
 // Not commit(): commit() books a date AND a window, and the rebooker cannot
 // clear a window. Every check runs before anything is written, and a refusal
@@ -3021,11 +3022,18 @@ function summarizeCommitResults(results) {
 // send.
 const PICK_TEMPLATE_KEY = 'rain_out_customer_pick_v1';
 const PICK_DUE_DAYS = 8;
-const PICK_BY_HOUR = 20;
+// The customer has 24 hours from the text to pick (owner 2026-11-02; the text
+// goes out in the same request, seconds after the hand-off). The deadline is
+// rounded UP to the quarter hour, so it is never less than 24 hours and reads
+// as a plain clock time ("Tue 11 AM", "Tue 11:15 AM").
+const PICK_WINDOW_MS = 24 * 60 * 60 * 1000;
+const PICK_BY_STEP_MS = 15 * 60 * 1000;
 // en_route is live: it lands on 'confirmed' with its tracker lifecycle
 // rewound, as every live move does. on_site is not handed over.
 const PICK_STATUSES = new Set(['pending', 'confirmed', 'en_route']);
-// The one sentence the text drops when it is what bills a third segment.
+// The one sentence the text drops when it is what bills a third segment. Only
+// a row that kept the 2026-11-01 wording ends with it (the 2026-11-02 body,
+// migration 20261102170000, has no optional sentence).
 const PICK_OPTIONAL_TAIL = ' Questions? Reply here.';
 // The hand-off's reschedule_log marker (in notes; reason_code is why the visit moved).
 const PICK_LOG_MARKER = 'customer_pick';
@@ -3042,19 +3050,23 @@ function pickReasonCodes() {
   return [...Object.keys(WEATHER_PHRASES), ...(extraReasonsEnabled() ? Object.keys(EXTRA_REASON_LEADS) : [])];
 }
 
-// dueDate: the ET date the visit is parked on; pickBy: 8 PM ET tomorrow, an instant.
+// dueDate: the ET date the visit is parked on; pickBy: 24 hours from now,
+// rounded up to the quarter hour, an instant. Epoch quarter hours are ET
+// quarter hours (ET is a whole number of hours from UTC).
 function pickDates(now = new Date()) {
   return {
     dueDate: etDateString(addETDays(now, PICK_DUE_DAYS)),
-    pickBy: parseETDateTime(`${etDateString(addETDays(now, 1))}T${pad2(PICK_BY_HOUR)}:00`),
+    pickBy: new Date(Math.ceil((now.getTime() + PICK_WINDOW_MS) / PICK_BY_STEP_MS) * PICK_BY_STEP_MS),
   };
 }
 
-// "Wed 8 PM": the ET short weekday and hour, built from etParts so the label
-// is plain GSM-7 whatever the runtime's Intl data puts before "PM".
+// "Wed 8 PM" / "Wed 8:15 PM": the ET short weekday and clock, built from
+// etParts so the label is plain GSM-7 whatever the runtime's Intl data puts
+// before "PM". The minutes show only when not :00.
 function pickByLabel(pickBy) {
-  const { dayOfWeek, hour } = etParts(pickBy);
-  return `${WEEKDAY_SHORT[dayOfWeek]} ${hour % 12 || 12} ${hour >= 12 ? 'PM' : 'AM'}`;
+  const { dayOfWeek, hour, minute } = etParts(pickBy);
+  const clock = `${hour % 12 || 12}${minute ? `:${pad2(minute)}` : ''}`;
+  return `${WEEKDAY_SHORT[dayOfWeek]} ${clock} ${hour >= 12 ? 'PM' : 'AM'}`;
 }
 
 // pending and confirmed keep their status; a live visit lands on 'confirmed'.

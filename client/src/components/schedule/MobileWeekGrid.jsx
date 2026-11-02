@@ -585,9 +585,11 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
     });
   }, [data]);
 
-  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds, target }) => {
     if (!pending) return;
-    const { svc, toDate, newWindow } = pending;
+    const { svc } = pending;
+    // A time tapped in the confirm's open-times list replaces the drop.
+    const [toDate, newWindow] = target ? [target.date, target.window] : [pending.toDate, pending.newWindow];
     setBusy(true);
     try {
       const notifyCustomer = notificationType === 'sms';
@@ -734,6 +736,7 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
         durationMinutes={pending?.svc ? effectiveDuration(pending.svc) : undefined}
         technicianId={pending?.svc?.technicianId || pending?.svc?.technician_id || undefined}
+        pickTimes
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />

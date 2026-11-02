@@ -398,12 +398,23 @@ class CampaignAdvisor {
       this.stampProvenance(advice, res, now);
       this.normalizeRecommendations(advice, campaigns, inputs.recentlyChangedIds, this.negativeContext(inputs));
       await this.storeReport(advice);
+      await this.queueNegativeBells(advice);
       await this.sendSummary(advice);
 
       return advice;
     } catch (err) {
       logger.error(`AI Advisor failed: ${err.message}`);
       return this.storeFallbackAdvice(campaignSummaries);
+    }
+  }
+
+  // Owner plan A (2026-11-02, GATE_ADS_NEGATIVES): each safe add_negative word of a model-written report becomes one
+  // pending row and, 3 a day at most, one bell row with Add / Decline. A failure here only logs: it never fails the report.
+  async queueNegativeBells(advice) {
+    try {
+      await require('./negative-keyword-actions').queueAdvisorNegatives(advice);
+    } catch (err) {
+      logger.warn(`Negative keyword bells for advisor: ${err.message}`);
     }
   }
 

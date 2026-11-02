@@ -576,9 +576,16 @@ function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bun
   // Reconcile against the stored annual total, which is authoritative (accept
   // stamps it, and it is what the plan bills) — this picks the right CADENCE,
   // it does not reprice one. A plan-level manual credit is priced into the
-  // cadence total but NOT into the per-service treatment rows
-  // (estimate-public.js treatmentDisplayPrice applies only the tier discount),
-  // so a gap of exactly the declared credit still identifies this candidate.
+  // cadence total, while a multi-service plan's per-service treatment rows
+  // stay pre-credit (estimate-public.js treatmentDisplayPrice applies only the
+  // tier discount), so a gap of exactly the declared credit still identifies
+  // this candidate.
+  //
+  // Rounding is not a mismatch: each application price and each month of the
+  // cadence total is rounded to the cent (a v1 cadence annual is its rounded
+  // monthly x 12, net of a rounded monthly credit slice), so the two sides can
+  // sit a few cents apart. A missing service, a wrong cadence or a wrong
+  // credit is off by dollars.
   //
   // The rows are then quoted UNSCALED, because that is what the customer is
   // actually charged: the accepted first-application amount comes from the
@@ -588,10 +595,11 @@ function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bun
   // Nothing on this document contradicts that — a per-application plan prints
   // no recurring roll-up for the unscaled rows to disagree with.
   const gross = roundMoney(drafts.reduce((acc, d) => acc + d.annual, 0));
-  if (annualTotal > 0 && Math.abs(gross - annualTotal) > 0.05) {
+  const roundingTolerance = 0.01 * (drafts.reduce((acc, d) => acc + (d.visits || 0), 0) + 12);
+  if (annualTotal > 0 && Math.abs(gross - annualTotal) > roundingTolerance) {
     const creditAnnual = num(candidate.manualDiscount?.recurringAmount ?? candidate.manualDiscount?.amount)
       || num(bundleCredit);
-    if (!(creditAnnual > 0) || Math.abs(gross - creditAnnual - annualTotal) > 0.05 || !(gross > 0)) return null;
+    if (!(creditAnnual > 0) || Math.abs(gross - creditAnnual - annualTotal) > roundingTolerance || !(gross > 0)) return null;
   }
 
   return drafts.map((draft) => (draft.visits

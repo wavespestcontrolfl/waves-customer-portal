@@ -356,3 +356,56 @@ describe('resolveLocation', () => {
     expect(resolveLocation(null)).toBe('Bradenton,Florida,United States');
   });
 });
+
+// ── profile(): a DataForSEO task error ───────────────────────────────
+
+describe('profile(): a DataForSEO task error (owner 2026-11-02 "retry")', () => {
+  const dataforseo = require('../services/seo/dataforseo');
+  const logger = require('../services/logger');
+  const { SerpProfiler } = require('../services/seo/serp-profiler');
+  const failed = (code, message) => ({ tasks: [{ status_code: code, status_message: message, result: null }] });
+  const ok = { tasks: [{ status_code: 20000, status_message: 'Ok.', result: [{ items: [
+    { type: 'organic', rank_absolute: 1, url: 'https://www.example.com/blog/rats-in-palm-trees/', domain: 'example.com', title: 'Rats in palm trees', description: 'Why roof rats nest in palm fronds.' },
+  ] }] }] };
+  const profiler = () => new SerpProfiler({ transientRetryDelayMs: 0 });
+  const args = { query: 'palm fronds touching the roof and rats', force: true, persist: false };
+  beforeEach(() => { dataforseo.serpOrganic.mockReset(); logger.warn.mockClear(); });
+
+  test('a 40101 is searched again when the caller asks, and the second answer is used', async () => {
+    dataforseo.serpOrganic.mockResolvedValueOnce(failed(40101, 'Internal SE Server Error.')).mockResolvedValueOnce(ok);
+    const p = await profiler().profile({ ...args, transientRetries: 1 });
+    expect(p).toMatchObject({ query: args.query, location_used: 'Bradenton,Florida,United States', dominant_intent: expect.any(String) });
+    expect(dataforseo.serpOrganic).toHaveBeenCalledTimes(2);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('a second 40101 gives up: no profile, one retry only, and the log names the DataForSEO error, never the query', async () => {
+    dataforseo.serpOrganic.mockResolvedValue(failed(40101, 'Internal SE Server Error.'));
+    expect(await profiler().profile({ ...args, transientRetries: 1 })).toBeNull();
+    expect(dataforseo.serpOrganic).toHaveBeenCalledTimes(2);
+    const line = logger.warn.mock.calls[0][0];
+    expect(line).toMatch(/no SERP data for query#[0-9a-f]{12} in Bradenton,Florida,United States: DataForSEO 40101 Internal SE Server Error\.$/);
+    expect(line).not.toContain(args.query);
+  });
+
+  test('without transientRetries (every other caller) a 40101 is not searched again', async () => {
+    dataforseo.serpOrganic.mockResolvedValue(failed(40101, 'Internal SE Server Error.'));
+    expect(await profiler().profile(args)).toBeNull();
+    expect(dataforseo.serpOrganic).toHaveBeenCalledTimes(1);
+  });
+
+  test('other task errors are not searched again (no results, a bad location); no answer at all logs no code', async () => {
+    for (const [code, message] of [[40102, 'No Search Results.'], [40501, "Invalid Field: 'location_name'."]]) {
+      dataforseo.serpOrganic.mockReset();
+      dataforseo.serpOrganic.mockResolvedValue(failed(code, message));
+      expect(await profiler().profile({ ...args, transientRetries: 1 })).toBeNull();
+      expect(dataforseo.serpOrganic).toHaveBeenCalledTimes(1);
+    }
+    dataforseo.serpOrganic.mockReset();
+    logger.warn.mockClear();
+    dataforseo.serpOrganic.mockResolvedValue(null);
+    expect(await profiler().profile({ ...args, transientRetries: 1 })).toBeNull();
+    expect(dataforseo.serpOrganic).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toMatch(/in Bradenton,Florida,United States$/);
+  });
+});

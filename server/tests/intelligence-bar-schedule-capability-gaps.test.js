@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
   return jest.fn(() => api);
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), ibSeriesMoveLive: jest.fn(() => false) }));
 const mockRebooker = {
   needsLifecycleRewind: jest.fn(() => false),
   collectiveMoveGateOn: jest.fn(() => false),

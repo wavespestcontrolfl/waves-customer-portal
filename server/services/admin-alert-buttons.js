@@ -12,8 +12,9 @@ const NotificationService = require('./notification-service');
 const { buttonViolations } = require('./admin-alert-compose');
 
 // kind -> its handler { live() -> boolean, run({ row, item, technicianId, claimedVersion }), visibleItems? }. A run
-// answers { ok: true, message, resolution, closed? } or { ok: false, code, message, close? }: `closed` says the step
-// already closed the row itself (fenced), `close` is the resolution for a row whose record was already
+// answers { ok: true, message, resolution, closed?, keepOpen? } or { ok: false, code, message, close? }: `closed` says
+// the step already closed the row itself (fenced), `keepOpen` that the step leaves the row open (Call: a call can
+// ring out, so the row's own done-when closes it), `close` is the resolution for a row whose record was already
 // answered elsewhere. The optional `visibleItems(rows)` answers, when the bell list is served, which of each row's
 // stored buttons its record allows now (Map row id -> item ids; a row it leaves out serves none); the tap still
 // checks again. Required at call time: serving the bell list loads no emitter. A kind whose step texts or emails a customer, moves money or flips a gate needs the owner's ruling
@@ -25,6 +26,12 @@ const KINDS = {
   close_note: () => closeNoteHandler,
   // Owner 2026-10-29 "bid buttons, as a trial": No bid, and Bid once the due date is confirmed. The Bid desk's save step.
   bid_decision: () => require('./bid-desk/alert-buttons').buttonHandler,
+  // Owner 2026-11-02 ("cant we add a call button"): Call on a row about one caller, the linked page's own Call step;
+  // the row stays open. A row's close-only button rides along (alert-call-button.js).
+  call_back: () => require('./alert-call-button').buttonHandler,
+  // Owner plan A 2026-11-02 "Your word list goes to Google automatically, and the advisor drafts new words for your one-click
+  // yes or no. Every block can be undone.": Add / Decline on an ads-advisor word. The Ads page's own decide step; Undo is on that page.
+  negative_keyword: () => require('./ads/negative-keyword-buttons').buttonHandler,
 };
 
 // Close-only buttons an emitter puts on its row: Handled on a customer's texts, Called back on a call-back
@@ -157,7 +164,8 @@ const reply = (status, body) => ({ status, body });
 /**
  * One tap: `version` is the content version the bell served for the row (the Done fence), so a button runs only
  * on the row the admin saw. Returns { status, body } for the route: 200 { success, message } when the step ran
- * (the row is then done), 409 { error, message? } when the row changed, was handled, or the step refused.
+ * (the row is then done; 200 { success, message, open: true } when the step leaves it open), 409 { error, message? }
+ * when the row changed, was handled, or the step refused.
  */
 async function runAlertButton({ notificationId, actionId, version, technicianId, role }) {
   if (role !== 'admin' || !technicianId) return reply(403, { error: 'Admin access required' });
@@ -183,7 +191,9 @@ async function runAlertButton({ notificationId, actionId, version, technicianId,
     await finishTap(notificationId, { ...tap, outcome: 'error' });
     throw err;
   }
-  await finishTap(notificationId, { ...tap, outcome: result.ok ? 'done' : result.code });
+  await finishTap(notificationId, { ...tap, outcome: result.ok ? (result.keepOpen ? 'started' : 'done') : result.code });
+  // A step that leaves the row open: the bell keeps the row and reads the list again for its new version.
+  if (result.ok && result.keepOpen) return reply(200, { success: true, message: result.message, open: true });
   if (result.ok) {
     // A step that answered its record elsewhere (the referral's own close) may have closed the row already;
     // this keeps that close (markAdminDone writes only an open row). A step that closed the row itself, fenced,
@@ -195,4 +205,4 @@ async function runAlertButton({ notificationId, actionId, version, technicianId,
   return reply(409, { error: result.code, message: result.message });
 }
 
-module.exports = { withAlertButtons, runAlertButton, closeNoteButtons, _private: { KINDS, storedButtons, CLOSE_NOTES } };
+module.exports = { withAlertButtons, runAlertButton, closeNoteButtons, _private: { KINDS, storedButtons, CLOSE_NOTES, closeNoteHandler } };

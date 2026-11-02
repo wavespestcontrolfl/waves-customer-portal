@@ -628,6 +628,155 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Campaign negative keywords (owner plan A, 2026-11-02; GATE_ADS_NEGATIVES).
+// Phrase-match negatives on one campaign, written and read back here; the
+// callers (services/ads/negative-keyword-actions.js) own the gate, the
+// database rows and every rule about which word may go. Each function returns
+// null on any failure, like pauseCampaign.
+// ---------------------------------------------------------------------------
+
+// A GAQL string literal: backslash and single quote escaped. Negative words are
+// already limited to letters, digits, spaces, & and ' by normalizeNegative.
+const gaqlString = (text) => `'${String(text).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+
+// The resource name of a mutate's first result. MutateGoogleAdsResponse is
+// { mutate_operation_responses: [{ campaign_criterion_result: { resource_name } }] }
+// (google-ads-api 23; camelCase read too in case a client is built with parsing on).
+function firstCriterionResourceName(response) {
+  const entry = (response?.mutate_operation_responses || response?.mutateOperationResponses || [])[0];
+  const result = entry?.campaign_criterion_result || entry?.campaignCriterionResult;
+  return result?.resource_name || result?.resourceName || null;
+}
+
+// The resource name of the campaign's existing phrase negative with this text, or null.
+async function findCampaignNegativeKeyword(customer, platformCampaignId, text) {
+  if (!/^\d+$/.test(String(platformCampaignId))) throw new Error('campaign id is not a number');
+  const rows = await customer.query(`
+    SELECT campaign_criterion.resource_name
+    FROM campaign_criterion
+    WHERE campaign.id = ${String(platformCampaignId)}
+      AND campaign_criterion.negative = TRUE
+      AND campaign_criterion.type = 'KEYWORD'
+      AND campaign_criterion.keyword.text = ${gaqlString(text)}
+      AND campaign_criterion.keyword.match_type = 'PHRASE'
+      AND campaign_criterion.status != 'REMOVED'
+  `);
+  return rows?.[0]?.campaign_criterion?.resource_name || null;
+}
+
+// Whether Google still has this criterion (not removed). A failed read throws: the caller never reads it as "gone".
+async function campaignCriterionExists(customer, resourceName) {
+  const rows = await customer.query(`
+    SELECT campaign_criterion.resource_name
+    FROM campaign_criterion
+    WHERE campaign_criterion.resource_name = ${gaqlString(resourceName)}
+      AND campaign_criterion.status != 'REMOVED'
+  `);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// addCampaignNegativeKeyword — a phrase-match negative on one campaign
+// ---------------------------------------------------------------------------
+async function addCampaignNegativeKeyword(platformCampaignId, text) {
+  const customer = getCustomer();
+  if (!customer) return null;
+
+  try {
+    logger.info(`[google-ads] Adding negative keyword "${text}" to campaign ${platformCampaignId}`);
+    try {
+      const response = await customer.mutateResources([
+        {
+          entity: 'campaign_criterion',
+          operation: 'create',
+          resource: {
+            campaign: `customers/${process.env.GOOGLE_ADS_CUSTOMER_ID}/campaigns/${platformCampaignId}`,
+            negative: true,
+            keyword: { text, match_type: enums.KeywordMatchType.PHRASE },
+          },
+        },
+      ]);
+      const resourceName = firstCriterionResourceName(response);
+      if (!resourceName) {
+        logger.error('[google-ads] addCampaignNegativeKeyword: Google answered without a resource name');
+        return null;
+      }
+      return { success: true, resourceName };
+    } catch (err) {
+      // Google refuses a duplicate under more than one error code, and the codes are not pinned here. Whatever the
+      // code, a phrase negative with this text already on the campaign (added in Ads Manager, or a retry after a lost
+      // answer) means the block is in place: take that one. Otherwise the refusal stands.
+      const resourceName = await findCampaignNegativeKeyword(customer, platformCampaignId, text).catch(() => null);
+      if (!resourceName) throw err;
+      logger.info(`[google-ads] Negative keyword "${text}" already on campaign ${platformCampaignId}`);
+      return { success: true, resourceName, existed: true };
+    }
+  } catch (err) {
+    logger.error(`[google-ads] addCampaignNegativeKeyword failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// removeCampaignNegativeKeyword — take a negative out of its campaign
+// ---------------------------------------------------------------------------
+// A refused remove counts as removed only when Google no longer has the criterion; a failed check is a failure.
+async function removeCampaignNegativeKeyword(resourceName) {
+  const customer = getCustomer();
+  if (!customer) return null;
+  if (typeof resourceName !== 'string' || !resourceName) return null;
+
+  try {
+    logger.info(`[google-ads] Removing negative keyword ${resourceName}`);
+    try {
+      await customer.mutateResources([
+        { entity: 'campaign_criterion', operation: 'remove', resource: resourceName },
+      ]);
+      return { success: true, resourceName };
+    } catch (err) {
+      const stillThere = await campaignCriterionExists(customer, resourceName).catch(() => true);
+      if (stillThere) throw err;
+      logger.info(`[google-ads] Negative keyword ${resourceName} was already gone`);
+      return { success: true, resourceName, alreadyGone: true };
+    }
+  } catch (err) {
+    logger.error(`[google-ads] removeCampaignNegativeKeyword failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// convertingSearchTerms — every search term that brought a conversion
+// ---------------------------------------------------------------------------
+// Read-only. All campaigns, trailing `days`. null on any failure, so a caller
+// never reads "no answer" as "no conversions".
+async function convertingSearchTerms(days = 90) {
+  const customer = getCustomer();
+  if (!customer) return null;
+
+  try {
+    const { since, until } = gaqlDateRange(days);
+    const rows = await customer.query(`
+      SELECT
+        campaign.id,
+        search_term_view.search_term,
+        metrics.conversions
+      FROM search_term_view
+      WHERE segments.date BETWEEN '${since}' AND '${until}'
+        AND metrics.conversions > 0
+    `);
+    return rows.map((row) => ({
+      term: row.search_term_view.search_term,
+      campaignId: String(row.campaign.id),
+      conversions: Number(row.metrics.conversions || 0),
+    }));
+  } catch (err) {
+    logger.error(`[google-ads] convertingSearchTerms failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   isConfigured,
   // Read-only GAQL access for the Intelligence Bar ops tools — mutations
@@ -641,7 +790,11 @@ module.exports = {
   pauseCampaign,
   enableCampaign,
   updateBudget,
+  addCampaignNegativeKeyword,
+  removeCampaignNegativeKeyword,
+  convertingSearchTerms,
   _private: {
+    gaqlString,
     searchTermStatusName,
     buildCallViewQuery,
     gaqlDateRange,

@@ -421,3 +421,87 @@ describe('PublicBookingPage contact phone normalization', () => {
     expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
   });
 });
+
+describe('PublicBookingPage ?service= names', () => {
+  const chip = (name) => screen.queryByRole('button', { name: new RegExp(`^${name}$`) });
+  const renderAt = (url) => render(<MemoryRouter initialEntries={[url]}><PublicBookingPage /></MemoryRouter>);
+  const fillAddress = async () => {
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+  };
+  const availabilityCalls = (fetchMock) => fetchMock.mock.calls
+    .filter(([url]) => new URL(String(url), 'https://portal.test').pathname.endsWith('/booking/availability'));
+
+  it('a bare /book keeps the Pest Control default', async () => {
+    const fetchMock = stubFetch({ config: { enabled: true, multi_service: true } });
+    renderAt('/book');
+    await fillAddress();
+    await waitFor(() => expect(chip('Pest Control')).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+    expect(new URL(String(availabilityCalls(fetchMock)[0][0]), 'https://portal.test').searchParams.get('service_type')).toBe('pest_control');
+  });
+
+  it('a website name (mosquito-control) preselects Mosquito Control, not Pest Control', async () => {
+    const fetchMock = stubFetch({ config: { enabled: true, multi_service: true } });
+    renderAt('/book?service=mosquito-control');
+    await fillAddress();
+    await waitFor(() => expect(chip('Mosquito Control')).toHaveAttribute('aria-pressed', 'true'));
+    expect(chip('Pest Control')).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+    expect(new URL(String(availabilityCalls(fetchMock)[0][0]), 'https://portal.test').searchParams.get('service_type')).toBe('mosquito');
+  });
+
+  it('an unreadable name starts with nothing selected and holds the continue button until one is picked', async () => {
+    const fetchMock = stubFetch({ config: { enabled: true, multi_service: true } });
+    renderAt('/book?service=gutter-cleaning');
+    await fillAddress();
+    expect(await screen.findByText('Pick your service.')).toBeInTheDocument();
+    const next = screen.getByRole('button', { name: /Find my best times/ });
+    expect(next).toBeDisabled();
+    for (const name of ['Pest Control', 'Mosquito Control']) expect(chip(name)).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(next);
+    expect(availabilityCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(chip('Mosquito Control'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Find my best times/ })).toBeEnabled());
+    expect(screen.queryByText('Pick your service.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+    expect(new URL(String(availabilityCalls(fetchMock)[0][0]), 'https://portal.test').searchParams.get('service_type')).toBe('mosquito');
+  });
+
+  it('an unreadable name still shows the chips when multi-service is off (one at a time)', async () => {
+    stubFetch({ config: { enabled: true, multi_service: false } });
+    renderAt('/book?service=gutter-cleaning');
+    await fillAddress();
+    expect(await screen.findByText('Pick your service.')).toBeInTheDocument();
+    fireEvent.click(chip('Lawn Care'));
+    fireEvent.click(chip('Rodent Control'));
+    expect(chip('Lawn Care')).toHaveAttribute('aria-pressed', 'false');
+    expect(chip('Rodent Control')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('a token entry with an unreadable name shows the chips (single select) and holds the continue button', async () => {
+    stubFetch({ config: { enabled: true, multi_service: true } });
+    renderAt('/book?service=gutter-cleaning&estimate_id=est-1&estimate_token=tok-1');
+    await fillAddress();
+    expect(await screen.findByText('Pick your service.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Find my best times/ })).toBeDisabled();
+    fireEvent.click(chip('Termite Inspection'));
+    fireEvent.click(chip('Rodent Control'));
+    expect(chip('Termite Inspection')).toHaveAttribute('aria-pressed', 'false');
+    expect(chip('Rodent Control')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /Find my best times/ })).toBeEnabled();
+  });
+
+  it('a token entry with a readable name keeps the chips hidden', async () => {
+    stubFetch({ config: { enabled: true, multi_service: true } });
+    renderAt('/book?service=mosquito-control&estimate_id=est-1&estimate_token=tok-1');
+    await fillAddress();
+    await waitFor(() => expect(screen.getByRole('button', { name: /Find my best times/ })).toBeEnabled());
+    expect(chip('Mosquito Control')).not.toBeInTheDocument();
+    expect(chip('Pest Control')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pick your service.')).not.toBeInTheDocument();
+  });
+});
