@@ -903,6 +903,9 @@ export default function PublicBookingPage() {
         @keyframes slideUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
         @keyframes checkPop { 0% { transform:scale(0) } 60% { transform:scale(1.2) } 100% { transform:scale(1) } }
         @keyframes pulse { 0%,100% { transform:scale(1) } 50% { transform:scale(1.03) } }
+        @media (prefers-reduced-motion: reduce) {
+          [data-booking-motion] { animation: none !important; }
+        }
         input:focus { border-color: ${COLORS.wavesBlue} !important; }
       `}</style>
 
@@ -927,7 +930,7 @@ export default function PublicBookingPage() {
 
         {/* Customers-only verification gate (GATE_BOOKING_CUSTOMERS_ONLY) */}
         {gateActive && (
-          <div style={{ animation: 'slideUp 0.4s ease-out' }}>
+          <div data-booking-motion="" style={{ animation: 'slideUp 0.4s ease-out' }}>
             <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               Book your next visit
             </h1>
@@ -1055,7 +1058,7 @@ export default function PublicBookingPage() {
 
         {/* STEP 1 — Address */}
         {step === 1 && (
-          <div style={{ animation: 'slideUp 0.4s ease-out' }}>
+          <div data-booking-motion="" style={{ animation: 'slideUp 0.4s ease-out' }}>
             <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h1>
@@ -1171,7 +1174,7 @@ export default function PublicBookingPage() {
 
         {/* STEP 2 — Times */}
         {step === 2 && (
-          <div style={{ animation: 'slideUp 0.4s ease-out' }}>
+          <div data-booking-motion="" style={{ animation: 'slideUp 0.4s ease-out' }}>
             <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               Find a time
             </h1>
@@ -1323,7 +1326,7 @@ export default function PublicBookingPage() {
 
         {/* STEP 3 — Contact */}
         {step === 3 && (
-          <div style={{ animation: 'slideUp 0.4s ease-out' }}>
+          <div data-booking-motion="" style={{ animation: 'slideUp 0.4s ease-out' }}>
             <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               {existingCustomerId ? 'Confirm your booking' : 'Your info'}
             </h1>
@@ -1537,8 +1540,8 @@ export default function PublicBookingPage() {
 
         {/* STEP 4 — Confirmation */}
         {step === 4 && (
-          <div style={{ animation: 'slideUp 0.4s ease-out', textAlign: 'center', paddingTop: 20 }}>
-            <div style={{
+          <div data-booking-motion="" style={{ animation: 'slideUp 0.4s ease-out', textAlign: 'center', paddingTop: 20 }}>
+            <div data-booking-motion="" style={{
               width: 72, height: 72, borderRadius: '50%', background: COLORS.greenLight,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               margin: '0 auto 20px', animation: 'checkPop 0.5s ease-out',

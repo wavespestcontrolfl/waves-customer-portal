@@ -20,6 +20,7 @@ import POLISH_COPY from '../../../../../shared/lawn-report-polish-copy.json';
 import RAIN_COPY from '../../../../../shared/lawn-water-rain-copy.json';
 import { weekPlanOnCard, rainSensorLineOnCard } from '@lawn-water-card';
 import { bannerAtNow, bannerNextChangeMs } from './lawnLayoutRules';
+import { scrollBehavior } from '../../../lib/scrollMotion';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -623,7 +624,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
   const go = (d) => {
     const el = scroller.current;
     if (!el) return;
-    el.scrollBy({ left: d * el.clientWidth, behavior: 'smooth' });
+    el.scrollBy({ left: d * el.clientWidth, behavior: scrollBehavior() });
   };
   const onScroll = () => {
     const el = scroller.current;
