@@ -9843,6 +9843,14 @@ function staffEditLockStartOnlyLive() {
 function prepaySeedSeriesSlotLive() {
   return process.env.GATE_PREPAY_SEED_SERIES_SLOT === 'true';
 }
+// GATE_TECH_VOICE_LINE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01, hands-free field voice PR 3a). On,
+// POST /api/webhooks/twilio/tech-voice admits a call to TECH_VOICE_NUMBER from an active technician's own cell, after
+// reserving its billed minutes (services/tech-voice-usage.js: one call at a time, 3 a call, 15 a day, 150 a month per
+// technician); every other call is rejected before Twilio answers ($0). Off = every call to the line is rejected.
+// Kill = unset. Running it costs Twilio minutes: the owner's yes comes first.
+function techVoiceLineLive() {
+  return process.env.GATE_TECH_VOICE_LINE === 'true';
+}
 // GATE_PAYER_PACKET_AUTOSEND read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, a grouped closeout
 // ("combined stop") whose every billed member resolves to the SAME active third-party payer mints ONE invoice billed to
 // that payer and emails it to the payer's AP inbox at the packet's effects phase, as a single-visit completion already
@@ -10054,6 +10062,8 @@ module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
 module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;
 // GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
 module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
+// GATE_TECH_VOICE_LINE reader, on its own line so gate PRs never conflict.
+module.exports.techVoiceLineLive = techVoiceLineLive;
 module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER reader, on its own line so gate PRs never conflict.
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;

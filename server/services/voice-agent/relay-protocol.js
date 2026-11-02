@@ -38,6 +38,15 @@ const RELAY_WS_PATH = '/ws/voice-agent';
 // calls filters on it — a sandbox call must never reach the Communications
 // inbox or the calls tab as a customer call.
 const VOICE_RELAY_SANDBOX_SOURCE = 'voice_relay_sandbox';
+// call_log.source for calls to the staff-only "Waves Tech" voice line
+// (GATE_TECH_VOICE_LINE, routes/twilio-voice-webhook.js POST /tech-voice): a
+// technician calling from their own cell. Like a sandbox call it is never a
+// customer call — no inbox thread, no lead, no KPI, no missed-call bell.
+const TECH_VOICE_SOURCE = 'tech_voice';
+const INTERNAL_CALL_SOURCES = Object.freeze([VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE]);
+function isInternalCallSource(source) {
+  return INTERNAL_CALL_SOURCES.includes(String(source || ''));
+}
 
 // call_outcome values that are TERMINAL for a relay call: the session's
 // close-time reconcile (relay-conversation end()) never overwrites them with
@@ -390,13 +399,17 @@ function classifyRelayEvent(frame) {
 }
 
 /**
- * Knex modifier: drop voice-agent sandbox calls (the dead GA# test number)
- * from a call_log query. Every call metric and inbox that counts inbound
- * calls applies it — a profile bake-off persists each test as an ordinary
- * inbound row, and those rows must never reach a KPI.
+ * Knex modifier: drop internal calls from a call_log query — voice-agent
+ * sandbox calls (the dead GA# test number) and calls to the staff-only tech
+ * voice line. Every call metric and inbox that counts inbound calls applies
+ * it — a profile bake-off persists each test as an ordinary inbound row, a
+ * technician's call to the tech line is an inbound row too, and neither may
+ * ever reach a KPI. One clause per source, so the sandbox clause readers pin
+ * stays as it was.
  */
 function whereNotSandboxCall(qb, column = 'source') {
-  return qb.whereRaw("COALESCE(??, '') <> ?", [column, VOICE_RELAY_SANDBOX_SOURCE]);
+  return qb.whereRaw("COALESCE(??, '') <> ?", [column, VOICE_RELAY_SANDBOX_SOURCE])
+    .whereRaw("COALESCE(??, '') <> ?", [column, TECH_VOICE_SOURCE]);
 }
 
 // A relay profile may tune the relay, never re-point or re-voice it.
@@ -503,6 +516,9 @@ function buildRelayTwiML({
 module.exports = {
   RELAY_WS_PATH,
   VOICE_RELAY_SANDBOX_SOURCE,
+  TECH_VOICE_SOURCE,
+  INTERNAL_CALL_SOURCES,
+  isInternalCallSource,
   whereNotSandboxCall,
   RELAY_FAILED_OUTCOME,
   RELAY_TERMINAL_OUTCOMES,
