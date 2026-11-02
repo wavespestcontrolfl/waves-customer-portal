@@ -182,13 +182,8 @@ function bookingItem(row) {
     createdAt: row.created_at,
     version: row.version,
     customer,
-    source: meta.source === 'estimate_card' ? 'estimate_card' : 'booking_page',
     service: String(meta.service || ''),
-    slot: meta.slotDate ? { date: String(meta.slotDate), start: meta.slotStart || null, end: meta.slotEnd || null } : null,
-    ...(meta.checkoutEstimateId || meta.pricingEstimateId ? { estimateId: String(meta.checkoutEstimateId || meta.pricingEstimateId) } : {}),
-    // Only the card step of an estimate our office sent is established (portal-unfinished-bookings.js); every other
-    // drop-off carries a phone or email someone typed in, which nothing has verified.
-    verified: meta.trust === 'established',
+    ...(meta.checkoutEstimateId ? { estimateId: String(meta.checkoutEstimateId) } : {}),
   };
 }
 

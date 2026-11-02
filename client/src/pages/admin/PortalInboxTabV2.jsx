@@ -94,42 +94,12 @@ function RequestDetails({ item }) {
   );
 }
 
-// The slot the visitor picked, as a person says it: "Tue Nov 3, 1-2 PM" (the bell's own wording).
-function clockParts(hhmm) {
-  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
-  if (!m) return null;
-  const hour = Number(m[1]);
-  return { hour12: hour % 12 || 12, minute: m[2], meridiem: hour >= 12 ? "PM" : "AM" };
-}
-
-const clockText = (p, withMeridiem) => `${p.hour12}${p.minute === "00" ? "" : `:${p.minute}`}${withMeridiem ? ` ${p.meridiem}` : ""}`;
-
-function rangeText(start, end) {
-  const from = clockParts(start);
-  if (!from) return "";
-  const to = clockParts(end);
-  if (!to) return clockText(from, true);
-  return from.meridiem === to.meridiem ? `${clockText(from, false)}-${clockText(to, true)}` : `${clockText(from, true)}-${clockText(to, true)}`;
-}
-
-function slotText(slot) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(slot?.date || "");
-  if (!m) return "";
-  const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
-  const when = day.toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" }).replace(",", "");
-  const range = rangeText(slot.start, slot.end);
-  return range ? `${when}, ${range}` : when;
-}
-
 function BookingDetails({ item }) {
-  const picked = slotText(item.slot);
-  const where = item.source === "estimate_card" ? "the card step of an estimate" : "the booking page";
   return (
     <>
       {item.service && <div className="text-14 font-medium text-zinc-900 mt-1" data-testid="booking-service">{item.service}</div>}
-      {picked && <div className="text-14 text-zinc-800 mt-1" data-testid="booking-slot">They picked {picked}.</div>}
       <div className="text-14 text-ink-secondary mt-1" data-testid="booking-where">
-        They left at {where} without finishing.
+        They left at the card step of an estimate without finishing.
         {item.estimateId && (
           <>
             {" "}
@@ -137,11 +107,6 @@ function BookingDetails({ item }) {
           </>
         )}
       </div>
-      {item.verified === false && (
-        <div className="text-14 text-ink-secondary mt-1" data-testid="booking-unverified">
-          The phone was typed in online and is not verified.
-        </div>
-      )}
     </>
   );
 }

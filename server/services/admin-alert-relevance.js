@@ -127,11 +127,11 @@
  *     request row quietly (portal-inbox.js resolveRequestQuietly: no customer email). The contact close rides
  *     on GATE_ALERT_CONTACT_CLOSE like the chat class. A cancellation bell (`cancellation_reviewed`) is never judged.
  *   - GATE_PORTAL_BOOKING_ITEMS (boolean, own gate; owner 2026-11-02): the unfinished-booking bell
- *     (portal-unfinished-bookings.js: dedupeKey `portal-unfinished-booking:<intent id>` or
+ *     (portal-unfinished-bookings.js, the card step of an estimate our office sent: dedupeKey
  *     `portal-unfinished-checkout:<estimate id>`, `doneWhen: 'customer_answered'`) closes once a person
- *     contacted the customer after the bell (the portal request class's contact rule; a visitor with no
- *     customer on file is matched by the phone in the bell), or the booking converted, a visit was booked for
- *     the customer after the bell, or the estimate was accepted. Sends nothing to a customer.
+ *     contacted the customer after the drop-off (the portal request class's contact rule; an estimate with no
+ *     customer on file is matched by the phone in the bell), or the estimate was accepted, declined or
+ *     archived, or a visit was booked for the customer after the drop-off. Sends nothing to a customer.
  */
 
 const db = require('../models/db');
@@ -416,11 +416,11 @@ async function loadQuoteHandoffs(rows, data, conn) {
   }
 }
 
-// Each unfinished-booking bell (GATE_PORTAL_BOOKING_ITEMS): did the booking finish after the bell? The intent
-// converted, the estimate was accepted, or a live visit was booked for the bell's customer after the bell (the
-// new-lead class's live-booking predicate). Person contact is the contact rule's, not read here. A bell with
-// no customer is judged by the intent and the estimate alone. Loaded into data.bookingMovedOn (bell id -> the
-// reason in plain words); a read that fails throws and the sweep skips the batch.
+// Each unfinished-booking bell (GATE_PORTAL_BOOKING_ITEMS, the card step of an estimate our office sent): did it end
+// after the drop-off? The estimate was accepted, declined or archived, or a live visit was booked for the bell's
+// customer after the drop-off (the new-lead class's live-booking predicate). Person contact is the contact rule's,
+// not read here. A bell with no customer is judged by the estimate alone. Loaded into data.bookingMovedOn (bell id
+// -> the reason in plain words); a read that fails throws and the sweep skips the batch.
 const isUnfinishedBookingBell = (meta) => String(meta.dedupeKey || '').startsWith(UNFINISHED_BOOKING_PREFIX);
 
 // An unfinished-booking bell's evidence boundary is the drop-off itself (metadata.dropOffAt), the boundary the
@@ -436,25 +436,21 @@ async function loadUnfinishedBookings(rows, data, conn) {
   const bells = rows.map((row) => ({ row, meta: parseMeta(row.metadata) })).filter(({ meta }) => isUnfinishedBookingBell(meta));
   if (!bells.length) return;
   const pick = (key) => [...new Set(bells.map(({ meta }) => uuidOrNull(meta[key])).filter(Boolean))];
-  const intentIds = pick('bookingIntentId');
   const estimateIds = pick('checkoutEstimateId');
   const customerIds = pick('customerId');
-  const intents = intentIds.length ? await conn('booking_intents').whereIn('id', intentIds).select('id', 'converted_at') : [];
   const estimates = estimateIds.length ? await conn('estimates').whereIn('id', estimateIds).select('id', 'accepted_at', 'status', 'archived_at') : [];
-  const converted = new Set(intents.filter((r) => r.converted_at).map((r) => String(r.id)));
   // The estimate's end, in words: the same three states estimateCardQuery never raises a bell for.
   const estimateEnded = new Map(estimates.map((r) => [String(r.id), (r.accepted_at || r.status === 'accepted') ? 'Estimate was accepted'
     : (r.status === 'declined' ? 'Estimate was declined' : (r.archived_at ? 'Estimate was archived' : null))]).filter(([, reason]) => reason));
   const booked = await bookedVisitsByCustomer(conn, customerIds);
   for (const { row, meta } of bells) {
-    const reason = unfinishedBookingReason(meta, bookingBoundaryAt(row, meta), { converted, estimateEnded, booked });
+    const reason = unfinishedBookingReason(meta, bookingBoundaryAt(row, meta), { estimateEnded, booked });
     if (reason) data.bookingMovedOn.set(String(row.id), reason);
   }
 }
 
-// The first fact, in order, that the booking was finished or the customer booked another way.
-function unfinishedBookingReason(meta, bellAt, { converted, estimateEnded, booked }) {
-  if (converted.has(String(uuidOrNull(meta.bookingIntentId)))) return 'Booking was finished';
+// The first fact, in order, that the estimate ended or the customer booked another way.
+function unfinishedBookingReason(meta, bellAt, { estimateEnded, booked }) {
   const ended = estimateEnded.get(String(uuidOrNull(meta.checkoutEstimateId)));
   if (ended) return ended;
   const customerId = uuidOrNull(meta.customerId);
@@ -998,8 +994,8 @@ function portalItemAnswered(s) {
   return reason ? { reason, mode: 'true' } : null;
 }
 
-// An unfinished-booking bell (GATE_PORTAL_BOOKING_ITEMS): finished once the booking converted, a visit was booked
-// for the customer or the estimate was accepted, all after the drop-off (loadUnfinishedBookings, bookingBoundaryAt).
+// An unfinished-booking bell (GATE_PORTAL_BOOKING_ITEMS): finished once the estimate was accepted, declined or
+// archived, or a visit was booked for the customer after the drop-off (loadUnfinishedBookings, bookingBoundaryAt).
 // A person's contact after the drop-off closes it too, by the portal request class's contactRule (portalItemAnswered).
 function unfinishedBookingSettled(s) {
   return isUnfinishedBookingBell(s.meta) ? s.bookingMovedOn : null;
@@ -1097,9 +1093,9 @@ const CLASSES = [
     gate: portalItemGate, rule: addServiceQuoted,
     onRetired: (bell) => resolveRequestOf(bell, 'Estimate sent'),
   },
-  { // portal-unfinished-bookings.js — a visitor who picked a time on the booking page, or opened the card step on
-    // an estimate, and left (GATE_PORTAL_BOOKING_ITEMS). Closed by a person's contact with that customer after the
-    // bell (a visitor with no customer on file by the phone in the bell), or when the booking finished.
+  { // portal-unfinished-bookings.js — a customer opened the card step of an estimate our office sent and left
+    // (GATE_PORTAL_BOOKING_ITEMS). Closed by a person's contact with that customer after the drop-off (an estimate
+    // with no customer on file by the phone in the bell), or when the estimate ended or a visit was booked.
     key: 'portal_unfinished_booking', categories: ['alert'], prefix: UNFINISHED_BOOKING_PREFIX, doneWhen: 'customer_answered',
     // Only the bell that promises an answer to the customer: the class's doneWhen, checked like the request class's.
     match: (meta) => meta.doneWhen === 'customer_answered',
@@ -1197,12 +1193,8 @@ function classify(row, { anyMode = false } = {}) {
 // cut-off would hide a re-rung one for good). Keyset-paged on id: retiring a
 // row removes it from the set, so an offset would skip rows.
 function candidateQuery(cursor) {
-  const { NOT_ACTIVITY_ONLY_SQL } = require('./notification-service')._private;
-  // Activity-only rows are not bell items, so the sweep skips them, with one exception: an unfinished-booking row
-  // written quietly past the day's room (portal-unfinished-bookings.js) is still a Portal item and closes by the same
-  // rules as a rung one. It stays out of the bell: the bell list keeps excluding activity rows.
-  return db('notifications').where({ recipient_type: 'admin' })
-    .whereRaw(`(${NOT_ACTIVITY_ONLY_SQL} OR left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?)`, [UNFINISHED_BOOKING_PREFIX.length, UNFINISHED_BOOKING_PREFIX])
+  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
+  return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
     // Open rows, and rows a PERSON marked done (openToCloser's rule): when the
     // subject moves on, the sweep takes the close over so their Reopen can't
     // bring back an obsolete alert. A row any system component closed is left.

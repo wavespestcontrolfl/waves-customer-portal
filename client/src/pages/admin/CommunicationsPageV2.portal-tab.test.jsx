@@ -78,7 +78,7 @@ describe("Communications Portal tab", () => {
     portalItems = [{
       kind: "booking", id: "bell-1", version: "0123456789abcdef0123456789abcdef", createdAt: "2026-10-31T15:00:00.000Z",
       customer: { id: "cust-7", firstName: "Jo", lastName: "Visitor", phone: "+19415550107", hasTexts: false },
-      source: "booking_page", service: "Mosquito Control", slot: { date: "2026-11-03", start: "13:00", end: "14:00" },
+      service: "Mosquito Control", estimateId: "est-7",
     }];
     window.location.hash = "#tab=portal";
     mount("admin", "/admin/communications#tab=portal");

@@ -1,29 +1,29 @@
 /**
  * Unfinished bookings reach a person (GATE_PORTAL_BOOKING_ITEMS, owner 2026-11-02, unworked-leads audit).
  *
- * Two kinds of visitor started to book with Waves and left, and nobody was told:
- *   (A) the public booking page: the visitor picked a time and went away. That is a booking_intents row with
- *       converted_at null. Only the automatic recovery text and email (booking-abandon-recovery.js) followed.
- *   (B) the card step of an estimate: the visitor opened the save-a-card step (an estimate_checkout_events row,
- *       kind recurring_card or card_hold) on an estimate that was never accepted. Nothing followed at all.
- * This raises ONE admin bell per drop-off, so a person calls. It is an admin row, never a service request: a
- * request is shown to the customer in the app and a status change sends them a notice.
+ * A customer opened the card step of an estimate our office sent (an estimate_checkout_events row, kind
+ * recurring_card or card_hold) and left without accepting. Nothing followed and nobody was told. This raises ONE
+ * admin bell per such estimate, so a person calls. It is an admin row, never a service request: a request is shown
+ * to the customer in the app and a status change sends them a notice.
  *
- * - Drop-off time: the intent's last_activity_at; the newest checkout event's updated_at of the estimate.
- *   A drop-off counts after QUIET_MINUTES with no new touch, and only if it is not older than WINDOW_DAYS, so
- *   turning the gate on cannot burst old rows.
- * - Skipped: an intent that converted or is suppressed; an estimate accepted, declined or archived; a customer
- *   with a live visit booked (any way) after the drop-off; a drop-off a PERSON already followed up (the shared
- *   witnesses in admin-alert-contact-witnesses.js: a person's text, a call a person placed or answered, a
- *   person's Gmail send, after the drop-off); a drop-off that already has a bell with its key, open or done.
- * - Customer-less: a booking-page visitor with no customer on file, and an estimate with no customer_id (the
- *   staff estimator keeps only customer_name and customer_phone), still get a bell. The contact check then
- *   matches by their PHONE; the "booked a visit" skip needs a customer id, so only a converted intent or an
- *   accepted estimate closes those. Without a customer id or a phone nothing can be matched at all, and the
- *   close rules are the converted / accepted ones.
- * - One bell per key: dedupeKey `portal-unfinished-booking:<intent id>` or `portal-unfinished-checkout:<estimate
- *   id>`, notifyAdmin's default dedupe (finds a done row too). The sweep also leaves out a key whose row exists,
- *   so a bell a person marked done never rings again.
+ * Scope (owner 2026-11-02, "A"): only an estimate our office sent: made by staff (its maker is on the row) or
+ * drafted by the call and text estimator, so its link went only to the contact we chose or to the number that
+ * called or texted us (99 of 105 card-step drop-offs, Jun-Nov 2026). Booking-page starts and website estimates are
+ * left out: anyone can type any phone number there and nothing verifies it, so they keep today's automatic
+ * recovery text and email until the booking page can check phone numbers.
+ *
+ * - Drop-off time: the newest checkout event's updated_at of the estimate. It counts after QUIET_MINUTES with no
+ *   new touch, and only if it is not older than WINDOW_DAYS, so turning the gate on cannot burst old rows.
+ * - Skipped: an estimate accepted, declined or archived; a customer with a live visit booked (any way) after the
+ *   drop-off; a drop-off a PERSON already followed up (the shared witnesses in admin-alert-contact-witnesses.js:
+ *   a person's text, a call a person placed or answered, a person's Gmail send, after the drop-off); an estimate
+ *   that already has a bell with its key, open or done.
+ * - Customer-less: an estimate with no customer_id (the staff estimator can keep only customer_name and
+ *   customer_phone) still gets a bell. The contact check then matches by its PHONE; the "booked a visit" skip
+ *   needs a customer id, so only the estimate's own end closes it then.
+ * - One bell per key: dedupeKey `portal-unfinished-checkout:<estimate id>`, notifyAdmin's default dedupe (finds a
+ *   done row too). The query also leaves out a key whose row exists, so a bell a person marked done never rings
+ *   again.
  * - The bell is closed by admin-alert-relevance.js (class portal_unfinished_booking) and listed on the
  *   Communications Portal tab by portal-inbox.js.
  * - Sends nothing to a customer: no text, email, call or app notice. Admin bell rows only.
@@ -34,43 +34,21 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 const WINDOW_DAYS = 14;
 const QUIET_MINUTES = 60;
 // Candidates read per page, newest first, keyset-paged on (drop-off time, id). A drop-off a person already followed
 // up never gets a bell, so it never drops out of the query: paging is what lets an older unanswered drop-off behind
-// many contacted ones still ring. At most MAX_PAGES pages per source per run; a run that stops there says so, and
-// the next sweep starts again from the newest.
+// many contacted ones still ring. At most MAX_PAGES pages per run; a run that stops there says so, and the next
+// sweep starts again from the newest.
 const PAGE_SIZE = 200;
 const MAX_PAGES = 10;
-// Bells a day from this module, per tier (Codex #7489 security review). Nothing proves a booking-page visitor owns
-// the phone they typed (the page links a customer by that phone alone), so a scripted burst must neither ring a
-// bell per start nor use up the room real drop-offs need:
-// - established: the card step of an estimate our office sent (made by staff, or drafted by the call and text
-//   estimator): its link went only to the contact we chose, or to the number that called or texted us. Their own
-//   room, a safety cap only. 99 of 105 card-step drop-offs, Jun-Nov 2026.
-// - unverified: every booking-page start and every website estimate, whatever customer they link to: the page and
-//   the website forms match a customer by the phone or email typed, which proves nothing (Codex #7489 r4). A small
-//   room.
-// The room caps the ringing only, never the record (Codex #7489 r5): a drop-off past its tier's room still gets its
-// row, written quietly (the activity feed, not the bell), so the Portal tab lists every drop-off and fake starts can
-// never hide a real one; the day's one summary bell says the unverified room ran over. Real days had at most three
-// drop-offs of any kind (Jul-Nov 2026), so neither cap binds in normal use.
-const ESTABLISHED = 'established';
-const UNVERIFIED = 'unverified';
-const MAX_BELLS_PER_DAY = { [ESTABLISHED]: 10, [UNVERIFIED]: 3 };
-const BURST_KEY_PREFIX = 'portal-booking-burst:';
 // An estimate our office sent: made by staff (its maker is on the row), or drafted by the call and text estimator
 // (estimate-learning.js AI_DRAFT_SOURCES), never a website or self-served source. Not source 'manual': it is the
 // column's default, so a path that sets no source would pass as the office's.
 const OFFICE_ESTIMATE_SQL = "(e.created_by_technician_id IS NOT NULL OR e.source IN ('estimator_engine', 'ai_agent'))";
-const tierOf = (item) => (item.established ? ESTABLISHED : UNVERIFIED);
-const TIER_SQL = `COALESCE(metadata->>'trust', '${UNVERIFIED}')`;
 const KEY_PREFIX = 'portal-unfinished-';
-const BOOKING_KEY_PREFIX = 'portal-unfinished-booking:';
 const CHECKOUT_KEY_PREFIX = 'portal-unfinished-checkout:';
-const SOURCE_BOOKING_PAGE = 'booking_page';
 const SOURCE_ESTIMATE_CARD = 'estimate_card';
 const MAX_WHY_CHARS = 110;
 
@@ -105,28 +83,7 @@ function afterCursor(query, timeColumn, idColumn, cursor) {
   return cursor ? query.whereRaw(`(${timeColumn}, ${idColumn}) < (?::timestamptz, ?::uuid)`, [cursor.at, cursor.id]) : query;
 }
 
-// (A) booking-page drop-offs: not converted, not suppressed, quiet for QUIET_MINUTES, in the window.
-function bookingPageQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = {}) {
-  const quietBefore = new Date(now.getTime() - QUIET_MINUTES * MIN_MS);
-  const since = new Date(now.getTime() - WINDOW_DAYS * DAY_MS);
-  const query = conn('booking_intents as bi')
-    .leftJoin('customers as c', 'c.id', 'bi.customer_id')
-    .whereNull('bi.converted_at')
-    .whereRaw('COALESCE(bi.suppressed, false) = false')
-    .where('bi.last_activity_at', '<=', quietBefore)
-    .where('bi.last_activity_at', '>', since)
-    .whereRaw(`NOT ${KEY_TAKEN_SQL(BOOKING_KEY_PREFIX, 'bi.id')}`);
-  // Against the latest attempt, not the first capture: /capture-intent reuses an open intent and moves only
-  // last_activity_at, so a visit booked between the two must not hide the newer attempt.
-  return afterCursor(visitBookedAfter(query, 'bi.customer_id', 'bi.last_activity_at'), 'bi.last_activity_at', 'bi.id', cursor)
-    .orderBy([{ column: 'bi.last_activity_at', order: 'desc' }, { column: 'bi.id', order: 'desc' }])
-    .limit(pageSize)
-    .select('bi.id', 'bi.customer_id', 'bi.phone', 'bi.service_type', 'bi.slot_date', 'bi.slot_start', 'bi.slot_end',
-      'bi.last_activity_at as drop_off_at', 'bi.pricing_estimate_id', conn.raw('bi.last_activity_at::text AS cursor_at'),
-      conn.raw("COALESCE(NULLIF(trim(concat_ws(' ', c.first_name, c.last_name)), ''), NULLIF(trim(concat_ws(' ', bi.first_name, bi.last_name)), '')) AS name"));
-}
-
-// (B) estimate card-step drop-offs: one row per estimate (its newest event), the estimate still open.
+// Card-step drop-offs: one row per estimate (its newest event), an estimate our office sent and still open.
 function estimateCardQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = {}) {
   const quietBefore = new Date(now.getTime() - QUIET_MINUTES * MIN_MS);
   const since = new Date(now.getTime() - WINDOW_DAYS * DAY_MS);
@@ -141,33 +98,16 @@ function estimateCardQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = 
     .whereNull('e.accepted_at')
     .whereNull('e.archived_at')
     .whereRaw("COALESCE(e.status, '') NOT IN ('accepted', 'declined')")
+    .whereRaw(OFFICE_ESTIMATE_SQL)
     .whereRaw(`NOT ${KEY_TAKEN_SQL(CHECKOUT_KEY_PREFIX, 'e.id')}`);
   return afterCursor(visitBookedAfter(query, 'e.customer_id', 'ce.last_at'), 'ce.last_at', 'e.id', cursor)
     .orderBy([{ column: 'ce.last_at', order: 'desc' }, { column: 'e.id', order: 'desc' }])
     .limit(pageSize)
     .select('e.id', 'e.customer_id', 'e.customer_name', 'e.customer_phone', 'e.estimate_data', 'e.service_interest',
-      'ce.last_at as drop_off_at', conn.raw('ce.last_at::text AS cursor_at'),
-      conn.raw(`${OFFICE_ESTIMATE_SQL} AS established`));
+      'ce.last_at as drop_off_at', conn.raw('ce.last_at::text AS cursor_at'));
 }
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
-
-function bookingItem(row) {
-  return {
-    key: `${BOOKING_KEY_PREFIX}${row.id}`,
-    source: SOURCE_BOOKING_PAGE,
-    sourceId: String(row.id),
-    dropOffAt: new Date(row.drop_off_at),
-    customerId: row.customer_id ? String(row.customer_id) : null,
-    name: text(row.name),
-    phone: text(row.phone),
-    service: text(row.service_type),
-    slot: row.slot_date ? { date: String(row.slot_date).slice(0, 10), start: text(row.slot_start), end: text(row.slot_end) } : null,
-    estimateId: row.pricing_estimate_id ? String(row.pricing_estimate_id) : null,
-    // A typed phone links the customer; nothing proves the visitor owns it.
-    established: false,
-  };
-}
 
 // The services an estimate is for, in the words the estimate screens use ("Pest Control + Lawn Care"), or ''.
 function estimateService(row) {
@@ -191,24 +131,15 @@ function estimateItem(row) {
     name: text(row.customer_name),
     phone: text(row.customer_phone),
     service: estimateService(row),
-    slot: null,
     estimateId: String(row.id),
-    established: row.established === true,
   };
 }
 
-// The estimate card step first, then the booking page. Each tier has its own room, so the order decides only which
-// of one tier's drop-offs are raised first on a day it is full.
-const SOURCES = [
-  { name: SOURCE_ESTIMATE_CARD, query: estimateCardQuery, item: estimateItem },
-  { name: SOURCE_BOOKING_PAGE, query: bookingPageQuery, item: bookingItem },
-];
-
-// One page of one source's drop-offs that could ring now, before the person-contact check, and the cursor of the
-// next page (null when this was the last one).
-async function findDropOffPage(source, now, { conn = db, cursor = null, pageSize = PAGE_SIZE } = {}) {
-  const rows = await source.query(conn, now, { cursor, pageSize });
-  const items = rows.map(source.item).filter((item) => !Number.isNaN(item.dropOffAt.getTime()));
+// One page of drop-offs that could ring now, before the person-contact check, and the cursor of the next page
+// (null when this was the last one).
+async function findDropOffPage(now, { conn = db, cursor = null, pageSize = PAGE_SIZE } = {}) {
+  const rows = await estimateCardQuery(conn, now, { cursor, pageSize });
+  const items = rows.map(estimateItem).filter((item) => !Number.isNaN(item.dropOffAt.getTime()));
   const last = rows[rows.length - 1];
   return { items, next: rows.length < pageSize || !last ? null : { at: last.cursor_at, id: String(last.id) } };
 }
@@ -219,7 +150,7 @@ const reached = (bundle) => [bundle.textAt, bundle.backAt, bundle.inAt, bundle.r
 
 // The drop-offs no person has followed up. A customer-less drop-off is matched by its phone. A witness read that
 // fails is no verdict and throws: nothing rings this run. A drop-off the witnesses cannot identify (no customer
-// id and no usable phone) has no bundle and stays: only the converted / accepted closes can judge it.
+// id and no usable phone) has no bundle and stays: only the estimate's own end can close it.
 async function withoutPersonContact(items, conn = db) {
   if (!items.length) return [];
   const { loadContactBundles } = require('./admin-alert-contact-witnesses');
@@ -241,52 +172,9 @@ async function withoutPersonContact(items, conn = db) {
 
 // ---- The bell --------------------------------------------------------------------------------------------
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-// "1 PM" / "1:30 PM" parts of an HH:MM time, or null.
-function clockParts(hhmm) {
-  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
-  if (!m) return null;
-  const hour = Number(m[1]);
-  const minute = Number(m[2]);
-  if (hour > 23 || minute > 59) return null;
-  return { hour12: hour % 12 || 12, minute, meridiem: hour >= 12 ? 'PM' : 'AM' };
-}
-const clockText = (p, withMeridiem) => `${p.hour12}${p.minute ? `:${String(p.minute).padStart(2, '0')}` : ''}${withMeridiem ? ` ${p.meridiem}` : ''}`;
-
-// "1-2 PM", "11 AM-1 PM", "1 PM" (no end), or ''.
-function timeRangeWords(start, end) {
-  const from = clockParts(start);
-  if (!from) return '';
-  const to = clockParts(end);
-  if (!to) return clockText(from, true);
-  return from.meridiem === to.meridiem
-    ? `${clockText(from, false)}-${clockText(to, true)}`
-    : `${clockText(from, true)}-${clockText(to, true)}`;
-}
-
-// "Mon Nov 3, 1-2 PM": the day the visitor picked, as a person says it. '' when the date is unusable.
-function slotWords(slot) {
-  if (!slot) return '';
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(slot.date || '');
-  if (!m) return '';
-  const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
-  if (Number.isNaN(day.getTime())) return '';
-  const when = `${WEEKDAYS[day.getUTCDay()]} ${MONTHS[day.getUTCMonth()]} ${day.getUTCDate()}`;
-  const range = timeRangeWords(slot.start, slot.end);
-  return range ? `${when}, ${range}` : when;
-}
-
 // What happened, as the bell's one sentence.
 function whyWords(item, who) {
-  const service = item.service || '';
-  if (item.source === SOURCE_ESTIMATE_CARD) {
-    return `${who} opened the card step on ${service ? `a ${service}` : 'an'} estimate and did not finish`;
-  }
-  const picked = slotWords(item.slot);
-  const forService = service ? ` for ${service}` : '';
-  return picked ? `${who} picked ${picked}${forService} and did not finish` : `${who} started booking${forService} and did not finish`;
+  return `${who} opened the card step on ${item.service ? `a ${item.service}` : 'an'} estimate and did not finish`;
 }
 
 // The headline half: "Call <name>: booking not finished", the name cut to fit.
@@ -298,11 +186,10 @@ function actionWords(name) {
   ]);
 }
 
-// Where a person opens it: the customer page, else the estimate, else a new text to the visitor's phone.
+// Where a person opens it: the customer page, else the estimate.
 function linkFor(item) {
   if (item.customerId) return `/admin/customers?customerId=${encodeURIComponent(item.customerId)}`;
-  if (item.estimateId) return `/admin/estimates?estimateId=${encodeURIComponent(item.estimateId)}`;
-  return `/admin/communications?phone=${encodeURIComponent(item.phone)}&action=sms#tab=sms`;
+  return `/admin/estimates?estimateId=${encodeURIComponent(item.estimateId)}`;
 }
 
 // The alert's words for a name. A name that breaks the alert rules (a typed full stop before a capital, a
@@ -317,37 +204,29 @@ function composeWords(item) {
     const action = actionWords(name);
     if (!breaksAlertRules(why) && !breaksAlertRules(action)) return { action, why, name };
   }
-  return { action: 'Call a visitor: booking not finished', why: 'A visitor started booking and did not finish', name: '' };
+  return { action: 'Call a visitor: booking not finished', why: 'A visitor opened the card step on an estimate and did not finish', name: '' };
 }
 
 function bellMetadata(item) {
   return {
     ...(item.customerId ? { customerId: item.customerId } : {}),
-    ...(item.source === SOURCE_BOOKING_PAGE ? { bookingIntentId: item.sourceId } : { checkoutEstimateId: item.sourceId }),
-    ...(item.source === SOURCE_BOOKING_PAGE && item.estimateId ? { pricingEstimateId: item.estimateId } : {}),
+    checkoutEstimateId: item.sourceId,
     source: item.source,
     service: item.service || null,
-    slotDate: item.slot?.date || null,
-    slotStart: item.slot?.start || null,
-    slotEnd: item.slot?.end || null,
     dropOffAt: item.dropOffAt.toISOString(),
-    trust: tierOf(item),
-    // A visitor with no customer on file: the Portal tab and the contact check read these.
+    // An estimate with no customer on file: the Portal tab and the contact check read these.
     ...(item.customerId ? {} : { contactName: item.name || null, contactPhone: item.phone || null }),
   };
 }
 
-// What the bell is about: the customer, else the estimate, else the intent as a lead.
+// What the bell is about: the customer, else the estimate.
 function subjectFor(item) {
-  if (item.customerId) return { type: 'customer', id: item.customerId };
-  return item.source === SOURCE_ESTIMATE_CARD ? { type: 'estimate', id: item.sourceId } : { type: 'lead', id: item.sourceId };
+  return item.customerId ? { type: 'customer', id: item.customerId } : { type: 'estimate', id: item.sourceId };
 }
 
 // Raise the one bell. Returns { id, isNew } or null when nothing was written. The default dedupe finds a row
 // with this key, open or done, so a drop-off never rings twice.
-// `quiet`: past the tier's room. The same row and key, written to the activity feed (notifyAdmin's ringGate), so it
-// is listed and handled in the Portal tab like any other but rings nothing.
-async function raiseBell(item, { quiet = false } = {}) {
+async function raiseBell(item) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const { action, why } = composeWords(item);
   const result = await raiseAdminAlert('alert', {
@@ -363,7 +242,6 @@ async function raiseBell(item, { quiet = false } = {}) {
     bell: true,
     dedupeKey: item.key,
     metadata: bellMetadata(item),
-    ...(quiet ? { ringGate: async () => false } : {}),
   });
   if (!result?.id || result.suppressed) return null;
   return { id: result.id, isNew: result.deduped === false, why, action };
@@ -371,132 +249,50 @@ async function raiseBell(item, { quiet = false } = {}) {
 
 // Phone push for an app ask (portal-ask-push.js) is added by another change; this module rings the bell alone.
 
-// Raises each drop-off's row: ringing while its tier's room for the day lasts (`room.left`), quietly past it
-// (`room.held` counts those).
-async function raiseAll(items, room) {
+async function raiseAll(items) {
   let raised = 0;
   for (const item of items) {
-    const tier = tierOf(item);
-    const quiet = room.left[tier] <= 0;
     try {
-      const done = await raiseBell(item, { quiet });
-      if (done?.isNew && quiet) room.held += 1;
-      else if (done?.isNew) {
-        raised += 1;
-        room.left[tier] -= 1;
-      }
+      const done = await raiseBell(item);
+      if (done?.isNew) raised += 1;
     } catch (err) {
-      logger.warn(`[portal-unfinished-bookings] bell for ${item.source} ${item.sourceId} not raised: ${safeError(err)}`);
+      logger.warn(`[portal-unfinished-bookings] bell for estimate ${item.sourceId} not raised: ${safeError(err)}`);
     }
   }
   return raised;
 }
 
-// Every page of one source, up to MAX_PAGES: each page's unanswered drop-offs ring before the next page is read.
-// A witness read that fails is no verdict: it throws, nothing more rings this run, and the next sweep reads again.
-async function sweepSource(source, now, conn, pageSize, room) {
-  let cursor = null;
-  let found = 0;
-  let raised = 0;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const { items, next } = await findDropOffPage(source, now, { conn, cursor, pageSize });
-    found += items.length;
-    if (items.length) raised += await raiseAll(await withoutPersonContact(items, conn), room);
-    if (!next) return { found, raised };
-    cursor = next;
-  }
-  logger.warn(`[portal-unfinished-bookings] ${source.name}: stopped after ${MAX_PAGES} pages; the next sweep reads the rest`);
-  return { found, raised };
-}
-
-// This ET day's ringing bells from this module per tier, open or done (a bell with no tier counts as unverified;
-// a quiet row past the room is not counted). The cap reads the table, so a restart cannot reset it.
-async function bellsRaisedToday(conn, now) {
-  const since = parseETDateTime(`${etDateString(now)}T00:00`);
-  const rows = await conn('notifications').where({ recipient_type: 'admin' }).where('created_at', '>=', since)
-    .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [KEY_PREFIX.length, KEY_PREFIX])
-    .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'")
-    // One expression, the constant inlined: two bound copies of the default are two parameters to Postgres, so
-    // the SELECT would not match the GROUP BY (42803).
-    .groupByRaw(TIER_SQL)
-    .select(conn.raw(`${TIER_SQL} AS tier`))
-    .count({ n: '*' });
-  const counts = { [ESTABLISHED]: 0, [UNVERIFIED]: 0 };
-  for (const row of rows) if (row.tier in counts) counts[row.tier] = Number(row.n || 0);
-  return counts;
-}
-
-// The day's one summary bell once a tier's room ran over: the extra drop-offs are on the Portal tab without a ring.
-// The words never carry a count (the first bell of the day stands).
-function burstAlertSpec(day) {
-  return {
-    area: 'Customers',
-    action: 'Check unverified booking starts',
-    why: 'More unverified booking starts than usual today; the extra ones are on the Portal tab without a ring',
-    severity: 'needs-you',
-    link: '/admin/communications#tab=portal',
-    subject: { type: 'check', id: `${BURST_KEY_PREFIX}${day}` },
-    doneWhen: 'person_checked',
-    who: 'person',
-  };
-}
-
-// Rings once a day: the first raise; a later run's raise is a plain dedupe.
-async function raiseBurstBell(now, held) {
-  const day = etDateString(now);
-  try {
-    const { raiseAdminAlert } = require('./admin-alert-compose');
-    await raiseAdminAlert('alert', burstAlertSpec(day), { bell: true, dedupeKey: `${BURST_KEY_PREFIX}${day}`, metadata: { day, heldCount: held } });
-  } catch (err) {
-    logger.warn(`[portal-unfinished-bookings] summary bell not raised: ${safeError(err)}`);
-  }
-}
-
+// Every page, up to MAX_PAGES: each page's unanswered drop-offs ring before the next page is read. A witness read
+// that fails is no verdict: it throws, nothing more rings this run, and the next sweep reads again.
 async function runPortalUnfinishedBookings({ now = new Date(), conn = db, pageSize = PAGE_SIZE } = {}) {
   if (!require('../config/feature-gates').portalBookingItemsLive?.()) return { skipped: true, reason: 'gate_off' };
   let found = 0;
   let raised = 0;
-  let room = null;
   try {
-    const today = await bellsRaisedToday(conn, now);
-    room = {
-      left: { [ESTABLISHED]: Math.max(0, MAX_BELLS_PER_DAY[ESTABLISHED] - today[ESTABLISHED]), [UNVERIFIED]: Math.max(0, MAX_BELLS_PER_DAY[UNVERIFIED] - today[UNVERIFIED]) },
-      held: 0,
-    };
-    for (const source of SOURCES) {
-      const result = await sweepSource(source, now, conn, pageSize, room);
-      found += result.found;
-      raised += result.raised;
+    let cursor = null;
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const { items, next } = await findDropOffPage(now, { conn, cursor, pageSize });
+      found += items.length;
+      if (items.length) raised += await raiseAll(await withoutPersonContact(items, conn));
+      if (!next) break;
+      if (page === MAX_PAGES - 1) logger.warn(`[portal-unfinished-bookings] stopped after ${MAX_PAGES} pages; the next sweep reads the rest`);
+      cursor = next;
     }
   } catch (err) {
     logger.warn(`[portal-unfinished-bookings] stopped, nothing more raised this run: ${safeError(err)}`);
   }
-  const held = room?.held || 0;
-  if (held) {
-    logger.warn(`[portal-unfinished-bookings] a day's room was full: ${held} drop-off(s) written without a ring`);
-    await raiseBurstBell(now, held);
-  }
   if (raised) logger.info(`[portal-unfinished-bookings] raised ${raised} bell(s) for bookings not finished`);
-  return { skipped: false, found, raised, held };
+  return { skipped: false, found, raised };
 }
 
 module.exports = {
   WINDOW_DAYS,
   QUIET_MINUTES,
   KEY_PREFIX,
-  BOOKING_KEY_PREFIX,
   CHECKOUT_KEY_PREFIX,
-  SOURCE_BOOKING_PAGE,
   SOURCE_ESTIMATE_CARD,
-  SOURCES,
-  ESTABLISHED,
-  UNVERIFIED,
-  MAX_BELLS_PER_DAY,
-  BURST_KEY_PREFIX,
-  burstAlertSpec,
   findDropOffPage,
   withoutPersonContact,
-  slotWords,
   composeWords,
   runPortalUnfinishedBookings,
 };

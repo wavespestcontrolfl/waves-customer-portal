@@ -24,17 +24,17 @@ const request = {
   requestedService: "", source: "portal", urgency: "routine", status: "new",
 };
 
-// A visitor who picked a time on the booking page and left (GATE_PORTAL_BOOKING_ITEMS): a bell, not a request.
+// A customer left the card step of an estimate our office sent (GATE_PORTAL_BOOKING_ITEMS): a bell, not a request.
 const booking = {
   kind: "booking", id: "bell-1", version: "0123456789abcdef0123456789abcdef", createdAt: "2026-10-31T15:00:00.000Z",
   customer: { id: "cust-7", firstName: "Jo", lastName: "Visitor", phone: "+19415550107", hasTexts: false },
-  source: "booking_page", service: "Mosquito Control", slot: { date: "2026-11-03", start: "13:00", end: "14:00" }, verified: false,
+  service: "Mosquito Control", estimateId: "est-7",
 };
 // An estimate card step with no customer on file: only the contact the bell carries.
 const cardStep = {
   kind: "booking", id: "bell-2", version: "fedcba9876543210fedcba9876543210", createdAt: "2026-10-30T15:00:00.000Z",
   customer: { id: null, firstName: "Sam Walkin", lastName: "", phone: "+19415550108", hasTexts: false },
-  source: "estimate_card", service: "Pest Control", slot: null, estimateId: "est-1", verified: true,
+  service: "Pest Control", estimateId: "est-1",
 };
 
 const olderChat = {
@@ -362,21 +362,16 @@ describe("Portal inbox tab", () => {
     expect(screen.queryByText(/Older than 14 days/)).not.toBeInTheDocument();
   });
 
-  it("shows a booking item with what they picked, where they left, and a link to the estimate", async () => {
+  it("shows a booking item with the service, where they left, and a link to the estimate", async () => {
     adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ items: [booking, cardStep], total: 2 }) : updated(url)));
     mount();
     const pageRow = (await screen.findByText("Jo Visitor")).closest("[data-testid]");
     expect(within(pageRow).getByText("Booking not finished")).toBeInTheDocument();
     expect(within(pageRow).getByTestId("booking-service")).toHaveTextContent("Mosquito Control");
-    expect(within(pageRow).getByTestId("booking-slot")).toHaveTextContent("They picked Tue Nov 3, 1-2 PM.");
-    expect(within(pageRow).getByTestId("booking-where")).toHaveTextContent("They left at the booking page without finishing.");
-    expect(within(pageRow).queryByRole("link", { name: "Open the estimate" })).not.toBeInTheDocument();
-    // A phone typed in on the booking page is not verified; the card step of an estimate the office sent is.
-    expect(within(pageRow).getByTestId("booking-unverified")).toHaveTextContent("The phone was typed in online and is not verified.");
+    expect(within(pageRow).getByTestId("booking-where")).toHaveTextContent("They left at the card step of an estimate without finishing.");
+    expect(within(pageRow).getByRole("link", { name: "Open the estimate" })).toHaveAttribute("href", "/admin/estimates?estimateId=est-7");
     const cardRow = screen.getByText("Sam Walkin").closest("[data-testid]");
-    expect(within(cardRow).queryByTestId("booking-unverified")).not.toBeInTheDocument();
     expect(within(cardRow).getByTestId("booking-where")).toHaveTextContent("They left at the card step of an estimate without finishing.");
-    expect(within(cardRow).queryByTestId("booking-slot")).not.toBeInTheDocument();
     expect(within(cardRow).getByRole("link", { name: "Open the estimate" })).toHaveAttribute("href", "/admin/estimates?estimateId=est-1");
     // Reply and Open customer work like the other kinds: by phone when there is no customer.
     fireEvent.click(within(cardRow).getByRole("button", { name: "Reply by text" }));
