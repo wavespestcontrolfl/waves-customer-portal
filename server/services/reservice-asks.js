@@ -290,6 +290,19 @@ async function readEmails(knex, customerId, window) {
 // booking words above.
 
 // One failed channel logs its error code and yields nothing; the rest stand.
+// A customer with more than one property: a text, a call or an email names no property, so it may be about another
+// one (a rental). Such items stay on the sheet and the office bell, but never print on this property's report (Codex
+// security review on #7502). A failed read counts as several properties.
+async function accountHasSeveralProperties(knex, customerId) {
+  try {
+    const rows = await knex('customer_properties').where({ customer_id: customerId }).select('id').limit(2);
+    return (rows || []).length > 1;
+  } catch (err) {
+    logger.warn(`[reservice-asks] property count unavailable: ${err?.code || err?.name || 'Error'}`);
+    return true;
+  }
+}
+
 async function safeChannel(name, read) {
   try {
     return await read();
@@ -353,7 +366,10 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
     safeChannel('email', () => readEmails(knex, customerId, window)),
   ]) : [];
 
-  const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean);
+  // `accountWide` (only when set): the visit's own booking words are this property's; the rest may not be.
+  const severalProperties = customerId ? await accountHasSeveralProperties(knex, customerId) : false;
+  const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean)
+    .map((item) => (severalProperties && item.id !== bookingId ? { ...item, accountWide: true } : item));
   return {
     ok: true,
     lane,

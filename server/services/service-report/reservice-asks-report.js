@@ -83,6 +83,9 @@ function shownEntries(frozen) {
     if (!answer || typeof answer !== 'object' || !ANSWER_KINDS.has(answer.answer)) continue;
     // The verdict frozen from the ORIGINAL words (reservice-asks.js buildItem), then the shown words themselves.
     if (item.officeOnly || officeOnlyReason(item.text)) continue;
+    // A message from an account with several properties may be about another one: only the visit's own booking
+    // words print on this property's report (reservice-asks.js accountHasSeveralProperties).
+    if (item.accountWide) continue;
     entries.push({ item, answer });
   }
   return entries;

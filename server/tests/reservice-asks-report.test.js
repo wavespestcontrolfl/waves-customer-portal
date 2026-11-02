@@ -101,6 +101,15 @@ describe('reserviceAsksReport builder', () => {
     expect(reserviceAsksReportApplies(service(treatedAsk), null)).toBe(true);
   });
 
+  test('an account-wide item (several properties) never prints on this property\'s report', () => {
+    on();
+    const asks = frozen([item({ accountWide: true })], { 'text:1': { answer: 'noted' } });
+    expect(buildReserviceAsksReport(service(asks), { block: BLOCK, products: PRODUCTS })).toBeNull();
+    const mixed = frozen([item({ id: 'booking:1', source: 'request_form' }), item({ id: 'text:2', accountWide: true })],
+      { 'booking:1': { answer: 'noted' }, 'text:2': { answer: 'noted' } });
+    expect(buildReserviceAsksReport(service(mixed), { block: BLOCK, products: PRODUCTS }).told.map((row) => row.label)).toEqual(['Request form · Oct 30']);
+  });
+
   test('an item frozen as office-only never shows, even when its scrubbed words read clean', () => {
     on();
     const flagged = frozen([item({ officeOnly: 'billing' })], { 'text:1': { answer: 'noted' } });
