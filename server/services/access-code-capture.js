@@ -95,7 +95,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const numbers = require('../config/twilio-numbers');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
-const { canonicalizeAddress, stripTrailingUnit, normalizeZip, unitKey, streetEmbeddedUnitKey, STREET_SUFFIX_CANON } = require('./customer-property-address-keys');
+const { stripTrailingUnit, normalizeZip, unitKey, streetEmbeddedUnitKey, STREET_SUFFIX_CANON } = require('./customer-property-address-keys');
 
 // data_hygiene_source_extractions.extractor_version is varchar(32).
 const VERSION = 'access-net-v1';
@@ -205,8 +205,15 @@ const UNIT_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite']);
 // Address words in one canonical spelling: lower case, suffixes in long form,
 // directionals short ("North" = "n"), "#5" as "unit 5".
 function addressWords(value) {
-  return canonicalizeAddress(String(value || '').replace(/#\s*(?=[A-Za-z0-9])/g, ' unit '))
-    .split(/\s+/).filter(Boolean).map((w) => DIRECTIONALS[w] || w);
+  const words = String(value || '').replace(/#\s*(?=[A-Za-z0-9])/g, ' unit ').toLowerCase().replace(/[.,#]/g, ' ')
+    .split(/\s+/).filter(Boolean);
+  // The id after a unit word is data and stays exact: "Unit LP" != "Unit Loop",
+  // "Apt E" != "Apt East", as unitKey reads the home's unit (pre-push audit, #7485).
+  return words.map((w, i) => {
+    if (UNIT_WORDS.has(words[i - 1])) return w;
+    const canon = STREET_SUFFIX_CANON[w] || w;
+    return DIRECTIONALS[canon] || canon;
+  });
 }
 
 // The street addresses a text names, for a text with no customer (so no

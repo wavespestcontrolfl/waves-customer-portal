@@ -351,6 +351,13 @@ describe('suggestedHome street parsing with the expanded suffix map', () => {
     expect(await homeFor('100 Lake Haven Dr', 'Gate code 1234 for 100 Lake Haven Dr, Parrish FL 34219')).toBe('p1');
     expect(await homeFor('100 Green Briar Ln', 'code 4321 for 100 Green Briar Lane, Parrish FL 34219')).toBe('p1');
   });
+  // Pre-push audit (#7485): the unit id after a unit word stays exact.
+  test('a unit id that looks like a suffix or a direction matches only the same unit', async () => {
+    expect(await homeFor('100 Main St Unit Loop', 'Gate code 1234 for 100 Main St Unit LP, Parrish FL 34219')).toBeNull();
+    expect(await homeFor('100 Main St Unit LP', 'Gate code 1234 for 100 Main St Unit LP, Parrish FL 34219')).toBe('p1');
+    expect(await homeFor('100 Main St Apt E', 'Gate code 1234 for 100 Main St Apt East, Parrish FL 34219')).toBeNull();
+    expect(await homeFor('100 Main St #5', 'Gate code 1234 for 100 Main Street Apt 5, Parrish FL 34219')).toBe('p1');
+  });
   test('a "Lp" street in the text matches the "Loop" home', async () => {
     expect(await homeFor('12 Sample Bay Loop', 'Gate code 1234 at 12 Sample Bay Lp, Parrish FL 34219')).toBe('p1');
   });
