@@ -34,8 +34,9 @@
  * good, so it only counts inside the matcher, next to a real review with a related name.
  *
  * Tap pause (GATE_REVIEW_TAP_PAUSE, owner 2026-11-02): tapPauseActive says a tap in the last 180 days
- * pauses AUTOMATIC asks whatever visit it answered; review-request.js reads it only where a visit
- * enrolls a cadence and where an automatic cadence sends, so staff sends by hand are untouched.
+ * pauses AUTOMATIC asks whatever visit it answered. review-request.js reads it where a visit enrolls
+ * an ask, where an automatic cadence sends, where a queued automatic ask sends (tapPauseForRequest)
+ * and before a Day-3 follow-up; staff sends by hand and a link the customer asked for are untouched.
  */
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
@@ -113,6 +114,13 @@ const REVIEW_TAP_PAUSE_DAYS = 180;
 async function tapPauseActive(customerId, database = db) {
   if (!customerId || !reviewTapPauseLive()) return false;
   return reviewLinkClickedSince(customerId, new Date(Date.now() - REVIEW_TAP_PAUSE_DAYS * 24 * 60 * 60 * 1000), database);
+}
+// A queued ask row the pause covers: an automatic one (review_requests.triggered_by, default
+// 'auto'). Staff asks (admin, tech, manual, intelligence_bar) never read the pause.
+const AUTOMATIC_ASK_TRIGGERS = new Set(['auto', 'auto_inline', 'sequence']);
+async function tapPauseForRequest(request, database = db) {
+  if (!request?.customer_id || !AUTOMATIC_ASK_TRIGGERS.has(request.triggered_by || 'auto')) return false;
+  return tapPauseActive(request.customer_id, database);
 }
 
 // Review-matcher decisions that say this customer probably wrote an unlinked live review.
@@ -200,4 +208,4 @@ async function touchSuppressedByClick(customerId, { serviceRecordId = null, sche
 
 const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, or probably already left a review, so no further review request is sent.';
 
-module.exports = { reviewLinkClickedSince, probableReviewer, tapPauseActive, REVIEW_TAP_PAUSE_DAYS, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };
+module.exports = { reviewLinkClickedSince, probableReviewer, tapPauseActive, tapPauseForRequest, REVIEW_TAP_PAUSE_DAYS, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };

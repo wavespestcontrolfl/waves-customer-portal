@@ -1841,10 +1841,10 @@ const ReviewService = {
     reportTextAnchor = null,
   }) {
     // GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, reviews audit D3): a customer who tapped a tracked
-    // review link in the last 180 days gets no automatic ask, in either mode. A failed lookup asks
-    // nothing now and reads as a passing failure, so a recovery path (the payment, the packet
-    // sweep) can try again.
-    if (triggeredBy === "auto") {
+    // review link in the last 180 days gets no automatic ask, in either mode. A link the customer
+    // asked for (completion panel) still goes. A failed lookup asks nothing now and reads as a
+    // passing failure, so a recovery path (the payment, the packet sweep) can try again.
+    if (triggeredBy === "auto" && !customerRequested) {
       let tapPaused;
       try {
         tapPaused = await ClickGuard.tapPauseActive(customerId);
@@ -2294,6 +2294,13 @@ const ReviewService = {
     if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) {
       await db("review_requests").where({ id: requestId }).update({ status: "suppressed" });
       logger.info(`[review] Suppressed request (customerId=${request.customer_id} requestId=${requestId} reason=review_link_clicked)`);
+      return { refused: "review_link_clicked" };
+    }
+    // GATE_REVIEW_TAP_PAUSE: a queued AUTOMATIC ask (one queued before the switch, or in legacy mode)
+    // stands down after a tap in the last 180 days, whatever visit it answered. Staff asks go.
+    if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.tapPauseForRequest(request)) {
+      await db("review_requests").where({ id: requestId }).update({ status: "suppressed" });
+      logger.info(`[review] Suppressed request (customerId=${request.customer_id} requestId=${requestId} reason=tap_pause)`);
       return { refused: "review_link_clicked" };
     }
     // A pending automatic ask whose combined-visit summary is parked as
@@ -4481,6 +4488,14 @@ const ReviewService = {
           if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) {
             await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
             logger.info(`[review] Follow-up suppressed (requestId=${request.id} reason=review_link_clicked)`);
+            suppressed++;
+            return;
+          }
+          // GATE_REVIEW_TAP_PAUSE: the Day-3 follow-up is an automatic text, whoever sent the first
+          // ask: a tap in the last 180 days ends it.
+          if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.tapPauseActive(request.customer_id)) {
+            await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
+            logger.info(`[review] Follow-up suppressed (requestId=${request.id} reason=tap_pause)`);
             suppressed++;
             return;
           }
@@ -7218,8 +7233,9 @@ const ReviewService = {
 
     // GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, D3): an automatic cadence stands down when the customer
     // tapped a tracked review link in the last 180 days (a tap on this cadence stopped it above). A
-    // cadence a person started keeps going. A failed lookup defers an ask step (below).
-    if (seq.started_by === "post_service") {
+    // cadence a person started, or one the customer asked for, keeps going. A failed lookup defers an
+    // ask step (below).
+    if (seq.started_by === "post_service" && !seq.customer_requested) {
       let tapPaused = false;
       try {
         tapPaused = await ClickGuard.tapPauseActive(seq.customer_id);

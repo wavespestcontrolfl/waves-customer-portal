@@ -8394,4 +8394,48 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     await ReviewService.processReviewSequences();
     expect(mock.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
   });
+
+  test('switch on: a link the customer asked for still enrolls and its cadence keeps going', async () => {
+    mockGates.reviewSequences = true;
+    mockGates.reviewTapPause = true;
+    const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion' };
+    const mock = makeMock({ customers: [{ id: 'tp-6', first_name: 'Flo', last_name: 'T', phone: '+19410000096', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-6', 39)] });
+    db.mockImplementation(mock);
+    expect((await ReviewService.enrollPostService({ customerId: 'tp-6', completedAt: new Date(), customerRequested: asked })).started).toBe(true);
+    const running = makeMock({ customers: [{ id: 'tp-7', first_name: 'Gus', last_name: 'T', phone: '+19410000097', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ ...cadence('tp-7', 'post_service'), customer_requested: JSON.stringify(asked) }], review_requests: [tapRow('tp-7', 39)] });
+    db.mockImplementation(running);
+    await ReviewService.processReviewSequences();
+    expect(running.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
+  });
+
+  test.each([
+    ['an automatic queued ask stands down', 'auto', 0, 'suppressed'],
+    ['a staff ask still goes', 'admin', 1, undefined],
+  ])('switch on, a queued ask after a tap 39 days ago: %s', async (_label, triggeredBy, sends, status) => {
+    mockGates.reviewTapPause = true;
+    const customer = { id: 'tp-8', first_name: 'Synthetic', phone: '+12025550108', nearest_location_id: 'venice' };
+    const mock = makeMock({ customers: [customer], review_requests: [tapRow('tp-8', 39), { id: 'rr-queued-tp', customer_id: customer.id,
+      status: 'pending', channel: 'sms', template_key: 'friendly_ask', location_id: 'venice', token: 'tp-token', triggered_by: triggeredBy,
+      expires_at: new Date(Date.now() + 10 * DAY), scheduled_for: new Date(Date.now() - 60000), created_at: new Date(Date.now() - DAY) }] });
+    db.mockImplementation(mock);
+    await ReviewService.sendSMS('rr-queued-tp');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(sends);
+    if (status) expect(mock.__state.rows.review_requests.find((r) => r.id === 'rr-queued-tp').status).toBe(status);
+  });
+
+  test.each([
+    ['switch on: the Day-3 follow-up of an older ask stands down after a tap 39 days ago', true, 0],
+    ['switch off: the same follow-up goes (control)', false, 1],
+  ])('%s', async (_label, on, sent) => {
+    mockGates.reviewTapPause = on;
+    const customer = { id: 'tp-9', first_name: 'Synthetic', phone: '+12025550109' };
+    const mock = makeMock({ customers: [customer], review_requests: [{ ...tapRow('tp-9', 39), followup_sent: true },
+      { id: 'legacy-tp', customer_id: customer.id, status: 'sent', followup_sent: false, sms_sent_at: new Date(Date.now() - 80 * 3600000), score: null, rated_at: null }] });
+    db.mockImplementation(mock);
+    mockRenderSmsTemplate.mockResolvedValue('Please leave a Google review: https://g.page/r/example/review');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-tp' });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(sent);
+  });
 });
