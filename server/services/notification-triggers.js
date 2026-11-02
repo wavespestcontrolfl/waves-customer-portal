@@ -1220,19 +1220,17 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
 // A registry event the bell policy just dropped: when it is a fault marked "Claude fixes this"
-// (GATE_ALERT_CLAUDE_FAULTS, services/admin-alert-routing.js), write the one row to Claude's queue, keyed like the
-// bell write so a retry dedupes, with no push (Claude's queue never pages a phone), and return the stats.
-// `policySilenced` stays true: the policy still kept it off the bell. null = not rescued, drop as before. Never throws.
-async function writeRescuedFault({ trigger, triggerKey, built, payload, safePayload, dedupeKey, onBell, pushOnly, relayFailureCall }) {
+// (GATE_ALERT_CLAUDE_FAULTS, services/admin-alert-routing.js), write its one row to Claude's queue through the same
+// bell write (`writeBell`, so it is keyed like a ring and a retry dedupes), send no push (Claude's queue never pages a
+// phone), and return the stats. `policySilenced` stays true: the policy still kept it off the bell.
+// null = not rescued, drop as before. Never throws.
+async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, writeBell, onBell, pushOnly, relayFailureCall }) {
   if (pushOnly || relayFailureCall) return null;
-  const metadata = rescueClaudeFault({ category: trigger.category, triggerKey,
-    metadata: { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload }, payload });
+  const metadata = rescueClaudeFault({ category: trigger.category, triggerKey, metadata: bellMetadata, payload });
   if (!metadata) return null;
   let bellWritten = false;
   try {
-    const created = await NotificationService.notifyAdmin(trigger.category, built.title, built.body, {
-      link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata, ...(dedupeKey ? { dedupeKey } : {}),
-    });
+    const created = await writeBell(metadata);
     bellWritten = Boolean(created && !created.suppressed);
   } catch (e) {
     logger.error(`[notification-triggers] Claude-queue fault write failed: ${e.message}`);
@@ -1354,10 +1352,47 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     } catch (err) {
       logger.warn(`[notification-triggers] bell policy check failed: ${err.message}; delivering`);
     }
+    // The one bell write, shared by a ring (the loop below) and a rescued Claude fault (writeRescuedFault): the
+    // registry's built row under the given metadata, with the caller's dedupe and refresh options.
+    const bellMetadata = { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload };
+    const writeBell = (metadata) => NotificationService.notifyAdmin(
+      trigger.category,
+      built.title,
+      built.body,
+      { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata,
+        ...(declaredCustomerAlert ? { bell: true } : {}),
+        ...(dedupeKey ? { dedupeKey } : {}),
+        // A standing thread row (sms_reply, one per customer) is rewritten
+        // in place by each new message instead of inserting another row.
+        ...(dedupeKey && refreshOnDedupe ? { refreshOnDedupe: true, ...(bumpOnRefresh ? { bumpOnRefresh: true } : {}) } : {}),
+        // Decided inside notifyAdmin's keyed lock against the row as it stands:
+        // refreshPayload(existingRow, existingPayload) -> null | { payload, keepContent }.
+        // keepContent: this emission is OLDER than what the row shows, so the
+        // row keeps its text, link and position and only its payload (the
+        // count) moves, quietly.
+        ...(dedupeKey && refreshOnDedupe && typeof refreshPayload === 'function' ? {
+          standingRefresh: async (existing, existingMeta) => {
+            const base = existingMeta?.payload || {};
+            const r = await refreshPayload(existing, base);
+            if (!r) return null;
+            if (r.keepContent) {
+              const kept = { ...base, ...r.payload };
+              const rebuilt = sanitizeBuiltNotification(trigger.build(kept), trigger);
+              return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept }, quiet: true };
+            }
+            const merged = { ...payload, ...r.payload };
+            const rebuilt = sanitizeBuiltNotification(trigger.build(merged), trigger);
+            return { title: rebuilt.title, body: rebuilt.body, link: rebuilt.link, detail: rebuilt.detail, metadata: { payload: sanitizeNotificationPayload(triggerKey, merged) } };
+          },
+        } : {}),
+        ...(shouldContinue ? { shouldContinue } : {}),
+        ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
+    );
+
     if (policySilenced) {
       // GATE_ALERT_CLAUDE_FAULTS (services/admin-alert-routing.js): a fault the registry marks "Claude fixes this" is
       // written to Claude's queue instead of the drop below: one Activity-only row, no ring, no push.
-      const rescued = await writeRescuedFault({ trigger, triggerKey, built, payload, safePayload, dedupeKey, onBell, pushOnly, relayFailureCall });
+      const rescued = await writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, writeBell, onBell, pushOnly, relayFailureCall });
       if (rescued) return rescued;
       logger.info('[bell-policy] silenced (bell + push)', { triggerKey, category: trigger.category });
       // GATE_ALERT_CATALOG=watch: this return skips NotificationService.create, so the muted record is left here,
@@ -1382,39 +1417,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           // bell policy — returns a truthy sentinel with suppressed: true) —
           // bellWritten must reflect the actual outcome, not that the call
           // returned.
-          const created = await NotificationService.notifyAdmin(
-            trigger.category,
-            built.title,
-            built.body,
-            { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload },
-              ...(declaredCustomerAlert ? { bell: true } : {}),
-              ...(dedupeKey ? { dedupeKey } : {}),
-              // A standing thread row (sms_reply, one per customer) is rewritten
-              // in place by each new message instead of inserting another row.
-              ...(dedupeKey && refreshOnDedupe ? { refreshOnDedupe: true, ...(bumpOnRefresh ? { bumpOnRefresh: true } : {}) } : {}),
-              // Decided inside notifyAdmin's keyed lock against the row as it stands:
-              // refreshPayload(existingRow, existingPayload) -> null | { payload, keepContent }.
-              // keepContent: this emission is OLDER than what the row shows, so the
-              // row keeps its text, link and position and only its payload (the
-              // count) moves, quietly.
-              ...(dedupeKey && refreshOnDedupe && typeof refreshPayload === 'function' ? {
-                standingRefresh: async (existing, existingMeta) => {
-                  const base = existingMeta?.payload || {};
-                  const r = await refreshPayload(existing, base);
-                  if (!r) return null;
-                  if (r.keepContent) {
-                    const kept = { ...base, ...r.payload };
-                    const rebuilt = sanitizeBuiltNotification(trigger.build(kept), trigger);
-                    return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept }, quiet: true };
-                  }
-                  const merged = { ...payload, ...r.payload };
-                  const rebuilt = sanitizeBuiltNotification(trigger.build(merged), trigger);
-                  return { title: rebuilt.title, body: rebuilt.body, link: rebuilt.link, detail: rebuilt.detail, metadata: { payload: sanitizeNotificationPayload(triggerKey, merged) } };
-                },
-              } : {}),
-              ...(shouldContinue ? { shouldContinue } : {}),
-              ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
-          );
+          const created = await writeBell(bellMetadata);
           if (created && !created.suppressed) bellWritten = true;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
