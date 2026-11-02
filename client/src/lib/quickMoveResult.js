@@ -67,3 +67,116 @@ export function summarizeQuickMoveResult(data, { notify, display, stopName } = {
     needsAttention, followUps,
   };
 }
+
+// ---------------------------------------------------------------------------
+// "Let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK). Both Quick Move
+// sheets hand the visit to the customer with POST .../customer-pick instead of
+// booking a time. These helpers hold what the two sheets share: who the
+// customer is, whether the option shows, and how the answer reads.
+// ---------------------------------------------------------------------------
+
+// Selection key of the single "Let {first} pick a day" row in MOVE TO.
+export const PICK_KEY = 'customer-pick';
+const NO_NAME = 'the customer';
+const CUSTOM_REASON_CODE = 'custom';
+
+const nameTokens = (full) => String(full || '').trim().split(/\s+/).filter(Boolean);
+
+// The customer's first name: the options payload first, then the sheet's props,
+// then the first word of the full name. "the customer" when nothing names them.
+export function customerFirstName(options, service) {
+  const named = [
+    // rain-out.js getOptions sends service.customerFirstName; the rest are fallbacks.
+    options?.service?.customerFirstName,
+    options?.service?.firstName, options?.customer?.firstName, options?.firstName,
+    service?.firstName, service?.first_name, service?.customer_first_name,
+  ].find((v) => typeof v === 'string' && v.trim());
+  if (named) return named.trim();
+  return nameTokens(service?.customerName || service?.customer_name)[0] || NO_NAME;
+}
+
+// The surname for the Today card heading; a one-word name stays whole.
+export function customerLastName(service) {
+  const tokens = nameTokens(service?.customerName || service?.customer_name);
+  return tokens.length > 1 ? tokens.slice(1).join(' ') : (tokens[0] || 'Customer');
+}
+
+// The payload's pick block when the option is on for this reason, else null.
+// The server only sends the block with the gate on; "Custom message" is a
+// dispatcher-written text, so it never offers a hand-off; and a reason whose
+// text cannot fit two segments has no preview, so it offers none either.
+export function usablePick(options, reason) {
+  const pick = options?.customerPick;
+  return pick?.available && reason !== CUSTOM_REASON_CODE && pick.previewByReason?.[reason] ? pick : null;
+}
+
+// The options a technician whose "Can move visits" switch is off gets when the
+// options GET answers 403 with customerPickOnly (GATE_TECH_MOVE_SWITCH): the
+// hand-off only, no day rows.
+export function pickOnlyOptions(data) {
+  return {
+    customerPickOnly: true,
+    customerPick: data.customerPick,
+    extraReasonsEnabled: !!data.extraReasonsEnabled,
+    sameDay: [],
+    days: [],
+    remainingRouteCount: 0,
+  };
+}
+
+// A GET rain-out-options answer as a sheet's first state: the options and the
+// row that starts selected. Throws the server's message on a refusal. Both
+// Quick Move sheets read the answer this one way.
+export function readOptionsAnswer(res, data) {
+  if (res.status === 403 && data.customerPickOnly) {
+    // No pick on offer: today's refusal stands ("Ask the office to move this
+    // visit."); unavailableReason is a machine code, never shown.
+    if (!data.customerPick?.available) throw new Error(data.error || 'HTTP 403');
+    return { options: pickOnlyOptions(data), selectedKey: PICK_KEY };
+  }
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  const pickOn = !!data.customerPick?.available;
+  // With the pick row on, the day rows are replaced by it.
+  const first = data.sameDay?.[0] || (pickOn ? null : data.days?.[0]);
+  if (first) return { options: data, selectedKey: `${first.kind}:${first.date}:${first.window.start}` };
+  return { options: data, selectedKey: pickOn ? PICK_KEY : null };
+}
+
+export const pickSentMessage = (first, { offRoute } = {}) => (
+  `Texted ${first} to pick a day.${offRoute ? ' Stop taken off your route.' : ''}`
+);
+export const pickNotTextedMessage = (first) => `Handed off, but ${first} was NOT texted — call them so they can pick a time.`;
+
+// One follow-up line from a needsAttention entry (a string, or an object that
+// carries its lines as `issues` or a single `issue` / `message` / `error`).
+function attentionLines(entry) {
+  if (typeof entry === 'string') return [entry];
+  if (Array.isArray(entry?.issues)) return entry.issues.map(String);
+  const one = entry?.issue || entry?.message || entry?.error;
+  return one ? [String(one)] : [];
+}
+
+// `data`  the parsed POST customer-pick response.
+// `first` the customer's first name as the sheet showed it.
+// Returns the shape the sheets already hand their parents (summary, message,
+// movedCount, notTexted …) so a parent treats a hand-off like a clean move.
+export function summarizeCustomerPickResult(data, { first, offRoute } = {}) {
+  const extra = asArray(data?.needsAttention).flatMap(attentionLines);
+  // A refused or failed text and any server-flagged attention row read the
+  // same way: the stop is handed off but the customer must be called.
+  const needsAttention = data?.textSent === false || asArray(data?.needsAttention).length > 0;
+  const message = needsAttention ? pickNotTextedMessage(first) : pickSentMessage(first, { offRoute });
+  return {
+    pick: true,
+    summary: message,
+    message,
+    needsAttention,
+    notTexted: needsAttention,
+    pickBy: data?.pickBy || null,
+    movedCount: 1,
+    failedCount: 0,
+    overlapCount: 0,
+    overlapWarnings: [],
+    followUps: extra.length ? [{ id: 'customer-pick', name: first, issues: extra }] : [],
+  };
+}

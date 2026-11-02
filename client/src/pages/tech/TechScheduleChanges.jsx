@@ -89,6 +89,25 @@ function SoonCard({ change, onDismiss, busy }) {
   );
 }
 
+// A stop Quick Move handed to the customer to pick a day (the tech app's
+// "Let {first} pick a day"). Held in the Today page's own state, so it is gone
+// after a reload; Got it clears it.
+export function HandoffCards({ cards, onDismiss }) {
+  return cards.map((card) => (
+    <article key={card.id} className="tf-card" data-testid="quick-move-handoff">
+      <div className="tf-card-top">HANDED OFF TO THE CUSTOMER</div>
+      <div className="tf-card-main">
+        <h2>{card.last}</h2>
+        {card.serviceName && <p>{card.serviceName}</p>}
+        <p className="tf-muted tf-struck">{`Was ${card.was}`}</p>
+        <p>{`Now ${card.first} picks a day by ${card.pickByLabel}`}</p>
+        <p className="tf-muted">{`Off your route. If ${card.first} doesn't pick, Auto-Dispatch books it.`}</p>
+        <div className="tf-actions"><button type="button" className="tf-button" onClick={() => onDismiss(card.id)}>Got it</button></div>
+      </div>
+    </article>
+  ));
+}
+
 // `total` is every open folded change (the server counts past the rows it
 // returns); the breakdown reads the rows on hand.
 function summaryOf(changes, total = changes.length) {
