@@ -17,7 +17,9 @@
 // under its row (an engineering digest's diagnosis may live only there); --json always has it.
 //
 // Run from the repo root. A `*` after who marks a row from an older alert whose area, who
-// and subject are inferred. Alert text names customers: do not paste it into the repo.
+// and subject are inferred. A "Customer:" line under a row names the customer it is about,
+// read from the record behind the alert, and a row the owner sent from the bell ("Send to
+// Claude") says so: its own tab works it. Alert text names customers: do not paste it into the repo.
 if (!process.env.DATABASE_PUBLIC_URL) {
   console.error('DATABASE_PUBLIC_URL is not set — run via: railway run --service Postgres node ops/agents/needs-me.js …');
   process.exit(2);
@@ -52,7 +54,8 @@ const cell = (text, width) => {
 };
 
 (async () => {
-  const result = await listNeedsMe({ who, area, limit, after });
+  // customers: true names each alert's customer (owner 2026-11-02): this script never sees the portal's gates.
+  const result = await listNeedsMe({ who, area, limit, after, customers: true });
   if (process.argv.includes('--quality')) {
     const { alertQuality } = require('./report-evidence');
     result.quality = alertQuality(result);
@@ -71,6 +74,8 @@ const cell = (text, width) => {
     }
     const row = [item.area, item.severity || '-', `${item.who}${item.derived ? '*' : ''}`, item.headline, item.why || (item.count != null ? `${item.count} open` : ''), item.link];
     console.log(row.map((text, i) => cell(text, cols[i][1])).join(' | ').trimEnd());
+    if (item.customer?.name) console.log(`    Customer: ${item.customer.name}`);
+    if (item.sent) console.log('    Sent to Claude from the bell: it has its own terminal tab.');
     if (process.argv.includes('--detail') && item.detail) console.log(item.detail.split('\n').map((l) => `    ${l}`).join('\n'));
   }
   console.log(`\n${result.items.length} shown: ${result.total} need you, ${result.unsortedTotal} unsorted. * = inferred from an older alert.`);

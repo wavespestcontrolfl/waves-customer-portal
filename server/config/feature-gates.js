@@ -9712,6 +9712,18 @@ function alertExplainerLive() {
 }
 // GATE_ALERT_EXPLAINER reader, on its own line so gate PRs never conflict.
 module.exports.alertExplainerLive = alertExplainerLive;
+
+// GATE_ALERT_SEND_TO_CLAUDE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02: "for the
+// stuff that needs to be fixed ... we need to be able to send that back to terminal, open a terminal session, to have
+// Claude fix that"; scope "All but customer contact"). On, the bell's "What to do" panel (GATE_ALERT_EXPLAINER) carries
+// a "Send to Claude" button that moves the row into Claude's queue, where the Mac launcher opens a terminal tab for it
+// (services/admin-alert-send-to-claude.js), and `needs-me` names each alert's customer. Off = no button, the send route
+// answers 404 and needs-me is as before.
+function alertSendToClaudeLive() {
+  return process.env.GATE_ALERT_SEND_TO_CLAUDE === 'true';
+}
+// GATE_ALERT_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
+module.exports.alertSendToClaudeLive = alertSendToClaudeLive;
 // GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
 module.exports.alertCatalogMode = alertCatalogMode;
 

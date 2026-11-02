@@ -8,9 +8,11 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { computeDashboardAlerts } = require('./dashboard-alerts');
 const { refsFromRow } = require('./admin-alert-relevance');
+const { customersForAlerts } = require('./admin-alert-customer');
 const { AREAS, SEVERITIES, WHO, SUBJECT_TYPES, cutAtWord, firstSentence } = require('./admin-alert-compose');
 const { legacyKindFromTitle } = require('./agent-activity');
 const { TRIGGER_REGISTRY } = require('./notification-triggers');
+const { SENT_TO_CLAUDE_CLASS } = require('./admin-alert-routing');
 
 const DEFAULT_LIMIT = 200;
 const ROW_CAP = 500; // most items one response returns
@@ -123,6 +125,9 @@ function inferredArea(row) {
   return areaFrom(AREA_BY_CATEGORY, row.category);
 }
 
+// A row the owner sent from the bell ("Send to Claude") is marked `sent`: the Mac launcher gives it its own terminal tab.
+const sentMark = (meta) => (meta.claudeQueue === SENT_TO_CLAUDE_CLASS ? { sent: true } : {});
+
 function mapAlertRow(row) {
   const meta = parseMeta(row.metadata);
   // Composed only with ALL its parts, a valid allowlisted subject included:
@@ -163,6 +168,7 @@ function mapAlertRow(row) {
     who: has.who ? meta.who : (row.category === 'ops_digest' && meta.audience === 'engineering' ? 'claude' : 'person'),
     derived: !Object.values(has).every(Boolean),
     activityOnly: meta.feed === 'activity',
+    ...sentMark(meta),
     createdAt: row.created_at,
     readAt: row.read_at || null,
     metadata: { dedupeKey: meta.dedupeKey || null, triggerKey: meta.triggerKey || null },
@@ -239,6 +245,22 @@ async function withText(page, rowsById) {
   });
 }
 
+// The returned page's alert items with the customer each is about (`customer: { id, name }`), read from the record behind
+// the alert (admin-alert-customer.js), so a terminal session can say which customer it is working on (owner 2026-11-02:
+// "if it's in the terminal, I still want to be able to say what customer is this"). Only while GATE_ALERT_SEND_TO_CLAUDE
+// is on, or when the caller asks (`customers: true`: ops/agents/needs-me.js, which runs with the database's settings
+// only and so never sees the portal's gates); otherwise the items are as before.
+async function withCustomers(page, rowsById, asked) {
+  if (asked !== true && !require('./admin-alert-send-to-claude').sendToClaudeLive()) return page;
+  const rows = page.filter((item) => item.kind === 'alert').map((item) => rowsById.get(String(item.id))).filter(Boolean);
+  if (!rows.length) return page;
+  const customers = await customersForAlerts(db, rows);
+  return page.map((item) => {
+    const customer = item.kind === 'alert' ? customers.get(String(item.id)) : null;
+    return customer ? { ...item, customer } : item;
+  });
+}
+
 // Exact: `claude` is what Claude may fix alone. `either` (Claude drafts, a person approves)
 // is its own filter and never rides along with `claude`.
 const whoMatches = (filter, who) => !filter || filter === who;
@@ -266,7 +288,7 @@ function decodeCursor(raw) {
   } catch { return null; }
 }
 
-async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
+async function listNeedsMe({ who, area, limit, role, after = null, customers = false } = {}) {
   const generatedAt = new Date();
   const rowsById = new Map();
   const warnings = [];
@@ -308,6 +330,11 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
     // The list still answers; its alerts just lack their why/detail text.
     logger.error(`[needs-me] text for the page failed: ${err.message}`);
     warnings.push({ source: 'notifications', error: 'text_unavailable' });
+  }
+  try { page = await withCustomers(page, rowsById, customers); } catch (err) {
+    // The list still answers; its alerts just lack the customer's name.
+    logger.error(`[needs-me] customer names for the page failed: ${err.message}`);
+    warnings.push({ source: 'notifications', error: 'customers_unavailable' });
   }
   return {
     generatedAt: generatedAt.toISOString(),

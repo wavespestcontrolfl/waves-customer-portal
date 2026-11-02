@@ -13,6 +13,7 @@ const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
 const { withAlertButtons, runAlertButton } = require('../services/admin-alert-buttons');
 const { explainAdminAlert, explainerLive, withExplainerFields } = require('../services/admin-alert-explainer');
+const { sendAdminAlertToClaude, sendToClaudeLive } = require('../services/admin-alert-send-to-claude');
 
 router.use(adminAuthenticate);
 
@@ -501,6 +502,27 @@ router.post('/:id/explain', requireAdmin, async (req, res, next) => {
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
     const { status, body } = await explainAdminAlert(id, { role: req.techRole, technicianId: req.technicianId });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/send-to-claude — the "Send to Claude" button in the bell's "What to do" panel
+// (GATE_ALERT_SEND_TO_CLAUDE with GATE_ALERT_EXPLAINER, admin only). `version` (required): the content version the bell
+// served for the row. Moves the row out of the bell into Claude's queue, where the Mac launcher opens a terminal tab for
+// it (services/admin-alert-send-to-claude.js). 422 for customer contact, a done row or a row already off the bell; 409
+// when the row changed since the bell read it. Sends nothing to anyone. Gate off: 404, the same as an unknown route.
+router.post('/:id/send-to-claude', requireAdmin, async (req, res, next) => {
+  try {
+    if (!explainerLive() || !sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
+    const version = req.body?.version;
+    if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
+      return res.status(400).json({ error: 'version is required' });
+    }
+    const { status, body } = await sendAdminAlertToClaude(id, {
+      version: version.toLowerCase(), by: req.technicianId, role: req.techRole, technicianId: req.technicianId,
+    });
     res.status(status).json(body);
   } catch (err) { next(err); }
 });
