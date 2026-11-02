@@ -9,7 +9,7 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
-const { flagsAccess, verifyItems, valueHash, buildPrompt, readAccessCodes, KINDS } = require('../services/access-code-capture');
+const { flagsAccess, verifyItems, valueHash, buildPrompt, readAccessCodes, KINDS, suggestedHome } = require('../services/access-code-capture');
 const { dispatchWithFallback } = require('../services/llm/call');
 
 describe('flagsAccess', () => {
@@ -336,5 +336,22 @@ describe('model read', () => {
       { kind: 'other', code: null, instructions: 'card 4111 1111 1111 1111', life: 'standing', quote: 'x' },
     ] } });
     await expect(readAccessCodes({ message: current, history, properties: [] })).rejects.toThrow('access_net_sensitive_output');
+  });
+});
+
+// codex #7485 r2: the 2026-11-02 suffix forms that often lead a street name
+// ("lake", "green") must not cut the street short, and "Lp" now reads as "Loop".
+describe('suggestedHome street parsing with the expanded suffix map', () => {
+  const homeFor = async (addressLine1, body) => {
+    const rows = [{ id: 'p1', customer_id: 'c1', address_line1: addressLine1, address_line2: null, city: 'Parrish', zip: '34219' }];
+    const q = { join: () => q, where: () => q, whereNull: () => q, whereRaw: () => q, select: async () => rows };
+    return (await suggestedHome(() => q, body)).propertyId;
+  };
+  test('a street that starts with a name-like suffix word still matches its home', async () => {
+    expect(await homeFor('100 Lake Haven Dr', 'Gate code 1234 for 100 Lake Haven Dr, Parrish FL 34219')).toBe('p1');
+    expect(await homeFor('100 Green Briar Ln', 'code 4321 for 100 Green Briar Lane, Parrish FL 34219')).toBe('p1');
+  });
+  test('a "Lp" street in the text matches the "Loop" home', async () => {
+    expect(await homeFor('12 Sample Bay Loop', 'Gate code 1234 at 12 Sample Bay Lp, Parrish FL 34219')).toBe('p1');
   });
 });
