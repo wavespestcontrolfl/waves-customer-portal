@@ -131,6 +131,12 @@ describe('replay safety', () => {
     expect(() => lib.assertOutsideRepo(undefined, REPO_ROOT)).toThrow(/outside the checkout/);
     const outside = path.join(os.tmpdir(), 'ib-replay', 'cases.json');
     expect(lib.assertOutsideRepo(outside, REPO_ROOT)).toBe(outside);
+    // A folder outside that is a symlink into the checkout does not count as outside.
+    const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-replay-checkout-'));
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-replay-elsewhere-'));
+    fs.symlinkSync(checkout, path.join(elsewhere, 'link'));
+    expect(() => lib.assertOutsideRepo(path.join(elsewhere, 'link', 'new-dir', 'cases.json'), checkout)).toThrow(/outside the checkout/);
+    expect(lib.assertOutsideRepo(path.join(elsewhere, 'cases.json'), checkout)).toBe(path.join(elsewhere, 'cases.json'));
     expect(() => exporter.parseArgs(['--out', path.join(REPO_ROOT, 'x.json')])).toThrow(/outside the checkout/);
     expect(() => exporter.parseArgs(['--out', outside, '--days', '45'])).toThrow(/--days/);
   });

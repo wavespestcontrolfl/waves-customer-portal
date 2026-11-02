@@ -154,11 +154,25 @@ function replayEnv(callerEnv, profile, { databaseUrl, apiKey = null }) {
   };
 }
 
-// Case and result files hold customer text, so they live outside the checkout.
+// The real location of a path that may not exist yet: its nearest existing
+// ancestor with symlinks resolved, plus the parts still to be created.
+function realLocation(abs) {
+  let dir = abs;
+  const rest = [];
+  while (!fs.existsSync(dir)) {
+    rest.unshift(path.basename(dir));
+    dir = path.dirname(dir);
+  }
+  return path.join(fs.realpathSync(dir), ...rest);
+}
+
+// The case file holds customer text, so case and result files live outside
+// the checkout, also when a symlinked folder points back into it.
 function assertOutsideRepo(file, repoRoot) {
   const abs = path.resolve(String(file || ''));
-  const root = path.resolve(repoRoot);
-  if (!file || abs === root || abs.startsWith(root + path.sep)) {
+  const real = file ? realLocation(abs) : '';
+  const root = fs.realpathSync(path.resolve(repoRoot));
+  if (!file || real === root || real.startsWith(root + path.sep)) {
     throw new Error(`${file || '(no path)'}: case and result files must be outside the checkout`);
   }
   return abs;
