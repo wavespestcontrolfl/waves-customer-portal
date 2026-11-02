@@ -125,6 +125,25 @@ jest.setTimeout(60000);
     expect(await officeLike.newerThreadMessageExists(database, target, { inboundOnly: true })).toBe(false);
   });
 
+  test('a historical backfill with no provider id: its own linked log twin does not block the like', async () => {
+    const convo = await thread();
+    const id = randomUUID();
+    await database('messages').insert({
+      id, conversation_id: convo.id, channel: 'sms', direction: 'inbound', body: 'Thanks!', twilio_sid: null, metadata: '{}', created_at: at(15),
+    });
+    const twin = randomUUID();
+    await database('sms_log').insert({
+      id: twin, direction: 'inbound', twilio_sid: null, message_body: 'Thanks!', customer_id: convo.customerId,
+      from_phone: PHONE, to_phone: OUR_LINE, created_at: at(15),
+    });
+    const target = await load(id);
+
+    expect(target).toMatchObject({ twilioSid: null, legacyId: twin, contactPhone: PHONE });
+    expect(await officeLike.newerThreadMessageExists(database, target)).toBe(false);
+    await logRow({ direction: 'outbound', minute: 16, sid: null });
+    expect(await officeLike.newerThreadMessageExists(database, target)).toBe(true);
+  });
+
   test('one click wins the claim, other metadata keys survive, and finishing touches only its own claim', async () => {
     const convo = await thread();
     const id = await text(convo.id, { metadata: { sms_contact_phone: PHONE } });
