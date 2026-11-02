@@ -1,8 +1,10 @@
 /**
  * POST /admin/communications/moving-link: the SMS composer's "Moving link"
- * helper (GATE_MOVING_FLOW). Same identity rule as /reservice-link: a full
- * 10-digit phone that matches the selected customer. It opens (or reuses) the
- * customer's move and answers the link; it never sends a text itself.
+ * helper (GATE_MOVING_FLOW). With a selected customer the full 10-digit phone
+ * must match it (as /reservice-link); with none (a new text opened from
+ * Customer 360 by phone) the number must belong to exactly one customer. It
+ * opens (or reuses) the customer's move and answers the link; it never sends
+ * a text itself.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -93,13 +95,17 @@ const Moves = require('../services/customer-moves');
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
 
-function wireCustomer(row) {
+// first() answers the selected-customer lookup; select() the phone lookup.
+function wireCustomer(row, phoneMatches = []) {
   db.mockImplementation((table) => {
     if (table !== 'customers') throw new Error(`unexpected table ${table}`);
     const b = {};
     b.where = jest.fn(() => b);
     b.whereNull = jest.fn(() => b);
+    b.whereRaw = jest.fn(() => b);
+    b.limit = jest.fn(() => b);
     b.first = jest.fn(async () => row);
+    b.select = jest.fn(async () => phoneMatches);
     return b;
   });
 }
@@ -149,14 +155,38 @@ describe('POST /admin/communications/moving-link', () => {
     });
   });
 
-  test('needs a full phone and a selected customer', async () => {
+  test('needs a full phone and a well-formed customer id', async () => {
     await withServer(async (baseUrl) => {
       expect((await post(baseUrl, { phone: '555', customerId: CUSTOMER_UUID })).status).toBe(400);
-      const noCustomer = await post(baseUrl, { phone: '9415551234' });
-      expect(noCustomer.status).toBe(400);
-      expect((await noCustomer.json()).error).toBe('Pick the customer first');
+      const bad = await post(baseUrl, { phone: '9415551234', customerId: 'not-a-uuid' });
+      expect(bad.status).toBe(400);
+      expect((await bad.json()).error).toBe('Pick the customer first');
       expect(Moves.openMoveForCustomer).not.toHaveBeenCalled();
     });
+  });
+
+  test('with no selected customer, a number on exactly one customer resolves to that customer', async () => {
+    wireCustomer(null, [{ id: CUSTOMER_UUID, phone: '+19415551234', first_name: 'Chris' }]);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ url: 'wvs.example/m/abc123', customerId: CUSTOMER_UUID, moveId: 'move-1', firstName: 'Chris' });
+      expect(Moves.openMoveForCustomer).toHaveBeenCalledWith(CUSTOMER_UUID, { actorId: 'admin-1' });
+    });
+  });
+
+  test('with no selected customer, an unknown or shared number makes no link', async () => {
+    wireCustomer(null, []);
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { phone: '9415551234' })).status).toBe(404);
+    });
+    wireCustomer(null, [{ id: CUSTOMER_UUID, phone: '+19415551234' }, { id: '5d1c7e2a-8b3f-4a6d-9e1c-2b7f4d8a6c3e', phone: '9415551234' }]);
+    await withServer(async (baseUrl) => {
+      const shared = await post(baseUrl, { phone: '9415551234' });
+      expect(shared.status).toBe(409);
+      expect((await shared.json()).error).toMatch(/more than one customer/);
+    });
+    expect(Moves.openMoveForCustomer).not.toHaveBeenCalled();
   });
 
   test('the phone must match the selected customer', async () => {

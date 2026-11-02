@@ -28,6 +28,7 @@ jest.mock('../models/db', () => jest.fn(() => {
 }));
 jest.mock('../services/customer-moves', () => ({
   recentMoves: jest.fn(async () => [{ id: 'move-1', status: 'open' }]),
+  textTarget: jest.fn(async () => ({ phone: '+19415550100', hasTexts: false })),
   openMoveForCustomer: jest.fn(async () => ({ id: 'move-1', status: 'open', token: 'ab'.repeat(24) })),
   movingLinkFor: jest.fn(async () => 'https://wvs.sh/m1'),
   sendMovingEmail: jest.fn(async () => ({ ok: true, sent: true, reason: null, moveId: 'move-1' })),
@@ -100,14 +101,20 @@ test('dark: the read says enabled false and both writes 404 without touching a m
   expect((await request(app()).post(`/api/admin/customers/${CUSTOMER}/moving-link`).set(ADMIN)).status).toBe(404);
   expect((await request(app()).post(`/api/admin/customers/${CUSTOMER}/moving-email`).set(ADMIN)).status).toBe(404);
   expect(Moves.recentMoves).not.toHaveBeenCalled();
+  expect(Moves.textTarget).not.toHaveBeenCalled();
   expect(Moves.openMoveForCustomer).not.toHaveBeenCalled();
   expect(Moves.sendMovingEmail).not.toHaveBeenCalled();
 });
 
-test('the read lists the latest moves', async () => {
+test('the read lists the latest moves and where "Text moving link" opens', async () => {
   const res = await request(app()).get(`/api/admin/customers/${CUSTOMER}/moves`).set(ADMIN);
-  expect(res.body).toEqual({ enabled: true, moves: [{ id: 'move-1', status: 'open' }] });
+  expect(res.body).toEqual({
+    enabled: true,
+    moves: [{ id: 'move-1', status: 'open' }],
+    text: { phone: '+19415550100', hasTexts: false },
+  });
   expect(Moves.recentMoves).toHaveBeenCalledWith(CUSTOMER, 5);
+  expect(Moves.textTarget).toHaveBeenCalledWith(CUSTOMER);
 });
 
 test('moving-link opens or reuses the move and answers its link; sends nothing', async () => {

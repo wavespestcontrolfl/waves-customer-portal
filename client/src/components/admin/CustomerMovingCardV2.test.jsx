@@ -7,7 +7,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const state = { list: { enabled: true, moves: [] }, email: { ok: true, sent: true, reason: null } };
+const state = { list: { enabled: true, moves: [], text: { phone: '+19415550100', hasTexts: true } }, email: { ok: true, sent: true, reason: null } };
 vi.mock('../../lib/adminFetch', () => ({
   adminFetch: vi.fn(async (url) => {
     if (url.endsWith('/moving-email')) return { ok: true, json: async () => state.email };
@@ -17,13 +17,13 @@ vi.mock('../../lib/adminFetch', () => ({
 }));
 
 import { adminFetch } from '../../lib/adminFetch';
-import CustomerMovingCardV2, { moveStatusText } from './CustomerMovingCardV2';
+import CustomerMovingCardV2, { moveStatusText, textHref } from './CustomerMovingCardV2';
 
 const CUSTOMER = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
 
 afterEach(() => cleanup());
 beforeEach(() => {
-  state.list = { enabled: true, moves: [] };
+  state.list = { enabled: true, moves: [], text: { phone: '+19415550100', hasTexts: true } };
   state.email = { ok: true, sent: true, reason: null };
   adminFetch.mockClear();
 });
@@ -47,6 +47,15 @@ describe('moveStatusText', () => {
   });
 });
 
+describe('textHref', () => {
+  it('opens the SMS thread when the customer has texts, else a new text to the phone', () => {
+    expect(textHref(CUSTOMER, { hasTexts: true, phone: '+19415550100' })).toBe(`/admin/communications?thread=${CUSTOMER}#tab=sms`);
+    expect(textHref(CUSTOMER, { hasTexts: false, phone: '+19415550100' })).toBe('/admin/communications?phone=%2B19415550100&action=sms#tab=sms');
+    expect(textHref(CUSTOMER, { hasTexts: false, phone: null })).toBeNull();
+    expect(textHref(CUSTOMER, null)).toBeNull();
+  });
+});
+
 describe('CustomerMovingCardV2', () => {
   it('renders nothing while the server says enabled:false', async () => {
     state.list = { enabled: false, moves: [] };
@@ -60,7 +69,17 @@ describe('CustomerMovingCardV2', () => {
     expect(await screen.findByTestId('moving-status')).toHaveTextContent('No move yet');
     expect(adminFetch).toHaveBeenCalledTimes(1);
     expect(adminFetch.mock.calls[0][0]).toBe(`/admin/customers/${CUSTOMER}/moves`);
-    expect(screen.getByRole('link', { name: 'Text moving link' })).toHaveAttribute('href', `/admin/communications?thread=${CUSTOMER}`);
+    expect(screen.getByRole('link', { name: 'Text moving link' })).toHaveAttribute('href', `/admin/communications?thread=${CUSTOMER}#tab=sms`);
+  });
+
+  it('a customer with no texts gets a new text to their phone; no phone disables the button', async () => {
+    state.list = { enabled: true, moves: [], text: { phone: '+19415550100', hasTexts: false } };
+    const { unmount } = render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+    expect(await screen.findByRole('link', { name: 'Text moving link' })).toHaveAttribute('href', '/admin/communications?phone=%2B19415550100&action=sms#tab=sms');
+    unmount();
+    state.list = { enabled: true, moves: [], text: { phone: null, hasTexts: false } };
+    render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+    expect(await screen.findByRole('button', { name: 'Text moving link' })).toBeDisabled();
   });
 
   it('Email moving link posts the email route and reports the outcome', async () => {

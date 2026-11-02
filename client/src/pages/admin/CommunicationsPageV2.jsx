@@ -2581,6 +2581,9 @@ export function SmsTab({
         }),
       });
       if (movingContextChanged()) return;
+      // A new text by phone has no selected customer: take the one the server
+      // resolved (same as the other minted links).
+      adoptResolvedOwner(d, requestCustomerId, requestRecipientKey);
       const clause = `Moving? Tell us your new address and move dates here: ${d.url}`;
       const prefill = buildMovingPrefill({ firstName: d.firstName, url: d.url });
       const prevUrl = insertedMoving?.url || null;
@@ -2600,7 +2603,7 @@ export function SmsTab({
       setInsertedMoving({
         url: d.url,
         recipientKey: requestRecipientKey,
-        customerId: requestCustomerId,
+        customerId: d.customerId || requestCustomerId,
       });
       setSendResult({ ok: true, text: "Moving link added." });
     } catch (e) {

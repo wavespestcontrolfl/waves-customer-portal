@@ -28,7 +28,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
 const { shortenOrPassthrough } = require('./short-url');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-et');
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validateAddress, STATUSES } = require('./address-validation');
 const { moveVerdictLabel } = require('./move-address-verdict');
@@ -56,12 +56,6 @@ class MoveError extends Error {
 
 function stripHtml(s) {
   return String(s || '').replace(/[<>]/g, '');
-}
-
-function isoDate(value) {
-  if (!value) return null;
-  if (value instanceof Date) return etDateString(value);
-  return String(value).slice(0, 10);
 }
 
 // "Nov 15, 2026" from an ISO date string, with no time-zone hop.
@@ -259,8 +253,11 @@ async function publicMoveView(move) {
     firstName,
     services,
     status: move.status,
-    moveOutDate: isoDate(move.move_out_date),
-    moveInDate: isoDate(move.move_in_date),
+    // DATE columns: the calendar date as stored. Never through an Eastern
+    // instant: pg parses a DATE at midnight in the process zone (UTC on
+    // Railway), and etDateString would show the day before.
+    moveOutDate: dateOnlyString(move.move_out_date) || null,
+    moveInDate: dateOnlyString(move.move_in_date) || null,
     newCity: (normalized && normalized.city) || null,
     verdict: move.address_verdict || null,
     addressOnFile: !!normalized,
@@ -331,7 +328,7 @@ function addressForSubmit(move, useCheckedAddress) {
   };
 }
 
-async function writeOfficeItem(trx, { move, subject, description }) {
+async function writeOfficeItem(trx, { move, subject, description, now }) {
   const existing = move.service_request_id
     ? await trx('service_requests').where({ id: move.service_request_id }).forUpdate().first()
     : null;
@@ -349,9 +346,14 @@ async function writeOfficeItem(trx, { move, subject, description }) {
     return row;
   }
   const reopen = REQUEST_TERMINAL_STATUSES.includes(existing.status);
+  // One request row per move, but each submit is a new customer submission:
+  // the Portal inbox ages, sorts and bulk-closes requests by created_at
+  // (portal-inbox.js listOpen / closeRequestsOlder), so the row takes the
+  // submit time. The move and activity_log keep the history.
   const [row] = await trx('service_requests').where({ id: existing.id }).update({
     subject,
     description,
+    created_at: now,
     ...(reopen
       ? { status: 'new', resolved_at: null, status_version: trx.raw('status_version + 1') }
       : {}),
@@ -379,6 +381,10 @@ async function raiseMoveAlert({ move, customer, request, normalized, hasAddress,
     subject: { type: 'customer', id: move.customer_id },
     doneWhen: 'request_answered',
     who: 'person',
+    // A customer reached us: with GATE_ADMIN_BELL_POLICY on, a plain
+    // 'service' alert is silenced; a declared contact rings
+    // (notification-bell-policy.js step 1b, GATE_CUSTOMER_ALERTS_RING).
+    contact: true,
   }, {
     detail: `Category: moving\nSubject: ${request.subject}\n\n${description}`,
     icon: '🚚',
@@ -394,6 +400,8 @@ async function raiseMoveAlert({ move, customer, request, normalized, hasAddress,
   });
   if (!notif) {
     logger.error(`[customer-moves] admin alert did not persist for move ${move.id}; the office item ${request.id} is durable`);
+  } else if (notif.suppressed) {
+    logger.warn(`[customer-moves] admin alert suppressed (${notif.reason || 'no reason'}) for move ${move.id}; the office item ${request.id} is durable`);
   }
 }
 
@@ -416,7 +424,7 @@ async function saveSubmit(move, { useCheckedAddress, moveOut, moveIn, services, 
     const hasAddress = !!address.typed;
     const description = requestDescription({ ...address, moveOut, moveIn, services });
     const subject = requestSubject(address.normalized, hasAddress);
-    const request = await writeOfficeItem(trx, { move: locked, subject, description });
+    const request = await writeOfficeItem(trx, { move: locked, subject, description, now });
     const [updated] = await trx('customer_moves').where({ id: locked.id }).update({
       typed_address: address.typed,
       normalized_address: address.normalized ? JSON.stringify(address.normalized) : null,
@@ -502,14 +510,29 @@ async function sendMovingEmail({ customerId, actorId = null }) {
   return { ok: !!(result && result.ok), sent: !!(result && result.ok), reason: result && !result.ok ? (result.reason || 'email_not_sent') : null, moveId: move.id };
 }
 
+// Where the card's "Text moving link" opens: the customer's SMS thread when
+// one exists, else a new text to their phone (PortalInboxTabV2.replyHref and
+// portal-inbox.js HAS_TEXTS_SQL pick the same way).
+async function textTarget(customerId) {
+  const row = await db('customers as c')
+    .where('c.id', customerId)
+    .first('c.phone', db.raw('EXISTS (SELECT 1 FROM sms_log sl WHERE sl.customer_id = c.id) AS has_texts'));
+  return { phone: (row && row.phone) || null, hasTexts: !!(row && row.has_texts) };
+}
+
 // The latest moves for the Customer 360 Moving card.
 async function recentMoves(customerId, limit = 5) {
-  return db('customer_moves')
+  const rows = await db('customer_moves')
     .where({ customer_id: customerId })
     .orderBy('created_at', 'desc')
     .limit(limit)
     .select('id', 'status', 'link_sent_at', 'link_channel', 'submitted_at', 'typed_address', 'normalized_address',
       'address_verdict', 'move_out_date', 'move_in_date', 'service_request_id');
+  return rows.map((row) => ({
+    ...row,
+    move_out_date: dateOnlyString(row.move_out_date) || null,
+    move_in_date: dateOnlyString(row.move_in_date) || null,
+  }));
 }
 
 module.exports = {
@@ -526,6 +549,7 @@ module.exports = {
   receiptFor,
   sendMovingEmail,
   recentMoves,
+  textTarget,
   planServiceNames,
-  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate },
+  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert },
 };

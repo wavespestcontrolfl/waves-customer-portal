@@ -2,8 +2,10 @@
  * Admin moving routes (owner 2026-11-02, dark behind GATE_MOVING_FLOW), mounted
  * under /api/admin/customers so Customer 360's Moving card can call them.
  *
- *   GET  /:id/moves         the customer's latest 5 moves. Gate off: 200
- *                           { enabled: false, moves: [] } so the card hides.
+ *   GET  /:id/moves         the customer's latest 5 moves and where "Text
+ *                           moving link" opens ({ phone, hasTexts }). Gate
+ *                           off: 200 { enabled: false, moves: [] } so the
+ *                           card hides.
  *   POST /:id/moving-link   open (or reuse) the customer's move and answer its
  *                           link { url, moveId, status }. Sends nothing.
  *   POST /:id/moving-email  email the link on this staff click { ok, sent, reason }.
@@ -46,7 +48,8 @@ router.get('/:id/moves', ...adminOnly, async (req, res) => {
   const id = String(req.params.id || '');
   if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Customer not found' });
   try {
-    return res.json({ enabled: true, moves: await Moves.recentMoves(id, 5) });
+    const [moves, text] = await Promise.all([Moves.recentMoves(id, 5), Moves.textTarget(id)]);
+    return res.json({ enabled: true, moves, text });
   } catch (err) {
     logger.error(`[admin-customer-moves] list failed: ${err.message}`);
     return res.status(500).json({ error: 'Could not load moves' });

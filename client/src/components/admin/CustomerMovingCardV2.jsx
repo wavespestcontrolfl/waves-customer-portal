@@ -59,6 +59,15 @@ export function moveStatusText(move) {
   return "Link made, not sent yet";
 }
 
+// "Text moving link": the customer's SMS thread when one exists, else a new
+// text to their phone (PortalInboxTabV2 replyHref picks the same way). The
+// composer's Quick Links "Moving link" row then makes the link.
+export function textHref(customerId, text) {
+  if (customerId && text?.hasTexts) return `/admin/communications?thread=${encodeURIComponent(customerId)}#tab=sms`;
+  if (text?.phone) return `/admin/communications?phone=${encodeURIComponent(text.phone)}&action=sms#tab=sms`;
+  return null;
+}
+
 const EMAIL_REASONS = {
   missing_email: "There is no email address on file.",
   email_opted_out: "This customer turned email off.",
@@ -68,6 +77,7 @@ const EMAIL_REASONS = {
 export default function CustomerMovingCardV2({ customerId }) {
   const [enabled, setEnabled] = useState(false);
   const [moves, setMoves] = useState([]);
+  const [text, setText] = useState(null);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
   const [manualUrl, setManualUrl] = useState("");
@@ -81,6 +91,7 @@ export default function CustomerMovingCardV2({ customerId }) {
       if (signal?.aborted) return;
       setEnabled(data.enabled === true);
       setMoves(Array.isArray(data.moves) ? data.moves : []);
+      setText(data.text || null);
     } catch {
       // The card is optional: a failed read leaves it hidden.
     }
@@ -90,6 +101,7 @@ export default function CustomerMovingCardV2({ customerId }) {
     if (!customerId) return undefined;
     setEnabled(false);
     setMoves([]);
+    setText(null);
     setNote("");
     setManualUrl("");
     const ac = new AbortController();
@@ -138,6 +150,7 @@ export default function CustomerMovingCardV2({ customerId }) {
   };
 
   if (!enabled) return null;
+  const textLink = textHref(customerId, text);
 
   return (
     <div className="mt-5" data-testid="customer-moving-card">
@@ -151,12 +164,15 @@ export default function CustomerMovingCardV2({ customerId }) {
           <Button variant="secondary" size="sm" onClick={copyLink} disabled={!!busy}>
             {busy === "copy" ? "Making link" : "Copy moving link"}
           </Button>
-          <a
-            className={buttonStyles({ variant: "secondary", size: "sm" })}
-            href={`/admin/communications?thread=${encodeURIComponent(customerId)}`}
-          >
-            Text moving link
-          </a>
+          {textLink ? (
+            <a className={buttonStyles({ variant: "secondary", size: "sm" })} href={textLink}>
+              Text moving link
+            </a>
+          ) : (
+            <Button variant="secondary" size="sm" disabled title="No phone on file">
+              Text moving link
+            </Button>
+          )}
         </div>
         {note && <div className="text-12 text-ink-secondary mt-1.5" role="status">{note}</div>}
         {manualUrl && (

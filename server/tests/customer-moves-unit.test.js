@@ -5,6 +5,10 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/admin-alert-compose', () => {
+  const actual = jest.requireActual('../services/admin-alert-compose');
+  return { ...actual, raiseAdminAlert: jest.fn(async () => ({ id: 'n1' })) };
+});
 
 const Moves = require('../services/customer-moves');
 const { cancelMoveAddressVerdict, moveVerdictLabel } = require('../services/move-address-verdict');
@@ -154,6 +158,40 @@ describe('one verdict rule for the cancel flow and the moving page', () => {
     expect(moveVerdictLabel({ status: STATUSES.VALIDATED_ACCEPT, inServiceArea: true }, STATUSES)).toBe('in_area');
     expect(moveVerdictLabel({ status: STATUSES.OUT_OF_SERVICE_AREA }, STATUSES)).toBe('out_of_area');
     expect(moveVerdictLabel({ status: STATUSES.API_UNAVAILABLE }, STATUSES)).toBe('unverified');
+  });
+});
+
+describe('the move alert and the admin bell policy', () => {
+  const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
+  const { bellAllowed } = require('../services/notification-bell-policy');
+  const env = { ...process.env };
+  afterEach(() => { process.env = { ...env }; });
+
+  async function composedMoveAlert() {
+    raiseAdminAlert.mockClear();
+    await P.raiseMoveAlert({
+      move: { id: 'move-1', customer_id: '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f' },
+      customer: { first_name: 'Pat', last_name: 'Example' },
+      request: { id: 'req-1', subject: 'Moving: Parrish' },
+      normalized: { city: 'Parrish' },
+      hasAddress: true,
+      verdict: 'in_area',
+      description: 'New address as typed: 12 Example Way, Parrish.',
+    });
+    const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
+    return { category, spec, opts, composed: composeAdminAlert(spec) };
+  }
+
+  test('a declared customer contact rings with GATE_ADMIN_BELL_POLICY and GATE_CUSTOMER_ALERTS_RING on', async () => {
+    process.env.GATE_ADMIN_BELL_POLICY = 'true';
+    process.env.GATE_CUSTOMER_ALERTS_RING = 'true';
+    const { category, opts, composed } = await composedMoveAlert();
+    expect(category).toBe('service');
+    expect(composed.metadata.contact).toBe(true);
+    const declared = { contact: composed.metadata.contact === true, promise: composed.metadata.promise === true };
+    expect(await bellAllowed({ category, options: opts, declared })).toBe(true);
+    // The same alert without the declaration is silenced by the policy.
+    expect(await bellAllowed({ category, options: opts, declared: { contact: false, promise: false } })).toBe(false);
   });
 });
 

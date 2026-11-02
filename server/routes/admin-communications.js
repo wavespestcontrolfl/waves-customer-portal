@@ -3209,12 +3209,14 @@ async function reserviceLinkHandler(req, res) {
 }
 router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
-// POST /api/admin/communications/moving-link  { customerId, phone }
-// Composer helper (owner 2026-11-02, dark behind GATE_MOVING_FLOW): the selected
-// customer's /moving/:token short link for insertion into the SMS body. Same
-// identity rule as /reservice-link: a full 10-digit phone that matches the
-// selected customer. Opens the customer's move if there is none; sends nothing
-// (the operator's own send is the only text). 404 while the gate is dark.
+// POST /api/admin/communications/moving-link  { customerId?, phone }
+// Composer helper (owner 2026-11-02, dark behind GATE_MOVING_FLOW): the
+// customer's /moving/:token short link for insertion into the SMS body. With a
+// selected customer, the full 10-digit phone must match it (as /reservice-link).
+// Without one (a new text opened from Customer 360 by phone), the number must
+// belong to exactly one customer profile; the composer adopts that customer.
+// Opens the customer's move if there is none; sends nothing (the operator's
+// own send is the only text). 404 while the gate is dark.
 async function movingLinkHandler(req, res) {
   try {
     if (!require('../config/feature-gates').movingFlowLive()) {
@@ -3225,16 +3227,28 @@ async function movingLinkHandler(req, res) {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
     }
     const customerId = req.body?.customerId;
-    if (!customerId || !UUID_RE.test(String(customerId))) {
-      return res.status(400).json({ error: 'Pick the customer first' });
-    }
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .whereNull('deleted_at')
-      .first('id', 'phone', 'first_name');
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    if (fullPhoneLast10(customer.phone) !== last10) {
-      return res.status(400).json({ error: 'phone must match the selected customer' });
+    let customer;
+    if (customerId) {
+      if (!UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'Pick the customer first' });
+      customer = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .first('id', 'phone', 'first_name');
+      if (!customer) return res.status(404).json({ error: 'Customer not found' });
+      if (fullPhoneLast10(customer.phone) !== last10) {
+        return res.status(400).json({ error: 'phone must match the selected customer' });
+      }
+    } else {
+      const matches = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .limit(2)
+        .select('id', 'phone', 'first_name');
+      if (!matches.length) return res.status(404).json({ error: 'No customer found for that number' });
+      if (matches.length > 1) {
+        return res.status(409).json({ error: 'That number is on file for more than one customer. Pick the customer from the search first' });
+      }
+      [customer] = matches;
     }
     const Moves = require('../services/customer-moves');
     const move = await Moves.openMoveForCustomer(customer.id, { actorId: req.technicianId || null });

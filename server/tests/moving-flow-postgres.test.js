@@ -268,7 +268,7 @@ maybeDescribe('moving flow (live Postgres)', () => {
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
     expect(category).toBe('service');
-    expect(spec).toMatchObject({ area: 'Customers', severity: 'needs-you', doneWhen: 'request_answered', subject: { type: 'customer', id: customerId } });
+    expect(spec).toMatchObject({ area: 'Customers', severity: 'needs-you', doneWhen: 'request_answered', subject: { type: 'customer', id: customerId }, contact: true });
     expect(opts).toMatchObject({ dedupeKey: `moving:${move.id}`, refreshOnDedupe: true });
     expect(opts.metadata).toMatchObject({ requestId: requests[0].id, customerId, moveId: move.id });
     expect(await db('activity_log').where({ customer_id: customerId, action: 'moving_submitted' }).count('* as n').first()).toEqual({ n: '1' });
@@ -342,6 +342,41 @@ maybeDescribe('moving flow (live Postgres)', () => {
     process.env.GATE_MOVING_FLOW = 'false';
     expect((await request(app).get(`/api/public/moving/${move.token}`)).status).toBe(404);
     expect((await request(app).post(`/api/public/moving/${move.token}/submit`).send({ moveOutDate: etDateString(addETDays(new Date(), 14)) })).status).toBe(404);
+  });
+
+  test('move dates keep their calendar day: a UTC-midnight DATE (Railway) and a page round trip', async () => {
+    const move = await Moves.openMoveForCustomer(customerId);
+    await Moves.submitMove(move, { moveOutDate: '2026-11-15', moveInDate: '2026-11-20' }, { now: NOW });
+    const row = await db('customer_moves').where({ id: move.id }).first();
+    // pg returns a DATE as midnight in the process zone, and Railway runs in
+    // UTC: the row pg hands back there. (Jest sandboxes process.env, so TZ
+    // cannot be switched inside the suite.)
+    const railwayRow = { ...row, move_out_date: new Date('2026-11-15T00:00:00Z'), move_in_date: new Date('2026-11-20T00:00:00Z') };
+    const view = await Moves.publicMoveView(railwayRow);
+    expect(view).toMatchObject({ moveOutDate: '2026-11-15', moveInDate: '2026-11-20' });
+    // "Add or change details" resubmits the dates the page shows: they stay put.
+    await Moves.submitMove(row, { moveOutDate: view.moveOutDate, moveInDate: view.moveInDate }, { now: NOW });
+    const again = await db('customer_moves').where({ id: move.id }).first();
+    expect(await Moves.publicMoveView(again)).toMatchObject({ moveOutDate: '2026-11-15', moveInDate: '2026-11-20' });
+    const [listed] = await Moves.recentMoves(customerId, 1);
+    expect(listed).toMatchObject({ move_out_date: '2026-11-15', move_in_date: '2026-11-20' });
+  });
+
+  test('a resubmit makes the one office item fresh for the Portal inbox', async () => {
+    const move = await Moves.openMoveForCustomer(customerId);
+    const first = await Moves.submitMove(move, { moveOutDate: '2026-11-15' }, { now: NOW });
+    // Weeks later the item is old work: the inbox ages and bulk-closes by created_at.
+    await db('service_requests').where({ id: first.request.id }).update({ created_at: new Date('2026-10-01T12:00:00Z') });
+    const later = new Date('2026-11-03T15:00:00Z');
+    const second = await Moves.submitMove(first.move, { moveOutDate: '2026-11-15', moveInDate: '2026-11-20' }, { now: later });
+    expect(second.request.id).toBe(first.request.id);
+    const row = await db('service_requests').where({ id: first.request.id }).first();
+    expect(new Date(row.created_at).toISOString()).toBe(later.toISOString());
+    expect(await db('service_requests').where({ customer_id: customerId }).count('* as n').first()).toEqual({ n: '1' });
+  });
+
+  test('the card learns where "Text moving link" opens', async () => {
+    expect(await Moves.textTarget(customerId)).toMatchObject({ hasTexts: false });
   });
 
   test('the token is 24 random bytes in hex', () => {
