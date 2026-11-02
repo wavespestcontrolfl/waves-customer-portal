@@ -190,6 +190,7 @@
  *   GATE_UNASSIGNED_VISIT_GUARD=true (owner 2026-10-25, second technician starts early 2027: an office visit must not silently land with no technician. On, the office create modal's "Auto" technician choice picks a real technician: the one technician assignable that day (active, field-dispatchable, not off that day or absent, not Off for the service category), or, when several qualify, the existing scheduling pick when that is active; otherwise the visit is saved unassigned and the response and modal say so (the old tech-matcher path never existed, so Auto always saved it unassigned). A daily 6:10 PM ET check also reports timed visits tomorrow through 3 days out that have no technician as one standing Schedule bell (rings when a new visit joins, clears at zero). Strict opt-in: exactly 'true', read at call time via unassignedVisitGuardLive(). Ships DARK; off = Auto behaves exactly as before and the check does nothing, no query. Sends nothing to a customer.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
+ *   GATE_SMS_LIKE=true (owner 2026-11-02, "SMS Like Button" option B: Messages and the customer thread show a like button under the customer's newest text when nothing came after it; a click texts a thumbs-up back through the composer's own send (every consent, opt-out and line check) and marks the text with who liked it and when; customer likes on our texts show as a badge on that text instead of their own bubble. It texts customers, so the owner flips it. Read at call time via smsLikeLive(); off = no button, no badges, POST /messages/:id/like answers 404)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
@@ -4699,6 +4700,8 @@ const gates = {
   // byte-identical to before. Read at CALL time via homeLineLive(); this
   // entry is for logGateStatus.
   homeLine: process.env.GATE_HOME_LINE === 'true',
+  // GATE_SMS_LIKE: read at CALL time via smsLikeLive(); this entry is for logGateStatus.
+  smsLike: process.env.GATE_SMS_LIKE === 'true',
 
   // Tech open-visit nudge (owner ask 2026-09-28: "just do an afternoon
   // nudge, at 7 pm" — ~1/3 of visits a week sit open past their day because
@@ -7759,6 +7762,13 @@ function homeLineLive() {
   return process.env.GATE_HOME_LINE === 'true';
 }
 
+// GATE_SMS_LIKE read at CALL time — strict `=== 'true'`. The office's like on
+// a customer text and customer-like badges (services/sms-office-like.js); the
+// `smsLike` gates-map entry above is for logGateStatus only.
+function smsLikeLive() {
+  return process.env.GATE_SMS_LIKE === 'true';
+}
+
 // GATE_SMS_LINK_WRAP read at CALL time — strict `=== 'true'`, same convention
 // as visitPrepPhotosLive(). The canonical reader for the sendCustomerMessage
 // choke point's portal-link wrap (services/messaging/sms-link-wrap.js). Off =
@@ -9006,6 +9016,7 @@ module.exports.payerInvoiceSmsLive = payerInvoiceSmsLive;
 module.exports.knownGateCatalog = knownGateCatalog;
 // GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE reader, on its own line so gate PRs never conflict.
 module.exports.estimateFollowupEmailReplyPauseLive = estimateFollowupEmailReplyPauseLive;
+module.exports.smsLikeLive = smsLikeLive;
 
 // GATE_SOCIAL_STUDIO_SKIP_META read at CALL time (so a flip needs no redeploy); strict 'true'.
 // Owner 2026-11-01 "studio trim": the autonomous Social Studio stops drafting and posting to

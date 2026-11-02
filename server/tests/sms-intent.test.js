@@ -1,4 +1,4 @@
-const { hasSchedulingIntent, isSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
+const { hasSchedulingIntent, isSmsReaction, customerLikeReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 
 describe('SMS intent helpers', () => {
   test('detects scheduling changes and schedule lookups', () => {
@@ -329,5 +329,39 @@ describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', (
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/twilio-webhook.js'), 'utf8');
     expect(src.match(/\.\.\.courtesyTailMetadata/g)).toHaveLength(2);
     expect(src).toContain("courtesyTailShadowMetadata('shadow',");
+  });
+});
+
+// GATE_SMS_LIKE badge extra (owner 2026-11-02): only the like family becomes a
+// badge on our quoted text; every other reaction stays a bubble (null).
+describe('customerLikeReaction — the like family, with the text it quotes', () => {
+  const THUMB = '\u{1F44D}';
+  const HEART = '\u2764\ufe0f';
+  test.each([
+    ['iPhone Liked', 'Liked \u201cSee you Tuesday\u201d', { emoji: THUMB, removed: false, target: 'See you Tuesday' }],
+    ['iPhone Loved, straight quotes', 'Loved "Thanks for the update"', { emoji: HEART, removed: false, target: 'Thanks for the update' }],
+    ['a removed like', 'Removed a like from \u201cSee you Tuesday\u201d', { emoji: THUMB, removed: true, target: 'See you Tuesday' }],
+    ['a removed heart', 'Removed a heart from "OK"', { emoji: HEART, removed: true, target: 'OK' }],
+    ['iOS 18 emoji tapback', 'Reacted \u{1F64F} to \u201cYour technician is on the way\u201d', { emoji: '\u{1F64F}', removed: false, target: 'Your technician is on the way' }],
+    ['a removed emoji tapback', 'Removed \u{1F44D}\u{1F3FD} from \u201cDone\u201d', { emoji: '\u{1F44D}\u{1F3FD}', removed: true, target: 'Done' }],
+    ['Android: zero-width padding, spaces inside the quote', '\u200b\u{1F44D}\u200b to \u201c Your technician is on the way \u201d', { emoji: THUMB, removed: false, target: 'Your technician is on the way' }],
+    ['a multi-line quoted template', 'Liked \u201cSee you at 4:00 PM.\n\nReschedule here: https://x.co/r\u201d', { emoji: THUMB, removed: false, target: 'See you at 4:00 PM.\n\nReschedule here: https://x.co/r' }],
+  ])('%s', (_label, body, expected) => {
+    expect(customerLikeReaction(body)).toEqual(expected);
+  });
+
+  test.each([
+    ['a question mark', 'Questioned \u201cDoes 9 AM work?\u201d'],
+    ['a dislike', 'Disliked "Your balance is $80"'],
+    ['a laugh', 'Laughed at \u201cWe found the leak\u201d'],
+    ['an emphasis', 'Emphasized \u201cGate code please\u201d'],
+    ['a removed question mark', 'Removed a question mark from "Does 9 AM work?"'],
+    ['a non-acknowledgement emoji', 'Reacted \u2753 to \u201cDoes 9 AM work?\u201d'],
+    ['an image target', 'Liked an image'],
+    ['a reaction followed by a real ask', 'Liked \u201cSee you Tuesday\u201d Actually can we do Friday?'],
+    ['plain text', 'Thanks, see you Tuesday!'],
+    ['an empty body', ''],
+  ])('%s is not a like (stays a bubble)', (_label, body) => {
+    expect(customerLikeReaction(body)).toBeNull();
   });
 });
