@@ -14,6 +14,7 @@ import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../utils/api';
 import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
+import { parseServiceParam } from '../lib/booking-service-param';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -119,7 +120,12 @@ export default function PublicBookingPage() {
   useGlassSurface(true);
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
-  const serviceParam = searchParams.get('service') || 'pest_control';
+  // No ?service= at all (bare /book) keeps the Pest Control default. A param
+  // that IS present is read through the website-name aliases; if no part maps
+  // to a catalog service the page asks instead of silently booking Pest
+  // Control (a mosquito lead was shown Pest Control, and could not change it
+  // on an estimate link).
+  const serviceParam = searchParams.get('service');
   const quotedServiceLabel = (searchParams.get('service_label') || '').trim().slice(0, 120);
   // Quote→book handoff: the estimate this booking came from + its server-trusted
   // token. Passed through to /booking/confirm, which verifies the token before
@@ -142,10 +148,12 @@ export default function PublicBookingPage() {
   const tokenEntry = !!(estimateTokenParam || acceptTokenParam);
   // ?service= may be a composite id from a multi-service recovery link
   // (a+b+c) — parse every valid component; unknown parts drop.
-  const initialServiceIds = [...new Set(serviceParam.split('+')
-    .map((id) => id.trim())
-    .filter((id) => SERVICES.some((s) => s.id === id)))];
-  const initialService = SERVICES.find(s => s.id === initialServiceIds[0]) || SERVICES[0];
+  const initialServiceIds = serviceParam === null
+    ? [SERVICES[0].id]
+    : parseServiceParam(serviceParam, SERVICES.map((s) => s.id));
+  // The link named a service we cannot read: start with nothing selected and
+  // show the chips (all entries, token links included) until one is picked.
+  const serviceUnreadable = initialServiceIds.length === 0;
   const isEmbedded = window !== window.parent;
 
   // Post height updates to parent when embedded in an iframe
@@ -225,14 +233,12 @@ export default function PublicBookingPage() {
     return () => { cancelled = true; };
   }, []);
 
-  const [step, setStep] = useState(1);
+  const [stepState, setStep] = useState(1);
   // Selected service ids, anchor first (the query-param service). The
   // rendered `service` object is derived: single selection = the catalog
   // entry unchanged; multi = composite id (sorted, '+'-joined — mirrors
   // the server's canonical key), joined label, summed duration.
-  const [selectedServiceIds, setSelectedServiceIds] = useState(
-    initialServiceIds.length ? initialServiceIds.slice(0, 3) : [initialService.id]
-  );
+  const [selectedServiceIds, setSelectedServiceIds] = useState(initialServiceIds);
   const selectedServices = selectedServiceIds
     .map((id) => SERVICES.find((s) => s.id === id))
     .filter(Boolean);
@@ -247,12 +253,19 @@ export default function PublicBookingPage() {
         duration: selectedServices.reduce((sum, s) => sum + s.duration, 0),
         icon: selectedServices[0].icon,
       }
-      : (selectedServices[0] || initialService)
+      : (selectedServices[0] || null)
     // Keyed on the joined id string deliberately — the arrays are rebuilt
     // each render; the string is the stable identity.
   ), [selectedServiceIds.join('+')]);
+  // No service picked yet (unreadable ?service=) pins the wizard to step 1:
+  // availability, slot search, capture and confirm all need a service.
+  const step = service ? stepState : 1;
+  // One service at a time when the link is token-bound, carries a quoted
+  // label, or the multi-service gate is off; otherwise up to 3.
+  const singleSelect = tokenEntry || !!quotedServiceLabel || !multiServiceEnabled;
   const toggleService = (id) => {
     setSelectedServiceIds((prev) => {
+      if (singleSelect) return [id];
       if (prev.includes(id)) {
         // The anchor (first selection) can't be removed below one service.
         const next = prev.filter((x) => x !== id);
@@ -517,7 +530,7 @@ export default function PublicBookingPage() {
     // crafted /book?source=<email-or-token> can't send raw PII as a property.
     const KNOWN_SOURCES = new Set(['direct', 'marketing-site', 'estimate-accept', 'quote-wizard', 'quote-wizard-onetime', 'newsletter-quiz', 'admin-manual-booking-resend']);
     const safeSource = KNOWN_SOURCES.has(source) ? source : 'other';
-    track(FUNNEL_EVENTS.BOOKING_VIEWED, { source: safeSource, service: service.id });
+    track(FUNNEL_EVENTS.BOOKING_VIEWED, { source: safeSource, service: service?.id || 'unselected' });
     // Deliberately fires once on mount (funnel-top event).
   }, []);
 
@@ -560,7 +573,7 @@ export default function PublicBookingPage() {
   // bail before confirming. keepalive so it survives the tab closing right after.
   const captureBookingIntent = () => {
     const digits = phoneDigits(contact.phone);
-    if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current) return;
+    if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current || !service) return;
     if (preferredSubmittedRef.current) return;
     try {
       fetch(`${API_BASE}/booking/capture-intent`, {
@@ -609,7 +622,7 @@ export default function PublicBookingPage() {
   useEffect(() => {
     if (phoneDigits(contact.phone).length === 10 && selectedSlot) captureBookingIntent();
     // Deliberately keyed on slot/service/address identity, not the callback.
-  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
+  }, [selectedSlot?.start_time, selectedDate, service?.id, address.line1, address.line2]);
 
   // Cadence: a bundle that includes Pest Control is a PEST-family series
   // regardless of chip order (mosquito-first + pest must still seed the
@@ -892,7 +905,7 @@ export default function PublicBookingPage() {
     || (searchResult?.days || []).find((d) => d.date === selectedDate)
   )?.fullDate;
   // Slot length follows the service (60 → "1-hour", else "<n>-minute").
-  const slotLenLabel = service.duration === 60 ? '1-hour' : `${service.duration}-minute`;
+  const slotLenLabel = service?.duration === 60 ? '1-hour' : `${service?.duration}-minute`;
   // A pending custom-date lookup will replace the picker (and clear the
   // selection) when it lands — Continue waits for it.
   const continueDisabled = !selectedSlot || browseLoading || aiSearching;
@@ -1062,10 +1075,15 @@ export default function PublicBookingPage() {
             <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h1>
-            {multiServiceEnabled && !quotedServiceLabel && !tokenEntry && (
+            {((multiServiceEnabled && !quotedServiceLabel && !tokenEntry) || serviceUnreadable) && (
               <div style={{ marginTop: 18 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8 }}>
-                  What can we help with? <span style={{ fontWeight: 400, color: '#475569' }}>Pick up to 3 — one visit, one arrival window.</span>
+                  What can we help with?{' '}
+                  <span style={{ fontWeight: 400, color: '#475569' }}>
+                    {!selectedServices.length
+                      ? 'Pick your service.'
+                      : singleSelect ? '' : 'Pick up to 3 — one visit, one arrival window.'}
+                  </span>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   {SERVICES.map((s) => {
@@ -1161,8 +1179,8 @@ export default function PublicBookingPage() {
             <div style={{ display: 'flex', gap: 10 }}>
               <Button
                 variant="primary"
-                onClick={() => { track(FUNNEL_EVENTS.BOOKING_SERVICE_SELECTED, { service: service.id }); setStep(2); }}
-                disabled={!address.line1}
+                onClick={() => { if (!service) return; track(FUNNEL_EVENTS.BOOKING_SERVICE_SELECTED, { service: service.id }); setStep(2); }}
+                disabled={!address.line1 || !service}
                 data-glass-accent=""
                 style={{ width: '100%', color: COLORS.glassNavy }}
               >
