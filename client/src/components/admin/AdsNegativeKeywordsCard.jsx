@@ -134,7 +134,23 @@ function PendingItem({ item, highlighted, itemRef, busy, message, onDecide }) {
 function NegativeKeywordsCard({ highlightId }) {
   const [phase, setPhase] = useState("loading"); // loading | off | error | ready
   const [data, setData] = useState(null);
-  const [busyKey, setBusyKey] = useState("");
+  // Every action in flight, by key: each control stays disabled until its own request and reload finish,
+  // whatever else starts or ends meanwhile.
+  const [busyKeys, setBusyKeys] = useState(() => new Set());
+  const isBusy = (key) => busyKeys.has(key);
+  // The same keys, read and written synchronously: a second click that lands before the re-render (the button
+  // still enabled) starts nothing.
+  const inFlight = useRef(new Set());
+  const setBusy = (key, on) => {
+    if (on) inFlight.current.add(key);
+    else inFlight.current.delete(key);
+    setBusyKeys((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  };
   const [messages, setMessages] = useState({});
   const [wordText, setWordText] = useState("");
   const [wordError, setWordError] = useState("");
@@ -184,13 +200,17 @@ function NegativeKeywordsCard({ highlightId }) {
   // Runs one request: marks the key busy, shows a failure message under `id`,
   // reloads the card, and returns the response.
   async function run(key, id, path, body, fallback, { reloadOnFail = false } = {}) {
-    setBusyKey(key);
+    if (inFlight.current.has(key)) return null;
+    setBusy(key, true);
     setMessage(id, "");
-    const res = await request(path, { method: "POST", body });
-    if (!res.ok) setMessage(id, failText(res, fallback));
-    if (res.ok || reloadOnFail) await load();
-    setBusyKey("");
-    return res;
+    try {
+      const res = await request(path, { method: "POST", body });
+      if (!res.ok) setMessage(id, failText(res, fallback));
+      if (res.ok || reloadOnFail) await load();
+      return res;
+    } finally {
+      setBusy(key, false);
+    }
   }
 
   const decide = (item, decision) =>
@@ -208,17 +228,20 @@ function NegativeKeywordsCard({ highlightId }) {
   async function addWord(event) {
     event.preventDefault();
     const text = wordText.trim();
-    if (!text) return;
-    setBusyKey("new-word");
+    if (!text || inFlight.current.has("new-word")) return;
+    setBusy("new-word", true);
     setWordError("");
-    const res = await request("/words", { method: "POST", body: { text } });
-    if (res.ok) {
-      setWordText("");
-      await load();
-    } else {
-      setWordError(failText(res, "Could not add that word. Try again."));
+    try {
+      const res = await request("/words", { method: "POST", body: { text } });
+      if (res.ok) {
+        setWordText("");
+        await load();
+      } else {
+        setWordError(failText(res, "Could not add that word. Try again."));
+      }
+    } finally {
+      setBusy("new-word", false);
     }
-    setBusyKey("");
   }
 
   if (phase === "off" || phase === "loading") return null;
@@ -262,7 +285,7 @@ function NegativeKeywordsCard({ highlightId }) {
                   if (el) itemRefs.current[item.id] = el;
                   else delete itemRefs.current[item.id];
                 }}
-                busy={busyKey === item.id}
+                busy={isBusy(item.id)}
                 message={messages[item.id]}
                 onDecide={decide}
               />
@@ -289,7 +312,7 @@ function NegativeKeywordsCard({ highlightId }) {
                     <Button
                       variant="ghost"
                       size="sm"
-                      disabled={busyKey === key}
+                      disabled={isBusy(key)}
                       aria-label={`Remove “${word.text}”`}
                       onClick={() => removeWord(word)}
                     >
@@ -306,11 +329,11 @@ function NegativeKeywordsCard({ highlightId }) {
               <Input
                 value={wordText}
                 onChange={(e) => setWordText(e.target.value)}
-                disabled={busyKey === "new-word"}
+                disabled={isBusy("new-word")}
                 maxLength={80}
               />
             </Field>
-            <Button type="submit" disabled={busyKey === "new-word" || !wordText.trim()}>
+            <Button type="submit" disabled={isBusy("new-word") || !wordText.trim()}>
               Add
             </Button>
           </form>
@@ -358,7 +381,7 @@ function NegativeKeywordsCard({ highlightId }) {
                           <Button
                             variant="secondary"
                             size="sm"
-                            disabled={busyKey === row.id}
+                            disabled={isBusy(row.id)}
                             aria-label={`Undo “${row.text}”`}
                             onClick={() => undo(row)}
                           >

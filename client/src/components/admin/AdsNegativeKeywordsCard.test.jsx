@@ -151,6 +151,35 @@ describe('AdsNegativeKeywordsCard', () => {
     expect(screen.getByRole('button', { name: 'Add “free”' })).not.toBeDisabled();
   });
 
+  it('keeps each word busy until its own request ends, whatever else runs meanwhile', async () => {
+    const release = {};
+    const refusal = () => new Response(JSON.stringify({ error: 'decided', message: 'This word was already decided.' }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+    route({
+      'GET /admin/ads/negatives': () => json(payload()),
+      [`POST /admin/ads/negatives/${ID_A}/decide`]: () => new Promise((resolve) => { release.a = () => resolve(refusal()); }),
+      [`POST /admin/ads/negatives/${ID_B}/decide`]: () => new Promise((resolve) => { release.b = () => resolve(refusal()); }),
+    });
+    renderCard();
+    const addA = await screen.findByRole('button', { name: 'Add “free”' });
+    fireEvent.click(addA);
+    await waitFor(() => expect(addA).toBeDisabled());
+    // A second click on the same word while it runs starts nothing.
+    fireEvent.click(addA);
+    fireEvent.click(screen.getByRole('button', { name: 'Decline “diy”' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Decline “diy”' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Add “free”' })).toBeDisabled();
+    expect(posts()).toHaveLength(2);
+
+    release.b();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Decline “diy”' })).not.toBeDisabled());
+    // The first word's request is still running: its buttons stay off.
+    expect(screen.getByRole('button', { name: 'Add “free”' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Decline “free”' })).toBeDisabled();
+
+    release.a();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add “free”' })).not.toBeDisabled());
+  });
+
   it('shows the word list states and removes a word', async () => {
     let loads = 0;
     route({
