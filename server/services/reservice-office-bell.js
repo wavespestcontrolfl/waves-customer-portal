@@ -97,6 +97,10 @@ const notTodayWords = (reason) => {
   const { redactedWords } = require('./admin-alert-names');
   return reason ? redactedWords(reason) : '';
 };
+// A sentence ends once: "Office to book it." never becomes "Office to book it..".
+const endSentence = (text) => (/[.?!…]["”')\]]?$/.test(text) ? text : `${text}.`);
+// Customer words in quotation marks, then the sentence's end: “Ants are back.” takes no second period.
+const quotedEnd = (words) => (words ? ` “${words}”${/[.?!…]$/.test(words) ? '' : '.'}` : '.');
 
 // The why covers the first row and counts the rest. One sentence, 110 characters.
 function whyFor(first, more) {
@@ -110,7 +114,9 @@ function whyFor(first, more) {
     const deferred = first.notToday ? ', not done today' : '';
     return cutAtWord(`${who}${day ? ` on ${day}` : ''} is about ${topic}${deferred}; read it in full${tail}.`, MAX_WHY_CHARS);
   }
-  const reason = notTodayWords(first.notToday.reason);
+  // The tech may write two sentences; the why holds one (docs/admin-notifications.md section 3), the detail keeps all.
+  const { firstSentence } = require('./admin-alert-compose');
+  const reason = notTodayWords(firstSentence(first.notToday.reason || '')).replace(/[.?!…]+$/, '');
   const lead = 'Not done today: ';
   const because = reason ? ` — ${cutAtWord(reason, REASON_ROOM)}` : '';
   const quote = redactedWords(first.entry.words);
@@ -121,13 +127,13 @@ function detailLine({ entry, office, notToday }) {
   const { redactedWords } = require('./admin-alert-names');
   const words = entry.words ? redactedWords(entry.words) : '';
   const reason = notToday ? notTodayWords(notToday.reason) : '';
-  const deferred = notToday ? `${reason ? ` Tech's reason: ${reason}.` : ' The tech gave no reason.'}` : '';
+  const deferred = notToday ? `${reason ? ` Tech's reason: ${endSentence(reason)}` : ' The tech gave no reason.'}` : '';
   if (office) {
     const topic = TOPIC[office] || 'something for the office';
     return `Office only${notToday ? ', not done today' : ''}: ${channelDay(entry)} about ${topic}. Read the whole message; it is not on the report.`
-      + `${words ? ` The pest part: “${words}”.` : ''}${deferred}`;
+      + `${words ? ` The pest part:${quotedEnd(words)}` : ''}${deferred}`;
   }
-  return `Not done today: ${channelDay(entry)}${words ? ` “${words}”` : ''}.${deferred}`;
+  return `Not done today: ${channelDay(entry)}${quotedEnd(words)}${deferred}`;
 }
 
 /**
@@ -161,7 +167,11 @@ async function raiseReserviceOfficeBell({ freeze, customer, scheduledServiceId, 
       action,
       why: whyFor(rows[0], rows.length - 1),
       severity: 'needs-you',
-      link: visitLink(scheduledServiceId, scheduledDate),
+      // A visit to follow up opens the visit; office-only messages alone open the customer's messages, where the
+      // whole text is (the report and this row carry only the pest words).
+      link: area === 'Schedule' || !customer?.id
+        ? visitLink(scheduledServiceId, scheduledDate)
+        : `/admin/communications?thread=${encodeURIComponent(customer.id)}`,
       subject: { type: 'visit', id: String(scheduledServiceId) },
       doneWhen: 'visit_checked',
       who: 'person',

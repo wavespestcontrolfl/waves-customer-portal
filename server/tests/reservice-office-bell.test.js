@@ -117,6 +117,33 @@ describe('raiseReserviceOfficeBell', () => {
     expect(opts.metadata.area).toBe('Customers');
     expect(opts.detail).toBe('Office only: a call on Nov 2 about damage to their things. Read the whole message; it is not on the report.');
     expect(opts.metadata.itemIds).toEqual(['a']);
+    // The whole message is in the customer's messages, not on the visit: the row opens their thread.
+    expect(opts.link).toBe(`/admin/communications?thread=${CUSTOMER.id}`);
+  });
+
+  test('a two-sentence reason: the why keeps its first sentence (one-sentence rule), the detail keeps it all', async () => {
+    await raise(freezeOf([item('a')], { a: { answer: 'not_today' } }, { a: 'Needs a soil sample first. Office to book it.' }));
+
+    const { why, opts } = sent();
+    expect(why).toBe('Not done today: “Ants in the kitchen” — Needs a soil sample first');
+    expect(opts.metadata.ruleViolations).toBeUndefined();
+    expect(opts.detail).toBe('Not done today: a text on Nov 2 “Ants in the kitchen”. Tech\'s reason: Needs a soil sample first. Office to book it.');
+    expect(opts.link).toMatch(/^\/admin\/dispatch\?/);
+  });
+
+  test('a sentence ends once: no double period after a reason or a quote that already ends one', async () => {
+    await raise(freezeOf(
+      [item('a', { text: 'Ants are back.' }), item('b', { officeOnly: 'billing', text: 'Ants are back.' })],
+      { a: { answer: 'not_today' }, b: { answer: 'not_today' } },
+      { a: 'Office to call her.', b: 'Gate locked' },
+    ));
+
+    const lines = sent().opts.detail.split('\n');
+    expect(lines).toEqual([
+      'Office only, not done today: a text on Nov 2 about money (a charge or refund). Read the whole message; it is not on the report. The pest part: “Ants are back.” Tech\'s reason: Gate locked.',
+      'Not done today: a text on Nov 2 “Ants are back.” Tech\'s reason: Office to call her.',
+    ]);
+    expect(lines.join(' ')).not.toMatch(/\.\.|”\./);
   });
 
   test.each([
