@@ -177,9 +177,12 @@ test('no server code sends an internal alert text without allowOwnerSms, whateve
   expect(offenders).toEqual(['services/scheduler.js']);
 });
 
-test('the shipped ring picks: the three money alerts and two customer contacts ring, every other kind is quiet', () => {
+test('the shipped ring picks: the three money alerts and the customer contacts ring, every other kind is quiet', () => {
   // Owner 2026-11-02: a charge Stripe took that our records miss, a retry that will charge again, an autopay
-  // result nobody knows; and, by the 08-28 ruling, a low satisfaction rating and a web lead whose own bell failed.
-  expect(SHIPPED_RINGING_KINDS).toEqual(['autopay-outcome-unknown', 'charge-unrecorded', 'charge-will-repeat', 'low-rating', 'web-lead']);
+  // result nobody knows; and, by the 08-28 ruling, a low satisfaction rating, a web lead whose own bell failed
+  // and a promotion tap.
+  expect(SHIPPED_RINGING_KINDS).toEqual([
+    'autopay-outcome-unknown', 'charge-unrecorded', 'charge-will-repeat', 'low-rating', 'promotion-interest', 'web-lead',
+  ]);
   for (const kind of SHIPPED_RINGING_KINDS) expect(OWNER_ALERT_KINDS[kind]).toMatchObject({ severity: 'needs-you' });
 });

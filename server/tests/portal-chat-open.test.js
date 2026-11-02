@@ -282,7 +282,7 @@ describe('request_quote', () => {
   });
 
   test('portal_chat shares the open-request slot with the other add-service sources', () => {
-    expect(CTA_REQUEST_SOURCES).toEqual(['service_report', 'portal_home', 'portal_chat', 'promotion']);
+    expect(CTA_REQUEST_SOURCES).toEqual(['service_report', 'portal_home', 'portal_chat']);
   });
 
   test('a second ask for the same service while one is open writes nothing and rings nothing', async () => {

@@ -5,6 +5,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(authenticate);
 
@@ -322,20 +323,14 @@ router.post('/:id/interest', async (req, res, next) => {
     const { serviceType, serviceName } = req.body;
     const customer = req.customer;
 
-    // The service request, through the shared add-service writer: one open request per customer and service
-    // across every customer surface, so a repeat tap (or a replayed request) refreshes or reuses the open row
-    // instead of minting another, and only a new or changed request rings the office below.
-    const { writeOrRefreshCtaRequest } = require('../services/cta-service-request');
-    const { normalizeRequestedServiceKey } = require('../services/estimate-add-service-request');
-    const outcome = await writeOrRefreshCtaRequest(db, {
-      customerId: req.customerId,
-      requestedService: normalizeRequestedServiceKey(serviceType) || String(serviceType || 'other').slice(0, 80),
-      source: 'promotion',
+    // Create service request
+    const [request] = await db('service_requests').insert({
+      customer_id: req.customerId,
+      category: 'add_service',
       subject: `Interested in adding ${serviceName || serviceType}`,
       description: `Customer expressed interest via promotion card: ${promoId}`,
-      revisionSnapshot: { source: 'promotion', promoId: String(promoId), serviceType: serviceType || null },
-    });
-    const { request } = outcome;
+      status: 'new',
+    }).returning('*');
 
     // The insert has committed before dispatch. App delivery is independent
     // of the existing office alert and customer confirmation text.
@@ -355,26 +350,30 @@ router.post('/:id/interest', async (req, res, next) => {
     ).length;
     const newTier = getTierForServiceCount(currentCount + 1);
 
-    // The office hears of it through the add-a-service bell (bundle_quote_requested, a customer contact: it
-    // rings and pushes, and opens the customer's requests panel). It was a text to the owner's phone that
-    // reached nobody since about 2026-09-01 (services/owner-alerts.js). Rung after the durable row, and only
-    // for a new or changed request (a deduped repeat rings nothing); a bell failure leaves the request
-    // actionable in the requests panel.
+    // Tell the office: a ringing owner alert (services/owner-alerts.js). It was a text to the owner's phone that
+    // reached nobody since about 2026-09-01. One row per customer, service and ET day, keyed on the service as
+    // the server names it (never the client's promotion id or labels): a repeat or replayed tap refreshes that
+    // row and rings nothing new, so a customer cannot flood the bell. Owner-alert rows never push.
     try {
-      if (!outcome.deduped) await require('../services/notification-triggers').triggerNotification('bundle_quote_requested', {
-        bundled: false,
-        customerId: req.customerId,
-        customerName: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null,
-        suggestedService: serviceName || serviceType,
-        relationship: currentCount > 0 ? 'add' : 'start',
-        previousTier: customer.waveguard_tier || null,
-        refreshed: !!outcome.refreshed,
-        // GATE_PORTAL_ITEM_CLOSE (bundleRequestAlert reads it): the request row this bell is about, so the
-        // Portal tab's Mark handled closes it and the relevance sweep tracks it, as for every add-a-service ask.
-        requestId: request.id,
+      const { fitAction } = require('../services/admin-alert-names');
+      const { normalizeRequestedServiceKey, requestedServiceLabel } = require('../services/estimate-add-service-request');
+      const serviceKey = normalizeRequestedServiceKey(serviceType) || 'other';
+      const label = serviceKey === 'other' ? 'a service' : requestedServiceLabel(serviceKey);
+      const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'A customer';
+      const item = `${req.customerId}:${serviceKey}:${etDateString()}`;
+      await require('../services/owner-alerts').recordOwnerAlert('promotion-interest', {
+        action: fitAction('Estimates', name, [(who) => `follow up with ${who} about ${label}`, (who) => `follow up with ${who}`]),
+        why: `Tapped interested in ${label} on a portal promotion.`,
+        link: `/admin/customers?customerId=${encodeURIComponent(req.customerId)}`,
+        subject: { type: 'customer', id: String(req.customerId) },
+        // The client's own words, capped (they are not validated server-side).
+        text: `Promotion interest: ${name} wants to add ${String(serviceName || serviceType || '').slice(0, 80)} (promotion ${String(promoId).slice(0, 80)}). The request is open on their profile.`,
+        dedupeKey: `owner-alert:promotion-interest:${item}`,
+        itemKeys: [item],
+        metadata: { customerId: req.customerId },
       });
-    } catch (bellErr) {
-      logger.error(`Promotion interest bell failed for request ${request.id}: ${bellErr.message}`);
+    } catch (alertErr) {
+      logger.error(`Promotion interest owner alert failed for request ${request.id}: ${alertErr.message}`);
     }
 
     // SMS to customer
