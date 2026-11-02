@@ -5642,6 +5642,9 @@ const gates = {
   dunningCustomerScheduleShadow: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true',
   dunningCustomerSchedule: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true',
   dunningCustomerScheduleAllowlist: String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '').trim() !== '',
+  // GATE_PORTAL_BOOKING_ITEMS: read at CALL time via portalBookingItemsLive(); this entry is for logGateStatus, so
+  // the boot log shows the flip.
+  portalBookingItems: process.env.GATE_PORTAL_BOOKING_ITEMS === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
