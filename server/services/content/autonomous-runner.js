@@ -1953,22 +1953,28 @@ class AutonomousRunner {
 
   // The rows whose terminal draft is pushed and usable, best score first
   // (terminal-writer awaitingTerminalDrafts `written`; a row whose brief is
-  // past its age limit is not listed, it is briefed again), then the rows
-  // whose terminal hold is pushed (`held`), so a hold parks its row at the
-  // next pass instead of leaving it on the waiting list. With an
-  // actionType (a scoped pass), only that lane's rows: the run that waited
-  // for the draft carries the lane its claim was fenced to. Gate off, kill
-  // switch off or any read failure: none (the batch claims by score as before).
-  async _writtenTerminalDraftIds(actionType = null) {
+  // past its age limit is not listed, it is briefed again), and the rows
+  // whose terminal hold is pushed (`held`, owner 2026-11-02), each list on
+  // its own. With an actionType (a scoped pass), only that lane's rows: the
+  // run that waited for the draft carries the lane its claim was fenced to.
+  // Gate off, kill switch off or any read failure: none (the batch claims by
+  // score as before).
+  async _terminalFirstIds(actionType = null) {
+    const none = { written: [], held: [] };
     const terminalWriter = require('./terminal-writer');
-    if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return [];
+    if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return none;
     try {
-      const { written, held = [] } = await terminalWriter.awaitingTerminalDrafts();
-      return [...written, ...held].filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
+      const listing = await terminalWriter.awaitingTerminalDrafts();
+      const ids = (rows) => (rows || []).filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
+      return { written: ids(listing.written), held: ids(listing.held) };
     } catch (err) {
       logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
-      return [];
+      return none;
     }
+  }
+
+  async _writtenTerminalDraftIds(actionType = null) {
+    return (await this._terminalFirstIds(actionType)).written;
   }
 
   async _runDailyInner({ limit = null, actionType = null } = {}) {
@@ -2043,10 +2049,13 @@ class AutonomousRunner {
     // carry the blog lane, so a non-blog draft id among them matches nothing
     // and the slot returns. No written draft = the batch as before.
     // Kill: AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST=false.
-    let draftIds = await this._writtenTerminalDraftIds(actionType);
+    // Then the rows whose terminal hold is pushed (owner 2026-11-02), in a
+    // pass of their own so a hold never outranks a written draft; a run that
+    // parks a held row gives its slot back (nothing is written or published).
+    const terminalFirst = await this._terminalFirstIds(actionType);
     for (let i = 0; i < slotBudget; i += 1) {
-      const drafts = draftIds.length > 0;
-      const reserve = !drafts && reservedLeft > 0 && !scopedActionType;
+      const scope = terminalFirstScope(terminalFirst);
+      const reserve = !scope && reservedLeft > 0 && !scopedActionType;
       if (reserve) reservedLeft -= 1;
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
       // through to claimNext; spread conditionally so the unscoped daily
@@ -2054,18 +2063,17 @@ class AutonomousRunner {
       const run = await this.runNext({
         excludeIds: [...failedOppIds],
         ...(scopedActionType ? { actionType: scopedActionType } : {}),
-        ...(drafts ? { onlyIds: [...draftIds] } : {}),
+        ...(scope ? { onlyIds: [...scope.ids] } : {}),
         ...(reserve ? { bucket: CITABILITY_BACKFILL_BUCKET } : {}),
       });
-      if (drafts) {
+      if (scope) {
         // None of them is claimable now (deferred, held by a claim rule):
         // the slot returns to the general pool, as an empty reserved slot does.
+        takeFromTerminalScope(terminalFirst, scope, run);
         if (run.outcome === 'skipped_no_opportunity') {
-          draftIds = [];
           i -= 1;
           continue;
         }
-        draftIds = draftIds.filter((id) => id !== run.opportunity_id);
       }
       if (reserve && run.outcome === 'skipped_no_opportunity') {
         // Claimed away since the peek: the slot returns to the general pool.
@@ -2076,6 +2084,12 @@ class AutonomousRunner {
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
+      if (run.outcome === require('./terminal-writer').HOLD_OUTCOME) {
+        // A hold parked its row: no draft, no publish, so no slot used.
+        i -= 1;
+        streakLanes.length = 0;
+        continue;
+      }
       if (run.action_type === 'new_supporting_blog') blogAttempted = true;
       if (!String(run.outcome).startsWith('failed')) {
         streakLanes.length = 0;
@@ -5307,6 +5321,20 @@ function isDeterministicPublishError(err) {
     /^autonomous draft canonical points off-site /,
     /^autonomous draft canonical must match slug /,
   ].some((pattern) => pattern.test(message));
+}
+
+// The claim scope for the next batch slot (_terminalFirstIds lists): the
+// written drafts first, then the held rows, then none (score order).
+function terminalFirstScope(lists) {
+  if (lists.written.length) return { kind: 'written', ids: lists.written };
+  if (lists.held.length) return { kind: 'held', ids: lists.held };
+  return null;
+}
+
+// After a scoped claim: drop the row it took, or the whole list when none of
+// its rows was claimable.
+function takeFromTerminalScope(lists, scope, run) {
+  lists[scope.kind] = run.outcome === 'skipped_no_opportunity' ? [] : scope.ids.filter((id) => id !== run.opportunity_id);
 }
 
 function envBool(key, defaultValue = false) {

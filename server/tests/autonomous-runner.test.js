@@ -1596,7 +1596,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
   // runNext stands in for the claim: the best pending row by score among the
   // ids the call may take (onlyIds), minus the excluded ones. A row with
   // `claimable: false` is held by a claim rule (deferred, fenced).
-  function queueRunner(rows, { written = [], reserved = 0 } = {}) {
+  function queueRunner(rows, { written = [], held = [], reserved = 0 } = {}) {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
     const runner = new AutonomousRunner();
     const pending = new Map(rows.map((r) => [r.id, r]));
@@ -1614,7 +1614,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     runner._appendToDailyDigest = jest.fn(async () => {});
     runner._withEngineLock = (label, fn) => fn();
     runner._claimableBackfillSlots = jest.fn(async () => reserved);
-    runner._writtenTerminalDraftIds = jest.fn(async () => written);
+    runner._terminalFirstIds = jest.fn(async () => ({ written, held }));
     runner.settleTerminalWork = jest.fn(async () => {});
     runner._sendBlogDroughtSms = jest.fn(async () => {});
     return { runner, order };
@@ -1683,12 +1683,41 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       { written: ['written_blog'] },
     );
     await runner._runDailyInner({ limit: 2, actionType: 'new_supporting_blog' });
-    expect(runner._writtenTerminalDraftIds).toHaveBeenCalledWith('new_supporting_blog');
+    expect(runner._terminalFirstIds).toHaveBeenCalledWith('new_supporting_blog');
     expect(order).toEqual(['written_blog', 'no_draft_80']);
     expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
       { excludeIds: [], actionType: 'new_supporting_blog', onlyIds: ['written_blog'] },
       { excludeIds: [], actionType: 'new_supporting_blog' },
     ]);
+  });
+
+  test('holds (owner 2026-11-02) come after every written draft, even with a higher score, and give their slot back', async () => {
+    const rows = [
+      row('held_95', 95, { outcome: 'deferred_terminal_hold' }), row('held_60', 60, { outcome: 'deferred_terminal_hold' }),
+      row('written_50', 50, { outcome: 'completed_pending_review' }),
+      row('no_draft_90', 90), row('no_draft_85', 85), row('no_draft_70', 70),
+    ];
+    const { runner, order } = queueRunner(rows, { written: ['written_50'], held: ['held_95', 'held_60'] });
+    await runner.runDaily({ limit: 3 });
+    // The draft first; then both holds, neither using a slot; then two score-order slots.
+    expect(order).toEqual(['written_50', 'held_95', 'held_60', 'no_draft_90', 'no_draft_85']);
+    expect(runner.runNext.mock.calls.slice(0, 4).map(([args]) => args)).toEqual([
+      { excludeIds: [], onlyIds: ['written_50'] },
+      { excludeIds: [], onlyIds: ['held_95', 'held_60'] },
+      { excludeIds: [], onlyIds: ['held_60'] },
+      { excludeIds: [] },
+    ]);
+  });
+
+  test('a held row that is not claimable now (or whose run did not park it) uses its slot as any run does', async () => {
+    const rows = [
+      row('held_cap', 90, { outcome: 'deferred_publish_cap' }), row('held_deferred', 95, { claimable: false }),
+      row('no_draft_80', 80), row('no_draft_70', 70),
+    ];
+    const { runner, order } = queueRunner(rows, { held: ['held_deferred', 'held_cap'] });
+    await runner.runDaily({ limit: 2 });
+    // held_cap was capped before its hold was read: a normal run, a slot used.
+    expect(order).toEqual(['held_cap', 'no_draft_80']);
   });
 
   test('the blog fallback after a failure streak keeps taking the drafts left, in the blog lane', async () => {
@@ -1715,12 +1744,13 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       const listing = spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockResolvedValue({
         due: [{ opportunity_id: 'due_1' }],
         written: [{ opportunity_id: 'w_hi', action_type: 'refresh_existing_page' }, { opportunity_id: 'w_lo', action_type: 'new_supporting_blog' }],
-        // A pushed hold is taken at the next pass too, after the drafts, so it parks its row.
+        // A pushed hold is listed on its own (the batch takes holds in a pass after the drafts).
         held: [{ opportunity_id: 'h_1', action_type: 'new_supporting_blog' }],
         rebrief: [{ opportunity_id: 'old_1' }],
       });
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['w_hi', 'w_lo', 'h_1']);
-      await expect(runnerFor()._writtenTerminalDraftIds('new_supporting_blog')).resolves.toEqual(['w_lo', 'h_1']);
+      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['w_hi', 'w_lo']);
+      await expect(runnerFor()._writtenTerminalDraftIds('new_supporting_blog')).resolves.toEqual(['w_lo']);
+      await expect(runnerFor()._terminalFirstIds('new_supporting_blog')).resolves.toEqual({ written: ['w_lo'], held: ['h_1'] });
 
       listing.mockRejectedValueOnce(new Error('GitHub 502'));
       await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
@@ -1730,7 +1760,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST;
       delete process.env.GATE_CONTENT_WRITER_TERMINAL;
       await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
-      expect(listing).toHaveBeenCalledTimes(3);
+      expect(listing).toHaveBeenCalledTimes(4);
     });
 
     test('a pushed draft whose brief is past its 7 days is not taken first (it is briefed again)', async () => {
