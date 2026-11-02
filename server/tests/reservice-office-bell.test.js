@@ -108,6 +108,13 @@ describe('raiseReserviceOfficeBell', () => {
     expect(mockNotifyAdmin.mock.calls[0][3].detail).toContain(words);
   });
 
+  test('a health concern names its subject in the why (never "something for the office")', async () => {
+    await raise(freezeOf([item('a', { officeOnly: 'health', text: 'Ants are still in the kitchen.' })]));
+    const { why, opts } = sent();
+    expect(why).toBe('Their text on Nov 2 is about a health or safety concern; read it in full.');
+    expect(opts.detail).toContain('about a health or safety concern');
+  });
+
   test('an office-only message alone: Customers, names the channel, day and subject, says to read it in full', async () => {
     await raise(freezeOf([item('a', { source: 'call', officeOnly: 'damage', text: '' })]));
 

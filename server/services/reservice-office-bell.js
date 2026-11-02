@@ -3,7 +3,7 @@
  *
  * After a re-service completes, ONE office bell lists what the customer's report leaves to the office:
  *   - "Not today": an item the tech answered not_today. The reason is for the office, never the customer.
- *   - Office only: a customer message about damage we caused, money, a complaint or a missed visit
+ *   - Office only: a customer message about a health concern, damage we caused, money, a complaint or a missed visit
  *     (reservice-office-only.js). It never prints on the report; the office reads it in full. An office-only item
  *     is listed whatever its answer, even none or hidden, and one the tech also marked not_today keeps the tech's
  *     reason on the same line.
@@ -21,6 +21,7 @@ const REASON_ROOM = 40; // characters of the tech's reason kept in the why
 
 // What the customer's original words were about, as the screen found it.
 const TOPIC = Object.freeze({
+  health: 'a health or safety concern',
   damage: 'damage to their things',
   billing: 'money (a charge or refund)',
   complaint: 'a complaint',
