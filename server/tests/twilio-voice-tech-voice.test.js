@@ -1,7 +1,9 @@
 /**
  * The "Waves Tech" voice line on the voice webhook (GATE_TECH_VOICE_LINE):
- * /tech-voice answers only an admitted call and rejects every other one before
- * Twilio answers; /voice refuses the line if its voice URL is ever wrong; and
+ * /tech-voice hands only an admitted call to the voice relay's tech session
+ * (keypad on for the PIN, a 3-minute Twilio limit) and rejects every other one
+ * before Twilio answers; /tech-voice-complete hangs up; /voice refuses the line
+ * if its voice URL is ever wrong; and
  * /call-status keeps a tech-line call internal — its own source on a fallback
  * row, its minutes settled, no recording recovery, no failure bell.
  */
@@ -18,6 +20,12 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
 jest.mock('../services/tech-voice-line', () => ({ admitTechVoiceCall: jest.fn() }));
 jest.mock('../services/tech-voice-usage', () => ({ settleTechVoiceCall: jest.fn(async () => true) }));
+const mockCallUpdate = jest.fn(async () => ({}));
+jest.mock('twilio', () => {
+  const actual = jest.requireActual('twilio');
+  const client = jest.fn(() => ({ calls: jest.fn(() => ({ update: mockCallUpdate })) }));
+  return Object.assign(client, actual);
+});
 jest.mock('../services/messaging/inbound-dedupe', () => ({
   tryClaimInboundWebhook: jest.fn(async () => ({ processable: true, owned: true })),
   releaseInboundWebhook: jest.fn(async () => undefined),
@@ -26,6 +34,9 @@ jest.mock('../middleware/spam-block', () => ({ checkInboundBlock: jest.fn(async 
 
 const LINE = '+19415550188';
 process.env.TECH_VOICE_NUMBER = LINE;
+process.env.TWILIO_ACCOUNT_SID = 'AC-test';
+process.env.TWILIO_AUTH_TOKEN = 'test-token';
+process.env.VOICE_RELAY_WS_SECRET = 'test-ws-secret';
 
 const db = require('../models/db');
 const voiceRouter = require('../routes/twilio-voice-webhook');
@@ -67,14 +78,27 @@ describe('/tech-voice', () => {
     });
   });
 
-  test('an admitted call hears the notice and hangs up — no dial, record, gather or relay', async () => {
+  test('an admitted call goes to the relay with the keypad on and a 3-minute Twilio limit — no dial, record or gather', async () => {
     admitTechVoiceCall.mockResolvedValueOnce({ ok: true, technicianId: 'tech-1' });
     const res = mockRes();
-    await handlerFor('/tech-voice')({ body: call() }, res);
-    expect(res.body).toContain('<Say');
-    expect(res.body).toContain('The Waves tech line is not ready yet. Goodbye.');
+    await handlerFor('/tech-voice')({ body: call(), headers: { host: 'portal.test' } }, res);
+    expect(res.body).toMatch(/<Connect action="\/api\/webhooks\/twilio\/tech-voice-complete" method="POST"><ConversationRelay /);
+    expect(res.body).toContain('url="wss://');
+    expect(res.body).toContain('dtmfDetection="true"');
+    expect(res.body).toContain('welcomeGreeting="Waves Tech. Enter your PIN, then press pound."');
+    expect(res.body).not.toMatch(/<Dial|<Record|<Gather|<Reject|<Say/);
+    expect(mockCallUpdate).toHaveBeenCalledWith({ timeLimit: 180 });
+  });
+
+  test('admitted with no relay attached: a short notice and hangup, no relay', async () => {
+    const { isRelayAttached } = require('../services/voice-agent/relay-server');
+    isRelayAttached.mockReturnValueOnce(false);
+    admitTechVoiceCall.mockResolvedValueOnce({ ok: true, technicianId: 'tech-1' });
+    const res = mockRes();
+    await handlerFor('/tech-voice')({ body: call(), headers: {} }, res);
+    expect(res.body).toContain('The Waves tech line is not available right now. Goodbye.');
     expect(res.body).toContain('<Hangup/>');
-    expect(res.body).not.toMatch(/<Dial|<Record|<Gather|<Connect|<Reject/);
+    expect(res.body).not.toMatch(/<Connect|<Dial|<Record/);
   });
 
   test('an admission error rejects (fail closed)', async () => {
@@ -82,6 +106,14 @@ describe('/tech-voice', () => {
     const res = mockRes();
     await handlerFor('/tech-voice')({ body: call() }, res);
     expect(res.body).toMatch(/<Reject\/>/);
+  });
+});
+
+describe('/tech-voice-complete', () => {
+  test('the relay session ended: the call hangs up', async () => {
+    const res = mockRes();
+    await handlerFor('/tech-voice-complete')({ body: call({ CallStatus: 'in-progress' }) }, res);
+    expect(res.body).toMatch(/<Response><Hangup\/><\/Response>/);
   });
 });
 

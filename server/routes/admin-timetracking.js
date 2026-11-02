@@ -1594,6 +1594,31 @@ async function putTechnicianCapabilities(req, res, next) {
 router.get('/technicians/:id/capabilities', requireAdmin, getTechnicianCapabilities);
 router.put('/technicians/:id/capabilities', requireAdmin, putTechnicianCapabilities);
 
+// PUT /technicians/:id/voice-pin { pin } — set or reset the technician's
+// "Waves Tech" voice line PIN (services/tech-voice-pin.js: 4 to 6 digits,
+// stored only as a salted hash; a reset also clears a lockout). The PIN is
+// never returned or logged; the audit row says who set it, never the value.
+const VOICE_PIN_TECH_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function putTechnicianVoicePin(req, res, next) {
+  try {
+    if (!VOICE_PIN_TECH_ID_RE.test(String(req.params.id || ''))) return res.status(404).json({ error: 'Technician not found' });
+    const target = await db('technicians').where({ id: req.params.id }).first('id');
+    if (!target) return res.status(404).json({ error: 'Technician not found' });
+    const { setTechVoicePin } = require('../services/tech-voice-pin');
+    const out = await setTechVoicePin(db, { technicianId: target.id, pin: req.body?.pin });
+    if (!out.ok) return res.status(400).json({ error: 'The PIN must be 4 to 6 digits', code: 'PIN_FORMAT' });
+    await recordAuditEvent({
+      actor_type: 'admin', actor_id: req.technicianId || null, action: 'tech_voice.pin_set',
+      resource_type: 'technician', resource_id: String(target.id), metadata: {},
+    });
+    logger.info(`[team] Set the voice line PIN for technician id=${target.id} by staff id=${req.technicianId}`);
+    return res.json({ success: true, technicianId: target.id });
+  } catch (err) {
+    return next(err);
+  }
+}
+router.put('/technicians/:id/voice-pin', requireAdmin, putTechnicianVoicePin);
+
 // ── Service-line map (GATE_SERVICE_LINE_MAP=shadow|live, owner 2026-10-25 / 2026-10-30) ─
 // One home and one gap technician per service line. In shadow, nothing reads this
 // to place a visit; the six booking choice points only log what it would pick. In
@@ -2191,6 +2216,7 @@ module.exports._handlers = {
   hireTechnician,
   listTechnicians,
   putTechnicianCapabilities,
+  putTechnicianVoicePin,
   resendHireLink,
   updateTechnician,
 };
