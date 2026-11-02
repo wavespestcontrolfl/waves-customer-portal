@@ -597,7 +597,7 @@ router.post('/sms', async (req, res) => {
     // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
     // Consent runs BEFORE the classifier, and ONLY for eligible senders, on
     // the FULL untouched text: a real customer's or known prospect's STOP is
-    // honored immediately — no model call, no 3.5s budget, no footer
+    // honored immediately — no model call, no model wait, no footer
     // stripping. A NON-eligible sender's opt-out-shaped phrasing is never
     // checked here at all: their full text (footer included) goes to the
     // classifier below, and the model alone decides solicitation vs. a
@@ -624,6 +624,26 @@ router.post('/sms', async (req, res) => {
     try {
       const screen = require('../services/sms-solicitation-classifier');
       const solicitationMode = screen.classifierMode();
+      // A sender the office tagged as spam (GATE_SMS_SPAM_TAG, dark): the same
+      // silencing path as an enforced screen verdict, with a manual verdict and
+      // no model call. Staff, the AI line, reactions, photos, an empty body, a
+      // carrier keyword or command, an applicant, and any sender with a customer
+      // record keep ordinary handling; an open lead is checked inside the call.
+      // A lookup error reads as not tagged (fails open).
+      const taggedVerdict = inboundTouchpoint?.message?.id && MessageSid
+        ? await require('../services/sms-spam-tag').verdictForNewText({
+          phone: From, body: Body, rawOptCommand, optCommand, isAiNumber, staffSender, smsReaction,
+          hasMedia: inboundMedia.length > 0, recruitingReply: Boolean(recruitingReply),
+          hasCustomerRecord: Boolean(customer || knownCallerRecord || knownCallerLookupFailed),
+        })
+        : null;
+      if (taggedVerdict) {
+        verdictMessage = await updateByTwilioSid(MessageSid, {
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spam_verdict: taggedVerdict })]),
+          updated_at: new Date(),
+        });
+        solicitation = taggedVerdict;
+      }
       // `!complianceEligible` — an eligible sender (known relationship or
       // outbound history) never reaches the classifier at all, consent or
       // not (contract: known primary/secondary/service-contact numbers and
@@ -637,7 +657,7 @@ router.post('/sms', async (req, res) => {
       // alone. Skipping the screen entirely for any inbound carrying media
       // is the safe default: no verdict, no enforcement, ordinary handling
       // (alerts/lead intake) proceeds.
-      if (inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !complianceEligible && !smsReaction && !inboundMedia.length && Body) {
+      if (!solicitation && inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !complianceEligible && !smsReaction && !inboundMedia.length && Body) {
         solicitation = await screen.screenInboundSms({ body: Body, isReaction: smsReaction, isAiLine: isAiNumber });
         if (solicitation) {
           // NOT marked read here even when enforced — see the deferred

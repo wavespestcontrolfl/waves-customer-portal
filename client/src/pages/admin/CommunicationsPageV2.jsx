@@ -650,6 +650,15 @@ function SmsLogItemV2({ msg: m, onReply }) {
   );
 }
 
+// GATE_SMS_SPAM_TAG: a thread whose inbound texts carry an enforced spam
+// verdict (tagged here, or silenced by the auto screen) offers "Not spam"
+// instead of "Mark spam"; the tag keeps the texts and only silences alerts.
+function spamTagState(thread, { spamTagOn, canAct }) {
+  const spamTagged = spamTagOn && Array.isArray(thread.messages)
+    && thread.messages.some((m) => m.direction === "inbound" && m.spamEnforced === true);
+  return { spamTagged, canNotSpam: spamTagged && canAct && !thread.customerId && !thread.customerName };
+}
+
 function ConversationViewV2({
   thread,
   messages,
@@ -658,6 +667,8 @@ function ConversationViewV2({
   onBack,
   onOpenProfile,
   onMarkSpam,
+  onNotSpam,
+  spamTagOn = false,
 }) {
   // "Call back" rides the owner-only call bridge: a technician gets no button.
   const canCall = useCanAccessCalls();
@@ -671,6 +682,7 @@ function ConversationViewV2({
   // unlinked number (outbound only, nothing ever received) does not offer it.
   const hasInbound = Array.isArray(thread.messages) && thread.messages.some((m) => m.direction === "inbound");
   const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && hasInbound && typeof onMarkSpam === "function";
+  const { spamTagged, canNotSpam } = spamTagState(thread, { spamTagOn, canAct: !!contactPhone && typeof onNotSpam === "function" });
   return (
     <div className="flex flex-col h-full">
       {" "}
@@ -701,12 +713,25 @@ function ConversationViewV2({
           </div>{" "}
         </div>{" "}
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
-          {canMarkSpam ? (
+          {canNotSpam ? (
             <Button
               size="sm"
               variant="secondary"
               className="flex-1 md:flex-none"
-              title="Block this number and mark the thread read"
+              title="Bring this number's texts back as needing a reply"
+              onClick={() => onNotSpam(thread)}
+            >
+              <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Not spam
+            </Button>
+          ) : canMarkSpam && !spamTagged ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="flex-1 md:flex-none"
+              title={spamTagOn
+                ? "Tag this number as spam: its texts stay here, marked read, with no alerts"
+                : "Block this number and mark the thread read"}
               onClick={() => onMarkSpam(thread)}
             >
               <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -793,6 +818,11 @@ function ConversationViewV2({
                       )}
                     >
                       {m.messageType.replace(/_/g, " ")}
+                    </span>
+                  )}
+                  {!isOut && m.spamEnforced === true && (
+                    <span className="text-ui-body uppercase tracking-label text-ink-tertiary">
+                      Spam · no alert sent
                     </span>
                   )}
                   {receipt && (
@@ -1307,6 +1337,9 @@ export function SmsTab({
   // full digits so a foreign block can never hide a NANP thread sharing
   // its suffix (the server enforces the same split).
   const [blocked, setBlocked] = useState(() => new Set());
+  // GATE_SMS_SPAM_TAG, from the /log payload: Mark spam tags the sender (texts
+  // stay, no alerts) instead of blocking it.
+  const [spamTagOn, setSpamTagOn] = useState(false);
   const blockedFromNumbers = (numbers) => {
     return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
@@ -1526,6 +1559,7 @@ export function SmsTab({
       }
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
+        setSpamTagOn(logData.smsSpamTag === true);
         const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
         if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
@@ -3097,6 +3131,7 @@ export function SmsTab({
   const handleMarkSpam = async (thread) => {
     const number = thread?.contactPhone;
     if (!number) return;
+    if (spamTagOn) return handleTagSpam(number);
     if (!window.confirm(`Block ${number} as spam? Future texts AND calls from this number are rejected before they reach anyone, and this thread is marked read.`)) return;
     try {
       await adminFetch(`/admin/communications/blocked-numbers`, {
@@ -3124,6 +3159,44 @@ export function SmsTab({
     } catch (e) {
       alert(`${number} is blocked, but marking the thread read failed: ${e.message}. Its messages may still show as unread if this number is ever unblocked.`);
     }
+  };
+
+  // GATE_SMS_SPAM_TAG: tag the sender. Nothing is removed: its texts stay in
+  // the inbox, marked read with a Spam tag and no alerts, and calls still ring.
+  // The server refuses a customer's or an open lead's number.
+  const handleTagSpam = async (number) => {
+    if (!window.confirm(`Mark ${number} as spam? Its texts stay in the inbox with a Spam tag and no alerts. Calls are not blocked.`)) return;
+    try {
+      const result = await adminFetch(`/admin/communications/spam-senders`, {
+        method: "POST",
+        body: JSON.stringify({ number, reason: "Marked spam from the SMS inbox" }),
+      });
+      if (result?.readFailed) {
+        alert(`${number} is tagged as spam, but marking its texts read failed. They may still show as unread.`);
+      }
+    } catch (e) {
+      alert(`Could not mark spam: ${e.message}`);
+      return;
+    }
+    setSmsView("threads");
+    setActiveThread(null);
+    loadData(smsSearch);
+  };
+
+  // GATE_SMS_SPAM_TAG: undo the tag. The number's texts come back as needing a reply.
+  const handleNotSpam = async (thread) => {
+    const number = thread?.contactPhone;
+    if (!number) return;
+    if (!window.confirm(`Bring ${number}'s texts back as needing a reply?`)) return;
+    try {
+      await adminFetch(`/admin/communications/spam-senders/${encodeURIComponent(number)}`, { method: "DELETE" });
+    } catch (e) {
+      alert(`Could not undo spam: ${e.message}`);
+      return;
+    }
+    setSmsView("threads");
+    setActiveThread(null);
+    loadData(smsSearch);
   };
 
   const handleThreadReply = (contactPhone, ourNumber, customerId = null, replyTo = null) => {
@@ -3953,6 +4026,8 @@ export function SmsTab({
             // Blocking a number is owner-only (2026-10-02); the server
             // refuses a technician, so the button is not offered.
             onMarkSpam={smsIsAdminRole ? handleMarkSpam : undefined}
+            onNotSpam={smsIsAdminRole ? handleNotSpam : undefined}
+            spamTagOn={spamTagOn}
           />{" "}
           {renderLoadMore("Load older SMS history")}
         </Card>

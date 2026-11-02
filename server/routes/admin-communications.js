@@ -2343,6 +2343,8 @@ router.get('/log', async (req, res, next) => {
     // GATE_SMS_LIKE: the office's like on a customer text, and customer likes on ours.
     const officeLike = require('../services/sms-office-like');
     const likesOn = officeLike.likesLive();
+    // GATE_SMS_SPAM_TAG: tells the inbox to offer Mark spam as a tag, not a block.
+    const spamTagOn = require('../services/sms-spam-tag').spamTagLive();
 
     const messages = await Promise.all(rows.map(async (m) => {
       const initialContact = m.effective_contact_phone || m.contact_phone || m.customer_phone;
@@ -2404,6 +2406,7 @@ router.get('/log', async (req, res, next) => {
     res.json({
       messages,
       ...(likesOn ? { smsLike: true } : {}),
+      ...(spamTagOn ? { smsSpamTag: true } : {}),
       page: requestedPage,
       limit: effectiveLimit,
       hasMore,
@@ -4210,6 +4213,46 @@ router.delete('/blocked-numbers/:number', requireAdmin, async (req, res, next) =
     await db('blocked_numbers').where({ number: req.params.number }).del();
     res.json({ success: true });
   } catch (err) { next(err); }
+});
+
+/* ── Spam tag (GATE_SMS_SPAM_TAG, owner 2026-11-02) ──
+ * "Mark spam" TAGS a sender instead of blocking it: its texts stay in the
+ * inbox, marked read with a Spam tag and no alert (services/sms-spam-tag.js).
+ * Calls are not blocked. 404 while the gate is off, so the dark inbox keeps
+ * the block button. Admin-only, like the block routes. */
+
+// POST /api/admin/communications/spam-senders — Body: { number, reason? }
+router.post('/spam-senders', requireAdmin, async (req, res, next) => {
+  try {
+    const spamTag = require('../services/sms-spam-tag');
+    if (!spamTag.spamTagLive()) return res.status(404).json({ error: 'Not found' });
+    const result = await spamTag.tagSpamSender({
+      number: req.body?.number,
+      adminUserId: req.technicianId,
+      reason: req.body?.reason,
+      source: 'inbox',
+    });
+    res.json({ success: true, alreadyTagged: result.alreadyTagged, readFailed: result.readFailed });
+  } catch (err) {
+    if (err.code === 'INVALID_NUMBER') return res.status(400).json({ error: err.message });
+    if (err.code === 'CUSTOMER_NUMBER' || err.code === 'LEAD_NUMBER') {
+      return res.status(409).json({ error: err.message, code: err.code, ...err.details });
+    }
+    next(err);
+  }
+});
+
+// DELETE /api/admin/communications/spam-senders/:number — "Not spam"
+router.delete('/spam-senders/:number', requireAdmin, async (req, res, next) => {
+  try {
+    const spamTag = require('../services/sms-spam-tag');
+    if (!spamTag.spamTagLive()) return res.status(404).json({ error: 'Not found' });
+    const result = await spamTag.untagSpamSender({ number: req.params.number, adminUserId: req.technicianId });
+    res.json({ success: true, removed: result.removed });
+  } catch (err) {
+    if (err.code === 'INVALID_NUMBER') return res.status(400).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/communications/compliance-export
