@@ -354,6 +354,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
 
 module.exports = {
   gatherReserviceAsks,
+  isReserviceVisit,
   ASKS_LOOKBACK_DAYS,
   MAX_ITEMS,
   _test: {
