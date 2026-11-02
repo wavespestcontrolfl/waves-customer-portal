@@ -46,7 +46,13 @@ function stampedAddressDiverges(row = {}) {
 // SQL mirror of streetKey's suffix canonicalization: abbreviations EXPAND to
 // one canonical spelling ("st" -> "street") so formats key identically, but
 // suffixes are never stripped ("Main St" != "Main Ave"). Keep this list in
-// sync with STREET_SUFFIX_CANON in customer-properties.js.
+// sync with STREET_SUFFIX_CANON in customer-properties.js. It already lags that
+// map (the 2026-10-01 forms) and does not expand directionals ("Ave E" ==
+// "Avenue East") as the JS streetKey does since 2026-11-02: where the two
+// differ, SQL reads two spellings as DIVERGENT, which withholds a pin or ETA
+// ("no pin beats a wrong pin"), never invents one. 13 nested replaces per
+// column are already the cost of the dispatch board query; do not grow it
+// without measuring.
 const SQL_SUFFIX_CANON = [
   ['st', 'street'], ['ave', 'avenue'], ['rd', 'road'], ['dr', 'drive'],
   ['ln', 'lane'], ['ct', 'court'], ['blvd', 'boulevard'], ['cir', 'circle'],

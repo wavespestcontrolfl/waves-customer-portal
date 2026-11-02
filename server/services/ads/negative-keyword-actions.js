@@ -470,7 +470,7 @@ function negativeBellSpec(row) {
       action: fitAction(AREA, `"${row.text}"`, [(n) => `block ${n} in Google Ads`, (n) => `block ${n}`]),
       why: whyFor(metrics),
       severity: 'needs-you',
-      link: `/admin/ads?tab=advisor&negative=${row.id}`,
+      link: `/admin/ppc?tab=advisor&negative=${row.id}`, // the page itself: /admin/ads redirects and drops the query
       subject: { type: 'check', id: row.id },
       doneWhen: 'negative_decided',
       who: 'person',

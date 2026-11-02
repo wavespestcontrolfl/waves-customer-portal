@@ -133,7 +133,10 @@ function hasAffirmativeRodentMention(text) {
 //     LIVE plan check (reserviceLanesForCustomer), never completed history,
 //     so a lapsed or one-time customer can't talk their way into a free visit;
 //   - a specific model pick and the deterministic keyword rules both outrank
-//     revisit wording ("rodent inspection re-visit" books the inspection);
+//     revisit wording ("rodent inspection re-visit" books the inspection) —
+//     EXCEPT the plan-covered pest one-time rows (PLAN_COVERED_PEST_ONE_TIME_KEYS
+//     below): a roach pick or roach wording from a customer with a live pest
+//     lane is the plan's free re-service, not a new paid job;
 //   - the coarse resolver's label must be lane-compatible — a mosquito or
 //     termite resolution is a different service, not a covered re-service.
 // Bare "retreat" is excluded on purpose — too common as a plain English
@@ -144,6 +147,72 @@ function hasAffirmativeRodentMention(text) {
 // "revisit next month's pricing" is administrative; "revisit next week
 // for the ants" is a treatment ask).
 const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
+// Plan-covered pest one-time rows (owner ruling 2026-11-02, call 534ea913): the
+// Quarterly Pest Control plan targets roaches, ants, spiders, silverfish and
+// occasional invaders, so a plan customer who asks for a re-service while the
+// call names one of these pests gets the free Pest Control Re-Service, not a
+// paid one-time row plus its package follow-up visit. Only these two keys:
+// rodent rows and German Roach Cleanout stay paid specialty work. Eligibility
+// is still the live pest lane (reServiceLanes) — with no live pest lane the
+// paid row books as before.
+const PLAN_COVERED_PEST_ONE_TIME_KEYS = new Set(['cockroach_control', 'one_time_pest_control']);
+// German roach words come from the species catalog's high-risk indoor roach
+// subgroup: every common name and alias word that is not a generic roach word,
+// plus the scientific species epithet ("german", "germanica"). "croton" (the
+// "croton bug" nickname) is added because the catalog does not list it. Any
+// of them anywhere in the call text, negated or not, keeps the paid row (codex
+// #7480 r2-r5). The check only runs once the call already resolved to a roach
+// row (pick or keyword), so a stray or negated word can only keep a paid
+// booking paid, which is what every roach call did before this exception.
+const GENERIC_ROACH_WORDS = new Set(['cockroach', 'cockroaches', 'roach', 'roaches', 'bug', 'bugs']);
+let germanRoachRe = null;
+function highRiskRoachRe() {
+  if (germanRoachRe) return germanRoachRe;
+  const words = new Set(['german', 'germanica', 'croton']);
+  try {
+    const entries = require('./species-catalog').listEntries({ subgroup: 'high-risk-indoor-roaches' });
+    const names = entries.flatMap((e) => [e.common_name, ...(e.aliases || [])]);
+    names.flatMap((name) => String(name || '').toLowerCase().split(/[^a-z]+/))
+      .filter((w) => w && !GENERIC_ROACH_WORDS.has(w))
+      .forEach((w) => words.add(w));
+    entries.map((e) => String(e.scientific_name || '').toLowerCase().split(/\s+/)[1])
+      .filter(Boolean)
+      .forEach((w) => words.add(w));
+  } catch (err) {
+    logger.warn(`[call-booking-catalog] species catalog unreadable (German roach words fall back to the built-in list): ${err.message}`);
+  }
+  germanRoachRe = new RegExp(`\\b(?:${[...words].join('|')})\\b`, 'i');
+  return germanRoachRe;
+}
+
+function isPlanCoveredPestRow(row) {
+  return !!row && PLAN_COVERED_PEST_ONE_TIME_KEYS.has(row.service_key);
+}
+
+// German roach stays a paid specialty cleanout even for a plan customer, so an
+// affirmative German-roach mention switches the plan-covered exception off.
+function mentionsGermanRoach(haystack) {
+  return highRiskRoachRe().test(String(haystack || ''));
+}
+
+// A keyword match anchors the real paid row UNLESS every matched row is a
+// plan-covered pest row (and no German roach): then the re-service override
+// may still run, and if it declines the keyword row stands as before. That
+// override is pest work, so it runs toward the pest lane only (codex #7480
+// r1): a pick pinned to another lane (a lawn plan row) keeps the block.
+function keywordRowsBlockReService(keywordRows, haystack, pickPlanLane) {
+  if (keywordRows.length === 0) return false;
+  return keywordRows.some((row) => !isPlanCoveredPestRow(row))
+    || mentionsGermanRoach(haystack)
+    || (!!pickPlanLane && pickPlanLane !== 'pest');
+}
+
+// The re-service override behind the keyword gate: a blocking keyword row
+// keeps the paid row; plan-covered roach wording with no pick pins the pest lane.
+function keywordGatedReServiceRow({ keywordRows, pickPlanLane, ...overrideArgs }) {
+  if (keywordRowsBlockReService(keywordRows, overrideArgs.haystack, pickPlanLane)) return null;
+  return reServiceOverrideRow({ ...overrideArgs, pickPlanLane: pickPlanLane || (keywordRows.length > 0 ? 'pest' : null) });
+}
 const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?=\\s*$|\\s*[.;!?]|\\s*[,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|\\s*[^a-z\\s.;!?,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b)|\\s+(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|revisit(?=\\s*$|\\s*[.;!?]|\\s*[,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|\\s*[^a-z\\s.;!?,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b)|\\s+(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
 const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
 // Negated wording ("I don't need a re-service, just my regular visit") is not
@@ -406,6 +475,21 @@ function assessmentPickHolds(pick, extracted, services) {
     .some((row) => row && !isGenericCallCatalogRow(row));
 }
 
+// Lane a replaceable pick pins the re-service override to: the customer's own
+// recurring plan family, or 'pest' for a plan-covered pest one-time row.
+function reServicePickLane(pick, haystack) {
+  const planLane = reServiceLaneForPlanRow(pick);
+  if (planLane) return planLane;
+  return isPlanCoveredPestRow(pick) && !mentionsGermanRoach(haystack) ? 'pest' : null;
+}
+
+function matchingKeywordRows(haystack, services) {
+  return KEYWORD_SERVICE_RULES
+    .filter((rule) => haystack && rule.matches(haystack))
+    .map((rule) => services.find((s) => s.service_key === rule.serviceKey))
+    .filter(Boolean);
+}
+
 // transcription / reServices / reServiceLanes / coarseServiceLabel may be
 // absent: the haystack drops empty parts and reServiceOverrideRow treats
 // missing lists and labels as none.
@@ -418,28 +502,31 @@ function resolveCallBookingCatalogService({
   const byModelPick = findServiceByName(services, extracted.specific_service_name)
     || findServiceByName(services, extracted.matched_service)
     || findServiceByName(services, extracted.requested_service);
-  // A SPECIFIC pick is final — except the two shapes the re-service override
-  // may replace (both keep their original precedence over the keyword rules
-  // when the override misses): the generic anything-rows, and (codex #3222
+  // A SPECIFIC pick is final — except the shapes the re-service override
+  // may replace (all keep their original precedence over the keyword rules
+  // when the override misses): the generic anything-rows; (codex #3222
   // r3) the customer's own lane-family RECURRING plan row — the extractor
   // exact-picks it from the prompt catalog on plan-customer revisit calls,
   // but a revisit is the plan's free between-visits callback, not an extra
-  // plan visit.
-  const pickPlanLane = reServiceLaneForPlanRow(byModelPick);
+  // plan visit; and (owner 2026-11-02, call 534ea913) a plan-covered pest
+  // one-time row (roach / One-Time Pest Control), which pins the override to
+  // the pest lane. German roach mentions switch that last shape off.
+  const haystack = callBookingResolutionHaystack(extracted, transcription);
+  const pickPlanLane = reServicePickLane(byModelPick, haystack);
   if (byModelPick && !isGenericCallCatalogRow(byModelPick) && !pickPlanLane) return byModelPick;
 
-  const haystack = callBookingResolutionHaystack(extracted, transcription);
+  // Computed before the re-service override so a concrete paid service keyword
+  // ("rodent inspection re-visit") anchors the real specialty row, never a
+  // free re-service (codex #3222 r1 P2). Roach wording is the one exception
+  // (keywordRowsBlockReService): a live-pest-lane customer's roach re-service
+  // is the plan's free callback, pinned to the pest lane (a lawn-only
+  // customer's roach call never becomes a lawn callback). If the override
+  // declines, the keyword row stands exactly as before.
+  const keywordRows = matchingKeywordRows(haystack, services);
+  const keywordRow = keywordRows[0] || null;
 
-  // Computed before the re-service override so a concrete service keyword
-  // ("rodent inspection re-visit", "roach re-treatment") anchors the real
-  // specialty row, never a free re-service (codex #3222 r1 P2).
-  const keywordRow = KEYWORD_SERVICE_RULES
-    .filter((rule) => haystack && rule.matches(haystack))
-    .map((rule) => services.find((s) => s.service_key === rule.serviceKey))
-    .find(Boolean) || null;
-
-  const reServiceRow = keywordRow ? null : reServiceOverrideRow({
-    extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane,
+  const reServiceRow = keywordGatedReServiceRow({
+    keywordRows, extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane,
   });
   if (reServiceRow) return reServiceRow;
 

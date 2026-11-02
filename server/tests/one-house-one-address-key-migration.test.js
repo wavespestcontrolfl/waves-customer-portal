@@ -6,13 +6,16 @@
  * inactive rows are untouched; every stored key becomes the live key; open
  * property-role cards are re-keyed / re-pointed / resolved; re-runs are
  * no-ops; down() reverses exactly what up() did; the frozen key copies match
- * the live helper (new) and the pre-2026-10-02 format (legacy).
+ * the formats they were frozen from (legacy: before 2026-10-02; new: 2026-10-02,
+ * pinned by literals, NOT by the live helper, which a later migration moved on).
  */
 jest.mock('../models/db', () => ({}), { virtual: false });
-const { addressKey } = require('../services/customer-properties');
 const migration = require('../models/migrations/20261002090000_one_house_one_address_key');
 
 const { legacyKey, newKey } = migration;
+// The live addressKey moved on after this migration (directionals, 2026-11-02);
+// every key below is this migration's own frozen newKey.
+const addressKey = newKey;
 
 function fakeKnex(db) {
   const log = (db.__log = db.__log || []);
@@ -149,7 +152,7 @@ describe('20261002090000 one house, one address key', () => {
     expect(row(db, 'keep-a').is_primary && row(db, 'keep-b').is_primary).toBe(true);
   });
 
-  test('stores the live key on every row, retired ones included', async () => {
+  test("stores this migration's frozen key on every row, retired ones included", async () => {
     const db = seed();
     await migration.up(fakeKnex(db));
     for (const r of db.customer_properties) expect(r.address_key).toBe(addressKey(r));
@@ -315,20 +318,23 @@ describe('20261002090000 one house, one address key', () => {
     expect(db.__log[1]).not.toContain('field_credit_allocations');
   });
 
-  test('the frozen new key matches the live addressKey; the legacy key is the pre-2026-10-02 format', () => {
-    const fixtures = [
-      A1, A2, B1, B2, C1,
-      { address_line1: '100 Main St Apt 4', address_line2: 'Building A', zip: '34285' },
-      { address_line1: '100 Main St Apt 4 Building A', zip: '34285' },
-      { address_line1: '100 Main St#4.', zip: '34285' },
-      { address_line1: '100 Unit Rd', city: 'Venice' },
-      { address_line1: '700 Demo Gln Unit PT', zip: '34219' },
-      { address_line1: '700 Demo Gln Unit AB', zip: '34219' },
-      { address_line1: '700 Demo Gln Unit PT Building A', zip: '34219' },
-      { address_line1: '700 Demo Pt', address_line2: 'Unit PT', zip: '34219-1234' },
-      { address_line1: '', city: 'Venice' },
+  test('the frozen new key is the 2026-10-02 format (pinned by literals, not the live helper); the legacy key is the format before it', () => {
+    const expected = [
+      [A1, '200exampleglen34219'],
+      [A2, '200exampleglen34219'],
+      [B2, '400testcreekcourt34219'],
+      [{ address_line1: '100 Main St Apt 4', address_line2: 'Building A', zip: '34285' }, '100mainstreet4buildinga34285'],
+      [{ address_line1: '100 Main St Apt 4 Building A', zip: '34285' }, '100mainstreet4buildinga34285'],
+      [{ address_line1: '100 Main St#4.', zip: '34285' }, '100mainstreet434285'],
+      [{ address_line1: '100 Unit Rd', city: 'Venice' }, '100rdvenice'],
+      [{ address_line1: '700 Demo Gln Unit PT', zip: '34219' }, '700demoglenpt34219'],
+      [{ address_line1: '700 Demo Pt', address_line2: 'Unit PT', zip: '34219-1234' }, '700demopointpt34219'],
+      [{ address_line1: '', city: 'Venice' }, 'venice'],
     ];
-    for (const f of fixtures) expect(newKey(f)).toBe(addressKey(f));
+    for (const [f, key] of expected) expect(newKey(f)).toBe(key);
+    // The 2026-10-02 format never expanded a directional or the 2026-11-02 suffixes.
+    expect(newKey({ address_line1: '10 Demo Ave E', zip: '34219' })).toBe('10demoavenuee34219');
+    expect(newKey({ address_line1: '12 Demo Lp', zip: '34219' })).toBe('12demolp34219');
     expect(legacyKey({ address_line1: '400 Test Creek Ct', address_line2: 'Apt 4', city: 'Duette', zip: '34219-1234' }))
       .toBe('400testcreekcourt4duette34219');
   });
