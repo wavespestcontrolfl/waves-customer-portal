@@ -45,7 +45,12 @@ function bellFacts(source, meta) {
   return bellExceptions(Array.isArray(facts) ? facts : []).filter((f) => fields.has(f.field));
 }
 
-const sameText = (a, b) => String(a ?? '').replace(/\s+/g, ' ').trim().toLowerCase() === String(b ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+const normalized = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '').toLowerCase();
+const sameText = (a, b) => normalized(a) === normalized(b);
+// A note already holds the text only as a whole line (its "[text <date>] " tag ignored), never as part of one:
+// "Do not skip the shed" does not hold "Skip the shed".
+const DATED_LINE = /^\[text \d{4}-\d{2}-\d{2}\]\s*/;
+const holdsLine = (text, value) => String(text ?? '').split('\n').some((line) => sameText(line.replace(DATED_LINE, ''), value));
 
 // The value Save writes for one fact, null when the profile already says it, or a refusal code.
 function nextValue(fact, before, sourceAt) {
@@ -53,9 +58,10 @@ function nextValue(fact, before, sourceAt) {
   if (!value) return { refusal: 'nothing_to_save' };
   if (LONG_TEXT_FIELDS.has(fact.field)) {
     const text = String(before ?? '').trim();
-    if (text.toLowerCase().includes(value.toLowerCase())) return { value: null };
+    if (holdsLine(text, value)) return { value: null };
     const { etDateString } = require('../utils/datetime-et');
-    const line = `[text ${etDateString(new Date(sourceAt))}] ${value}`;
+    // One line per text, so the whole-line check above finds it next time.
+    const line = `[text ${etDateString(new Date(sourceAt))}] ${value.replace(/\s+/g, ' ')}`;
     return { value: text ? `${text}\n${line}` : line };
   }
   if (before == null || String(before).trim() === '') return { value };

@@ -26,8 +26,14 @@ describe('text-note bell buttons (owner 2026-11-02 "C")', () => {
       .toEqual([['pet_details', '[text 2040-03-10] Skip the shed please']]);
   });
 
-  test('a note the profile already holds writes nothing, so Save is not offered', () => {
-    expect(plan([held()], { special_instructions: 'Gate first. skip the shed please. Thanks' })).toEqual({ writes: [] });
+  test('a note the profile already holds as a whole line writes nothing; a line that only contains it is not a match', () => {
+    expect(plan([held()], { special_instructions: 'Text me first\n[text 2040-03-01] Skip the shed please' })).toEqual({ writes: [] });
+    expect(plan([held()], { special_instructions: 'skip the shed please.' })).toEqual({ writes: [] });
+    // Pre-push P1: the opposite instruction contains the new one; it is still saved.
+    expect(writes(plan([held({ value: 'Skip the shed' })], { special_instructions: 'Do not skip the shed' })))
+      .toEqual([['special_instructions', 'Do not skip the shed\n[text 2040-03-10] Skip the shed']]);
+    // A text written over two lines is saved as one, so the next Save finds it.
+    expect(writes(plan([held({ value: 'Skip the\nshed please' })]))).toEqual([['special_instructions', '[text 2040-03-10] Skip the shed please']]);
   });
 
   test('a code fills only an empty field: the same code writes nothing, a different one refuses', () => {
