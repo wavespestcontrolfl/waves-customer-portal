@@ -724,15 +724,16 @@ async function mirrorPackageChildren(database, estimateId, approvedServiceIds) {
 // stripping them — the exact drift codex caught between these keys and
 // addressKey. Unit identity stays part of the key ("Unit 4" != "Unit 5").
 function normalizedStampedStreet(line1, line2, city, zip) {
-  const { canonicalizeScopeAddress, canonicalizeAddress, stripUnitDesignators, normalizeZip } = require('./customer-properties');
+  const { canonicalizeScopeAddress, canonicalizeUnitLine, stripUnitDesignators, normalizeZip } = require('./customer-properties');
   // Street directionals expand too ("Dr E" == "Drive East"): the one-line
   // Google estimate address and the structured property row spell the same
   // house either way. Only the STREET (line 1) expands: line 2 is a unit and
   // keeps its exact identifier, as does the token after a designator inside
-  // line 1 ("Apt E" != "Apt East"). Final fold matches addressKey exactly
+  // line 1 ("Apt E" != "Apt East"); neither maps suffix forms ("Unit LP" !=
+  // "Unit Loop", codex #7485 r1). Final fold matches addressKey exactly
   // ([^a-z0-9] stripped — codex #3248 r3): "100 O'Connor St" and
   // "100 OConnor St" key identically.
-  const street = stripUnitDesignators([canonicalizeScopeAddress(line1), canonicalizeAddress(line2)]
+  const street = stripUnitDesignators([canonicalizeScopeAddress(line1), canonicalizeUnitLine(line2)]
     .map((v) => String(v || '').trim())
     .filter(Boolean)
     .join(' '))

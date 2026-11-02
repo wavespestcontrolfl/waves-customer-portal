@@ -52,7 +52,7 @@ function defaultRelationshipForContactRole(contactRole) {
 }
 
 const {
-  normStreet, canonicalizeAddress, canonicalizeScopeAddress, normalizeZip, stripTrailingUnit, streetKey, stripUnitDesignators, addressKey, unitKey, streetEmbeddedUnitKey,
+  normStreet, canonicalizeAddress, canonicalizeScopeAddress, canonicalizeUnitLine, normalizeZip, stripTrailingUnit, streetKey, stripUnitDesignators, addressKey, unitKey, streetEmbeddedUnitKey,
 } = require('./customer-property-address-keys');
 
 /** Coerce to a known occupancy enum value (pure). */
@@ -1529,6 +1529,7 @@ module.exports = {
   addressKey,
   canonicalizeAddress,
   canonicalizeScopeAddress,
+  canonicalizeUnitLine,
   stripUnitDesignators,
   unitKey,
   streetEmbeddedUnitKey,

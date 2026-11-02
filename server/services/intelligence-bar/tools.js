@@ -372,7 +372,7 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'reschedule_appointment',
-    description: 'Move an existing appointment to a new date. Keeps the same service type and customer.',
+    description: 'Move an existing appointment to a new date. Keeps the same service type and customer. When the visit is part of a recurring plan and plan moves are turned on, its later visits move with it: the card lists every visit\'s old and new date before anything changes. No customer text is sent.',
     input_schema: {
       type: 'object',
       properties: {
@@ -4366,17 +4366,25 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // row directly and cannot shift the sister visits, so with the gate on a
   // DATE move of a cadence visit is refused rather than silently applied
   // per-visit (refuse-don't-drop — the same contract update-details keeps
-  // for gated scopes). The Intelligence Bar series path (preview card +
-  // rebooker choke point + series effects) lands in the follow-up PR.
+  // for gated scopes). With GATE_IB_SERIES_MOVE on it goes to the plan
+  // mover instead (preview card + the Dispatch board's staff move).
   {
     const { movesAsSeries } = require('../rebooker');
     const oldDateStr = oldDate instanceof Date ? oldDate.toISOString().slice(0, 10) : String(oldDate || '').slice(0, 10);
     if (movesAsSeries(appt, dateStr) && dateStr !== oldDateStr) {
+      // GATE_IB_SERIES_MOVE (gap #22): the card listed every visit of the plan; Confirm runs the Dispatch
+      // board's staff move bound to that card (intelligence-bar/series-move.js).
+      if (require('../../config/feature-gates').ibSeriesMoveLive()) return rescheduleSeriesFromBar(input, actionContext, appt, dateStr);
       return {
         error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move, and the bar can\'t move a series from here yet. Nothing was changed.',
         code: 'collective_move_unsupported',
       };
     }
+  }
+  // A card that showed a plan move never runs as a one-visit move: the plan, the size rule or collective
+  // moves changed since the card, and the later visits it listed would stay behind.
+  if (input._series_move) {
+    return { error: 'The recurring plan changed after the card was shown, so nothing was moved. Ask again for a fresh card.', preview_changed: true };
   }
 
   // Preserve the original visit's window length when a new start is given.
@@ -4739,6 +4747,41 @@ async function rescheduleAppointment(input, actionContext = {}) {
   };
 }
 
+
+// The anchor window a plan move of this visit lands on: { window: { start, end } } for a new start, { window: null }
+// to keep each visit's own, or the refusal. The same parse, derivation and admin window rules the single move above
+// runs; shared by the card (routes/admin-intelligence-bar.js) and Confirm so both preview the same move.
+function seriesAnchorWindow(appt, newTimeWindow, dateStr) {
+  const duration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
+  const win = parseTimeWindowStart(newTimeWindow, duration);
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
+  let start = win.start || appt.window_start || null;
+  let end = win.start ? deriveWindowEnd(win.start, duration) : (appt.window_end || null);
+  if (win.start && !end) return { error: 'That window would cross midnight — pick an earlier start.' };
+  if (start || end) {
+    try {
+      const normalized = assertAdminAppointmentWindow({ windowStart: start, windowEnd: end, durationMinutes: duration });
+      if (win.start) ({ window_start: start, window_end: end } = normalized);
+    } catch (err) {
+      if (err?.status === 422) return { error: err.message };
+      throw err;
+    }
+  }
+  if (sameDayWindowElapsed(dateStr, end || start)) {
+    return { error: 'That window has already passed today — pick a later window or a future date.' };
+  }
+  return { window: win.start ? { start, end } : null };
+}
+
+async function rescheduleSeriesFromBar(input, actionContext, appt, dateStr) {
+  const anchor = seriesAnchorWindow(appt, input.new_time_window, dateStr);
+  if (anchor.error) return anchor;
+  const customer = await db('customers').where('id', appt.customer_id).first('first_name', 'last_name');
+  return require('./series-move').runSeriesMove({
+    input, actionContext, appt, dateStr, window: anchor.window,
+    customerName: customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : null,
+  });
+}
 
 // Owner ruling 2026-09-28, "bare visits only" (supersedes the earlier
 // "simple visits only" wording this message carried): a bare visit has no
@@ -5529,7 +5572,7 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho, ibBookingPropertyProposal, bookingPropertyLabel,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, seriesAnchorWindow, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho, ibBookingPropertyProposal, bookingPropertyLabel,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.

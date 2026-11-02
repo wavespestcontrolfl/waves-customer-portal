@@ -44,9 +44,6 @@ const ET = 'America/New_York';
 const SOURCE_LABELS = {
   request_form: 'Request form', text: 'Text', call: 'Call', office: 'Office', email: 'Email',
 };
-const SOURCE_SUBJECTS = {
-  request_form: 'request form', text: 'text', call: 'call', email: 'email',
-};
 const ANSWER_KINDS = new Set(['treated', 'checked_none', 'noted', 'not_today', 'answered']);
 const FIXED_LINES = {
   checked_none: ['Checked', 'We checked and found no activity there today.'],
@@ -179,18 +176,17 @@ function wordsOf(item) {
   return customerCopyViolations(words).length ? '' : words;
 }
 
+// Which message an answer is for: card 1's own label plus the first words that card printed, so three answers about
+// ants still point at three messages ("Text · Oct 30 · “Ants are back in the kitchen”"). A message card 1 shows by
+// its label only keeps the label; call and office words are never put in quotation marks.
+const SUBJECT_WORDS = 6;
 function subjectOf(item) {
-  const pests = (Array.isArray(item.pests) ? item.pests : [])
-    .filter((pest) => typeof pest === 'string' && pest.trim() && customerCopyViolations(pest).length === 0)
-    .map((pest) => pest.trim());
-  if (pests.length) {
-    return naturalJoin(pests.map((pest, index) => (index === 0 ? pest.charAt(0).toUpperCase() + pest.slice(1) : pest.charAt(0).toLowerCase() + pest.slice(1))));
-  }
-  if (item.kind === 'question') return 'Your question';
-  if (item.source === 'office') return 'From our office notes';
-  const channel = SOURCE_SUBJECTS[item.source];
-  const date = monthDay(item.at);
-  return channel ? `From your ${channel}${date ? ` on ${date}` : ''}` : (date ? `From ${date}` : 'From your message');
+  const label = labelOf(item);
+  if (!wordsOf(item)) return label;
+  const words = withoutAccessOrClaims(String(item.text || '').replace(/\s+/g, ' ').trim()).split(' ');
+  const cut = words.slice(0, SUBJECT_WORDS).join(' ').replace(/[\s.,;:!?…]+$/, '');
+  const short = words.length > SUBJECT_WORDS ? `${cut}…` : cut;
+  return `${label} · ${item.quoted === true ? `“${short}”` : short}`;
 }
 
 // Zone letters mean nothing to a homeowner; the report's own product cards

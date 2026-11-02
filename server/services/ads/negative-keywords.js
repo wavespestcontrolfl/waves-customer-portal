@@ -75,6 +75,17 @@ function competitorName(text) {
   return firstMatch(spaced(text), COMPETITOR_NAMES);
 }
 
+// Would a Google PHRASE-match negative with this phrase block this search term?
+// True when the term's tokens contain the phrase's tokens contiguously, same
+// lenient tokenizing as protectedReason. Google phrase negatives do not match
+// plurals or close variants, so the tokens must be equal: "squirrel" does not
+// match "squirrels".
+function phraseMatches(term, phrase) {
+  const needle = spaced(phrase);
+  if (needle.trim() === '') return false;
+  return spaced(term).includes(needle);
+}
+
 module.exports = {
   PROTECTED_BRAND_TERMS,
   COMPETITOR_NAMES,
@@ -85,4 +96,5 @@ module.exports = {
   normalizeNegative,
   protectedReason,
   competitorName,
+  phraseMatches,
 };

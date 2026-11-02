@@ -142,12 +142,14 @@ function clockLabel(hhmm) {
 
 // Quick Move "let the customer pick a day": a visit handed to the customer has a
 // placeholder date and no time until they pick, so its card says that instead
-// ("the customer picks a day by Wed 8 PM"), never the parking date.
+// ("the customer picks a day by Wed 8 PM", "... by Wed 8:15 PM"), never the
+// parking date.
 const PICK_WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function visitWhen(visit) {
   if (!awaitingCustomerPick(visit)) return formatWhen(visit.scheduled_date, visit.window_start, visit.window_end);
-  const { dayOfWeek, hour } = etParts(new Date(visit.customer_pick_by));
-  return `the customer picks a day by ${PICK_WEEKDAY[dayOfWeek]} ${hour % 12 || 12} ${hour >= 12 ? 'PM' : 'AM'}`;
+  const { dayOfWeek, hour, minute } = etParts(new Date(visit.customer_pick_by));
+  const { text, meridiem } = clockLabel(`${hour}:${minute}`);
+  return `the customer picks a day by ${PICK_WEEKDAY[dayOfWeek]} ${text} ${meridiem}`;
 }
 
 /** "Thu Sep 10, 9–11 AM" / "Thu Sep 10, 11 AM–1 PM" / "Thu Sep 10". */

@@ -56,7 +56,7 @@ describe('trigger registry catalog contract', () => {
     const declared = (flag) => entries.filter(([, t]) => t.rule[flag] === true).map(([key]) => key).sort();
     expect(declared('contact')).toEqual([
       'appointment_reschedule_intent', 'bundle_quote_requested', 'customer_email_received', 'customer_missed_call',
-      'customer_voicemail_callback', 'new_lead', 'relay_hot_lead', 'relay_reservice_filed', 'relay_unbooked_call',
+      'customer_voicemail_callback', 'new_lead', 'portal_ask', 'relay_hot_lead', 'relay_reservice_filed', 'relay_unbooked_call',
       'reservice_self_booked', 'sandy_transfer_no_context', 'sms_reply',
     ]);
     expect(declared('promise')).toEqual(['call_commitment_overdue', 'promise_chaser', 'sms_operational_followup']);
