@@ -1,3 +1,7 @@
+# The portal builds from deploy/portal.Dockerfile once its Dockerfile path is
+# set (it installs ffmpeg itself); this file still serves the
+# seo-pipeline-worker and the portal's rollback to Nixpacks.
+#
 # Railway build (service setting: builder = Nixpacks). Extends the auto-detected
 # Node setup phase — "..." keeps nixpacks' defaults — with ffmpeg on PATH:
 # the Reel MP4 metadata strip (uploadVideoToS3 → stripVideoMetadata) and the
