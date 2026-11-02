@@ -30,7 +30,7 @@ beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   fetchMock = vi.fn(async (url, init) => {
     const path = String(url);
-    if (path.endsWith('/rain-out-options')) {
+    if (path.split('?')[0].endsWith('/rain-out-options')) {
       if (optionsRefusal) return { ok: false, status: 403, json: async () => optionsRefusal };
       return json({
         sameDay: [], days: [{ kind: 'day', date: '2099-01-02', window: { start: '09:00', end: '10:00' }, display: 'Fri, Jan 2, 9:00 AM-10:00 AM' }],
@@ -202,5 +202,44 @@ describe('RainOutSheet: let the customer pick a day', () => {
     render(<RainOutSheet service={{ id: 'visit-1', customerName: 'Fixture Customer' }} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(await screen.findByText('Ask the office to move this visit.')).toBeInTheDocument();
     expect(screen.queryByText(/pick a day/i)).not.toBeInTheDocument();
+  });
+});
+
+// GATE_RAINOUT_KEEP_RAIN_OK: the server filters the rest-of-route list for a
+// rain move only, so the sheet says which kind of move it is previewing.
+describe('RainOutSheet: reason reaches the route preview', () => {
+  const optionCalls = () => fetchMock.mock.calls.map(([path]) => String(path)).filter((path) => path.split('?')[0].endsWith('/rain-out-options'));
+  const checkBodies = () => fetchMock.mock.calls
+    .filter(([path]) => String(path).endsWith('/rain-out/target-check'))
+    .map(([, init]) => JSON.parse(init.body));
+
+  it('asks for the rain list first, refetches only when the reason crosses rain / not rain, and keeps the slot', async () => {
+    optionsExtra = { extraReasonsEnabled: true, remainingRouteCount: 2 };
+    render(<RainOutSheet service={{ id: 'visit-1', customerName: 'Fixture Customer' }} onClose={vi.fn()} onDone={vi.fn()} />);
+    const move = await screen.findByRole('button', { name: 'Move appointment' });
+    await waitFor(() => expect(move).toBeEnabled());
+    expect(optionCalls()).toEqual(['/api/admin/dispatch/visit-1/rain-out-options?reasonCode=weather_rain']);
+
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'running_late' } });
+    await waitFor(() => expect(optionCalls()).toHaveLength(2));
+    expect(optionCalls()[1]).toBe('/api/admin/dispatch/visit-1/rain-out-options');
+    // Another non-rain reason: same list, no new request.
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'equipment_issue' } });
+    // Back to rain: asks for the rain list again; the picked slot stays picked.
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'weather_rain' } });
+    await waitFor(() => expect(optionCalls()).toHaveLength(3));
+    expect(optionCalls()[2]).toBe('/api/admin/dispatch/visit-1/rain-out-options?reasonCode=weather_rain');
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeEnabled();
+  });
+
+  it('sends the picked reason with every target-check', async () => {
+    optionsExtra = { extraReasonsEnabled: true, remainingRouteCount: 2 };
+    render(<RainOutSheet service={{ id: 'visit-1', customerName: 'Fixture Customer' }} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByRole('button', { name: 'Move appointment' });
+    await waitFor(() => expect(checkBodies().length).toBeGreaterThan(0), { timeout: 3000 });
+    expect(checkBodies().at(-1)).toMatchObject({ reasonCode: 'weather_rain', target: { date: '2099-01-02' } });
+
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'tech_emergency' } });
+    await waitFor(() => expect(checkBodies().at(-1)).toMatchObject({ reasonCode: 'tech_emergency' }), { timeout: 3000 });
   });
 });

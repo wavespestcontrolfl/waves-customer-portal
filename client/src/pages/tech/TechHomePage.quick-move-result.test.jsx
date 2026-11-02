@@ -51,10 +51,10 @@ beforeEach(() => {
     if (path.includes('/admin/schedule?')) { scheduleReads += 1; data = { services: [row('one', 'Ames Fixture'), row('two', 'Baker Fixture')] }; }
     if (path.endsWith('/visit-brief')) data = { facts: { access: { accessNotes: 'Use the side gate' } } };
     if (path.includes('/tech/line')) data = { line: null };
-    if (path.endsWith('/rain-out-options') && optionsRefusal) {
+    if (path.split('?')[0].endsWith('/rain-out-options') && optionsRefusal) {
       return { ok: false, status: optionsRefusal.status, json: async () => optionsRefusal.body };
     }
-    if (path.endsWith('/rain-out-options')) {
+    if (path.split('?')[0].endsWith('/rain-out-options')) {
       data = {
         ok: true, days: [], ...optionsExtra, remainingRouteCount: 1, service: { window: { start: '09:00', end: '10:00' } }, today: {},
         sameDay: [{ kind: 'same_day', date: '2099-01-01', window: { start: '14:00', end: '15:00' }, label: 'Later today', display: 'Today, 2:00 PM-3:00 PM' }],
@@ -133,6 +133,31 @@ describe('Tech Home Quick Move result', () => {
     expect(await screen.findByText('Moved 1 stop to Today, 2:00 PM-3:00 PM, customer texted')).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByTestId('quick-move-result')).not.toBeInTheDocument();
+  });
+});
+
+// GATE_RAINOUT_KEEP_RAIN_OK: the server filters the rest-of-route count for a
+// rain move only, so the sheet says which kind of move it is previewing.
+describe('Tech Home Quick Move: reason reaches the route count', () => {
+  const optionCalls = () => fetchMock.mock.calls.map(([path]) => String(path)).filter((path) => path.split('?')[0].endsWith('/rain-out-options'));
+
+  it('asks for the rain list first, refetches only when the reason crosses rain / not rain, and keeps the slot', async () => {
+    optionsExtra = { extraReasonsEnabled: true };
+    mount();
+    await screen.findByText('Property brief for one');
+    fireEvent.click(screen.getByRole('button', { name: 'Quick Move' }));
+    await screen.findByText(/Today, 2:00 PM-3:00 PM/);
+    expect(optionCalls()).toEqual(['/api/tech/services/one/rain-out-options?reasonCode=weather_rain']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Running late' }));
+    await waitFor(() => expect(optionCalls()).toHaveLength(2));
+    expect(optionCalls()[1]).toBe('/api/tech/services/one/rain-out-options');
+    // Another non-rain reason: same list, no new request.
+    fireEvent.click(screen.getByRole('button', { name: 'Emergency' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Rain' }));
+    await waitFor(() => expect(optionCalls()).toHaveLength(3));
+    expect(optionCalls()[2]).toBe('/api/tech/services/one/rain-out-options?reasonCode=weather_rain');
+    expect(screen.getByRole('button', { name: /^Move this stop/ })).toBeEnabled();
   });
 });
 

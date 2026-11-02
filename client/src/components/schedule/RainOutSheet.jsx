@@ -14,7 +14,7 @@
 // Styling matches the light/zinc detail sheet it opens over (not the tech
 // app's dark palette) — neutral chrome only, per the admin design spec.
 
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -386,11 +386,17 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
   const [customDate, setCustomDate] = useState(todayStr);
   const [customStart, setCustomStart] = useState('');
 
+  // GATE_RAINOUT_KEEP_RAIN_OK: the server drops all-rain-OK stops from the
+  // "rest of route" count and badges for a RAIN move only, so the fetch says
+  // when the picked reason is rain. Only that bucket change refetches (not
+  // every reason pick); the refetch keeps the highlighted slot and fails quietly.
+  const rainReason = reason === 'weather_rain';
+  const optionsLoaded = useRef(false);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out-options`, {
+        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out-options${rainReason ? '?reasonCode=weather_rain' : ''}`, {
           headers: authHeaders(),
         });
         const data = await res.json().catch(() => ({}));
@@ -399,14 +405,15 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
         const answer = readOptionsAnswer(res, data);
         if (!cancelled) {
           setOptions(answer.options);
-          setSelectedKey(answer.selectedKey);
+          if (!optionsLoaded.current) setSelectedKey(answer.selectedKey);
+          optionsLoaded.current = true;
         }
       } catch (err) {
-        if (!cancelled) setError(err.message || 'Failed to load options');
+        if (!cancelled && !optionsLoaded.current) setError(err.message || 'Failed to load options');
       }
     })();
     return () => { cancelled = true; };
-  }, [service.id]);
+  }, [service.id, rainReason]);
 
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
@@ -577,6 +584,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
           signal: controller.signal,
           body: JSON.stringify({
             target: { date: selectedDate, window: { start: selectedStart, end: selectedEnd } },
+            reasonCode: reason,
           }),
         });
         const data = await res.json().catch(() => null);
@@ -586,7 +594,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
       } catch { /* advisory only — commit still rejects real overlaps */ }
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [selectedDate, selectedStart, selectedEnd, service.id]);
+  }, [selectedDate, selectedStart, selectedEnd, service.id, reason]);
   // Advisory availability strip for the landing day in play — the custom
   // picker's date when it's active, otherwise the highlighted preset's day.
   // On a rest-of-route move the hint advises the tapped visit only; that's

@@ -1680,26 +1680,33 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
   const [attention, setAttention] = useState(null);
   const committed = !!attention;
 
+  // GATE_RAINOUT_KEEP_RAIN_OK: the server drops all-rain-OK stops from the
+  // "rest of route" count and badges for a RAIN move only, so the fetch says
+  // when the picked reason is rain. Only that bucket change refetches (not
+  // every reason pick); the refetch keeps the highlighted slot and fails quietly.
+  const rainReason = reason === 'weather_rain';
+  const optionsLoaded = useRef(false);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const token = getAdminAuthToken();
-        const res = await fetch(`${API}/api/tech/services/${service.id}/rain-out-options`, {
+        const res = await fetch(`${API}/api/tech/services/${service.id}/rain-out-options${rainReason ? '?reasonCode=weather_rain' : ''}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         const data = await res.json().catch(() => ({}));
         const loaded = readOptionsAnswer(res, data);
         if (!cancelled) {
           setOptions(loaded.options);
-          setSelectedKey(loaded.selectedKey);
+          if (!optionsLoaded.current) setSelectedKey(loaded.selectedKey);
+          optionsLoaded.current = true;
         }
       } catch (err) {
-        if (!cancelled) setError(err.message || 'Failed to load options');
+        if (!cancelled && !optionsLoaded.current) setError(err.message || 'Failed to load options');
       }
     })();
     return () => { cancelled = true; };
-  }, [service.id]);
+  }, [service.id, rainReason]);
 
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
