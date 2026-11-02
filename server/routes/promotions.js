@@ -1,17 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 router.use(authenticate);
-
-// Admin alert recipient — must be a real cell, never one of our own Twilio
-// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
-const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 // =========================================================================
 // SERVICE DEFINITIONS & PRICING
@@ -353,25 +348,24 @@ router.post('/:id/interest', async (req, res, next) => {
       svc.keywords.some(kw => serviceTypes.some(st => st.toLowerCase().includes(kw)))
     ).length;
     const newTier = getTierForServiceCount(currentCount + 1);
-    const newDiscount = TIERS[newTier]?.discount || 0;
-    const svc = SERVICES[serviceType] || {};
-    const discountedPrice = svc.monthlyPrice ? (svc.monthlyPrice * (1 - newDiscount)).toFixed(2) : '?';
 
-    // Internal office notification
+    // The office hears of it through the add-a-service bell (bundle_quote_requested, a customer contact: it
+    // rings and pushes, and opens the customer's requests panel). It was a text to the owner's phone that
+    // reached nobody since about 2026-09-01 (services/owner-alerts.js). Rung after the durable row; a bell
+    // failure leaves the request actionable in the requests panel.
     try {
-      await TwilioService.sendSMS(
-        ADMIN_ALERT_PHONE,
-        `🎯 Upsell Interest!\n\n` +
-        `${customer.first_name} ${customer.last_name} at ${customer.address_line1}, ${customer.city}\n` +
-        `is interested in adding ${serviceName || serviceType}.\n\n` +
-        `Currently: ${customer.waveguard_tier} WaveGuard (${currentCount} services)\n` +
-        `Adding this → ${newTier} (${newDiscount * 100}% off)\n` +
-        `Their price: $${discountedPrice}/mo\n\n` +
-        `Follow up!`,
-        { messageType: 'internal_alert', link: '/admin/customers' }
-      );
-    } catch (smsErr) {
-      logger.error(`Failed to send upsell notification: ${smsErr.message}`);
+      const { triggerNotification } = require('../services/notification-triggers');
+      await triggerNotification('bundle_quote_requested', {
+        bundled: false,
+        customerId: req.customerId,
+        customerName: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null,
+        suggestedService: serviceName || serviceType,
+        relationship: currentCount > 0 ? 'add' : 'start',
+        previousTier: customer.waveguard_tier || null,
+        refreshed: false,
+      });
+    } catch (bellErr) {
+      logger.error(`Promotion interest bell failed for request ${request.id}: ${bellErr.message}`);
     }
 
     // SMS to customer

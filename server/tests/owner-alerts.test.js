@@ -18,6 +18,9 @@ const {
   recordOwnerAlert, recordUrgentEscalation, whyFromFreeText, OWNER_ALERT_KINDS, RINGING_KINDS,
 } = require('../services/owner-alerts');
 
+// The kinds that ring as shipped, read before beforeEach empties the set for the tests below.
+const SHIPPED_RINGING_KINDS = [...RINGING_KINDS].sort();
+
 const credentialAlert = (extra = {}) => ({
   action: 'renew an expired credential',
   why: '1 credential failed the 7 AM check.',
@@ -146,9 +149,12 @@ test('whyFromFreeText keeps a clean first sentence and drops one that breaks the
 });
 
 // The regression this replaces: an internal alert texted to the owner's phone is redirected into the
-// denylisted internal_admin_alert trigger and reaches nobody. The one kept send is the tax reminder's
-// legacy branch, which runs only while GATE_TAX_DEADLINE_BELLS is off.
-test('no server code texts an internal alert to the owner phone without allowOwnerSms', () => {
+// denylisted internal_admin_alert trigger and reaches nobody. Every internal or admin alert text must opt in
+// with allowOwnerSms (a real text), whatever its recipient is called: the first version of this guard matched
+// only `process.env.ADAM_PHONE` and missed 18 sends written as ADMIN_ALERT_PHONE, ADAM_CELL, OWNER_PHONE,
+// ADMIN_PHONE or a literal number. The one kept send is the tax reminder's legacy branch, which runs only while
+// GATE_TAX_DEADLINE_BELLS is off.
+test('no server code sends an internal alert text without allowOwnerSms, whatever the recipient is called', () => {
   const root = path.join(__dirname, '..');
   const offenders = [];
   const walk = (dir) => {
@@ -157,10 +163,11 @@ test('no server code texts an internal alert to the owner phone without allowOwn
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(file);
       else if (entry.name.endsWith('.js')) {
-        const src = fs.readFileSync(file, 'utf8');
-        const calls = src.match(/sendSMS\(\s*process\.env\.ADAM_PHONE[^;]*?;/g) || [];
+        // Comments out (owner-alerts.js quotes the old call in its header); `//` after a colon is a URL.
+        const src = fs.readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+        const calls = src.match(/\bsendSMS\([^;]*?;/g) || [];
         for (const call of calls) {
-          if (/internal_alert|admin_alert/.test(call) && !/allowOwnerSms:\s*true/.test(call)) offenders.push(path.relative(root, file));
+          if (/['"](?:internal_alert|admin_alert)['"]/.test(call) && !/allowOwnerSms:\s*true/.test(call)) offenders.push(path.relative(root, file));
         }
       }
     }
@@ -168,4 +175,11 @@ test('no server code texts an internal alert to the owner phone without allowOwn
   walk(path.join(root, 'routes'));
   walk(path.join(root, 'services'));
   expect(offenders).toEqual(['services/scheduler.js']);
+});
+
+test('the shipped ring picks: the three money alerts and two customer contacts ring, every other kind is quiet', () => {
+  // Owner 2026-11-02: a charge Stripe took that our records miss, a retry that will charge again, an autopay
+  // result nobody knows; and, by the 08-28 ruling, a low satisfaction rating and a web lead whose own bell failed.
+  expect(SHIPPED_RINGING_KINDS).toEqual(['autopay-outcome-unknown', 'charge-unrecorded', 'charge-will-repeat', 'low-rating', 'web-lead']);
+  for (const kind of SHIPPED_RINGING_KINDS) expect(OWNER_ALERT_KINDS[kind]).toMatchObject({ severity: 'needs-you' });
 });
