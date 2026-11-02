@@ -56,7 +56,8 @@ export function moveStatusText(move) {
   if (move.link_sent_at) {
     return `Link sent ${shortDate(move.link_sent_at)} by ${move.link_channel === "sms" ? "text" : (move.link_channel || "email")}`;
   }
-  return "Link made, not sent yet";
+  // A copied link may have gone out some other way: never claim "not sent".
+  return "Link made";
 }
 
 // "Text moving link": the customer's SMS thread when one exists, else a new

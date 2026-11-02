@@ -1211,6 +1211,52 @@ describe('admin communications SMS route', () => {
     // A prepared (composer-inserted) contract link in the body: activated
     // BEFORE the provider call, restored on every no-send exit, recorded
     // after a real send (GH Codex #3844 r3 P1).
+    // A composer-carried moving link (GATE_MOVING_FLOW): a REAL provider send
+    // is its delivery, stamped for the Customer 360 Moving card; a blocked
+    // send stamps nothing; an accepted-then-thrown send still stamps.
+    describe('moving link in the body', () => {
+      const MOVING_BODY = `Moving? Tell us here: portal.wavespestcontrol.com/moving/${'ab'.repeat(24)}`;
+      const moves = () => require('../services/customer-moves');
+      let bearerSpy;
+      let stampSpy;
+      beforeEach(() => {
+        bearerSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck').mockResolvedValue({ ok: true, moves: ['move-1'] });
+        stampSpy = jest.spyOn(moves(), 'markLinkSent').mockResolvedValue(1);
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        });
+      });
+      afterEach(() => {
+        bearerSpy.mockRestore();
+        stampSpy.mockRestore();
+      });
+
+      test('a real send stamps the move as sent by text', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-move', provider: 'twilio' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: MOVING_BODY });
+          expect(res.status).toBe(200);
+          expect(stampSpy).toHaveBeenCalledWith(['move-1'], expect.objectContaining({ channel: 'sms' }));
+        });
+      });
+
+      test('a send the provider never took stamps nothing; an accepted-then-thrown send still stamps', async () => {
+        sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, reason: 'opted_out' });
+        await withServer(async (baseUrl) => {
+          await send(baseUrl, { customerId: 'cust-A', body: MOVING_BODY });
+          expect(stampSpy).not.toHaveBeenCalled();
+        });
+        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-move2' } }));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: MOVING_BODY });
+          expect(res.status).toBe(500);
+          expect(stampSpy).toHaveBeenCalledWith(['move-1'], expect.objectContaining({ channel: 'sms' }));
+        });
+      });
+    });
+
     describe('prepared contract signing link in the body', () => {
       const CONTRACT_BODY = 'Please sign: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY';
       const { hashContractToken } = jest.requireActual('../services/contracts');

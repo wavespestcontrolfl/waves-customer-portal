@@ -406,6 +406,16 @@ maybeDescribe('moving flow (live Postgres)', () => {
     expect(await db('service_requests').where({ customer_id: customerId }).count('* as n').first()).toEqual({ n: '1' });
   });
 
+  test('markLinkSent records the channel and who sent it, and leaves a closed move alone', async () => {
+    const move = await Moves.openMoveForCustomer(customerId);
+    expect(await Moves.markLinkSent([move.id, move.id], { channel: 'sms', actorId: null, now: NOW })).toBe(1);
+    const [listed] = await Moves.recentMoves(customerId, 1);
+    expect(listed).toMatchObject({ link_channel: 'sms' });
+    expect(new Date(listed.link_sent_at).toISOString()).toBe(NOW.toISOString());
+    await db('customer_moves').where({ id: move.id }).update({ status: 'closed' });
+    expect(await Moves.markLinkSent([move.id], { channel: 'email', now: NOW })).toBe(0);
+  });
+
   test('the card learns where "Text moving link" opens', async () => {
     expect(await Moves.textTarget(customerId)).toMatchObject({ hasTexts: false });
   });

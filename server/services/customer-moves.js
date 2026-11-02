@@ -521,15 +521,20 @@ async function sendMovingEmail({ customerId, actorId = null }) {
   const url = await movingLinkFor(move);
   const AccountMembershipEmail = require('./account-membership-email');
   const result = await AccountMembershipEmail.sendMovingLink({ customerId, moveId: move.id, movingUrl: url, actorId });
-  if (result && result.ok) {
-    await db('customer_moves').where({ id: move.id }).update({
-      link_sent_at: new Date(),
-      link_sent_by: actorId || null,
-      link_channel: 'email',
-      updated_at: new Date(),
-    });
-  }
+  if (result && result.ok) await markLinkSent([move.id], { channel: 'email', actorId });
   return { ok: !!(result && result.ok), sent: !!(result && result.ok), reason: result && !result.ok ? (result.reason || 'email_not_sent') : null, moveId: move.id };
+}
+
+// Record that the link went out ('email' from the card, 'sms' from a real
+// composer send that carried it), for the card's status line. A closed move
+// is left alone.
+async function markLinkSent(moveIds, { channel, actorId = null, now = new Date() } = {}) {
+  const ids = [...new Set((moveIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return 0;
+  return db('customer_moves')
+    .whereIn('id', ids)
+    .whereNot({ status: 'closed' })
+    .update({ link_sent_at: now, link_sent_by: actorId || null, link_channel: channel, updated_at: now });
 }
 
 // Where the card's "Text moving link" opens: the customer's SMS thread when
@@ -570,6 +575,7 @@ module.exports = {
   publicMoveView,
   receiptFor,
   sendMovingEmail,
+  markLinkSent,
   recentMoves,
   textTarget,
   planServiceNames,

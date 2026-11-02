@@ -1582,16 +1582,18 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
 // review on #7486). A short link arrives expanded to its /moving/ target
 // (expandedView). A token with no move fails closed; a look-alike host is not
 // a Waves link and is not judged.
-async function checkMovingLinks(ctx) {
+async function checkMovingLinks(ctx, moveIds) {
   const onRecipientAccount = recipientAccountBinder(ctx);
   for (const run of linkRuns(ctx.runs, /\/moving\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, MOVING_PATH_RE, ANY_SCHEME);
     if (!token) continue;
-    const ownerId = await movingLinkOwner(db, token);
-    if (!ownerId) return refuseSend('This moving link no longer resolves — remove it and insert a fresh one.');
-    const bad = await onRecipientAccount(ownerId, 'moving link');
+    const move = await db('customer_moves').where({ token: token.toLowerCase() }).first('id', 'customer_id');
+    if (!move) return refuseSend('This moving link no longer resolves — remove it and insert a fresh one.');
+    const bad = await onRecipientAccount(move.customer_id, 'moving link');
     if (bad) return bad;
     ctx.bearers += 1;
+    // A real send of this text is the link's delivery (POST /sms stamps it).
+    if (!moveIds.includes(String(move.id))) moveIds.push(String(move.id));
   }
   return null;
 }
@@ -2078,7 +2080,6 @@ async function visitCardRequestLinked(runs, hosts, conn) {
 // The moving page (routes/moving-public.js, 48 lowercase hex). A pasted
 // upper-case token is looked up lower-cased, so it is judged, never skipped.
 const MOVING_PATH_RE = /^\/moving\/([a-f0-9]{48})$/i;
-const movingLinkOwner = async (conn, t) => (await conn('customer_moves').where({ token: String(t).toLowerCase() }).first('customer_id'))?.customer_id;
 const ownedBearerShapes = () => [
   ['reschedule', /\/reschedule\//i, RESCHEDULE_PATH_RE,
     async (conn, t) => (await conn('scheduled_services').where({ reschedule_token: t }).first('customer_id'))?.customer_id],
@@ -2091,7 +2092,8 @@ const ownedBearerShapes = () => [
   ['estimate', /\/estimate\//i, /^\/estimate\/([A-Za-z0-9_-]{8,})$/i,
     async (conn, t) => (await conn('estimates').where({ token: t }).first('customer_id'))?.customer_id],
   ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i, referralLinkOwner],
-  ['moving', /\/moving\//i, MOVING_PATH_RE, movingLinkOwner],
+  ['moving', /\/moving\//i, MOVING_PATH_RE,
+    async (conn, t) => (await conn('customer_moves').where({ token: String(t).toLowerCase() }).first('customer_id'))?.customer_id],
 ];
 // The public /r/:code resolver's own three paths (routes/referral-links.js):
 // an active promoter, a merged-away promoter whose code survives as an alias
@@ -2155,12 +2157,13 @@ async function bearerLinkSendCheck(body, toLast10, {
   const statements = [];
   const preps = [];
   const projectReports = [];
+  const moves = [];
   const checks = [
     () => checkContractLinks(ctx, contracts),
     () => checkPrepLinks(ctx, preps),
     () => checkStatementLinks(ctx, statements),
     () => checkAccountBoundLinks(ctx, projectReports),
-    () => checkMovingLinks(ctx),
+    () => checkMovingLinks(ctx, moves),
     () => checkCardLinks(ctx, cards),
     // Pre-push Codex P1: consultation is lead-bound, not account-bound —
     // checked by destination phone alone (ctx.toLast10), independent of
@@ -2185,6 +2188,7 @@ async function bearerLinkSendCheck(body, toLast10, {
     ...(statements.length ? { statements } : {}),
     ...(preps.length ? { preps } : {}),
     ...(projectReports.length ? { projectReports } : {}),
+    ...(moves.length ? { moves } : {}),
     // The one lead a validated consultation link belongs to (Codex #4709
     // r13 P2) — so a pasted link still gets its lead outreach bookkeeping.
     ...(ctx.consultationLeadIds?.length === 1 ? { consultationLeadId: ctx.consultationLeadIds[0] } : {}),

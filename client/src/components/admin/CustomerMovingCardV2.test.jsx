@@ -31,7 +31,7 @@ beforeEach(() => {
 describe('moveStatusText', () => {
   it('says where the newest move stands in plain words', () => {
     expect(moveStatusText(undefined)).toBe('No move yet');
-    expect(moveStatusText({ status: 'open', link_sent_at: null })).toBe('Link made, not sent yet');
+    expect(moveStatusText({ status: 'open', link_sent_at: null })).toBe('Link made');
     expect(moveStatusText({ status: 'open', link_sent_at: '2026-11-02T15:00:00Z', link_channel: 'email' })).toBe('Link sent Nov 2 by email');
     expect(moveStatusText({
       status: 'submitted',
