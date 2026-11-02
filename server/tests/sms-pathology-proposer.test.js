@@ -126,7 +126,9 @@ describe('proposePatches — threshold + cap + ordering', () => {
 
   test('while the rule loop runs (observe or true) a proposal it can take is still parked, with no "parked for review" notice', async () => {
     const prior = process.env.GATE_SMS_PROMPT_AUTOPROMOTE;
+    const priorReal = process.env.GATE_SMS_REAL_ANSWERS;
     try {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
       for (const mode of ['observe', 'true']) {
         process.env.GATE_SMS_PROMPT_AUTOPROMOTE = mode;
         NotificationService.notifyAdmin.mockClear();
@@ -139,9 +141,17 @@ describe('proposePatches — threshold + cap + ordering', () => {
         expect(dbi.inserts).toHaveLength(1);
         expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
       }
+      // Real answers off: createCandidate returns real_answers_off, so the loop would never act; the notice stays.
+      process.env.GATE_SMS_REAL_ANSWERS = 'false';
+      NotificationService.notifyAdmin.mockClear();
+      const offDbi = makeProposerDb({ cells: [{ surface: 'prompt_discipline', failure_mode: 'invented_commitment', fresh: '6' }], entries: entryRows });
+      await proposePatches({ dbi: offDbi, anthropicClient: {} });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     } finally {
       if (prior === undefined) delete process.env.GATE_SMS_PROMPT_AUTOPROMOTE;
       else process.env.GATE_SMS_PROMPT_AUTOPROMOTE = prior;
+      if (priorReal === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+      else process.env.GATE_SMS_REAL_ANSWERS = priorReal;
     }
   });
 

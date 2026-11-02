@@ -611,7 +611,10 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
       // "parked for review" notice: it would ask the owner to approve a step his 2026-09-27 ruling removed (owner
       // 2026-11-02, weekly-loop review item 8). Every other proposal (a facts gap, a verifier miss) still needs
       // someone to act on it and keeps the notice; with the loop off, nothing changes.
+      // Same preconditions createCandidate checks: the loop is on and real answers are on (it returns
+      // real_answers_off otherwise and the proposal would sit with no notice).
       const loopTakesIt = require('./sms-prompt-patch').promptAutopromoteMode() !== 'off'
+        && require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS')
         && cell.surface === 'prompt_discipline'
         && require('./sms-prompt-autopromote').eligibleFailureModes().includes(cell.failure_mode);
       if (!loopTakesIt) {
