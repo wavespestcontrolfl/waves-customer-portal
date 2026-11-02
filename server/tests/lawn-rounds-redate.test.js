@@ -229,6 +229,30 @@ describe('reviewPlan', () => {
     expect(out.held).toBe('closed day');
   });
 
+  test('a round day that is closed moves to the next open day of the same round; later rounds keep their dates', async () => {
+    const closed = new Set(['2027-01-12']);
+    const nudged = planSeriesRedate(series(legacy()), { closedDates: closed, maxShiftDays: 21 });
+    expect(targets(nudged)).toEqual([['v1', '2026-11-17'], ['v2', '2027-01-13'], ['v3', '2027-02-23'], ['v4', '2027-03-30']]);
+    expect(nudged.moves[0]).toMatchObject({ id: 'v2', to: '2027-01-13', closedFrom: '2027-01-12', shift: 15 });
+    expect(nudged.heldReasons).toEqual([]);
+    // The plan's own checks judge the open day: under a 14-day limit the 15-day shift is too far for the area day.
+    expect(planSeriesRedate(series(legacy()), { closedDates: closed })).toMatchObject({ anchorSource: 'own' });
+    // The review then judges the open day: no closed-day hold, and the hour is placed on it.
+    const out = await planAndReview(conn, series(legacy()), { maxShiftDays: 21 }, { closedDates: closed, rebooker: scheduleWith([]) });
+    expect(out.held).toBeNull();
+    expect(out.moves.map((m) => [m.id, m.to])).toEqual([['v2', '2027-01-13'], ['v3', '2027-02-23'], ['v4', '2027-03-30']]);
+  });
+
+  test('a closed span that runs past the round leaves the round day in place, and the series holds: closed day', async () => {
+    // 2027-01-12 through 2027-02-04 is closed: the next open day (2027-02-05) is in the next round.
+    const closed = new Set(Array.from({ length: 24 }, (_, i) => new Date(Date.UTC(2027, 0, 12 + i)).toISOString().slice(0, 10)));
+    const kept = planSeriesRedate(series(legacy()), { closedDates: closed, maxShiftDays: 21 });
+    expect(kept.moves[0]).toMatchObject({ id: 'v2', to: '2027-01-12' });
+    expect(kept.moves[0].closedFrom).toBeUndefined();
+    const out = await planAndReview(conn, series(legacy()), { maxShiftDays: 21 }, { closedDates: closed, rebooker: scheduleWith([]) });
+    expect(out.held).toBe('closed day');
+  });
+
   test('an earlier planned series in the run claims its hour, whatever the technician; a held series claims none', async () => {
     const reserved = new Map();
     const rebooker = scheduleWith([]);
@@ -261,7 +285,9 @@ describe('planAndReview', () => {
     const everyDayFull = { previewMoveConflicts: jest.fn(async () => [{ id: 'x' }]) };
     const drifted = [visit('v1', '2026-11-17'), visit('v2', '2026-12-29'), visit('v3', '2027-02-11')];
     expect(await planAndReview(conn, series(drifted), {}, { rebooker: everyDayFull })).toMatchObject({ held: 'hour taken', anchorSource: 'area' });
-    const closed = await planAndReview(conn, series(drifted), {}, { rebooker: areaDayFull, closedDates: new Set(['2027-01-12']) });
+    // Closed from the area day to past its round: the area day cannot move inside its round, so it stays and holds.
+    const roundClosed = new Set(Array.from({ length: 24 }, (_, i) => new Date(Date.UTC(2027, 0, 12 + i)).toISOString().slice(0, 10)));
+    const closed = await planAndReview(conn, series(drifted), {}, { rebooker: areaDayFull, closedDates: roundClosed });
     expect(closed).toMatchObject({ anchorSource: 'area', heldReasons: ['closed day', 'hour taken'] });
   });
 });

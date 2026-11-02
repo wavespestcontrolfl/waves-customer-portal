@@ -23,6 +23,7 @@ const { seriesCustomerSkipReason } = require('./series-customer-eligibility');
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const { DATE_EXCEPTION_CLEAR } = require('./rebooker');
 const { DAY_START_HOUR, DAY_END_HOUR } = require('./scheduling/find-time');
+const { clearOfBlackout } = require('./scheduling/blackout-nudge');
 
 const DEFAULT_MAX_SHIFT_DAYS = 14;
 const STAY_WINDOW_HOURS = 73;
@@ -76,7 +77,7 @@ function planSeriesRedate(series, opts = {}) {
   return own.tooFar ? plan : { ...own, flags: [...own.flags, 'area day too far'] };
 }
 
-function planFromAnchor(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allowLongShift = false } = {}) {
+function planFromAnchor(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allowLongShift = false, closedDates } = {}) {
   const [next, ...later] = series.visits;
   const anchorSource = series.anchorOverride ? 'override' : (series.areaAnchor ? 'area' : 'own');
   const anchor = series.anchorOverride || series.areaAnchor || next.date;
@@ -88,7 +89,7 @@ function planFromAnchor(series, { maxShiftDays = DEFAULT_MAX_SHIFT_DAYS, allowLo
     if (v.stay) {
       conflict = conflict || roundOrdinal(v.date) <= roundOrdinal(prev);
     } else {
-      row.to = lawnRoundDateFrom(anchor, prev, 1);
+      Object.assign(row, roundTarget(lawnRoundDateFrom(anchor, prev, 1), closedDates));
       row.shift = diffDays(v.date, row.to);
       row.kind = row.shift === 0 ? 'at-target' : 'move';
     }
@@ -127,6 +128,15 @@ const FLAG_RULES = [
   ['prepaid', (c) => c.series.visits.some((v) => v.prepaid)],
   ['short gap', (c) => c.rows.some((r, i) => i > 0 && diffDays(c.rows[i - 1].to, r.to) < SHORT_GAP_DAYS)],
 ];
+
+// A round date on a closed day (a holiday, a day off) moves forward to the next open day, the way the seeder and the
+// office series tools place a series date (scheduling/blackout-nudge), but only inside the same round: past it the
+// date stays and the review holds the series (closed day). The plan's other checks (shift limit, prepaid term, gaps)
+// then judge the open day. Returns { to } or, when moved, { to, closedFrom } (the closed round day).
+function roundTarget(date, closedDates) {
+  const open = closedDates ? clearOfBlackout(date, closedDates) : date;
+  return open && open !== date && roundOrdinal(open) === roundOrdinal(date) ? { to: open, closedFrom: date } : { to: date };
+}
 
 const pick = (v) => ({ id: v.id, ws: v.ws, we: v.we, dur: v.dur, tech: v.tech, prepaid: !!v.prepaid, termId: v.termId || null });
 
@@ -283,9 +293,10 @@ async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new 
 // day has no open hour (the day is full) falls back to the customer's own weekday on the rounds (flag
 // `area day full`) when that plan passes the review; otherwise the area plan and its hold stand.
 async function planAndReview(conn, series, opts, review) {
-  const plan = await reviewPlan(conn, planSeriesRedate(series, opts), review);
+  const planOpts = { ...opts, closedDates: review?.closedDates || null };
+  const plan = await reviewPlan(conn, planSeriesRedate(series, planOpts), review);
   if (plan.anchorSource !== 'area' || plan.heldReasons.join() !== 'hour taken') return plan;
-  const own = await reviewPlan(conn, planSeriesRedate({ ...series, areaAnchor: null }, opts), review);
+  const own = await reviewPlan(conn, planSeriesRedate({ ...series, areaAnchor: null }, planOpts), review);
   return own.held ? plan : { ...own, flags: [...own.flags, 'area day full'] };
 }
 
