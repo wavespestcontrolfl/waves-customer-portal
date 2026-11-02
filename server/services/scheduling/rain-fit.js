@@ -234,11 +234,17 @@ async function outdoorStopRows(rows, db, { keepVisitId = null } = {}) {
       .map((a) => ({ name: a.service_name, serviceKey: a.service_key_snapshot })),
   ].filter((svc) => String(svc.name ?? '').trim()).map(rainClassOf).filter((c) => c !== 'skip');
   const stopKey = (row) => (row.visit_id ? `v:${row.visit_id}` : `r:${row.id}`);
-  const keepStop = new Set();
+  // Classes are pooled per stop before deciding: a grouped stop whose only
+  // non-skip work is rain-OK leaves even when one member row is skip-only
+  // (Codex pre-push P1). A stop with no non-skip class at all stays.
+  const classesByStop = new Map();
   for (const row of list) {
-    const classes = classesOf(row);
-    if (!classes.length || classes.some((c) => c !== 'ok')) keepStop.add(stopKey(row));
+    const key = stopKey(row);
+    classesByStop.set(key, [...(classesByStop.get(key) || []), ...classesOf(row)]);
   }
+  const keepStop = new Set([...classesByStop]
+    .filter(([, classes]) => !classes.length || classes.some((c) => c !== 'ok'))
+    .map(([key]) => key));
   return list.filter((row) => keepStop.has(stopKey(row))
     || (keepVisitId && String(row.visit_id || '') === String(keepVisitId)));
 }

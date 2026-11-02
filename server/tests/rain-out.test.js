@@ -4749,6 +4749,17 @@ describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
     expect(options.remainingRouteCount).toBe(2);
   });
 
+  test('gate on + rain reason: a rain-OK member grouped with a skip-only row leaves; a skip-only stop alone stays', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    wireOptions([
+      stopRow('svc-4', 'WDO Inspection', 'wdo_inspection', { visit_id: 'visit-c' }),
+      stopRow('svc-5', 'General Appointment', 'general_appointment', { visit_id: 'visit-c' }),
+      stopRow('svc-6', 'General Appointment', 'general_appointment'),
+    ], { filtered: true });
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
+    expect(options.remainingRouteCount).toBe(1); // only the lone skip-only stop (unknown work) stays
+  });
+
   test('gate on + rain reason: an outdoor add-on keeps its stop; a stop with no key and an inspection name leaves', async () => {
     process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
     wireOptions(
