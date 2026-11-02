@@ -243,6 +243,19 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(later.created).toBeTruthy();
     });
 
+    test('a proposal whose candidate was rejected only because its exam could not run is picked again; any other rejection binds it', async () => {
+      const proposal = await insertProposal();
+      const first = await auto.createCandidate({ dbi: trx, now: NOW, distill: distillWith(GOOD_RULE) });
+      expect(first.created).toBeTruthy();
+      await trx('sms_prompt_patches').where({ id: first.created }).update({ status: 'rejected', decision_reason: 'exam_unavailable', decided_at: NOW });
+      const retry = await auto.createCandidate({ dbi: trx, now: new Date(NOW.getTime() + 8 * DAY), distill: distillWith(SECOND_RULE) });
+      expect(retry.created).toBeTruthy();
+      expect((await rowOf(retry.created)).source_proposal_id).toBe(proposal.id);
+      // Any other rejection (here a decided exam) still binds the proposal for good.
+      await trx('sms_prompt_patches').where({ id: retry.created }).update({ status: 'rejected', decision_reason: 'overall_not_improved', decided_at: NOW });
+      expect(await auto.createCandidate({ dbi: trx, now: new Date(NOW.getTime() + 16 * DAY), distill: distillWith(GOOD_RULE) })).toEqual({ skipped: 'no_eligible_proposal' });
+    });
+
     test('proposals that a prompt rule cannot or must not fix are never picked', async () => {
       await insertProposal({ surface: 'facts_block_gap' });
       await insertProposal({ surface: 'verifier_miss' });
