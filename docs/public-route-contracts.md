@@ -3267,8 +3267,7 @@ test, or watering, rain or mowing guidance, and never ordinal or sequence
 wording (first, final, again, re-check) since a customer may join mid-year.
 A visit on a 9-visit rounds series gets the sentence for its lawn round instead
 of its month: when the visit's linked scheduled row has `recurring_pattern`
-`lawn_rounds_9` (only `GATE_LAWN_9X_ROUNDS` creates such rows; nothing here reads
-that gate), the round (1 to 9) is `lawn-rounds.js` `roundOf` of that row's
+`lawn_rounds_9` (a residential lawn 9x series is written that way), the round (1 to 9) is `lawn-rounds.js` `roundOf` of that row's
 `scheduled_date`, and the line is that round's sentence from `lawn-program-line.js`
 `ROUND_PROGRAM_LINES_V13` (nine sentences held to every rule above, so none says
 "round"). Every other visit, including one with no linked scheduled row, keeps the

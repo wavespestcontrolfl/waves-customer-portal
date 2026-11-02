@@ -1,10 +1,10 @@
 /**
- * GATE_LAWN_9X_ROUNDS on the office writers (owner 2026-10-28): POST
+ * Lawn 9x rounds on the office writers (owner 2026-10-28; live since 2026-11-02): POST
  * /api/admin/schedule stores a NEW residential lawn 9x series as
  * lawn_rounds_9 with no interval on the parent AND every child; the
  * make-recurring spawn of PUT /:id/update-details does the same; prepay on
  * book and the prepay preview cover it on the lawn_rounds_9 coverage cadence
- * (9 visits, no downgrade). Off, every value is stored as posted. Harness mirrors admin-schedule-create-tech-absence.test.js.
+ * (9 visits, no downgrade). Harness mirrors admin-schedule-create-tech-absence.test.js.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -208,8 +208,6 @@ async function post(body) {
   return { status: res.status, body: await res.json() };
 }
 
-afterEach(() => { delete process.env.GATE_LAWN_9X_ROUNDS; });
-const gateOn = () => { process.env.GATE_LAWN_9X_ROUNDS = 'true'; };
 
 const lawnBody = {
   customerId: 'cust-1',
@@ -229,17 +227,8 @@ const lawnBody = {
 const seriesRows = () => inserts.filter((d) => d.is_recurring);
 
 describe('POST / — admin create — lawn 9x series pattern', () => {
-  test('gate off: parent and children are stored custom with 42 days, exactly as posted', async () => {
-    const { status } = await post(lawnBody);
-    expect(status).toBe(201);
-    expect(inserts).toHaveLength(4);
-    expect(seriesRows().map((d) => d.recurring_pattern)).toEqual(['custom', 'custom', 'custom', 'custom']);
-    expect(seriesRows().map((d) => d.recurring_interval_days)).toEqual([42, 42, 42, 42]);
-    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-14', '2099-09-25', '2099-11-06']);
-  });
 
-  test('gate on: parent and every child are stored lawn_rounds_9 with no interval, one visit a round', async () => {
-    gateOn();
+  test('parent and every child are stored lawn_rounds_9 with no interval, one visit a round', async () => {
     const { status } = await post(lawnBody);
     expect(status).toBe(201);
     expect(inserts).toHaveLength(4);
@@ -249,8 +238,7 @@ describe('POST / — admin create — lawn 9x series pattern', () => {
     expect(inserts.map((d) => roundOf(d.scheduled_date).round)).toEqual([5, 6, 7, 8]);
   });
 
-  test('gate on: a posted every_6_weeks lawn series is stored lawn_rounds_9 too', async () => {
-    gateOn();
+  test('a posted every_6_weeks lawn series is stored lawn_rounds_9 too', async () => {
     const { status } = await post({ ...lawnBody, recurringPattern: 'every_6_weeks', recurringIntervalDays: undefined });
     expect(status).toBe(201);
     expect(seriesRows().map((d) => d.recurring_pattern)).toEqual(Array(4).fill('lawn_rounds_9'));
@@ -261,23 +249,20 @@ describe('POST / — admin create — lawn 9x series pattern', () => {
     ['mosquito', 'Mosquito Control'],
     ['pest', 'General Pest Control'],
     ['commercial lawn', 'Commercial Lawn Care'],
-  ])('gate on: %s custom/42 is stored as posted', async (_name, serviceType) => {
-    gateOn();
+  ])('%s custom/42 is stored as posted', async (_name, serviceType) => {
     const { status } = await post({ ...lawnBody, serviceType, allowDuplicateSeries: true });
     expect(status).toBe(201);
     expect(seriesRows().map((d) => d.recurring_pattern)).toEqual(Array(4).fill('custom'));
     expect(seriesRows().map((d) => d.recurring_interval_days)).toEqual(Array(4).fill(42));
   });
 
-  test.each(['monthly', 'bimonthly'])('gate on: lawn %s is stored as posted', async (recurringPattern) => {
-    gateOn();
+  test.each(['monthly', 'bimonthly'])('lawn %s is stored as posted', async (recurringPattern) => {
     const { status } = await post({ ...lawnBody, recurringPattern, recurringIntervalDays: undefined });
     expect(status).toBe(201);
     expect(seriesRows().map((d) => d.recurring_pattern)).toEqual(Array(4).fill(recurringPattern));
   });
 
-  test('gate on: a one-time lawn visit is untouched', async () => {
-    gateOn();
+  test('a one-time lawn visit is untouched', async () => {
     const { status } = await post({ ...lawnBody, isRecurring: false, recurringPattern: undefined, recurringIntervalDays: undefined });
     expect(status).toBe(201);
     expect(inserts).toHaveLength(1);
@@ -302,7 +287,6 @@ describe('POST / — admin create — lawn neighborhood day', () => {
   const areaDates = (base) => [0, 1, 2, 3].map((i) => lawnRoundDateFrom(PARRISH, base, i));
 
   test('an area customer: the parent stores the area anchor and the children follow it', async () => {
-    gateOn();
     withCustomer({ zip: '34219', city: 'Parrish' });
     const { status } = await post(lawnBody);
     expect(status).toBe(201);
@@ -315,7 +299,6 @@ describe('POST / — admin create — lawn neighborhood day', () => {
   });
 
   test('planner equals write: the dates locked up front are exactly the dates inserted', async () => {
-    gateOn();
     withCustomer({ zip: '34219', city: 'Parrish' });
     const { status } = await post(lawnBody);
     expect(status).toBe(201);
@@ -324,7 +307,6 @@ describe('POST / — admin create — lawn neighborhood day', () => {
   });
 
   test('a customer outside every area is unchanged: own anchor, no stamp', async () => {
-    gateOn();
     withCustomer({ zip: '34251', city: 'Myakka City' });
     const { status } = await post(lawnBody);
     expect(status).toBe(201);
@@ -332,13 +314,6 @@ describe('POST / — admin create — lawn neighborhood day', () => {
     expect(inserts.every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
   });
 
-  test('gate off: custom/42 is stored as posted and never takes an area anchor', async () => {
-    withCustomer({ zip: '34219', city: 'Parrish' });
-    const off = await post(lawnBody);
-    expect(off.status).toBe(201);
-    expect(inserts.every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
-    expect(dates()).toEqual(['2099-07-03', '2099-08-14', '2099-09-25', '2099-11-06']);
-  });
 });
 
 describe('GET /annual-prepay-preview — lawn 9x draft', () => {
@@ -355,13 +330,7 @@ describe('GET /annual-prepay-preview — lawn 9x draft', () => {
     return { status: res.status, body: await res.json() };
   }
 
-  test('gate off: custom/42 reads as every_6_weeks, a supported coverage cadence (no cadence refusal)', async () => {
-    const { body } = await preview();
-    expect(String(body.blockReason || '')).not.toMatch(/visit cadence/);
-  });
-
-  test('gate on: a lawn 9x draft is covered on the lawn_rounds_9 cadence with 9 visits (no cadence refusal)', async () => {
-    gateOn();
+  test('a lawn 9x draft is covered on the lawn_rounds_9 cadence with 9 visits (no cadence refusal)', async () => {
     const { status, body } = await preview();
     expect(status).toBe(200);
     expect(String(body.blockReason || '')).not.toMatch(/visit cadence/);
@@ -372,20 +341,12 @@ describe('GET /annual-prepay-preview — lawn 9x draft', () => {
     expect(body.mintPayload.visitCount).toBe(9);
   });
 
-  test('gate off: the same draft stays every_6_weeks', async () => {
-    const { body } = await preview();
-    expect(body.eligible).toBe(true);
-    expect(body.coverageCadence).toBe('every_6_weeks');
-  });
-
-  test('gate on: a tree and shrub custom/42 draft is not refused for its cadence', async () => {
-    gateOn();
+  test('a tree and shrub custom/42 draft is not refused for its cadence', async () => {
     const { body } = await preview({ serviceType: 'Tree & Shrub Care' });
     expect(String(body.blockReason || '')).not.toMatch(/visit cadence/);
   });
 
-  test('gate on: a lawn bimonthly draft is not refused for its cadence', async () => {
-    gateOn();
+  test('a lawn bimonthly draft is not refused for its cadence', async () => {
     const { body } = await preview({ cadence: 'bimonthly', intervalDays: '' });
     expect(String(body.blockReason || '')).not.toMatch(/visit cadence/);
   });
@@ -408,8 +369,7 @@ describe('POST / — admin create — prepay on book for a lawn 9x series', () =
     trx.mockImplementation((table) => (table === 'estimates' ? chain({ ...lawnQuote }) : baseTrx(table)));
   });
 
-  test('gate on: the series is written as rounds and prepay on book mints a lawn_rounds_9 term (no downgrade)', async () => {
-    gateOn();
+  test('the series is written as rounds and prepay on book mints a lawn_rounds_9 term (no downgrade)', async () => {
     const accept = require('../services/estimate-manual-acceptance').markEstimateManuallyAccepted;
     accept.mockClear();
     accept.mockResolvedValueOnce({ conversion: { draftInvoiceId: 'inv-1' } });
@@ -424,12 +384,6 @@ describe('POST / — admin create — prepay on book for a lawn 9x series', () =
     });
   });
 
-  test('gate off: custom/42 keeps its supported every_6_weeks coverage cadence (no cadence downgrade)', async () => {
-    const { status, body } = await post(prepayBody);
-    expect(status).toBe(201);
-    expect(seriesRows().map((d) => d.recurring_pattern)).toEqual(Array(4).fill('custom'));
-    expect((body.warnings || []).some((w) => cadenceRefusal.test(w))).toBe(false);
-  });
 });
 
 describe('PUT /:id/update-details — make this lawn visit recurring', () => {
@@ -490,18 +444,7 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
   const makeRecurring = { isRecurring: true, recurringPattern: 'custom', recurringIntervalDays: 42, recurringCount: 3 };
   const parentWrites = () => parentUpdates.filter((u) => u.recurring_pattern !== undefined);
 
-  test('gate off: the parent and the spawned children keep custom with 42 days', async () => {
-    mockVisit(lawnVisit);
-    const { status } = await put(makeRecurring);
-    expect(status).toBe(200);
-    expect(parentWrites()[0]).toMatchObject({ recurring_pattern: 'custom', recurring_interval_days: 42 });
-    expect(spawned).toHaveLength(2);
-    expect(spawned.map((d) => d.recurring_pattern)).toEqual(['custom', 'custom']);
-    expect(spawned.map((d) => d.recurring_interval_days)).toEqual([42, 42]);
-  });
-
-  test('gate on: the parent and every spawned child are written lawn_rounds_9 with no interval', async () => {
-    gateOn();
+  test('the parent and every spawned child are written lawn_rounds_9 with no interval', async () => {
     mockVisit(lawnVisit);
     const { status } = await put(makeRecurring);
     expect(status).toBe(200);
@@ -512,8 +455,7 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     expect(spawned.every((d) => (d.recurring_interval_days ?? null) === null)).toBe(true);
   });
 
-  test('gate on: a tree and shrub visit made recurring keeps custom with 42 days', async () => {
-    gateOn();
+  test('a tree and shrub visit made recurring keeps custom with 42 days', async () => {
     mockVisit({ ...lawnVisit, service_type: 'Tree & Shrub Care' });
     const { status } = await put(makeRecurring);
     expect(status).toBe(200);
@@ -521,7 +463,7 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     expect(spawned.map((d) => d.recurring_pattern)).toEqual(['custom', 'custom']);
   });
 
-  describe('gate on: the identity is the EFFECTIVE posted service, not the stored one', () => {
+  describe('the identity is the EFFECTIVE posted service, not the stored one', () => {
     const asCustom = () => {
       expect(parentWrites()[0]).toMatchObject({ recurring_pattern: 'custom', recurring_interval_days: 42 });
       expect(spawned.map((d) => d.recurring_pattern)).toEqual(['custom', 'custom']);
@@ -534,44 +476,44 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     const tsStored = { ...lawnVisit, service_type: 'Tree & Shrub Care', service_id: 'svc-ts' };
 
     test('a lawn visit changed to tree & shrub (T&S serviceId) and made recurring stays custom/42', async () => {
-      gateOn(); mockVisit(lawnStored);
+      mockVisit(lawnStored);
       const r = await put({ ...makeRecurring, serviceId: 'svc-ts', serviceType: 'Tree & Shrub Care' })
       expect(r.status).toBe(200);
       asCustom();
     });
 
     test('a tree & shrub visit changed to lawn (lawn serviceId) and made recurring becomes lawn_rounds_9', async () => {
-      gateOn(); mockVisit(tsStored);
+      mockVisit(tsStored);
       expect((await put({ ...makeRecurring, serviceId: 'svc-lawn', serviceType: 'Lawn Care' })).status).toBe(200);
       asRounds();
     });
 
     test('serviceId null with a "Lawn Care" label becomes lawn_rounds_9, even from a tree & shrub row', async () => {
-      gateOn(); mockVisit(tsStored);
+      mockVisit(tsStored);
       expect((await put({ ...makeRecurring, serviceId: null, serviceType: 'Lawn Care' })).status).toBe(200);
       asRounds();
     });
 
     test('serviceId null with postedServiceKey lawn_care_6week becomes lawn_rounds_9 (label does not say lawn)', async () => {
-      gateOn(); mockVisit(tsStored);
+      mockVisit(tsStored);
       expect((await put({ ...makeRecurring, serviceId: null, serviceType: 'Enhanced Program', serviceKey: 'lawn_care_6week' })).status).toBe(200);
       asRounds();
     });
 
     test('serviceId null with a tree & shrub label stays custom/42 even from a lawn row', async () => {
-      gateOn(); mockVisit(lawnStored);
+      mockVisit(lawnStored);
       expect((await put({ ...makeRecurring, serviceId: null, serviceType: 'Tree & Shrub Care' })).status).toBe(200);
       asCustom();
     });
 
     test('a label-only change to tree & shrub (no serviceId) stays custom/42 — the stale lawn id is not used', async () => {
-      gateOn(); mockVisit(lawnStored);
+      mockVisit(lawnStored);
       expect((await put({ ...makeRecurring, serviceType: 'Tree & Shrub Care' })).status).toBe(200);
       asCustom();
     });
 
     test('no service fields posted keeps the stored identity (lawn row → rounds, tree & shrub row → custom)', async () => {
-      gateOn(); mockVisit(lawnStored);
+      mockVisit(lawnStored);
       expect((await put(makeRecurring)).status).toBe(200);
       asRounds();
       mockVisit(tsStored);
@@ -580,8 +522,7 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     });
   });
 
-  test('gate on: a lawn visit that is already in a series is never re-written (a series never mixes the two patterns)', async () => {
-    gateOn();
+  test('a lawn visit that is already in a series is never re-written (a series never mixes the two patterns)', async () => {
     mockVisit({ ...lawnVisit, is_recurring: true, recurring_pattern: 'custom', recurring_interval_days: 42 });
     const { status } = await put({ ...makeRecurring, spawnRecurringChildren: false });
     expect(status).toBe(200);
@@ -591,14 +532,13 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
   // Lawn neighborhood day (lawn-area-days.js): a make-recurring spawn of a rounds visit with no stored
   // anchor is placed from its area's anchor. The save's drift check aborts when the pre-lock plan
   // (planUpdateDetailsRecurrenceDates) and the write disagree, so a 200 here means plan == write.
-  describe('gate on: a lawn neighborhood day', () => {
+  describe('a lawn neighborhood day', () => {
     const roundsVisit = { ...lawnVisit, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2099-07-01', day: '2099-07-01' };
     const { lawnRoundDateFrom } = require('../services/lawn-rounds');
     const PARRISH = '2027-01-26';
     const stamps = () => parentUpdates.filter((u) => u.recurring_round_anchor_date !== undefined);
 
     test('an area customer: the parent stores the area anchor and the children follow it', async () => {
-      gateOn();
       mockVisit(roundsVisit, { zip: '34219', city: 'Parrish' });
       const { status } = await put({ ...makeRecurring, recurringCount: 4 });
       expect(status).toBe(200);
@@ -609,7 +549,6 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     });
 
     test('a visit late in its round: the first follow-up is still 28+ days out, on the area day', async () => {
-      gateOn();
       mockVisit({ ...roundsVisit, scheduled_date: '2099-07-07', day: '2099-07-07' }, { zip: '34219', city: 'Parrish' });
       const { status } = await put({ ...makeRecurring, recurringCount: 3 });
       expect(status).toBe(200);
@@ -618,7 +557,6 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     });
 
     test('a customer outside every area keeps the visit date as the anchor', async () => {
-      gateOn();
       mockVisit(roundsVisit, { zip: '34251', city: 'Myakka City' });
       const { status } = await put({ ...makeRecurring, recurringCount: 3 });
       expect(status).toBe(200);
@@ -627,7 +565,6 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     });
 
     test('a parent that already stores an anchor is re-placed from its own date, as before', async () => {
-      gateOn();
       mockVisit({ ...roundsVisit, recurring_round_anchor_date: '2099-01-05' }, { zip: '34219', city: 'Parrish' });
       const { status } = await put({ ...makeRecurring, recurringCount: 3 });
       expect(status).toBe(200);
