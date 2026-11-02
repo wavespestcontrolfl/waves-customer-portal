@@ -642,6 +642,15 @@ describe('resolveContextWindow: re-service window (GATE_RESERVICE_ASKS)', () => 
     }
   });
 
+  test('gate on: a rodent trapping follow-up keeps the booking origin even with the callback flag', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    const win = await resolveContextWindow({
+      customerId: 'c1', scheduledServiceId: 'svc-1', knex: reserviceKnex({ is_callback: true }, [{ service_key: 'rodent_trapping_followup' }]),
+    });
+    expect(win.floor.getTime()).toBe(booked.getTime());
+    expect(win.reason).toContain('since the booking');
+  });
+
   test('gate off: a callback keeps the booking origin and the select is unchanged', async () => {
     delete process.env.GATE_RESERVICE_ASKS;
     const firstArgs = [];

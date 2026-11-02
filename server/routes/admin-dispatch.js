@@ -4938,17 +4938,26 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/dispatch/:serviceId/reservice-asks
+// GET /api/admin/dispatch/:reserviceAsksServiceId/reservice-asks
 // Every message in which the customer described the problem behind a pest or
 // lawn re-service: the booking words, texts, calls, emails and portal requests
 // from 10 days before the booking to now, each scrubbed and marked quoted or
 // paraphrased (step S1 of the consolidated re-service report). Read-only; dark
-// behind GATE_RESERVICE_ASKS (404 {enabled:false}, nothing read). A visit that
-// is not a re-service is refused (409 not_reservice). See
-// services/reservice-asks.js.
-router.get('/:serviceId/reservice-asks', async (req, res, next) => {
+// behind GATE_RESERVICE_ASKS. The path param is NAMED :reserviceAsksServiceId,
+// not :serviceId, so router.param('serviceId') never runs its lookup first (the
+// lawn-fast routes' reason): the steps run in this order, the dark gate (404
+// {enabled:false}, nothing read), the id must be a uuid (404 not_found, nothing
+// read), then the sibling routes' ownership assertion (assertRecapOwnership
+// reads req.params.serviceId, set after validation). A visit that is not a
+// re-service is refused (409 not_reservice). See services/reservice-asks.js.
+router.get('/:reserviceAsksServiceId/reservice-asks', async (req, res, next) => {
   try {
     if (!reserviceAsksLive()) return res.status(404).json({ enabled: false });
+    const id = req.params.reserviceAsksServiceId;
+    if (!require('../services/reservice-office-request').isUuid(id)) {
+      return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    }
+    req.params.serviceId = id;
     if (!(await assertRecapOwnership(req, res))) return;
     const asks = await require('../services/reservice-asks').gatherReserviceAsks(req.params.serviceId);
     if (!asks.ok) {

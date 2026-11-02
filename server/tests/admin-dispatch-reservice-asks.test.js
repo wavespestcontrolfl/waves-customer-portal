@@ -1,8 +1,10 @@
 /**
- * GET /admin/dispatch/:serviceId/reservice-asks (re-service asks, dark behind
+ * GET /admin/dispatch/:reserviceAsksServiceId/reservice-asks (re-service asks, dark behind
  * GATE_RESERVICE_ASKS).
  *
  *  - Gate off answers 404 {enabled:false} without touching the database.
+ *  - The path param is not :serviceId, so router.param('serviceId') never runs
+ *    its lookup first; a malformed id is a 404 before any read.
  *  - A technician only reads their own visit; admins read any.
  *  - Gate on returns the gatherer's body under {enabled:true}; a visit that is
  *    not a re-service is a 409, a missing visit is 404.
@@ -55,13 +57,14 @@ function invoke(method, routePath, { params = {}, body, actor = { techRole: 'adm
   });
 }
 
-const ASKS = '/:serviceId/reservice-asks';
-const params = { serviceId: 'visit-1' };
+const ASKS = '/:reserviceAsksServiceId/reservice-asks';
+const VISIT = '00000000-0000-4000-8000-0000000000a1';
+const params = { reserviceAsksServiceId: VISIT };
 const BODY = {
   ok: true,
   lane: 'pest',
   window: { from: '2026-10-18T14:00:00.000Z', to: '2026-11-02T15:00:00.000Z' },
-  items: [{ id: 'booking:visit-1', source: 'request_form', text: 'Ants in the kitchen', quoted: true }],
+  items: [{ id: `booking:${VISIT}`, source: 'request_form', text: 'Ants in the kitchen', quoted: true }],
 };
 
 // A scripted db: scheduled_services -> the owning row (assertRecapOwnership).
@@ -69,7 +72,7 @@ const dbWithOwner = (technician_id, calls = []) => (table) => {
   calls.push(table);
   const chain = {};
   for (const m of ['where', 'select', 'leftJoin']) chain[m] = () => chain;
-  chain.first = async () => (table === 'scheduled_services' ? { id: 'visit-1', technician_id, status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()), service_type: 'Pest Control Re-Service' } : null);
+  chain.first = async () => (table === 'scheduled_services' ? { id: VISIT, technician_id, status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()), service_type: 'Pest Control Re-Service' } : null);
   return chain;
 };
 
@@ -87,6 +90,23 @@ describe('GET reservice-asks', () => {
     const authIdx = router.stack.findIndex((l) => !l.route && l.name === 'adminAuthenticate');
     expect(authIdx).toBeGreaterThan(-1);
     expect(router.stack.indexOf(layer)).toBeGreaterThan(authIdx);
+  });
+
+  test("its param is not :serviceId, so router.param('serviceId') never runs a lookup before the gate", () => {
+    const layer = routeLayer('get', ASKS);
+    expect(layer.keys.map((k) => k.name)).toEqual(['reserviceAsksServiceId']);
+    expect(ASKS.includes(':serviceId')).toBe(false);
+  });
+
+  test.each(['not-a-uuid', 'visit-1', "1' or '1'='1"])('gate on: a malformed id %p answers 404 not_found and reads nothing', async (id) => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    const calls = [];
+    mockDbCurrent = dbWithOwner('tech-1', calls);
+    const res = await invoke('get', ASKS, { params: { reserviceAsksServiceId: id }, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ error: 'Service not found', code: 'not_found' });
+    expect(calls).toEqual([]);
+    expect(gatherReserviceAsks).not.toHaveBeenCalled();
   });
 
   test.each([undefined, '', 'false', '1', 'TRUE', 'on'])('gate %p answers 404 {enabled:false} and reads nothing', async (value) => {
@@ -107,7 +127,7 @@ describe('GET reservice-asks', () => {
     const res = await invoke('get', ASKS, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ enabled: true, lane: 'pest', window: BODY.window, items: BODY.items });
-    expect(gatherReserviceAsks).toHaveBeenCalledWith('visit-1');
+    expect(gatherReserviceAsks).toHaveBeenCalledWith(VISIT);
   });
 
   test("gate on: a technician cannot read another technician's visit", async () => {

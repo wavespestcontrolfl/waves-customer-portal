@@ -64,6 +64,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/treatment-guide` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview` | admin-dispatch |
+| GET | `/api/admin/dispatch/:reserviceAsksServiceId/reservice-asks` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/blog-posts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/card-hold` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/complete` | admin-dispatch |
@@ -100,7 +101,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | PUT | `/api/admin/dispatch/:serviceId/reorder` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/reschedule` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/reschedule-options` | admin-dispatch |
-| GET | `/api/admin/dispatch/:serviceId/reservice-asks` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/schedule-followup` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/series-move-preview` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/standard-wording` | admin-dispatch |

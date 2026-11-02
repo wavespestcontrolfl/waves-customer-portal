@@ -85,17 +85,21 @@ function asDate(value) {
 // A pest or lawn re-service visit: a callback, or the catalog's re-service
 // key. Only asked while GATE_RESERVICE_ASKS is live; a failed catalog lookup
 // reads as "not a re-service" (the window stays as it was).
+// The rodent trapping follow-up is a callback too (is_callback, re-service.js), but it is a trap check, never a
+// re-service the customer described: its catalog key is checked first, so its flag never widens the window.
 async function isReserviceVisit(svc, knex) {
   if (!reserviceAsksLive()) return false;
-  if (svc.is_callback === true) return true;
-  if (!svc.service_id) return false;
-  try {
-    const row = await knex('services').where({ id: svc.service_id }).first('service_key');
-    return RESERVICE_SERVICE_KEYS.has(row?.service_key);
-  } catch (err) {
-    logger.warn(`[comms-context] re-service key lookup failed: ${err.message}`);
-    return false;
+  let serviceKey = null;
+  if (svc.service_id) {
+    try {
+      serviceKey = (await knex('services').where({ id: svc.service_id }).first('service_key'))?.service_key || null;
+    } catch (err) {
+      logger.warn(`[comms-context] re-service key lookup failed: ${err.message}`);
+      return false;
+    }
   }
+  if (serviceKey === 'rodent_trapping_followup') return false;
+  return svc.is_callback === true || RESERVICE_SERVICE_KEYS.has(serviceKey);
 }
 
 // The visit columns the window reads. GATE_RESERVICE_ASKS adds is_callback;
