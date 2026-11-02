@@ -2014,6 +2014,20 @@ describe('customer-contact classes', () => {
         mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'lawn_care', minted_estimate_id: uid(539) }];
         mockTables.estimates = [{ id: uid(539), customer_id: CUST, estimate_data: {} }];
         expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        // Termite: a bait request is answered by bait monitoring, never by trenching or other termite work.
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'termite_bait' }];
+        mockTables.estimates = [{ id: uid(541), customer_id: CUST, estimate_data: { inputs: { svcTrenching: true } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
+        mockTables.estimates = [{ id: uid(542), customer_id: CUST, estimate_data: { inputs: { svcTermiteBait: true } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        mockTables.estimates = [{ id: uid(543), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Termite Bait Monitoring', mo: 35 }] } } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        // A one-time line for the asked service answers it even beside another service's recurring plan.
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'mosquito' }];
+        mockTables.estimates = [{ id: uid(544), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Lawn Care', mo: 55 }] }, oneTime: { items: [{ service: 'Mosquito', name: 'One-time mosquito treatment', price: 120 }] } } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        mockTables.estimates = [{ id: uid(545), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Lawn Care', mo: 55 }] } } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
         // No request row for the bell's customer: nothing to match, no close.
         mockTables.service_requests = [];
         mockTables.estimates = [{ id: uid(540), customer_id: CUST, estimate_data: { inputs: { svcMosquito: true } } }];

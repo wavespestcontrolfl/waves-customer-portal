@@ -376,8 +376,32 @@ const REQUEST_SERVICE_LINES = {
   pest_control: ['pest', 'commercial_pest'],
   mosquito: ['mosquito', 'commercial_mosquito'],
   tree_shrub: ['tree_shrub', 'commercial_tree_shrub'],
-  termite_bait: ['termite', 'commercial_termite_bait'],
+  // The plain `termite` line also names trenching, Bora-Care, foam and WDO work, so it never answers a bait ask:
+  // only the commercial bait line or a bait-specific signal does (termiteBaitPriced).
+  termite_bait: ['commercial_termite_bait'],
 };
+
+// Does the estimate price termite bait monitoring itself (not other termite work)? The estimator's bait flag, the
+// engine's bait service, or a recurring line named for termite bait / monitoring / stations.
+function termiteBaitPriced(data) {
+  const services = data?.engineInputs?.services || {};
+  if (data?.inputs?.svcTermiteBait === true || services.termite_bait || services.termiteBait) return true;
+  const recurring = data?.result?.recurring?.services || data?.engineResult?.recurring?.services || [];
+  return (Array.isArray(recurring) ? recurring : []).some((line) => {
+    const words = [line?.service, line?.serviceKey, line?.service_key, line?.name, line?.label].filter((w) => typeof w === 'string').join(' ');
+    return /termite/i.test(words) && /bait|monitor|station/i.test(words);
+  });
+}
+
+// Does a delivered estimate price the request's service? Its inferred lines (recurring, or input and text keys)
+// plus its priced one-time lines: inferEstimateServiceLines returns only the recurring lines when a plan exists,
+// and a one-time line for the asked service still answers the ask.
+function estimatePricesService(estimate, serviceKey, lines) {
+  const { inferEstimateServiceLines, oneTimeServicesFromData, parseEstimateData } = require('./estimate-service-lines');
+  const data = parseEstimateData(estimate.estimate_data);
+  const keys = new Set([...inferEstimateServiceLines(estimate), ...oneTimeServicesFromData(data)].map((line) => line.key));
+  return lines.some((key) => keys.has(key)) || (serviceKey === 'termite_bait' && termiteBaitPriced(data));
+}
 
 // Was the quote this bell asks for handed to its customer after `bellAt`? The witness is the promise lane's
 // (handedOffWithin: a real delivery or the customer's acceptance, never sent_at) inside the estimate-ownership
@@ -393,14 +417,14 @@ async function quoteAnswered(conn, { meta, customerId, bellAt }) {
   const request = await conn('service_requests').where({ id: meta.requestId, customer_id: customerId })
     .first('requested_service', conn.raw("pricing_revision->'mintedEstimate'->>'id' as minted_estimate_id"));
   const { normalizeRequestedServiceKey } = require('./estimate-add-service-request');
-  const lines = REQUEST_SERVICE_LINES[normalizeRequestedServiceKey(request?.requested_service)];
+  const serviceKey = normalizeRequestedServiceKey(request?.requested_service);
+  const lines = REQUEST_SERVICE_LINES[serviceKey];
   if (!lines) return false;
-  const { inferEstimateServiceLines } = require('./estimate-service-lines');
   const estimates = await handedOff().select('estimates.*');
   // The request's own minted estimate answers it as made (its lines need not name the service); any other
   // estimate must price the requested service.
   return estimates.some((estimate) => (request.minted_estimate_id && String(estimate.id) === String(request.minted_estimate_id))
-    || inferEstimateServiceLines(estimate).some((line) => lines.includes(line.key)));
+    || estimatePricesService(estimate, serviceKey, lines));
 }
 
 // GATE_LEAD_CONTACTED_CLOSE on (shadow or true): was an estimate handed off to each
