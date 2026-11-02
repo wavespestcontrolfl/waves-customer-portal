@@ -251,9 +251,9 @@ const DIRECT_EDIT_STAGES = [directScopeStage, directToolStage, directGroundingSt
 // review, and (GATE_IB_TARGET_RULES_V2) every read outside TRUSTED_READS below.
 const GENERAL_READ_TOOL = 'read_admin_data';
 // needs_me returns open alerts' why and detail, and those carry customer-written
-// text (the latest text on an "SMS from" row, a quoted text note), so it taints
-// like the general read and leaves the same thread marker, gate on or off
-// (Codex #7466 r1).
+// text (the latest text on an "SMS from" row, a customer's request or email), so
+// it taints like the general read and leaves the same thread marker, gate on or
+// off (Codex #7466 r1).
 const ALWAYS_TAINTING_READS = new Set([GENERAL_READ_TOOL, 'needs_me']);
 
 // A general-read result that carries data: a 2xx answer with a `data` field.

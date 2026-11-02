@@ -135,6 +135,13 @@ function fullTextFor(n, type) {
   return typeof n.detail === 'string' && n.detail.trim() ? n.detail : null;
 }
 
+// An SMS review bell's source text in quotes, or nothing: the server reads it from the text itself while it
+// serves the list (sms-operational-actions.js withTextNoteSources) and never stores it on the row. Admin rows only.
+function SourceText({ n, type, style }) {
+  const text = type === 'admin' && typeof n?.source_text === 'string' && n.source_text.trim() ? n.source_text : null;
+  return text ? <div title={text} style={style}>&ldquo;{text}&rdquo;</div> : null;
+}
+
 // "Show full text" / "Hide full text": its own click and key handling, never
 // the row's — the row still navigates to its link and marks itself read only
 // on its own tap. `pre-wrap` keeps a list body's line breaks.
@@ -1025,6 +1032,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                         }}>{chip.label}</span>
                       )}
                     </div>
+                    <SourceText n={n} type={type} style={{ fontSize: 14, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, marginTop: 4, lineHeight: 1.4 }} />
                     {n.body && (
                       <div style={{
                         fontSize: 14, color: isDark ? '#52525B' : CUSTOMER_SURFACE.body, marginTop: 4, lineHeight: 1.4,
@@ -1197,6 +1205,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                             }}>{chip.label}</span>
                           )}
                         </div>
+                        <SourceText n={n} type={type} style={{
+                          fontSize: 14, color: colors.text, marginTop: 2, lineHeight: 1.4,
+                          overflow: 'hidden', textOverflow: 'ellipsis',
+                          display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+                        }} />
                         {n.body && (
                           <div title={n.body} style={{
                             fontSize: 14, color: colors.muted, marginTop: 2, lineHeight: 1.4,

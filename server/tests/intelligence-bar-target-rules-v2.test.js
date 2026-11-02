@@ -1584,7 +1584,7 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
   });
 
   test('needs_me taints like the general read, gate on or off, and leaves the general marker (Codex #7466 r1)', () => {
-    const open = { items: [{ id: 'n1', why: 'Wanted to save “Skip the shed please” as special instructions; it is not clear if this is lasting.' }] };
+    const open = { items: [{ id: 'n1', headline: 'SMS from Synthetic Fixture', why: 'Skip the shed please' }] };
     const marks = () => {
       const taint = OwnerDirect.newRequestTaint([]);
       OwnerDirect.noteUntrustedRead(taint, 'needs_me', open);

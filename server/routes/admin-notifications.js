@@ -87,9 +87,12 @@ router.get('/', async (req, res, next) => {
     // a page containing only live-alert duplicates must still allow paging.
     const dedupedPersisted = persisted.slice(0, limit).filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
     const lastServed = persisted.slice(0, limit).at(-1);
+    // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9),
+    // and an SMS review bell's source text as `source_text`, read now and never stored on the row.
+    const { withTextNoteSources } = require('../services/sms-operational-actions');
+    const served = await withTextNoteSources(await withAlertButtons(dedupedPersisted.map(withoutCursorFields), { role: req.techRole }), { role: req.techRole });
     res.json({
-      // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
-      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...(await withAlertButtons(dedupedPersisted.map(withoutCursorFields), { role: req.techRole }))],
+      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...served],
       page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
     });
