@@ -1583,6 +1583,27 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
     expect(taints('get_revenue_overview', leadRows)).toBe(false);
   });
 
+  test('needs_me taints like the general read, gate on or off, and leaves the general marker (Codex #7466 r1)', () => {
+    const open = { items: [{ id: 'n1', why: 'Wanted to save “Skip the shed please” as special instructions; it is not clear if this is lasting.' }] };
+    const marks = () => {
+      const taint = OwnerDirect.newRequestTaint([]);
+      OwnerDirect.noteUntrustedRead(taint, 'needs_me', open);
+      return taint;
+    };
+    expect(marks()).toEqual({ untrustedRead: true, untrustedGeneral: true, untrustedV2: false });
+    process.env[ON] = 'true';
+    expect(marks()).toEqual({ untrustedRead: true, untrustedGeneral: true, untrustedV2: false });
+    delete process.env[ON];
+    const history = [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_n', name: 'needs_me', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_n', content: JSON.stringify(open) }] },
+    ];
+    expect(OwnerDirect.newRequestTaint(history)).toEqual({ untrustedRead: true, untrustedGeneral: true, untrustedV2: false });
+    const failed = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteUntrustedRead(failed, 'needs_me', { error: 'Could not read what is open' });
+    expect(failed.untrustedRead).toBe(false);
+  });
+
   test('gate off: lead reads do not taint (today)', () => {
     const taint = OwnerDirect.newRequestTaint([]);
     OwnerDirect.noteUntrustedRead(taint, 'query_leads', leadRows);
