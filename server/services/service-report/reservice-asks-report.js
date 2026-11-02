@@ -82,7 +82,8 @@ function shownEntries(frozen) {
     if (!item || typeof item !== 'object' || typeof item.text !== 'string') continue;
     const answer = Object.prototype.hasOwnProperty.call(answers, item.id) ? answers[item.id] : null;
     if (!answer || typeof answer !== 'object' || !ANSWER_KINDS.has(answer.answer)) continue;
-    if (officeOnlyReason(item.text)) continue;
+    // The verdict frozen from the ORIGINAL words (reservice-asks.js buildItem), then the shown words themselves.
+    if (item.officeOnly || officeOnlyReason(item.text)) continue;
     entries.push({ item, answer });
   }
   return entries;

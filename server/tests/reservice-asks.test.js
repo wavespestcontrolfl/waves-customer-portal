@@ -201,6 +201,14 @@ describe('texts', () => {
     }]);
   });
 
+  test('the office-only screen reads the original words, before the scrub keeps only the pest talk', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const { items } = await gather({ sms: [sms('s2', 'The ants came back after the spray. I want a refund.', at)] });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 'text:s2', officeOnly: 'billing' });
+    expect(items[0].text).not.toMatch(/refund/);
+  });
+
   test('tapbacks, STOP and empty texts are dropped', async () => {
     const { items } = await gather({
       sms: [

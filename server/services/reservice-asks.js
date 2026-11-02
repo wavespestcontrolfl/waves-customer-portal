@@ -15,6 +15,7 @@
  */
 
 const db = require('../models/db');
+const { officeOnlyReason } = require('./reservice-office-only');
 const logger = require('./logger');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -149,11 +150,16 @@ function pestsIn(text) {
 
 // A raw customer line to a finished item, or null when nothing relevant is
 // left after the scrub. `lead` and `quoted` come from the source's rules.
+// `officeOnly` (only when set) is the office-only screen's verdict on the
+// ORIGINAL words: the scrub keeps pest talk only and the cap cuts the tail, so
+// "Ants are back. I want a refund." would reach a later screen as "Ants are
+// back." (reservice-office-only.js). It freezes with the item.
 function buildItem({ id, source, at, text, quoted, lead = null }) {
   const iso = toIso(at);
   if (!iso) return null;
   const scrubbed = capWords(compact(scrubCustomerText(text, { lane: 'reservice' })));
   if (!scrubbed) return null;
+  const officeOnly = officeOnlyReason(text);
   return {
     id,
     source,
@@ -163,6 +169,7 @@ function buildItem({ id, source, at, text, quoted, lead = null }) {
     lead,
     kind: scrubbed.includes('?') ? 'question' : 'problem',
     pests: pestsIn(scrubbed),
+    ...(officeOnly ? { officeOnly } : {}),
   };
 }
 

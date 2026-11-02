@@ -101,6 +101,13 @@ describe('reserviceAsksReport builder', () => {
     expect(reserviceAsksReportApplies(service(treatedAsk), null)).toBe(true);
   });
 
+  test('an item frozen as office-only never shows, even when its scrubbed words read clean', () => {
+    on();
+    const flagged = frozen([item({ officeOnly: 'billing' })], { 'text:1': { answer: 'noted' } });
+    expect(buildReserviceAsksReport(service(flagged), { block: BLOCK, products: PRODUCTS })).toBeNull();
+    expect(reserviceAsksReportApplies(service(flagged), BLOCK)).toBe(false);
+  });
+
   test('summary line: singulars, and a clause with a zero count is dropped', () => {
     on();
     const make = (items) => {
