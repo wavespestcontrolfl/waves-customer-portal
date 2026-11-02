@@ -71,16 +71,18 @@ const { buildRescheduleLink } = require('../services/reschedule-link');
 const { isCustomerRecurringDispatchEnabled } = require('../services/auto-dispatch/config');
 const { detectEncoding, countSegments } = require('../services/messaging/segment-counter');
 const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
-const { BODY } = require('../models/migrations/20261101164500_rain_out_customer_pick')._test;
+const { BODY: SEEDED_BODY } = require('../models/migrations/20261101164500_rain_out_customer_pick')._test;
+// The live body since 2026-11-02 (owner: 24 hours to pick, a shorter text).
+const { _AFTER: BODY } = require('../models/migrations/20261102170000_rain_out_customer_pick_concise');
 const RainOut = require('../services/rain-out');
 
 const NOW = new Date('2026-11-03T14:00:00Z'); // Tue 9:00 AM EST
 const TODAY = '2026-11-03';
 const DUE = '2026-11-11';
-const PICK_BY = new Date('2026-11-05T01:00:00Z'); // Wed 2026-11-04 8:00 PM EST
+const PICK_BY = new Date('2026-11-04T14:00:00Z'); // Wed 9:00 AM EST: 24 hours after NOW
 const LINK = 'https://portal.wavespestcontrol.com/l/k3j9m2x7qp';
 const SID = `SM${'a'.repeat(32)}`;
-const REFERENCE_TEXT = "Hi Maria - rain is moving through your area this morning, so we need to move your Quarterly Pest Control Service. Pick a new time here: portal.wavespestcontrol.com/l/k3j9m2x7qp\n\nPlease pick by Wed 8 PM. If we don't hear back, we'll book the best open time and text you. Questions? Reply here.";
+const REFERENCE_TEXT = "Hi Maria - rain is moving through your area this morning, so we need to move your Quarterly Pest Control Service.\n\nPick a new time by Wed 9 AM: portal.wavespestcontrol.com/l/k3j9m2x7qp\n\nIf you don't, we'll book one and text you.";
 
 // The visit columns (what the locked read returns) and the joined customer columns.
 const VISIT = {
@@ -189,29 +191,61 @@ function expectNothingWritten() {
 }
 
 describe('rain_out_customer_pick_v1 template', () => {
-  test('the seeded body is GSM-7 and carries every placeholder the flow requires', () => {
+  test('the live body is GSM-7, carries the same placeholders as the seeded one and only rewrites that body', () => {
     expect(detectEncoding(BODY).encoding).toBe('GSM_7');
-    const placeholders = [...BODY.matchAll(/\{([a-z_]+)\}/g)].map((m) => m[1]);
-    expect(placeholders).toEqual(['first_name', 'reason_lead', 'service_type', 'pick_url', 'pick_by']);
+    const placeholders = (body) => [...body.matchAll(/\{([a-z_]+)\}/g)].map((m) => m[1]).sort();
+    expect(placeholders(BODY)).toEqual(['first_name', 'pick_by', 'pick_url', 'reason_lead', 'service_type']);
+    expect(placeholders(BODY)).toEqual(placeholders(SEEDED_BODY));
     expect(REQUIRED_TEMPLATE_PLACEHOLDERS.rain_out_customer_pick_v1).toEqual(['pick_url', 'pick_by']);
+    // The migration's exact-body swap matches the seeded row, so an admin edit is left alone.
+    expect(require('../models/migrations/20261102170000_rain_out_customer_pick_concise')._BEFORE).toBe(SEEDED_BODY);
   });
 
-  test('the reference render is the exact text sent: 292 characters, GSM-7, 2 segments', async () => {
+  test('the migration rewrites only the seeded row; an edited row and other keys stay', async () => {
+    const rows = [
+      { id: 1, template_key: 'rain_out_customer_pick_v1', body: SEEDED_BODY },
+      { id: 2, template_key: 'rain_out_customer_pick_v1', body: 'An office edit: {pick_url} by {pick_by}' },
+      { id: 3, template_key: 'rain_out_moved_custom_v1', body: SEEDED_BODY },
+    ];
+    const knex = (table) => {
+      const q = { filters: {} };
+      const hits = () => rows.filter((r) => table === 'sms_templates' && Object.entries(q.filters).every(([c, v]) => r[c] === v));
+      q.where = (f) => { Object.assign(q.filters, f); return q; };
+      q.select = async () => hits();
+      q.update = async (patch) => { const hit = hits(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
+      return q;
+    };
+    knex.schema = { hasTable: async (t) => t === 'sms_templates' };
+    knex.fn = { now: () => 'now()' };
+    await require('../models/migrations/20261102170000_rain_out_customer_pick_concise').up(knex);
+    expect(rows.map((r) => r.body)).toEqual([BODY, 'An office edit: {pick_url} by {pick_by}', SEEDED_BODY]);
+  });
+
+  test('the reference render is the exact text sent: 228 characters, GSM-7, 2 segments', async () => {
     const r = await handOff();
     expect(r.ok).toBe(true);
     expect(sentBody()).toBe(REFERENCE_TEXT);
-    expect(REFERENCE_TEXT).toHaveLength(292);
+    expect(REFERENCE_TEXT).toHaveLength(228);
     expect(countSegments(REFERENCE_TEXT)).toEqual(expect.objectContaining({ encoding: 'GSM_7', segmentCount: 2 }));
   });
 
-  test('the deadline label and dates come from the ET calendar', () => {
+  test('the customer gets 24 hours from the text, rounded up to the quarter hour', () => {
     const { pickDates, pickByLabel } = RainOut._test;
+    // On a quarter hour: exactly 24 hours.
     expect(pickDates(NOW)).toEqual({ dueDate: DUE, pickBy: PICK_BY });
-    expect(pickByLabel(PICK_BY)).toBe('Wed 8 PM');
+    expect(pickByLabel(PICK_BY)).toBe('Wed 9 AM');
+    // Past a quarter hour, never less than 24 hours: 10:45:46 AM -> 11:00 AM, 9:00:01 AM -> 9:15 AM.
+    expect(pickDates(new Date('2026-11-03T15:45:46Z')).pickBy).toEqual(new Date('2026-11-04T16:00:00Z'));
+    expect(pickByLabel(new Date('2026-11-04T16:00:00Z'))).toBe('Wed 11 AM');
+    const justPast = pickDates(new Date('2026-11-03T14:00:01Z')).pickBy;
+    expect(justPast).toEqual(new Date('2026-11-04T14:15:00Z'));
+    expect(pickByLabel(justPast)).toBe('Wed 9:15 AM');
     // 11:30 PM ET on Sunday is still Sunday in ET (UTC is already Monday).
     const lateSunday = new Date('2026-11-09T04:30:00Z');
-    expect(pickDates(lateSunday)).toEqual({ dueDate: '2026-11-16', pickBy: new Date('2026-11-10T01:00:00Z') });
-    expect(pickByLabel(pickDates(lateSunday).pickBy)).toBe('Mon 8 PM');
+    expect(pickDates(lateSunday)).toEqual({ dueDate: '2026-11-16', pickBy: new Date('2026-11-10T04:30:00Z') });
+    expect(pickByLabel(pickDates(lateSunday).pickBy)).toBe('Mon 11:30 PM');
+    // 24 real hours across the fall-back night: Sat 10 AM EDT -> Sun 9 AM EST.
+    expect(pickByLabel(pickDates(new Date('2026-10-31T14:00:00Z')).pickBy)).toBe('Sun 9 AM');
   });
 });
 
@@ -444,7 +478,7 @@ describe('handOffToCustomer writes and texts', () => {
       ok: true,
       dueDate: DUE,
       pickBy: PICK_BY.toISOString(),
-      pickByLabel: 'Wed 8 PM',
+      pickByLabel: 'Wed 9 AM',
       textSent: true,
       needsAttention: [],
       qualityDates: [TODAY, DUE],
@@ -515,7 +549,18 @@ describe('handOffToCustomer writes and texts', () => {
     expect(sendCustomerMessage.mock.calls[0][0].metadata.reason_code).toBe('running_late');
   });
 
-  test('a long name that would bill a third segment sends without the closing "Questions? Reply here."', async () => {
+  test('a long name fits the live body in 2 segments as is', async () => {
+    state.service.first_name = 'Maximiliana-Josephine';
+    state.service.service_type = 'Quarterly Termite Active Bait Station Service';
+    const r = await handOff();
+
+    expect(r.textSent).toBe(true);
+    expect(sentBody().endsWith("If you don't, we'll book one and text you.")).toBe(true);
+    expect(countSegments(sentBody()).segmentCount).toBe(2);
+  });
+
+  test('a row that kept the 2026-11-01 wording: a long name sends without its closing "Questions? Reply here."', async () => {
+    state.template = { body: SEEDED_BODY, is_active: true };
     state.service.first_name = 'Maximiliana-Josephine';
     state.service.service_type = 'Quarterly Pest Control Service Plus';
     const r = await handOff();
@@ -531,7 +576,7 @@ describe('handOffToCustomer writes and texts', () => {
   test('the service name keeps its catalog casing and loses only an admin suffix', async () => {
     state.service.service_type = 'Quarterly Pest Control Service (Monthly)';
     await handOff();
-    expect(sentBody()).toContain('so we need to move your Quarterly Pest Control Service. Pick');
+    expect(sentBody()).toContain('so we need to move your Quarterly Pest Control Service.\n\nPick');
   });
 
   describe('the visit is handed off but the text does not go: textSent false and a follow-up', () => {
@@ -579,7 +624,7 @@ describe('customerPickOffer (the sheets\' offer)', () => {
       available: true,
       unavailableReason: null,
       pickBy: PICK_BY.toISOString(),
-      pickByLabel: 'Wed 8 PM',
+      pickByLabel: 'Wed 9 AM',
       previewByReason: {
         // The preview carries a placeholder of the link's real length, never the working link.
         weather_rain: REFERENCE_TEXT.replace('k3j9m2x7qp', 'xxxxxxxxxx'),
@@ -602,7 +647,7 @@ describe('customerPickOffer (the sheets\' offer)', () => {
   test("a legacy 5-character code is measured at its own length (the send reuses it)", async () => {
     buildRescheduleLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/l/ab12c' });
     const offer = await RainOut.customerPickOffer('svc-1');
-    expect(offer.previewByReason.weather_rain).toContain('Pick a new time here: portal.wavespestcontrol.com/l/xxxxx\n\n');
+    expect(offer.previewByReason.weather_rain).toContain('Pick a new time by Wed 9 AM: portal.wavespestcontrol.com/l/xxxxx\n\n');
   });
 
   test('the extra reasons are offered while their gate is on (never custom)', async () => {
@@ -620,13 +665,13 @@ describe('customerPickOffer (the sheets\' offer)', () => {
     ['the customer opted out', () => suppression.checkSuppression.mockResolvedValue({ ok: false, code: 'SUPPRESSED' }), 'customer_texts_off'],
     ['a gone visit', () => { state.service = null; }, 'not_found'],
     ['a read failure', () => { state.templateError = new Error('connection reset'); }, 'pick_check_failed'],
-    ['no reason fits two segments', () => { state.service.service_type = 'Quarterly Pest Control Service and Perimeter Barrier Treatment and Interior Spot Treatment and Rodent Check'; }, 'pick_text_too_long'],
+    ['no reason fits two segments', () => { state.service.service_type = 'Quarterly Pest Control Service and Perimeter Barrier Treatment and Interior Spot Treatment and Rodent Check and Fire Ant Mound Treatment'; }, 'pick_text_too_long'],
     ['a template edit that dropped {pick_by}', () => { state.template = { body: BODY.replace('{pick_by}', 'tomorrow night'), is_active: true }; }, 'pick_text_unavailable'],
   ])('%s: unavailable with the reason, no previews', async (_label, arrange, reason) => {
     arrange();
     const offer = await RainOut.customerPickOffer('svc-1');
     expect(offer).toEqual(expect.objectContaining({
-      available: false, unavailableReason: reason, pickByLabel: 'Wed 8 PM', previewByReason: {}, segments: null,
+      available: false, unavailableReason: reason, pickByLabel: 'Wed 9 AM', previewByReason: {}, segments: null,
     }));
   });
 

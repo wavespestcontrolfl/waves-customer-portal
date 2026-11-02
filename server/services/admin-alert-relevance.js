@@ -93,6 +93,12 @@
  * promise reopened later is the promise list's and the SLA pager's to
  * surface, and a later callback rings its own bell.
  *
+ * A text-note bell (owner 2026-11-02; the SMS reader's "check <name>'s text note", doneWhen
+ * `text_note_checked`) also closes under GATE_ALERT_CONTACT_CLOSE alone, once BOTH hold after the bell: a person
+ * answered that customer (a text that reached them, a call a person made or took, a person's email: the
+ * customer kind's witnesses) and a visit for that customer was completed (visitsCompletedAfterBell, by customer
+ * id, any Eastern day).
+ *
  * Three more rules carry their OWN three-state gate (owner 2026-10-29, "Stuck
  * Alert Fixes"; the third 2026-10-31), so they can run in shadow while GATE_ALERT_CONTACT_CLOSE is
  * `true`. A class (`gate`) is not offered at all while its gate is off, except
@@ -239,7 +245,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), contactMode: 'off', contactFailed: false });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), contactMode: 'off', contactFailed: false });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The latest valid time per customer across rows (a bad time is skipped).
@@ -295,6 +301,9 @@ function askedAtOf(row, meta = parseMeta(row.metadata)) {
   return stamped && !Number.isNaN(stamped.getTime()) ? stamped : row.created_at;
 }
 
+// The portal chat hand-off classes: the only customer-kind classes behind GATE_PORTAL_CHAT_ANSWERED_CLOSE.
+const PORTAL_CHAT_CLASSES = new Set(['portal_chat_add_service', 'portal_chat_answered']);
+const TEXT_NOTE_CLASS = 'text_note_checked';
 const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered']);
 // (portal_add_service_request has no contact witness; its estimate boundary is askedAtOf, in loadQuoteHandoffs.)
 
@@ -341,8 +350,10 @@ async function loadContact(rows, data, conn) {
     // A gated class that judges by the contact witnesses also rides on GATE_ALERT_CONTACT_CLOSE.
     if (cls.gate && cls.contactRule && data.contactMode === 'off') continue;
     // The portal chat contact witnesses (customer kind) are read only while their own gate is on.
-    // (The portal item classes read them under their own gates, GATE_PORTAL_ITEM_CLOSE and GATE_PORTAL_BOOKING_ITEMS, checked above.)
-    if (cls.contact === 'customer' && cls.gate !== portalItemGate && cls.gate !== portalBookingGate && portalChatAnsweredCloseMode() === 'off') continue;
+    // (The portal item classes read them under their own gates, GATE_PORTAL_ITEM_CLOSE and GATE_PORTAL_BOOKING_ITEMS,
+    // checked above.)
+    // (The text-note class and the portal item classes are not chat classes: they ride on their own gates.)
+    if (PORTAL_CHAT_CLASSES.has(cls.key) && portalChatAnsweredCloseMode() === 'off') continue;
     const refs = cls.contact ? contactRefs(cls.contact, row, data) : null;
     if (!refs) continue;
     // A lead_contacted or portal chat bell can be refreshed and rung again: its boundary is its latest event.
@@ -361,6 +372,27 @@ async function loadContact(rows, data, conn) {
   } catch (err) {
     data.contactFailed = true;
     logger.warn(`[alert-relevance] customer-contact witnesses failed to load: ${errSummary(err)}`);
+  }
+}
+
+// Each text-note bell (the SMS reader's "check <name>'s text note"): did a visit for its customer complete
+// after the bell? The shared visit witness (admin-alert-contact-witnesses.js visitsCompletedAfterBell), by
+// customer id only. Read only while GATE_ALERT_CONTACT_CLOSE is shadow or true; a load that fails is no verdict.
+async function loadNoteVisits(rows, data, conn) {
+  if (data.contactMode === 'off') return;
+  const items = [];
+  for (const row of rows) {
+    if (classify(row)?.key !== TEXT_NOTE_CLASS) continue;
+    const refs = contactRefs('customer', row, data);
+    const bellAt = row.created_at ? new Date(row.created_at) : null;
+    if (refs && bellAt && !Number.isNaN(bellAt.getTime())) items.push({ id: row.id, customerId: refs.customerId, bellAt });
+  }
+  if (!items.length) return;
+  try {
+    data.noteVisits = await require('./admin-alert-contact-witnesses').visitsCompletedAfterBell(conn, items);
+  } catch (err) {
+    data.contactFailed = true;
+    logger.warn(`[alert-relevance] text-note visit witnesses failed to load: ${errSummary(err)}`);
   }
 }
 
@@ -519,6 +551,7 @@ async function loadSubjects(rows, conn = db) {
       .select('id', 'deleted_at', 'customer_id', 'estimate_id', 'status', 'phone'));
   }
   if (data.contactMode !== 'off' || leadContactedCloseMode() !== 'off') await loadContact(rows, data, conn);
+  await loadNoteVisits(rows, data, conn);
   await loadLeadHandoffs(rows, data, conn);
   // The stale-consent bells' customers: when did each last record a consent
   // at a CURRENT recurring-card text version — the base text or the
@@ -608,6 +641,8 @@ function subjectFor(row, data, todayET) {
     contactMode: data.contactMode,
     contactUnknown: data.contactFailed,
     contact: data.contact.get(String(row.id)) || null,
+    // When a visit for the bell's customer was completed after the bell (text-note bells only).
+    noteVisitDoneAt: data.noteVisits.get(String(row.id)) || null,
   };
 }
 
@@ -957,6 +992,18 @@ function unfinishedBookingSettled(s) {
   return isUnfinishedBookingBell(s.meta) ? s.bookingMovedOn : null;
 }
 
+// A text-note bell (sms-operational-actions.js recordMessageOperations, doneWhen 'text_note_checked'; owner
+// 2026-11-02, option B: closes by itself once someone answered the customer AND a visit for them was done).
+// Both facts are judged only after the bell. Answered = a person's text that reached the customer, a call a
+// person made or took, or a person's email (personContactReason: the shared customer-kind witnesses). The
+// visit is the shared completed-visit witness (noteVisitDoneAt, by customer id). A booking, a quote, read
+// state or a bare call row is never evidence.
+function textNoteSettled(s) {
+  const c = s.contact;
+  if (!c || !s.noteVisitDoneAt || !personContactReason(c)) return null;
+  return contactAfter(c, s.noteVisitDoneAt) ? 'Answered, and a visit after the text is done' : null;
+}
+
 // What closing a portal item bell also settles: its request row, resolved quietly with the reason as the
 // admin note (portal-inbox.js; no customer email). Failing here never undoes the bell's close.
 // The request is resolved only if nobody touched it after the bell's ask (askedAtOf: the ask, not a re-ring's
@@ -1071,6 +1118,13 @@ const CLASSES = [
   // and Sandy hand-off bells share the category and keep their own owners.
   { // email-sync.js ringCustomerEmailBell — one bell per email
     key: 'inbound_email', categories: ['inbound_email'], triggerKey: 'customer_email_received', contactOnly: true, contact: 'email', contactRule: emailAnswered,
+  },
+  { // sms-operational-actions.js recordMessageOperations — the SMS reader's "check <name>'s text note" bell,
+    // one per text (dedupeKey sms-property-instructions:<sms_log id>, never refreshed, so created_at is its
+    // boundary). Closes once a person answered that customer AND a visit for them completed after the bell
+    // (owner 2026-11-02, option B). The failure bell (sms-operations-failed:) has no doneWhen and never matches.
+    key: TEXT_NOTE_CLASS, categories: ['alert'], prefix: 'sms-property-instructions:', doneWhen: 'text_note_checked',
+    match: (meta) => meta.doneWhen === 'text_note_checked', contactOnly: true, contact: 'customer', contactRule: textNoteSettled,
   },
   // Leads bells that promise `doneWhen: 'lead_contacted'` and name a lead (lead-call-text-followup,
   // lead-call-reply-ring, sms-lead-extraction, lead-unverified-hold; the lead id is in metadata.leadId

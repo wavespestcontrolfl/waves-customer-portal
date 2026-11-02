@@ -5,7 +5,6 @@
  *   - "Schedule"     — DispatchPageV2's schedule grid
  *   - "Protocols"    — DispatchPageV2's Protocols panel
  *   - "Job Scores"   — DispatchPageV2's RevenuePanel
- *   - "Insights"     — DispatchPageV2's InsightsPanel
  * Auto-Dispatch runs in the background; old diagnostic links still redirect.
  *
  * Per-tab URL state via ?tab=<key>. Default = board. Tabs that route into
@@ -34,7 +33,6 @@ import {
   CalendarPlus,
   ClipboardList,
   Gauge,
-  Lightbulb,
   Map,
   TrendingUp,
 } from "lucide-react";
@@ -54,12 +52,11 @@ const TABS = {
   SCHEDULE: "schedule",
   PROTOCOLS: "protocols",
   REVENUE: "revenue",
-  INSIGHTS: "insights",
   SCORECARD: "scorecard",
 };
 const TAB_LIST = [
-  // Board (GET /admin/dispatch/board) and Insights (GET /dispatch/insights)
-  // are requireAdmin routes: owner-only tabs too (codex #5683 r1).
+  // Board (GET /admin/dispatch/board) is a requireAdmin route: an owner-only
+  // tab too (codex #5683 r1).
   { key: TABS.BOARD, label: "Board", Icon: Map, adminOnly: true },
   { key: TABS.SCHEDULE, label: "Schedule", Icon: CalendarDays },
   { key: TABS.PROTOCOLS, label: "Protocols", Icon: ClipboardList },
@@ -71,12 +68,10 @@ const TAB_LIST = [
     label: "Scores",
     Icon: TrendingUp,
   },
-  {
-    key: TABS.INSIGHTS,
-    label: "Insights",
-    Icon: Lightbulb,
-    adminOnly: true,
-  },
+  // No Insights tab (owner 2026-11-02): its drive share was a fixed 22%,
+  // its completion rate counted every future visit, and its tech and
+  // seasonal sections read fields the server never sends. A ?tab=insights
+  // link falls back like any other unknown tab.
 ];
 // GATE_ROUTE_SCORECARD (admin-only, read-only): appended only once the
 // gate's own /status endpoint confirms it's on — never rendered as a dead
@@ -116,7 +111,7 @@ export default function AdminDispatchPage() {
     && searchParams.get(TAB_KEY) === TABS.SCORECARD;
   const roleTabs = isAdmin ? TAB_LIST : TAB_LIST.filter((t) => !t.adminOnly);
   const tabList = scorecardEnabled ? [...roleTabs, SCORECARD_TAB] : roleTabs;
-  const navGridClassName = `grid-cols-2 md:grid-cols-4 ${scorecardEnabled ? "xl:grid-cols-6" : "xl:grid-cols-5"}`;
+  const navGridClassName = `grid-cols-2 md:grid-cols-4 ${scorecardEnabled ? "xl:grid-cols-5" : "xl:grid-cols-4"}`;
 
   const validTabKeys = tabList.map((t) => t.key);
   // Fallback: Board for an admin, Schedule for a technician (Board is

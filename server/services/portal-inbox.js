@@ -59,18 +59,30 @@ function cut(text, max = TEXT_CAP) {
   return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
 }
 
-function openChats(conn = db) {
-  return conn('ai_escalations as e')
+// The two definitions of an open customer ask, as scopes over a builder on
+// `ai_escalations as e` / `service_requests as r`. openChats / openRequests
+// below and other readers (the lead staleness sweep, services/lead-staleness.js)
+// all go through these two, so "open" is defined once.
+function openChatScope(builder) {
+  return builder
     .join('agent_sessions as s', 's.id', 'e.conversation_id')
     .where('s.channel', 'portal_chat')
     .where('e.status', 'pending')
     .whereRaw(CHAT_NOT_DONE_SQL);
 }
 
-function openRequests(conn = db) {
-  return conn('service_requests as r')
+function openRequestScope(builder) {
+  return builder
     .whereRaw("coalesce(r.status, 'new') not in (?, ?, ?)", TERMINAL_REQUEST_STATUSES)
     .whereRaw("coalesce(r.source, '') <> 'admin'");
+}
+
+function openChats(conn = db) {
+  return openChatScope(conn('ai_escalations as e'));
+}
+
+function openRequests(conn = db) {
+  return openRequestScope(conn('service_requests as r'));
 }
 
 // Open unfinished-booking bells: admin rows not done whose key carries the prefix.
@@ -380,6 +392,8 @@ async function closeOlder(cutoff, actor, now = new Date()) {
 
 module.exports = {
   WINDOW_DAYS,
+  openChatScope,
+  openRequestScope,
   windowCutoff,
   summary,
   list,
