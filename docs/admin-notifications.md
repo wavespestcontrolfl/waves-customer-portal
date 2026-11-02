@@ -112,6 +112,20 @@ Kinds today:
   desk's own save step (`saveBidUpdate` in `server/routes/admin-bid-desk.js`, behind the page's Save
   decision) with the same checks again under its row lock: still new, and a confirmed date for Bid.
   It sends nothing to a buyer or customer and moves no money. Off unless `GATE_BID_DESK` is on too.
+- `text_note` (`server/services/sms-text-note-buttons.js`, `GATE_ALERT_CLOSE_BUTTONS`; owner 2026-11-02
+  "C"): **Save to profile** and **One visit only** on the SMS reader's review bell ("Comms — check
+  <name>'s text note", `sms-property-instructions:<sms>`). Both are stored at raise; `visibleItems`
+  serves Save only while it would write something. Save re-reads the held-back facts of the bell's
+  source text (`bellExceptions`, the set the bell rang for) and writes each through the SMS lane's
+  shared compare-and-set writer (`data-hygiene/property-preferences.js`) under the
+  `property-preferences` lock: a long-text note (special instructions, access, pet, parking and the two
+  irrigation notes) gets the text as a new `[text <date>]` line, and any other field (the four codes,
+  the controller location, the contact preference) is filled only while it is empty, so a value on
+  file is never overwritten. A fact the reader could not pin to one value or topic, or one not tied to
+  a property when the customer has more than one, is left for the profile. Each write is audited as
+  `sms.property_preference.updated` (field names only), and the bell closes on the version the tap
+  claimed; a bell that changed rolls the write back. One visit only is the bell's own Done, fenced the
+  same way. Neither sends anything to a customer.
 
 ## 3. Never in a headline or a why
 

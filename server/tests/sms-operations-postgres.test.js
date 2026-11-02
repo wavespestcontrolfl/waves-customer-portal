@@ -12,10 +12,13 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(),
+  // The real Done and its version fence, for the review bell's buttons (sms-text-note-buttons.js).
+  markAdminDone: (...args) => jest.requireActual('../services/notification-service').markAdminDone(...args),
   // The real done writer: a system close is done, not just read (read is not done).
   _private: {
     doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args),
     openToCloser: (...args) => jest.requireActual('../services/notification-service')._private.openToCloser(...args),
+    get NOTIFICATION_VERSION_SQL() { return jest.requireActual('../services/notification-service')._private.NOTIFICATION_VERSION_SQL; },
   },
 }));
 
@@ -1340,5 +1343,70 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     await expect(migration.down(mockPg)).rejects.toThrow('disable the gate');
     expect(await mockPg('call_commitments')).toHaveLength(0);
+  });
+
+  describe('review bell buttons: Save to profile and One visit only (owner 2026-11-02 "C")', () => {
+    const STAFF = '00000000-0000-4000-8000-000000000201';
+    const { runAlertButton, withAlertButtons } = require('../services/admin-alert-buttons');
+    const { etDateString } = require('../utils/datetime-et');
+    beforeEach(() => { process.env.GATE_ALERT_CLOSE_BUTTONS = 'true'; });
+    afterEach(() => { delete process.env.GATE_ALERT_CLOSE_BUTTONS; });
+
+    // The text arrives, the reader holds one fact back, and the real notifier raises the bell.
+    async function raiseBell(body, fact, prefs = null) {
+      message.message_body = body;
+      await mockPg('sms_log').where({ id: message.id }).update({ message_body: body });
+      if (prefs) await mockPg('property_preferences').insert({ customer_id: message.customer_id, ...prefs });
+      context = await loadMessageContext(mockPg, message);
+      const notifier = jest.requireActual('../services/notification-service');
+      NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
+      await recordMessageOperations(mockPg, message, { dropped: 0, facts: [{ quote: body, property_id: context.properties[0].id, ...fact }] }, context);
+      const bell = await mockPg('notifications').first('id', 'metadata', 'done_at',
+        mockPg.raw(`${notifier._private.NOTIFICATION_VERSION_SQL} AS version`));
+      expect(bell.metadata.buttons).toEqual({ kind: 'text_note', items: [{ id: 'save', label: 'Save to profile' }, { id: 'one_visit', label: 'One visit only' }] });
+      return bell;
+    }
+    const served = async (bell) => ((await withAlertButtons([bell], { role: 'admin' }))[0].actions || []).map((a) => a.id);
+    const tap = (bell, actionId, version = bell.version) => runAlertButton({ notificationId: bell.id, actionId, version, technicianId: STAFF, role: 'admin' });
+    const savedAudits = () => mockPg('audit_log').where({ action: 'sms.property_preference.updated' });
+
+    test('Save adds the text as a dated line through the shared writer, audits it, and closes the bell it claimed', async () => {
+      const bell = await raiseBell('Skip the shed please', { field: 'special_instructions', value: 'Skip the shed please', duration: 'uncertain' },
+        { special_instructions: 'Text me first' });
+      expect(await served(bell)).toEqual(['save', 'one_visit']);
+      expect(await tap(bell, 'save')).toEqual({ status: 200, body: { success: true, message: 'Saved to the profile.' } });
+      expect((await mockPg('property_preferences').first()).special_instructions)
+        .toBe(`Text me first\n[text ${etDateString(message.created_at)}] Skip the shed please`);
+      const audits = await savedAudits();
+      expect(audits).toHaveLength(1);
+      expect(audits[0]).toMatchObject({ actor_type: 'technician', actor_id: STAFF });
+      expect(audits[0].metadata).toMatchObject({ field: 'special_instructions', via: 'text_note_button', notification_id: bell.id, sms_log_id: message.id });
+      const closed = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(closed).toMatchObject({ done_by: STAFF, resolution: 'Saved to profile' });
+      expect(closed.done_at).not.toBeNull();
+    });
+
+    test('a tap on a bell that changed since it was served saves nothing', async () => {
+      const bell = await raiseBell('Skip the shed please', { field: 'special_instructions', value: 'Skip the shed please', duration: 'uncertain' });
+      expect(await tap(bell, 'save', 'f'.repeat(32))).toEqual({ status: 409, body: { error: 'changed' } });
+      expect(await mockPg('property_preferences')).toHaveLength(0);
+      expect(await savedAudits()).toHaveLength(0);
+      expect((await mockPg('notifications').where({ id: bell.id }).first()).done_at).toBeNull();
+    });
+
+    test('a code already on file: Save is not offered and refuses; One visit only closes the bell and writes nothing', async () => {
+      const bell = await raiseBell('Lockbox is #4567 for tomorrow', { field: 'lockbox_code', value: '#4567', duration: 'uncertain' },
+        { lockbox_code: '#0123' });
+      expect(await served(bell)).toEqual(['one_visit']);
+      const refused = await tap(bell, 'save');
+      expect(refused).toMatchObject({ status: 409, body: { error: 'on_file' } });
+      expect(refused.body.message).toMatch(/already has a lockbox code/);
+      const reread = await mockPg('notifications').where({ id: bell.id })
+        .first('id', 'metadata', 'done_at', mockPg.raw(`${NotificationService._private.NOTIFICATION_VERSION_SQL} AS version`));
+      expect(await tap(reread, 'one_visit')).toEqual({ status: 200, body: { success: true, message: 'Closed: one visit only.' } });
+      expect((await mockPg('property_preferences').first()).lockbox_code).toBe('#0123');
+      expect(await savedAudits()).toHaveLength(0);
+      expect(await mockPg('notifications').where({ id: bell.id }).first()).toMatchObject({ done_by: STAFF, resolution: 'One visit only' });
+    });
   });
 });

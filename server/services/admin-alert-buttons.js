@@ -25,6 +25,9 @@ const KINDS = {
   close_note: () => closeNoteHandler,
   // Owner 2026-10-29 "bid buttons, as a trial": No bid, and Bid once the due date is confirmed. The Bid desk's save step.
   bid_decision: () => require('./bid-desk/alert-buttons').buttonHandler,
+  // Owner 2026-11-02 "C": Save to profile and One visit only on the SMS reader's review bell. Save writes the
+  // profile through the SMS lane's shared writer; neither button sends anything to a customer.
+  text_note: () => require('./sms-text-note-buttons').buttonHandler,
 };
 
 // Close-only buttons an emitter puts on its row: Handled on a customer's texts, Called back on a call-back
