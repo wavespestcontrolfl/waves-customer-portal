@@ -451,6 +451,22 @@ html[data-glass-theme] [data-glass-motion-state],
   }
 }
 
+/* Still surfaces (the customer portal; motion audit 2026-11-02, owner pick
+   3A): no hover lift. Only the kinds that lift (cards, chips, gold accents:
+   flow content, never positioned by a transform, as in the phone block).
+   :not(:active) keeps the press feedback above, since a pressed element is
+   also :hover. Colour and shadow changes stay. */
+html[data-glass-still] [data-glass="card"]:hover:not(:active),
+html[data-glass-still] [data-glass="chip"]:hover:not(:active),
+html[data-glass-still] [data-glass-accent]:hover:not(:active) {
+  transform: none !important;
+}
+/* Untagged buttons: no !important, so inline layout transforms (the
+   password eye, the photo arrows) still win, as in the phone block above. */
+html[data-glass-theme][data-glass-still] button:not([data-glass]):not([data-glass-accent]):hover {
+  transform: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html[data-glass-theme] [data-glass],
   html[data-glass-theme] [data-glass-accent] {

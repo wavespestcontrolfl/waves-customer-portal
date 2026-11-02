@@ -20,6 +20,7 @@ beforeEach(() => {
 afterEach(() => {
   setSearch('');
   document.documentElement.removeAttribute('data-glass-theme');
+  document.documentElement.removeAttribute('data-glass-still');
   document.documentElement.style.background = '';
   document.body.style.background = '';
   document.body.innerHTML = '';
@@ -113,4 +114,50 @@ describe('useGlassSurface', () => {
     unmount();
   });
 
+});
+
+describe('useGlassSurface motion: false (customer portal, motion audit 2026-11-02, owner pick 3A)', () => {
+  let observers;
+  beforeEach(() => {
+    observers = vi.fn();
+    vi.stubGlobal('IntersectionObserver', class { constructor() { observers(); } observe() {} unobserve() {} disconnect() {} });
+    Element.prototype.animate = vi.fn();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete Element.prototype.animate;
+  });
+
+  it('keeps the static scene but attaches no entrance engine, pointer or scroll listeners', () => {
+    const docAdd = vi.spyOn(document, 'addEventListener');
+    const winAdd = vi.spyOn(window, 'addEventListener');
+    const { unmount } = renderHook(() => useGlassSurface(true, { motion: false }));
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.querySelectorAll('.glass-orb')).toHaveLength(5);
+    expect(document.querySelector('.glass-scene-grain')).not.toBeNull();
+    expect(observers).not.toHaveBeenCalled();
+    expect(docAdd.mock.calls.map(([type]) => type)).not.toContain('pointermove');
+    expect(docAdd.mock.calls.map(([type]) => type)).not.toContain('pointerdown');
+    expect(winAdd.mock.calls.map(([type]) => type)).not.toContain('scroll');
+    unmount();
+  });
+
+  it('sets data-glass-still while mounted and clears it on unmount', () => {
+    const { unmount } = renderHook(() => useGlassSurface(true, { motion: false }));
+    expect(document.documentElement.hasAttribute('data-glass-still')).toBe(true);
+    unmount();
+    expect(document.documentElement.hasAttribute('data-glass-still')).toBe(false);
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
+  });
+
+  it('the default path still attaches the entrance engine and the pointer FX, and sets no still marker', () => {
+    const docAdd = vi.spyOn(document, 'addEventListener');
+    const winAdd = vi.spyOn(window, 'addEventListener');
+    const { unmount } = renderHook(() => useGlassSurface(true));
+    expect(observers).toHaveBeenCalled();
+    expect(docAdd.mock.calls.map(([type]) => type)).toContain('pointermove');
+    expect(winAdd.mock.calls.map(([type]) => type)).toContain('scroll');
+    expect(document.documentElement.hasAttribute('data-glass-still')).toBe(false);
+    unmount();
+  });
 });
