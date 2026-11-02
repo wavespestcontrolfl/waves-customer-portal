@@ -138,6 +138,8 @@ async function raiseMissedBell({ customerId, name, firstName, leadId, callLogId,
     subject: leadId ? { type: 'lead', id: String(leadId) } : { type: 'customer', id: String(customerId) },
     doneWhen: 'lead_contacted',
     who: 'person',
+    // Call: the lead page's own Call (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+    buttons: require('./alert-call-button').callButtons({ customerId }),
   };
   for (const delay of delaysMs) {
     if (delay) await new Promise((resolve) => { setTimeout(resolve, delay); });

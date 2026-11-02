@@ -71,7 +71,12 @@ jest.mock('../models/db', () => {
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
-jest.mock('../services/twilio', () => ({ sendSms: jest.fn() }));
+jest.mock('../services/twilio', () => ({ sendSms: jest.fn(), sendSMS: jest.fn() }));
+// Owner alerts (services/owner-alerts.js): the real composer runs; only the row write is stubbed.
+jest.mock('../services/ops-digest', () => ({
+  ...jest.requireActual('../services/ops-digest'),
+  deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n-1' })),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(() => Promise.resolve({ sent: true })),
 }));
@@ -151,5 +156,45 @@ describe('processMonthlyBilling — monthly failure retry target', () => {
     expect(armedIds()).toEqual([]);
     const { warn } = require('../services/logger');
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/failed outside the charge itself \(connection reset\)/));
+  });
+});
+
+// The monthly run's money exceptions were texts to the owner's phone that reached nobody since about
+// 2026-09-01. Each is now an owner alert row the owner chose to ring (2026-11-02).
+describe('processMonthlyBilling — money exceptions alert the owner', () => {
+  const TwilioService = require('../services/twilio');
+  const { deliverOpsDigest } = require('../services/ops-digest');
+  const ownerAlert = (kind) => deliverOpsDigest.mock.calls.map(([d]) => d).find((d) => d.metadata?.ownerAlert === kind);
+  // These branches log to autopay_log before alerting (the suite's default mock returns nothing).
+  beforeEach(() => { require('../services/autopay-log').logAutopay.mockResolvedValue(undefined); });
+
+  test('a charge Stripe took that our ledger missed rings an alert keyed by the payment intent', async () => {
+    StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('ledger insert failed'), {
+      code: 'STRIPE_CHARGED_DB_FAILED', stripePaymentIntentId: 'pi_orphan_month', amount: 55.3,
+    }));
+    await BillingCron.processMonthlyBilling();
+    const alert = ownerAlert('charge-unrecorded');
+    expect(alert).toMatchObject({
+      headline: "Billing — reconcile Test Customer's unrecorded charge",
+      summary: 'Stripe took $55.30 but our records do not show it, so do not charge again.',
+      audience: 'owner',
+      dedupeKey: 'owner-alert:charge-unrecorded:pi_orphan_month',
+    });
+    expect(alert.text).toContain('(autopay)');
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('an autopay result nobody knows rings an alert to check it, keyed by the parked attempt', async () => {
+    StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('socket hang up'), {
+      code: 'STRIPE_AMBIGUOUS_OUTCOME', paymentRecord: { id: 'attempt-ambiguous', status: 'failed', amount: 55.3 },
+    }));
+    await BillingCron.processMonthlyBilling();
+    expect(ownerAlert('autopay-outcome-unknown')).toMatchObject({
+      headline: "Billing — check whether Test Customer's autopay went through",
+      summary: 'Stripe stopped answering during a $55.30 charge, so it may or may not have gone through.',
+      audience: 'owner',
+      dedupeKey: 'owner-alert:autopay-outcome-unknown:attempt-ambiguous',
+    });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 });

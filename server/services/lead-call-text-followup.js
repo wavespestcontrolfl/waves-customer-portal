@@ -196,6 +196,8 @@ async function raiseLeadBell({ customer, leadId, requestId, why, actions = null,
     doneWhen: 'lead_contacted',
     who: 'person',
     contact: true,
+    // Call: the lead page's own Call (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+    buttons: require('./alert-call-button').callButtons({ customerId: customer.id }),
   };
   for (const delay of delaysMs) {
     if (delay) await new Promise((resolve) => { setTimeout(resolve, delay); });

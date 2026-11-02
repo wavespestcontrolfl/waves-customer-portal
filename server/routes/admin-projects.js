@@ -87,7 +87,8 @@ const InvoiceService = require('../services/invoice');
 const { acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES } = require('../services/scheduled-invoice-mint');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, wdoMarkSentOutsideLive } = require('../config/feature-gates');
+const { recordAuditEvent } = require('../services/audit-log');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('../services/wdo-inspection-fee');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -304,6 +305,24 @@ const AI_SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif'
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function isAdmin(req) {
   return req.techRole === 'admin';
+}
+
+// "Sent another way" (GATE_WDO_MARK_SENT_OUTSIDE): which projects can be
+// marked as sent outside the portal. Same "signed" test as the WDO attention
+// sweep (wdo_signature IS NOT NULL); a portal send sets sent_at, so only a
+// report with no portal send and no earlier mark qualifies.
+const MARK_SENT_OUTSIDE_NOTE_MAX = 500;
+
+function markSentOutsideBlock(project) {
+  if (project.project_type !== 'wdo_inspection') return { code: 'not_wdo_report', error: 'Only a WDO report can be marked as sent another way' };
+  if (project.wdo_signature == null) return { code: 'not_signed', error: 'The WDO report is not signed yet' };
+  if (project.sent_at) return { code: 'already_sent', error: 'This report was already sent through the portal' };
+  if (project.sent_outside_portal_at) return { code: 'already_marked', error: 'This report is already marked as sent another way' };
+  return null;
+}
+
+function canMarkSentOutside(req, project) {
+  return isAdmin(req) && wdoMarkSentOutsideLive() && !markSentOutsideBlock(project);
 }
 
 function canAccessProject(req, project) {
@@ -1733,6 +1752,8 @@ router.get('/:id', async (req, res, next) => {
         applicator_name,
         poison_control,
         wdo_signature: wdoSignature,
+        // Server-computed: gate on, admin viewer, signed, no portal send, not yet marked.
+        canMarkSentOutside: canMarkSentOutside(req, project),
         // Heavy archive index (carries as-sent findings snapshots) — the UI
         // lists filings via GET /:id/wdo-filings instead.
         wdo_sent_filings: undefined,
@@ -4116,6 +4137,79 @@ router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) =
       }
     }
     res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/:id/mark-sent-outside — "Sent another way".
+// Admin-only, dark behind GATE_WDO_MARK_SENT_OUTSIDE (off = 404). Records that
+// a signed WDO report went out by some route other than the portal, so the
+// nightly attention sweep stops flagging it. Records only: no customer
+// message, no email, no filing archive, and sent_at stays NULL.
+// Body: { note? } (trimmed, max 500 characters).
+// ---------------------------------------------------------------------------
+function requireMarkSentOutsideGate(_req, res, next) {
+  if (!wdoMarkSentOutsideLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+
+router.post('/:id/mark-sent-outside', requireMarkSentOutsideGate, requireAdmin, async (req, res, next) => {
+  try {
+    const rawNote = req.body?.note;
+    if (rawNote != null && typeof rawNote !== 'string') return res.status(400).json({ error: 'note must be text' });
+    const note = String(rawNote || '').trim();
+    if (note.length > MARK_SENT_OUTSIDE_NOTE_MAX) {
+      return res.status(400).json({ error: `note must be ${MARK_SENT_OUTSIDE_NOTE_MAX} characters or fewer` });
+    }
+
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const blocked = markSentOutsideBlock(project);
+    if (blocked) return res.status(409).json(blocked);
+
+    // One update guarded by the same state test, with the audit row in the same
+    // transaction: a racing portal send or a second click matches no row.
+    const updated = await db.transaction(async (trx) => {
+      const rows = await trx('projects')
+        .where({ id: project.id, project_type: 'wdo_inspection' })
+        .whereNotNull('wdo_signature')
+        .whereNull('sent_at')
+        .whereNull('sent_outside_portal_at')
+        .update({
+          sent_outside_portal_at: db.fn.now(),
+          sent_outside_portal_by: req.technicianId || null,
+          sent_outside_portal_note: note || null,
+        })
+        .returning(['sent_outside_portal_at', 'sent_outside_portal_by', 'sent_outside_portal_note']);
+      const row = Array.isArray(rows) ? rows[0] : null;
+      if (!row) return null;
+      await recordAuditEvent({
+        actor_type: 'technician',
+        actor_id: req.technicianId || null,
+        action: 'wdo.report_marked_sent_outside',
+        resource_type: 'project',
+        resource_id: project.id,
+        metadata: { customer_id: project.customer_id || null, note: note || null },
+        ip_address: req.ip || null,
+        user_agent: req.headers?.['user-agent'] || null,
+        critical: true,
+        trx,
+      });
+      return row;
+    });
+    if (!updated) {
+      return res.status(409).json({ code: 'state_changed', error: 'The report changed while you were marking it. Reload and check.' });
+    }
+
+    await logProjectActivity(req, project, 'project_wdo_marked_sent_outside', 'WDO report marked as sent another way (outside the portal)', {
+      has_note: Boolean(note),
+    });
+    res.json({
+      ok: true,
+      sent_outside_portal_at: updated.sent_outside_portal_at,
+      sent_outside_portal_by: updated.sent_outside_portal_by,
+      sent_outside_portal_note: updated.sent_outside_portal_note,
+    });
   } catch (err) { next(err); }
 });
 

@@ -71,7 +71,11 @@ The owner's rules ("ok go" on the plan, Oct 29):
    a tap names a button the row carries, and nothing else runs.
 5. A tap records who pressed what and when (`metadata.buttonTaps`, one entry per tap), and
    closes the row. One tap runs at a time: it claims the row in one conditional write against the
-   version the bell served, so a second tap at the same moment, or after, does nothing.
+   version the bell served, so a second tap at the same moment, or after, does nothing. The one
+   exception is **Call** (kind `call_back` below): a call can ring out, so its step answers
+   `keepOpen`, the row stays open (the bell reads its list again for the new version), and the row
+   closes by its own done-when, its close button or Done. A later tap calls again, as the page's own
+   button would.
 
 How: `buttons: { kind, items: [{ id, label, prompt?, args? }] }` in the spec, kept as
 `metadata.buttons`. `kind` names a handler in `server/services/admin-alert-buttons.js` (`KINDS`).
@@ -112,6 +116,24 @@ Kinds today:
   desk's own save step (`saveBidUpdate` in `server/routes/admin-bid-desk.js`, behind the page's Save
   decision) with the same checks again under its row lock: still new, and a confirmed date for Bid.
   It sends nothing to a buyer or customer and moves no money. Off unless `GATE_BID_DESK` is on too.
+- `call_back` (`server/services/alert-call-button.js`, `GATE_ALERT_CALL_BUTTON`; owner 2026-11-02:
+  "for the voicemail, or missed call notifications, or any other related to calls, cant we add a call
+  button, where we can call them from the admin notification", and a lead's CALL reply): **Call** on a
+  row about one caller. The owner's ruling for this kind under rule 3: a tap places a call, and only
+  after the owner presses 1 on their own phone does it ring the customer. The row names one record in
+  `args`: its call (`callLogId`, or `callSid` for an urgent Sandy caller raised during the call) on a
+  missed call, a voicemail, a promise chaser, a repeat caller and a Sandy hand-off; its customer
+  (`customerId`) on a landline, a lead's call-back bells, a text call-back follow-up and a lead's bare
+  CALL text. The tap reads that record again and runs the handler behind
+  `POST /api/admin/communications/call` in-process (`placeCallFromAlert`) with the body the linked
+  page's own button sends: the Call Log's "Call back" (the caller's number, else the linked customer's,
+  `source: 'call-log-callback'`, `relatedCallId`), or the customer page's Call (`customerIdHint`). The
+  step's own refusal (a callback already ringing) is shown as it reads. The row stays open (rule 5).
+  A row that had a close button keeps it after Call (**Called back** on a missed call and a text
+  call-back follow-up, **Handled** on the CALL text); that button is the `close_note` step itself and
+  follows `GATE_ALERT_CLOSE_BUTTONS`, so each button is served while its own gate is on
+  (`visibleItems`). A text thread row takes the buttons of the text it shows: the CALL text's
+  emission carries Call, the next text's emission drops it, and an older late text keeps the row's own.
 
 ## 3. Never in a headline or a why
 
@@ -279,7 +301,7 @@ launcher opens one Claude tab per `broken` queue row.
 | Catalog (owner 2026-10-29, step D1): every `TRIGGER_REGISTRY` type declares a `rule`: area, severity, who, and either `doneWhen` + `closedBy` (the module that marks its rows done) or `expiryDays` (30 for needs-you and broken, 7 for fyi; only the retention sweep closes it). Severity `fyi` replaces the old `informational` flag. In watch mode a muted alert is countable: when the bell policy silences an admin row, one `audit_log` row per Eastern day per distinct alert records its category, trigger key and digit-free title stem, and for a composer alert its declared area, severity and who, with its kind (the dedupe key's class prefix). Nothing is refused | `server/tests/admin-alert-catalog-contract.test.js` fails a type with no valid rule; `auditBellPolicyMuted` in `server/services/audit-log.js`, called at both silence points (`NotificationService.create`, and `triggerNotification`, which checks the policy itself and returns before create), action `notification.bell_policy.muted` | contract enforced; watch mode behind `GATE_ALERT_CATALOG=watch` (dark by default) |
 | Customer declaration (owner 2026-10-29, "small" E1): a registry `rule` or a composed spec may declare `contact: true` (a customer reached us) or `promise: true` (a follow-up we owe a customer): only `true`, never both, and only on a `needs-you` type for a person. A declared alert rings whatever the bell policy's later steps say (a site's explicit `bell: false` still wins), and a customer's failed invoice payment (`bill_payment_error`) rings beside `payment_failed` | `bellAllowed` in `server/services/notification-bell-policy.js` (step 1b), fed by `triggerNotification` (the type's rule; its bell write then carries `bell: true`) and `NotificationService.create` (the row's metadata); the shape is checked by `server/tests/admin-alert-catalog-contract.test.js` and `composeAdminAlert` | enforced while `GATE_CUSTOMER_ALERTS_RING` is on (dark by default) |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
-| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default) |
+| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
