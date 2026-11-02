@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_FOLLOWUP_DUE_ALERT=true (owner 2026-11-02, "build all", B1: a visit finished with the outcome "follow-up needed" parks a card on the dispatch board that no bell ever shows, so a follow-up nobody books just sits there. On, a daily 8:20 AM ET job (followup-due-alerts) raises one admin bell per card on its due date (the card's suggested follow-up date, else its Eastern created date + 14 days), titled "Schedule — book <First L.>'s follow-up (due <date>)" and linked to the customer page, where the owner books. A card more than 3 days past due with no alert of its own goes on ONE catch-up bell that rings when it is first raised or when a card joins it, and closes itself when empty. Each run closes the open bells whose card is covered: resolved, customer inactive, or any later live visit (created after the card, dated after it up to due + 7 days, or booked from it). Admin notifications only: books nothing, sends nothing to a customer, calls no paid API, never resolves or edits a card. Read at call time via followupDueAlertLive(), strict 'true', dark by default; off = the job returns before any read.)
  *   GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE=true (owner 2026-11-02, option A: an email reply pauses the estimate follow-up emails the way a text already does. On, hasRepliedRecently also returns true when the customer emailed Waves inside the same 14 days: an inbound row in the Gmail sync table linked to the estimate's customer_id, or whose from_address equals the estimate's email (leads have no customer_id). Gmail SENT rows never count, and the address match is skipped when the estimate's email is one of ours. A failed read fails open on the cron path and holds the replay, same as the text check. Strict `=== 'true'`, read at call time via estimateFollowupEmailReplyPauseLive(); dark by default; off = the emails table is never queried and nothing changes. Sends nothing; it only holds back follow-up emails.)
  *   GATE_SOCIAL_STUDIO_SKIP_META=true (owner 2026-11-01, social audit "studio trim": from Sep 1 to Nov 1 the autonomous Social Studio's Instagram stills reached about 1.5 to 3 people each and gained no followers, so the autonomous studio stops posting to Facebook and Instagram and keeps LinkedIn and Google Business. On, an autonomous run (the 6:30 AM ET cron, the admin Run Draft and Run Publish buttons, and the approval of a queued autonomous draft) drops facebook and instagram from its channel list: no copy or image is made for them, no Veo clip is made, and an old queued draft publishes to its other channels only. A run whose channels were only facebook and instagram is skipped and logged. The manual Social Studio, Campaign Builder, Publish All, blog and RSS shares, testimonial graphics and scheduled posts are NOT touched. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialStudioSkipMetaLive().)
  *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
@@ -8057,6 +8058,13 @@ function leadDraftPropertyLookupLive() {
   return process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true';
 }
 
+// GATE_FOLLOWUP_DUE_ALERT read at CALL time (so a flip needs no redeploy); strict 'true', dark (owner 2026-11-02, B1).
+// On, the daily 8:20 AM ET job in services/followup-due-alerts.js raises one admin bell per flagged follow-up that is due
+// and not booked, plus one catch-up bell for the older ones. Off = the cron returns before any read.
+function followupDueAlertLive() {
+  return process.env.GATE_FOLLOWUP_DUE_ALERT === 'true';
+}
+
 // GATE_QUIET_OVERDUE_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
 function quietOverdueListLive() {
   return process.env.GATE_QUIET_OVERDUE_LIST === 'true';
@@ -10263,6 +10271,8 @@ module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 module.exports.techSetTextsLive = techSetTextsLive;
 // GATE_EMAIL_DRAFT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.emailDraftFactsLive = emailDraftFactsLive;
+// GATE_FOLLOWUP_DUE_ALERT reader, on its own line so gate PRs never conflict.
+module.exports.followupDueAlertLive = followupDueAlertLive;
 // GATE_MONDAY_REVIEW_BELL reader, on its own line so gate PRs never conflict.
 module.exports.mondayReviewBellLive = mondayReviewBellLive;
 // GATE_RESERVICE_ASKS reader, on its own line so gate PRs never conflict.
