@@ -1596,7 +1596,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
   // runNext stands in for the claim: the best pending row by score among the
   // ids the call may take (onlyIds), minus the excluded ones. A row with
   // `claimable: false` is held by a claim rule (deferred, fenced).
-  function queueRunner(rows, { written = [], reserved = 0 } = {}) {
+  function queueRunner(rows, { written = [], held = [], reserved = 0 } = {}) {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
     const runner = new AutonomousRunner();
     const pending = new Map(rows.map((r) => [r.id, r]));
@@ -1614,7 +1614,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     runner._appendToDailyDigest = jest.fn(async () => {});
     runner._withEngineLock = (label, fn) => fn();
     runner._claimableBackfillSlots = jest.fn(async () => reserved);
-    runner._writtenTerminalDraftIds = jest.fn(async () => written);
+    runner._terminalFirstIds = jest.fn(async () => ({ written, held }));
     runner.settleTerminalWork = jest.fn(async () => {});
     runner._sendBlogDroughtSms = jest.fn(async () => {});
     return { runner, order };
@@ -1683,12 +1683,42 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       { written: ['written_blog'] },
     );
     await runner._runDailyInner({ limit: 2, actionType: 'new_supporting_blog' });
-    expect(runner._writtenTerminalDraftIds).toHaveBeenCalledWith('new_supporting_blog');
+    expect(runner._terminalFirstIds).toHaveBeenCalledWith('new_supporting_blog');
     expect(order).toEqual(['written_blog', 'no_draft_80']);
     expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
       { excludeIds: [], actionType: 'new_supporting_blog', onlyIds: ['written_blog'] },
       { excludeIds: [], actionType: 'new_supporting_blog' },
     ]);
+  });
+
+  test('holds (owner 2026-11-02) come after every written draft, even with a higher score, and give their slot back', async () => {
+    const rows = [
+      row('held_95', 95, { outcome: 'deferred_terminal_hold' }), row('held_60', 60, { outcome: 'deferred_terminal_hold' }),
+      row('written_50', 50, { outcome: 'completed_pending_review' }),
+      row('no_draft_90', 90), row('no_draft_85', 85), row('no_draft_70', 70),
+    ];
+    const { runner, order } = queueRunner(rows, { written: ['written_50'], held: ['held_95', 'held_60'] });
+    await runner.runDaily({ limit: 3 });
+    // The draft first; then both holds, neither using a slot; then two score-order slots.
+    expect(order).toEqual(['written_50', 'held_95', 'held_60', 'no_draft_90', 'no_draft_85']);
+    // The held pass tells runNext so: a hold publishes nothing, so no pre-draft cap check.
+    expect(runner.runNext.mock.calls.slice(0, 4).map(([args]) => args)).toEqual([
+      { excludeIds: [], onlyIds: ['written_50'] },
+      { excludeIds: [], onlyIds: ['held_95', 'held_60'], terminalHoldPass: true },
+      { excludeIds: [], onlyIds: ['held_60'], terminalHoldPass: true },
+      { excludeIds: [] },
+    ]);
+  });
+
+  test('a held row that is not claimable now (or whose run did not park it) uses its slot as any run does', async () => {
+    const rows = [
+      row('held_cap', 90, { outcome: 'deferred_publish_cap' }), row('held_deferred', 95, { claimable: false }),
+      row('no_draft_80', 80), row('no_draft_70', 70),
+    ];
+    const { runner, order } = queueRunner(rows, { held: ['held_deferred', 'held_cap'] });
+    await runner.runDaily({ limit: 2 });
+    // held_cap's run did not park it (its file became a draft and the publish guard held the cap): a slot used.
+    expect(order).toEqual(['held_cap', 'no_draft_80']);
   });
 
   test('the blog fallback after a failure streak keeps taking the drafts left, in the blog lane', async () => {
@@ -1705,30 +1735,34 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     });
   });
 
-  describe('_writtenTerminalDraftIds', () => {
+  describe('_terminalFirstIds', () => {
     const spy = (s) => { spies.push(s); return s; };
     const tw = () => require('../services/content/terminal-writer');
     const runnerFor = () => new (require('../services/content/autonomous-runner').AutonomousRunner)();
+    const none = { written: [], held: [] };
 
-    test('gate on: the written rows only, in the listed order (a scoped pass: its lane only); gate off, kill switch off or a failed read: none', async () => {
+    test('gate on: the written rows and the held rows, each in the listed order (a scoped pass: its lane only); gate off, kill switch off or a failed read: none', async () => {
       process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
       const listing = spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockResolvedValue({
         due: [{ opportunity_id: 'due_1' }],
         written: [{ opportunity_id: 'w_hi', action_type: 'refresh_existing_page' }, { opportunity_id: 'w_lo', action_type: 'new_supporting_blog' }],
+        // A pushed hold is listed on its own (the batch takes holds in a pass after the drafts).
+        held: [{ opportunity_id: 'h_1', action_type: 'new_supporting_blog' }],
         rebrief: [{ opportunity_id: 'old_1' }],
       });
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['w_hi', 'w_lo']);
-      await expect(runnerFor()._writtenTerminalDraftIds('new_supporting_blog')).resolves.toEqual(['w_lo']);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual({ written: ['w_hi', 'w_lo'], held: ['h_1'] });
+      await expect(runnerFor()._terminalFirstIds('new_supporting_blog')).resolves.toEqual({ written: ['w_lo'], held: ['h_1'] });
+      await expect(runnerFor()._terminalFirstIds('refresh_existing_page')).resolves.toEqual({ written: ['w_hi'], held: [] });
 
       listing.mockRejectedValueOnce(new Error('GitHub 502'));
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
 
       process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST = 'false';
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
       delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST;
       delete process.env.GATE_CONTENT_WRITER_TERMINAL;
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
-      expect(listing).toHaveBeenCalledTimes(3);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
+      expect(listing).toHaveBeenCalledTimes(4);
     });
 
     test('a pushed draft whose brief is past its 7 days is not taken first (it is briefed again)', async () => {
@@ -1750,7 +1784,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
         },
       };
       spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockImplementation((opts = {}) => real({ ...opts, deps }));
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['fresh']);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual({ written: ['fresh'], held: [] });
     });
   });
 });
@@ -5550,24 +5584,93 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(onward.mock.calls[0][2].terminal_draft_revision).toBeUndefined();
   });
 
-  test('settleTerminalWork: clean up what the runs took, then bring the item up to date (gate on: raise; gate off: close); a failure never throws', async () => {
+  describe('a terminal hold (owner 2026-11-02): the row is parked 30 days, not failed', () => {
+    const held = (hold) => ({ ok: false, held: true, code: 'terminal_draft_held', hold, brief_id: 'brief_handed', revision: 'sha_hold', duration_ms: 3, agent_id: 'terminal-writer', session_id: null });
+
+    test('a duplicate: the run records the hold, the claim is deferred 30 days, the branch rides the run for cleanup, no gates, no agent', async () => {
+      const hold = { reason: 'duplicate', detail: 'The live termite swarmers post covers this topic.' };
+      const { queue, dispatcher, briefBuilder, runner } = setup({ source: held(hold), handed: city('brief_handed') });
+      const onward = reachGates(runner);
+      const before = Date.now();
+      const result = await runner.runNext();
+      expect(result).toMatchObject({
+        outcome: 'deferred_terminal_hold', skip_reason: 'terminal_hold:duplicate', brief_id: 'brief_handed',
+        reviewer_notes: 'The live termite swarmers post covers this topic.', agent_id: 'terminal-writer', terminal_draft_revision: 'sha_hold',
+        // The hold is stored on the run: the batch end reads a needs_owner question from it.
+        draft_payload: { hold },
+      });
+      const [id, availableAt, payload] = queue.defer.mock.calls[0];
+      expect(id).toBe('opp_tw');
+      expect(payload).toEqual({ claimToken: claimedAt });
+      expect(availableAt.getTime() - before).toBeGreaterThanOrEqual(30 * 864e5 - 1000);
+      expect(availableAt.getTime() - before).toBeLessThan(30 * 864e5 + 60e3);
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(onward).not.toHaveBeenCalled();
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+      expect(briefBuilder.compose).not.toHaveBeenCalled();
+    });
+
+    test('the held pass skips the pre-draft publish cap (a hold publishes nothing); any other claim still defers to the cap window', async () => {
+      const hold = { reason: 'duplicate', detail: 'The live termite swarmers post covers this topic.' };
+      process.env.SHADOW_MODE_CREATE_OR_REFRESH_CITY_SERVICE_PAGE = 'false';
+      try {
+        const capped = { reason: 'canary_daily_publish_cap', notes: 'Daily publish cap already full.', availableAt: new Date(Date.now() + 864e5) };
+        const pass = setup({ source: held(hold), handed: city('brief_handed') });
+        const capCheck = jest.spyOn(pass.runner, '_capDeferralFor').mockResolvedValue(capped);
+        await expect(pass.runner.runNext({ terminalHoldPass: true })).resolves.toMatchObject({ outcome: 'deferred_terminal_hold' });
+        expect(capCheck).not.toHaveBeenCalled();
+
+        const other = setup({ source: held(hold), handed: city('brief_handed') });
+        jest.spyOn(other.runner, '_capDeferralFor').mockResolvedValue(capped);
+        await expect(other.runner.runNext()).resolves.toMatchObject({ outcome: 'deferred_publish_cap', skip_reason: 'canary_daily_publish_cap' });
+      } finally {
+        delete process.env.SHADOW_MODE_CREATE_OR_REFRESH_CITY_SERVICE_PAGE;
+      }
+    });
+
+    test('a needs_owner hold stores its question on the run; the run itself raises nothing (the batch end does)', async () => {
+      const hold = { reason: 'needs_owner', detail: 'The live page names a competitor in its text.', question: 'Remove the competitor names from the page text?' };
+      const { runner, terminalWriter } = setup({ source: held(hold), handed: city('brief_handed') });
+      terminalWriter.raiseHoldQuestion = jest.fn();
+      const result = await runner.runNext();
+      expect(result).toMatchObject({
+        outcome: 'deferred_terminal_hold', skip_reason: 'terminal_hold:needs_owner', draft_payload: { hold },
+        reviewer_notes: 'The live page names a competitor in its text. | Question for the owner: Remove the competitor names from the page text?',
+      });
+      expect(terminalWriter.raiseHoldQuestion).not.toHaveBeenCalled();
+    });
+  });
+
+  test('settleTerminalWork: clean up what the runs took, then bring the item up to date (gate on: raise; gate off: close), then the owner questions; a failure never throws', async () => {
     const { runner, terminalWriter } = setup({});
     Object.assign(terminalWriter, {
       cleanupConsumedDrafts: jest.fn().mockResolvedValue(undefined),
       raiseTerminalDue: jest.fn().mockResolvedValue({ due: 1 }),
       closeTerminalItems: jest.fn().mockResolvedValue(0),
+      syncHoldQuestions: jest.fn().mockResolvedValue({ raised: 0, closed: 0 }),
     });
     const runs = [{ id: 'run_1' }];
     await runner.settleTerminalWork(runs);
     expect(terminalWriter.cleanupConsumedDrafts).toHaveBeenCalledWith(runs);
     expect(terminalWriter.raiseTerminalDue).toHaveBeenCalledTimes(1);
     expect(terminalWriter.closeTerminalItems).not.toHaveBeenCalled();
+    expect(terminalWriter.syncHoldQuestions).toHaveBeenCalledTimes(1);
 
     terminalWriter.terminalWriterLive = () => false;
     await runner.settleTerminalWork(runs);
     expect(terminalWriter.closeTerminalItems).toHaveBeenCalledTimes(1);
+    expect(terminalWriter.syncHoldQuestions).toHaveBeenCalledTimes(2);
 
     terminalWriter.closeTerminalItems.mockRejectedValue(new Error('db down'));
+    await expect(runner.settleTerminalWork(runs)).resolves.toBeUndefined();
+
+    // A GitHub failure while the item lists the drafts never keeps the owner questions from their sync.
+    terminalWriter.terminalWriterLive = () => true;
+    terminalWriter.raiseTerminalDue.mockRejectedValue(new Error('GitHub 502'));
+    terminalWriter.syncHoldQuestions.mockClear();
+    await expect(runner.settleTerminalWork(runs)).resolves.toBeUndefined();
+    expect(terminalWriter.syncHoldQuestions).toHaveBeenCalledTimes(1);
+    terminalWriter.syncHoldQuestions.mockRejectedValue(new Error('db down'));
     await expect(runner.settleTerminalWork(runs)).resolves.toBeUndefined();
   });
 
