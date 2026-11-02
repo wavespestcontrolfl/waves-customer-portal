@@ -13,11 +13,12 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 jest.mock('../config/twilio-numbers', () => ({
   isInternalNumber: (n) => n === '+19412975749',
   isTechLine: (n) => n === '+19413529161',
+  isTechVoiceLine: (n) => n === '+19415550188',
   tollFree: { number: '+18559260203' },
   mainLine: { number: '+19412975749' },
   // Unset in the registry's own sense: falls back to the main line.
   internalAlertCallerId: jest.fn(() => '+19412975749'),
-  findByNumber: jest.fn((n) => (['+19412975749', '+19412972817', '+18559260203', '+19413529161'].includes(n) ? { id: 'known' } : null)),
+  findByNumber: jest.fn((n) => (['+19412975749', '+19412972817', '+18559260203', '+19413529161', '+19415550188'].includes(n) ? { id: 'known' } : null)),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The two robodialer classifiers are stubbed here (their SQL is pinned in
@@ -215,6 +216,9 @@ describe('fromNumberForDialed — send FROM the line the caller dialed, only whe
   });
   test('a field-tech line is never used (owner ruling: automated texts never originate there)', () => {
     expect(fromNumberForDialed('+19413529161')).toBeNull();
+  });
+  test('the staff-only tech voice line is never used, though the registry knows it', () => {
+    expect(fromNumberForDialed('+19415550188')).toBeNull();
   });
   test('a dedicated internal-alert caller ID is never used, even though the registry reports it as a line', () => {
     const TWILIO_NUMBERS = require('../config/twilio-numbers');

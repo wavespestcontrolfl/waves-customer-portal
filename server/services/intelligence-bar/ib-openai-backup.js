@@ -19,6 +19,7 @@
  * never sent half to each provider.
  */
 const ToolSearch = require('./tool-search');
+const ToolAdditions = require('./tool-additions');
 const ActionRegistry = require('./action-registry');
 const apiToolDefinition = require('./tool-definition');
 const { gapReportPromptLine } = require('../agent-gap-reports');
@@ -101,7 +102,11 @@ function withoutThinking(messages) {
   }).filter(message => !Array.isArray(message.content) || message.content.length);
 }
 
-function backupRequestState({ tools, messages, context, actionScope }) {
+function backupRequestState({ tools: liveTools, messages: liveMessages, pendingTools = [], context, actionScope }) {
+  // The backup knows no tool_addition (GATE_IB_TOOL_ADDITIONS): the tools those
+  // messages offered, and the ones still waiting for the next round, go back
+  // into `tools`, and the messages leave the history (tool-additions.js).
+  const { tools, messages } = ToolAdditions.foldAdditions({ tools: liveTools, messages: liveMessages, pending: pendingTools });
   let nextTools = tools;
   if (usesToolSearch(tools)) {
     const loaded = loadedToolNames(messages).map(name => ActionRegistry.actions.get(name))
@@ -136,8 +141,10 @@ const errorCode = err => err?.status || err?.code || 'unknown';
  * call sees what it always saw.
  *
  * The route hands over what the helper may change and nothing else:
- *   read()           -> { tools, messages, systemPrompt }  (the request's live values)
- *   apply(next)      -> sets tools, messages, toolSearch, systemPrompt on the request
+ *   read()           -> { tools, messages, systemPrompt, pendingTools }  (the request's live values;
+ *                       pendingTools = found tools not yet sent in a tool_addition message)
+ *   apply(next)      -> sets tools, messages, toolSearch, systemPrompt on the request, and
+ *                       stops tool additions (later finds merge into `tools`)
  *   markTask()       -> marks the saved task (a no-op without one)
  *   finalMessages(m) -> the last round's messages (the step-limit note)
  * `task` is the resumed task, if any: one marked as a backup task starts on the backup.
@@ -148,7 +155,7 @@ function createModelCaller({ context, actionScope, task, read, apply, markTask, 
 
   async function switchOver() {
     const live = read();
-    const next = backupRequestState({ tools: live.tools, messages: live.messages, context, actionScope });
+    const next = backupRequestState({ tools: live.tools, messages: live.messages, pendingTools: live.pendingTools, context, actionScope });
     apply({ ...next, systemPrompt: backupSystemPrompt(live.systemPrompt) });
     onBackup = true;
     await markTask();

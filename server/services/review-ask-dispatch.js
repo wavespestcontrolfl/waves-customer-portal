@@ -5,11 +5,15 @@ const logger = require('./logger');
 
 // The send-time click guard for a bundled ask, run while the caller holds the
 // per-customer review-send lock (the lock the click's own stopFutureAsks
-// takes): 'clicked' after a tracked tap since the ask's visit, 'unknown' when
-// the click state cannot be read (callers fail closed), else null.
+// takes): 'clicked' after a tracked tap since the ask's visit, or, with
+// GATE_REVIEW_TAP_PAUSE on, after any tap in the last 180 days (an automatic
+// ask the customer did not ask for); 'unknown' when the click state cannot be
+// read (callers fail closed), else null. 'clicked' drops only the review line.
 async function clickGate(reviewRequestId) {
   try {
-    return (await require('./review-click-guard').askIdSuppressedByClick(reviewRequestId)) ? 'clicked' : null;
+    const guard = require('./review-click-guard');
+    return (await guard.askIdSuppressedByClick(reviewRequestId) || await guard.tapPauseForRequestId(reviewRequestId))
+      ? 'clicked' : null;
   } catch (err) {
     logger.warn(`[review-ask] click-state read failed; bundled ask held (reviewRequestId=${reviewRequestId} errType=${err?.name})`);
     return 'unknown';

@@ -32,42 +32,26 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { techLineContext } = require('../services/tech-line');
-const { technicianVisitRowInScope } = require('../services/technician-visit-scope');
 const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const crypto = require('crypto');
-const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
 const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
-const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const featureGates = require('../config/feature-gates');
 const { isEnabled } = featureGates;
+const { setTextOptions, setTextReply } = require('../services/tech-set-texts');
 const {
-  isSetTextKind, setTextOptions, renderSetText, setTextClaimKey, openSetTextVisit, setTextReply,
-} = require('../services/tech-set-texts');
-const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { toE164, isLikelyE164 } = require('../utils/phone');
+  publicLine, visitCustomer, claimSend, releaseClaim, sendClaimedText, sendSetText,
+} = require('../services/tech-line-texts');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MAX_TEXT_CHARS = 600;
-// An identical tech-line text that already went out to the customer inside
-// this window is a double submit (two open PWAs), not a second message. The
-// window matches the provider's own retry horizon for an ambiguous outcome
-// (classifyProviderFailure's retryAfterMs, 5 minutes): a claim kept for a
-// text Twilio may still hold must outlive every retry that horizon allows
-// (codex #4072 r19 P2).
-const DUPLICATE_TEXT_WINDOW = '5 minutes';
 // The claim key hashes the body AS SENT — sendCustomerMessage GSM-normalizes
 // a plain customer SMS — so two submits of the same text share one key.
 function sentBodyHash(body) {
   return crypto.createHash('sha256').update(normalizeGsmPunctuation(body), 'utf8').digest('hex');
 }
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function publicLine(ctx) {
-  return { number: ctx.line.number, formatted: ctx.line.formatted, label: ctx.line.label };
-}
 
 // A provider / DB error here can carry the customer's phone and the message
 // body in its text (a knex message binds them). Log the code only and hand
@@ -80,24 +64,6 @@ function sanitized(err, label) {
   safe.statusCode = 500;
   safe.code = code;
   return safe;
-}
-
-// The visit's customer, or a { status, error } rejection. Techs reach only
-// visits assigned to them; admins any visit.
-async function visitCustomer(req, scheduledServiceId) {
-  if (!UUID_RE.test(String(scheduledServiceId || ''))) return { status: 400, error: 'scheduledServiceId is required' };
-  const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
-  if (!svc) return { status: 404, error: 'Visit not found' };
-  if (!technicianVisitRowInScope(req, svc)) return { status: 403, error: 'Not assigned to this visit' };
-  const customer = await db('customers').where({ id: svc.customer_id }).whereNull('deleted_at').first();
-  if (!customer) return { status: 404, error: 'Customer not found' };
-  const to = toE164(customer.phone);
-  if (!to || !isLikelyE164(to)) return { status: 409, error: 'This customer has no phone on file' };
-  // A Waves line or a staff forward number on the customer row is a data
-  // error, never a target: dialing it would re-enter /voice with the tech
-  // line as caller ID (codex #4072 r1 P1). The SMS provider blocks the same.
-  if (TWILIO_NUMBERS.isInternalNumber(to)) return { status: 409, error: 'This customer\'s phone on file is a Waves number — fix it before contacting them' };
-  return { customer, to, visit: svc };
 }
 
 // Strict lookups: a DB failure must never read as "no line" — the client
@@ -119,165 +85,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// The atomic cross-process gate both send routes use: sms_send_claims (the
-// table the public estimate route claims through) — a fresh insert, or a
-// takeover of a claim older than the window, in ONE statement on the pool.
-// No advisory-lock transaction: holding a pooled connection while the send
-// or the bridge takes a second one from the same pool wedges every slot
-// under a burst (codex #4072 r15 P2); the unique key is the serialization.
-async function claimSend(claimKey, window) {
-  const claim = await db.raw(
-    `INSERT INTO sms_send_claims (claim_key) VALUES (?)
-     ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
-     WHERE sms_send_claims.created_at < NOW() - interval '${window}'
-     RETURNING id`,
-    [claimKey],
-  );
-  return (claim?.rows || []).length > 0;
-}
-// A send that never left must not stay claimed for the window, or the
-// tech's real retry silently 409s.
-function releaseClaim(claimKey) {
-  return db('sms_send_claims').where({ claim_key: claimKey }).del()
-    .catch((err) => logger.warn(`[tech-line] claim release failed (${String(err?.code || err?.name || 'error')})`));
-}
-// AMBIGUOUS provider outcome — the admin composer's rule (GH Codex #3851 r4
-// P1): an explicit uncertain result is not a definitive no-send; the
-// provider may hold the text. Claims stay held and parked suggestions stay
-// parked. Legacy providers fall back to retryable/deferred classification.
-// A tech's real text is a first response to any open lead on this phone —
-// the same Speed-to-Lead stamp the admin composer makes after a real
-// provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
-// Fail-soft: SLA bookkeeping never breaks a send that already left.
-async function stampTechFirstResponse({ to, technicianId }) {
-  try {
-    const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
-    await stampFirstResponseByContact({ phone: to, performedBy: `tech:${technicianId}` });
-  } catch (stampErr) {
-    logger.warn(`[tech-line] first-response stamp failed: ${stampErr.message}`);
-  }
-}
-
-// The reserve → send → settle → stamp sequence for one text, as the
-// { status, json, ambiguous } the handler answers with. Throws for the
-// sanitized 500 (an ambiguous throw carries err.providerOutcome).
-async function textFromLine({ req, ctx, target, body, metadata }) {
-  // The same human-reply lifecycle the admin composer runs: park the
-  // thread's pending suggestions (and back off an autonomous reply mid-
-  // send) before Twilio, settle after — so the tech's text counts as the
-  // human answer every guard looks for (message_type manual).
-  const reply = await reserveHumanReply({
-    to: target.to, customerId: target.customer.id, fromNumber: ctx.line.number, body, adminUserId: req.technicianId,
-  });
-  if (reply.autoSendInFlight) {
-    return { status: 409, json: { error: 'An automatic reply to this customer is being sent right now — try again in a moment', code: 'AUTO_REPLY_IN_FLIGHT' } };
-  }
-  // Ambiguous: retain the reservation and parked suggestions so recovery
-  // cannot reopen a reply the customer may already hold. Provider evidence
-  // can settle the held decisions later.
-  const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, ambiguous: true, reviewedBy: req.technicianId }).catch(() => {});
-  const providerHandoffReservation = reply.reservationId
-    ? require('../services/messaging/provider-handoff-reservation').borrowProviderHandoffReservation({
-      reservationId: reply.reservationId,
-      to: target.to,
-      fromNumber: ctx.line.number,
-      body,
-      messageType: 'manual',
-      adminUserId: req.technicianId,
-    })
-    : null;
-  let result;
-  try {
-    result = await sendCustomerMessage({
-      to: target.to,
-      body,
-      channel: 'sms',
-      audience: 'customer',
-      purpose: 'conversational',
-      customerId: target.customer.id,
-      identityTrustLevel: 'phone_matches_customer',
-      entryPoint: 'tech_line_text',
-      providerHandoffReservation,
-      metadata: {
-        ...metadata,
-        original_message_type: 'manual',
-        tech_line: true,
-        scheduled_service_id: target.visit.id,
-        adminUserId: req.technicianId,
-        fromNumber: ctx.line.number,
-        parkedDecisionIds: reply.parkedDecisionIds.length ? reply.parkedDecisionIds : undefined,
-      },
-    });
-  } catch (err) {
-    // A throw AFTER Twilio accepted (the audit write failed — the error
-    // carries the provider outcome, the composer's convention) means the
-    // customer HAS the text: it is answered, and the tech must not be
-    // invited to send it again (codex #4072 r2 P1).
-    const accepted = err?.providerOutcome?.sent === true && isRealProviderSend(err.providerOutcome);
-    if (!accepted && isAmbiguousProviderOutcome(err?.providerOutcome)) await settleAmbiguous();
-    else await settleHumanReply({
-      ...reply,
-      sent: accepted,
-      acceptedResult: accepted ? err.providerOutcome : null,
-      reviewedBy: req.technicianId,
-    }).catch(() => {});
-    if (!accepted) throw err;
-    logger.error(`[tech-line] text accepted but its audit write failed (${String(err.code || err.name || 'error')}) for visit ${target.visit.id}`);
-    // The customer has the text: it is a first response too (codex r13 P2).
-    await stampTechFirstResponse({ to: target.to, technicianId: req.technicianId });
-    return { status: 200, json: { success: true, from: publicLine(ctx) } };
-  }
-  // A suppression / gate-off sentinel comes back sent:true with no real
-  // provider id — the tech must not see "Sent." for a text that never left.
-  const delivered = result.sent && isRealProviderSend(result);
-  if (!delivered) {
-    const ambiguous = isAmbiguousProviderOutcome(result);
-    if (ambiguous) await settleAmbiguous();
-    else await settleHumanReply({ ...reply, sent: false, reviewedBy: req.technicianId }).catch(() => {});
-    const code = result.code || (result.sent ? 'SMS_GATE_OFF' : 'NOT_SENT');
-    logger.info(`[tech-line] text from ${ctx.line.number} not sent for visit ${target.visit.id}: ${code}${ambiguous ? ' (ambiguous)' : ''}`);
-    return {
-      status: 409,
-      ambiguous,
-      json: {
-        error: ambiguous
-          ? 'The carrier did not confirm this text — it may still go out. Check the thread before sending it again.'
-          : (result.reason || (result.sent ? 'Texting is switched off right now' : 'Message was not sent')),
-        code,
-        deferred: Boolean(result.deferred),
-        ...(ambiguous ? { mayHaveSent: true } : {}),
-      },
-    };
-  }
-  await settleHumanReply({ ...reply, sent: true, acceptedResult: result, reviewedBy: req.technicianId }).catch(() => {});
-  await stampTechFirstResponse({ to: target.to, technicianId: req.technicianId });
-  return { status: 200, json: { success: true, from: publicLine(ctx) } };
-}
-
-// One text under its durable claim: the claim is taken BEFORE the send and
-// released only when the text definitively never left (a refusal, a validator
-// block, a throw before acceptance); an ambiguous outcome keeps it. Shared by
-// /sms (claim on customer + body) and /set-text (claim on visit + kind).
-async function sendClaimedText({ req, ctx, target, body, claimKey, metadata = null }) {
-  if (!(await claimSend(claimKey, DUPLICATE_TEXT_WINDOW))) {
-    return { status: 409, json: { error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' } };
-  }
-  let out;
-  try {
-    out = await textFromLine({ req, ctx, target, body, metadata });
-  } catch (err) {
-    if (!isAmbiguousProviderOutcome(err?.providerOutcome)) await releaseClaim(claimKey);
-    throw err;
-  }
-  if (out.status !== 200 && !out.ambiguous) await releaseClaim(claimKey);
-  if (out.status === 200) {
-    // One row per delivered text — a daily horizon keeps the table trivial
-    // (weekly claims such as the BI briefing's are kept: sms-send-claims.js).
-    void require('../services/sms-send-claims').pruneSmsSendClaims().catch(() => {});
-  }
-  return out;
-}
-
 router.post('/sms', async (req, res, next) => {
   try {
     const body = String(req.body?.body || '').trim();
@@ -298,32 +105,17 @@ router.post('/sms', async (req, res, next) => {
     // before acceptance) releases the claim so a real retry can send; an
     // ambiguous outcome keeps it.
     const claimKey = `tech-line-text:${target.customer.id}:${sentBodyHash(body)}`;
-    const out = await sendClaimedText({ req, ctx, target, body, claimKey });
+    const out = await sendClaimedText({ actor: req, ctx, target, body, claimKey });
     res.status(out.status).json(out.json);
   } catch (err) { next(sanitized(err, 'text')); }
 });
 
-// A set text: fixed wording rendered here, never client text. The claim is on
-// (visit, kind), so a second tap — or the voice line asking for the same text
-// on the same visit — inside the window is a duplicate even though the body
-// is identical for two visits of one customer.
+// A set text (services/tech-line-texts.js sendSetText): fixed wording, one
+// duplicate claim per visit and kind.
 router.post('/set-text', async (req, res, next) => {
   try {
-    if (!featureGates.techSetTextsLive()) return res.status(404).json({ error: 'Not found' });
-    const kind = String(req.body?.kind || '');
-    if (!isSetTextKind(kind)) return res.status(400).json({ error: 'Unknown set text', code: 'UNKNOWN_SET_TEXT' });
-    const ctx = await techLineContext(req.technicianId, { strict: true });
-    if (!ctx) return res.status(409).json({ error: 'You have no tech line assigned', code: 'NO_TECH_LINE' });
-    const target = await visitCustomer(req, req.body?.scheduledServiceId);
-    if (target.error) return res.status(target.status).json({ error: target.error });
-    if (!(await openSetTextVisit(db, target.visit.id))) {
-      return res.status(409).json({ error: 'Set texts are for today\'s visits that are not finished', code: 'VISIT_NOT_OPEN' });
-    }
-    const body = renderSetText(kind, target.customer);
-    const out = await sendClaimedText({
-      req, ctx, target, body, claimKey: setTextClaimKey(target.visit.id, kind), metadata: { set_text_kind: kind },
-    });
-    res.status(out.status).json(out.status === 200 ? { ...out.json, kind, body } : out.json);
+    const out = await sendSetText({ actor: req, scheduledServiceId: req.body?.scheduledServiceId, kind: String(req.body?.kind || '') });
+    res.status(out.status).json(out.json);
   } catch (err) { next(sanitized(err, 'set text')); }
 });
 

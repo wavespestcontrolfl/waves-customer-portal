@@ -3615,6 +3615,9 @@ export function TeamTab({ showToast }) {
                 ))}
               </select>{" "}
             </div>{" "}
+            {/* Keyed by technician: switching to another tech's Edit remounts it
+                empty, so a PIN typed for one person never goes to another. */}
+            <TechVoicePinField key={editingId} technicianId={editingId} />
             {/* Start-of-day point. Edit only: the add form does not send it.
                 Empty = the office (today's routing). Home needs an address
                 picked from the list so it carries coordinates. */}
@@ -4750,6 +4753,59 @@ const CAPABILITY_STATE_OPTIONS = [
   { value: "review_required", label: "Needs review", hint: "Offered, but scored lower until verified." },
   { value: "off", label: "Off", hint: "Never auto-dispatched; existing visits stay put." },
 ];
+
+// The "Waves Tech" voice line PIN (hands-free field voice). Set or reset only:
+// the server keeps a salted hash, so a PIN is never read back, shown again or
+// kept here after the request. 4 to 6 digits; a reset also clears a lockout.
+export function TechVoicePinField({ technicianId }) {
+  const [pin, setPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const valid = /^\d{4,6}$/.test(pin);
+  const handleSetPin = async () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await adminFetch(`/admin/timetracking/technicians/${technicianId}/voice-pin`, { method: "PUT", body: JSON.stringify({ pin }) });
+      setMessage("PIN set. Give it to the technician in person.");
+    } catch (err) {
+      setMessage(err?.data?.error || "The PIN was not set. Try again.");
+    } finally {
+      setPin("");
+      setBusy(false);
+    }
+  };
+  // A technician being added has no id yet: the PIN is set after the save.
+  if (!technicianId) return null;
+  return (
+    <div>
+      <label htmlFor="tech-form-voice-pin" style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>
+        Voice line PIN
+      </label>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          id="tech-form-voice-pin"
+          type="password"
+          inputMode="numeric"
+          autoComplete="new-password"
+          placeholder="4 to 6 digits"
+          value={pin}
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+          style={sInput}
+        />
+        <button type="button" onClick={handleSetPin} disabled={!valid || busy} style={{ ...sBtn(D.teal, D.white), opacity: valid && !busy ? 1 : 0.5 }}>
+          {busy ? "Setting…" : "Set PIN"}
+        </button>
+      </div>
+      {message && (
+        <div role="status" style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+          {message}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Capabilities editor (Field Team Program, Phase 0 item 4) — the five dispatch
 // categories auto-dispatch reads from technician_capabilities. Saving stamps

@@ -7335,6 +7335,73 @@ the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
 exactly as in production; that record is the bake-off. Any change to the
 number gate or the dry-run invariant is security-critical).
+`/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
+the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
+which a technician calls from their own cell; dark behind
+`GATE_TECH_VOICE_LINE`, owner 2026-11-01, hands-free field voice PR 3a).
+Twilio-signature validated at the `/api/webhooks/twilio` mount like every
+Twilio inbound route. Payload: standard Twilio voice-webhook form fields
+(`CallSid`, `From`, `To`, `CallStatus`, and `StirVerstat` when the carrier
+signed the call). Admission (`services/tech-voice-line.js`
+`admitTechVoiceCall`) runs BEFORE Twilio answers, and every refusal is a
+bare `<Reject/>`, which Twilio does not bill: the gate is not exactly
+`true`; the posted `To` is not exactly `TECH_VOICE_NUMBER` (unset, malformed
+or a number another registry bucket carries ⇒ every request refused); no
+`CallSid`; the `From` is not the usable cell of exactly one active,
+dispatchable technician (never a Waves line; a cell two technicians share
+admits nobody); the CallSid's `call_log` row belongs to another source; or
+the technician's billed-minute reservation is refused
+(`services/tech-voice-usage.js`: another call of theirs is still live, or 3
+more minutes would pass 15 per ET day or 150 per ET month, summing
+billed-or-reserved minutes). An admission error also rejects (fail closed).
+An admitted call first gets its own `call_log` row (`direction` inbound,
+`source` 'tech_voice', no customer link; metadata `tech_voice`,
+`technician_id`, `stir_verstat`) under the same per-CallSid advisory lock
+`/voice` and `/call-status` take — a generic `/call-status` fallback row
+(`source` NULL) is adopted and its customer link cleared — then, in the
+same transaction and still under that lock, a `tech_voice_usage`
+reservation of 3 minutes, idempotent per CallSid (a Twilio retry adds
+nothing). `/call-status` writes the final status under the same lock and
+settles only after that write commits, so a call whose final status is
+already on its row (the caller hung up during admission) is rejected and
+reserves nothing. An admitted call gets `<Connect action="/api/webhooks/
+twilio/tech-voice-complete"><ConversationRelay>` with `dtmfDetection="true"`
+and a per-call minted token (the same `/ws/voice-agent` door), and the
+handler sets a Twilio `TimeLimit` of 180 s on the call (fail-soft; the
+relay also ends a `tech_voice` session 150 s after admission, so the call
+stays inside its 3 reserved minutes either way). No `<Dial>`,
+`<Record>` or `<Gather>`; the relay not attached ⇒ a spoken notice and
+`<Hangup/>`. On the socket, `relay-server.js` routes a `tech_voice` row
+(proven at the upgrade, never a frame label) to
+`services/voice-agent/tech-voice-conversation.js`, which re-proves the call
+(gate, row, unsettled reservation, assignable technician), takes a keypad
+PIN (`services/tech-voice-pin.js`: salted hash, 3 tries a call, a 15-minute
+lockout after 5 wrong in a row with one admin alert) and then answers fixed
+commands with no model, always in the technician's own scope: next stop,
+access notes, last treatment, the stop's codes (only while
+`GATE_ACCESS_CODES_SECTION` is on; `listForVisit`, one `audit_log` row
+without the codes), the set-text reply (only while `GATE_TECH_SET_TEXTS`
+is on), and a set text
+only after a read-back of the name, street and wording and a spoken "yes"
+(`tech-line-texts.js sendSetText`, so `GATE_TECH_SET_TEXTS` and every send
+check apply). Nothing from the call is kept. `/voice` rejects the number
+before any customer logic if its voice URL is ever pointed there. On `/call-status`, a call to the number
+settles its reservation once (a completed call keeps the ceiling of its
+duration in minutes, at least one; a call that never connected keeps zero;
+a call with no final callback keeps its 3), a call with no row (refused
+before admission) gets a fallback row with the same internal source, and
+the call gets no recording recovery and no failure bell. Every call reader
+drops the source through `relay-protocol.whereNotSandboxCall` /
+`isInternalCallSource` (no inbox thread, lead, KPI, missed-call or
+repeat-caller bell, text-back, booking-link text, or "call since the text"
+for an unanswered reply). Gate off ⇒ every request rejected and nothing
+written. Any change to the number, caller or budget checks is security- and
+cost-critical).
+`/api/webhooks/twilio/tech-voice-complete` (POST; machine-to-machine TwiML
+webhook — the `<Connect>` action of a tech voice line call, Twilio's call
+when that relay session ends. Twilio-signature validated at the
+`/api/webhooks/twilio` mount. Payload: standard voice-webhook form fields,
+read for nothing. Always `<Hangup/>`: no transfer, no follow-on step).
 `/api/webhooks/twilio/relay-complete` (POST; machine-to-machine TwiML
 webhook — the `<Connect><ConversationRelay>` action Twilio calls when the
 AI receptionist's relay leg ends. Twilio-signature validated at the
@@ -7638,9 +7705,14 @@ office (recap has no pay-link fallback). Source contracts pin the guard
 strings — `admin-dispatch-backfill-completion.test.js` and
 `appointment-card-fees.test.js` must move with any change here.)
 `/api/mcp` (POST; machine-to-machine JSON-RPC — a minimal read-only MCP
-server exposing the knowledge index (hybrid search, catalog service +
-static protocol lookups, corpus stats) to MCP clients such as Claude Code
-sessions and agents. Fail-closed in three ordered layers: 403 unless
+server exposing the knowledge index (hybrid search, whole-entry reads,
+catalog service + static protocol lookups, corpus stats) to MCP clients
+such as Claude Code sessions and agents. A search row's `snippet` is one
+matching chunk cut to 500 characters, and its `partial` is true unless the
+entry is that one short chunk (an unreadable chunk count reads as partial);
+`get_document` returns the entry's chunks in order, the title once, in
+parts of 20,000 characters paged by `offset`/`nextOffset`, and refuses a
+source outside the known corpora. Fail-closed in three ordered layers: 403 unless
 `GATE_MCP_READ_TOOLS=true`, 503 unless `MCP_SERVICE_TOKEN` is configured,
 401 unless the `Authorization: Bearer` / `X-MCP-Token` credential matches
 via constant-time compare — the endpoint is unusable until deliberately

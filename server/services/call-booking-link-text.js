@@ -611,6 +611,9 @@ function managedLineForCall(call) {
   if (!candidate) return null;
   if (!TWILIO_NUMBERS.findByNumber(candidate)) return null;
   if (TWILIO_NUMBERS.isTechLine(candidate)) return null;
+  // The staff-only tech voice line (it may also be the alert caller ID, which
+  // internalAlertLine() then no longer reports as a separate line).
+  if (TWILIO_NUMBERS.isTechVoiceLine(candidate)) return null;
   if (TWILIO_NUMBERS.isStaffForwardNumber(candidate)) return null;
   if (candidate === TWILIO_NUMBERS.tollFree.number) return null;
   // codex #5018 P2: internalAlertCallerId() is the new-lead ring TO Adam's

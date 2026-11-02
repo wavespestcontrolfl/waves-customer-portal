@@ -23,6 +23,28 @@ const TWILIO_NUMBERS = {
   // minutes — the exact "robocall pattern" that earned it a Spam Likely label
   // (Twilio support, 2026-09-23). Moving that traffic to a dedicated number
   // isolates the pattern so the main line's reputation can recover.
+  // The "Waves Tech" voice line (GATE_TECH_VOICE_LINE): a staff-only number a
+  // technician calls from their own cell (routes/twilio-voice-webhook.js
+  // POST /tech-voice). Reads TECH_VOICE_NUMBER (E.164) at call time; unset or
+  // malformed = no line. It may be the internal alert number (both are staff-
+  // only), never a customer line: a number another registry bucket already
+  // carries is refused, so a customer can never reach the voice line.
+  techVoiceNumber() {
+    const raw = String(process.env.TECH_VOICE_NUMBER || '').trim();
+    if (!/^\+1\d{10}$/.test(raw)) return null;
+    return this._registeredNumbers({ withTechVoice: false }).has(raw) ? null : raw;
+  },
+  techVoiceLine() {
+    const number = this.techVoiceNumber();
+    if (!number) return null;
+    const d = number.slice(2);
+    return { number, formatted: `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`, label: 'Waves Tech voice line' };
+  },
+  isTechVoiceLine(phoneNumber) {
+    const number = this.techVoiceNumber();
+    return Boolean(number) && phoneNumber === number;
+  },
+
   internalAlertCallerId() {
     const raw = String(process.env.INTERNAL_ALERT_CALLER_ID || '').trim();
     return /^\+1\d{10}$/.test(raw) ? raw : this.mainLine.number;
@@ -40,8 +62,9 @@ const TWILIO_NUMBERS = {
     const d = number.slice(2);
     return { number, formatted: `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`, label: 'Internal Alerts — lead ring to Adam' };
   },
-  _registeredNumbers() {
+  _registeredNumbers({ withTechVoice = true } = {}) {
     return new Set([
+      ...(withTechVoice && this.techVoiceNumber() ? [this.techVoiceNumber()] : []),
       ...Object.values(this.locations).map(l => l.number),
       ...this.domainTracking.map(d => d.number),
       ...this.lawnDomainTracking.map(d => d.number),
@@ -163,6 +186,7 @@ const TWILIO_NUMBERS = {
       ...this.fieldTech.map(t => ({ ...t, type: 'tech_line' })),
       ...this.unassigned.map(u => ({ ...u, type: 'unassigned', label: 'Unassigned' })),
       ...(this.internalAlertLine() ? [{ ...this.internalAlertLine(), type: 'internal_alert' }] : []),
+      ...(this.techVoiceLine() ? [{ ...this.techVoiceLine(), type: 'tech_voice' }] : []),
     ];
   },
 
@@ -259,6 +283,8 @@ const TWILIO_NUMBERS = {
   },
 
   findByNumber(phoneNumber) {
+    // The staff-only voice line first: never office semantics.
+    if (this.isTechVoiceLine(phoneNumber)) return { ...this.techVoiceLine(), type: 'tech_voice' };
     // Location lines
     for (const [locId, loc] of Object.entries(this.locations)) {
       if (loc.number === phoneNumber) return { ...loc, type: 'location', locationId: locId };
