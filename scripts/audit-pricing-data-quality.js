@@ -38,6 +38,7 @@ const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX 
 const { autopayActivePredicate } = require(path.join(__dirname, '..', 'server', 'services', 'autopay-eligibility'));
 const { INTERNAL_TEST_CUSTOMERS } = require(path.join(__dirname, '..', 'server', 'services', 'internal-test-customers'));
 const { etDateString } = require(path.join(__dirname, '..', 'server', 'utils', 'datetime-et'));
+const { costLineFromUsage } = require(path.join(__dirname, '..', 'server', 'services', 'product-costing'));
 const TODAY_ET = etDateString(new Date());
 // Word-boundary regex, same as the workbench's `~*` bind (a bare `%re service%` ILIKE matched "Lawn Ca-re Service").
 const ALWAYS_FREE_SQL_LITERAL = `'${ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX.replace(/'/g, "''")}'`;
@@ -203,34 +204,34 @@ const CHECKS = [
   {
     key: 'service_product_usage_quality',
     title: 'service_product_usage (the estimate audit COGS map) completeness',
-    // product_no_cost mirrors the COGS calculator's two costing paths
-    // (server/services/product-costing.js costLineFromUsage): cost_per_unit, else
-    // best_price ÷ unit_size_oz × the usage converted to ounces — which needs a
-    // positive package size AND a usage unit the ounce table converts (normalizeUnit:
-    // trim, lower, spaces → _, drop one trailing "s"). A product with a price but no
-    // package size or an unconvertible unit costs $0 there, so it counts here
-    // (codex r16 P2). A $0 price stays "no cost" for audit purposes. The calculator
-    // takes ANY non-null cost_per_unit >= 0 first (product-costing.js:243-255), so an
-    // explicit zero costs $0 and never reaches the best_price fallback — it counts here
-    // regardless of the fallback fields; a NEGATIVE cost_per_unit is skipped by that
-    // guard and falls through to the fallback like a NULL (codex r26 P2).
+    // One row per usage line, counted in JS. product_no_cost asks the COGS
+    // calculator itself (server/services/product-costing.js costLineFromUsage)
+    // whether one usage unit of the product has a positive cost: an SQL copy of
+    // its unit rules went stale each time they changed (codex r16, r26 P2). A $0
+    // cost, a missing package size, and a usage unit the cost unit cannot price
+    // all count here.
     // no_quantity mirrors the same calculator's usage resolution: a usage of zero or
     // less resolves as missing and costs $0 with a warning, and the admin create /
     // update endpoints accept zero and negative values unvalidated — so a row counts
     // here when BOTH usage columns are NULL or non-positive, not only when both are
     // NULL (codex r21 P2).
-    sql: `select count(*) as rows, count(distinct u.service_type) as service_types,
-                 count(*) filter (where coalesce(u.usage_amount, 0) <= 0 and coalesce(u.usage_per_1000sf, 0) <= 0) as no_quantity,
-                 count(*) filter (where u.usage_unit is null) as no_unit,
-                 count(*) filter (where p.id is null) as product_missing,
-                 count(*) filter (where p.id is not null
-                   and ((p.cost_per_unit is not null and p.cost_per_unit >= 0 and p.cost_per_unit = 0)
-                     or ((p.cost_per_unit is null or p.cost_per_unit < 0)
-                   and (coalesce(p.best_price, 0) <= 0 or coalesce(p.unit_size_oz, 0) <= 0
-                        or coalesce(regexp_replace(lower(regexp_replace(btrim(u.usage_unit), '\\s+', '_', 'g')), 's$', ''), '')
-                           not in ('fl_oz','floz','oz','ounce','gal','gallon','qt','quart','pt','pint','ml','milliliter','millilitre','cc','l','liter','litre','lb','pound','g','gram','gm','kg'))))) as product_no_cost,
-                 count(*) filter (where not exists (select 1 from services s where s.service_key = u.service_type)) as service_type_not_a_catalog_key
+    sql: `select u.service_type, u.usage_amount, u.usage_per_1000sf, u.usage_unit,
+                 p.id as product_id, p.name as product_name, p.cost_per_unit, p.cost_unit, p.best_price, p.unit_size_oz,
+                 not exists (select 1 from services s where s.service_key = u.service_type) as not_a_catalog_key
           from service_product_usage u left join products_catalog p on p.id = u.product_id`,
+    summarize: (rows) => {
+      const positive = (value) => Number(value) > 0;
+      const costed = (row) => costLineFromUsage({ ...row, usage_amount: 1, usage_per_1000sf: null, notes: '' }).cost > 0;
+      return [{
+        rows: rows.length,
+        service_types: new Set(rows.filter((r) => r.service_type != null).map((r) => r.service_type)).size,
+        no_quantity: rows.filter((r) => !positive(r.usage_amount) && !positive(r.usage_per_1000sf)).length,
+        no_unit: rows.filter((r) => r.usage_unit == null).length,
+        product_missing: rows.filter((r) => r.product_id == null).length,
+        product_no_cost: rows.filter((r) => r.product_id != null && !costed(r)).length,
+        service_type_not_a_catalog_key: rows.filter((r) => r.not_a_catalog_key).length,
+      }];
+    },
   },
   {
     key: 'lawn_protocol_products_quality',
@@ -434,7 +435,10 @@ async function main() {
   const md = ['# Pricing data-quality audit (read-only)', '', `Generated ${new Date().toISOString()} · database host ${u.hostname.replace(/[A-Za-z0-9]{4,}/g, (m) => m.slice(0, 2) + '…')} · window since ${SINCE}`, ''];
   for (const check of CHECKS) {
     let rows; let error = null;
-    try { rows = (await client.query(check.sql, check.params || [])).rows; } catch (e) { rows = []; error = e.message; }
+    try {
+      rows = (await client.query(check.sql, check.params || [])).rows;
+      if (check.summarize) rows = check.summarize(rows);
+    } catch (e) { rows = []; error = e.message; }
     results.push({ key: check.key, title: check.title, rows, error });
     md.push(`## ${check.title}`, '');
     if (error) { md.push(`_query failed: ${error}_`, ''); continue; }

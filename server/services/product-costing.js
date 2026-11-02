@@ -236,6 +236,32 @@ function usageAmountForArea(row, areaSqFt = 0) {
   return areaAmount > 0 ? areaAmount : baseAmount;
 }
 
+// A count unit's noun: generic counts ("ea", "ct", "count") read as 'each',
+// plurals drop their s ("stations" -> "station").
+function countNoun(unit) {
+  const word = normalizeUnit(unit);
+  return parsePackCount(`1 ${word}`)?.unit || word;
+}
+
+// The usage amount expressed in cost units, or null when the two units do not
+// measure the same thing: a count against a measure ("2 each" at $/gal), a
+// weight against a volume (lb at $/gal), or two count nouns with no known
+// conversion (a case against an each). A bare oz stands in for either
+// measure, as it does for inventory deduction (inventory-units.js).
+function usageInCostUnits(usageAmount, usageUnit, costUnit) {
+  const usageOz = convertToOz(usageAmount, usageUnit);
+  const costUnitOz = convertToOz(1, costUnit);
+  if (usageOz == null && costUnitOz == null) {
+    return countUnitsCompatible(countNoun(usageUnit), countNoun(costUnit)) ? usageAmount : null;
+  }
+  if (usageOz == null || costUnitOz == null) return null;
+  const usageFamily = unitFamily(normalizeUnit(usageUnit));
+  const costFamily = unitFamily(normalizeUnit(costUnit));
+  const measured = usageFamily && costFamily
+    && (usageFamily === costFamily || usageFamily === 'ambiguous' || costFamily === 'ambiguous');
+  return measured ? usageOz / costUnitOz : null;
+}
+
 function costLineFromUsage(row, areaSqFt = 0) {
   const usageAmount = usageAmountForArea(row, areaSqFt);
   if (!Number.isFinite(usageAmount) || usageAmount <= 0) {
@@ -244,26 +270,28 @@ function costLineFromUsage(row, areaSqFt = 0) {
 
   const usageUnit = row.usage_unit;
   const costPerUnit = row.cost_per_unit != null ? Number(row.cost_per_unit) : null;
-  if (costPerUnit != null && Number.isFinite(costPerUnit) && costPerUnit >= 0) {
+  let unitMismatch = null;
+  if (Number.isFinite(costPerUnit) && costPerUnit >= 0) {
     const costUnit = row.cost_unit || usageUnit;
-    const usageOz = convertToOz(usageAmount, usageUnit);
-    const costUnitOz = convertToOz(1, costUnit);
-    const convertedUsage = usageOz != null && costUnitOz != null
-      ? usageOz / costUnitOz
-      : usageAmount;
-    return {
-      cost: convertedUsage * costPerUnit,
-      source: 'cost_per_unit',
-      usageAmount,
-    };
+    const convertedUsage = usageInCostUnits(usageAmount, usageUnit, costUnit);
+    if (convertedUsage != null) {
+      return {
+        cost: convertedUsage * costPerUnit,
+        source: 'cost_per_unit',
+        usageAmount,
+      };
+    }
+    // The unit cost cannot price this usage. The package price below may
+    // still price it; otherwise the cost is unknown, never a guess.
+    unitMismatch = `${row.product_name}: usage in ${usageUnit || 'no unit'} cannot be priced per ${costUnit || 'no unit'}`;
   }
 
   const bestPrice = row.best_price != null ? Number(row.best_price) : null;
   const unitSizeOz = row.unit_size_oz != null ? Number(row.unit_size_oz) : null;
   const usageOz = convertToOz(usageAmount, usageUnit);
   if (
-    bestPrice != null && Number.isFinite(bestPrice) && bestPrice >= 0
-    && unitSizeOz != null && Number.isFinite(unitSizeOz) && unitSizeOz > 0
+    Number.isFinite(bestPrice) && bestPrice >= 0
+    && Number.isFinite(unitSizeOz) && unitSizeOz > 0
     && usageOz != null
   ) {
     return {
@@ -276,7 +304,7 @@ function costLineFromUsage(row, areaSqFt = 0) {
   return {
     cost: 0,
     usageAmount,
-    warning: `No normalized cost data for ${row.product_name}`,
+    warning: unitMismatch || `No normalized cost data for ${row.product_name}`,
   };
 }
 

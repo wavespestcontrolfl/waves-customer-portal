@@ -182,6 +182,35 @@ test('forecast HTTP handler returns computed demand and forwards query bounds', 
   expect(db.transaction).not.toHaveBeenCalled();
 });
 
+test('small doses sum at full precision: 100 x 1 ml against gallon stock is 0.0264 gal, not 0.03 (metrics audit 2026-11-01)', async () => {
+  visits = readQuery(Array.from({ length: 100 }, (_, i) => ({ id: `dose-${i}`, scheduled_date: '2030-01-10' })));
+  buildPlanForService.mockResolvedValue({
+    propertyGate: { serviceTier: 'Silver' },
+    mixCalculator: { items: [item('igr', 1, 'ml', { unit: 'gal', onHand: 0.0265 })] },
+  });
+  const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 200 });
+  expect(result.products).toHaveLength(1);
+  expect(result.products[0]).toMatchObject({ committedDemand: 0.0264, projectedRemaining: 0.0001, status: 'ok', firstShortDate: null });
+  expect(result.products[0].appointments[0].inventoryAmount).toBeCloseTo(0.033814 / 128, 12);
+});
+
+test.each([
+  [{ days: 'abc' }, 'days must be a number from 1 to 90'],
+  [{ limit: '7rows' }, 'limit must be a number from 1 to 300'],
+])('a malformed forecast bound %j is a 400 with a message, not a failed date range (metrics audit 2026-11-01)', async (query, message) => {
+  await expect(buildWaveGuardInventoryForecast(query)).rejects.toMatchObject({ statusCode: 400, isOperational: true, message });
+  const { body, next } = await get('/waveguard-forecast', query);
+  expect(body).toBeUndefined();
+  expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message }));
+  expect(visits.whereBetween).not.toHaveBeenCalled();
+});
+
+test('numeric forecast bounds are held to their range, as before', async () => {
+  const result = await buildWaveGuardInventoryForecast({ days: '500', limit: '2.9' });
+  expect(result.days).toBe(90);
+  expect(visits.limit).toHaveBeenCalledWith(2);
+});
+
 test('forecast defaults to a one-week window when no days are given (owner 2026-10-26)', async () => {
   expect(DEFAULT_FORECAST_DAYS).toBe(7);
   const result = await buildWaveGuardInventoryForecast({ limit: 20 });
