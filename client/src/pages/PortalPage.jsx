@@ -10634,7 +10634,9 @@ const SERVICE_CATALOG = [
     // matched service's real cadence.
     frequencies: ['Recurring lawn program'],
     basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, thatch monitoring, soil testing when a lawn is not responding',
-    products: ['Prodiamine 65 WDG', 'Celsius WG', '16-4-8 + Micros', 'Headway G'],
+    // Lawn program v13 products (owner 2026-11-01): Stonewall 4FL is its prodiamine, and 24-0-11 its main
+    // fertilizer, with no phosphorus (the old 16-4-8 chip named a phosphorus fertilizer v13 does not use).
+    products: ['Stonewall 4FL', 'Celsius WG', '24-0-11 + Micros', 'Headway G'],
   },
   {
     id: 'mosquito', name: 'Mosquito Control', icon: 'bug',
