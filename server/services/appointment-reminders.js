@@ -1200,7 +1200,7 @@ async function renderTemplate(templateKey, vars, context = {}, opts = undefined)
 
 // Quick Move "let the customer pick a day": the customer did not pick, so
 // Auto-Dispatch booked the visit. The 72-hour reminder then says so. The
-// hand-off stamps customer_pick_by (8 PM ET the next day) and the booking
+// hand-off stamps customer_pick_by (24 hours after its text) and the booking
 // keeps it; Auto-Dispatch stamps last_auto_dispatch_at when it places the
 // visit. A customer or staff move clears customer_pick_by, so only a visit
 // Auto-Dispatch booked AFTER the deadline still matches. The visit needs a
