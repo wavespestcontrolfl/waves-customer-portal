@@ -3,9 +3,10 @@
  *
  * Matrix:
  *   - gate off → no alert, no sender loaded
- *   - lead_quality 'hot' → ONE internal alert, through the SAME sender the
- *     self-booking confirm path uses (TwilioService.sendSMS to ADAM_PHONE with
- *     messageType 'internal_alert')
+ *   - lead_quality 'hot' → ONE page through the relay_hot_lead trigger (a bell
+ *     row + a phone push); a silenced, suppressed or failed page is NOT
+ *     delivered (sweep #7303 B1: the old owner-phone internal_alert SMS was
+ *     silenced by the bell policy and still read as sent)
  *   - cold / warm / spam / no quality → no alert
  *   - idempotent: one per CALL, never per turn (two capture_lead calls, one alert)
  *   - fail-open: an alert failure never breaks the call OR the lead write
@@ -17,15 +18,21 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
-// The internal-alert sender (services/twilio.js redirects owner-phone
-// internal_alert sends to the admin bell/push before Twilio is ever touched).
-jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({ success: true, sid: 'internal-admin-notification' })) }));
+// The voice agent texts nobody: the pages are registry triggers (bell + push).
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
+// The real registry (its sanitizers feed the composed copy); only the dispatch is faked.
+jest.mock('../services/notification-triggers', () => ({
+  ...jest.requireActual('../services/notification-triggers'),
+  triggerNotification: jest.fn(),
+}));
 // CUSTOMER-FACING spies — none of these may EVER fire from the voice agent.
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/email', () => ({ send: jest.fn() }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn(), sendConfirmation: jest.fn() }));
 
 const TwilioService = require('../services/twilio');
+const { triggerNotification } = require('../services/notification-triggers');
+const { agentName } = require('../services/voice-agent/relay-protocol');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailService = require('../services/email');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -36,8 +43,11 @@ const relayAlert = require('../services/voice-agent/relay-alert');
 const { executeTool } = require('../services/voice-agent/relay-tools');
 
 // Synthetic fixtures only — 555 numbers, example.com.
-const OWNER = '+19415550199';
 const CALLER = '+19415550142';
+// What triggerNotification reports for a page that landed: a bell row and a push.
+const DELIVERED = { bellWritten: true, push: { sent: 1 } };
+// The dispatches of one page trigger (other triggers are not this module's).
+const pages = (key = 'relay_hot_lead') => triggerNotification.mock.calls.filter(([k]) => k === key);
 const HOT_LEAD = {
   first_name: 'Pat', last_name: 'Rivera', phone: CALLER, city: 'Bradenton',
   requested_service: 'termites swarming in the living room',
@@ -51,10 +61,10 @@ function assertNeverCustomerFacing() {
   expect(EmailService.send).not.toHaveBeenCalled();
   expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
-  // Every sendSMS the agent can make is an internal_alert to the owner phone.
-  for (const call of TwilioService.sendSMS.mock.calls) {
-    expect(call[0]).toBe(OWNER);
-    expect(call[2]).toMatchObject({ messageType: 'internal_alert' });
+  // The agent sends no SMS at all; every page is one of its two triggers.
+  expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  for (const [key] of triggerNotification.mock.calls) {
+    expect(['relay_hot_lead', 'relay_reservice_filed']).toContain(key);
   }
 }
 
@@ -70,15 +80,15 @@ afterAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
-  process.env.ADAM_PHONE = OWNER;
+  process.env.ADAM_PHONE = '+19415550199';
   createLeadFromExtraction.mockResolvedValue({ leadId: 'l-1', customerId: null, created: true });
-  TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'internal-admin-notification' });
+  triggerNotification.mockResolvedValue(DELIVERED);
 });
 
 describe('GATE OFF — dark', () => {
   test('a hot lead fires NOTHING while the context gate is off', async () => {
     expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA1' })).toBe(false);
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(triggerNotification).not.toHaveBeenCalled();
     assertNeverCustomerFacing();
   });
 
@@ -87,7 +97,7 @@ describe('GATE OFF — dark', () => {
       process.env.VOICE_RELAY_CONTEXT_ENABLED = v;
       expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, {})).toBe(false);
     }
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
   // ⭐ NO OBLIGATION WITHOUT A LANE. The sweep's recovery carve-out bypasses
@@ -144,14 +154,15 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     builder.update = jest.fn(() => ({ returning: jest.fn(async () => (claimWins ? [{ id: 'cl-1' }] : [])) }));
     // The row exists; `metadata` is what the loser's state read sees.
     builder.first = jest.fn(async () => ({ id: 'cl-1', metadata }));
-    // The DELIVERY-evidence probe reads the notifications table by title —
-    // its own builder, empty unless a test primes deliveredRow.
+    // The DELIVERY-evidence probe reads the notifications table by dedupe
+    // key — its own builder, empty unless a test primes deliveredRow.
     const notif = {};
     for (const m of ['where', 'whereRaw']) notif[m] = jest.fn(() => notif);
     notif.first = jest.fn(async () => deliveredRow);
     notif.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
     db.mockImplementation((table) => (table === 'notifications' ? notif : builder));
     db.raw = jest.fn((sql) => ({ __raw: sql }));
+    builder.notif = notif;
     return builder;
   }
 
@@ -162,7 +173,7 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     primeClaimDb({ claimWins: false });
     const ctx = { callSid: 'CA-reconnect', markOwnerAlerted: jest.fn() };
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(pages()).toHaveLength(0);
     // …and the session is told the call IS covered: latch set, promise stands.
     expect(ctx.markOwnerAlerted).toHaveBeenCalled();
     expect(out).toBe(true);
@@ -176,7 +187,7 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     primeClaimDb({ claimWins: false, metadata: { relay_hot_alert_at: 't1' } }); // claimed, never sent
     const ctx = { callSid: 'CA-inflight', markOwnerAlerted: jest.fn() };
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(pages()).toHaveLength(0);
     expect(ctx.markOwnerAlerted).not.toHaveBeenCalled();
     expect(out).toBe(false);
   }, 15000);
@@ -201,18 +212,54 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     db.raw = jest.fn((sql) => ({ __raw: sql }));
     const ctx = { callSid: 'CA-takeover', markOwnerAlerted: jest.fn() };
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(pages()).toHaveLength(1);
     expect(out).toBe(true);
   }, 15000);
 
+  // ⭐ THE PAGE'S OWN ROW IS DELIVERY EVIDENCE. A page that landed but whose
+  // sent receipt failed to write is found by its per-call dedupe key: the
+  // receipt is repaired and nobody is paged twice.
+  test('a bell row already under this call\'s dedupe key repairs the receipt and pages nobody', async () => {
+    const builder = primeClaimDb({ claimWins: true, deliveredRow: { id: 'n-1' } });
+    const ctx = { callSid: 'CA-landed', markOwnerAlerted: jest.fn() };
+    expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx)).toBe(true);
+    expect(pages()).toHaveLength(0);
+    expect(ctx.markOwnerAlerted).toHaveBeenCalled();
+    expect(builder.notif.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['relay-hot-lead:CA-landed']);
+    const updates = builder.update.mock.calls.map(([payload]) => String((payload.metadata || {}).__raw || ''));
+    expect(updates.some((sql) => sql.includes("'{relay_hot_alert_sent_at}'"))).toBe(true); // receipt repaired
+  });
+
   test('a FAILED send releases the durable claim so a retry can still page', async () => {
     const builder = primeClaimDb({ claimWins: true });
-    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, notificationUndelivered: true });
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, error: 'bell down' });
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-release', markOwnerAlerted: jest.fn() });
     expect(out).toBe(false);
     // Two updates: the claim burn, then the release (metadata minus the key).
     const updates = builder.update.mock.calls.map(([payload]) => String((payload.metadata || {}).__raw || ''));
     expect(updates.some((sql) => sql.includes("- 'relay_hot_alert_at'"))).toBe(true);
+  });
+
+  // ⭐ A MUTE IS NOT AN OUTAGE. Every admin turned this page off on both
+  // channels: nothing is owed, so the call leaves the sweep's population
+  // instead of being retried every hour forever — and the caller is still
+  // promised nothing.
+  test('a page every admin muted drops the call\'s obligation and promises nothing', async () => {
+    const builder = primeClaimDb({ claimWins: true });
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, suppressed: true });
+    const ctx = { callSid: 'CA-muted', markOwnerAlerted: jest.fn() };
+    expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx)).toBe(false);
+    expect(ctx.markOwnerAlerted).not.toHaveBeenCalled();
+    const updates = builder.update.mock.calls.map(([payload]) => String((payload.metadata || {}).__raw || ''));
+    expect(updates.some((sql) => sql.includes("- 'relay_hot_alert_needed'"))).toBe(true);
+  });
+
+  test('a page that FAILED keeps the call\'s obligation for the sweep', async () => {
+    const builder = primeClaimDb({ claimWins: true });
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, failed: 1 } });
+    expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-failed', markOwnerAlerted: jest.fn() })).toBe(false);
+    const updates = builder.update.mock.calls.map(([payload]) => String((payload.metadata || {}).__raw || ''));
+    expect(updates.some((sql) => sql.includes("- 'relay_hot_alert_needed'"))).toBe(false);
   });
 
   // ⭐ THE LEASE HAS AN OWNER, NOT JUST AN AGE. A stale claimant (its send ran
@@ -223,7 +270,7 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
   // token is still on the row.
   test('the claim mints an owner token atomically; release removes both keys and is owner-guarded', async () => {
     const builder = primeClaimDb({ claimWins: true });
-    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, notificationUndelivered: true }); // force the release path
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, error: 'bell down' }); // force the release path
     await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-owner-guard', markOwnerAlerted: jest.fn() });
     const updates = builder.update.mock.calls.map(([payload]) => String((payload.metadata || {}).__raw || ''));
     const claimSql = updates.find((sql) => sql.includes("'{relay_hot_alert_at}'"));
@@ -243,7 +290,7 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     jest.useFakeTimers();
     try {
       const builder = primeClaimDb({ claimWins: true });
-      TwilioService.sendSMS.mockReturnValueOnce(new Promise(() => {})); // never settles
+      triggerNotification.mockReturnValueOnce(new Promise(() => {})); // never settles
       const ctx = { callSid: 'CA-stalled-send', markOwnerAlerted: jest.fn() };
       const pending = relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
       await jest.advanceTimersByTimeAsync(91_000);
@@ -305,7 +352,7 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
 
     const paged = await relayAlert.sweepAbandonedHotAlerts();
     expect(paged).toBe(1);
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(pages()).toHaveLength(1);
     expect(leadsBuilder.where).toHaveBeenCalledWith({ id: 'lead-9' }); // exact linkage, not urgency
     const raws = callBuilder.whereRaw.mock.calls.map(([sql]) => String(sql));
     expect(raws.some((sql) => sql.includes('relay_hot_alert_needed'))).toBe(true);
@@ -335,14 +382,34 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
 
     const paged = await relayAlert.sweepAbandonedHotAlerts();
     expect(paged).toBe(1);
-    const [, body, sendOpts] = TwilioService.sendSMS.mock.calls[0];
-    expect(body).toContain('wasps in the soffit'); // the call row fed the page
-    // ⭐ THE RECOVERED ALERT IS ACTIONABLE: the internal-alert sanitizer masks
-    // the callback number in the body and there is no lead record to open, so
+    const [, payload] = pages()[0];
+    expect(payload.detail).toContain('wasps in the soffit'); // the call row fed the page
+    // ⭐ THE RECOVERED ALERT IS ACTIONABLE: the trigger sanitizer masks the
+    // callback number in the page and there is no lead record to open, so
     // the deep link must land on the CUSTOMER the call row already knows.
-    expect(sendOpts.link).toBe('/admin/customers?customerId=c-88');
+    expect(payload.link).toBe('/admin/customers?customerId=c-88');
+    expect(payload.alert.subject).toEqual({ type: 'customer', id: 'c-88' });
     // …and the query selected what the branch reads.
     expect(callBuilder.select).toHaveBeenCalledWith('twilio_call_sid', 'metadata', 'from_phone', 'call_summary', 'customer_id');
+  });
+
+  test('a marker whose lead was DELETED leaves the sweep: obligation dropped, nobody paged', async () => {
+    const callRows = [{ twilio_call_sid: 'CA-dead-link', metadata: { relay_hot_alert_needed: 'true', relay_lead_id: 'lead-gone' } }];
+    const callBuilder = {};
+    for (const m of ['where', 'whereRaw', 'orderBy', 'limit']) callBuilder[m] = jest.fn(() => callBuilder);
+    callBuilder.select = jest.fn(async () => callRows);
+    callBuilder.update = jest.fn(async () => 1);
+    const leadsBuilder = {};
+    for (const m of ['where', 'whereNull']) leadsBuilder[m] = jest.fn(() => leadsBuilder);
+    leadsBuilder.first = jest.fn(async () => null); // a successful lookup: the lead is gone
+    db.mockImplementation((table) => (table === 'leads' ? leadsBuilder : callBuilder));
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+
+    expect(await relayAlert.sweepAbandonedHotAlerts()).toBe(0);
+    expect(pages()).toHaveLength(0);
+    expect(callBuilder.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-dead-link' });
+    expect(String(callBuilder.update.mock.calls[0][0].metadata.__raw)).toContain("- 'relay_hot_alert_needed'");
   });
 
   // ⭐ RECOVERY OUTLIVES THE GATE. Obligations minted while the lane was live
@@ -368,13 +435,13 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
 
     const paged = await relayAlert.sweepAbandonedHotAlerts();
     expect(paged).toBe(1);
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(pages()).toHaveLength(1);
   });
 
   test('a claim ERROR pages anyway (fail-open: a duplicate beats a missed swarm)', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-db-down', markOwnerAlerted: jest.fn() });
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(pages()).toHaveLength(1);
     expect(out).toBe(true);
   });
 });
@@ -382,39 +449,50 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
 describe('GATE ON — the alert', () => {
   beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 
-  test('hot lead → ONE internal alert via the self-booking confirm path\'s exact sender', async () => {
+  test('hot lead → ONE composed page through relay_hot_lead, deduped per call', async () => {
     const ctx = { callSid: 'CA-hot', markOwnerAlerted: jest.fn() };
-    expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx)).toBe(true);
+    expect(await relayAlert.alertOwnerHotLead({ ...HOT_LEAD, leadId: 'l-9' }, ctx)).toBe(true);
 
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-    const [to, body, opts] = TwilioService.sendSMS.mock.calls[0];
-    expect(to).toBe(OWNER);
-    expect(opts).toMatchObject({
-      messageType: 'internal_alert',
-      // sha256 digest of the FULL CallSid — a truncated tail collides across
-      // history and would mark a NEW hot lead "already delivered".
-      notificationTitle: expect.stringContaining(
-        require('crypto').createHash('sha256').update('CA-hot').digest('hex').slice(0, 16),
-      ),
-    });
-    expect(body).toMatch(/URGENT lead/i);
-    expect(body).toContain('Pat Rivera');
-    expect(body).toContain(CALLER); // the owner needs a number to call back
-    expect(body).toContain('swarming termites right now');
+    expect(pages()).toHaveLength(1);
+    const [, payload, opts] = pages()[0];
+    expect(opts).toEqual({ dedupeKey: 'relay-hot-lead:CA-hot' });
+    // docs/admin-notifications.md: who and what in the headline, the caller's words in the why.
+    expect(payload.title).toBe('Leads — call back Pat Rivera now');
+    expect(payload.body).toBe(`${agentName()} flagged the call urgent: “swarming termites right now”`);
+    // The lead page carries the full callback number (the page masks it).
+    expect(payload.link).toBe('/admin/leads?leadId=l-9');
+    expect(payload.alert).toEqual({
+      area: 'Leads', severity: 'needs-you', who: 'person', contact: true,
+      subject: { type: 'lead', id: 'l-9' }, doneWhen: 'urgent_caller_called_back',
+    }); // no ruleViolations: our own copy passes the rule
+    expect(payload.detail).toMatch(/URGENT lead/i);
+    expect(payload.detail).toContain('Pat Rivera');
+    expect(payload.detail).toContain('swarming termites right now');
     expect(ctx.markOwnerAlerted).toHaveBeenCalledTimes(1);
     assertNeverCustomerFacing();
   });
 
-  test('a matched existing customer is flagged as such in the alert', async () => {
+  test('a matched existing customer is flagged as such, and the page opens their account', async () => {
     await relayAlert.alertOwnerHotLead(HOT_LEAD, { customerId: 'c-1', callSid: 'CA-x' });
-    expect(TwilioService.sendSMS.mock.calls[0][1]).toMatch(/EXISTING CUSTOMER/);
+    const [, payload] = pages()[0];
+    expect(payload.detail).toMatch(/EXISTING CUSTOMER/);
+    expect(payload.link).toBe('/admin/customers?customerId=c-1');
+    expect(payload.alert.subject).toEqual({ type: 'customer', id: 'c-1' });
+  });
+
+  test('a caller with no name and no words still gets a rule-clean page', async () => {
+    await relayAlert.alertOwnerHotLead({ lead_quality: 'hot', phone: CALLER }, { callSid: 'CA-bare' });
+    const [, payload] = pages()[0];
+    expect(payload.title).toBe('Leads — call back an urgent caller now');
+    expect(payload.body).toBe(`${agentName()} flagged the call urgent.`);
+    expect(payload.alert.ruleViolations).toBeUndefined();
   });
 
   test('cold / warm / spam / missing quality → NO alert', async () => {
     for (const quality of ['cold', 'warm', 'spam', null, undefined, 'HOT ']) {
       expect(await relayAlert.alertOwnerHotLead({ ...HOT_LEAD, lead_quality: quality }, {})).toBe(false);
     }
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(triggerNotification).not.toHaveBeenCalled();
     assertNeverCustomerFacing();
   });
 
@@ -423,25 +501,24 @@ describe('GATE ON — the alert', () => {
     const ctx = { callSid: 'CA-twice', isOwnerAlerted: () => alerted, markOwnerAlerted: () => { alerted = true; } };
     expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx)).toBe(true);
     expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx)).toBe(false);
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(pages()).toHaveLength(1);
   });
 
   test('a plain ownerAlerted boolean is honoured too (simple ctx)', async () => {
     expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, { ownerAlerted: true })).toBe(false);
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
   test('FAIL-OPEN — a send failure is logged loudly and never thrown', async () => {
-    TwilioService.sendSMS.mockRejectedValue(new Error('notification trigger down'));
+    triggerNotification.mockRejectedValue(new Error('notification trigger down'));
     await expect(relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-fail' })).resolves.toBe(false);
     expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/hot-lead owner alert FAILED/i));
   });
 
-  test('no ADAM_PHONE configured → no alert, warned, nothing thrown', async () => {
+  test('the page needs no owner phone: ADAM_PHONE unset still pages', async () => {
     delete process.env.ADAM_PHONE;
-    await expect(relayAlert.alertOwnerHotLead(HOT_LEAD, {})).resolves.toBe(false);
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/ADAM_PHONE is unset/i));
+    await expect(relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-nophone' })).resolves.toBe(true);
+    expect(pages()).toHaveLength(1);
   });
 
   // ⭐ THE PAN SCRUB COVERS EVERY DURABLE SURFACE THE MODEL CAN WRITE. A card
@@ -453,14 +530,16 @@ describe('GATE ON — the alert', () => {
       urgency_reason: 'card 4111 1111 1111 1111 was read aloud',
       call_summary: 'Caller gave card 4111111111111111 mid-call.',
     }, { callSid: 'CA-pan' });
-    expect(TwilioService.sendSMS).toHaveBeenCalled();
-    const body = TwilioService.sendSMS.mock.calls[0][1];
+    const [, payload] = pages()[0];
     // The shared scrub keeps only the last four ("[card ending 1111]"), same
-    // as the transcript path — the full PAN must be gone in both spellings.
-    expect(body).not.toContain('4111 1111 1111 1111');
-    expect(body).not.toContain('4111111111111111');
-    expect(body).not.toContain('4111');
-    expect(body).toContain('[card ending');
+    // as the transcript path — the full PAN must be gone in both spellings,
+    // from the full text AND from the quoted why the push shows.
+    for (const text of [payload.detail, payload.body, payload.title]) {
+      expect(text).not.toContain('4111 1111 1111 1111');
+      expect(text).not.toContain('4111111111111111');
+      expect(text).not.toContain('4111');
+    }
+    expect(payload.detail).toContain('[card ending');
   });
 
   // ⭐ FAIL CLOSED: a scrub that cannot run must DROP the field, never pass
@@ -474,10 +553,9 @@ describe('GATE ON — the alert', () => {
         ...HOT_LEAD,
         urgency_reason: 'card 4111 1111 1111 1111 was read aloud',
       }, { callSid: 'CA-pan-fail' });
-      expect(TwilioService.sendSMS).toHaveBeenCalled();
-      const body = TwilioService.sendSMS.mock.calls[0][1];
-      expect(body).not.toContain('4111');
-      expect(body).toContain('[detail unavailable]');
+      const [, payload] = pages()[0];
+      for (const text of [payload.detail, payload.body, payload.title]) expect(text).not.toContain('4111');
+      expect(payload.detail).toContain('[detail unavailable]');
     } finally {
       spy.mockRestore();
     }
@@ -495,7 +573,7 @@ describe('GATE ON — the alert', () => {
 // transient failure PERMANENTLY consumed the one-per-call budget — the retry saw
 // `alreadyAlerted` and returned quietly, and the hot lead was never paged at all.
 describe('the one-per-call latch survives a failed send', () => {
-  beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; process.env.ADAM_PHONE = OWNER; });
+  beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 
   function latchCtx() {
     let alerted = false;
@@ -511,69 +589,82 @@ describe('the one-per-call latch survives a failed send', () => {
 
   test('a failed send leaves the latch OPEN so the retry can still page', async () => {
     const ctx = latchCtx();
-    TwilioService.sendSMS.mockRejectedValueOnce(new Error('twilio down'));
+    triggerNotification.mockRejectedValueOnce(new Error('bell down'));
     expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(false);
     expect(ctx._alerted()).toBe(false); // NOT consumed
 
-    TwilioService.sendSMS.mockResolvedValueOnce({ success: true });
+    triggerNotification.mockResolvedValueOnce(DELIVERED);
     expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(true);
     expect(ctx._alerted()).toBe(true);
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(2);
+    expect(pages()).toHaveLength(2);
   });
 
   test('a SUCCESSFUL send still closes the latch — never two pages per call', async () => {
     const ctx = latchCtx();
     expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(true);
     expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(false);
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(pages()).toHaveLength(1);
   });
 
-  // ⭐ `success: true` IS NOT DELIVERY HERE. services/twilio.js suppresses the
-  // owner SMS and redirects internal_alert sends to the bell/push path — and
-  // that redirect still returns success:true when the notification write itself
-  // failed (notificationUndelivered / notificationError). Latching on that
-  // burned the one-per-call budget for a page nobody ever saw.
-  test('an UNDELIVERED notification redirect does not close the latch', async () => {
+  // ⭐ A RETURNED CALL IS NOT DELIVERY (sweep #7303 B1). triggerNotification
+  // reports a bell-policy silence, a suppression or an error without throwing.
+  // The old owner-phone internal_alert page was silenced by the bell policy
+  // and still read as sent: the latch closed and the caller was told the team
+  // was notified. None of these may close the latch.
+  test('a silenced, suppressed or failed page does not close the latch', async () => {
     for (const failure of [
-      { success: true, sid: 'internal-admin-notification-undelivered', suppressed: true, notificationRedirected: false, notificationUndelivered: true },
-      { success: true, sid: 'internal-admin-notification-error', suppressed: true, notificationRedirected: false, notificationError: true },
-      { success: false },
+      { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true },
+      { bellWritten: false, push: null, suppressed: true },
+      { bellWritten: false, push: null, prefsUnavailable: true },
+      { bellWritten: false, push: null, error: 'dispatch failed' },
+      { bellWritten: false, push: { sent: 0, failed: 1 } },
+      undefined,
     ]) {
       const ctx = latchCtx();
-      TwilioService.sendSMS.mockResolvedValueOnce(failure);
+      triggerNotification.mockResolvedValueOnce(failure);
       expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(false);
       expect(ctx._alerted()).toBe(false); // budget NOT consumed — the retry can still page
       expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/hot-lead owner alert NOT delivered/i));
     }
   });
 
-  test('a delivered redirect (notificationRedirected) still closes the latch', async () => {
-    const ctx = latchCtx();
-    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: 'internal-admin-notification', suppressed: true, notificationRedirected: true });
-    expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(true);
-    expect(ctx._alerted()).toBe(true);
+  test('a bell row alone, or a push alone, is a delivered page', async () => {
+    for (const landed of [{ bellWritten: true, push: { sent: 0 } }, { bellWritten: false, push: { sent: 1 } }, { bellWritten: true, push: null, deduped: true }]) {
+      const ctx = latchCtx();
+      triggerNotification.mockResolvedValueOnce(landed);
+      expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(true);
+      expect(ctx._alerted()).toBe(true);
+    }
   });
 });
 
 // ⭐ OWNER-RULED: the ticket queue is "a proven black hole — 14 requests, zero
 // resolved", and the agent cannot use the streamline's booking half (it fires
-// customer comms). So every voice-filed re-service ALSO pages the owner through
-// the existing internal sender — no new notification mechanism.
+// customer comms). So every voice-filed re-service ALSO pages the owner: the
+// ticket's own bell card (relay-reservice.js) is the bell, and this is its phone
+// push — relay_reservice_filed, pushOnly, so the bell keeps one row per ticket.
 describe('re-service owner alert (owner ruling)', () => {
-  beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; process.env.ADAM_PHONE = OWNER; });
+  const PUSHED = { bellWritten: false, push: { sent: 1 } };
+  beforeEach(() => {
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    triggerNotification.mockResolvedValue(PUSHED);
+  });
 
   const REQ = { lane: 'pest', category: 'pest_issue', urgency: 'urgent', issue: 'ants back in the kitchen', subject: 'Re-service request (phone assistant): ants back in the kitchen', covered: true, requestId: 'req-1', customerId: 'c-1' };
 
-  test('sends through the SAME internal sender, to the owner, internal_alert only', async () => {
+  test('pushes ONE composed page through relay_reservice_filed, never a second bell row', async () => {
     expect(await relayAlert.alertOwnerReservice(REQ, { callSid: 'CA-rs' })).toBe(true);
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-    const [to, body, opts] = TwilioService.sendSMS.mock.calls[0];
-    expect(to).toBe(OWNER);
-    expect(opts).toMatchObject({ messageType: 'internal_alert' }); // hot path adds the per-call dedupe title
-    expect(body).toMatch(/URGENT/);
-    expect(body).toContain('ants back in the kitchen');
-    expect(body).toMatch(/do not leave this in the request queue/i);
-    // Never customer-facing.
+    const calls = pages('relay_reservice_filed');
+    expect(calls).toHaveLength(1);
+    const [, payload, opts] = calls[0];
+    expect(opts).toEqual({ pushOnly: true });
+    expect(payload).toEqual({
+      title: `Schedule — book the urgent re-service ${agentName()} took`,
+      body: 'They said: “ants back in the kitchen”',
+      link: '/admin/customers?customerId=c-1',
+      requestId: 'req-1',
+    });
+    assertNeverCustomerFacing();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailService.send).not.toHaveBeenCalled();
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
@@ -582,46 +673,48 @@ describe('re-service owner alert (owner ruling)', () => {
   test('gate off → no alert, no sender touched', async () => {
     delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
     expect(await relayAlert.alertOwnerReservice(REQ, {})).toBe(false);
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
   test('fail-open: a send failure never throws (the ticket is already durable)', async () => {
-    TwilioService.sendSMS.mockRejectedValueOnce(new Error('twilio down'));
+    triggerNotification.mockRejectedValueOnce(new Error('push down'));
     await expect(relayAlert.alertOwnerReservice(REQ, {})).resolves.toBe(false);
   });
 
-  test('the body is bounded', () => {
-    const body = relayAlert.buildReserviceAlert({ ...REQ, issue: 'x'.repeat(5000), subject: 'y'.repeat(5000) });
-    expect(body.length).toBeLessThanOrEqual(relayAlert.MAX_ALERT_BODY);
+  // ⭐ ONLY A PUSH THAT REACHED A DEVICE IS A PAGE (sweep #7303 B1). The old
+  // internal_alert SMS was silenced by the bell policy and still read as sent,
+  // so the ticket was stamped owner_alerted_at with no page behind it.
+  test('a silenced page, or a push that reached no device, is NOT delivered', async () => {
+    for (const failure of [
+      { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true },
+      { bellWritten: false, push: { sent: 0, failed: 1 } },
+      { bellWritten: false, push: null },
+    ]) {
+      triggerNotification.mockResolvedValueOnce(failure);
+      expect(await relayAlert.alertOwnerReservice(REQ, { callSid: 'CA-rs' })).toBe(false);
+    }
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/re-service owner alert NOT delivered/i));
   });
 
   // ⭐ A REDACTED-TIER (contact-slot) requester pages the owner about someone
-  // ELSE's account. The warning is the SECOND line so neither the
-  // MAX_ALERT_BODY slice nor the bell/push render can truncate it away.
-  test('an unverified requester puts the warning on the alert\'s second line', async () => {
+  // ELSE's account. The warning is the push body itself, so nothing can
+  // truncate it away; the ticket's card carries the full note.
+  test('an unverified requester\'s warning IS the push body', async () => {
     const note = 'UNVERIFIED third-party requester — verify identity before confirming. The caller on ***0142 '
-      + 'matched this account only on a secondary contact number (spouse, tenant, or a previous occupant), '
-      + 'NOT the account holder\'s own number.';
+      + 'matched this account only on a secondary contact number.';
     await relayAlert.alertOwnerReservice({ ...REQ, unverifiedRequester: true, unverifiedNote: note }, { callSid: 'CA-rs' });
-    const body = TwilioService.sendSMS.mock.calls[0][1];
-    expect(body.split('\n')[1]).toMatch(/^⚠️ UNVERIFIED third-party requester — verify identity before confirming\./);
-    expect(body).toContain('***0142');
-    expect(body).not.toContain('9415550142');
+    const [, payload] = pages('relay_reservice_filed')[0];
+    expect(payload.body).toBe('The caller is not the account holder, so check who they are before you book it.');
+    expect(payload.body).not.toContain('9415550142');
   });
 
-  test('an unverified requester with no note still gets a warning line; a verified one gets none', () => {
-    const fallback = relayAlert.buildReserviceAlert({ ...REQ, unverifiedRequester: true });
-    expect(fallback.split('\n')[1]).toMatch(/UNVERIFIED third-party requester/);
-    expect(relayAlert.buildReserviceAlert(REQ)).not.toMatch(/UNVERIFIED/);
-  });
-
-  test('the body stays bounded even with a long unverified note', () => {
-    const body = relayAlert.buildReserviceAlert({
-      ...REQ, issue: 'x'.repeat(5000), subject: 'y'.repeat(5000),
-      unverifiedRequester: true, unverifiedNote: 'z'.repeat(5000),
-    });
-    expect(body.length).toBeLessThanOrEqual(relayAlert.MAX_ALERT_BODY);
-    expect(body).toMatch(/UNVERIFIED|⚠️/);
+  test('a long description still composes within the rule (headline ≤60, why ≤110)', async () => {
+    const { MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+    await relayAlert.alertOwnerReservice({ ...REQ, urgency: 'routine', issue: 'termites in the garage '.repeat(300) }, {});
+    const [, payload] = pages('relay_reservice_filed')[0];
+    expect(payload.title).toBe(`Schedule — book the re-service ${agentName()} took`);
+    expect(payload.title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
+    expect(payload.body.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
   });
 });
 
@@ -636,12 +729,12 @@ describe('capture_lead → alert wiring (the live path)', () => {
 
     expect(out).toMatch(/Lead saved successfully/);
     expect(createLeadFromExtraction).toHaveBeenCalledTimes(1);
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(pages()).toHaveLength(1);
     assertNeverCustomerFacing();
   });
 
   test('an alert failure NEVER loses the lead or fails the tool', async () => {
-    TwilioService.sendSMS.mockRejectedValue(new Error('bell down'));
+    triggerNotification.mockRejectedValue(new Error('bell down'));
     const out = await executeTool('capture_lead', {
       call_summary: 'Angry about a missed visit.', lead_quality: 'hot',
     }, { from: CALLER, callSid: 'CA-live-2', markCaptured: jest.fn() });
@@ -653,12 +746,22 @@ describe('capture_lead → alert wiring (the live path)', () => {
   // hot caller "a team member is being notified right away"; when the page did
   // not go out, the tool result is where she learns not to say it.
   test('a hot lead whose page FAILED gets the promise withdrawn in the tool result', async () => {
-    TwilioService.sendSMS.mockRejectedValue(new Error('bell down'));
+    triggerNotification.mockRejectedValue(new Error('bell down'));
     const out = await executeTool('capture_lead', {
       call_summary: 'Angry about a missed visit.', lead_quality: 'hot',
     }, { from: CALLER, callSid: 'CA-live-3', markCaptured: jest.fn() });
     expect(out).toMatch(/could NOT be confirmed/i);
     expect(out).toMatch(/do NOT tell the caller a team member is being notified right away/i);
+  });
+
+  // ⭐ Sweep #7303 B1, end to end: a page the bell policy silenced is not a page,
+  // so the caller must not hear that the team is being notified.
+  test('a hot lead whose page the bell policy SILENCED gets the promise withdrawn too', async () => {
+    triggerNotification.mockResolvedValue({ bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true });
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Wasps nest by the front door, kids stung.', lead_quality: 'hot',
+    }, { from: CALLER, callSid: 'CA-live-silenced', markCaptured: jest.fn(), markOwnerAlerted: jest.fn() });
+    expect(out).toMatch(/could NOT be confirmed/i);
   });
 
   test('a DELIVERED page keeps the promise, and an already-paged call keeps it too', async () => {
@@ -675,7 +778,7 @@ describe('capture_lead → alert wiring (the live path)', () => {
   });
 
   test('a non-hot lead never carries the withdrawal (there was no promise)', async () => {
-    TwilioService.sendSMS.mockRejectedValue(new Error('down'));
+    triggerNotification.mockRejectedValue(new Error('down'));
     const out = await executeTool('capture_lead', {
       call_summary: 'Just price shopping.', lead_quality: 'warm',
     }, { from: CALLER, callSid: 'CA-live-5', markCaptured: jest.fn() });
@@ -687,7 +790,7 @@ describe('capture_lead → alert wiring (the live path)', () => {
       call_summary: 'Just price shopping.', lead_quality: 'cold',
     }, { from: CALLER, callSid: 'CA-cold', markCaptured: jest.fn() });
     expect(createLeadFromExtraction).toHaveBeenCalledTimes(1);
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(pages()).toHaveLength(0);
     assertNeverCustomerFacing();
   });
 
@@ -697,6 +800,6 @@ describe('capture_lead → alert wiring (the live path)', () => {
     }, { from: CALLER, callSid: 'CA-spam', markCaptured: jest.fn() });
     expect(out).toMatch(/Marked as spam/i);
     expect(createLeadFromExtraction).not.toHaveBeenCalled();
-    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(pages()).toHaveLength(0);
   });
 });

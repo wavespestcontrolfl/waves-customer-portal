@@ -40,6 +40,10 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'customer_voicemail_callback',    // a customer left a voicemail
   'customer_missed_call',           // a customer called, nobody answered, no voicemail
   'relay_unbooked_call',            // a caller spoke with Sandy and the call ended with nothing booked or captured
+  // Sweep #7303 B1: the two pages Sandy owes the owner. They rode the
+  // denylisted internal_admin_alert redirect, which silenced them.
+  'relay_hot_lead',                 // a caller told Sandy about an emergency; the page she promises the caller
+  'relay_reservice_filed',          // a customer asked Sandy for a re-service; the ticket's phone page
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
   'reservice_self_booked',          // a customer booked a free re-service and described the problem (owner 2026-10-05)
   // Owner ruling 2026-09-11: a declined card / returned ACH is the one money

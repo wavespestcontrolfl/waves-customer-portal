@@ -247,7 +247,7 @@ const { stripEmoji } = require('../utils/strip-emoji');
 // MAX_ADMIN_TITLE_CHARS) — several senders dedupe/refresh by an exact title
 // lookup against the stored row (google-business.js's "Review sync health
 // escalation [...]" signature marker and its per-location review-request
-// title, voice-agent/relay-alert.js); a title this guard silently shortened
+// title); a title this guard silently shortened
 // would never match that probe again and the alert would re-ring on every run.
 // ops-digest.js composes its OWN ≤60-char headline before this guard ever
 // sees it, so that path is unaffected either way.

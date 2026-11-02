@@ -5,22 +5,22 @@
  * emergency / swarming / active infestation / angry customer), the owner gets
  * an alert IMMEDIATELY instead of finding it in a digest tomorrow.
  *
- * REUSED MECHANISM (never a parallel one): this is the SAME internal-alert
- * sender the self-booking confirm path uses — routes/booking.js
- * createSelfBooking's `if (process.env.ADAM_PHONE) TwilioService.sendSMS(...,
- * { messageType: 'internal_alert' })` block. services/twilio.js
- * redirectInternalAdminSmsToNotification intercepts owner-phone +
- * internal_alert sends at the top of sendSMS and delivers them through the
- * admin bell/push path. Nothing here talks to Twilio directly.
+ * THE PAGE IS A REGISTRY TRIGGER (sweep #7303 B1): relay_hot_lead rings the
+ * admin bell and pushes to the owner's phone; relay_reservice_filed pushes the
+ * re-service ticket whose own bell card relay-reservice.js already wrote. Both
+ * keys are on the bell policy's trigger allowlist: a caller reaching us is
+ * customer communication (owner ruling 2026-08-28). These pages used to go out
+ * as owner-phone `internal_alert` SMS, which services/twilio.js redirects to
+ * the internal_admin_alert trigger — denylisted, so they reached nobody while
+ * the result still read as sent.
  *
  * NOT CUSTOMER-FACING, EVER. The house rule ("the owner sends all customer
- * communications") is untouched: the only recipient this module can address is
- * the owner phone from the environment, and the only messageType it can send
- * is 'internal_alert'. There is no code path from the voice agent to
+ * communications") is untouched: both triggers reach admin-role staff only, as
+ * a bell row and a phone push. There is no code path from the voice agent to
  * sendCustomerMessage / a customer SMS or email.
  *
  * GATE: the existing context gate (VOICE_RELAY_CONTEXT_ENABLED === 'true',
- * fail-closed). Gate off ⇒ no alert, no sender loaded, no env read.
+ * fail-closed). Gate off ⇒ no alert, no sender loaded.
  *
  * IDEMPOTENT: at most ONE SUCCESSFUL alert per call. The session owns the flag
  * (relay-conversation's tool ctx: ctx.ownerAlerted / ctx.markOwnerAlerted), so
@@ -31,33 +31,65 @@
  *
  * FAIL-OPEN: an alert failure must never break the call or the lead write.
  * Everything is inside a try/catch that logs and returns false. Phone numbers
- * are masked in logs (the alert BODY carries the real callback number — that
- * is the point of the alert, and it goes only to the owner).
+ * are masked in logs and, by the trigger sanitizer, in the bell and the push;
+ * the link opens the lead or customer page, which carries the full number.
  */
 
 const logger = require('../logger');
 const { maskPhone, agentName } = require('./relay-protocol');
 
-const MAX_ALERT_BODY = 480; // two-ish SMS segments; the bell/push render truncates anyway
+const MAX_ALERT_BODY = 480; // the full text behind the hot-lead bell's "Show full text"
 
 /**
- * Did an internal alert actually LAND? services/twilio.js suppresses
- * owner-phone `internal_alert` sends and redirects them to the admin
- * bell/push path — and that redirect returns `success: true` even when the
- * notification write failed (`notificationUndelivered` / `notificationError`),
- * because the SMS fallback is deliberately not taken. Only an explicit
- * failure marker counts as undelivered, so a plain SMS result (no redirect
- * keys) still reads as delivered.
+ * Did the page LAND? triggerNotification never throws; it reports what it
+ * did. A bell-policy silence, a preference or test-account suppression, or an
+ * error is not delivery. A bell row written, or a push handed to at least one
+ * device, is.
  */
-function internalAlertDelivered(result) {
-  if (!result || result.success === false) return false;
-  if (result.notificationUndelivered === true || result.notificationError === true) return false;
-  return true;
+function pageDelivered(stats) {
+  if (!stats || stats.error || stats.policySilenced || stats.suppressed) return false;
+  return stats.bellWritten === true || Number(stats.push?.sent || 0) > 0;
 }
 
-/** The owner phone, using the SAME env precedence the alert callers use. */
-function ownerAlertPhone() {
-  return String(process.env.ADAM_PHONE || '').trim() || null;
+/** Why pageDelivered said no, for the log line. */
+function undeliveredReason(stats) {
+  if (stats?.policySilenced) return 'silenced by the bell policy';
+  if (stats?.suppressed) return 'suppressed';
+  if (stats?.error) return 'notification error';
+  return 'no bell row and no push';
+}
+
+/**
+ * The page's headline and why, composed through docs/admin-notifications.md.
+ * Only the caller's own words can break a copy rule here (the copy tests prove
+ * our own text passes), so a violation keeps the page in the composer's own
+ * fallback shape, as raiseAdminAlert and reservice_self_booked do.
+ */
+function composePage(spec) {
+  const compose = require('../admin-alert-compose');
+  try {
+    return compose.composeAdminAlert(spec);
+  } catch (err) {
+    if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+    return {
+      headline: compose.cutAtWord(`${spec.area} — ${spec.action}`, compose.MAX_HEADLINE_CHARS),
+      why: spec.why,
+      link: spec.link,
+      metadata: { ...compose.validStructuredFields(spec), ruleViolations: err.violations },
+    };
+  }
+}
+
+/**
+ * A why that quotes the first sentence of the caller's words (PAN-scrubbed by
+ * alertSafe first, like every durable field here), or `plain` when there are
+ * none.
+ */
+function quotedWhy(lead, text, plain) {
+  const { firstSentence } = require('../admin-alert-compose');
+  const { redactedWords, whyWithQuote } = require('../admin-alert-names');
+  const quote = text ? firstSentence(redactedWords(alertSafe(text, 200))).replace(/[.!?]+$/, '') : '';
+  return quote ? whyWithQuote({ lead, quote }) : plain;
 }
 
 /** One flat, quote-free line for the alert body. */
@@ -85,8 +117,9 @@ function alertSafe(value, max = 80) {
 }
 
 /**
- * Build the owner-facing alert body. Internal surface: the callback number is
- * deliberately in full so the owner can call back from the notification.
+ * Build the full owner-facing text, read from the bell's "Show full text".
+ * The trigger sanitizer masks the callback number there; the page's link
+ * opens the lead or customer record, which carries it in full.
  */
 function buildHotLeadAlert({ firstName, lastName, phone, city, requestedService, urgencyReason, summary, existingCustomer }) {
   const name = [alertSafe(firstName, 40), alertSafe(lastName, 40)].filter(Boolean).join(' ');
@@ -105,9 +138,54 @@ function buildHotLeadAlert({ firstName, lastName, phone, city, requestedService,
 }
 
 /**
- * Fire the internal hot-lead alert for THIS call. Returns true when an alert
- * was actually sent, false in every other case (gate off, not hot, already
- * alerted, no owner phone configured, send failed).
+ * The relay_hot_lead payload: the composed headline and why (what the bell
+ * row and the push show), the full text, and the deep link.
+ */
+function buildHotLeadPage(lead, ctx) {
+  // Deep link straight to the actionable record: the trigger sanitizer masks
+  // phone numbers in the bell and the push, so the lead (or the matched
+  // customer) page is where the full callback number lives.
+  const link = lead.leadId
+    ? `/admin/leads?leadId=${encodeURIComponent(lead.leadId)}`
+    : (ctx.customerId ? `/admin/customers?customerId=${encodeURIComponent(ctx.customerId)}` : '/admin/leads');
+  const { fitAction } = require('../admin-alert-names');
+  const name = [alertSafe(lead.first_name, 40), alertSafe(lead.last_name, 40)].filter(Boolean).join(' ');
+  const page = composePage({
+    area: 'Leads',
+    action: name ? fitAction('Leads', name, [(n) => `call back ${n} now`]) : 'call back an urgent caller now',
+    why: quotedWhy(`${agentName()} flagged the call urgent: `, lead.urgency_reason || lead.call_summary, `${agentName()} flagged the call urgent.`),
+    severity: 'needs-you',
+    link,
+    // The record the owner acts on; a call with neither falls back to its CallSid.
+    subject: lead.leadId ? { type: 'lead', id: String(lead.leadId) }
+      : (ctx.customerId ? { type: 'customer', id: String(ctx.customerId) } : { type: 'call', id: String(ctx.callSid || 'unknown') }),
+    doneWhen: 'urgent_caller_called_back',
+    who: 'person',
+    contact: true,
+  });
+  return {
+    title: page.headline,
+    body: page.why,
+    detail: buildHotLeadAlert({
+      firstName: lead.first_name,
+      lastName: lead.last_name,
+      phone: lead.phone,
+      city: lead.city,
+      requestedService: lead.requested_service,
+      urgencyReason: lead.urgency_reason,
+      summary: lead.call_summary,
+      existingCustomer: Boolean(ctx.customerId),
+    }),
+    link,
+    alert: page.metadata,
+    callSid: ctx.callSid || null,
+  };
+}
+
+/**
+ * Fire the internal hot-lead alert for THIS call. Returns true when the page
+ * landed (a bell row or a push), false in every other case (gate off, not hot,
+ * already alerted, silenced, send failed).
  *
  * @param {object} lead   { first_name, last_name, phone, city, requested_service,
  *                          urgency_reason, call_summary, lead_quality }
@@ -156,8 +234,8 @@ const ALERT_SEND_DEADLINE_MS = 90 * 1000;
 const SEND_TIMED_OUT = Symbol('alert-send-timed-out');
 function sendWithDeadline(sendPromise) {
   // Materialize ONCE — racing a bare thenable and touching it again re-runs it
-  // (the Knex-thenable lesson); sendSMS returns a real promise but the rule
-  // costs nothing to keep.
+  // (the Knex-thenable lesson); triggerNotification returns a real promise but
+  // the rule costs nothing to keep.
   const send = Promise.resolve(sendPromise);
   let timer;
   const deadline = new Promise((resolve) => {
@@ -263,25 +341,27 @@ async function releaseHotAlertClaim(callSid, owner) {
   }
 }
 
-// The DISTINCTIVE per-call notification title — the delivery-level dedupe key.
-// buildInternalAlertPayload honours options.notificationTitle verbatim, so this
-// exact string lands on the notifications row and a retry after an AMBIGUOUS
-// receipt failure (page delivered, receipt write lost) can probe for it instead
-// of paging twice. The CallSid tail is an opaque id, not PII.
-function hotAlertNotificationTitle(callSid) {
-  // A collision-resistant digest, not a truncated tail: the probe searches ALL
-  // historical notifications by title, and an 8-char suffix repeats across a
-  // long enough call history — a colliding earlier call would mark a NEW hot
-  // lead "already delivered" and skip its page. 16 hex chars of sha256 over
-  // the full CallSid keeps the title short and the key effectively unique.
-  const sid = String(callSid || '');
-  const digest = sid
-    ? require('crypto').createHash('sha256').update(sid).digest('hex').slice(0, 16)
-    : 'unknown';
-  // Emoji-free ON PURPOSE: the admin notification pipeline strips emoji from
-  // titles at persist time (sanitizeBuiltNotification), so an emoji-bearing
-  // probe key would never match the stored row and the dedupe would re-page.
-  return `Hot lead — phone assistant call ${digest}`;
+// Ends the sweep's obligation for a call (its relay_hot_alert_needed marker):
+// a linkage to a deleted lead, or a page every admin muted. Best effort.
+async function dropHotAlertObligation(callSid) {
+  const key = String(callSid || '').trim();
+  if (!key) return;
+  try {
+    const db = require('../../models/db');
+    await db('call_log')
+      .where({ twilio_call_sid: key })
+      .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'relay_hot_alert_needed'") });
+  } catch (err) {
+    logger.warn(`[voice-relay-alert] hot-alert obligation clear failed for ${key}: ${err.message}`);
+  }
+}
+
+// The per-call delivery-level dedupe key. triggerNotification stamps it on the
+// bell row (metadata.dedupeKey) under notifyAdmin's advisory lock, so a retry
+// after an AMBIGUOUS receipt failure (page delivered, receipt write lost) can
+// probe for it instead of paging twice. The CallSid is an opaque id, not PII.
+function hotAlertDedupeKey(callSid) {
+  return `relay-hot-lead:${callSid}`;
 }
 
 async function hotAlertAlreadyDelivered(callSid) {
@@ -290,8 +370,8 @@ async function hotAlertAlreadyDelivered(callSid) {
   try {
     const db = require('../../models/db');
     const row = await db('notifications')
-      .where({ category: 'alert' })
-      .where('title', hotAlertNotificationTitle(key))
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [hotAlertDedupeKey(key)])
       .first('id');
     return !!row;
   } catch {
@@ -321,12 +401,6 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
       ? ctx.isOwnerAlerted() === true
       : ctx.ownerAlerted === true;
     if (alreadyAlerted) return false;
-
-    const to = ownerAlertPhone();
-    if (!to) {
-      logger.warn('[voice-relay-alert] hot lead captured but ADAM_PHONE is unset — no owner alert sent');
-      return false;
-    }
 
     // The durable one-per-CALL receipt (reconnects build a fresh session).
     claim = await claimHotAlertForCall(ctx.callSid);
@@ -360,22 +434,11 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
       }
     }
 
-    const body = buildHotLeadAlert({
-      firstName: lead.first_name,
-      lastName: lead.last_name,
-      phone: lead.phone,
-      city: lead.city,
-      requestedService: lead.requested_service,
-      urgencyReason: lead.urgency_reason,
-      summary: lead.call_summary,
-      existingCustomer: Boolean(ctx.customerId),
-    });
-
     // ⭐ THE DELIVERY-LEVEL DEDUPE. A page that was DELIVERED but whose sent
     // receipt failed to write leaves claimed-but-unsent — the lease expires and
     // the sweep would page again. The notification row IS delivery evidence:
-    // probe for this call's distinctive title before sending, and a hit just
-    // repairs the receipt instead of re-paging.
+    // probe for this call's dedupe key before sending, and a hit just repairs
+    // the receipt instead of re-paging.
     if (await hotAlertAlreadyDelivered(ctx.callSid)) {
       if (claim.durable) await markHotAlertSent(ctx.callSid, claim.owner);
       if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
@@ -383,22 +446,12 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
       return true;
     }
 
-    // The SAME sender + messageType the self-booking confirm alert uses.
-    const TwilioService = require('../twilio');
-    // Deep link straight to the actionable record: the internal-alert
-    // sanitizer masks phone numbers in the BODY (no allowContactDetails on
-    // this trigger), so without a link the owner landed on /admin/dashboard
-    // with a hot lead and no way to call back. The lead (or the matched
-    // customer) page carries the full number.
-    const alertLink = lead.leadId
-      ? `/admin/leads?leadId=${encodeURIComponent(lead.leadId)}`
-      : (ctx.customerId ? `/admin/customers?customerId=${encodeURIComponent(ctx.customerId)}` : '/admin/leads');
-    const sent = await sendWithDeadline(TwilioService.sendSMS(to, body, {
-      messageType: 'internal_alert',
-      // The dedupe key doubles as the bell title; the body carries the detail.
-      notificationTitle: hotAlertNotificationTitle(ctx.callSid),
-      link: alertLink,
-    }));
+    const { triggerNotification } = require('../notification-triggers');
+    const sent = await sendWithDeadline(triggerNotification(
+      'relay_hot_lead',
+      buildHotLeadPage(lead, ctx),
+      ctx.callSid ? { dedupeKey: hotAlertDedupeKey(ctx.callSid) } : {},
+    ));
     if (sent === SEND_TIMED_OUT) {
       // AMBIGUOUS — the page may still land after this returns. No latch, no
       // receipt, and crucially NO release: releasing would invite an immediate
@@ -410,23 +463,26 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
       );
       return false;
     }
-    // ⭐ `success: true` IS NOT DELIVERY ON THIS PATH. The internal-alert
-    // redirect (services/twilio.js redirectInternalAdminSmsToNotification)
-    // returns success:true with `notificationUndelivered` / `notificationError`
-    // when the bell/push write itself failed — it suppressed the SMS and had
-    // nowhere to put the alert. Latching on that consumed the one-per-call
-    // budget for an alert nobody ever saw, and blocked the retry that would
-    // have paged the owner.
-    if (!internalAlertDelivered(sent)) {
+    // ⭐ A RETURNED CALL IS NOT DELIVERY. triggerNotification reports a bell
+    // policy silence, a suppression or an error without throwing. Until sweep
+    // #7303 B1 this page rode the denylisted internal_alert redirect and every
+    // silenced result read as sent: the latch closed, the retry never ran, and
+    // the caller was told the team was notified. Only a bell row or a push
+    // counts.
+    if (!pageDelivered(sent)) {
       logger.error(
         `[voice-relay-alert] hot-lead owner alert NOT delivered callSid=${ctx.callSid || 'n/a'} `
-        + `(${sent && sent.notificationError ? 'notification error' : 'notification undelivered'}) — latch left open for a retry`
+        + `(${undeliveredReason(sent)}) — latch left open for a retry`
       );
+      // A deliberate mute (every admin turned this page off on both channels)
+      // is the owner's choice, not an outage: nothing is owed, so the hourly
+      // sweep stops retrying this call. The caller is still promised nothing.
+      if (sent?.suppressed) await dropHotAlertObligation(ctx.callSid);
       if (claim.durable) await releaseHotAlertClaim(ctx.callSid, claim.owner); // the retry rail stays open
       return false;
     }
     // ⭐ THE LATCH IS SET AFTER A SUCCESSFUL SEND, NOT BEFORE IT. Marking first
-    // meant a transient Twilio/DB blip PERMANENTLY consumed the one-per-call
+    // meant a transient bell/DB blip PERMANENTLY consumed the one-per-call
     // budget: the retry (or the second capture_lead) saw `alreadyAlerted` and
     // returned quietly, and the hot lead — a swarm, a sting, an angry customer —
     // was never paged at all. The failure path below now leaves the latch open
@@ -453,29 +509,28 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
 }
 
 /**
- * Build the owner-facing body for a voice-filed RE-SERVICE. Internal surface.
+ * The relay_reservice_filed payload: the composed headline and why the push
+ * shows, and the deep link to the customer whose ticket it is.
  */
-function buildReserviceAlert({ lane, urgency, subject, issue, covered, requestId, unverifiedRequester, unverifiedNote }) {
-  const lines = [
-    `${urgency === 'urgent' ? '🚨 URGENT ' : ''}Re-service filed by the phone assistant`,
-  ];
-  // ⭐ SECOND LINE, ALWAYS, when the caller only matched a secondary contact
-  // slot (spouse/tenant/prior occupant — relay-reservice's stamp). The body is
-  // sliced to MAX_ALERT_BODY and the bell/push render truncates again, so a
-  // warning further down could be cut off; this one cannot be.
-  if (unverifiedRequester) {
-    lines.push(`⚠️ ${alertSafe(unverifiedNote, 200)
-      || 'UNVERIFIED third-party requester — verify identity before confirming.'}`);
-  }
-  lines.push(
-    `Lane: ${alertSafe(lane, 20)}`,
-    alertSafe(subject || issue, 200),
-  );
-  if (covered) lines.push('Covered by their plan (free re-service).');
-  if (requestId) lines.push(`Request ${alertSafe(requestId, 40)}`);
-  // The ticket queue is a known black hole — this alert IS the routing fix.
-  lines.push('Get them on the schedule — do not leave this in the request queue.');
-  return lines.join('\n').slice(0, MAX_ALERT_BODY);
+function buildReservicePage(request) {
+  const page = composePage({
+    area: 'Schedule',
+    action: `book the ${request.urgency === 'urgent' ? 'urgent ' : ''}re-service ${agentName()} took`,
+    // ⭐ AN UNVERIFIED REQUESTER IS THE WHOLE WHY. The caller matched the
+    // account only on a secondary contact slot (spouse, tenant, a previous
+    // occupant), so the warning is the push body itself and nothing can
+    // truncate it away; the ticket's card carries the full note.
+    why: request.unverifiedRequester
+      ? 'The caller is not the account holder, so check who they are before you book it.'
+      : quotedWhy('They said: ', request.issue || request.subject, `${agentName()} filed it as a re-service request.`),
+    severity: 'needs-you',
+    link: request.customerId ? `/admin/customers?customerId=${encodeURIComponent(request.customerId)}` : '/admin/customers',
+    subject: { type: 'customer', id: String(request.customerId || '') },
+    doneWhen: 'reservice_scheduled',
+    who: 'person',
+    contact: true,
+  });
+  return { title: page.headline, body: page.why, link: page.link, requestId: request.requestId || null };
 }
 
 /**
@@ -487,13 +542,15 @@ function buildReserviceAlert({ lane, urgency, subject, issue, covered, requestId
  * streamline's booking half (that fires customer comms, which the agent may
  * never do) — so the alert is what makes the ticket reach a human.
  *
- * Reuses the SAME internal sender as the hot-lead alert. Not idempotent-latched
- * like the hot-lead path: request_reservice already refuses to file a second
- * ticket in a lane, so one filed ticket is one alert by construction.
+ * relay-reservice.js writes the ticket's bell card itself (bell:true); this is
+ * the card's PHONE page: relay_reservice_filed, sent pushOnly so the bell keeps
+ * one row per ticket. Not idempotent-latched like the hot-lead path:
+ * request_reservice already refuses to file a second ticket in a lane, and the
+ * caller's service_requests claim makes one filed ticket one page.
  *
- * Returns true when an alert was actually sent, the string 'ambiguous' when
- * the send timed out inside the lease (may still land — the caller must keep
- * its claim), false otherwise. Never throws.
+ * Returns true when the push reached at least one device, the string
+ * 'ambiguous' when the send timed out inside the lease (may still land — the
+ * caller must keep its claim), false otherwise. Never throws.
  */
 async function alertOwnerReservice(request = {}, ctx = {}) {
   try {
@@ -502,15 +559,8 @@ async function alertOwnerReservice(request = {}, ctx = {}) {
     // passes recovery:true; live callers never do.
     const { isContextEnabled } = require('./relay-context');
     if (!isContextEnabled() && ctx.recovery !== true) return false;
-    const to = ownerAlertPhone();
-    if (!to) {
-      logger.warn('[voice-relay-alert] re-service filed but ADAM_PHONE is unset — no owner alert sent');
-      return false;
-    }
-    const TwilioService = require('../twilio');
-    const sent = await sendWithDeadline(
-      TwilioService.sendSMS(to, buildReserviceAlert(request), { messageType: 'internal_alert' }),
-    );
+    const { triggerNotification } = require('../notification-triggers');
+    const sent = await sendWithDeadline(triggerNotification('relay_reservice_filed', buildReservicePage(request), { pushOnly: true }));
     if (sent === SEND_TIMED_OUT) {
       // AMBIGUOUS, not failed — the page may still land. The caller must NOT
       // release its claim on this result (the lease expires on its own);
@@ -521,13 +571,14 @@ async function alertOwnerReservice(request = {}, ctx = {}) {
       );
       return 'ambiguous';
     }
-    // Same success-is-not-delivery rule as the hot-lead path: the ticket is
-    // durable either way, but an alert that never reached the bell must say so
-    // (the whole point of this lane is reaching a human, not the queue).
-    if (!internalAlertDelivered(sent)) {
+    // Same rule as the hot-lead path: only a push that reached a device is a
+    // page. The ticket and its bell card are durable either way; an owed page
+    // stays owed, so the caller's claim is released and the sweep retries it
+    // while the ticket is open.
+    if (!pageDelivered(sent)) {
       logger.error(
         `[voice-relay-alert] re-service owner alert NOT delivered callSid=${ctx.callSid || 'n/a'} `
-        + `request=${request.requestId || 'n/a'} — the ticket is filed but unannounced`
+        + `request=${request.requestId || 'n/a'} (${undeliveredReason(sent)}) — the phone page is still owed`
       );
       return false;
     }
@@ -567,7 +618,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
       // from_phone + call_summary + customer_id feed the lead-LESS branch
       // below (a hot lifecycle-customer call composes its page from the call
       // row itself — and the customer link is what makes the recovered alert
-      // actionable: the body's callback number is masked by the internal-alert
+      // actionable: the page's callback number is masked by the trigger
       // sanitizer and there is no lead record to open).
       .select('twilio_call_sid', 'metadata', 'from_phone', 'call_summary', 'customer_id');
   } catch (err) {
@@ -606,10 +657,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
         lead = { phone: row.from_phone, transcript_summary: row.call_summary, first_name: null, last_name: null, city: null };
       } else {
          
-        await db('call_log')
-          .where({ twilio_call_sid: row.twilio_call_sid })
-          .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'relay_hot_alert_needed'") })
-          .catch(() => {});
+        await dropHotAlertObligation(row.twilio_call_sid);
         continue;
       }
     }
@@ -713,7 +761,5 @@ module.exports = {
   sweepAbandonedHotAlerts,
   alertOwnerReservice,
   buildHotLeadAlert,
-  buildReserviceAlert,
-  ownerAlertPhone,
   MAX_ALERT_BODY,
 };

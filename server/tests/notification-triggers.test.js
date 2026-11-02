@@ -51,6 +51,13 @@ describe('notification trigger push tags', () => {
     expect(__private.pushTagFor('payment_failed', { paymentIntentId: 'pi_1' })).toBe('waves-payment_failed-pi_1');
   });
 
+  // Sweep #7303 B1: two urgent callers' pages must not replace each other on the phone.
+  test('the voice agent pages get a per-call / per-ticket push tag', () => {
+    expect(__private.pushTagFor('relay_hot_lead', { callSid: 'CA-a' })).toBe('waves-relay_hot_lead-CA-a');
+    expect(__private.pushTagFor('relay_reservice_filed', { requestId: 'req-a' })).toBe('waves-relay_reservice_filed-req-a');
+    expect(__private.pushTagFor('relay_hot_lead', {})).not.toBe(__private.pushTagFor('relay_hot_lead', {}));
+  });
+
   it('customer_landline_from_call gets a per-customer push tag so concurrent alerts do not collapse', () => {
     const a = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-a' });
     const b = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-b' });
@@ -413,6 +420,29 @@ describe('triggerNotification bell outcome', () => {
     expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },
       { dedupeKey: 'sms-reply:SM-synthetic-replay' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  // Sweep #7303 B1: Sandy's hot-lead page is keyed per call, so a dedupe hit is a
+  // reconnect's or the hourly sweep's retry of a page that already landed.
+  test('a keyed hot-lead page retry reuses its bell and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'hot-bell', deduped: true });
+    expect(await triggerNotification('relay_hot_lead', { title: 'Leads — call back Pat Rivera now', callSid: 'CA-synthetic' },
+      { dedupeKey: 'relay-hot-lead:CA-synthetic' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  test('the hot-lead page writes its composed parts and full text onto the bell row', async () => {
+    const alert = { area: 'Leads', severity: 'needs-you', who: 'person', contact: true, subject: { type: 'lead', id: 'l-9' }, doneWhen: 'urgent_caller_called_back' };
+    await triggerNotification('relay_hot_lead', {
+      title: 'Leads — call back Pat Rivera now', body: 'Sandy flagged the call urgent.', detail: 'Pat Rivera\nCall them back.',
+      link: '/admin/leads?leadId=l-9', alert, callSid: 'CA-synthetic',
+    }, { dedupeKey: 'relay-hot-lead:CA-synthetic' });
+    const [category, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect([category, title, body]).toEqual(['new_lead', 'Leads — call back Pat Rivera now', 'Sandy flagged the call urgent.']);
+    expect(opts).toMatchObject({
+      link: '/admin/leads?leadId=l-9', detail: 'Pat Rivera\nCall them back.', dedupeKey: 'relay-hot-lead:CA-synthetic',
+      metadata: { ...alert, triggerKey: 'relay_hot_lead' },
+    });
   });
 
   // One bell row per conversation (owner 2026-10-01): a known sender's next text
