@@ -272,19 +272,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     updatedRow = rows[0];
 
     if (!fromTechId && newTechId) {
-      const { resolveAlert } = require('./dispatch-alerts');
-      const openAlerts = await assignmentTrx('dispatch_alerts')
-        .where({ type: 'unassigned_overdue', job_id: jobId })
-        .whereNull('resolved_at')
-        .select('id');
-      for (const { id } of openAlerts) {
-        // auto: true — assigning a tech is not the dispatcher acknowledging
-        // THIS alert, it's a side effect that makes "unassigned" stale. If
-        // the visit is later unassigned again under the same promise, a
-        // fresh unassigned_overdue alert must still be raisable under the
-        // same tracking_key (codex P1, pre-push audit on 925e9e977).
-        await resolveAlert({ id, resolvedBy: actorId, trx: assignmentTrx, auto: true });
-      }
+      await require('./dispatch-alerts').autoResolveUnassignedAlertsForJob({ jobId, resolvedBy: actorId, trx: assignmentTrx });
     }
     // GATE_ROUTE_CHECK_ASSIGN_SAVES: the update above dropped the old stop
     // number; an office board assign (`place: true`, only PUT /jobs/:id/assign)
