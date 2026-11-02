@@ -870,6 +870,13 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
   } re-service here: ${url}`;
 }
 
+// Moving link text (owner 2026-11-02, GATE_MOVING_FLOW): fixed words, no price.
+export function buildMovingPrefill({ firstName, url }) {
+  const first = String(firstName || "").trim();
+  if (!first || !url) return null;
+  return `Hi ${first}, it's Waves. Moving? Tell us your new address and move dates here: ${url}`;
+}
+
 // Both-channel review ask: the /sms response says whether the email copy went.
 export function reviewEmailNote(outcome) {
   if (!outcome) return "";
@@ -895,6 +902,7 @@ export function reviewEmailNote(outcome) {
 export const CUSTOMER_COMPOSER_LINKS = [
   { key: "reschedule", name: "Reschedule link", keywords: "appointment move change visit time", dynamic: true },
   { key: "reservice", name: "Re-service link", keywords: "free callback between visit retreat", dynamic: true },
+  { key: "moving", name: "Moving link", keywords: "moving move relocating new address new home moved", dynamic: true },
   // channels: picking the row asks Text / Email / Both (owner ruling
   // 2026-09-03) — Text inserts the link, Email sends the review email now,
   // Both inserts the link and emails when the text is sent.
@@ -1247,6 +1255,11 @@ export function SmsTab({
   const [insertingReservice, setInsertingReservice] = useState(false);
   // Same contract for the standing re-service link (free between-visit
   // callback booking) — a bearer credential tracked per recipient.
+  // The moving link (GATE_MOVING_FLOW): same contract as the re-service link, with
+  // local state. movingLinkGone hides the entry once the server answers 404.
+  const [insertingMoving, setInsertingMoving] = useState(false);
+  const [insertedMoving, setInsertedMoving] = useState(null);
+  const [movingLinkGone, setMovingLinkGone] = useState(false);
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
@@ -1291,7 +1304,7 @@ export function SmsTab({
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
   useEffect(() => { if (linkRequest > 0) setShowLinkSheet(true); }, [linkRequest]);
-  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled, consultationLinksEnabled } = useLinkLibrary(active && showLinkSheet);
+  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled, consultationLinksEnabled, movingLinksEnabled } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
@@ -2533,6 +2546,111 @@ export function SmsTab({
     }
   }, [insertedReservice, msgBody, toNumber, selectedCustomerId]);
 
+  // Insert the selected customer's moving link (GATE_MOVING_FLOW). The server
+  // opens the customer's move if there is none and answers 404 while the gate
+  // is dark, which hides the entry. Nothing is sent: the operator's own send is
+  // the only text.
+  const handleInsertMovingLink = async () => {
+    const requestRecipient = toNumber.trim();
+    if (!requestRecipient || insertingMoving) return;
+    const requestRecipientKey = smsThreadKey(requestRecipient);
+    const requestCustomerId = selectedCustomerId || null;
+    const requestThreadKey = activeThread?.contactPhone
+      ? smsThreadKey(activeThread.contactPhone)
+      : "";
+    const movingContextChanged = () => {
+      const latest = rewriteContextRef.current;
+      const latestRecipient = latest.toNumber.trim();
+      const latestRecipientKey = latestRecipient
+        ? smsThreadKey(latestRecipient)
+        : "";
+      return (
+        latestRecipientKey !== requestRecipientKey ||
+        (latest.selectedCustomerId || null) !== requestCustomerId ||
+        latest.activeThreadKey !== requestThreadKey
+      );
+    };
+    setInsertingMoving(true);
+    setSendResult(null);
+    try {
+      const d = await adminFetch("/admin/communications/moving-link", {
+        method: "POST",
+        body: JSON.stringify({
+          phone: requestRecipient,
+          customerId: requestCustomerId || undefined,
+        }),
+      });
+      if (movingContextChanged()) return;
+      // A new text by phone has no selected customer: take the one the server
+      // resolved (same as the other minted links).
+      adoptResolvedOwner(d, requestCustomerId, requestRecipientKey);
+      const clause = `Moving? Tell us your new address and move dates here: ${d.url}`;
+      const prefill = buildMovingPrefill({ firstName: d.firstName, url: d.url });
+      const prevUrl = insertedMoving?.url || null;
+      setMsgBody((b) => {
+        const base = prevUrl
+          ? b
+              .split("\n")
+              .filter((l) => !l.includes(prevUrl))
+              .join("\n")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim()
+          : b;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
+      });
+      setInsertedMoving({
+        url: d.url,
+        recipientKey: requestRecipientKey,
+        customerId: d.customerId || requestCustomerId,
+      });
+      setSendResult({ ok: true, text: "Moving link added." });
+    } catch (e) {
+      if (e && e.status === 404 && /not enabled/i.test(e.message || "")) {
+        setMovingLinkGone(true);
+        setSendResult({ ok: false, text: "Moving links are not turned on." });
+      } else if (!movingContextChanged()) {
+        setSendResult({ ok: false, text: e.message });
+      }
+    } finally {
+      setInsertingMoving(false);
+    }
+  };
+
+  // Same bearer-credential rule as the re-service link: an inserted moving link
+  // must not survive a recipient change, and the tracked link is forgotten once
+  // the operator deletes it from the body.
+  useEffect(() => {
+    if (!insertedMoving) return;
+    if (!msgBody.includes(insertedMoving.url)) {
+      setInsertedMoving(null);
+      return;
+    }
+    const currentRecipient = toNumber.trim();
+    const currentRecipientKey = currentRecipient
+      ? smsThreadKey(currentRecipient)
+      : "";
+    if (
+      currentRecipientKey !== insertedMoving.recipientKey ||
+      (selectedCustomerId || null) !== insertedMoving.customerId
+    ) {
+      setMsgBody((b) =>
+        b
+          .split("\n")
+          .filter((l) => !l.includes(insertedMoving.url))
+          .join("\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim(),
+      );
+      setInsertedMoving(null);
+      setSendResult({
+        ok: true,
+        text: "Moving link removed — the recipient changed.",
+      });
+    }
+  }, [insertedMoving, msgBody, toNumber, selectedCustomerId]);
+
   const openLinkSheet = () => setShowLinkSheet(true);
 
   // Insert a static library row (or the portal-login customer row). No
@@ -2826,17 +2944,19 @@ export function SmsTab({
     () => [
       ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim()))
         && (l.key !== "receipt" || receiptLinksEnabled)
-        && (l.key !== "consultation" || consultationLinksEnabled)),
+        && (l.key !== "consultation" || consultationLinksEnabled)
+        && (l.key !== "moving" || (movingLinksEnabled && !movingLinkGone))),
       ...HOW_TO_GUIDE_LINKS,
       ...(libraryLinks || []),
     ],
-    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled],
+    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled, movingLinksEnabled, movingLinkGone],
   );
 
   const handleInsertSheetPick = (link, channel = null) => {
     setShowLinkSheet(false);
     if (link.key === "reschedule") return handleInsertRescheduleLink();
     if (link.key === "reservice") return handleInsertReserviceLink();
+    if (link.key === "moving") return handleInsertMovingLink();
     if (link.dynamic) return handleInsertCustomerLink(link.key, channel);
     return handleInsertLibraryLink(link);
   };
@@ -3632,6 +3752,7 @@ export function SmsTab({
               disabled={
                 insertingResched ||
                 insertingReservice ||
+                insertingMoving ||
                 !!insertingCustomerLink || sending
               }
               title="Quick Links — insert a link or send a prep guide"
@@ -3640,7 +3761,7 @@ export function SmsTab({
               aria-haspopup="dialog"
               aria-expanded={showLinkSheet}
             >
-              {insertingResched || insertingReservice || insertingCustomerLink ? (
+              {insertingResched || insertingReservice || insertingMoving || insertingCustomerLink ? (
                 <Loader2 size={16} strokeWidth={2.2} className="animate-spin" aria-hidden />
               ) : (
                 <Link2 size={16} strokeWidth={2.2} aria-hidden />
@@ -3821,6 +3942,7 @@ export function SmsTab({
               // the response) — wait out the link fetches.
               insertingResched ||
               insertingReservice ||
+              insertingMoving ||
               !!insertingCustomerLink ||
               !toNumber.trim() ||
               (!msgBody.trim() && attachments.length === 0)
@@ -3852,7 +3974,7 @@ export function SmsTab({
           <Button
             variant="secondary"
             className="mt-3"
-            disabled={sending || uploading || hearing || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
+            disabled={sending || uploading || hearing || rewritingSms || aiDrafting || insertingResched || insertingReservice || insertingMoving || !!insertingCustomerLink}
             onClick={leaveApprovalDraft}
           >
             Leave approval draft
@@ -3881,7 +4003,9 @@ export function SmsTab({
               ? "reschedule"
               : insertingReservice
                 ? "reservice"
-                : insertingCustomerLink
+                : insertingMoving
+                  ? "moving"
+                  : insertingCustomerLink
           }
           onPick={handleInsertSheetPick}
           groupCaptions={{

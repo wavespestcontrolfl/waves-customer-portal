@@ -56,7 +56,7 @@ function route(map) {
 }
 const posts = () => calls.filter((c) => c.method === 'POST');
 
-function renderCard(path = '/admin/ads?tab=advisor') {
+function renderCard(path = '/admin/ppc?tab=advisor') {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <AdsNegativeKeywordsCard />
@@ -297,7 +297,7 @@ describe('AdsNegativeKeywordsCard', () => {
     const scroll = vi.fn();
     window.HTMLElement.prototype.scrollIntoView = scroll;
     route({ 'GET /admin/ads/negatives': () => json(payload()) });
-    renderCard(`/admin/ads?tab=advisor&negative=${ID_B}`);
+    renderCard(`/admin/ppc?tab=advisor&negative=${ID_B}`);
     const target = await screen.findByTestId(`pending-${ID_B}`);
     expect(target.className).toMatch(/ring-2/);
     expect(screen.getByTestId(`pending-${ID_A}`).className).not.toMatch(/ring-2/);

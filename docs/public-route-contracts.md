@@ -245,8 +245,9 @@ Re-service asks report (owner-approved design 2026-11-02, consolidated re-servic
 report step S3a; `GATE_RESERVICE_ASKS` — dark, off unless exactly `'true'`, read
 at call time): on the same service-report payload (`/api/reports/:token/data` and
 the PDF, which share `buildReportV1Data`), gate on adds an optional
-`data.reserviceAsksReport` when the record carries a version-1
-`service_records.service_data.reserviceAsks` block (frozen at completion: pest /
+`data.reserviceAsksReport` when the record carries a version-2
+`service_records.service_data.reserviceAsks` block (version 2 is the first
+to mark account-wide items; a version-1 freeze never renders) (frozen at completion: pest /
 lawn re-services completed as performed on a live closeout), the report's
 `reserviceReport` copy block, when composed, reads a performed (`treated`)
 outcome, and at least one item shows. When the key is present
@@ -264,7 +265,10 @@ words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
   complaint about the service, a missed or late visit) passes it: the verdict
   on the customer's ORIGINAL words is frozen as the item's `officeOnly` (the
   scrub keeps only pest talk, so it would hide "I want a refund"), and the
-  shown words are screened again.
+  shown words are screened again. On an account with more than one
+  property, texts, calls and emails name no property and may be about another
+  one: they are frozen `accountWide` and never print; only the visit's own
+  booking words do (a failed property read counts as several).
   The office's not-today reasons (`officeNotes`) are never read; no item ids
   are exposed.
 - `told`: `label` is `<Source> · <Mon D>` (Eastern date; a question reads
@@ -7024,6 +7028,39 @@ id, gate off, a non-multipart body (answered by
 `reservicePhotosPreParserGuard` ahead of the shared body parsers), another
 customer's or a non-re-service visit, an ineligible visit — is the generic
 404. Sends nothing to a customer.
+`/api/public/moving/:token` (GET, plus `POST /:token/check` and
+`POST /:token/submit`; the moving page the office sends a customer who is
+moving, by email from the Customer 360 Moving card or by text from the
+Communications composer, always on a staff click). Dark behind
+`GATE_MOVING_FLOW` (strict `'true'`, read per request): off, every route is
+the generic 404 before any DB read. 48-hex token format gate on
+`customer_moves.token`; a malformed, unknown or closed move is the same
+generic 404. Privacy headers (`Cache-Control: private, no-store`,
+`X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
+answer, and the `/moving/<token>` SPA shell gets the sensitive-page headers.
+Router limit 60 req/min per IP; `/check` 6 req/min per IP and `/submit` 10
+req/min per IP on top. GET payload (`services/customer-moves.js`
+`publicMoveView`): `firstName`, the plan's recurring service names, `status`
+(`open` | `submitted`), `moveOutDate` / `moveInDate` (`YYYY-MM-DD` or null),
+`newCity` (only the CITY of a submitted new address), `verdict`
+(`in_area` | `out_of_area` | `unverified` | null) and `addressOnFile`. Never
+the current street address, a phone, an email or money. `/check` takes
+`{ address }` (5-200 chars) and makes one paid Google address check: the
+same text is answered from `customer_moves.last_check` for 24 hours, and a
+link gets at most 10 paid checks per Eastern day (claimed atomically in SQL;
+the 11th is a 429). It answers `{ typed, normalized, verdict, checkId }` for
+the NEW address only; `checkId` is an opaque 16-hex id of that check.
+`/submit` takes `{ checkId, moveOutDate, moveInDate }`: the browser never
+sends an address or a verdict. A `checkId` uses the address of that check,
+and only while it is still the check the server holds (read under the move's
+row lock); a check replaced since (another tab or device) is a 409, never
+swapped in. No `checkId` keeps the address already saved. It needs a checked
+address or a move-out date; dates must be real and inside 60 days back to 400 days
+ahead. A submit writes one `service_requests` row (`category` `moving`,
+reused and reopened on a resubmit), an `activity_log` row and one admin
+alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
+receipt sentences. It changes no visit, price, property or primary address
+and sends nothing to a customer.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

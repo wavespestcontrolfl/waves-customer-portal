@@ -34,10 +34,10 @@ function baseVisit(over = {}) {
 // Chainable stand-in: the visit read ends in first(); every other read is
 // awaited as a list. `fail` makes a table's read reject with that error.
 function fakeKnex({
-  visit = baseVisit(), sms = [], calls = [], emails = [], requests = [], fail = {},
+  visit = baseVisit(), sms = [], calls = [], emails = [], requests = [], properties = [], fail = {},
 } = {}) {
   const rowsByTable = {
-    sms_log: sms, call_log: calls, emails, service_requests: requests,
+    sms_log: sms, call_log: calls, emails, service_requests: requests, customer_properties: properties,
   };
   const seen = [];
   const wheres = [];
@@ -234,6 +234,17 @@ describe('texts', () => {
       sms: [sms('s6', 'The ants came back after the spray. I want a refund.', at)],
     });
     expect(items.map((item) => item.officeOnly || null)).toEqual([null, 'billing']);
+  });
+
+  test('an account with several properties: the channel items are account-wide, the booking words are not', async () => {
+    const visit = baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' });
+    const several = await gather({ visit, sms: [sms('s7', 'Roaches are back at the rental')], properties: [{ id: 'p1' }, { id: 'p2' }] });
+    expect(several.items.map((item) => [item.id, item.accountWide || false])).toEqual([['booking:visit-1', false], ['text:s7', true]]);
+    const one = await gather({ visit, sms: [sms('s7', 'Roaches are back at the rental')], properties: [{ id: 'p1' }] });
+    expect(one.items.some((item) => item.accountWide)).toBe(false);
+    // A failed property read counts as several: nothing account-wide can print.
+    const failed = await gather({ visit, sms: [sms('s7', 'Roaches are back at the rental')], fail: { customer_properties: new Error('db down') } });
+    expect(failed.items.find((item) => item.id === 'text:s7').accountWide).toBe(true);
   });
 
   test('tapbacks, STOP and empty texts are dropped', async () => {

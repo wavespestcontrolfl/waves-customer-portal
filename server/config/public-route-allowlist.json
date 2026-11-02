@@ -540,6 +540,17 @@
       ]
     },
     {
+      "router": "server/routes/moving-public.js",
+      "mount": "/api/public/moving",
+      "reason": "Tokenized moving page (GATE_MOVING_FLOW, dark): the link the office sends a customer who is moving; the USE entries are the router's 404-when-dark gate (always next() or 404) and its rate limiter",
+      "routes": [
+        "USE /api/public/moving (inline function#42a28bfa)",
+        "GET /api/public/moving/:token",
+        "POST /api/public/moving/:token/check",
+        "POST /api/public/moving/:token/submit"
+      ]
+    },
+    {
       "router": "server/routes/public-lawn-diagnostic.js",
       "mount": "/api/public/lawn-diagnostic",
       "reason": "Tokenized lawn diagnostic viewer + quote-request intake",

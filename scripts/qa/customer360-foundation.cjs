@@ -162,6 +162,8 @@ const detail = {
             body = { available: false };
           else if (url.pathname === "/api/admin/requests")
             body = { requests: [] };
+          else if (url.pathname === "/api/admin/customers/customer-a/moves")
+            body = { enabled: false, moves: [] };
           else if (
             [
               "/api/admin/call-recordings/commitments/open",

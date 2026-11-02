@@ -166,7 +166,7 @@ postgres('re-service answers frozen on /complete', () => {
       expect(result.status).toBe(200);
       const data = await savedServiceData(f);
       expect(data.reserviceAsks).toMatchObject({
-        version: 1, lane: 'pest',
+        version: 2, lane: 'pest',
         answers: { [bookingId]: { answer: 'not_today' } },
         officeNotes: { [bookingId]: 'Dog in the yard' },
       });
@@ -180,7 +180,7 @@ postgres('re-service answers frozen on /complete', () => {
   test('gate on, no answers: the record still keeps what the customer said', async () => {
     const { result, data } = await run({ body: {} });
     expect(result.status).toBe(200);
-    expect(data.reserviceAsks).toMatchObject({ version: 1, lane: 'pest', answers: {}, officeNotes: {} });
+    expect(data.reserviceAsks).toMatchObject({ version: 2, lane: 'pest', answers: {}, officeNotes: {} });
     expect(data.reserviceAsks.items.length).toBeGreaterThan(0);
   });
 

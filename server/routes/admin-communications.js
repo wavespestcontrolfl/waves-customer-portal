@@ -403,6 +403,8 @@ async function sendSmsHandler(req, res, next) {
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
   let prepLinkSends = null;
+  // Verified moving links (GATE_MOVING_FLOW) — a real send is the link's delivery.
+  let movingLinkMoveIds = null;
   // Composer-carried contract signing links: a prepared link is ACTIVATED
   // (delivered state stamped, windowed from the send) before the provider
   // call — handed back on every no-send exit, recorded after a real send.
@@ -954,6 +956,7 @@ async function sendSmsHandler(req, res, next) {
       outreachLeadId = bearerCheck.consultationLeadId || null;
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
+      if (bearerCheck.moves) movingLinkMoveIds = bearerCheck.moves;
       // A bearer send to a number exactly one live customer owns is that
       // customer's text (a pasted URL never passes /customer-link to adopt
       // its owner): trust the row the seam verified so the recipient's own
@@ -1567,6 +1570,17 @@ async function sendSmsHandler(req, res, next) {
         logger.warn(`[communications] statement sent stamp failed (text already sent): ${stampErr.message}`);
       }
     }
+    // Composer-carried moving links: a REAL provider send is the link's
+    // delivery, which the Customer 360 Moving card shows (fail-soft
+    // bookkeeping: the text already left).
+    if (movingLinkMoveIds && result?.sent) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) await require('../services/customer-moves').markLinkSent(movingLinkMoveIds, { channel: 'sms', actorId: req.technicianId || null });
+      } catch (stampErr) {
+        logger.warn(`[communications] moving link sent stamp failed (text already sent) (${stampErr?.code || stampErr?.name || 'Error'})`);
+      }
+    }
     // Composer-carried contract signing links: a REAL provider send is the
     // delivery — record it on the contract's timeline (the row was
     // activated before the call); a suppressed send hands the prepared link
@@ -1782,6 +1796,14 @@ async function sendSmsHandler(req, res, next) {
         await require('../services/composer-customer-links').markStatementsSent(statementLinkIds, { actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed after a throw: ${stampErr.message}`);
+      }
+    }
+    // And for the moving links: an accepted-then-thrown send DID deliver them.
+    if (movingLinkMoveIds && autoSendExecutor.isRealProviderSend(err?.providerOutcome)) {
+      try {
+        await require('../services/customer-moves').markLinkSent(movingLinkMoveIds, { channel: 'sms', actorId: req.technicianId || null });
+      } catch (stampErr) {
+        logger.warn(`[communications] moving link sent stamp failed after a throw (${stampErr?.code || stampErr?.name || 'Error'})`);
       }
     }
     // And for the activated contract links: accepted → record, else hand back.
@@ -3209,6 +3231,63 @@ async function reserviceLinkHandler(req, res) {
 }
 router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
+// POST /api/admin/communications/moving-link  { customerId?, phone }
+// Composer helper (owner 2026-11-02, dark behind GATE_MOVING_FLOW): the
+// customer's /moving/:token short link for insertion into the SMS body. With a
+// selected customer, the full 10-digit phone must match it (as /reservice-link).
+// Without one (a new text opened from Customer 360 by phone), the number must
+// belong to exactly one customer profile; the composer adopts that customer.
+// Opens the customer's move if there is none; sends nothing (the operator's
+// own send is the only text). 404 while the gate is dark.
+async function movingLinkHandler(req, res) {
+  try {
+    if (!require('../config/feature-gates').movingFlowLive()) {
+      return res.status(404).json({ error: 'Moving links are not enabled' });
+    }
+    const last10 = fullPhoneLast10(req.body?.phone);
+    if (!last10) {
+      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
+    }
+    const customerId = req.body?.customerId;
+    let customer;
+    if (customerId) {
+      if (!UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'Pick the customer first' });
+      customer = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .first('id', 'phone', 'first_name');
+      if (!customer) return res.status(404).json({ error: 'Customer not found' });
+      if (fullPhoneLast10(customer.phone) !== last10) {
+        return res.status(400).json({ error: 'phone must match the selected customer' });
+      }
+    } else {
+      const matches = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .limit(2)
+        .select('id', 'phone', 'first_name');
+      if (!matches.length) return res.status(404).json({ error: 'No customer found for that number' });
+      if (matches.length > 1) {
+        return res.status(409).json({ error: 'That number is on file for more than one customer. Pick the customer from the search first' });
+      }
+      [customer] = matches;
+    }
+    const Moves = require('../services/customer-moves');
+    const move = await Moves.openMoveForCustomer(customer.id, { actorId: req.technicianId || null });
+    const url = await Moves.movingLinkFor(move);
+    return res.json({
+      url: stripSmsUrlScheme(url),
+      customerId: customer.id,
+      moveId: move.id,
+      firstName: String(customer.first_name || '').trim().split(/\s+/)[0] || null,
+    });
+  } catch (err) {
+    logger.error(`moving-link lookup failed (${err?.code || err?.name || 'Error'})`);
+    return res.status(500).json({ error: 'Could not make the moving link' });
+  }
+}
+router.post('/moving-link', requireAdmin, (req, res) => movingLinkHandler(req, res));
+
 // Quick Links review channel 'email' (owner ruling 2026-09-03): a SEND, not
 // a link build — the gate-wrapped engine path emails the ask now and nothing
 // is inserted into the text. strictChannel: the operator chose Email — never
@@ -3779,6 +3858,8 @@ router.get('/link-library', async (req, res) => {
       // Codex #4709 r3 P1: the composer omits "Free consultation" while
       // GATE_LEAD_INSPECTION_LINK is dark.
       consultationLinksEnabled: featureGates.leadInspectionLinkLive(),
+      // GATE_MOVING_FLOW: the composer omits "Moving link" while it is dark.
+      movingLinksEnabled: featureGates.movingFlowLive(),
     });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);

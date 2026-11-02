@@ -143,6 +143,7 @@ const INVOICE_STATUS_TEXT = {
 };
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
+import CustomerMovingCardV2 from "./CustomerMovingCardV2";
 import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
@@ -6167,6 +6168,8 @@ function CustomerProfileOverview({
       {/* GET/PATCH /admin/requests are owner-only: a technician would only
           see a 403 here. */}
       {isAdmin && <CustomerRequestsPanel customerId={customerId} />}
+      {/* GET /admin/customers/:id/moves is requireAdmin and answers enabled:false while GATE_MOVING_FLOW is dark: the card then renders nothing. */}
+      {isAdmin && <CustomerMovingCardV2 customerId={customerId} />}
       {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
       {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
