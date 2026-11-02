@@ -16,7 +16,7 @@
 // own) counts as failed the same way, and its late answer is ignored.
 import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import {
-  ASKS_LOADING_HOLD, ASKS_LOAD_FAILED, NEEDS_PRODUCT_HINT, MAX_ANSWER_TEXT, MAX_REASON_TEXT, NOT_ABOUT_ANSWER, PROBLEM_ANSWERS,
+  ASKS_HOLD, ASKS_HOLD_REPORT_STEP, ASKS_LOADING_HOLD, ASKS_LOAD_FAILED, NEEDS_PRODUCT_HINT, MAX_ANSWER_TEXT, MAX_REASON_TEXT, NOT_ABOUT_ANSWER, PROBLEM_ANSWERS,
   answerTextProblem, asksEyebrow, asksHold, asksItemsFrom, itemLabel, itemWords, orderedChoices, productChoicesFrom, prunedAnswer,
   reasonProblem, reserviceAnswersField,
 } from '../../lib/fast-complete-reservice-asks';
@@ -88,6 +88,8 @@ export function useReserviceAsks({ service, request, rows, readTimeoutMs = ASKS_
   return {
     enabled: on,
     status: load.status,
+    // The block is on screen with items: a sheet's older "They said" box would only repeat the booking words.
+    shows: items.length > 0,
     items,
     answers,
     choices,
@@ -103,7 +105,9 @@ export function useReserviceAsks({ service, request, rows, readTimeoutMs = ASKS_
 // Folds the block's hold into a sheet's own missing-requirement reason: the sheet's reasons come first.
 export const withAsksHold = (reason, asks) => reason || asks?.hold || '';
 // The same for a { reason, ...} hold object (the report flow's): the object is returned as it is unless the block is what holds.
-export const heldByAsks = (missing, asks) => (missing.reason || !asks.hold ? missing : { ...missing, reason: asks.hold });
+// That hold shows on the report step, where the block is not on screen, so it says where to go.
+export const heldByAsks = (missing, asks) => (missing.reason || !asks.hold ? missing
+  : { ...missing, reason: asks.hold === ASKS_HOLD ? ASKS_HOLD_REPORT_STEP : asks.hold });
 
 export default function FastCompleteReserviceAsks({ asks, locked = false }) {
   if (!asks?.enabled) return null;

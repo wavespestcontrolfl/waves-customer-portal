@@ -11,6 +11,8 @@ import { formatETDate } from './timezone';
 export const MAX_ANSWER_TEXT = 200;
 export const MAX_REASON_TEXT = 160;
 export const ASKS_HOLD = 'Answer each item in They told us.';
+// The report flow's report step, where the block is not on screen: the hold says where to go.
+export const ASKS_HOLD_REPORT_STEP = 'Go back to the visit and answer each item in They told us.';
 export const ASKS_LOADING_HOLD = 'Loading what the customer told us…';
 export const ASKS_LOAD_FAILED = 'Could not load what the customer told us.';
 export const NEEDS_PRODUCT_HINT = 'Add the product first.';

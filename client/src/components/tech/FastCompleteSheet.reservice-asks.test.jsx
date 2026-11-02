@@ -206,7 +206,8 @@ describe('the report flow', () => {
     await generate();
     const complete = screen.getByRole('button', { name: 'Complete & send' });
     expect(complete.disabled).toBe(true);
-    expect(screen.getByText(HINT)).toBeTruthy();
+    // The block is on the visit step, so the report step's hold says where to go.
+    expect(screen.getByText('Go back to the visit and answer each item in They told us.')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
     tap(card('Request form · Oct 6'), 'Treated');
@@ -215,7 +216,7 @@ describe('the report flow', () => {
     // The report is still current: the answers are not part of what it was written from.
     fireEvent.click(screen.getByRole('button', { name: 'Back to the report' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
-    expect(screen.queryByText(HINT)).toBeNull();
+    expect(screen.queryByText(/answer each item in They told us/i)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await waitFor(() => expect(request.completes()).toHaveLength(1));
     expect(request.completes()[0].body.reserviceAnswers).toEqual({

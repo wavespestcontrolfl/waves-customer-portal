@@ -33,9 +33,9 @@ const ITEMS = [
   { id: 'text:9', source: 'text', at: '2026-10-08T15:00:00.000Z', text: 'Is it ok to mow?', quoted: true, lead: null, kind: 'question', pests: [] },
 ];
 
-function contextOf() {
+function contextOf({ customerRequest = null } = {}) {
   return {
-    enabled: true, eligible: true, reason: null, service: VISIT, customerRequest: null, products: CATALOG,
+    enabled: true, eligible: true, reason: null, service: VISIT, customerRequest, products: CATALOG,
     methods: [{ value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false }],
     lawnSqft: 6400,
     lastVisit: {
@@ -49,13 +49,13 @@ function contextOf() {
 }
 
 // `asks`: the reservice-asks answer (an object), or a function of the attempt number that returns or throws.
-function makeRequest({ asks = { enabled: true, lane: 'lawn', window: { from: 'a', to: 'b' }, items: ITEMS }, complete = null } = {}) {
+function makeRequest({ asks = { enabled: true, lane: 'lawn', window: { from: 'a', to: 'b' }, items: ITEMS }, complete = null, customerRequest = null } = {}) {
   const calls = [];
   let askReads = 0;
   const request = vi.fn(async (path, options) => {
     calls.push({ path, body: options?.body ? JSON.parse(options.body) : null });
     const bare = path.split('?')[0];
-    if (bare.endsWith('/lawn-reservice/fast-context')) return contextOf();
+    if (bare.endsWith('/lawn-reservice/fast-context')) return contextOf({ customerRequest });
     if (bare.endsWith('/reservice-asks')) {
       askReads += 1;
       return typeof asks === 'function' ? asks(askReads) : asks;
@@ -113,6 +113,17 @@ describe('flag on', () => {
     // 9:30 PM Eastern on Oct 6 (01:30 UTC on the 7th): the label is the Eastern day.
     expect(within(card('Call · Oct 6')).getByText('On your call on Oct 6, you mentioned weeds by the garage')).toBeTruthy();
     expect(within(card('Question · Oct 8')).getByText('“Is it ok to mow?”')).toBeTruthy();
+  });
+
+  test('the older "They said" box is left out while the block shows items, and stays when the read fails', async () => {
+    const said = { text: 'Brown patches by the mailbox', pests: [] };
+    await openSheet(makeRequest({ customerRequest: said }));
+    await screen.findByText('They told us · 3 items');
+    expect(screen.queryByRole('heading', { name: 'They said' })).toBeNull();
+    cleanup();
+    await openSheet(makeRequest({ customerRequest: said, asks: () => { throw Object.assign(new Error('boom'), { status: 500 }); } }));
+    await screen.findByText('Could not load what the customer told us.');
+    expect(screen.getByRole('heading', { name: 'They said' })).toBeTruthy();
   });
 
   test('one item reads "1 item"', async () => {
