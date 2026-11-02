@@ -8480,6 +8480,7 @@ const EstimateConverter = {
               database: invoiceTrx,
               customerId,
               title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
+              serviceTypeLabel: 'Annual prepay',
               lineItems: [{
                 description: prepayManualLabel
                   ? `${prepayLineDescription} — ${prepayManualLabel} applied`
