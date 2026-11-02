@@ -32,6 +32,12 @@ jest.mock('../services/logger', () => ({
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (token === 'tech') {
+      req.technician = { id: 'tech-1', role: 'technician', name: 'Tech One' };
+      req.technicianId = 'tech-1';
+      req.techRole = 'technician';
+      return next();
+    }
     if (token !== 'admin') return res.status(401).json({ error: 'Admin authentication required' });
     req.technician = { id: 'admin-1', role: 'admin' };
     req.technicianId = 'admin-1';
@@ -181,6 +187,21 @@ jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => fa
   gates: {},
   logGateStatus: jest.fn(),
 }));
+// GATE_SMS_LIKE: the like route's database steps are stubbed (their SQL has
+// its own Postgres suite, sms-office-like-postgres.test.js); its rules
+// (likeRefusal, the client fields) stay real. Off by default.
+const mockLikes = { live: false };
+jest.mock('../services/sms-office-like', () => {
+  const real = jest.requireActual('../services/sms-office-like');
+  return {
+    ...real,
+    likesLive: jest.fn(() => mockLikes.live),
+    loadLikeTarget: jest.fn(async () => null),
+    newerThreadMessageExists: jest.fn(async () => false),
+    claimOfficeLike: jest.fn(async () => null),
+    finishOfficeLike: jest.fn(async () => {}),
+  };
+});
 const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => (
   jest.fn().mockImplementation(() => ({
@@ -2488,6 +2509,10 @@ describe('admin communications SMS route', () => {
       });
       expect(body.messages[0]).not.toHaveProperty('metadata');
       expect(body.messages[0]).not.toHaveProperty('responseNeedsResponse');
+      // GATE_SMS_LIKE off: byte-identical, no like fields.
+      expect(body.messages[0]).not.toHaveProperty('officeLike');
+      expect(body.messages[0]).not.toHaveProperty('customerReaction');
+      expect(body).not.toHaveProperty('smsLike');
       expect(body).toMatchObject({
         page: 1,
         limit: 500,
@@ -4256,5 +4281,231 @@ describe('the consultation-link attempt marker (codex #5196 P1)', () => {
     expect(onDispatchAbort).toBeUndefined();
     expect(onDispatchRejected).toBeUndefined();
     expect(insertAttemptSpy).not.toHaveBeenCalled();
+  });
+});
+
+// GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button" option B): the office's
+// like texts a thumbs-up back through the composer's own send handler.
+describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
+  const officeLike = require('../services/sms-office-like');
+  const MESSAGE_ID = 'bbbbbbbb-2222-4222-8222-222222222222';
+  const target = (overrides = {}) => ({
+    id: MESSAGE_ID,
+    direction: 'inbound',
+    body: 'Thanks, see you Tuesday!',
+    createdAt: new Date('2026-11-02T16:15:00Z'),
+    twilioSid: 'SM-in',
+    metadata: {},
+    contactPhone: '+15551234567',
+    ourEndpoint: '+19413187612',
+    peer: '5551234567',
+    recipientCustomerId: null,
+    ...overrides,
+  });
+  const claim = { status: 'sending', token: 'tok-1', by_id: 'admin-1', by_name: 'Adam', at: '2026-11-02T16:16:00.000Z' };
+  const like = (baseUrl, token = 'admin') => fetch(`${baseUrl}/admin/communications/messages/${MESSAGE_ID}/like`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    db.mockImplementation(() => makeUniversalBuilder());
+    mockLikes.live = true;
+    officeLike.loadLikeTarget.mockResolvedValue(target());
+    officeLike.newerThreadMessageExists.mockResolvedValue(false);
+    officeLike.claimOfficeLike.mockResolvedValue(claim);
+  });
+  afterAll(() => { mockLikes.live = false; });
+
+  test('gate off: 404 before any read or write', async () => {
+    mockLikes.live = false;
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(404);
+    });
+    expect(officeLike.loadLikeTarget).not.toHaveBeenCalled();
+    expect(officeLike.claimOfficeLike).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a like sends one thumbs-up through the composer send, then marks the text sent', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-like' });
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body).toEqual({ success: true, officeLike: { status: 'sent', by: 'Adam', at: claim.at } });
+    });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    const sent = sendCustomerMessage.mock.calls[0][0];
+    expect(sent).toMatchObject({ to: '+15551234567', body: '\u{1F44D}', channel: 'sms', entryPoint: 'admin_communications_manual_sms' });
+    expect(officeLike.claimOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, { technicianId: 'admin-1', name: undefined });
+    expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'sent');
+
+    // The provider-boundary check: any newer text since the click stops the send
+    // (no reservation row here: the reply lanes are dark in this suite).
+    expect(typeof sent.providerPreSendCheck).toBe('function');
+    officeLike.newerThreadMessageExists.mockResolvedValueOnce(true);
+    await expect(sent.providerPreSendCheck({ dbi: 'held-trx' })).resolves.toMatchObject({ ok: false, code: 'like_target_changed' });
+    expect(officeLike.newerThreadMessageExists).toHaveBeenLastCalledWith('held-trx', expect.objectContaining({ id: MESSAGE_ID }), { excludeLogIds: [] });
+    await expect(sent.providerPreSendCheck({ dbi: 'held-trx' })).resolves.toEqual({ ok: true });
+  });
+
+  test('with a reply lane armed, the boundary check leaves out exactly this send\'s reservation row', async () => {
+    mockGates.gratitudeActivatedAt = new Date('2026-09-24T12:00:00Z');
+    try {
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        await opts.providerPreSendCheck({ dbi: 'held-trx' });
+        return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-like' };
+      });
+      await withServer(async (baseUrl) => {
+        expect((await like(baseUrl)).status).toBe(200);
+      });
+      expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledTimes(1);
+      expect(officeLike.newerThreadMessageExists).toHaveBeenLastCalledWith(
+        'held-trx', expect.objectContaining({ id: MESSAGE_ID }), { excludeLogIds: ['44444444-4444-4444-8444-444444444444'] },
+      );
+    } finally {
+      mockGates.gratitudeActivatedAt = null;
+    }
+  });
+
+  test('a newer text in the thread refuses the like before any claim or send', async () => {
+    officeLike.newerThreadMessageExists.mockResolvedValue(true);
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe(officeLike.NEWER_MESSAGE_REFUSAL);
+    });
+    expect(officeLike.claimOfficeLike).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['our own text', { direction: 'outbound' }, 'Only a customer text can get a like.'],
+    ['a customer reaction', { body: 'Liked \u201cSee you Tuesday\u201d' }, 'This text is a reaction. It cannot get a like.'],
+    ['a text liked already', { metadata: { office_like: { status: 'sent' } } }, 'This text already has a like.'],
+  ])('%s is refused with 409 and nothing is sent', async (_label, overrides, error) => {
+    officeLike.loadLikeTarget.mockResolvedValue(target(overrides));
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe(error);
+    });
+    expect(officeLike.claimOfficeLike).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a second click loses the claim and sends nothing', async () => {
+    officeLike.claimOfficeLike.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe('This text already has a like.');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a blocked send hands the like back and returns the send error', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SMS_OPTED_OUT', reason: 'Recipient has opted out of SMS' });
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(422);
+      expect((await res.json())).toMatchObject({ error: 'Recipient has opted out of SMS', code: 'SMS_OPTED_OUT' });
+    });
+    expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'not_sent');
+  });
+
+  test('an uncertain provider outcome keeps the like, so a second click cannot send a second thumbs-up', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, deliveryOutcome: 'uncertain' });
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(422);
+    });
+    expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'uncertain');
+  });
+
+  test('a send that throws with no provider outcome keeps the like as uncertain', async () => {
+    sendCustomerMessage.mockRejectedValue(new Error('socket hang up'));
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(500);
+    });
+    expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'uncertain');
+  });
+
+  test('a suppressed send answers 200 with nothing delivered: the like is handed back and the click hears why', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'gate-blocked' });
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(422);
+      expect((await res.json()).error).toBe('The thumbs-up was not sent, so the text has no like.');
+    });
+    expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'not_sent');
+  });
+
+  test.each([
+    ['a real provider send', { status: 200, json: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-1' } }, null, 'sent'],
+    ['a suppressed send', { status: 200, json: { sent: true, providerMessageId: 'owner-silence' } }, null, 'not_sent'],
+    ['a blocked send', { status: 422, json: { sent: false, blocked: true, code: 'SMS_OPTED_OUT' } }, null, 'not_sent'],
+    ['an uncertain outcome', { status: 422, json: { sent: false, retryable: true, deliveryOutcome: 'uncertain' } }, null, 'uncertain'],
+    ['a refusal before any send', { status: 409, json: { error: 'refused', code: 'like_applicant_thread' } }, null, 'not_sent'],
+    ['an error with no provider outcome', null, new Error('socket hang up'), 'uncertain'],
+    ['an error after a definite non-send', null, Object.assign(new Error('rejected'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }), 'not_sent'],
+    ['an error after the provider took it', null, Object.assign(new Error('late'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-2' } }), 'sent'],
+  ])('the send verdict for %s', (_label, reply, err, verdict) => {
+    expect(communicationsRouter._officeLikeSendVerdict(reply, err)).toBe(verdict);
+  });
+
+  test('a job applicant thread refuses the like before any send, and hands the like back', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValueOnce(true);
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('like_applicant_thread');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'not_sent');
+  });
+
+  test('a technician gets the composer\'s own scope answer before any write', async () => {
+    // A text with no customer behind it: 403, as the composer answers.
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl, 'tech');
+      expect(res.status).toBe(403);
+    });
+    // A customer who is not on the technician's route: 404, existence does not leak.
+    officeLike.loadLikeTarget.mockResolvedValue(target({ recipientCustomerId: 'customer-elsewhere' }));
+    db.mockImplementation(() => {
+      const builder = makeUniversalBuilder();
+      builder.whereNotIn = jest.fn(() => builder);
+      return builder;
+    });
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl, 'tech');
+      expect(res.status).toBe(404);
+    });
+    expect(officeLike.claimOfficeLike).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the log carries the office like and customer likes, without the claim token', async () => {
+    db.mockReturnValue(makeQueryBuilder([
+      smsMessageRow({ id: 'in-1', body: 'Thanks!', metadata: { office_like: { ...claim, status: 'sent' } } }),
+      smsMessageRow({ id: 'in-2', body: 'Liked \u201cSee you Tuesday\u201d' }),
+    ]));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.smsLike).toBe(true);
+      expect(body.messages[0].officeLike).toEqual({ status: 'sent', by: 'Adam', at: claim.at });
+      expect(JSON.stringify(body)).not.toContain('tok-1');
+      expect(body.messages[1].customerReaction).toEqual({ emoji: '\u{1F44D}', removed: false, target: 'See you Tuesday' });
+    });
   });
 });
