@@ -474,6 +474,7 @@
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
+ *   GATE_MOVING_FLOW=true (owner 2026-11-02, "a moving email where they can do it": the office can send a customer a moving link by email or text (Customer 360 Moving card, Communications composer). The link opens a plain page at /moving/<token> where the customer types a new address (checked once by Google Address Validation, capped at 10 checks per link per day, the last result reused for 24 hours), adds move-out and move-in dates, and sees a fixed receipt. A submit makes one office item (category moving) and one admin alert. It changes no visit, price, property or plan and sends no message by itself; every email and text starts with a staff click. Strict opt-in, read at call time via movingFlowLive(); off = the public page and its routes answer 404, the admin routes answer 404 (the list answers enabled:false) and the admin buttons are hidden. The owner flips it because it adds a customer page and email. Kill switch: unset.)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -10007,6 +10008,12 @@ function emailDraftFactsLive() {
 function wdoMarkSentOutsideLive() {
   return process.env.GATE_WDO_MARK_SENT_OUTSIDE === 'true';
 }
+// GATE_MOVING_FLOW read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02). On, the moving link, the public
+// /moving/:token page and its routes, and the Customer 360 Moving card work (services/customer-moves.js,
+// routes/moving-public.js). Off = every new public and admin route answers 404 and the admin UI hides the card. Kill = unset.
+function movingFlowLive() {
+  return process.env.GATE_MOVING_FLOW === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -10204,3 +10211,5 @@ module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 module.exports.techSetTextsLive = techSetTextsLive;
 // GATE_EMAIL_DRAFT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.emailDraftFactsLive = emailDraftFactsLive;
+// GATE_MOVING_FLOW reader, on its own line so gate PRs never conflict.
+module.exports.movingFlowLive = movingFlowLive;

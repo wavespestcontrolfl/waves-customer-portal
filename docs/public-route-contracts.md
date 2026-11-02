@@ -6966,6 +6966,37 @@ id, gate off, a non-multipart body (answered by
 `reservicePhotosPreParserGuard` ahead of the shared body parsers), another
 customer's or a non-re-service visit, an ineligible visit — is the generic
 404. Sends nothing to a customer.
+`/api/public/moving/:token` (GET, plus `POST /:token/check` and
+`POST /:token/submit`; the moving page the office sends a customer who is
+moving, by email from the Customer 360 Moving card or by text from the
+Communications composer, always on a staff click). Dark behind
+`GATE_MOVING_FLOW` (strict `'true'`, read per request): off, every route is
+the generic 404 before any DB read. 48-hex token format gate on
+`customer_moves.token`; a malformed, unknown or closed move is the same
+generic 404. Privacy headers (`Cache-Control: private, no-store`,
+`X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
+answer, and the `/moving/<token>` SPA shell gets the sensitive-page headers.
+Router limit 60 req/min per IP; `/check` 6 req/min per IP and `/submit` 10
+req/min per IP on top. GET payload (`services/customer-moves.js`
+`publicMoveView`): `firstName`, the plan's recurring service names, `status`
+(`open` | `submitted`), `moveOutDate` / `moveInDate` (`YYYY-MM-DD` or null),
+`newCity` (only the CITY of a submitted new address), `verdict`
+(`in_area` | `out_of_area` | `unverified` | null) and `addressOnFile`. Never
+the current street address, a phone, an email or money. `/check` takes
+`{ address }` (5-200 chars) and makes one paid Google address check: the
+same text is answered from `customer_moves.last_check` for 24 hours, and a
+link gets at most 10 paid checks per Eastern day (claimed atomically in SQL;
+the 11th is a 429). It answers `{ typed, normalized, verdict }` for the NEW
+address only. `/submit` takes `{ useCheckedAddress, moveOutDate,
+moveInDate }`: the browser never sends an address or a verdict, and
+`useCheckedAddress: true` uses only the address the server last checked for
+this link, read under the move's row lock. It needs a checked address or a
+move-out date; dates must be real and inside 60 days back to 400 days
+ahead. A submit writes one `service_requests` row (`category` `moving`,
+reused and reopened on a resubmit), an `activity_log` row and one admin
+alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
+receipt sentences. It changes no visit, price, property or primary address
+and sends nothing to a customer.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

@@ -3209,6 +3209,49 @@ async function reserviceLinkHandler(req, res) {
 }
 router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
+// POST /api/admin/communications/moving-link  { customerId, phone }
+// Composer helper (owner 2026-11-02, dark behind GATE_MOVING_FLOW): the selected
+// customer's /moving/:token short link for insertion into the SMS body. Same
+// identity rule as /reservice-link: a full 10-digit phone that matches the
+// selected customer. Opens the customer's move if there is none; sends nothing
+// (the operator's own send is the only text). 404 while the gate is dark.
+async function movingLinkHandler(req, res) {
+  try {
+    if (!require('../config/feature-gates').movingFlowLive()) {
+      return res.status(404).json({ error: 'Moving links are not enabled' });
+    }
+    const last10 = fullPhoneLast10(req.body?.phone);
+    if (!last10) {
+      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
+    }
+    const customerId = req.body?.customerId;
+    if (!customerId || !UUID_RE.test(String(customerId))) {
+      return res.status(400).json({ error: 'Pick the customer first' });
+    }
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'phone', 'first_name');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    if (fullPhoneLast10(customer.phone) !== last10) {
+      return res.status(400).json({ error: 'phone must match the selected customer' });
+    }
+    const Moves = require('../services/customer-moves');
+    const move = await Moves.openMoveForCustomer(customer.id, { actorId: req.technicianId || null });
+    const url = await Moves.movingLinkFor(move);
+    return res.json({
+      url: stripSmsUrlScheme(url),
+      customerId: customer.id,
+      moveId: move.id,
+      firstName: String(customer.first_name || '').trim().split(/\s+/)[0] || null,
+    });
+  } catch (err) {
+    logger.error(`moving-link lookup failed: ${err.message}`);
+    return res.status(500).json({ error: 'Could not make the moving link' });
+  }
+}
+router.post('/moving-link', requireAdmin, (req, res) => movingLinkHandler(req, res));
+
 // Quick Links review channel 'email' (owner ruling 2026-09-03): a SEND, not
 // a link build — the gate-wrapped engine path emails the ask now and nothing
 // is inserted into the text. strictChannel: the operator chose Email — never
@@ -3779,6 +3822,8 @@ router.get('/link-library', async (req, res) => {
       // Codex #4709 r3 P1: the composer omits "Free consultation" while
       // GATE_LEAD_INSPECTION_LINK is dark.
       consultationLinksEnabled: featureGates.leadInspectionLinkLive(),
+      // GATE_MOVING_FLOW: the composer omits "Moving link" while it is dark.
+      movingLinksEnabled: featureGates.movingFlowLive(),
     });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);
