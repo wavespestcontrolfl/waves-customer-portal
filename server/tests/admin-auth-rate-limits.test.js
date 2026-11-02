@@ -22,9 +22,11 @@ const { adminAuthenticate } = require('../middleware/admin-auth');
 const router = require('../routes/admin-auth');
 
 describe('Staff auth route rate limits', () => {
-  test('uses IP-only buckets for public reset routes and a versioned Staff bucket for change-password', () => {
-    expect(rateLimit).toHaveBeenCalledTimes(4);
-    const [requestOptions, resetOptions, changeOptions, mfaOptions] = rateLimit.mock.calls.map(([options]) => options);
+  test('uses IP-only buckets for public reset and Google sign-in routes and a versioned Staff bucket for change-password', () => {
+    expect(rateLimit).toHaveBeenCalledTimes(6);
+    const [
+      requestOptions, resetOptions, changeOptions, mfaOptions, googleRedirectOptions, googleFinishOptions,
+    ] = rateLimit.mock.calls.map(([options]) => options);
 
     expect(requestOptions.max).toBe(5);
     expect(resetOptions.max).toBe(10);
@@ -42,6 +44,11 @@ describe('Staff auth route rate limits', () => {
     };
     expect(requestOptions.keyGenerator(publicRequest)).toBe('2001:db8:abcd:12::/64');
     expect(resetOptions.keyGenerator(publicRequest)).toBe('2001:db8:abcd:12::/64');
+    // Sign in with Google: unauthenticated, so an attached token buys no extra bucket.
+    expect(googleRedirectOptions.max).toBe(30);
+    expect(googleFinishOptions.max).toBe(15);
+    expect(googleRedirectOptions.keyGenerator(publicRequest)).toBe('2001:db8:abcd:12::/64');
+    expect(googleFinishOptions.keyGenerator(publicRequest)).toBe('2001:db8:abcd:12::/64');
 
     const staffRequest = {
       ip: '203.0.113.9',

@@ -7470,6 +7470,10 @@ function initScheduledJobs() {
         if (result && result.failed > 0) {
           throw new Error(`ad budget adjustment: ${result.failed} of ${result.evaluated} campaign(s) failed`);
         }
+        // Budgets are already settled; only the gap-rule record was lost.
+        if (result && result.recordFailed) {
+          throw new Error('ad budget adjustment: the gap-rule record was not saved');
+        }
         return result;
       });
     } catch (err) {

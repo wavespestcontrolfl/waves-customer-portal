@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Combine
 import SwiftUI
 import WebKit
@@ -32,12 +33,23 @@ import WebKit
 // reaches the main view's page as a cancelable 'wavesadmin:openlink' event
 // (detail = { url }); a staff page cancels it and opens the link itself.
 //
-// The page side of this contract is client/src/lib/tapToPay.js and
-// client/src/native/wavesAdminPush.js.
+// Sign in with Google: Google refuses OAuth inside a web view, so the sign-in
+// page posts { type: 'googleSignIn', challenge } (challenge = 43 base64url
+// characters) and the app runs the flow in Apple's sign-in sheet
+// (ASWebAuthenticationSession) at /api/admin/auth/google/start?client=ios.
+// The server ends it at wavespay://google-signin?result=<43 base64url chars>
+// or ?error=<reason>, and the app answers the main view's page with
+//   window.dispatchEvent(new CustomEvent('wavesadmin:googlesignin', { detail }))
+// detail = { result } or { error: 'canceled' | 'busy' | 'failed' | <reason> }.
+//
+// The page side of this contract is client/src/lib/tapToPay.js,
+// client/src/native/wavesAdminPush.js and
+// client/src/native/wavesAdminGoogleSignIn.js.
 
 enum Portal {
     static let messageHandler = "wavesAdmin"
     static let resultEvent = "wavesadmin:taptopay"
+    static let googleSignInEvent = "wavesadmin:googlesignin"
 
     static var origin: URL { API.portalOrigin }
     static var startURL: URL { URL(string: "/admin/", relativeTo: origin)!.absoluteURL }
@@ -63,6 +75,114 @@ struct TapToPayResult {
         if let paymentIntentId { d["paymentIntentId"] = paymentIntentId }
         if let message { d["message"] = message }
         return d
+    }
+}
+
+// One Google sign-in in Apple's sign-in sheet. The portal's start route sends
+// the staff member to Google and ends at wavespay://google-signin.
+@MainActor
+final class GoogleSignInSession: NSObject, ASWebAuthenticationPresentationContextProviding {
+    enum Outcome: Equatable {
+        case result(String)
+        case error(String)
+
+        var detail: [String: String] {
+            switch self {
+            case .result(let value): return ["result": value]
+            case .error(let reason): return ["error": reason]
+            }
+        }
+    }
+
+    static let callbackScheme = "wavespay"
+    static let callbackHost = "google-signin"
+
+    // Kept until the sheet ends: the session stops if nothing holds it.
+    private var session: ASWebAuthenticationSession?
+    private weak var anchorView: UIView?
+
+    var isRunning: Bool { session != nil }
+
+    // 43 base64url characters (a SHA-256 digest, unpadded).
+    static func isChallenge(_ value: String) -> Bool {
+        value.utf8.count == 43 && value.utf8.allSatisfy {
+            ($0 >= 0x41 && $0 <= 0x5A) || ($0 >= 0x61 && $0 <= 0x7A)
+                || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x2D || $0 == 0x5F
+        }
+    }
+
+    // 1 to 40 characters of a-z and underscore.
+    private static func isReason(_ value: String) -> Bool {
+        (1...40).contains(value.utf8.count) && value.utf8.allSatisfy {
+            ($0 >= 0x61 && $0 <= 0x7A) || $0 == 0x5F
+        }
+    }
+
+    static func startURL(challenge: String) -> URL? {
+        guard var comps = URLComponents(url: Portal.origin, resolvingAgainstBaseURL: false) else { return nil }
+        comps.path = "/api/admin/auth/google/start"
+        comps.queryItems = [
+            URLQueryItem(name: "client", value: "ios"),
+            URLQueryItem(name: "challenge", value: challenge),
+        ]
+        return comps.url
+    }
+
+    static func outcome(callback url: URL) -> Outcome {
+        guard url.scheme == callbackScheme,
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              comps.host == callbackHost
+        else { return .error("failed") }
+        let items = comps.queryItems ?? []
+        if let result = items.first(where: { $0.name == "result" })?.value, isChallenge(result) {
+            return .result(result)
+        }
+        if let reason = items.first(where: { $0.name == "error" })?.value, isReason(reason) {
+            return .error(reason)
+        }
+        return .error("failed")
+    }
+
+    // Returns false when the sheet could not start; the caller answers "failed".
+    func start(challenge: String, anchor: UIView?, completion: @escaping (Outcome) -> Void) -> Bool {
+        guard let url = Self.startURL(challenge: challenge) else { return false }
+        anchorView = anchor
+        let finish: (URL?, Error?) -> Void = { [weak self] callbackURL, error in
+            // The session ends here, so the next sign-in can start.
+            Task { @MainActor in
+                self?.session = nil
+                if let error {
+                    let canceled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+                    completion(.error(canceled ? "canceled" : "failed"))
+                } else if let callbackURL {
+                    completion(Self.outcome(callback: callbackURL))
+                } else {
+                    completion(.error("failed"))
+                }
+            }
+        }
+        // The app supports iOS 16.7, so the callbackURLScheme form is used
+        // (the Callback form needs iOS 17.4).
+        let session = ASWebAuthenticationSession(
+            url: url, callbackURLScheme: Self.callbackScheme, completionHandler: finish
+        )
+        session.presentationContextProvider = self
+        session.prefersEphemeralWebBrowserSession = false
+        self.session = session
+        guard session.start() else {
+            self.session = nil
+            return false
+        }
+        return true
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        if let window = anchorView?.window { return window }
+        let key = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }
+        return key ?? ASPresentationAnchor()
     }
 }
 
@@ -120,6 +240,7 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     private var offlineView: UIView?
     private var downloads: [ObjectIdentifier: URL] = [:]
     private var flowWatch: AnyCancellable?
+    private let googleSignIn = GoogleSignInSession()
 
     init(app: AppState) {
         self.app = app
@@ -144,6 +265,7 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         case "tapToPay": startPayment(body, from: sender)
         case "prepareReader": prepareReader(from: sender)
         case "registerPush": registerPush(from: sender)
+        case "googleSignIn": startGoogleSignIn(body, from: sender)
         case "badge": StaffAlerts.shared.setBadge((body["count"] as? Int) ?? 0)
         case "signOut": StaffAlerts.shared.signOut()
         default: break
@@ -203,6 +325,30 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         guard page === webView else { return }
         StaffAlerts.shared.onToken = { [weak self] token in self?.deliverPushToken(token) }
         StaffAlerts.shared.register()
+    }
+
+    private func startGoogleSignIn(_ body: [String: Any], from page: WKWebView) {
+        // Only the main view signs in; a popup shares its sign-in.
+        guard page === webView else { return }
+        guard let challenge = body["challenge"] as? String, GoogleSignInSession.isChallenge(challenge) else {
+            return deliverGoogleSignIn(.error("failed"), to: page)
+        }
+        if googleSignIn.isRunning { return deliverGoogleSignIn(.error("busy"), to: page) }
+        let started = googleSignIn.start(challenge: challenge, anchor: page) { [weak self, weak page] outcome in
+            self?.deliverGoogleSignIn(outcome, to: page)
+        }
+        if !started { deliverGoogleSignIn(.error("failed"), to: page) }
+    }
+
+    private func deliverGoogleSignIn(_ outcome: GoogleSignInSession.Outcome, to page: WKWebView?) {
+        guard let page, let url = page.url, Portal.isPortal(url) else { return }
+        page.callAsyncJavaScript(
+            "window.dispatchEvent(new CustomEvent(name, { detail }));",
+            arguments: ["name": Portal.googleSignInEvent, "detail": outcome.detail],
+            in: nil,
+            in: .page,
+            completionHandler: nil
+        )
     }
 
     // A signed-in staff page navigates to the alert's page itself, so its

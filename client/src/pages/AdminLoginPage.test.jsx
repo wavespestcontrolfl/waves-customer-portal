@@ -4,12 +4,20 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 
 vi.mock('../hooks/useFeatureFlag', () => ({
   refetchFlags: vi.fn(async () => ({})),
 }));
+// Sign in with Google is off unless a test turns it on; its status request
+// would otherwise take the first reply each test queues.
+vi.mock('../native/wavesAdminGoogleSignIn', async (importOriginal) => ({
+  ...(await importOriginal()),
+  fetchGoogleSignInEnabled: vi.fn(async () => false),
+}));
 
 import AdminLoginPage from './AdminLoginPage';
+import { fetchGoogleSignInEnabled } from '../native/wavesAdminGoogleSignIn';
 
 function renderPage(entry = '/admin/login') {
   return render(
@@ -140,5 +148,115 @@ describe('AdminLoginPage two-step sign-in', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
     expect(await screen.findByText('Change password page')).toBeInTheDocument();
     expect(store.get('waves_admin_token')).toBe('jwt-mfa');
+  });
+});
+
+describe('AdminLoginPage Sign in with Google', () => {
+  let store;
+  const RESULT = 'r'.repeat(43);
+  const SECRET = 's'.repeat(43);
+
+  function renderAt(entry) {
+    return render(
+      <MemoryRouter initialEntries={[entry]}>
+        <Routes>
+          <Route path="/admin/login" element={<AdminLoginPage />} />
+          <Route path="/admin" element={<div>Admin home</div>} />
+          <Route path="/admin/customers" element={<div>Customers page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  beforeEach(() => {
+    store = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: (key) => store.get(key) ?? null,
+      setItem: (key, value) => store.set(key, String(value)),
+      removeItem: (key) => store.delete(key),
+    });
+    sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.mocked(fetchGoogleSignInEnabled).mockResolvedValue(false);
+    delete window.webkit;
+  });
+
+  it('shows the button only when the server says Google sign-in is on', async () => {
+    renderAt('/admin/login');
+    await waitFor(() => expect(fetchGoogleSignInEnabled).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: 'Sign in with Google' })).not.toBeInTheDocument();
+    cleanup();
+    vi.mocked(fetchGoogleSignInEnabled).mockResolvedValue(true);
+    renderAt('/admin/login');
+    expect(await screen.findByRole('button', { name: 'Sign in with Google' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Email address')).toBeInTheDocument();
+  });
+
+  it('finishes the sign-in Google sent back and returns to the saved page', async () => {
+    sessionStorage.setItem('waves_google_signin_secret', SECRET);
+    sessionStorage.setItem('waves_google_signin_next', '/admin/customers');
+    const fetchMock = vi.fn(async () => reply(200, { token: 'jwt-google', user: { id: 'a', role: 'admin' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderAt(`/admin/login#google_result=${RESULT}`);
+    expect(await screen.findByText('Customers page')).toBeInTheDocument();
+    expect(store.get('waves_admin_token')).toBe('jwt-google');
+    expect(fetchMock).toHaveBeenCalledWith('/api/admin/auth/google/finish', expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ result: RESULT, verifier: SECRET });
+    expect(sessionStorage.getItem('waves_google_signin_secret')).toBeNull();
+  });
+
+  it('asks for the authenticator code after Google for an enrolled account', async () => {
+    sessionStorage.setItem('waves_google_signin_secret', SECRET);
+    vi.stubGlobal('fetch', vi.fn(async () => reply(200, { mfaRequired: true, challengeToken: 'challenge-g' })));
+    renderAt(`/admin/login#google_result=${RESULT}`);
+    expect(await screen.findByLabelText('Authentication code')).toBeInTheDocument();
+    expect(store.has('waves_admin_token')).toBe(false);
+  });
+
+  it('says why Google refused, and a page without the secret cannot finish', async () => {
+    renderAt('/admin/login#google_error=not_allowed');
+    expect(await screen.findByRole('alert')).toHaveTextContent('not linked to an active Waves staff account');
+    cleanup();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    renderAt(`/admin/login#google_result=${RESULT}`);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your Google sign-in expired');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('inside Waves Admin 1.7 asks the app for Google and signs in with its answer', async () => {
+    vi.mocked(fetchGoogleSignInEnabled).mockResolvedValue(true);
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone) Mobile/15E148 WavesAdmin/1.7');
+    const postMessage = vi.fn((message) => {
+      setTimeout(() => window.dispatchEvent(new CustomEvent('wavesadmin:googlesignin', { detail: { result: RESULT } })), 0);
+      return message;
+    });
+    window.webkit = { messageHandlers: { wavesAdmin: { postMessage } } };
+    const fetchMock = vi.fn(async () => reply(200, { token: 'jwt-app', user: { id: 'a', role: 'admin' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderAt('/admin/login');
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Google' }));
+    expect(await screen.findByText('Admin home')).toBeInTheDocument();
+    expect(postMessage).toHaveBeenCalledWith({ type: 'googleSignIn', challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
+    const { verifier } = JSON.parse(fetchMock.mock.calls[0][1].body);
+    // The server checks SHA-256(verifier), base64url, against the challenge.
+    expect(postMessage.mock.calls[0][0].challenge).toBe(createHash('sha256').update(verifier).digest('base64url'));
+    expect(store.get('waves_admin_token')).toBe('jwt-app');
+  });
+
+  it('hides the button in Waves Admin before 1.7, which has no Google step', async () => {
+    vi.mocked(fetchGoogleSignInEnabled).mockResolvedValue(true);
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone) Mobile/15E148 WavesAdmin/1.6');
+    window.webkit = { messageHandlers: { wavesAdmin: { postMessage: vi.fn() } } };
+    vi.mocked(fetchGoogleSignInEnabled).mockClear();
+    renderAt('/admin/login');
+    expect(await screen.findByLabelText('Email address')).toBeInTheDocument();
+    expect(fetchGoogleSignInEnabled).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Sign in with Google' })).not.toBeInTheDocument();
   });
 });

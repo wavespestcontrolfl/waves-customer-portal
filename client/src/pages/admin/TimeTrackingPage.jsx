@@ -3072,6 +3072,9 @@ const EMPTY_TECH_FORM = {
   // GATE_TECH_MOVE_SWITCH: a technician added now cannot move visits until the
   // owner ticks this (owner 2026-10-25).
   canMoveVisits: false,
+  // GATE_STAFF_GOOGLE_SIGNIN: the company Google account this person signs
+  // in with. Saved through its own route after the profile save.
+  googleEmail: "",
   autoFlipEnabled: true,
   // Payroll profile
   payRate: "",
@@ -3156,6 +3159,34 @@ function describeStartPoint(tech) {
   return `Starts: home, ${[street, city].filter(Boolean).join(", ")}`;
 }
 
+// Team tab "Google sign-in" field (GATE_STAFF_GOOGLE_SIGNIN): the company
+// Google account this person signs in with, and whether its first sign-in
+// happened.
+function GoogleSigninField({ enabled, tech, value, onChange }) {
+  if (!enabled) return null;
+  const hint = tech && tech.google_linked
+    ? "In use. A change or a clear signs this person out."
+    : tech && tech.google_email
+      ? "Not used yet. The first Google sign-in links it."
+      : "Optional. A company Google account for Sign in with Google.";
+  return (
+    <div>
+      <label htmlFor="tech-form-google" style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>
+        Google sign-in
+      </label>
+      <input
+        id="tech-form-google"
+        type="email"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="john@wavespestcontrol.com"
+        style={sInput}
+      />
+      <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>{hint}</div>
+    </div>
+  );
+}
+
 export function TeamTab({ showToast }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3175,6 +3206,7 @@ export function TeamTab({ showToast }) {
   // GATE_TERRITORY_READOUT: the server marks the roster response; off, the Territories
   // card never renders and nothing is fetched.
   const [territoryReadoutEnabled, setTerritoryReadoutEnabled] = useState(false);
+  const [googleSigninEnabled, setGoogleSigninEnabled] = useState(false);
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
@@ -3255,6 +3287,7 @@ export function TeamTab({ showToast }) {
       setWorkDaysEnabled(res.workDaysEnabled === true);
       setServiceLinesEnabled(res.serviceLinesEnabled === true);
       setTerritoryReadoutEnabled(res.territoryReadoutEnabled === true);
+      setGoogleSigninEnabled(res.googleSigninEnabled === true);
       setLoadFailed(false);
     } catch {
       if (request !== loadRequestRef.current) return;
@@ -3268,6 +3301,23 @@ export function TeamTab({ showToast }) {
     load();
   }, [load]);
 
+  const editingTech = techs.find((t) => t.id === editingId);
+
+  // A refused link (another domain, already linked) is reported; the profile
+  // save above it stands.
+  const saveGoogleSignin = async (techId) => {
+    const next = form.googleEmail.trim();
+    if (!googleSigninEnabled || next.toLowerCase() === (editingTech?.google_email || "").toLowerCase()) return;
+    try {
+      await adminFetch(`/admin/timetracking/technicians/${techId}/google-signin`, {
+        method: "PUT",
+        body: JSON.stringify({ googleEmail: next || null }),
+      });
+    } catch (e) {
+      showToast("Saved, but not the Google sign-in: " + ((e && e.data && e.data.error) || (e && e.message) || "Unknown error"));
+    }
+  };
+
   const handleSave = async () => {
     if (!form.name.trim()) return;
     if (workDaysEnabled && form.workDays.length === 0) {
@@ -3277,7 +3327,7 @@ export function TeamTab({ showToast }) {
     setSaving(true);
     try {
       if (editingId) {
-        const { startMode, startText, startPoint, workDays, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, googleEmail: _googleEmail, ...rest } = form;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
           body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays), startPoint: buildStartPointPayload(form) }),
@@ -3292,13 +3342,15 @@ export function TeamTab({ showToast }) {
             ? `Technician updated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
             : "Technician updated",
         );
+        await saveGoogleSignin(editingId);
       } else {
-        const { startMode, startText, startPoint, workDays, ...rest } = form;
-        await adminFetch("/admin/timetracking/technicians", {
+        const { startMode, startText, startPoint, workDays, googleEmail: _googleEmail, ...rest } = form;
+        const created = await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
           body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays) }),
         });
         showToast("Technician added");
+        await saveGoogleSignin(created.technician.id);
       }
       setShowAdd(false);
       setEditingId(null);
@@ -3421,6 +3473,7 @@ export function TeamTab({ showToast }) {
       // Unknown (an older response without the column) stays unsent, so an
       // ordinary edit can never switch moves off by accident.
       canMoveVisits: typeof tech.can_move_visits === "boolean" ? tech.can_move_visits : undefined,
+      googleEmail: tech.google_email || "",
       autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
       payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
       hireDate: tech.hire_date ? String(tech.hire_date).split("T")[0] : "",
@@ -3572,6 +3625,12 @@ export function TeamTab({ showToast }) {
                 style={sInput}
               />{" "}
             </div>{" "}
+            <GoogleSigninField
+              enabled={googleSigninEnabled}
+              tech={editingTech}
+              value={form.googleEmail}
+              onChange={(googleEmail) => setForm((f) => ({ ...f, googleEmail }))}
+            />
             <div>
               {" "}
               <label htmlFor="tech-form-employment" style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>

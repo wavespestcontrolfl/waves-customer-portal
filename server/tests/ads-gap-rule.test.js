@@ -49,7 +49,7 @@ const mockDb = jest.fn((table) => {
     return b;
   }
   if (table === 'scheduled_services') {
-    windowQuery = { reservationClause: [] };
+    windowQuery = { reservationClause: [], selects: [] };
     const b = {
       whereBetween: jest.fn((col, range) => { windowQuery.range = range; return b; }),
       whereNotIn: jest.fn((col, list) => { windowQuery.excluded = list; return b; }),
@@ -60,8 +60,7 @@ const mockDb = jest.fn((table) => {
         return b;
       }),
       groupBy: jest.fn(() => b),
-      select: jest.fn(() => b),
-      countDistinct: jest.fn((arg) => { windowQuery.distinct = arg; return b; }),
+      select: jest.fn((arg) => { windowQuery.selects.push(arg); return b; }),
       then: (resolve, reject) => Promise.resolve(stopRows).then(resolve, reject),
     };
     return b;
@@ -265,12 +264,17 @@ describe('getGapWindow', () => {
     expect(BudgetManager.getTechCountForArea).toHaveBeenCalledWith('general', '2026-10-30', { workDays: true });
   });
 
-  test('uses ONE grouped query that counts distinct customers on live route stops', async () => {
+  test('uses ONE grouped query that counts physical stops on live route stops', async () => {
     await BudgetManager.getGapWindow(NOW, DEFAULTS);
     expect(mockDb.mock.calls.filter(([t]) => t === 'scheduled_services')).toHaveLength(1);
     expect(windowQuery.range).toEqual(['2026-10-30', '2026-11-05']);
     expect(windowQuery.excluded).toEqual(NOT_A_ROUTE_STOP_STATUSES);
-    expect(windowQuery.distinct).toBe('customer_id as stops');
+    // Physical stops, the dispatcher's way: a visit_id group is one stop; with no
+    // visit_id, the same customer + window_start (NULL for a placeholder) is one.
+    const stopsSql = windowQuery.selects.find((arg) => typeof arg === 'string' && arg.includes('AS stops'));
+    expect(stopsSql).toMatch(/COUNT\(DISTINCT CASE/);
+    expect(stopsSql).toMatch(/WHEN visit_id IS NOT NULL THEN 'v:' \|\| visit_id::text/);
+    expect(stopsSql).toMatch(/'c:' \|\| customer_id::text \|\| ':' \|\| COALESCE\(window_start::text, ''\)/);
     expect(windowQuery.reservationClause).toEqual(['null:reservation_expires_at', 'or:reservation_expires_at>']);
   });
 
@@ -289,6 +293,7 @@ describe('adjustBudgets: gate off', () => {
     expect(touchedTables.has('scheduled_services')).toBe(false);
     expect(touchedTables.has('system_settings')).toBe(false);
     expect(out).toEqual({ evaluated: 1, changed: 1, failed: 0 });
+    expect(out).not.toHaveProperty('recordFailed');
   });
 });
 
@@ -318,6 +323,30 @@ describe('adjustBudgets: shadow', () => {
     const history = JSON.parse(settingsStore['ads.gap_rule.history']);
     expect(history).toEqual([{ at: NOW.toISOString(), mode: 'shadow', total_open: 59, decision: 'base' }]);
     expect(logger.info).toHaveBeenCalledWith('[ads-gap-rule shadow] open 59 in 2026-10-30..2026-11-05 -> base');
+  });
+
+  test('a failed record sets recordFailed and leaves the settled budgets alone', async () => {
+    campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5' })];
+    stopRows = stopsEveryDay(0);
+    jest.spyOn(BudgetManager, 'recordGapRun').mockRejectedValue(new Error('settings write failed'));
+    const out = await BudgetManager.adjustBudgets();
+
+    expect(out).toEqual({ evaluated: 1, changed: 1, failed: 0, recordFailed: true });
+    expect(mockUpdateBudget).toHaveBeenCalledTimes(1); // only the old rule's push
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('could not record the decision: settings write failed'));
+  });
+
+  test('a failed evaluation also sets recordFailed', async () => {
+    campaignRows = [];
+    jest.spyOn(BudgetManager, 'evaluateGapRule').mockRejectedValue(new Error('window query failed'));
+    const out = await BudgetManager.adjustBudgets();
+    expect(out).toEqual({ evaluated: 0, changed: 0, failed: 0, recordFailed: true });
+  });
+
+  test('a successful record adds no recordFailed key', async () => {
+    campaignRows = [];
+    const out = await BudgetManager.adjustBudgets();
+    expect(out).toEqual({ evaluated: 0, changed: 0, failed: 0 });
   });
 
   test('history keeps the last 120 entries', async () => {
@@ -357,7 +386,7 @@ describe('adjustBudgets: shadow', () => {
     campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5' })];
     BudgetManager.getTechCountForArea.mockRejectedValue(new Error('tech query down'));
     const out = await BudgetManager.adjustBudgets();
-    expect(out).toEqual({ evaluated: 1, changed: 1, failed: 0 });
+    expect(out).toEqual({ evaluated: 1, changed: 1, failed: 0, recordFailed: true });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('could not record the decision'));
   });
 });
