@@ -155,11 +155,12 @@ const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
 // is still the live pest lane (reServiceLanes) — with no live pest lane the
 // paid row books as before.
 const PLAN_COVERED_PEST_ONE_TIME_KEYS = new Set(['cockroach_control', 'one_time_pest_control']);
-// Any affirmative "German" in the call text keeps the paid row (codex #7480
-// r2 + r3: a word-distance bound kept missing phrasings such as "the roaches
-// we keep finding are the German kind"). This check only runs once the call
-// already resolved to a roach row (pick or keyword), so a stray "German" can
-// only keep a paid booking paid, never grant a free one.
+// Any "German" anywhere in the call text keeps the paid row, negated or not
+// (codex #7480 r2-r4: a word-distance bound and then the negation strip each
+// missed a phrasing, e.g. "not bugs just German roaches"). This check only
+// runs once the call already resolved to a roach row (pick or keyword), so a
+// stray or negated "German" can only keep a paid booking paid, which is what
+// every roach call did before the plan-covered exception.
 const GERMAN_ROACH_RE = /\bgerman\b/i;
 
 function isPlanCoveredPestRow(row) {
@@ -169,7 +170,7 @@ function isPlanCoveredPestRow(row) {
 // German roach stays a paid specialty cleanout even for a plan customer, so an
 // affirmative German-roach mention switches the plan-covered exception off.
 function mentionsGermanRoach(haystack) {
-  return GERMAN_ROACH_RE.test(String(haystack || '').replace(NEGATED_ROACH_RE, ' '));
+  return GERMAN_ROACH_RE.test(String(haystack || ''));
 }
 
 // A keyword match anchors the real paid row UNLESS every matched row is a

@@ -2057,6 +2057,12 @@ describe('plan-covered pest one-time rows → free Pest Control Re-Service (owne
       expect(resolve({ requested_service: words }, ['pest'])).toBe('cockroach_control');
       expect(resolve({ specific_service_name: 'Cockroach Treatment Service', requested_service: words }, ['pest'])).toBe('cockroach_control');
     }
+    // codex #7480 r4: a contrastive or negated German mention on a call that
+    // resolved to the roach row keeps it paid (the negation strip no longer
+    // runs for this check).
+    for (const words of ['not bugs just German roaches, need a re-service', 'no German roaches, I think, but need a re-service']) {
+      expect(resolve({ specific_service_name: 'Cockroach Treatment Service', requested_service: words }, ['pest'])).toBe('cockroach_control');
+    }
   });
 
   test('dual-lane customer (pest + lawn) on a roach pick: the pick pins the pest lane', () => {
