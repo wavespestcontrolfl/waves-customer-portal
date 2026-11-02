@@ -56,6 +56,26 @@ quote in `detail`. `server/services/admin-alert-names.js` has the helpers (`fitA
 long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
 alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
 
+**The bell names the customer and says what to do** (owner 2026-11-02, `GATE_ALERT_EXPLAINER`, admin logins
+only). Many rows still never name the customer (an older raw emitter, an ops check), and a long body cut into
+`detail` read back as raw check output. Two things cover every row, whatever its emitter wrote:
+- The bell list serves the customer a row is about (`customer: { id, name }`), read by
+  `server/services/admin-alert-customer.js` from the record behind it: a customer id (subject, top level,
+  trigger payload, SMS thread, a customer page link), else the visit, estimate, invoice, lead or call it names,
+  in one query per table for the page. An estimate or lead with no customer keeps its own name. The bell shows
+  "Customer: Name" under the title unless the title already carries the whole name.
+- "Show full text" becomes **What to do**: what happened, one to three steps, and whether the owner or Claude
+  fixes it. `server/services/admin-alert-explainer.js` asks an AI for it the first time an admin opens it
+  (`POST /api/admin/notifications/:id/explain`, `TEXT_POLICIES.routineAnswer`, lane `alert_explainer`), from the
+  row's title, body, detail and page (phone numbers, emails and street addresses masked, as in every bell body) and
+  the customer's name, and saves it on the row (`notifications.explainer`)
+  for the content version it was written from. The summary is not part of the version, so saving it never
+  fences a Done or a tap; a row whose text changes gets a new one. A stamped `who` decides the fixer. When both
+  providers fail the panel shows the row's own words, marked as such, nothing is saved, and the row is not asked
+  about again for a minute. The original text
+  stays one tap further ("Show original text"). Emitters change nothing: a good headline and why still matter,
+  because the bell is read before anything is opened.
+
 ### A ninth part: Buttons (optional; owner 2026-10-29)
 
 A row may carry up to three buttons, so a person can act from the bell without opening the page.
@@ -304,7 +324,8 @@ launcher opens one Claude tab per `broken` queue row.
 | Retention: a bell row idle 30 days, and an `fyi` row idle 7 days, is marked done (never deleted, read state kept). Not built: the 14-day Monday summary for an unread `needs-you` row | `runAdminAlertRetention` in `server/services/admin-alert-retention.js`, nightly 1:32 AM ET, gate `GATE_ALERT_RETENTION` (`shadow` records one audit_log summary, `true` expires); undo with `server/scripts/undo-admin-alert-retention.js` | enforced when the gate is `true` |
 | Catalog (owner 2026-10-29, step D1): every `TRIGGER_REGISTRY` type declares a `rule`: area, severity, who, and either `doneWhen` + `closedBy` (the module that marks its rows done) or `expiryDays` (30 for needs-you and broken, 7 for fyi; only the retention sweep closes it). Severity `fyi` replaces the old `informational` flag. In watch mode a muted alert is countable: when the bell policy silences an admin row, one `audit_log` row per Eastern day per distinct alert records its category, trigger key and digit-free title stem, and for a composer alert its declared area, severity and who, with its kind (the dedupe key's class prefix). Nothing is refused | `server/tests/admin-alert-catalog-contract.test.js` fails a type with no valid rule; `auditBellPolicyMuted` in `server/services/audit-log.js`, called at both silence points (`NotificationService.create`, and `triggerNotification`, which checks the policy itself and returns before create), action `notification.bell_policy.muted` | contract enforced; watch mode behind `GATE_ALERT_CATALOG=watch` (dark by default) |
 | Customer declaration (owner 2026-10-29, "small" E1): a registry `rule` or a composed spec may declare `contact: true` (a customer reached us) or `promise: true` (a follow-up we owe a customer): only `true`, never both, and only on a `needs-you` type for a person. A declared alert rings whatever the bell policy's later steps say (a site's explicit `bell: false` still wins), and a customer's failed invoice payment (`bill_payment_error`) rings beside `payment_failed` | `bellAllowed` in `server/services/notification-bell-policy.js` (step 1b), fed by `triggerNotification` (the type's rule; its bell write then carries `bell: true`) and `NotificationService.create` (the row's metadata); the shape is checked by `server/tests/admin-alert-catalog-contract.test.js` and `composeAdminAlert` | enforced while `GATE_CUSTOMER_ALERTS_RING` is on (dark by default) |
-| Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
+| Body over 110 chars moves to `detail`, read from the bell's "Show full text" (with `GATE_ALERT_EXPLAINER` on: "What to do", the original under "Show original text") | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
+| The bell names the customer a row is about, and "What to do" explains it in plain words (section 2) | `server/services/admin-alert-customer.js`, `server/services/admin-alert-explainer.js`, `POST /api/admin/notifications/:id/explain`, admin role only | enforced while `GATE_ALERT_EXPLAINER` is on (dark by default) |
 | Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
