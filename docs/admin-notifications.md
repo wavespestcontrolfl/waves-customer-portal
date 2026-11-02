@@ -122,18 +122,33 @@ Kinds today:
   row about one caller. The owner's ruling for this kind under rule 3: a tap places a call, and only
   after the owner presses 1 on their own phone does it ring the customer. The row names one record in
   `args`: its call (`callLogId`, or `callSid` for an urgent Sandy caller raised during the call) on a
-  missed call, a voicemail, a promise chaser, a repeat caller and a Sandy hand-off; its customer
-  (`customerId`) on a landline, a lead's call-back bells, a text call-back follow-up and a lead's bare
-  CALL text. The tap reads that record again and runs the handler behind
+  missed call, a voicemail, a promise chaser, a repeat caller and a Sandy hand-off; its lead
+  (`leadId`) on a new-lead alert (owner 2026-11-02, "A Call button on new website-lead alerts"),
+  else its customer (`customerId`) on a web form whose lead row failed, a landline, a lead's
+  call-back bells, a text call-back follow-up and a lead's bare CALL text, else an unknown sender's
+  text (`smsSid`) on a new-lead alert for a text to a website number. The tap reads that record
+  again and runs the handler behind
   `POST /api/admin/communications/call` in-process (`placeCallFromAlert`) with the body the linked
   page's own button sends: the Call Log's "Call back" (the caller's number, else the linked customer's,
-  `source: 'call-log-callback'`, `relatedCallId`), or the customer page's Call (`customerIdHint`). The
+  `source: 'call-log-callback'`, `relatedCallId`), the Leads page's Call Now (the lead's number, its
+  customer as `customerIdHint`), the customer page's Call (`customerIdHint`), or the Communications
+  thread's Call back (the sender's number). The
   step's own refusal (a callback already ringing) is shown as it reads. The row stays open (rule 5).
   A row that had a close button keeps it after Call (**Called back** on a missed call and a text
   call-back follow-up, **Handled** on the CALL text); that button is the `close_note` step itself and
   follows `GATE_ALERT_CLOSE_BUTTONS`, so each button is served while its own gate is on
   (`visibleItems`). A text thread row takes the buttons of the text it shows: the CALL text's
   emission carries Call, the next text's emission drops it, and an older late text keeps the row's own.
+  **On the phone push** (owner 2026-11-02, "A Call button on the phone push notification itself"):
+  a registry alert whose row carries Call pushes to admin-role logins with `apnsCategory: 'WAVES_CALL'`
+  (APNs `aps.category`) and `callAction: '<row id>.<version>'` (`pushCallAction`, the version the bell
+  serves right after the write). The Waves Admin iPhone app (1.8 and later) registers that category
+  with a **Call** action, shown when the notification is pressed or pulled down. The action hands
+  `<row id>.<version>` to the open staff page as a cancelable `wavesadmin:alertcall` window event, or,
+  with no page to take it, loads `/admin?alertCall=<row id>.<version>`; either way the bell runs that
+  row's Call through `POST /api/admin/notifications/:id/actions/call` with that version (only inside
+  the app; the address loses the param first). A row that changed since the push answers 409 and the
+  bell shows its list. Alerts raised through `raiseAdminAlert` ring the bell only and send no push.
 
 ## 3. Never in a headline or a why
 

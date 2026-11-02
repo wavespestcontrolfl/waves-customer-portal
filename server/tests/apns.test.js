@@ -32,6 +32,15 @@ describe('apns provider token', () => {
 });
 
 describe('buildApnsPayload', () => {
+  test('apnsCategory becomes aps.category (the Waves Admin Call action); without it there is none', () => {
+    const p = buildApnsPayload({ title: 'Missed call', body: 'x', url: '/admin', apnsCategory: 'WAVES_CALL', callAction: 'row.v' });
+    expect(p.aps.category).toBe('WAVES_CALL');
+    expect(p.callAction).toBe('row.v');
+    expect(p).not.toHaveProperty('apnsCategory');
+    expect(buildApnsPayload({ body: 'x' }).aps).not.toHaveProperty('category');
+    expect(buildApnsPayload({ body: 'x', apnsCategory: '' }).aps).not.toHaveProperty('category');
+  });
+
   test('maps title/body/url/badge into aps + top-level data', () => {
     const p = buildApnsPayload({ title: 'Visit complete', body: 'Your report is ready', url: '/reports/123', badge: 2 });
     expect(p.aps.alert).toEqual({ title: 'Visit complete', body: 'Your report is ready' });

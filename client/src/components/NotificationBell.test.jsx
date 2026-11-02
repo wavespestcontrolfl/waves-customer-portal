@@ -1256,3 +1256,92 @@ describe('NotificationBell admin row buttons (actions)', () => {
     }
   });
 });
+
+// The Call on the Waves Admin push: the app opens the portal with ?alertCall=<row id>.<version> and the bell runs that
+// row's Call through the row-button POST (server alert-call-button.js pushCallAction).
+describe('NotificationBell push Call (Waves Admin app)', () => {
+  const ROW = '00000000-0000-4000-8000-0000000000a1';
+  const VERSION = '0123456789abcdef0123456789abcdef';
+  const posts = () => global.fetch.mock.calls.filter(([, o]) => o?.method === 'POST');
+  const inApp = () => { window.webkit = { messageHandlers: { wavesAdmin: { postMessage: vi.fn() } } }; };
+  const setup = (postResponse) => {
+    global.fetch = vi.fn(async (url, options = {}) => {
+      if (options.method === 'POST') return postResponse();
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 0 });
+      if (String(url).includes('/push/status')) return jsonResponse({ available: true });
+      return jsonResponse({ notifications: [] });
+    });
+  };
+  beforeEach(() => {
+    inApp();
+    window.history.replaceState(null, '', `/admin?tab=x&alertCall=${ROW}.${VERSION}#top`);
+  });
+  afterEach(() => {
+    delete window.webkit;
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('runs the row\'s Call once, shows the answer in the open panel, and leaves the address', async () => {
+    setup(() => ({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }));
+    render(<NotificationBell type="admin" />);
+    expect(await screen.findByRole('status')).toHaveTextContent('Calling your phone now. Press 1 to connect.');
+    expect(posts()).toHaveLength(1);
+    const [url, options] = posts()[0];
+    expect(url).toBe(`/api/admin/notifications/${ROW}/actions/call`);
+    expect(JSON.parse(options.body)).toEqual({ version: VERSION });
+    expect(window.location.search).toBe('?tab=x');
+    expect(window.location.hash).toBe('#top');
+    // A second bell on the page finds nothing left to run.
+    render(<NotificationBell type="admin" />);
+    await act(async () => {});
+    expect(posts()).toHaveLength(1);
+  });
+
+  it('while the page is open, the app\'s Call event runs once and is cancelled, so the app loads nothing', async () => {
+    window.history.replaceState(null, '', '/admin');
+    setup(() => ({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }));
+    render(<NotificationBell type="admin" />);
+    await act(async () => {});
+    expect(posts()).toHaveLength(0);
+    const send = (value) => {
+      const event = new CustomEvent('wavesadmin:alertcall', { detail: { value }, cancelable: true });
+      let notTaken;
+      act(() => { notTaken = window.dispatchEvent(event); });
+      return notTaken;
+    };
+    expect(send(`${ROW}.${VERSION}`)).toBe(false);
+    expect(await screen.findByRole('status')).toHaveTextContent('Calling your phone now. Press 1 to connect.');
+    expect(posts()).toHaveLength(1);
+    expect(JSON.parse(posts()[0][1].body)).toEqual({ version: VERSION });
+    // A value that is not a row and version is left for the app.
+    expect(send('not-a-row')).toBe(true);
+    expect(posts()).toHaveLength(1);
+  });
+
+  it('a changed row says so; any other failure says the call did not start', async () => {
+    setup(() => ({ ok: false, status: 409, json: async () => ({ error: 'changed' }) }));
+    render(<NotificationBell type="admin" />);
+    expect(await screen.findByRole('status')).toHaveTextContent('That alert changed — the list was refreshed.');
+    cleanup();
+    window.history.replaceState(null, '', `/admin?alertCall=${ROW}.${VERSION}`);
+    setup(() => ({ ok: false, status: 500, json: async () => ({}) }));
+    render(<NotificationBell type="admin" />);
+    expect(await screen.findByRole('status')).toHaveTextContent('Couldn’t start that call. Open the alert to call.');
+  });
+
+  it('outside the app nothing runs and the address keeps the param; a malformed value runs nothing', async () => {
+    delete window.webkit;
+    setup(() => ({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'x' }) }));
+    render(<NotificationBell type="admin" />);
+    await act(async () => {});
+    expect(posts()).toHaveLength(0);
+    expect(window.location.search).toContain('alertCall=');
+    cleanup();
+    inApp();
+    window.history.replaceState(null, '', '/admin?alertCall=not-a-row');
+    render(<NotificationBell type="admin" />);
+    await act(async () => {});
+    expect(posts()).toHaveLength(0);
+    expect(window.location.search).toBe('');
+  });
+});

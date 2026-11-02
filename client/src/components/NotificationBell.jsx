@@ -162,6 +162,25 @@ function DoneButton({ onDone, color, tall }) {
 // Reopen and row-button paths.
 const CHANGED_NOTE = 'That alert changed \u2014 the list was refreshed.';
 
+// The Waves Admin push's Call (server alert-call-button.js pushCallAction), as "<row id>.<version>". While a staff
+// page is open, the app sends it as a cancelable 'wavesadmin:alertcall' window event (detail = { value }); the bell
+// cancels it, so the app does not load a page. Otherwise the app loads ?alertCall=<value>, and the first bell on the
+// page takes it out of the address before anything runs, so a second bell, a reload or Back never calls again.
+const ALERT_CALL_EVENT = 'wavesadmin:alertcall';
+const ALERT_CALL_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([0-9a-f]{32})$/i;
+const CALL_FAILED_NOTE = 'Couldn\u2019t start that call. Open the alert to call.';
+function takeAlertCall() {
+  let params;
+  try { params = new URLSearchParams(window.location.search); } catch { return null; }
+  const value = params.get('alertCall');
+  if (value === null) return null;
+  params.delete('alertCall');
+  const rest = params.toString();
+  window.history.replaceState(window.history.state, '', `${window.location.pathname}${rest ? `?${rest}` : ''}${window.location.hash}`);
+  const match = ALERT_CALL_RE.exec(value);
+  return match ? { id: match[1], version: match[2] } : null;
+}
+
 // Buttons the server set on an open persisted admin row (`actions`: an array of
 // { id, label, prompt? }). Never on a `live:` row or a customer bell.
 function actionsFor(n, type) {
@@ -649,6 +668,34 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     if (typeof d?.message === 'string' && d.message) setActionNote(d.message);
     return 'done';
   };
+
+  // The push's Call, inside the Waves Admin app only: the same POST as the row's Call button, on the row and version
+  // the push showed. The panel opens with the server's answer and the list read again.
+  useEffect(() => {
+    if (type !== 'admin' || !isWavesAdminApp()) return undefined;
+    const runCall = ({ id, version }) => {
+      setOpen(true);
+      loadNotifications();
+      requestJson(`${basePath}/${encodeURIComponent(id)}/actions/call`, { method: 'POST', body: JSON.stringify({ version }) })
+        .then((d) => d?.success === false ? CALL_FAILED_NOTE : (typeof d?.message === 'string' && d.message ? d.message : CALL_FAILED_NOTE))
+        .catch((err) => {
+          if (err?.status !== 409) return CALL_FAILED_NOTE;
+          if (err.data?.error === 'changed') return CHANGED_NOTE;
+          return typeof err.data?.message === 'string' && err.data.message ? err.data.message : 'That alert was already handled.';
+        })
+        .then((note) => { setActionNote(note); loadNotifications(); });
+    };
+    const fromAddress = takeAlertCall();
+    if (fromAddress) runCall(fromAddress);
+    const onAppCall = (event) => {
+      const match = event.defaultPrevented ? null : ALERT_CALL_RE.exec(String(event.detail?.value || ''));
+      if (!match) return;
+      event.preventDefault();
+      runCall({ id: match[1], version: match[2] });
+    };
+    window.addEventListener(ALERT_CALL_EVENT, onAppCall);
+    return () => window.removeEventListener(ALERT_CALL_EVENT, onAppCall);
+  }, []);
 
   const doneSeqRef = useRef(0);
   // more: append the page after the last one read (keyset cursor), so every

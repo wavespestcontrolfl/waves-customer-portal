@@ -681,6 +681,45 @@ describe('triggerNotification bell outcome', () => {
       : table === 'notification_preferences' ? [{ admin_user_id: 'admin-1', trigger_key: 'job_complete', bell_enabled: true, push_enabled: true, sound_enabled: true }]
         : []);
 
+  // The Call on the Waves Admin push (alert-call-button.js pushCallAction): the row this emission wrote names
+  // itself on admin-role pushes only; a technician's push of the same tech-visible alert carries no Call.
+  test('the push carries the written row\'s Call for admins only', async () => {
+    const ROW = '00000000-0000-4000-8000-0000000000a9';
+    const callButton = require('../services/alert-call-button');
+    const spy = jest.spyOn(callButton, 'pushCallAction').mockResolvedValue({ callAction: `${ROW}.${'c'.repeat(32)}`, apnsCategory: 'WAVES_CALL' });
+    try {
+      db.mockImplementation((table) => tableMock(table === 'technicians'
+        ? [{ id: 'admin-1', role: 'admin' }, { id: 'tech-1', role: 'technician' }] : []));
+      NotificationService.notifyAdmin.mockResolvedValueOnce({ id: ROW });
+      const PushService = require('../services/push-notifications');
+      PushService.sendToAdminUsers.mockClear();
+      await triggerNotification('customer_voicemail_callback', { name: 'Test Caller', phone: '+19415550100', callLogId: '00000000-0000-4000-8000-0000000000d1' });
+      expect(spy).toHaveBeenCalledWith(ROW);
+      const toUser = PushService.sendToAdminUsers.mock.calls[0][1];
+      expect(toUser('admin-1')).toMatchObject({ callAction: `${ROW}.${'c'.repeat(32)}`, apnsCategory: 'WAVES_CALL' });
+      expect(toUser('tech-1')).not.toHaveProperty('callAction');
+      expect(toUser('tech-1')).not.toHaveProperty('apnsCategory');
+      // No row written (push-only retry): no Call is looked up.
+      spy.mockClear();
+      await triggerNotification('customer_missed_call', { name: 'Test Caller', callLogId: 'call-1' }, { pushOnly: true });
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a new-lead alert carries Call for its lead, else the customer, else the sender\'s text', () => {
+    const LEAD = '00000000-0000-4000-8000-0000000000e2';
+    const CUSTOMER = '00000000-0000-4000-8000-0000000000c2';
+    const SID = `SM${'0123456789abcdef'.repeat(2)}`;
+    const callArgs = (p) => TRIGGER_REGISTRY.new_lead.build(p).alert?.buttons?.items[0].args;
+    expect(callArgs({ name: 'Pat Sample', leadId: LEAD, customerId: CUSTOMER })).toEqual({ leadId: LEAD });
+    // A web form whose lead row failed sends the customer id as leadId.
+    expect(callArgs({ name: 'Pat Sample', leadId: CUSTOMER, customerId: CUSTOMER })).toEqual({ customerId: CUSTOMER });
+    expect(callArgs({ title: 'New text from example.com', twilioSid: SID, phone: '+19415550100' })).toEqual({ smsSid: SID });
+    expect(TRIGGER_REGISTRY.new_lead.build({ title: 'New lead from van wrap number', phone: '+19415550100' }).alert).toBeUndefined();
+  });
+
   test('a quietByDefault trigger with no preference row writes no bell and sends no push', async () => {
     db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
     const result = await triggerNotification('job_complete', { techName: 'Adam' });
