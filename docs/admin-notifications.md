@@ -323,7 +323,11 @@ Everything else stays with the owner. One tap (`POST /api/admin/notifications/:i
 version the bell served like Done) moves the row into Claude's queue: Activity-only, `who = 'claude'`, `claudeQueue` =
 `sent-to-claude`, severity `broken` if it was broken and `needs-you` otherwise, and a `sentToClaude` stamp with when, who
 sent it, the customer it is about (read from the record, `admin-alert-customer.js`), the plain-words summary the owner
-saw, and the row's own who and severity before the send. A reviewed check still names its customer in the tab. While the
+saw, and the row's own who and severity before the send. What a Claude tab reads is inert data (Codex security review):
+the stamp's `alert` is the row's title, body and detail with phones, emails and street addresses masked and the customer's
+name replaced by `[customer]`; the stamped name keeps only letters, spaces, apostrophes, hyphens and periods (at most four
+words, 40 characters), since a customer sets their own name; the summary is masked the same way. `needs-me` shows a sent row
+through that copy, and the launcher's tab gets only it. A reviewed check still names its customer, in that form. While the
 row is open, a refresh of the same alert updates its text but keeps it in Claude's queue (`keepSentToClaude` in
 `admin-alert-routing.js`); a refresh that rings after it was closed brings it back to the bell without the stamp. The
 write takes the alert's dedupe lock, so a refresh in flight can never undo the send. On the owner's Mac, the

@@ -128,8 +128,21 @@ function inferredArea(row) {
 // A row the owner sent from the bell ("Send to Claude") is marked `sent`: the Mac launcher gives it its own terminal tab.
 const sentMark = (meta) => (meta.claudeQueue === SENT_TO_CLAUDE_CLASS ? { sent: true } : {});
 
-function mapAlertRow(row) {
-  const meta = parseMeta(row.metadata);
+// A sent row is read through the inert copy its send stamped (admin-alert-send-to-claude.js: the customer's name masked,
+// phones, emails and addresses masked), never through its own words, so Claude's queue never shows a customer's free text.
+// Only the fields this read carries are replaced (the first pass reads no body or detail).
+function sentAlertView(row, meta) {
+  const alert = meta.claudeQueue === SENT_TO_CLAUDE_CLASS ? meta.sentToClaude?.alert : null;
+  if (!alert || typeof alert !== 'object') return row;
+  const shown = { ...row, title: String(alert.title ?? '') };
+  if ('body' in row) shown.body = alert.body ?? null;
+  if ('detail' in row) shown.detail = alert.detail ?? null;
+  return shown;
+}
+
+function mapAlertRow(stored) {
+  const meta = parseMeta(stored.metadata);
+  const row = sentAlertView(stored, meta);
   // Composed only with ALL its parts, a valid allowlisted subject included:
   // raiseAdminAlert keeps the other fields when it drops an invalid subject,
   // and such a row is still partly inferred (derived).
@@ -251,13 +264,16 @@ async function withText(page, rowsById) {
 // is on, or when the caller asks (`customers: true`: ops/agents/needs-me.js, which runs with the database's settings
 // only and so never sees the portal's gates); otherwise the items are as before.
 async function withCustomers(page, rowsById, asked) {
-  if (asked !== true && !require('./admin-alert-send-to-claude').sendToClaudeLive()) return page;
+  const { sendToClaudeLive, inertName } = require('./admin-alert-send-to-claude');
+  if (asked !== true && !sendToClaudeLive()) return page;
   const rows = page.filter((item) => item.kind === 'alert').map((item) => rowsById.get(String(item.id))).filter(Boolean);
   if (!rows.length) return page;
   const customers = await customersForAlerts(db, rows);
   return page.map((item) => {
     const customer = item.kind === 'alert' ? customers.get(String(item.id)) : null;
-    return customer ? { ...item, customer } : item;
+    // The name as inert data (letters only, at most four words): a customer sets their own name.
+    const name = customer ? inertName(customer.name) : '';
+    return name ? { ...item, customer: { id: customer.id, name } } : item;
   });
 }
 

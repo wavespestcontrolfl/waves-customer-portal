@@ -64,6 +64,36 @@ const CHECK_CLASSES = Object.freeze([
   'first_application_sibling_divergence:', // first-application-sibling-split.js: first-application invoices disagree
 ]);
 
+// What a Claude tab reads about a sent alert is inert data (Codex security review on #7498): a customer sets their own name,
+// and a record's text can carry a phone, an email or an address, so none of it reaches a terminal session as free text.
+const NAME_MAX_WORDS = 4;
+const NAME_MAX_CHARS = 40;
+const TEXT_MAX = Object.freeze({ title: 200, body: 500, detail: 4000, summary: 300 });
+
+// A customer's name reduced to letters, marks, spaces, apostrophes, hyphens and periods: at most four words, 40 characters.
+function inertName(name) {
+  const kept = String(name ?? '').normalize('NFKC').replace(/[^\p{L}\p{M} '.-]/gu, ' ').replace(/\s+/g, ' ').trim();
+  return kept.split(' ').slice(0, NAME_MAX_WORDS).join(' ').slice(0, NAME_MAX_CHARS).trim();
+}
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const redact = (text) => require('./notification-triggers').__private.redactSensitiveText(text);
+
+// One alert text as inert data: phones, emails and street addresses are masked as in every bell body; then the customer's
+// name (whole, then each word of three or more letters, longest first, as whole words) becomes "[customer]"; control
+// characters go; the length is capped. Null stays null.
+function inertText(text, name, max) {
+  if (text === null || text === undefined || text === '') return text ?? null;
+  const raw = String(name ?? '').trim();
+  const parts = [...new Set([raw, ...raw.split(/\s+/)])].filter((p) => p.length >= 3).sort((x, y) => y.length - x.length);
+  let out = redact(String(text));
+  for (const part of parts) {
+    out = out.replace(new RegExp(`(?<![\\p{L}\\p{M}])${escapeRegExp(part)}(?![\\p{L}\\p{M}])`, 'giu'), '[customer]');
+  }
+  out = out.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ');
+  return out.length > max ? `${out.slice(0, max - 1)}\u2026` : out;
+}
+
 const metaOf = (value) => {
   if (typeof value === 'string') {
     try { return JSON.parse(value) || {}; } catch { return {}; }
@@ -109,10 +139,12 @@ function sendToClaudeLive() {
   try { return require('../config/feature-gates').alertSendToClaudeLive?.() === true; } catch { return false; }
 }
 
-// The fields a sent row carries. `was` keeps the row's own who and severity for the record. An fyi row becomes work:
-// the owner asked for it to be worked.
+// The fields a sent row carries. `alert` is the inert copy of the row's text a Claude tab and needs-me read instead of the
+// row's own words; `customer` and `summary` are inert too. `was` keeps the row's own who and severity for the record. An
+// fyi row becomes work: the owner asked for it to be worked.
 function sentPatch(row, { by, customer, summary, at = new Date() }) {
   const meta = metaOf(row.metadata);
+  const name = customer?.name || '';
   return {
     feed: 'activity',
     who: 'claude',
@@ -121,8 +153,16 @@ function sentPatch(row, { by, customer, summary, at = new Date() }) {
     sentToClaude: {
       at: at.toISOString(),
       by: by == null ? null : String(by),
-      customer: customer ? { id: customer.id || null, name: customer.name } : null,
-      summary: summary ? { happened: summary.happened, steps: summary.steps } : null,
+      customer: customer ? { id: customer.id || null, name: inertName(name) } : null,
+      alert: {
+        title: inertText(row.title, name, TEXT_MAX.title),
+        body: inertText(row.body, name, TEXT_MAX.body),
+        detail: inertText(row.detail, name, TEXT_MAX.detail),
+      },
+      summary: summary ? {
+        happened: inertText(summary.happened, name, TEXT_MAX.summary),
+        steps: (summary.steps || []).map((step) => inertText(step, name, TEXT_MAX.summary)),
+      } : null,
       was: { who: meta.who ?? null, severity: meta.severity ?? null },
     },
   };
@@ -154,4 +194,7 @@ async function sendAdminAlertToClaude(id, { version, by, role, technicianId = nu
   return { status: 200, body: { sent: true, message: 'Sent to Claude. A terminal tab opens for it within about 10 minutes.' } };
 }
 
-module.exports = { sendAdminAlertToClaude, sendRefusal, sendToClaudeLive, sentPatch, CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES };
+module.exports = {
+  sendAdminAlertToClaude, sendRefusal, sendToClaudeLive, sentPatch, inertName, inertText,
+  CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES,
+};
