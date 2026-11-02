@@ -3048,7 +3048,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
     : 0;
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
-    { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
+    { icon: 'chat', label: 'Text us', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
     { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${referralReward} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
@@ -3129,17 +3129,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
           </button>
         </div>
 
-        {/* 2-up on phones: four columns squeezed the chips to ~66px on
-            320-390px viewports. */}
-        <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
-          {quickActions.map((item) => (
-            <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
-              <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.15 }}>{item.label}</div>
-              {!compact && <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{item.sub}</div>}
-            </button>
-          ))}
-        </div>
       </section>
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
@@ -3309,6 +3298,20 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
             ))}
           </div>
         </section>
+      </div>
+
+      {/* The next visit and its Reschedule lead and the shortcuts follow
+          (owner pick 1A, UI audit 2026-11-02): above it, they pushed
+          Reschedule under the phone's bottom bar. 2-up on phones: four
+          columns squeezed the chips to ~66px on 320-390px viewports. */}
+      <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10 }}>
+        {quickActions.map((item) => (
+          <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
+            <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.15 }}>{item.label}</div>
+            {!compact && <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{item.sub}</div>}
+          </button>
+        ))}
       </div>
 
       {mistingSystem && <MistingSystemCard system={mistingSystem} cardStyle={card} muted={muted} />}
@@ -17768,7 +17771,7 @@ export default function PortalPage() {
     // cancelled account or a contact session keeps Call / Text only.
     ...(cancelledAccount || contactSession ? [] : [
       { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
-      { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
+      { icon: 'bot', label: 'Ask Waves AI', action: () => setShowChat(true) },
     ]),
   ];
   // Rate-the-app: inside the native shell an https store URL is a webview
