@@ -1240,7 +1240,10 @@ function allSkippedRefusal({ skippedGrouped, skippedCollective, skippedUnchanged
     ? { error: 'Every selected stop is already on that date — nothing to move' }
     : { error: 'Every movable stop\'s window has already passed today — pick a later window or a future date' };
   const refusal = anyKind && !skippedUnchanged.length && !skippedElapsed.length ? skippedKindsRefusal(byKind) : plain;
-  return { ...refusal, ...skippedMoveGaps(skippedGrouped, skippedCollective) };
+  // GATE_IB_SERIES_MOVE (gap #22): a recurring-plan visit moves on its own card, which lists the whole plan.
+  const seriesHint = refusal === plain || !byKind.collective.length || !require('../../config/feature-gates').ibSeriesMoveLive() ? ''
+    : ' Move each recurring-plan visit on its own with reschedule_appointment: its card lists every later visit that moves with it.';
+  return { ...refusal, ...(seriesHint ? { error: `${refusal.error}${seriesHint}` } : {}), ...skippedMoveGaps(skippedGrouped, skippedCollective) };
 }
 
 

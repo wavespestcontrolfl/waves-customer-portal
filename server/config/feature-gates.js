@@ -5614,6 +5614,10 @@ const gates = {
   // replays the Dispatch cancel handler. Ships DARK; also needs GATE_IB_CANCEL_APPOINTMENT. For logGateStatus only;
   // the canonical call-time reader is ibCancelWithEffectsLive() below.
   ibCancelWithEffects: process.env.GATE_IB_CANCEL_WITH_EFFECTS === 'true',
+  // Intelligence Bar move of a recurring-plan visit together with its later visits (gap #22): the card lists every
+  // visit's old and new date and Confirm runs the Dispatch board's own staff move. Ships DARK; also needs
+  // GATE_ADMIN_COLLECTIVE_MOVE. For logGateStatus only; the call-time reader is ibSeriesMoveLive() below.
+  ibSeriesMove: process.env.GATE_IB_SERIES_MOVE === 'true',
   // Admin customer Activity timeline (read-only). For logGateStatus only; the
   // route reads customerActivityTimelineLive() at call time.
   customerActivityTimeline: process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true',
@@ -7765,6 +7769,14 @@ function ibCancelWithEffectsLive() {
     && process.env.GATE_IB_CANCEL_WITH_EFFECTS === 'true';
 }
 
+// GATE_IB_SERIES_MOVE read at CALL time, strict `=== 'true'`, dark by default. On (with collective moves on): the bar's
+// reschedule_appointment moves a recurring-plan visit with its later visits through a card that lists each visit's
+// old and new date, and Confirm runs the Dispatch board's staff move (admin-dispatch.js planVisitMoveForStaff). Off:
+// the bar refuses that move (collective_move_unsupported) exactly as before.
+function ibSeriesMoveLive() {
+  return process.env.GATE_IB_SERIES_MOVE === 'true';
+}
+
 // GATE_CUSTOMER_ACTIVITY_TIMELINE read at CALL time — strict `=== 'true'`, dark
 // by default. The canonical reader for GET /api/admin/customers/:id/activity
 // (routes/admin-customers.js); the admin panel hides itself on the route's
@@ -9031,6 +9043,7 @@ function stockCountAwareUsageLive() {
 
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
+module.exports.ibSeriesMoveLive = ibSeriesMoveLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 module.exports.reviewNameMatchMode = reviewNameMatchMode;
 module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;

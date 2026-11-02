@@ -2005,7 +2005,7 @@ describe('caller wiring (source)', () => {
     expect(disp).toContain("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0");
     expect(read('../services/rebooker.js')).toContain('await markSeriesCleanupDone(seriesMoveId, cleanupOk);');
     expect(fs.existsSync(path.join(__dirname, '../models/migrations/20260828000032_series_moves_cleanup_done_at.js'))).toBe(true);
-    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule', 'call_makeup'];");
+    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule', 'call_makeup', 'intelligence_bar'];");
     expect(fx).not.toContain('operatorInitiated: true');
     expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
     const reb = read('../services/rebooker.js');
@@ -2073,14 +2073,17 @@ describe('caller wiring (source)', () => {
     expect(moveIdx).toBeGreaterThan(policyIdx);
   });
 
-  test('the IB reschedule tool refuses a gated cadence date move instead of moving one row (until its series path lands)', () => {
+  test('the IB reschedule tool never moves one row of a gated cadence date move: it hands it to the plan mover (GATE_IB_SERIES_MOVE) or refuses', () => {
     const src = read('../services/intelligence-bar/tools.js');
     const fn = src.indexOf('async function rescheduleAppointment(');
+    const handOver = src.indexOf('return rescheduleSeriesFromBar(input, actionContext, appt, dateStr);', fn);
     const refuse = src.indexOf("code: 'collective_move_unsupported'", fn);
     const write = src.indexOf('scheduled_date: dateStr,', fn);
     expect(refuse).toBeGreaterThan(fn);
     expect(refuse).toBeLessThan(write);
-    expect(src.slice(fn, refuse)).toContain('movesAsSeries(appt, dateStr) && dateStr !== oldDateStr');
+    expect(handOver).toBeGreaterThan(fn);
+    expect(handOver).toBeLessThan(refuse);
+    expect(src.slice(fn, handOver)).toContain('movesAsSeries(appt, dateStr) && dateStr !== oldDateStr');
   });
 
   test('rain-out fallback and the customer web single branch opt out; the edit modal intercepts BEFORE its per-row edit', () => {
