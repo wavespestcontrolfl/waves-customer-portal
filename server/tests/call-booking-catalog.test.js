@@ -1994,6 +1994,25 @@ describe('plan-covered pest one-time rows → free Pest Control Re-Service (owne
     expect(resolve(INCIDENT, ['lawn'])).toBe('cockroach_control');
   });
 
+  // codex #7480 r1: keyword-only roach wording has no pick to pin the lane,
+  // so a lawn-only customer must not get a free lawn callback for roaches.
+  test('keyword-only roach re-treatment from a lawn-only customer books the paid cockroach row', () => {
+    const roachOnly = { requested_service: 'roach re-treatment' };
+    expect(resolve(roachOnly, ['lawn'], { coarseServiceLabel: null })).toBe('cockroach_control');
+    expect(resolve(roachOnly, ['lawn'], { coarseServiceLabel: 'Waves Appointment' })).toBe('cockroach_control');
+    expect(resolve(roachOnly, ['lawn'], { coarseServiceLabel: 'Lawn Care' })).toBe('cockroach_control');
+    expect(resolve(roachOnly, ['pest', 'lawn'], { coarseServiceLabel: null })).toBe('pest_re_service');
+  });
+
+  test('a lawn plan pick with roach re-service wording keeps the keyword block', () => {
+    const lawnPlan = { id: 'svc-lawn-plan', service_key: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', short_name: 'Lawn Care', category: 'lawn_care', billing_type: 'recurring', pricing_type: 'variable', base_price: null, default_duration_minutes: 45 };
+    const r = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: lawnPlan.name, requested_service: 'roach re-service' },
+      services: [...SERVICES, lawnPlan], reServices: RE_SERVICES, reServiceLanes: ['pest', 'lawn'], coarseServiceLabel: null,
+    });
+    expect(r?.service_key).toBe('lawn_care_monthly');
+  });
+
   test('a lane-incompatible coarse label keeps the paid pick', () => {
     expect(resolve(INCIDENT, ['pest'], { coarseServiceLabel: 'Mosquito Control' })).toBe('cockroach_control');
   });

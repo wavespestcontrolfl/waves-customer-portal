@@ -169,10 +169,21 @@ function mentionsGermanRoach(haystack) {
 
 // A keyword match anchors the real paid row UNLESS every matched row is a
 // plan-covered pest row (and no German roach): then the re-service override
-// may still run, and if it declines the keyword row stands as before.
-function keywordRowsBlockReService(keywordRows, haystack) {
+// may still run, and if it declines the keyword row stands as before. That
+// override is pest work, so it runs toward the pest lane only (codex #7480
+// r1): a pick pinned to another lane (a lawn plan row) keeps the block.
+function keywordRowsBlockReService(keywordRows, haystack, pickPlanLane) {
   if (keywordRows.length === 0) return false;
-  return keywordRows.some((row) => !isPlanCoveredPestRow(row)) || mentionsGermanRoach(haystack);
+  return keywordRows.some((row) => !isPlanCoveredPestRow(row))
+    || mentionsGermanRoach(haystack)
+    || (!!pickPlanLane && pickPlanLane !== 'pest');
+}
+
+// The re-service override behind the keyword gate: a blocking keyword row
+// keeps the paid row; plan-covered roach wording with no pick pins the pest lane.
+function keywordGatedReServiceRow({ keywordRows, pickPlanLane, ...overrideArgs }) {
+  if (keywordRowsBlockReService(keywordRows, overrideArgs.haystack, pickPlanLane)) return null;
+  return reServiceOverrideRow({ ...overrideArgs, pickPlanLane: pickPlanLane || (keywordRows.length > 0 ? 'pest' : null) });
 }
 const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?=\\s*$|\\s*[.;!?]|\\s*[,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|\\s*[^a-z\\s.;!?,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b)|\\s+(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|revisit(?=\\s*$|\\s*[.;!?]|\\s*[,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|\\s*[^a-z\\s.;!?,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b)|\\s+(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
 const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
@@ -480,13 +491,14 @@ function resolveCallBookingCatalogService({
   // ("rodent inspection re-visit") anchors the real specialty row, never a
   // free re-service (codex #3222 r1 P2). Roach wording is the one exception
   // (keywordRowsBlockReService): a live-pest-lane customer's roach re-service
-  // is the plan's free callback. If the override declines, the keyword row
-  // stands exactly as before.
+  // is the plan's free callback, pinned to the pest lane (a lawn-only
+  // customer's roach call never becomes a lawn callback). If the override
+  // declines, the keyword row stands exactly as before.
   const keywordRows = matchingKeywordRows(haystack, services);
   const keywordRow = keywordRows[0] || null;
 
-  const reServiceRow = keywordRowsBlockReService(keywordRows, haystack) ? null : reServiceOverrideRow({
-    extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane,
+  const reServiceRow = keywordGatedReServiceRow({
+    keywordRows, extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane,
   });
   if (reServiceRow) return reServiceRow;
 
