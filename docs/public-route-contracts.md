@@ -997,7 +997,9 @@ Visits handed to the customer by Quick Move (owner 2026-11-01; the hand-off is
 behind `GATE_QUICKMOVE_CUSTOMER_PICK`, but everything below is keyed on the
 column and is NOT gated). Quick Move's "let the customer pick a day" parks a
 recurring plan visit with no window at a placeholder date about a week out and
-sets `scheduled_services.customer_pick_by` (timestamptz: 8 PM ET the next day).
+sets `scheduled_services.customer_pick_by` (timestamptz: 24 hours after the
+hand-off text, rounded up to the quarter hour; owner 2026-11-02, before which
+it was 8 PM ET the next day).
 For a row with `customer_pick_by` set:
 - **Not refused for having no time.** The self-serve notice rule
   (`services/scheduling/self-serve-notice.js visitInsideMoveNoticeWindow`)
@@ -1051,7 +1053,8 @@ read from `scheduled_services.customer_pick_by`, not behind
 set and no `window_start` (handed to the customer, waiting) carries
 `customerPick: { pickBy, pickByLabel, deadlinePassed, originalDate,
 originalWindowStart, reasonCode }`: `pickBy` is the marker as an ISO instant,
-`pickByLabel` its ET wording ("Wed, Nov 4 at 8 PM"), `deadlinePassed` is
+`pickByLabel` its ET wording ("Wed, Nov 4 at 8 PM", "Wed, Nov 4 at 11:15 AM";
+the minutes show only when not :00), `deadlinePassed` is
 `now >= pickBy`, and the other three come from the visit's newest hand-off
 `reschedule_log` row, the row with `notes = 'customer_pick'` (`original_date`,
 `original_window`'s start as `HH:MM`, and the Quick Move reason code in
