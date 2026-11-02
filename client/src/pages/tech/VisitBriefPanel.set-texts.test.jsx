@@ -63,7 +63,7 @@ describe('VisitBriefPanel — set texts', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(`Sent: ${SENT_BODY}`);
     // The Last reply card reads again after a send.
     expect(replyCalls(request)).toHaveLength(2);
-    expect(replyCalls(request)[1][0]).toBe(`/tech/line/replies?scheduledServiceId=${SERVICE.id}`);
+    expect(replyCalls(request)[1][0]).toBe(`/tech/line/replies?scheduledServiceIds=${SERVICE.id}`);
   });
 
   it('a declined confirm sends nothing; a refusal shows inline', async () => {
@@ -90,6 +90,17 @@ describe('VisitBriefPanel — set texts', () => {
     const card = await screen.findByTestId('set-text-reply');
     expect(card).toHaveTextContent('Reply from Pat Sample · 10:04 AM (1 photo)');
     expect(card).toHaveTextContent('Unlocked it, go ahead');
+    // A customer often answers twice: Check again stays on the card.
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check again' })); });
+    expect(replyCalls(request)).toHaveLength(2);
+  });
+
+  it('a grouped stop asks about all its visits, so the card holds when the lead member finishes', async () => {
+    const SIBLING = { ...SERVICE, id: '44444444-4444-4444-8444-444444444444', serviceType: 'Lawn Care' };
+    const request = makeRequest();
+    const stop = { key: 'row:1', isVisit: false, services: [SERVICE, SIBLING], primary: SERVICE, liveCount: 2 };
+    await act(async () => { render(<VisitBriefPanel stop={stop} detail={detail} techLine={{ ...LINE, setTexts: OPTIONS }} request={request} />); });
+    expect(replyCalls(request)[0][0]).toBe(`/tech/line/replies?scheduledServiceIds=${encodeURIComponent(`${SERVICE.id},${SIBLING.id}`)}`);
   });
 
   it('an answer that could belong to another visit is not shown', async () => {

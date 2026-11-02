@@ -499,7 +499,7 @@ describe('GET /replies', () => {
 
   test('is not there while the gate is off', async () => {
     techSetTextsLive.mockReturnValue(false);
-    const r = await call('get', '/replies', { query: { scheduledServiceId: VISIT } });
+    const r = await call('get', '/replies', { query: { scheduledServiceIds: VISIT } });
     expect(r.statusCode).toBe(404);
     expect(setTextReply).not.toHaveBeenCalled();
   });
@@ -508,15 +508,44 @@ describe('GET /replies', () => {
     primeVisit();
     const found = { setText: { kind: 'gate_locked', label: 'Back gate locked', sentAt: '2026-11-02T14:00:00Z' }, reply: { body: 'Unlocked!', receivedAt: '2026-11-02T14:03:00Z', mediaCount: 0 }, ambiguous: false };
     setTextReply.mockResolvedValueOnce(found);
-    const r = await call('get', '/replies', { query: { scheduledServiceId: VISIT } });
+    const r = await call('get', '/replies', { query: { scheduledServiceIds: VISIT } });
     expect(r.statusCode).toBe(200);
     expect(r.body).toEqual(found);
-    expect(setTextReply).toHaveBeenCalledWith(db, { customerId: 'c1', customerPhone: '+19415550100', lineNumber: LINE.number, visitId: VISIT });
+    expect(setTextReply).toHaveBeenCalledWith(db, { customerId: 'c1', customerPhone: '+19415550100', lineNumber: LINE.number, visitIds: [VISIT] });
+  });
+
+  test('a grouped stop sends all its visit ids; every one must be in scope and the same customer\'s', async () => {
+    const SIBLING = '44444444-4444-4444-8444-444444444444';
+    primeVisit();
+    let r = await call('get', '/replies', { query: { scheduledServiceIds: `${VISIT},${SIBLING},${VISIT}` } });
+    expect(r.statusCode).toBe(200);
+    expect(setTextReply).toHaveBeenLastCalledWith(db, expect.objectContaining({ visitIds: [VISIT, SIBLING] }));
+    // A second customer's visit in the list is refused.
+    setTextReply.mockClear();
+    const customers = [{ id: 'c1', first_name: 'Pat', phone: '(941) 555-0100' }, { id: 'c2', first_name: 'Sam', phone: '(941) 555-0111' }];
+    db.mockImplementation((table) => {
+      const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain) };
+      chain.first = jest.fn(async () => (table === 'scheduled_services'
+        ? { id: VISIT, customer_id: 'c1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) }
+        : customers.shift()));
+      return chain;
+    });
+    r = await call('get', '/replies', { query: { scheduledServiceIds: `${VISIT},${SIBLING}` } });
+    expect(r.statusCode).toBe(400);
+    expect(setTextReply).not.toHaveBeenCalled();
+  });
+
+  test('no ids, or more than one stop\'s worth, is a 400', async () => {
+    primeVisit();
+    expect((await call('get', '/replies', { query: {} })).statusCode).toBe(400);
+    const many = Array.from({ length: 7 }, (_, i) => `1111111${i}-1111-4111-8111-111111111111`).join(',');
+    expect((await call('get', '/replies', { query: { scheduledServiceIds: many } })).statusCode).toBe(400);
+    expect(setTextReply).not.toHaveBeenCalled();
   });
 
   test('a visit outside the caller\'s scope reads nothing', async () => {
     primeVisit({ visit: { id: VISIT, customer_id: 'c1', technician_id: 'tech-2', status: 'confirmed' } });
-    const r = await call('get', '/replies', { query: { scheduledServiceId: VISIT } });
+    const r = await call('get', '/replies', { query: { scheduledServiceIds: VISIT } });
     expect(r.statusCode).toBe(403);
     expect(setTextReply).not.toHaveBeenCalled();
   });

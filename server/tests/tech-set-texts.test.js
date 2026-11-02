@@ -34,9 +34,13 @@ function fakeConn(rows = {}) {
   conn.calls = calls;
   return conn;
 }
+const SIBLING = '44444444-4444-4444-8444-444444444444';
+const SID = `SM${'b'.repeat(32)}`;
 const send = (over = {}) => ({
   sent_at: new Date('2026-11-02T15:00:00Z'),
   metadata: { set_text_kind: 'gate_locked', scheduled_service_id: VISIT, fromNumber: LINE },
+  provider_message_id: SID,
+  blocked_code: null,
   ...over,
 });
 
@@ -88,7 +92,7 @@ describe('openSetTextVisit', () => {
 });
 
 describe('setTextReply', () => {
-  const args = { customerId: 'c1', customerPhone: PHONE, lineNumber: LINE, visitId: VISIT, now: NOW };
+  const args = { customerId: 'c1', customerPhone: PHONE, lineNumber: LINE, visitIds: [VISIT], now: NOW };
 
   test('no set text for this visit on this line: nothing to show, and no reply read', async () => {
     const conn = fakeConn({ messaging_audit_log: [send({ metadata: { set_text_kind: 'gate_locked', scheduled_service_id: VISIT, fromNumber: OTHER_LINE } })] });
@@ -121,6 +125,23 @@ describe('setTextReply', () => {
     expect(ops).toContainEqual(['where', { direction: 'inbound', from_phone: PHONE, to_phone: LINE }]);
     expect(ops).toContainEqual(['where', 'created_at', '>', new Date('2026-11-02T15:00:00Z')]);
     expect(ops).toContainEqual(['orderBy', 'created_at', 'desc']);
+  });
+
+  test('a send the gate suppressed (sentinel id) or a blocked attempt is not a set text', async () => {
+    for (const row of [send({ provider_message_id: 'gate-blocked' }), send({ blocked_code: 'SUPPRESSED' })]) {
+      const conn = fakeConn({ messaging_audit_log: [row], sms_log: [{ message_body: 'ok', created_at: new Date('2026-11-02T15:04:00Z') }] });
+      expect(await setTextReply(conn, args)).toEqual({ setText: null, reply: null, ambiguous: false });
+    }
+  });
+
+  test('a grouped stop: a set text sent for any of its visits is the stop\'s, and does not make it ambiguous', async () => {
+    const conn = fakeConn({
+      messaging_audit_log: [send({ metadata: { set_text_kind: 'dog_outside', scheduled_service_id: SIBLING, fromNumber: LINE } }), send()],
+      sms_log: [{ message_body: 'Dog is in', created_at: new Date('2026-11-02T15:20:00Z') }],
+    });
+    expect(await setTextReply(conn, { ...args, visitIds: [VISIT, SIBLING] })).toMatchObject({
+      setText: { kind: 'dog_outside' }, reply: { body: 'Dog is in' }, ambiguous: false,
+    });
   });
 
   test('a set text with no answer yet', async () => {

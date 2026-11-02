@@ -14,8 +14,9 @@
  *                   (services/tech-set-texts.js) to the visit's customer, the
  *                   same send path as /sms. Today's open visits only; one
  *                   duplicate check per visit and kind. GATE_TECH_SET_TEXTS.
- *   GET  /replies?scheduledServiceId= → the customer's answer to the newest
- *                   set text for that visit, when it clearly belongs to it.
+ *   GET  /replies?scheduledServiceIds=a,b → the customer's answer to the
+ *                   newest set text for that stop (all its visits), when it
+ *                   clearly belongs to it.
  *   POST /call    → { scheduledServiceId } — click-to-call through the shared
  *                   bridge (services/call-bridge.js): Twilio rings the tech's
  *                   cell first, they press 1, the customer is dialed with the
@@ -327,15 +328,28 @@ router.post('/set-text', async (req, res, next) => {
 });
 
 // The Visit Brief's Last reply card. Read-only; the tech's own line only.
+// A grouped stop sends all its visit ids: the member the panel leads with
+// changes as members finish, and a set text sent for any of them is the
+// stop's. Every id must be in the caller's scope and the same customer's.
+const MAX_STOP_VISITS = 6;
 router.get('/replies', async (req, res, next) => {
   try {
     if (!featureGates.techSetTextsLive()) return res.status(404).json({ error: 'Not found' });
+    const ids = [...new Set(String(req.query?.scheduledServiceIds || '').split(',').map((id) => id.trim()).filter(Boolean))];
+    if (!ids.length || ids.length > MAX_STOP_VISITS) return res.status(400).json({ error: 'scheduledServiceIds is required' });
     const ctx = await techLineContext(req.technicianId, { strict: true });
     if (!ctx) return res.status(409).json({ error: 'You have no tech line assigned', code: 'NO_TECH_LINE' });
-    const target = await visitCustomer(req, req.query?.scheduledServiceId);
-    if (target.error) return res.status(target.status).json({ error: target.error });
+    const targets = [];
+    for (const id of ids) {
+      const target = await visitCustomer(req, id);
+      if (target.error) return res.status(target.status).json({ error: target.error });
+      targets.push(target);
+    }
+    if (targets.some((t) => t.customer.id !== targets[0].customer.id)) {
+      return res.status(400).json({ error: 'Those visits are not one customer\'s stop' });
+    }
     const out = await setTextReply(db, {
-      customerId: target.customer.id, customerPhone: target.to, lineNumber: ctx.line.number, visitId: target.visit.id,
+      customerId: targets[0].customer.id, customerPhone: targets[0].to, lineNumber: ctx.line.number, visitIds: ids,
     });
     res.json(out);
   } catch (err) { next(sanitized(err, 'reply lookup')); }

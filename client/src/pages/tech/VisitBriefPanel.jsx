@@ -1054,19 +1054,22 @@ function SetTextRow({ options, line, customerName, onSend, onBusyChange, onSent 
   );
 }
 
-// Last reply: the customer's answer to the newest set text for THIS visit.
-// The server shows a reply only when it cannot belong to another visit of the
-// same customer; otherwise it says so and the tech checks the thread.
-function SetTextReply({ request, visitId, customerName, refreshKey }) {
+// Last reply: the customer's answer to the newest set text for THIS stop. All
+// the stop's visit ids go up, so the card holds when the member the panel
+// leads with finishes. The server shows a reply only when it cannot belong to
+// another visit of the same customer; otherwise it says so and the tech checks
+// the thread. Check again stays on the card: a customer often answers twice.
+function SetTextReply({ request, visitIds, customerName, refreshKey }) {
   const [tick, setTick] = useState(0);
   const [state, setState] = useState({ data: null, error: '' });
+  const idsKey = visitIds.join(',');
   useEffect(() => {
     let live = true;
-    request(`/tech/line/replies?scheduledServiceId=${encodeURIComponent(visitId)}`)
+    request(`/tech/line/replies?scheduledServiceIds=${encodeURIComponent(idsKey)}`)
       .then((data) => { if (live) setState({ data, error: '' }); })
       .catch((err) => { if (live) setState({ data: null, error: String(err?.message || err).slice(0, 160) }); });
     return () => { live = false; };
-  }, [request, visitId, refreshKey, tick]);
+  }, [request, idsKey, refreshKey, tick]);
   const again = <button type="button" onClick={() => setTick((t) => t + 1)} style={{ ...setTextBtnStyle, minHeight: 40, marginLeft: 8 }}>Check again</button>;
   if (state.error) return <p role="alert" style={{ ...factMutedStyle, color: DARK.amber, marginTop: 6 }}>Couldn't check for a reply.{again}</p>;
   const d = state.data;
@@ -1083,13 +1086,14 @@ function SetTextReply({ request, visitId, customerName, refreshKey }) {
     <div data-testid="set-text-reply" style={{ marginTop: 6, padding: 10, borderRadius: 4, border: `1px solid ${DARK.border}`, background: DARK.bg }}>
       <div style={{ ...factMutedStyle, margin: 0 }}>Reply from {customerName} · {formatETTime(d.reply.receivedAt)}{photos}</div>
       <p style={{ ...factRowStyle, whiteSpace: 'pre-wrap' }}>{d.reply.body}</p>
+      <div style={{ marginTop: 6 }}>{again}</div>
     </div>
   );
 }
 
 // The set texts the line lists, for a visit still to be done, and the Last
 // reply card under them. Renders nothing while the gate is off (no list).
-function SetTextsSection({ line, service, request, onBusyChange }) {
+function SetTextsSection({ line, service, visitIds, request, onBusyChange }) {
   const [sends, setSends] = useState(0);
   const options = Array.isArray(line.setTexts) ? line.setTexts : [];
   if (!options.length || TERMINAL_STATUSES.has(service.status)) return null;
@@ -1104,7 +1108,7 @@ function SetTextsSection({ line, service, request, onBusyChange }) {
         onBusyChange={onBusyChange}
         onSent={() => setSends((n) => n + 1)}
       />
-      <SetTextReply request={request} visitId={service.id} customerName={customerName} refreshKey={sends} />
+      <SetTextReply request={request} visitIds={visitIds} customerName={customerName} refreshKey={sends} />
     </>
   );
 }
@@ -1249,7 +1253,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           onBusyChange={setTextBusy}
         />
       )}
-      {line && <SetTextsSection line={line} service={service} request={request} onBusyChange={setPresetBusy} />}
+      {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       <VisitAccessCodes
         request={request}

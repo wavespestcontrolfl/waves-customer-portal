@@ -9,8 +9,9 @@
  *                      caller, so a button tap and a voice request for the same
  *                      text on the same visit send it once
  *   - openSetTextVisit a set text is for today's visit that has not ended
- *   - setTextReply     the customer's answer to the newest set text for a visit,
- *                      matched only when it cannot belong to another visit
+ *   - setTextReply     the customer's answer to the newest set text for a stop
+ *                      (its visit ids), matched only when it cannot belong to
+ *                      another visit
  *
  * The send itself is the tech-line text path (routes/tech-line.js): every
  * consent, suppression and duplicate guard applies. Each sent set text keeps
@@ -84,18 +85,30 @@ function metaOf(row) {
   try { return JSON.parse(m) || {}; } catch { return {}; }
 }
 
+// A send that really left: an accepted provider id, never a suppression
+// sentinel such as 'gate-blocked', which the audit row also carries with a
+// sent_at (the same rule the send route reports through).
+function deliveredSetText(row) {
+  const { isRealProviderSend } = require('./sms-auto-send');
+  return row.blocked_code == null && isRealProviderSend({ sent: true, providerMessageId: row.provider_message_id });
+}
+
 /**
- * The customer's newest answer to the newest set text for this visit.
+ * The customer's newest answer to the newest set text for one stop.
  *
- * Only the tech's own line counts: a set text from that line within the
- * window, and an inbound text from the customer's phone to that line after
- * it. When the same line sent this customer a set text for ANOTHER visit in
- * the window (two homes, two visits), an answer cannot be tied to one visit,
- * so it is reported as ambiguous and shown on neither.
+ * `visitIds` are the stop's visits (a grouped stop has several, and the one
+ * the panel leads with can change as members finish), so a set text sent for
+ * any of them is the stop's. Only the tech's own line counts: a delivered set
+ * text from that line within the window, and an inbound text from the
+ * customer's phone to that line after it. When the same line sent this
+ * customer a set text for a visit OUTSIDE the stop in the window (two homes,
+ * two visits), an answer cannot be tied to one stop, so it is reported as
+ * ambiguous and shown on neither.
  *
  * @returns {Promise<{ setText: null|{kind,label,sentAt}, reply: null|{body,receivedAt,mediaCount}, ambiguous: boolean }>}
  */
-async function setTextReply(conn, { customerId, customerPhone, lineNumber, visitId, now = new Date() }) {
+async function setTextReply(conn, { customerId, customerPhone, lineNumber, visitIds, now = new Date() }) {
+  const stopIds = new Set(visitIds);
   const since = new Date(now.getTime() - REPLY_WINDOW_MS);
   const sends = (await conn('messaging_audit_log')
     .where({ customer_id: customerId, entry_point: 'tech_line_text' })
@@ -104,13 +117,13 @@ async function setTextReply(conn, { customerId, customerPhone, lineNumber, visit
     .where('sent_at', '>=', since)
     .whereRaw("metadata->>'set_text_kind' IS NOT NULL")
     .orderBy('sent_at', 'desc')
-    .select('sent_at', 'metadata'))
-    .filter((row) => metaOf(row).fromNumber === lineNumber);
-  const mine = sends.find((row) => metaOf(row).scheduled_service_id === visitId);
+    .select('sent_at', 'metadata', 'provider_message_id', 'blocked_code'))
+    .filter((row) => metaOf(row).fromNumber === lineNumber && deliveredSetText(row));
+  const mine = sends.find((row) => stopIds.has(metaOf(row).scheduled_service_id));
   if (!mine) return { setText: null, reply: null, ambiguous: false };
   const kind = metaOf(mine).set_text_kind;
   const setText = { kind, label: setTextLabel(kind), sentAt: mine.sent_at };
-  if (sends.some((row) => metaOf(row).scheduled_service_id !== visitId)) {
+  if (sends.some((row) => !stopIds.has(metaOf(row).scheduled_service_id))) {
     return { setText, reply: null, ambiguous: true };
   }
   const reply = await conn('sms_log')
