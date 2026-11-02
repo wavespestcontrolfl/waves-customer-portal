@@ -18,6 +18,12 @@ has no "Triage done" comment.
 
 ## Rebutted findings (do not re-flag)
 
+- A bell-policy silence of an owner-phone `internal_alert` send is audited:
+  the redirect calls `triggerNotification('internal_admin_alert')`, whose
+  silence branch writes `notification.bell_policy.muted` (`auditBellPolicyMuted`,
+  while `GATE_ALERT_CATALOG=watch`) before it returns. The silenced pages
+  themselves are being converted (#7396 and the owner-alert lane's second PR).
+  (sweep #7303 B1, triaged 2026-11-01)
 - Partial-refund `refund_amount` overwrite: the `charge.refunded` webhook is the
   designed reconciler (cumulative `amount_refunded`) — heals within seconds.
   (money-path audit 2026-07-06)
@@ -39,6 +45,16 @@ has no "Triage done" comment.
 
 ## By-design behaviors (not bugs)
 
+- Admin bell read state belongs to the office, not to one admin: admin rows
+  are "the shared admin queue" (`markReadAdmin` / `markAllReadAdmin` in
+  `notification-service.js`), so one admin's read-all clears the other's
+  unread badge. Done and reopen are version-fenced, and dashboard-alert
+  dismissals are per admin. Revisit when a second daily admin misses rows.
+  (sweep #7303 B3, triaged 2026-11-01)
+- With `GATE_JOB_COST_STANDARD_MINUTES` on, a covered visit's prepay share
+  outranks any recorded `service_records.revenue`, a hand-typed correction
+  included (#7266). It changes cost and margin figures only. (sweep #7303
+  overflow, triaged 2026-11-01)
 - The raw `notifyAdmin(` ratchet fails only when a file gains a call. A file
   that loses calls passes with its old baseline, so parallel conversion PRs
   never conflict on the fixture (test header). CLAUDE.md rule 21 now says so.
