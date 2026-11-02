@@ -286,7 +286,13 @@ describe('the route check is told who is asking (GATE_ROUTE_CHECK_STAFF_LISTS: G
   test('the tech app\'s Quick Move options go in as a non-admin caller', async () => {
     const r = await call('GET', '/api/tech/services/svc-1/rain-out-options');
     expect(r.status).toBe(200);
-    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: false, technicianId: 'tech-1' } });
+    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: false, technicianId: 'tech-1' }, reasonCode: null });
+  });
+
+  test('the Quick Move options pass the picked rain reason through (GATE_RAINOUT_KEEP_RAIN_OK preview)', async () => {
+    const r = await call('GET', '/api/tech/services/svc-1/rain-out-options?reasonCode=weather_rain');
+    expect(r.status).toBe(200);
+    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: false, technicianId: 'tech-1' }, reasonCode: 'weather_rain' });
   });
 
   test('Dispatch\'s Quick Move options go in with the admin and his technician id', async () => {
@@ -294,7 +300,7 @@ describe('the route check is told who is asking (GATE_ROUTE_CHECK_STAFF_LISTS: G
     mockCaller.role = 'admin';
     const r = await call('GET', '/api/admin/dispatch/svc-1/rain-out-options');
     expect(r.status).toBe(200);
-    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: true, technicianId: 'admin-1' } });
+    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: true, technicianId: 'admin-1' }, reasonCode: null });
   });
 
   test.each([
