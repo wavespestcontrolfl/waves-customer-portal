@@ -163,7 +163,11 @@ const OWED_REPLY_CLAUSE_TAIL = [
   // a person's Gmail send naming the customer's address
   'or exists (select 1 from "emails" as "er" '
   + `where ${squash(personSentFilter('er'))} and "er"."received_at" >= ? and er.received_at > inb.created_at `
-  + "and strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), (SELECT LOWER(NULLIF(BTRIM(cu.email), '')) FROM customers cu WHERE cu.id = leads.customer_id)) > 0)))",
+  + "and strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), (SELECT LOWER(NULLIF(BTRIM(cu.email), '')) FROM customers cu WHERE cu.id = leads.customer_id)) > 0 "
+  // ...and the customer's address is one of the send's mailboxes (equality, not substring)
+  + "and (SELECT LOWER(NULLIF(BTRIM(cu.email), '')) FROM customers cu WHERE cu.id = leads.customer_id) IN "
+  + "(SELECT btrim(m[1]) FROM regexp_matches(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), '<\\s*([^<>\\s]+@[^<>\\s]+)\\s*>', 'g') AS m "
+  + "UNION SELECT btrim(m[1]) FROM regexp_matches(regexp_replace(regexp_replace(regexp_replace(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), '\"([^\"\\\\]|\\\\.)*\"', ' ', 'g'), '\\([^)]*\\)', ' ', 'g'), '<[^>]*>', ' ', 'g'), '([^\\s,;:<>\"()]+@[^\\s,;:<>\"()]+)', 'g') AS m))))",
 ].join('');
 
 describe('lead staleness sweep', () => {

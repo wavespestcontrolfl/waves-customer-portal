@@ -207,6 +207,30 @@ maybeDescribe('lead staleness: the customer\'s own unanswered ask (live Postgres
     expect(await parked(lead)).toBe(true);
   });
 
+  test('a Gmail send counts only when the customer\'s address is one of its mailboxes', async () => {
+    const t0 = ago(20);
+    const sent = (customer, headers) => insert('emails', {
+      gmail_id: sid('GM'), gmail_thread_id: sid('TH'), from_address: 'office@waves.example.invalid',
+      to_address: '', cc_address: '', bcc_address: '', ...headers,
+      label_ids: JSON.stringify(['SENT']), received_at: mins(t0, 20),
+    });
+    // A longer address that ends with the customer's (joann@ for ann@) is someone else.
+    const a = await scene();
+    await inboundText(a.customer, a.phone, t0);
+    await sent(a.customer, { to_address: `jo${a.customer.email}` });
+    expect(await parked(a.lead)).toBe(false);
+    // An email-shaped display name is not a recipient: this went to the office.
+    const b = await scene();
+    await inboundText(b.customer, b.phone, t0);
+    await sent(b.customer, { to_address: `"${b.customer.email}" <office@waves.example.invalid>` });
+    expect(await parked(b.lead)).toBe(false);
+    // The real mailbox in angle brackets, mixed case, in Cc beside another recipient, does count.
+    const c = await scene();
+    await inboundText(c.customer, c.phone, t0);
+    await sent(c.customer, { to_address: 'other@example.invalid', cc_address: `"Synthetic, Pat" <${c.customer.email.toUpperCase()}>` });
+    expect(await parked(c.lead)).toBe(true);
+  });
+
   test('a reply that came BEFORE the text, an automated text, or a call that rang out does not release the lead', async () => {
     const t0 = ago(20);
 

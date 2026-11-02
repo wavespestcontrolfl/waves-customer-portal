@@ -256,17 +256,35 @@ function wherePersonContactedAfter(group, after, since) {
         .whereRaw(`cl.created_at > ${after} - interval '1 day'`)
         .whereRaw(`${callEnded} > ${after}`);
     })
-    // A person's Gmail send whose recipients name the customer's own address.
-    // The same address-text prefilter attachCustomerEmailSends uses. It does not
-    // run resolveEmailCustomerLink (JS, a query per row), so a send that names
-    // two customers also counts here; that lead is then parked as before.
+    // A person's Gmail send with the customer's own address as one of its
+    // mailboxes. The address-text strpos is only the cheap prefilter
+    // attachCustomerEmailSends uses; the match itself is mailbox equality
+    // (recipientMailboxesSql), so joann@ never answers ann@ and an
+    // email-shaped display name never counts. It does not run
+    // resolveEmailCustomerLink (JS, a query per row), so a send that names two
+    // customers also counts here; that lead is then parked as before.
     .orWhereExists(function () {
       this.select(1).from('emails as er')
         .whereRaw(personSentFilter('er'))
         .where('er.received_at', '>=', since)
         .whereRaw(`er.received_at > ${after}`)
-        .whereRaw(`strpos(${recipients}, ${customerEmail}) > 0`);
+        .whereRaw(`strpos(${recipients}, ${customerEmail}) > 0`)
+        .whereRaw(`${customerEmail} IN ${recipientMailboxesSql('er')}`);
     });
+}
+
+// Every mailbox address in a send's To + Cc + Bcc headers, lowercased, as a SQL
+// subquery over `alias`. SQL twin of email-customer-link.js extractEmailAddresses
+// (nodemailer's RFC 5322 parser), which the set-based sweep cannot call: the
+// address inside <...> is the mailbox; a bare address counts whole; a quoted or
+// parenthesized display name never counts ('"ann@example.invalid"
+// <office@...>' is a send to the office). No `?` in these regexes: knex reads
+// one as a binding.
+function recipientMailboxesSql(alias) {
+  const header = `LOWER(CONCAT_WS(',', ${alias}.to_address, ${alias}.cc_address, ${alias}.bcc_address))`;
+  const bareText = `regexp_replace(regexp_replace(regexp_replace(${header}, '"([^"\\\\]|\\\\.)*"', ' ', 'g'), '\\([^)]*\\)', ' ', 'g'), '<[^>]*>', ' ', 'g')`;
+  return `(SELECT btrim(m[1]) FROM regexp_matches(${header}, '<\\s*([^<>\\s]+@[^<>\\s]+)\\s*>', 'g') AS m`
+    + ` UNION SELECT btrim(m[1]) FROM regexp_matches(${bareText}, '([^\\s,;:<>"()]+@[^\\s,;:<>"()]+)', 'g') AS m)`;
 }
 
 // The lead's linked estimate: expired with a lost-group disposition, not sent
