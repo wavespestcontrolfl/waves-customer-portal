@@ -48,7 +48,8 @@ const { ratesForTable } = require('./irrigation-rates');
 const { resolveRestrictionCounty, currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
-const { isEnabled, gateEnvValue } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue, autoDispatchMowingDaysMode } = require('../config/feature-gates');
+const { parseDays } = require('../utils/mowing-schedule');
 const { resolveRateTable, storedRateTable, rateOptionsForTable } = require('./irrigation-rates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etDateString, addETDays, etParts, lastCompletedWeekEndingET } = require('../utils/datetime-et');
@@ -213,6 +214,70 @@ async function loadSetupAskHistory({ customerId, weekEnding, conn = db }) {
     logger.warn(`[irrigation-weekly-email] setup ask history unreadable for ${customerId}: ${err.message}`);
     return null;
   }
+}
+
+// The mowing-days ask (owner-approved copy 2026-11-02, do not reword). Every
+// weekly template places {{mowing_ask}} and a small "Add my mowing days" link
+// on {{mowing_ask_url}} (20261102120000); both are empty when the line is off,
+// so neither block renders. It shows only while autoDispatchMowingDaysMode()
+// is 'true', the customer has nothing saved under Mowing, and the ask is due
+// on the setup ask's cadence (first SETUP_ASK_FREE_SENDS sends, then once
+// every SETUP_ASK_SPACING_DAYS).
+const MOWING_ASK = "When does your lawn get mowed? Mowing right before or right after a lawn treatment can undo it. Add your mowing days under Mowing in your portal, and we'll plan your lawn treatments around them.";
+const WEEKLY_TEMPLATES = [TEMPLATE_CUT_BACK, TEMPLATE_ADD_WATER, TEMPLATE_ON_TRACK, TEMPLATE_SETUP_SCHEDULE, TEMPLATE_SETUP_SYSTEM, TEMPLATE_RAIN_REPORT, TEMPLATE_CONFIRM_SCHEDULE, TEMPLATE_WEEK_PLAN];
+
+function mowingAskVariables(on) {
+  return on === true
+    ? { mowing_ask: MOWING_ASK, mowing_ask_url: buildPortalUrl('/?tab=property') }
+    : { mowing_ask: '', mowing_ask_url: '' };
+}
+
+// "Nothing saved under Mowing": no days, no time of day, no notes.
+function mowingNothingSaved(customer = {}) {
+  return parseDays(customer.mowing_days).length === 0
+    && !String(customer.mowing_time_of_day || '').trim()
+    && !String(customer.mowing_notes || '').trim();
+}
+
+// Weekly emails this customer was SENT that carried the mowing ask. This
+// week's own trigger is excluded so a retry inside the week decides the same
+// way. payload_snapshot is the send's payload (email-template-library).
+async function loadMowingAskHistory({ customerId, weekEnding, conn = db }) {
+  try {
+    const row = await conn('email_messages')
+      .where({ recipient_type: 'customer', recipient_id: String(customerId) })
+      .whereIn('template_key', WEEKLY_TEMPLATES)
+      .whereNotNull('sent_at')
+      .whereNot('trigger_event_id', `irrigation.weekly:${customerId}:${weekEnding}`)
+      .whereRaw("COALESCE(payload_snapshot->>'mowing_ask', '') <> ''")
+      .count({ count: '*' })
+      .max({ lastAskAt: 'sent_at' })
+      .first();
+    return { count: Number(row?.count) || 0, lastAskAt: row?.lastAskAt || null };
+  } catch (err) {
+    logger.warn(`[irrigation-weekly-email] mowing ask history unreadable for ${customerId}: ${err.message}`);
+    return null;
+  }
+}
+
+// The setup ask's cadence, with one difference: an UNREADABLE history holds
+// the line back. The mowing ask is optional, and a read error that repeats
+// every week must not turn into the same ask every week.
+function mowingAskDue(history, now = new Date()) {
+  return history != null && setupAskDue(history, now);
+}
+
+// A NEW decision's answer (a published plan keeps its frozen one). The copy
+// promises lawn treatments, so a customer in the audience only through the
+// irrigation_email tag (no recurring lawn program) never gets it; an
+// unreadable lawn check also means no line.
+async function mowingAskLive(customer, { weekEnding, now }) {
+  if (autoDispatchMowingDaysMode() !== 'true' || !mowingNothingSaved(customer)) return false;
+  if (!mowingAskDue(await loadMowingAskHistory({ customerId: customer.id, weekEnding }), now)) return false;
+  return hasRecurringLawnEvidence(customer.id, { now }).catch((err) => {
+    logger.warn(`[irrigation-weekly-email] lawn program check unreadable for ${customer.id}; no mowing ask: ${err.message}`);
+    return false;
+  });
 }
 
 function joinList(parts) {
@@ -520,9 +585,12 @@ function decideWeeklyEmail({
   // GATE_IRRIGATION_SETUP_ASK_CADENCE: the sweep found the setup ask is not
   // due this week, so a setup email goes out as the plain rain report.
   setupAskQuiet = false,
+  // true = the sweep found the mowing ask due (mowingAskLive), or a replay's frozen answer.
+  mowingAsk,
   now = new Date(),
 } = {}, rawArgs = {}) {
   const table = resolveRateTable(rateTable);
+  const mowingVars = mowingAskVariables(mowingAsk);
   // Same fallback chain, same precedence, as the lawn report's
   // buildLawnWaterContext (report-data.js): PORTAL ENTRY WINS, then a
   // tech-recorded turf-profile reading, then the latest assessment. The two
@@ -670,6 +738,7 @@ function decideWeeklyEmail({
         rain_source_note: rainSourceNote(rainSource),
     company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: CONTACT_EMAIL,
+        ...mowingVars,
       },
     };
   }
@@ -781,6 +850,7 @@ function decideWeeklyEmail({
         rain_source_note: rainSourceNote(rainSource),
     company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: CONTACT_EMAIL,
+        ...mowingVars,
       },
     };
   }
@@ -827,6 +897,7 @@ function decideWeeklyEmail({
     rain_source_note: rainSourceNote(rainSource),
     company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
     company_email: CONTACT_EMAIL,
+    ...mowingVars,
   };
 
   if (weekPlanEnabled) {
@@ -935,7 +1006,8 @@ function decideWeeklyEmail({
         advice,
         weekPlan: plan,
         restriction,
-        decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource, scheduleUnconfirmed },
+        // mowingAsk rides only when true, so a plan without the line hashes as before.
+        decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource, scheduleUnconfirmed, ...(mowingAsk === true ? { mowingAsk: true } : {}) },
         payload: {
           ...payload,
           // The plan template renders these WITH their unit here (its rows
@@ -1232,6 +1304,10 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
       // until re-saved (codex #3565 gh-r19).
       'pp.irrigation_confirmed_fields',
       'pp.irrigation_home_changed_at',
+      // What the customer saved under Mowing: the mowing-days ask shows only when all three are empty.
+      'pp.mowing_days',
+      'pp.mowing_time_of_day',
+      'pp.mowing_notes',
       // A schedule can also have been recorded by a tech rather than typed by
       // the customer (codex #3138 r1 P2). The lawn report already treats
       // portal → turf profile → assessment as one fallback chain
@@ -1279,7 +1355,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
 // the sweep pins the live one once per customer. Omitted = a NEW decision: the live gate is read ONCE here, and that one
 // table feeds both the move guard below and (through the returned `rateTable`) the decision, so the two can never
 // disagree about a runtime near the plausibility ceiling.
-function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now, rateTable = undefined, waterSaved = undefined, setupAskQuiet = false }) {
+function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now, rateTable = undefined, waterSaved = undefined, setupAskQuiet = false, mowingAsk = false }) {
   const table = resolveRateTable(rateTable);
   // After a move, every NON-NULL sizing field must have been re-saved
   // (irrigation_confirmed_fields, reset by the move, accrues one field
@@ -1345,6 +1421,8 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     // Key present only when the ask is held back, so a gate-off decision
     // (and any snapshot hash built from it) stays byte-identical.
     ...(setupAskQuiet === true ? { setupAskQuiet: true } : {}),
+    // Likewise only when the mowing ask shows: decided once per customer-week, then frozen.
+    ...(mowingAsk === true ? { mowingAsk: true } : {}),
     now,
   };
 }
@@ -1367,6 +1445,8 @@ function replayWeekPlanForCustomer(snapshot, current) {
       // The stored "water you saved" block (null for a row without one): a gate flip or a lawn-size edit after
       // publication must neither change the sentence nor withhold the plan.
       waterSaved: inputs.waterSaved ?? null,
+      // The frozen mowing-ask answer: a mowing edit after publication must not change the email.
+      mowingAsk: inputs.mowingAsk === true,
     }),
     forecastRainInches: inputs.forecastRainInches,
     forecastEt0Inches: inputs.forecastEt0Inches,
@@ -1551,7 +1631,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         const currentDecision = snapshotArgs
           ? replayWeekPlanForCustomer(snapshotArgs, current)
           : buildWeeklyEmailDecision({
-            ...weeklyInputsForCustomer(current, { weekEnding, weekWeather, priorWeek, weekPlanEnabled: false, planWeekEnd, now: decisionInputs.now, rateTable: decisionInputs.rateTable, setupAskQuiet: decisionInputs.setupAskQuiet === true }),
+            ...weeklyInputsForCustomer(current, { weekEnding, weekWeather, priorWeek, weekPlanEnabled: false, planWeekEnd, now: decisionInputs.now, rateTable: decisionInputs.rateTable, setupAskQuiet: decisionInputs.setupAskQuiet === true, mowingAsk: decisionInputs.mowingAsk === true }),
             forecastRainInches, forecastEt0Inches,
           });
         if (!currentDecision || !isDeepStrictEqual(currentDecision.payload, decision.payload)) {
@@ -1851,6 +1931,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         // A published row keeps its own answer; a new decision asks the history once.
         setupAskQuiet: frozen ? frozen.setupAskQuiet === true
           : (irrigationSetupAskCadenceLive() && !setupAskDue(await loadSetupAskHistory({ customerId: customer.id, weekEnding }), tick())),
+        mowingAsk: frozen ? frozen.mowingAsk === true : await mowingAskLive(customer, { weekEnding, now: tick() }),
       });
       // Replay already validated this premise and the current settings. Keep
       // its saved spelling so a formatting edit cannot change the claim hash.
@@ -2295,6 +2376,13 @@ module.exports = {
   irrigationSetupAskCadenceLive,
   setupAskDue,
   loadSetupAskHistory,
+  MOWING_ASK,
+  WEEKLY_TEMPLATES,
+  mowingAskVariables,
+  mowingNothingSaved,
+  loadMowingAskHistory,
+  mowingAskDue,
+  mowingAskLive,
   TEMPLATE_CONFIRM_SCHEDULE,
   TEMPLATE_WEEK_PLAN,
   IRRIGATION_EMAIL_OPT_IN_TAG,
