@@ -1816,7 +1816,7 @@ describe('SMS review bell (owner ruling 2026-10-21)', () => {
     expect(isQuietTemporaryFact(held({ field: 'pet_details', duration: 'visit_only', outcome: 'pet_needs_review' }))).toBe(false);
   });
 
-  test('copy names the customer in a bounded Comms headline and says what was wanted and why it stopped, never quoting the text', () => {
+  test('copy names the customer in a bounded Comms headline and says what was wanted and why it stopped; a text with a code or an address is not quoted', () => {
     const exception = { field: 'access_notes', outcome: 'existing_value_conflict' };
     const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: 'Fixture' }, exceptions: [exception],
       messageBody: "Ok I'm the last house on the left. Use BLUE at the keypad. 8 US 41" });
@@ -1852,9 +1852,59 @@ describe('SMS review bell (owner ruling 2026-10-21)', () => {
 
   test('Codex #6414 r3: the reason follows the duration label, not just the outcome code', () => {
     const why = (duration) => reviewBellCopy({ customer: {}, exceptions: [{ field: 'access_notes', outcome: 'temporary_instruction', duration }] }).why;
-    expect(why('uncertain')).toBe('Wanted to save as access note; it is not clear if this is lasting or just for one visit.');
+    expect(why('uncertain')).toBe('Wanted to save as access note; it is not clear if this is lasting.');
     expect(why('visit_only')).toBe('Wanted to save as access note; the text sounds like a one-time instruction.');
     expect(why('durable')).toBe('Wanted to save as access note; the text sounds like a one-time instruction.');
+  });
+
+  // Owner 2026-11-02 "do all": the bell shows the words, the way the "SMS from" alert does.
+  const uncertainNote = { field: 'special_instructions', outcome: 'temporary_instruction', duration: 'uncertain' };
+  const composes = (copy) => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    return composeAdminAlert({ area: 'Comms', action: copy.action, why: copy.why, severity: 'needs-you', link: '/admin/customers?customerId=c1',
+      subject: { type: 'customer', id: 'c1' }, doneWhen: 'text_note_checked', who: 'person' });
+  };
+
+  test('a text with no code, number or address is quoted in the why and in the detail', () => {
+    const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: 'Fixture' }, exceptions: [uncertainNote], messageBody: 'Skip the shed please ' });
+    expect(copy).toEqual({ action: "check Synthetic Fixture's text note",
+      why: 'Wanted to save “Skip the shed please” as special instructions; it is not clear if this is lasting.',
+      detail: 'Text: “Skip the shed please”\nWanted to save as special instructions; it is not clear if this is lasting.\nOpen the conversation to check.' });
+    expect(composes(copy).why).toBe(copy.why);
+  });
+
+  test('a long text shows its first sentence cut to fit the why; the detail keeps the whole text', () => {
+    const body = 'Please keep the side yard clear of any spraying because the neighbor grows vegetables along that fence. They asked us.';
+    const copy = reviewBellCopy({ customer: {}, exceptions: [uncertainNote], messageBody: body });
+    expect(copy.why.length).toBeLessThanOrEqual(110);
+    expect(copy.why).toBe('Wanted to save “Please keep the side yard…” as special instructions; it is not clear if this is lasting.');
+    expect(copy.why).not.toMatch(/They asked us/);
+    expect(composes(copy).why).toBe(copy.why);
+    expect(copy.detail.split('\n')[0]).toBe(`Text: “${body}”`);
+  });
+
+  test('a text the why rules refuse ("!") keeps the unquoted why; the detail still quotes it', () => {
+    const copy = reviewBellCopy({ customer: {}, exceptions: [uncertainNote], messageBody: 'Skip the shed please!' });
+    expect(copy.why).toBe('Wanted to save as special instructions; it is not clear if this is lasting.');
+    expect(copy.detail.split('\n')[0]).toBe('Text: “Skip the shed please!”');
+  });
+
+  test.each([
+    ['a digit (code, street, route or PO box)', 'Come to 9 PO Box 42'],
+    ['a word code the shared access-code screen flags', 'Use BLUE at the keypad'],
+    ['a positional word code', 'Gate code blue waves'],
+    ['number words in a row', 'It is four five four five at the side door'],
+    ['an email address', 'Send it to someone@example.test please'],
+  ])('a text with %s is never quoted', (_label, body) => {
+    const copy = reviewBellCopy({ customer: {}, exceptions: [uncertainNote], messageBody: body });
+    expect(copy.why).toBe('Wanted to save as special instructions; it is not clear if this is lasting.');
+    expect(JSON.stringify(copy)).not.toContain(body);
+  });
+
+  test('a text the reader read as a code is never quoted, however plain it looks', () => {
+    const exceptions = [{ field: 'lockbox_code', outcome: 'temporary_instruction', duration: 'uncertain' }];
+    const copy = reviewBellCopy({ customer: {}, exceptions, messageBody: 'Same as the old one' });
+    expect(JSON.stringify(copy)).not.toContain('Same as the old one');
   });
 });
 

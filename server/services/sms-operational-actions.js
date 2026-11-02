@@ -10,7 +10,7 @@ const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
-const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
+const { raiseAdminAlert, cutAtWord, breaksAlertRules, firstSentence, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validate: isUuid } = require('uuid');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
@@ -533,11 +533,10 @@ function isQuietTemporaryFact(f) {
 
 // Plain words for the review bell (owner ruling 2026-10-21). The title names
 // the customer; the body says what the reader wanted to save and why it
-// stopped. It NEVER quotes the customer's text (title, body, detail or
-// metadata): a text can hold a code, a spelled-out code word or an address, and
-// no screen caught them all (Codex #6414 r1/r2). The first line is the whole
-// visible bell (the admin brevity guard cuts a multi-line body at its first
-// line and keeps the rest under "Show full text").
+// stopped, and quotes the text when quotableText allows it (owner 2026-11-02
+// "do all": show the words the way the "SMS from" alert does). The first line
+// is the whole visible bell (the admin brevity guard cuts a multi-line body at
+// its first line and keeps the rest under "Show full text").
 const REVIEW_FIELD_LABELS = Object.freeze({
   access_notes: 'access note', pet_details: 'pet note', contact_preference: 'contact preference',
   neighborhood_gate_code: 'neighborhood gate code', property_gate_code: 'gate code', lockbox_code: 'lockbox code',
@@ -560,33 +559,65 @@ const REVIEW_REASONS = Object.freeze({
 
 // Why the reader stopped. The verdict code temporary_instruction is also what
 // factVerdict returns for any duration that is not 'durable', so an 'uncertain'
-// label gets its own words (Codex #6414 r3).
-const UNCERTAIN_DURATION_REASON = 'it is not clear if this is lasting or just for one visit';
+// label gets its own words (Codex #6414 r3), short so a quoted text fits the why.
+const UNCERTAIN_DURATION_REASON = 'it is not clear if this is lasting';
 function reviewReason(f) {
   if (f.outcome === 'temporary_instruction' && f.duration === 'uncertain') return UNCERTAIN_DURATION_REASON;
   return REVIEW_REASONS[f.outcome] || 'it needs a person to check it';
 }
 
+// The text the bell may quote, or null. Codex #6414 r1/r2 found a lockbox code,
+// a word code ("Use BLUE at the keypad") and route or PO-box addresses ("8 US
+// 41") that a narrower screen let through, so this one is strict: no digit at
+// all (codes, street and route numbers, PO boxes, phone numbers), no two number
+// words in a row ("four five"), no '@' (an email), nothing the shared
+// access-code screen flags, and never a text the reader read as a code. What
+// passes is still redacted the way every bell body is (redactedWords).
+const CODE_FIELDS = new Set(['neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code']);
+const NUMBER_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)';
+const NUMBER_WORD_RUN = new RegExp(`\\b${NUMBER_WORD}[\\s,-]+${NUMBER_WORD}\\b`, 'i');
+// The same cap as the "SMS from" alert's full text.
+const MAX_DETAIL_QUOTE_CHARS = 1600;
+function quotableText(messageBody, exceptions) {
+  const { containsReportAccessCode } = require('./service-report/technician-report-copy');
+  const raw = String(messageBody || '');
+  if (/[\d@]/.test(raw) || NUMBER_WORD_RUN.test(raw) || containsReportAccessCode(raw)) return null;
+  if (exceptions.some((f) => CODE_FIELDS.has(f.field))) return null;
+  return require('./admin-alert-names').redactedWords(raw) || null;
+}
+
+// The why with the text's first sentence quoted (cut at a word by the shared
+// whyWithQuote), or null when the quote gets no room or breaks the admin-alert
+// rules (an "!", an emoji): the caller then keeps the unquoted why.
+function quotedWhy(quote, tail) {
+  const { whyWithQuote } = require('./admin-alert-names');
+  const first = firstSentence(quote);
+  const shown = first.length < quote.length ? `${first.replace(/[.?!]+$/, '')}…` : quote;
+  const why = whyWithQuote({ lead: 'Wanted to save ', quote: shown, tail });
+  return why.includes('“') && !breaksAlertRules(why) ? why : null;
+}
+
 // The admin-alert spec parts (docs/admin-notifications.md): a "Comms — ..."
-// headline inside 60 characters, a one-sentence why inside 110, and the full
-// reason lines in `detail`.
-function reviewBellCopy({ customer, exceptions }) {
+// headline inside 60 characters, a one-sentence why inside 110, and the
+// quoted text plus the full reason lines in `detail`.
+function reviewBellCopy({ customer, exceptions, messageBody = null }) {
   const { fitAction, fullName } = require('./admin-alert-names');
   const name = fullName(customer);
   const action = name
     ? fitAction('Comms', name, [(n) => `check ${n}'s text note`, (n) => `check ${n}'s note`])
     : 'check a customer text note';
-  const lines = exceptions.map((f, i) => {
-    const label = REVIEW_FIELD_LABELS[f.field] || String(f.field).replaceAll('_', ' ');
-    return `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${label}; ${reviewReason(f)}.`;
-  });
+  const labelOf = (f) => REVIEW_FIELD_LABELS[f.field] || String(f.field).replaceAll('_', ' ');
+  const lines = exceptions.map((f, i) => `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${labelOf(f)}; ${reviewReason(f)}.`);
   const more = lines.length > 1 ? ` (+${lines.length - 1} more)` : '';
+  const quote = quotableText(messageBody, exceptions);
+  const quoted = quote && quotedWhy(quote, ` as ${labelOf(exceptions[0])}; ${reviewReason(exceptions[0])}.${more}`);
   const first = lines[0].replace(/\.$/, '');
   const room = MAX_WHY_CHARS - more.length - 1;
   const lead = first.length <= room ? `${first}.` : cutAtWord(first, room + 1);
-  let why = `${lead}${more}`;
+  let why = quoted || `${lead}${more}`;
   if (breaksAlertRules(why)) why = 'Part of a customer text needs a person to check it.';
-  return { action, why, detail: [...lines, 'Open the conversation to check.'].join('\n') };
+  const said = quote ? [`Text: “${cutAtWord(quote, MAX_DETAIL_QUOTE_CHARS)}”`] : [];
+  return { action, why, detail: [...said, ...lines, 'Open the conversation to check.'].join('\n') };
 }
 
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
@@ -697,7 +728,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // `dropped` still rides in `operational_analysis` and, when a bell does
     // fire for a real exception, in that bell's `unverified_count`.
     if (exceptions.length) {
-      const copy = reviewBellCopy({ customer, exceptions });
+      const copy = reviewBellCopy({ customer, exceptions, messageBody: message.message_body });
       const notif = await raiseAdminAlert('alert', {
         area: 'Comms', action: copy.action, why: copy.why, severity: 'needs-you',
         link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
