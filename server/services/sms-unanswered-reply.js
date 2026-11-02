@@ -38,6 +38,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { isWithinSendWindowET } = require('./messaging/send-window');
 const { jsonObject } = require('./sms-gratitude-context');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 // Open (8 AM–8 PM ET, closed days skipped) minutes a text waits for a person.
 const WAIT_OPEN_MINUTES = 120;
@@ -422,8 +423,9 @@ function callSinceInboundQuery(dbh, { threadLast10, customerId, smsLogId }) {
   if (!threadLast10 && !customerId) return null;
   return dbh('call_log')
     .whereRaw('created_at > (SELECT created_at FROM sms_log WHERE id = ?)', [smsLogId])
-    // Sandy's test line never carries a real customer conversation.
-    .whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'")
+    // Sandy's test line and the staff-only tech voice line never carry a
+    // real customer conversation.
+    .modify((q) => whereNotSandboxCall(q))
     .where(function thread() {
       if (customerId) this.where({ customer_id: customerId });
       if (threadLast10) {

@@ -23,7 +23,7 @@ const db = require('../models/db');
 const { createLeadFromExtraction } = require('../services/lead-from-extraction');
 const { executeTool, SANDBOX_DRY_RUN_TOOLS, TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS } = require('../services/voice-agent/relay-tools');
 const { RelayConversation } = require('../services/voice-agent/relay-conversation');
-const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE } = require('../services/voice-agent/relay-protocol');
 
 describe('executeTool on a sandbox session', () => {
   const OLD_CTX_GATE = process.env.VOICE_RELAY_CONTEXT_ENABLED;
@@ -173,6 +173,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/voice-agent/relay-context.js': 'keyed by the session CallSid',
     'services/voice-agent/relay-tools.js': 'keyed by the session CallSid (write tools run dry on a sandbox session)',
     'services/voice-agent/relay-conversation.js': 'keyed by the session CallSid (its own row is the artifact)',
+    'services/tech-voice-line.js': 'writer keyed by CallSid (the tech voice line\'s own internal row)',
     'routes/admin-import-sheets.js': 'writer',
     'services/lead-from-extraction.js': 'keyed by CallSid',
     'services/estimate-clarify-asks.js': 'keyed by id',
@@ -286,11 +287,16 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
 });
 
 describe('whereNotSandboxCall', () => {
-  test('binds the column as an identifier and the source as a value', () => {
+  test('binds the column as an identifier and each internal source as a value', () => {
     const qb = { whereRaw: jest.fn().mockReturnThis() };
     expect(whereNotSandboxCall(qb)).toBe(qb);
     expect(qb.whereRaw).toHaveBeenCalledWith("COALESCE(??, '') <> ?", ['source', VOICE_RELAY_SANDBOX_SOURCE]);
+    qb.whereRaw.mockClear();
     whereNotSandboxCall(qb, 'c.source');
-    expect(qb.whereRaw).toHaveBeenLastCalledWith("COALESCE(??, '') <> ?", ['c.source', VOICE_RELAY_SANDBOX_SOURCE]);
+    // The tech voice line's calls are internal too (its own clause; the sandbox one is unchanged).
+    expect(qb.whereRaw.mock.calls).toEqual([
+      ["COALESCE(??, '') <> ?", ['c.source', VOICE_RELAY_SANDBOX_SOURCE]],
+      ["COALESCE(??, '') <> ?", ['c.source', TECH_VOICE_SOURCE]],
+    ]);
   });
 });

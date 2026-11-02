@@ -7291,6 +7291,46 @@ the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
 exactly as in production; that record is the bake-off. Any change to the
 number gate or the dry-run invariant is security-critical).
+`/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
+the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
+which a technician calls from their own cell; dark behind
+`GATE_TECH_VOICE_LINE`, owner 2026-11-01, hands-free field voice PR 3a).
+Twilio-signature validated at the `/api/webhooks/twilio` mount like every
+Twilio inbound route. Payload: standard Twilio voice-webhook form fields
+(`CallSid`, `From`, `To`, `CallStatus`, and `StirVerstat` when the carrier
+signed the call). Admission (`services/tech-voice-line.js`
+`admitTechVoiceCall`) runs BEFORE Twilio answers, and every refusal is a
+bare `<Reject/>`, which Twilio does not bill: the gate is not exactly
+`true`; the posted `To` is not exactly `TECH_VOICE_NUMBER` (unset, malformed
+or a number another registry bucket carries ⇒ every request refused); no
+`CallSid`; the `From` is not the usable cell of exactly one active,
+dispatchable technician (never a Waves line; a cell two technicians share
+admits nobody); the CallSid's `call_log` row belongs to another source; or
+the technician's billed-minute reservation is refused
+(`services/tech-voice-usage.js`: another call of theirs is still live, or 3
+more minutes would pass 15 per ET day or 150 per ET month, summing
+billed-or-reserved minutes). An admission error also rejects (fail closed).
+An admitted call first gets its own `call_log` row (`direction` inbound,
+`source` 'tech_voice', no customer link; metadata `tech_voice`,
+`technician_id`, `stir_verstat`) under the same per-CallSid advisory lock
+`/voice` and `/call-status` take — a generic `/call-status` fallback row
+(`source` NULL) is adopted and its customer link cleared — then a
+`tech_voice_usage` reservation of 3 minutes, idempotent per CallSid (a
+Twilio retry adds nothing). The response is a short `<Say>` notice and
+`<Hangup/>`: no `<Dial>`, `<Record>`, `<Gather>` or relay, and nothing is
+sent to anyone. `/voice` rejects the number before any customer logic if
+its voice URL is ever pointed there. On `/call-status`, a call to the number
+settles its reservation once (a completed call keeps the ceiling of its
+duration in minutes, at least one; a call that never connected keeps zero;
+a call with no final callback keeps its 3), a call with no row (refused
+before admission) gets a fallback row with the same internal source, and
+the call gets no recording recovery and no failure bell. Every call reader
+drops the source through `relay-protocol.whereNotSandboxCall` /
+`isInternalCallSource` (no inbox thread, lead, KPI, missed-call or
+repeat-caller bell, text-back, booking-link text, or "call since the text"
+for an unanswered reply). Gate off ⇒ every request rejected and nothing
+written. Any change to the number, caller or budget checks is security- and
+cost-critical).
 `/api/webhooks/twilio/relay-complete` (POST; machine-to-machine TwiML
 webhook — the `<Connect><ConversationRelay>` action Twilio calls when the
 AI receptionist's relay leg ends. Twilio-signature validated at the
