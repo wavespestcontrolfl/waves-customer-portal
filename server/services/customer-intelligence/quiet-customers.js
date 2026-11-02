@@ -2,6 +2,9 @@
 // here so the /admin/health/quiet route stays thin and the (only) non-SQL
 // logic is unit-testable.
 
+const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('../staff-contact');
+const { personSentFilter } = require('../email/email-customer-link');
+
 // Last meaningful touch = most recent COMPLETED service OR INBOUND SMS for the
 // joined `customers as c`. Automated outbound messages deliberately don't count
 // — they don't make a customer feel cared for. A never-touched customer floors
@@ -10,6 +13,34 @@ const LAST_TOUCH_SQL = `GREATEST(
   COALESCE((SELECT MAX(sr.service_date) FROM service_records sr WHERE sr.customer_id = c.id AND sr.status = 'completed'), TIMESTAMP 'epoch'),
   COALESCE((SELECT MAX(sl.created_at) FROM sms_log sl WHERE sl.customer_id = c.id AND sl.direction = 'inbound'), TIMESTAMP 'epoch')
 )`;
+
+// Newest PERSON touch for the customer row `customerAlias` (customers.id), served
+// as "last contact" behind GATE_CUSTOMER_LAST_TOUCH by the Intelligence Bar
+// customer search, the admin MCP and the admin customer directory. NULL when the
+// customer has none. It differs from LAST_TOUCH_SQL above, which is the quiet
+// list's "meaningful touch" (completed visit or inbound text only, floored to
+// epoch): this one also counts a text a person sent that was delivered, a call a
+// person placed and spoke on, an inbound call a human answered and inbound mail
+// (never a Gmail SENT row), and it stays NULL instead of flooring. Automated
+// outbound texts, bare call rows and call durations never count. Recruiting
+// `job_%` texts are not customer context. Correlated MAX per source, keyed on
+// customer_id (indexed on all four tables). A visit has a date only, so it counts
+// at noon: the same calendar day in Eastern and UTC.
+function contactTouchSql(customerAlias = 'c') {
+  const cid = `${customerAlias}.id`;
+  return `GREATEST(
+  (SELECT MAX(sl.created_at) FROM sms_log sl WHERE sl.customer_id = ${cid}
+    AND ((sl.direction = 'inbound' AND (sl.message_type IS NULL OR sl.message_type NOT LIKE 'job\\_%'))
+      OR (sl.direction = 'outbound' AND ${operatorReplySql('sl')} AND ${smsDeliveredSql('sl')}))),
+  (SELECT MAX(cl.created_at) FROM call_log cl WHERE cl.customer_id = ${cid}
+    AND ((cl.direction = 'outbound' AND ${personCallBackSql('cl')})
+      OR (cl.direction = 'inbound' AND cl.answered_by = 'human'))),
+  (SELECT MAX(em.received_at) FROM emails em WHERE em.customer_id = ${cid}
+    AND NOT COALESCE((${personSentFilter('em')}), FALSE)),
+  (SELECT (MAX(sr.service_date) + TIME '12:00')::timestamptz FROM service_records sr WHERE sr.customer_id = ${cid}
+    AND sr.status = 'completed')
+)`;
+}
 
 // Days of silence before a healthy customer is "quiet". Env-tunable; floored at
 // a week so a misconfiguration can't flag the whole book.
@@ -40,4 +71,4 @@ function mapQuietRow(r, nowMs) {
   };
 }
 
-module.exports = { LAST_TOUCH_SQL, resolveQuietDays, mapQuietRow };
+module.exports = { LAST_TOUCH_SQL, contactTouchSql, resolveQuietDays, mapQuietRow };

@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_CUSTOMER_LAST_TOUCH=true (owner 2026-11-02: the "last contact" the Intelligence Bar customer search, the admin MCP and the admin customer directory serve is the newest PERSON touch instead of the stored customers.last_contact_date, which only web forms, quotes and estimate requests write. A person touch is the newest of: an inbound text, a delivered text a person sent, a call a person placed and spoke on, an inbound call a human answered, inbound email linked to the customer, and a completed visit; automated outbound texts, Gmail SENT rows and bare call rows never count. Same keys (last_contact_date / lastContactDate); the directory's last_contact sort orders by it, NULLS LAST both ways. Read only: never writes last_contact_date. Strict opt-in, read at call time via customerLastTouchLive(). Dark = byte-identical to today.)
  *   GATE_SOCIAL_STUDIO_SKIP_META=true (owner 2026-11-01, social audit "studio trim": from Sep 1 to Nov 1 the autonomous Social Studio's Instagram stills reached about 1.5 to 3 people each and gained no followers, so the autonomous studio stops posting to Facebook and Instagram and keeps LinkedIn and Google Business. On, an autonomous run (the 6:30 AM ET cron, the admin Run Draft and Run Publish buttons, and the approval of a queued autonomous draft) drops facebook and instagram from its channel list: no copy or image is made for them, no Veo clip is made, and an old queued draft publishes to its other channels only. A run whose channels were only facebook and instagram is skipped and logged. The manual Social Studio, Campaign Builder, Publish All, blog and RSS shares, testimonial graphics and scheduled posts are NOT touched. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialStudioSkipMetaLive().)
  *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
  *   GATE_MOVE_NOTICE_EMAIL=true (owner 2026-10-24 "reschedule email": the email version of a reschedule or cancellation text that reached nobody. A customer whose line cannot take texts (a landline, a carrier bounce) otherwise hears nothing when a visit moves or is cancelled. On, when the reschedule text (handleReschedule, sendRescheduleNoticeForVisit) or the cancellation text (handleCancellation) reached no recipient and was not held (send window, visit move, unreadable settings), or a carrier later bounced it (handleUndeliveredSms), the customer gets the same notice by email (appointment.rescheduled / appointment.cancelled, transactional). No usable email raises the no-channel admin alert. One email per notice. Off = today's behavior: no reschedule or cancellation email. Kill: unset)
@@ -5597,6 +5598,8 @@ const gates = {
   // Admin customer Activity timeline (read-only). For logGateStatus only; the
   // route reads customerActivityTimelineLive() at call time.
   customerActivityTimeline: process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true',
+  // Person-touch "last contact" in the bar, MCP and directory. logGateStatus only; readers use customerLastTouchLive().
+  customerLastTouch: process.env.GATE_CUSTOMER_LAST_TOUCH === 'true',
   // Prospect email on the customer Activity timeline. logGateStatus only;
   // the timeline reads leadEmailLinksLive() at call time.
   leadEmailLinks: process.env.GATE_LEAD_EMAIL_LINKS === 'true',
@@ -7686,6 +7689,13 @@ function customerActivityTimelineLive() {
   return process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true';
 }
 
+// GATE_CUSTOMER_LAST_TOUCH read at CALL time — strict `=== 'true'`, dark by default. On, the Intelligence Bar
+// customer search, the admin MCP and the admin customer directory serve the newest person touch
+// (contactTouchSql, services/customer-intelligence/quiet-customers.js) as the customer's last contact. Read-only.
+function customerLastTouchLive() {
+  return process.env.GATE_CUSTOMER_LAST_TOUCH === 'true';
+}
+
 // GATE_LEAD_EMAIL_LINKS read at CALL time — strict `=== 'true'`, dark by
 // default. Read-only: widens which email_messages rows the Customer Activity
 // timeline lists (mail sent to the customer's lead / estimate before they
@@ -8957,6 +8967,8 @@ module.exports.payerInvoiceSmsLive = payerInvoiceSmsLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+// GATE_CUSTOMER_LAST_TOUCH reader, on its own line so gate PRs never conflict.
+module.exports.customerLastTouchLive = customerLastTouchLive;
 
 // GATE_SOCIAL_STUDIO_SKIP_META read at CALL time (so a flip needs no redeploy); strict 'true'.
 // Owner 2026-11-01 "studio trim": the autonomous Social Studio stops drafting and posting to
