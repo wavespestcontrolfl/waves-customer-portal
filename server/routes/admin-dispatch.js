@@ -79,7 +79,7 @@ const {
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive, lawnFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, reserviceAsksLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 const { resolveSeriesTextRelease, COALESCE_SURFACES: SERIES_TEXT_COALESCE_SURFACES, SERIES_TEXT_HOLD_MS, SERIES_TEXT_HELD_WINDOW_MS } = require('../services/series-move-text-coalesce');
 
@@ -4938,6 +4938,37 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:reserviceAsksServiceId/reservice-asks
+// Every message in which the customer described the problem behind a pest or
+// lawn re-service: the booking words, texts, calls and emails
+// from 10 days before the booking to now, each scrubbed and marked quoted or
+// paraphrased (step S1 of the consolidated re-service report). Read-only; dark
+// behind GATE_RESERVICE_ASKS. The path param is NAMED :reserviceAsksServiceId,
+// not :serviceId, so router.param('serviceId') never runs its lookup first (the
+// lawn-fast routes' reason): the steps run in this order, the dark gate (404
+// {enabled:false}, nothing read), the id must be a uuid (404 not_found, nothing
+// read), then the sibling routes' ownership assertion (assertRecapOwnership
+// reads req.params.serviceId, set after validation). A visit that is not a
+// re-service is refused (409 not_reservice). See services/reservice-asks.js.
+router.get('/:reserviceAsksServiceId/reservice-asks', async (req, res, next) => {
+  try {
+    if (!reserviceAsksLive()) return res.status(404).json({ enabled: false });
+    const id = req.params.reserviceAsksServiceId;
+    if (!require('../services/reservice-office-request').isUuid(id)) {
+      return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    }
+    req.params.serviceId = id;
+    if (!(await assertRecapOwnership(req, res))) return;
+    const asks = await require('../services/reservice-asks').gatherReserviceAsks(req.params.serviceId);
+    if (!asks.ok) {
+      const status = asks.reason === 'not_reservice' ? 409 : recapStatusForReason(asks.reason);
+      return res.status(status).json({ error: asks.reason, code: asks.reason });
+    }
+    const { ok, ...body } = asks;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
 // Every lawn-fast route (the path param is NAMED :lawnFastServiceId, not :serviceId, so
 // router.param('serviceId') does not fire on it: that hook's lookup would raise Postgres
 // 22P02, a 500, on a malformed id before any handler ran). The handler runs the same
@@ -6167,7 +6198,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
 // effects of every such row from the operation's own recorded result —
 // only for surfaces whose effects run through applySeriesMoveEffects (the
 // customer web page and Quick Move keep their own effect paths).
-const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule', 'call_makeup'];
+const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule', 'call_makeup', 'intelligence_bar'];
 // Surfaces whose series text is an authenticated staff action (quiet-hours
 // exempt); every customer-driven surface stays inside the send window.
 const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_move']);

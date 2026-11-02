@@ -52,7 +52,11 @@ belong in the why: a text, an email, a promise we made, the failed amount, the v
 estimate” (Sep 29) — no estimate sent yet." works; "An SMS request needs follow-up" does not.
 Quote the customer, redacted the way every bell body is (`redactSensitiveText`, so a phone
 number or street address is masked), cut to the 110 characters at a word, and keep the whole
-quote in `detail`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
+quote in `detail`. One exception: the SMS reader's review bell ("Comms — check <name>'s text
+note") never stores the text, because a text can hold a code or a word that opens a door and no
+screen catches every form; the bell list reads it from the text itself while it serves the list
+(`withTextNoteSources` in `server/services/sms-operational-actions.js`, admin role only, masked
+the same way) and the bell shows it in quotes as `source_text`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
 long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
 alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
 
@@ -154,6 +158,18 @@ Kinds today:
   follows `GATE_ALERT_CLOSE_BUTTONS`, so each button is served while its own gate is on
   (`visibleItems`). A text thread row takes the buttons of the text it shows: the CALL text's
   emission carries Call, the next text's emission drops it, and an older late text keeps the row's own.
+- `negative_keyword` (`server/services/ads/negative-keyword-buttons.js`, `GATE_ADS_NEGATIVES`; owner plan A,
+  2026-11-02): **Add** and **Decline** on one ads-advisor word's row (`ads-negative:<id>`, area Leads, category
+  `system`, link `/admin/ads?tab=advisor&negative=<id>`). Both are stored at raise; `visibleItems` serves them only
+  while the word is still pending on the Ads page. A tap is the Ads page's own decide step
+  (`decideSuggestion` in `server/services/ads/negative-keyword-actions.js`, the route
+  `POST /api/admin/ads/negatives/:id/decide`) with its checks again under the row lock: the campaign is still a linked
+  Google Ads campaign, the word is not a brand, service or city word, and no search with it brought a conversion in
+  90 days. Add writes a phrase-match negative to Google Ads; Decline only records the answer. Each outcome that leaves
+  the word not pending closes the row. A Google error leaves the row open to try again. At most 3 new rows a day
+  (Eastern); the rest wait on the Ads page and ring on later days, oldest first, and a backlog is never a bell row.
+  The owner's own word list sends no bell. It sends nothing to a customer and moves no money; it changes where the ad
+  can show, and **Undo** is on the Ads page.
 
 ## 3. Never in a headline or a why
 

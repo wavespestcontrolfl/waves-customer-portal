@@ -380,7 +380,8 @@ const LAWN_PRICING_V2 = {
   // Cost-plus list price for residential recurring lawn care (owner ruling
   // 2026-10-09), behind GATE_LAWN_COST_PLUS_LIST (ships OFF). List price =
   // annual cost / (1 - listMargin), never below the market table nor
-  // minimumPerVisit; discounts still stop at targetCollectedMarginFloor.
+  // minimumPerVisit. Discounts apply in full since owner 2026-11-02 (the
+  // targetCollectedMarginFloor is a review line, not a discount stop).
   // Cost = the v13 whole-lawn product at SiteOne account prices 2026-10-05
   // (9 visits $17.73, 12 visits $20.84 per 1,000 sq ft a year) plus a $0.75
   // per 1,000 sq ft per visit spot-work reserve, and spotMinutesPerVisit

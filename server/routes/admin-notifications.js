@@ -89,11 +89,15 @@ router.get('/', async (req, res, next) => {
     const dedupedPersisted = persisted.slice(0, limit).filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
     const lastServed = persisted.slice(0, limit).at(-1);
     const served = await withAlertButtons(dedupedPersisted.map(withoutCursorFields), { role: req.techRole });
+    // An SMS review bell's source text rides as `source_text`, read now and never stored on the row. Added last:
+    // the explainer reads the stored row by id, never this.
+    const { withTextNoteSources } = require('../services/sms-operational-actions');
+    const rows = await withTextNoteSources(await withExplainerFields(served, { role: req.techRole }), { role: req.techRole });
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
       // admin role while GATE_ALERT_EXPLAINER is on.
-      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...(await withExplainerFields(served, { role: req.techRole }))],
+      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
       page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
     });
