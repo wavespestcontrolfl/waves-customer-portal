@@ -124,6 +124,27 @@ describe('proposePatches — threshold + cap + ordering', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][1]).toMatch(/facts_block_gap/);
   });
 
+  test('while the rule loop runs (observe or true) the proposal is still parked, with no "parked for review" notice', async () => {
+    const prior = process.env.GATE_SMS_PROMPT_AUTOPROMOTE;
+    try {
+      for (const mode of ['observe', 'true']) {
+        process.env.GATE_SMS_PROMPT_AUTOPROMOTE = mode;
+        NotificationService.notifyAdmin.mockClear();
+        const dbi = makeProposerDb({
+          cells: [{ surface: 'prompt_discipline', failure_mode: 'invented_commitment', fresh: '6' }],
+          entries: entryRows,
+        });
+        const out = await proposePatches({ dbi, anthropicClient: {} });
+        expect(out.proposed).toBe(1);
+        expect(dbi.inserts).toHaveLength(1);
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      }
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SMS_PROMPT_AUTOPROMOTE;
+      else process.env.GATE_SMS_PROMPT_AUTOPROMOTE = prior;
+    }
+  });
+
   test('the proposer prompt names the LIVE drafter version via currentPromptVersion(), not the frozen PROMPT_VERSION (pre-push audit P1)', async () => {
     const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
     try {

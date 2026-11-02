@@ -606,18 +606,23 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
       });
       proposed += 1;
 
-      try {
-        const NotificationService = require('./notification-service');
-        await NotificationService.notifyAdmin(
-          'agents',
-          `Patch proposal: ${cell.surface} / ${cell.failure_mode}`,
-          `${cell.fresh} recent failures share this pathology. A concrete harness patch is parked for review in Agents → Shadow Drafts. Nothing changes until you act on it.`,
-          // ?tab=shadow: the bell must land the operator ON the proposal —
-          // bare /admin/agents defaults to the Overview tab.
-          { link: '/admin/agents?tab=shadow' }
-        );
-      } catch (err) {
-        logger.warn(`[pathology] bell notification failed: ${err.message}`);
+      // The rule loop (GATE_SMS_PROMPT_AUTOPROMOTE observe or true) acts on proposals itself, so no "parked for
+      // review" notice then: it would ask the owner to approve a step his 2026-09-27 ruling removed (owner
+      // 2026-11-02, weekly-loop review item 8). Loop off: the notice is unchanged.
+      if (require('./sms-prompt-patch').promptAutopromoteMode() === 'off') {
+        try {
+          const NotificationService = require('./notification-service');
+          await NotificationService.notifyAdmin(
+            'agents',
+            `Patch proposal: ${cell.surface} / ${cell.failure_mode}`,
+            `${cell.fresh} recent failures share this pathology. A concrete harness patch is parked for review in Agents → Shadow Drafts. Nothing changes until you act on it.`,
+            // ?tab=shadow: the bell must land the operator ON the proposal —
+            // bare /admin/agents defaults to the Overview tab.
+            { link: '/admin/agents?tab=shadow' }
+          );
+        } catch (err) {
+          logger.warn(`[pathology] bell notification failed: ${err.message}`);
+        }
       }
       logger.info(`[pathology] proposal parked for ${cell.surface}/${cell.failure_mode} (${cell.fresh} fresh, id ${String(insertedId).slice(0, 8)})`);
     } catch (err) {
