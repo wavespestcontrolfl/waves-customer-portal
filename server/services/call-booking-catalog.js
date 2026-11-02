@@ -155,13 +155,34 @@ const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
 // is still the live pest lane (reServiceLanes) — with no live pest lane the
 // paid row books as before.
 const PLAN_COVERED_PEST_ONE_TIME_KEYS = new Set(['cockroach_control', 'one_time_pest_control']);
-// Any "German" anywhere in the call text keeps the paid row, negated or not
-// (codex #7480 r2-r4: a word-distance bound and then the negation strip each
-// missed a phrasing, e.g. "not bugs just German roaches"). This check only
-// runs once the call already resolved to a roach row (pick or keyword), so a
-// stray or negated "German" can only keep a paid booking paid, which is what
-// every roach call did before the plan-covered exception.
-const GERMAN_ROACH_RE = /\bgerman\b/i;
+// German roach words come from the species catalog's high-risk indoor roach
+// subgroup: every common name and alias word that is not a generic roach word,
+// plus the scientific species epithet ("german", "germanica"). "croton" (the
+// "croton bug" nickname) is added because the catalog does not list it. Any
+// of them anywhere in the call text, negated or not, keeps the paid row (codex
+// #7480 r2-r5). The check only runs once the call already resolved to a roach
+// row (pick or keyword), so a stray or negated word can only keep a paid
+// booking paid, which is what every roach call did before this exception.
+const GENERIC_ROACH_WORDS = new Set(['cockroach', 'cockroaches', 'roach', 'roaches', 'bug', 'bugs']);
+let germanRoachRe = null;
+function highRiskRoachRe() {
+  if (germanRoachRe) return germanRoachRe;
+  const words = new Set(['german', 'germanica', 'croton']);
+  try {
+    const entries = require('./species-catalog').listEntries({ subgroup: 'high-risk-indoor-roaches' });
+    const names = entries.flatMap((e) => [e.common_name, ...(e.aliases || [])]);
+    names.flatMap((name) => String(name || '').toLowerCase().split(/[^a-z]+/))
+      .filter((w) => w && !GENERIC_ROACH_WORDS.has(w))
+      .forEach((w) => words.add(w));
+    entries.map((e) => String(e.scientific_name || '').toLowerCase().split(/\s+/)[1])
+      .filter(Boolean)
+      .forEach((w) => words.add(w));
+  } catch (err) {
+    logger.warn(`[call-booking-catalog] species catalog unreadable (German roach words fall back to the built-in list): ${err.message}`);
+  }
+  germanRoachRe = new RegExp(`\\b(?:${[...words].join('|')})\\b`, 'i');
+  return germanRoachRe;
+}
 
 function isPlanCoveredPestRow(row) {
   return !!row && PLAN_COVERED_PEST_ONE_TIME_KEYS.has(row.service_key);
@@ -170,7 +191,7 @@ function isPlanCoveredPestRow(row) {
 // German roach stays a paid specialty cleanout even for a plan customer, so an
 // affirmative German-roach mention switches the plan-covered exception off.
 function mentionsGermanRoach(haystack) {
-  return GERMAN_ROACH_RE.test(String(haystack || ''));
+  return highRiskRoachRe().test(String(haystack || ''));
 }
 
 // A keyword match anchors the real paid row UNLESS every matched row is a
