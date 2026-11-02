@@ -23,6 +23,47 @@ Production is deployed by Railway from the GitHub `main` branch for
 - Pre-deploy command: `npm run db:migrate`
 - Start command: `node server/index.js`
 
+### Moving the build to `deploy/Dockerfile` (2026-11-02)
+
+Nixpacks writes every service variable NAME onto one `ARG` line and one
+`ENV k=$k` line of the Dockerfile it generates. BuildKit refuses a line over
+65,535 bytes. At about 1,260 variables (mostly `GATE_*`) every production
+deploy failed on 2026-11-02 from 03:17 to 04:23 ET, with
+`dockerfile line greater than max allowed size of 65535`. A Dockerfile build
+receives only the variables it declares with `ARG`, so `deploy/Dockerfile`
+has no such line. It is the Nixpacks v1.41.0 build for this repo step for
+step (same pinned base image, same Nix package set in
+`deploy/nixpkgs-23f9169c….nix`, one stage, `bash -l -c` entry point). Its
+header lists the traps. The `deploy-image` workflow builds it and checks node
+24, sharp, ffmpeg and a Chromium PDF inside the image.
+
+The file is inert until these service settings change, in this order:
+
+1. Pre-deploy command: `/bin/bash -l -c "node scripts/check-runtime-deps.js && npm run db:migrate"`,
+   and a pre-deploy timeout of 30 minutes. The check fails a deploy only when
+   ffmpeg or Chromium is missing from the new image, so a broken image never
+   takes traffic. Set this while still on Nixpacks, so one deploy proves it.
+2. Start command: `/bin/bash -l -c "node server/index.js"`. For a Dockerfile
+   build Railway runs start and pre-deploy commands in exec form, replacing the
+   image ENTRYPOINT, so without the login shell node, ffmpeg and the sharp
+   library path are missing. Also set while still on Nixpacks.
+3. Builder: Dockerfile, Dockerfile path `deploy/Dockerfile`. Outside the
+   restart windows. No variable changes.
+
+Do not add a file named `Dockerfile` at the repo root: Railway auto-detects
+that name and switches the builder by itself.
+
+Ways back: set the builder to Nixpacks again (works only while the variable
+names still fit the old line; check with `~/.claude/bin/railway-var-room`);
+or roll back to the last deploy before the switch in Railway (seconds, but it
+also restores that deploy's variables, so gates turned on since must be set
+again); or fix `deploy/Dockerfile` forward (a failed build leaves production
+on the last good deploy).
+
+To change a build input (Node major, a Nix package, the build command),
+change `deploy/Dockerfile` or the `.nix` file and let `deploy-image` prove it.
+`nixpacks.toml` only matters while the builder is Nixpacks.
+
 ### Confirm a Production Deploy
 
 Use these checks after a merge to `main`:

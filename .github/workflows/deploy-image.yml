@@ -1,0 +1,51 @@
+# Builds deploy/Dockerfile (the production image file, 2026-11-02 build-line-limit fix) and
+# checks the image the way production will run it, before Railway's builder ever points at it.
+#
+# Why: Railway's Nixpacks builder put every service variable name on one Dockerfile line and
+# BuildKit refused it past 65,535 bytes (every prod deploy failed 03:17-04:23 ET on 11-02).
+# deploy/Dockerfile copies the Nixpacks build without that line. A wrong copy shows up here, not
+# in production: the job builds the image, then runs, inside it and through the same login
+# shell the app uses (the image ENTRYPOINT is bash -l -c):
+#   - node is v24 (the Nix package set Nixpacks picks for this repo),
+#   - sharp loads (needs LD_LIBRARY_PATH from the Nix profile),
+#   - scripts/check-runtime-deps.js --pdf: ffmpeg runs, Chromium exists, starts and prints a PDF
+#     (the pre-deploy check minus --pdf).
+# It never starts the server: a full boot runs the scheduler and reports to the live Sentry DSN.
+#
+# Runs only when the image inputs change, on the same PR triggers as `tests` (a push alone
+# starts nothing), or by hand. The repo is public, so Actions minutes are free.
+name: deploy-image
+
+on:
+  pull_request:
+    types: [opened, reopened, labeled, unlabeled]
+    paths:
+      - 'deploy/**'
+      - 'nixpacks.toml'
+      - 'package-lock.json'
+      - 'scripts/check-runtime-deps.js'
+      - '.github/workflows/deploy-image.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# No job writes to the repo, so the token stays read-only.
+permissions:
+  contents: read
+
+jobs:
+  build-and-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build deploy/Dockerfile (as Railway would)
+        run: DOCKER_BUILDKIT=1 docker build -f deploy/Dockerfile -t portal-image:ci .
+      - name: Node is v24 from the Nix profile
+        run: docker run --rm portal-image:ci 'node --version | tee /dev/stderr | grep -q "^v24\."'
+      - name: sharp loads (LD_LIBRARY_PATH from the login shell)
+        run: docker run --rm portal-image:ci "node -e \"require('sharp'); console.log('sharp ok')\""
+      - name: ffmpeg + Chromium present, Chromium prints a PDF
+        run: docker run --rm --shm-size=1g portal-image:ci 'node scripts/check-runtime-deps.js --pdf'
