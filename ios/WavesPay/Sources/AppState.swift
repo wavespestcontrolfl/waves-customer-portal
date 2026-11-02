@@ -62,6 +62,9 @@ final class AppState: ObservableObject {
 
     // A wavespay:// link opened the app (Safari's Tap to Pay button).
     func handleIncomingURL(_ url: URL) {
+        // wavespay://google-signin only ends a Google sign-in, which the sign-in
+        // sheet reads itself; it never starts a payment.
+        if url.host == GoogleSignInSession.callbackHost { return }
         guard Self.handoffToken(from: url) != nil else { return }
         startCollect(from: url, requestId: nil)
     }

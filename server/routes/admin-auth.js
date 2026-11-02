@@ -31,6 +31,7 @@ const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar
 const staffMfa = require('../services/staff-mfa');
 const { noStore } = require('../middleware/no-store');
 const { loginMfaPreParserGuard } = require('../middleware/staff-mfa-guard');
+const googleSignin = require('../services/staff-google-signin');
 const { adminMfaLive } = staffMfa;
 
 const RESET_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -207,35 +208,117 @@ async function login(req, res, next) {
     const tech = candidate;
     if (!valid) return rejectInvalidCredentials(res, startedAt);
 
-    // Two-step sign-in: the password alone issues no session for an enrolled
-    // staff member — only a short-lived challenge for POST /login/mfa.
-    if (adminMfaLive() && staffMfa.mfaEnabled(tech)) {
-      // The challenge is a short-lived bearer: same privacy headers as
-      // /login/mfa (gate-off answers keep their headers unchanged).
-      noStore(req, res, () => {});
-      return res.json({
-        mfaRequired: true,
-        challengeToken: jwt.sign({
-          technicianId: tech.id,
-          type: MFA_CHALLENGE_TYPE,
-          tokenVersion: staffTokenVersion(tech),
-        }, config.jwt.secret, { expiresIn: MFA_CHALLENGE_TTL }),
-      });
-    }
-
-    const { token, refreshToken } = mintStaffTokens(tech);
-
-    await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
-    setAdminMarkerCookie(res, tech.id);
-
-    res.json({
-      token, refreshToken,
-      user: staffUser(tech),
-    });
+    return await respondWithStaffSession(req, res, tech);
   } catch (err) { next(err); }
 }
 
+// The end of every staff sign-in that proved who the person is (the password
+// here, or Google through /google/finish).
+async function respondWithStaffSession(req, res, tech) {
+  // Two-step sign-in: the first factor alone issues no session for an
+  // enrolled staff member — only a short-lived challenge for POST /login/mfa.
+  if (adminMfaLive() && staffMfa.mfaEnabled(tech)) {
+    // The challenge is a short-lived bearer: same privacy headers as
+    // /login/mfa (gate-off answers keep their headers unchanged).
+    noStore(req, res, () => {});
+    return res.json({
+      mfaRequired: true,
+      challengeToken: jwt.sign({
+        technicianId: tech.id,
+        type: MFA_CHALLENGE_TYPE,
+        tokenVersion: staffTokenVersion(tech),
+      }, config.jwt.secret, { expiresIn: MFA_CHALLENGE_TTL }),
+    });
+  }
+
+  const { token, refreshToken } = mintStaffTokens(tech);
+
+  await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
+  setAdminMarkerCookie(res, tech.id);
+
+  return res.json({
+    token, refreshToken,
+    user: staffUser(tech),
+  });
+}
+
 router.post('/login', login);
+
+// ── Sign in with Google (GATE_STAFF_GOOGLE_SIGNIN) ──────────────────────────
+// services/staff-google-signin.js holds the flow. Dark (or no Google client
+// configured) = the generic 404 on every route but /google/status.
+
+const googleRedirectLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: 'Too many sign-in attempts. Please try again in 15 minutes.' },
+  // Unauthenticated endpoint: attached JWTs must not create extra buckets.
+  keyGenerator: unauthenticatedAuthLimitKey,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+
+const googleFinishLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  message: { error: 'Too many sign-in attempts. Please try again in 15 minutes.' },
+  keyGenerator: unauthenticatedAuthLimitKey,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+
+function requireGoogleSignin(req, res, next) {
+  if (!googleSignin.googleSigninReady()) {
+    return res.status(404).json(require('../middleware/errors').notFoundBody(req));
+  }
+  return next();
+}
+
+// The signed-out sign-in page asks whether to show the button.
+router.get('/google/status', (req, res) => {
+  res.json({ enabled: googleSignin.googleSigninReady() });
+});
+
+async function googleStart(req, res, next) {
+  try {
+    const started = await googleSignin.startAttempt({
+      client: String(req.query.client || ''),
+      challenge: String(req.query.challenge || ''),
+    });
+    if (started.error) {
+      return res.status(400).json({ error: 'Start Google sign-in from the Waves sign-in page.' });
+    }
+    res.cookie(googleSignin.STATE_COOKIE, started.state, googleSignin.stateCookieOptions(googleSignin.ATTEMPT_TTL_MS));
+    return res.redirect(302, started.authUrl);
+  } catch (err) { return next(err); }
+}
+
+async function googleCallback(req, res, next) {
+  try {
+    const outcome = await googleSignin.completeCallback({
+      state: req.query.state,
+      cookieState: googleSignin.readStateCookie(req),
+      code: req.query.code,
+      googleError: req.query.error,
+    });
+    res.clearCookie(googleSignin.STATE_COOKIE, googleSignin.stateCookieOptions());
+    return res.redirect(302, googleSignin.callbackRedirect(outcome));
+  } catch (err) { return next(err); }
+}
+
+// Every refusal (unknown, used or expired result, a different page's secret,
+// a link changed since the callback) is the same 401: the page starts over.
+async function googleFinish(req, res, next) {
+  try {
+    const tech = await googleSignin.consumeResult(req.body || {});
+    if (!tech) {
+      return res.status(401).json({ error: 'Your Google sign-in expired. Try again.', code: 'GOOGLE_SIGNIN_EXPIRED' });
+    }
+    return await respondWithStaffSession(req, res, tech);
+  } catch (err) { return next(err); }
+}
+
+router.get('/google/start', requireGoogleSignin, noStore, googleRedirectLimiter, googleStart);
+router.get('/google/callback', requireGoogleSignin, noStore, googleRedirectLimiter, googleCallback);
+router.post('/google/finish', requireGoogleSignin, noStore, googleFinishLimiter, googleFinish);
 
 // `invalidStatus`: the login step answers a wrong code 401 (no session yet);
 // the signed-in management routes answer it 400 so a typo never reads as a
@@ -775,6 +858,9 @@ module.exports = router;
 module.exports._handlers = {
   changePassword,
   forgotPassword,
+  googleCallback,
+  googleFinish,
+  googleStart,
   issuePasswordReset,
   lockStaffAccountMutations,
   login,

@@ -441,6 +441,7 @@
  *   GATE_VISIT_PREP_PLANT_READ=true (sibling of GATE_VISIT_PREP_PEST_READ — automatic lawn / tree & shrub read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPlantReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS live, same as the pest read. Triggered from the SAME single place, services/visit-prep.js's createVisitPrepSubmission, as its own independent fire-and-forget call — never disturbs the pest-read or tech-alert hooks there. A submission whose stop is a strict lawn-only or tree & shrub-only service (visit-prep-plant-applicability.js isLawnOnlyServiceType/isTreeShrubOnlyServiceType — never WDO, termite, or a Waves Assessment) runs the merged photo-id-v2 lawn/plant engine (identifyPlantV2, photo-id-v2/plant-engine.js — L3, no customer route yet) and stores the workup on the submission's own `read_result` jsonb column (no second table; the pest read's `read_ref` is untouched). A combined Lawn & Pest stop (one combined service_type such as "Lawn Care + Pest Control", or separate pest and lawn / tree & shrub members) gets BOTH reads under ONE claim (services/visit-prep-combo-read.js, read key 'combo:<subject>') only while BOTH this gate and GATE_VISIT_PREP_PEST_READ are live (owner ruling 2026-09-30); with one dark the one live engine reads that stop alone; the combo read counts 2 against the daily cap (two vision calls). Anything else resolves straight to read_status='unsupported', no engine call. Shares the pest read's SAME VISIT_PREP_READ_DAILY_CAP (default 40) and the same advisory lock key — deliberately ONE cap across both engines, not a second one; a capped or failed read never blocks the submission. See docs in services/visit-prep-plant-read.js.)
  *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires a live read engine (visitPrepPestReadLive() or visitPrepPlantReadLive()). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same dispatchVisitPrepRead (services/visit-prep-read-dispatch.js, which runs only live engines) for at most 10 submissions from the last 14 ET days on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), 'unsupported' where a live engine now reads the stop, and a 'done' or 'failed' read made by the wrong engine or subject for the stop as it is now (released to 'none', then re-read; a row checked and needing nothing is skipped for an hour). Pending rows, and failed rows on the line they failed on, are never retried. One retry per row per case, per settled attempt for a stale read (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP on the ET day it runs, like a first read. A batch with failed retries fails the job run (job_health).)
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
+ *   GATE_CUSTOMER_LAST_TOUCH=true (owner 2026-11-02: the "last contact" the Intelligence Bar customer search, the admin MCP and the admin customer directory serve is the newest PERSON touch instead of the stored customers.last_contact_date, which only web forms, quotes and estimate requests write. A person touch is the newest of: an inbound text, a delivered text a person sent, a call a person placed and spoke on, an inbound call a human answered, inbound email linked to the customer, and a completed visit; automated outbound texts, Gmail SENT rows and bare call rows never count. Same keys (last_contact_date / lastContactDate); the directory's last_contact sort orders by it, NULLS LAST both ways. Read only: never writes last_contact_date. Strict opt-in, read at call time via customerLastTouchLive(). Dark = byte-identical to today.)
  *   GATE_CALL_COMMERCIAL_DICTATED_BOOKING=true (owner ruling 2026-09-30: a commercial job staff dictate on the call and the caller accepts, with a price agreed, auto-books on INBOUND calls (outbound waits for staff identity independent of the speaker labels) instead of always going to the office. The staff commitment quote AND the caller's acceptance quote must each appear word for word in a turn of their own speaker (call-reschedule-agreement.js groundRescheduleAgreement, reused unchanged); a missing/unlabeled transcript or a quote only in the other speaker's turn fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote — capacity, address validation, unit checks and the on-the-hour rule still apply, and no price agreed still goes to the office. Strict opt-in, read at call time via callCommercialDictatedBookingLive(). Off = byte-identical. hasAgentCommittedEvidence is untouched. See services/call-commercial-dictated-booking.js.)
  *   GATE_CALLBACK_SPAM_CLOSES_PARENT=true (an OUTBOUND call with metadata.relatedCallId (the admin Call back action on a voicemail) that lands a spam verdict also settles the parent inbound call: its open/in_progress triage_items whose reason a return call would have answered (the CALLBACK_SPAM_MOOT_CODES allowlist in call-triage-flags.js; other reasons stay open) resolve (resolution_source auto, resolution_rule callback_spam), its open Waves callback commitments are dismissed, review_status syncs to resolved when no card is left, metadata.callback_verdict is stamped. Nothing is sent. Strict opt-in, read via isEnabled. Off = today's behavior. Rollback: unset.)
  *   GATE_MISSED_CALL_ALERT_DETAIL=true (the missed-call bell and push body also name the line the caller dialed, the call length in seconds and, for a customer on file, the date of their next scheduled visit; admin copy only, nothing is sent to a customer. Strict opt-in, read via isEnabled. Off = today's sentence, byte-identical. Rollback: unset.)
@@ -454,6 +455,7 @@
  *   GATE_PLAN_RATE_LEDGER_RECONCILE=true (nightly plan-rate ledger invariant reconcile, 6:47 AM ET, services/plan-rate-ledger-reconcile.js: every live customer whose customer_plan_rates lines no longer add up to customers.monthly_rate is re-checked under the customer-comms lock and the customers row lock; a shortfall is parked in the 'unattributed' line (source invariant_repair), an overshoot is never deleted, and each distinct gap raises one Billing alert (at most 5 new a run). Never changes the billed rate, never charges, never messages a customer. Strict opt-in, read at call time via planRateLedgerReconcileLive(), which ALSO needs GATE_PLAN_RATE_LEDGER. Ships DARK; off = the tick returns before the cron lock: no query, no write, no alert.)
  *   GATE_ADMIN_MFA=true (staff two-step sign-in: a staff member who has set up an authenticator app must enter its 6-digit code (or a single-use recovery code) after the password before a session is issued, and a session minted without that step is refused; the enrollment page /admin/two-step and its /api/admin/auth/mfa routes answer only while on. Read at call time via adminMfaLive() in server/services/staff-mfa.js; off = login, /me and every staff session are exactly as before, whatever was enrolled, so unset is the kill switch.)
  *   GATE_ADMIN_MFA_ENFORCE=true (needs GATE_ADMIN_MFA: an ADMIN with no authenticator set up is held on the two-step enrollment page — every other staff route answers 403 MFA_ENROLLMENT_REQUIRED — until they finish it. Read at call time via adminMfaEnforceLive(); unset = enrollment stays optional.)
+ *   GATE_STAFF_GOOGLE_SIGNIN=true (owner 2026-11-02: staff can sign in with a company Google account. The sign-in page shows Sign in with Google; the server runs Google's code flow (state, nonce, PKCE), checks Google's signed ID token (company domain from GOOGLE_STAFF_SIGNIN_DOMAINS, verified address) and accepts only the Google account the owner linked to an active staff member on the Team tab, pinned to Google's account id at the first sign-in. The session then follows the password path: an enrolled staff member still enters the authenticator code. Needs GOOGLE_STAFF_SIGNIN_CLIENT_ID and GOOGLE_STAFF_SIGNIN_CLIENT_SECRET. Read at call time via staffGoogleSigninLive(), strict 'true', dark by default; off = the button and the Team tab field are hidden and every /api/admin/auth/google route answers 404. Sends nothing to anyone.)
  *   GATE_STAFF_DEFAULT_DENY=true (owner 2026-10-02: a technician-role staff login reaches ONLY the routes on server/middleware/technician-scope.js — own schedule/visits, own timesheet, texts with own-visit customers, promises, protocols, documents, pay-growth, knowledge READ, equipment/inventory READ; every other staff route is a 403 before it runs. Off = today's behavior plus a once-per-route "[staff-scope] would-deny" log line so the production log shows real technician use before the flip. Admins are never affected. docs/technician-reachable-routes.md is the rendered list.)
  *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
  *   GATE_REPORT_PLAN_RESCHEDULE=true (service report, owner ruling 2026-10-06: "Your plan" and "Your upcoming visits" become one section, and each upcoming visit gets a Reschedule button that opens the customer's self-serve /reschedule link. The server adds rescheduleUrl to each visit and `merged: true` to upcomingVisitsCard; a link is reused, never minted again on each view, and is null when the visit is too close to move or the link cannot be built. Needs GATE_REPORT_UPCOMING_VISITS, which supplies the visits. Strict opt-in: exactly 'true' in every environment, read at call time via reportPlanRescheduleLive(). Ships DARK; off = the report payload and page are byte-identical to before and the two sections stay separate. Sends nothing to a customer.)
@@ -5608,6 +5610,8 @@ const gates = {
   // Admin customer Activity timeline (read-only). For logGateStatus only; the
   // route reads customerActivityTimelineLive() at call time.
   customerActivityTimeline: process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true',
+  // Person-touch "last contact" in the bar, MCP and directory. logGateStatus only; readers use customerLastTouchLive().
+  customerLastTouch: process.env.GATE_CUSTOMER_LAST_TOUCH === 'true',
   // Prospect email on the customer Activity timeline. logGateStatus only;
   // the timeline reads leadEmailLinksLive() at call time.
   leadEmailLinks: process.env.GATE_LEAD_EMAIL_LINKS === 'true',
@@ -6709,6 +6713,14 @@ function adminMfaEnforceLive() {
   return adminMfaLive() && process.env.GATE_ADMIN_MFA_ENFORCE === 'true';
 }
 
+// GATE_STAFF_GOOGLE_SIGNIN read at CALL time — strict `=== 'true'`, ships
+// DARK. The only reader is server/services/staff-google-signin.js; unset is
+// the kill switch (no redeploy): the Google routes answer 404 and the button
+// and Team tab field hide.
+function staffGoogleSigninLive() {
+  return process.env.GATE_STAFF_GOOGLE_SIGNIN === 'true';
+}
+
 // GATE_TYPED_DECISIONS read at CALL time — ships DARK, off unless set
 // (gateEnvValue: true / 1 / on). Off, askPackage (typed-decisions/jev.js)
 // returns { ok:false, reason:'gate_off' } before any provider call, so a flip
@@ -7180,6 +7192,19 @@ function reviewNameMatchMode() {
 // services/review-click-guard.js). Covers the first-ask lock. Unset = today's guard, no redeploy.
 function reviewProbableReviewerGuardLive() {
   return String(process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD || '').trim().toLowerCase() === 'true';
+}
+
+// GATE_APP_RATING_PROMPT read at CALL time (owner 2026-11-02, "do the rating for everyone"):
+// 'off' | 'shadow' | 'on'. The Waves customer app (a build with the in-app review plugin) asks
+// POST /api/customer/app-rating/claim at most once a day from its home screen; the server answers
+// ask=true at most once per 120 days per customer, and only after a finished visit
+// (services/app-rating-prompt.js). on = the app asks the store for its rating card (the store
+// decides whether it shows; Apple shows it at most three times a year); shadow = record the
+// would-ask row, the app shows nothing. Unset is the kill, no redeploy. Sends no text, email or call.
+function appRatingPromptMode() {
+  const value = String(process.env.GATE_APP_RATING_PROMPT || '').trim().toLowerCase();
+  if (value === 'shadow') return 'shadow';
+  return value === 'true' ? 'on' : 'off';
 }
 
 // GATE_REVIEW_ASK_AT_VISIT read at CALL time (owner 2026-11-01, "every customer gets the review text 10
@@ -7732,6 +7757,13 @@ function ibCancelWithEffectsLive() {
 // `{ enabled: false }`. Read-only: no customer message, no write.
 function customerActivityTimelineLive() {
   return process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true';
+}
+
+// GATE_CUSTOMER_LAST_TOUCH read at CALL time — strict `=== 'true'`, dark by default. On, the Intelligence Bar
+// customer search, the admin MCP and the admin customer directory serve the newest person touch
+// (contactTouchSql, services/customer-intelligence/quiet-customers.js) as the customer's last contact. Read-only.
+function customerLastTouchLive() {
+  return process.env.GATE_CUSTOMER_LAST_TOUCH === 'true';
 }
 
 // GATE_LEAD_EMAIL_LINKS read at CALL time — strict `=== 'true'`, dark by
@@ -8988,6 +9020,8 @@ module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 module.exports.reviewNameMatchMode = reviewNameMatchMode;
 module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;
+// GATE_APP_RATING_PROMPT reader, on its own line so gate PRs never conflict.
+module.exports.appRatingPromptMode = appRatingPromptMode;
 // GATE_QUICKMOVE_CUSTOMER_PICK read at CALL time (so a flip needs no redeploy); strict 'true', dark.
 // Kept off the end-of-file append point, where gate PRs keep colliding.
 function quickMoveCustomerPickLive() {
@@ -9050,6 +9084,8 @@ module.exports.ibRecordPaymentPartialLive = ibRecordPaymentPartialLive;
 // GATE_ADMIN_MFA readers (mid-list, away from the end other gate PRs append to).
 module.exports.adminMfaLive = adminMfaLive;
 module.exports.adminMfaEnforceLive = adminMfaEnforceLive;
+// GATE_STAFF_GOOGLE_SIGNIN reader, beside its staff sign-in siblings.
+module.exports.staffGoogleSigninLive = staffGoogleSigninLive;
 // GATE_IB_DELETE_CUSTOMER reader, on its own line so gate PRs never conflict.
 module.exports.ibDeleteCustomerLive = ibDeleteCustomerLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
@@ -9066,6 +9102,8 @@ module.exports.smsEditLearningLive = smsEditLearningLive;
 module.exports.smsPromptB1Live = smsPromptB1Live;
 module.exports.smsJudgeV2Live = smsJudgeV2Live;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
+// GATE_CUSTOMER_LAST_TOUCH reader, on its own line so gate PRs never conflict.
+module.exports.customerLastTouchLive = customerLastTouchLive;
 module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;

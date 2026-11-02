@@ -201,6 +201,55 @@ describe('TimeTrackingPage team edit form names', () => {
     vi.unstubAllGlobals();
   });
 
+  it('links a company Google account after the profile save, only when it changed and the gate is on', async () => {
+    const showToast = vi.fn();
+    const roster = {
+      googleSigninEnabled: true,
+      technicians: [{
+        id: 'tech-1', name: 'River Tech', email: 'river@example.com', role: 'technician',
+        active: true, employment_status: 'active', google_email: null, google_linked: false,
+      }],
+    };
+    const fetchMock = vi.fn(async (url, options = {}) => (
+      options.method === 'PUT' ? apiResponse({ success: true, technician: roster.technicians[0] }) : apiResponse(roster)
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<TeamTab showToast={showToast} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const field = screen.getByRole('textbox', { name: 'Google sign-in' });
+    expect(screen.getByText('Optional. A company Google account for Sign in with Google.')).toBeInTheDocument();
+    fireEvent.change(field, { target: { value: ' River@WavesPestControl.com ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/admin/timetracking/technicians/tech-1/google-signin',
+      expect.objectContaining({ method: 'PUT' }),
+    ));
+    const puts = fetchMock.mock.calls.filter(([, options = {}]) => options.method === 'PUT');
+    expect(puts.map(([url]) => url)).toEqual([
+      '/api/admin/timetracking/technicians/tech-1',
+      '/api/admin/timetracking/technicians/tech-1/google-signin',
+    ]);
+    expect(JSON.parse(puts[0][1].body)).not.toHaveProperty('googleEmail');
+    expect(JSON.parse(puts[1][1].body)).toEqual({ googleEmail: 'River@WavesPestControl.com' });
+
+    // An edit that leaves the address alone sends no Google request.
+    fetchMock.mockClear();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(showToast).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/google-signin'))).toBe(false);
+  });
+
+  it('shows no Google sign-in field while the gate is off', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => apiResponse({
+      technicians: [{ id: 'tech-1', name: 'River Tech', role: 'technician', active: true, employment_status: 'active' }],
+    })));
+    render(<TeamTab showToast={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect(screen.queryByRole('textbox', { name: 'Google sign-in' })).not.toBeInTheDocument();
+  });
+
   it('gives every edit field the name of its visible label', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => apiResponse({
       technicians: [{

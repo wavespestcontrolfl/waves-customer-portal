@@ -64,6 +64,7 @@ async function main() {
         profileRole = 'admin';
         body = { token: 'synthetic-login-token', user: { id: 'fixture-user', name: 'Fixture operator', role: profileRole } };
       }
+      else if (api === '/admin/auth/google/status') body = { enabled: false };
       else if (api === '/health') body = { status: 'ok', gates: {} };
       else if (api === '/admin/feature-flags') body = { flags: {} };
       else if (api === '/admin/notifications/unread-count') body = { count: 0 };
