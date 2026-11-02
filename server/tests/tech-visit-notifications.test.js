@@ -1371,6 +1371,28 @@ describe('formatWhen', () => {
   });
 });
 
+describe('a visit handed to the customer to pick a day (Quick Move)', () => {
+  const { composeCard } = notices._test;
+  const visit = (extra = {}) => ({
+    id: 'visit-1', service_type: 'Quarterly Pest Control Service', status: 'pending',
+    scheduled_date: '2026-11-11', window_start: null, window_end: null,
+    customer_pick_by: new Date('2026-11-05T01:00:00Z'), // Wed, Nov 4 at 8 PM ET
+    cust_first_name: 'Pat', cust_last_name: 'Sample', cust_address: '100 Example St', cust_city: 'Bradenton',
+    ...extra,
+  });
+
+  test('the card says the customer is picking, never the parking date', () => {
+    const card = composeCard({ kind: 'rescheduled', visit: visit(), actorText: 'the office', previous: { date: '2026-11-03', windowStart: '09:00', windowEnd: '10:00' } });
+    expect(card.payload.when).toBe('the customer picks a day by Wed 8 PM');
+    expect(JSON.stringify(card)).not.toMatch(/Nov 11/);
+  });
+
+  test('once the visit has a time it reads like any visit', () => {
+    const card = composeCard({ kind: 'rescheduled', visit: visit({ window_start: '09:00:00', window_end: '11:00:00' }), actorText: 'the office', previous: null });
+    expect(card.payload.when).toBe('Wed Nov 11, 9–11 AM');
+  });
+});
+
 describe('formatPromisedWindow', () => {
   const { formatPromisedWindow } = notices;
   test('reads the promised window instants, in ET, same style as formatWhen', () => {

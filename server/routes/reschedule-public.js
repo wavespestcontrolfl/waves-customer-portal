@@ -602,7 +602,11 @@ async function loadWeatherMove(svc, now = new Date()) {
   const log = await db('reschedule_log')
     .where({ scheduled_service_id: svc.id })
     .orderBy('created_at', 'desc')
-    .first('reason_code', 'initiated_by', 'original_date', 'original_window', 'new_date', 'new_window', 'created_at');
+    .first('reason_code', 'initiated_by', 'original_date', 'original_window', 'new_date', 'new_window', 'created_at', 'notes');
+  // A Quick Move hand-off ("let the customer pick a day") logs its reason like a
+  // move but chose no slot: the page tells that story itself (customerPick /
+  // autoPlacedFromPick), never as a weather move.
+  if (log && log.notes === 'customer_pick') return null;
   // Series rain-outs log '<reason>_series' (rescheduleSeries) — normalize so
   // a collective-anchor rain-out still banners (codex P2). The payload keeps
   // the unsuffixed code the client's copy map speaks.
@@ -682,18 +686,21 @@ function pickByLabel(at) {
   return `${formatETDayDate(at)} at ${clock}`;
 }
 
-// The newest 'customer_pick' reschedule_log row the hand-off wrote: the visit's
-// ORIGINAL date and window, and the Quick Move reason in `notes` (one of the
-// reason codes above; any other text reads as no reason). Null when there is no
+// The newest reschedule_log row the hand-off wrote: the visit's ORIGINAL date
+// and window, and the Quick Move reason (one of the reason codes above; anything
+// else reads as no reason). The row is marked `notes = 'customer_pick'` with the
+// reason in reason_code, as a Quick Move logs it; rows from before that carry
+// reason_code 'customer_pick' with the reason in notes. Null when there is no
 // row or the read fails: the page then names no original date.
 async function loadPickHandoff(svc) {
   try {
     const row = await db('reschedule_log')
-      .where({ scheduled_service_id: svc.id, reason_code: 'customer_pick' })
+      .where({ scheduled_service_id: svc.id })
+      .where(function handOffRow() { this.where('notes', 'customer_pick').orWhere('reason_code', 'customer_pick'); })
       .orderBy('created_at', 'desc')
-      .first('original_date', 'original_window', 'notes');
+      .first('original_date', 'original_window', 'reason_code', 'notes');
     if (!row) return null;
-    const reason = String(row.notes || '').trim();
+    const reason = String((row.reason_code === 'customer_pick' ? row.notes : row.reason_code) || '').trim();
     return {
       date: apptDateStr(row.original_date),
       windowStart: hhmm(String(row.original_window || '').split('-')[0] || null),

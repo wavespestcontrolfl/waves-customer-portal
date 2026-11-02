@@ -837,6 +837,20 @@ function PickByNote({ pick }) {
   );
 }
 
+// A "gate locked" hand-off: the moved text's portal nudge (rain-out.js
+// GATE_ACCESS_CLAUSE) does not fit the 2-segment pick text, so the page the
+// customer opens to pick carries it.
+function GateAccessNote({ pick }) {
+  if (pick.reasonCode !== 'gate_locked') return null;
+  return (
+    <div data-glass="soft" data-testid="gate-access-note" style={{ ...SOFT_NOTE, ...NOTE_ROW }}>
+      <span>
+        Add gate access for next time in <a href="/?tab=property" style={{ color: S.text, fontWeight: 600 }}>your portal</a>, so we can get in.
+      </span>
+    </div>
+  );
+}
+
 // Replaces the reschedule hero while the visit waits for the customer's pick,
 // before and after the pick-by time.
 function CustomerPickHero({ data }) {
@@ -860,6 +874,7 @@ function CustomerPickHero({ data }) {
           : 'Tap a time below to book it — it’s confirmed right away.'}
       </div>
       <PickByNote pick={pick} />
+      <GateAccessNote pick={pick} />
       <MoveLimitNote moveLimit={data.moveLimit} />
     </div>
   );
