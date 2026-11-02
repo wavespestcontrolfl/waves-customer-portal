@@ -187,6 +187,23 @@ navigates itself, so its unsaved-changes prompt and the field visit lock still
 apply. With no such page (a cold start, the sign-in page) the app loads the
 link directly. Only the main view registers; a portal popup shares its sign-in.
 
+## Sign in with Google
+
+Google refuses OAuth inside a web view (403 `disallowed_useragent`), so the
+sign-in page asks the app to run it. The page posts
+`{ type: 'googleSignIn', challenge }` (`challenge` = 43 base64url characters);
+the app accepts it only from the main view and opens Apple's sign-in sheet
+(`ASWebAuthenticationSession`, shared Safari cookies) at
+`/api/admin/auth/google/start?client=ios&challenge=<challenge>`. The server
+ends the flow at `wavespay://google-signin?result=<43 base64url chars>` or
+`?error=<reason>`. The app answers the page with a `wavesadmin:googlesignin`
+window event, `detail = { result }` or `{ error }` (`canceled`, `busy`,
+`failed`, or the server's reason). A bad challenge answers `failed`; a second
+request while a sheet is open answers `busy`. The page side is
+`client/src/native/wavesAdminGoogleSignIn.js`; it detects support by the
+`WavesAdmin/1.7` user agent. A `wavespay://google-signin` link that reaches
+`handleIncomingURL` is ignored and never starts a payment.
+
 ## Security notes
 
 - The JWT's signature is verified server-side on `/validate-handoff`. The
