@@ -571,9 +571,13 @@ function reviewReason(f) {
 // 41") that a narrower screen let through, so this one is strict: no digit at
 // all (codes, street and route numbers, PO boxes, phone numbers), no two number
 // words in a row ("four five"), no '@' (an email), nothing the shared
-// access-code screen flags, and never a text the reader read as a code. What
-// passes is still redacted the way every bell body is (redactedWords).
+// access-code screen flags, and never a text the reader read as a code. A word
+// credential needs no code noun ("Use blue to open the gate", Codex #7466 r1),
+// so no credential screen can be complete: a text that names a way in at all
+// (WAY_IN) is never quoted. What passes is still redacted the way every bell
+// body is (redactedWords).
 const CODE_FIELDS = new Set(['neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code']);
+const WAY_IN = /\b(?:gates?|doors?|garages?|keypads?|keys?|locks?|locked|unlock\w*|lock\s?box(?:es)?|codes?|pins?|passwords?|passcodes?|passphrases?|passkeys?|combos?|combinations?|alarms?|entr(?:y|ies|ances?)|enter\w*|access\w*|open\w*|buzz\w*|intercoms?|fobs?|remotes?|clickers?|guards?|call\s?box(?:es)?|panels?|secrets?|words?)\b|\b(?:let|lets|letting|get|gets|getting)\s+(?:\w+\s+){0,2}in\b/i;
 const NUMBER_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)';
 const NUMBER_WORD_RUN = new RegExp(`\\b${NUMBER_WORD}[\\s,-]+${NUMBER_WORD}\\b`, 'i');
 // The same cap as the "SMS from" alert's full text.
@@ -581,7 +585,7 @@ const MAX_DETAIL_QUOTE_CHARS = 1600;
 function quotableText(messageBody, exceptions) {
   const { containsReportAccessCode } = require('./service-report/technician-report-copy');
   const raw = String(messageBody || '');
-  if (/[\d@]/.test(raw) || NUMBER_WORD_RUN.test(raw) || containsReportAccessCode(raw)) return null;
+  if (/[\d@]/.test(raw) || NUMBER_WORD_RUN.test(raw) || WAY_IN.test(raw) || containsReportAccessCode(raw)) return null;
   if (exceptions.some((f) => CODE_FIELDS.has(f.field))) return null;
   return require('./admin-alert-names').redactedWords(raw) || null;
 }

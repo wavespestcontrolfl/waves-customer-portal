@@ -1895,10 +1895,21 @@ describe('SMS review bell (owner ruling 2026-10-21)', () => {
     ['a positional word code', 'Gate code blue waves'],
     ['number words in a row', 'It is four five four five at the side door'],
     ['an email address', 'Send it to someone@example.test please'],
+    ['a word credential tied to opening a way in (Codex #7466 r1)', 'Use blue to open the gate'],
+    ['a word credential that lets someone in', 'Saying blue lets you in'],
+    ['a magic word', 'The magic word is blue'],
+    ['a call box', 'Say blue at the call box'],
   ])('a text with %s is never quoted', (_label, body) => {
     const copy = reviewBellCopy({ customer: {}, exceptions: [uncertainNote], messageBody: body });
     expect(copy.why).toBe('Wanted to save as special instructions; it is not clear if this is lasting.');
     expect(JSON.stringify(copy)).not.toContain(body);
+  });
+
+  test('Codex #7466 r1: a word credential beside an unrelated pet exception is never quoted', () => {
+    const body = 'Use blue to open the gate. Not sure whether the cat will be out.';
+    const copy = reviewBellCopy({ customer: {}, exceptions: [{ field: 'pet_details', outcome: 'pet_needs_review' }], messageBody: body });
+    expect(copy.why).toMatch(/^Wanted to save as pet note; /);
+    expect(JSON.stringify(copy)).not.toMatch(/blue|open the gate/i);
   });
 
   test('a text the reader read as a code is never quoted, however plain it looks', () => {
