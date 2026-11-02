@@ -710,7 +710,7 @@ function composeEfficacyClause({ reasonCode, serviceType, serviceKey = null }) {
   if (process.env.GATE_RAINOUT_EFFICACY_NOTE !== 'true') return '';
   if (reasonCode !== 'weather_rain') return '';
   if (EFFICACY_EXEMPT_SERVICE.test(String(serviceType || ''))) return '';
-  if (rainoutKeepRainOk()
+  if (rainoutKeepRainOk(reasonCode)
     && require('./scheduling/rain-fit').rainClassOf({ name: serviceType, serviceKey }) === 'ok') return '';
   return '\n\nWhy the move? Treatments need a few rain-free hours to bond - applying right before rain washes them away before they can work.';
 }
@@ -836,9 +836,16 @@ async function loadServiceWithCustomer(serviceId) {
     .first();
 }
 
-// GATE_RAINOUT_KEEP_RAIN_OK (dark; owner 2026-11-01): read at call time.
-function rainoutKeepRainOk() {
-  return require('../config/feature-gates').rainoutKeepRainOkLive?.() === true;
+// GATE_RAINOUT_KEEP_RAIN_OK (dark; owner 2026-11-01): read at call time. The
+// rain-OK list says rain does not spoil the work, so it answers only a RAIN
+// move: for any other reason (running late, equipment, an emergency, a no-show,
+// wind, lightning, heat) the tech cannot attend at all and the whole route
+// moves. No reason yet (the options fetch comes before the sheet's reason
+// pick) keeps the full list.
+const RAIN_OK_REASONS = new Set(['weather_rain']);
+function rainoutKeepRainOk(reasonCode = null) {
+  return RAIN_OK_REASONS.has(reasonCode)
+    && require('../config/feature-gates').rainoutKeepRainOkLive?.() === true;
 }
 
 // Other not-yet-terminal jobs on this tech's plate today, ordered the
@@ -852,12 +859,12 @@ function rainoutKeepRainOk() {
 // window-only bound would wrongly sweep stops that share the anchor's
 // window or sit before it under a manual route_order.
 //
-// With GATE_RAINOUT_KEEP_RAIN_OK on, a stop whose services are all rain-OK is
-// left out, so a Move neither moves nor texts it; the anchor's own visit group
-// moves with the anchor and is never filtered.
-async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, anchor = null) {
+// With GATE_RAINOUT_KEEP_RAIN_OK on AND a rain move (`reasonCode`), a stop whose
+// services are all rain-OK is left out, so a Move neither moves nor texts it;
+// the anchor's own visit group moves with the anchor and is never filtered.
+async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, anchor = null, reasonCode = null) {
   if (!technicianId) return [];
-  const keepRainOk = rainoutKeepRainOk();
+  const keepRainOk = rainoutKeepRainOk(reasonCode);
   const query = db('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: todayStr })
     .whereIn('status', MOVABLE_STATUSES)
@@ -1392,7 +1399,7 @@ function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
  * custom time re-checks on every date/hour change). Never blocks anything —
  * commit's locked probe is the enforcer.
  */
-async function checkTarget({ serviceId, target, caller = null }) {
+async function checkTarget({ serviceId, target, caller = null, reasonCode = null }) {
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
@@ -1406,7 +1413,7 @@ async function checkTarget({ serviceId, target, caller = null }) {
   if (!service) return { ok: false, reason: 'not_found' };
   // Route siblings flagged (not excluded) so one response serves both
   // scopes — the sheet filters by its live scope toggle without refetching.
-  const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service);
+  const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service, reasonCode);
   const targetDate = String(target.date).split('T')[0];
   // Fail-open exactly as before: a snapshot failure hides the badges, it
   // never blocks the sheet.
@@ -1539,9 +1546,11 @@ async function checkSlots({ targets, caller = null } = {}) {
 /**
  * Everything the tech sheet needs in one fetch: same-day windows,
  * route-scored day options with rain badges, the remaining-route count
- * for the scope toggle, and today's outlook for the header.
+ * for the scope toggle, and today's outlook for the header. The sheet fetches
+ * this before the dispatcher picks a reason, so `reasonCode` is optional; none
+ * means the full route list (GATE_RAINOUT_KEEP_RAIN_OK filters a rain move only).
  */
-async function getOptions(serviceId, { caller = null } = {}) {
+async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
 
@@ -1614,7 +1623,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
     };
   });
 
-  const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service);
+  const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service, reasonCode);
 
   // Overlap advisory on the same-day presets: +2h/+4h are pure clock
   // offsets with no occupancy input, so they can land on a booked stop.
@@ -2392,7 +2401,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 
   let jobs;
   if (scope === 'route') {
-    const rest = await remainingRouteJobs(technicianId, todayStr, serviceId, service);
+    const rest = await remainingRouteJobs(technicianId, todayStr, serviceId, service, reasonCode);
     jobs = [service, ...rest];
   } else {
     jobs = [service];

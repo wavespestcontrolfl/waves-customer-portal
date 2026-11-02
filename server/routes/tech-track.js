@@ -678,6 +678,7 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
     // own stops; every other technician's row comes back window-only.
     const options = await RainOut.getOptions(req.params.id, {
       caller: { isAdmin: false, technicianId: req.technicianId },
+      reasonCode: typeof req.query.reasonCode === 'string' ? req.query.reasonCode : null,
     });
     if (!options.ok) {
       return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });

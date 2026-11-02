@@ -4672,9 +4672,10 @@ describe('checkSlots: paid road times are staff-only', () => {
   });
 });
 
-// GATE_RAINOUT_KEEP_RAIN_OK (owner 2026-11-01, dark): the rest-of-route list leaves
-// out a stop whose services are all rain-OK, and the efficacy sentence skips a
-// rain-OK service.
+// GATE_RAINOUT_KEEP_RAIN_OK (owner 2026-11-01, dark): on a RAIN move the
+// rest-of-route list leaves out a stop whose services are all rain-OK, and the
+// efficacy sentence skips a rain-OK service. Any other reason moves the whole
+// route (the tech cannot attend at all).
 describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
   const ANCHOR = { ...SERVICE, visit_id: null };
   const stopRow = (id, serviceType, key, extra = {}) => ({
@@ -4683,23 +4684,27 @@ describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
   });
   const OK_STOP = stopRow('svc-2', 'Rodent Trapping', 'rodent_trapping');
   const OUTDOOR_STOP = stopRow('svc-3', 'Quarterly Pest Control', 'pest_control_quarterly');
+  const RAIN = 'weather_rain';
 
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_RAINOUT_KEEP_RAIN_OK;
+    process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
     SmartRebooker.findRescheduleOptions.mockReset().mockResolvedValue([]);
   });
   afterEach(() => {
     delete process.env.GATE_RAINOUT_KEEP_RAIN_OK;
     delete process.env.GATE_RAINOUT_EFFICACY_NOTE;
+    delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
   });
 
-  function wireOptions(rows, { addOns = [] } = {}) {
+  // `filtered`: the add-on lookup runs (gate on AND a rain reason).
+  function wireOptions(rows, { addOns = [], filtered = false } = {}) {
     const routeChain = chain({ rows });
     const queues = {
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR }) }), routeChain],
     };
-    if (process.env.GATE_RAINOUT_KEEP_RAIN_OK === 'true') queues.scheduled_service_addons = [chain({ rows: addOns })];
+    if (filtered) queues.scheduled_service_addons = [chain({ rows: addOns })];
     wireDb(queues);
     return routeChain;
   }
@@ -4707,73 +4712,116 @@ describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
 
   test('gate off: every row counts, the query selects no key and no add-on lookup runs', async () => {
     const routeChain = wireOptions([OK_STOP, OUTDOOR_STOP]);
-    const options = await RainOut.getOptions('svc-1', { caller });
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
     expect(options.remainingRouteCount).toBe(2);
     expect(routeChain.select).toHaveBeenCalledTimes(1);
     expect(routeChain.select.mock.calls[0]).not.toContain('service_key_snapshot');
   });
 
-  test('gate on: an all-rain-OK stop is left out, an outdoor stop stays', async () => {
+  test('gate on + rain reason: an all-rain-OK stop is left out, an outdoor stop stays', async () => {
     process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
-    const routeChain = wireOptions([OK_STOP, OUTDOOR_STOP]);
-    const options = await RainOut.getOptions('svc-1', { caller });
+    const routeChain = wireOptions([OK_STOP, OUTDOOR_STOP], { filtered: true });
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
     expect(options.remainingRouteCount).toBe(1);
     expect(routeChain.select).toHaveBeenCalledWith('service_key_snapshot');
   });
 
-  test('gate on: a grouped stop with one outdoor member stays whole; an all-rain-OK group leaves whole', async () => {
+  test.each([undefined, null, 'running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow', 'weather_wind', 'weather_lightning', 'weather_heat'])(
+    'gate on + reason %s: the full route list, byte-identical to gate off',
+    async (reasonCode) => {
+      process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+      const routeChain = wireOptions([OK_STOP, OUTDOOR_STOP]);
+      const options = await RainOut.getOptions('svc-1', { caller, reasonCode });
+      expect(options.remainingRouteCount).toBe(2);
+      expect(routeChain.select.mock.calls[0]).not.toContain('service_key_snapshot');
+    },
+  );
+
+  test('gate on + rain reason: a grouped stop with one outdoor member stays whole; an all-rain-OK group leaves whole', async () => {
     process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
     wireOptions([
       stopRow('svc-4', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-a' }),
       stopRow('svc-5', 'Quarterly Pest Control', 'pest_control_quarterly', { visit_id: 'visit-a' }),
       stopRow('svc-6', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-b' }),
       stopRow('svc-7', 'Wildlife Trapping', 'wildlife_trapping', { visit_id: 'visit-b' }),
-    ]);
-    const options = await RainOut.getOptions('svc-1', { caller });
+    ], { filtered: true });
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
     expect(options.remainingRouteCount).toBe(2);
   });
 
-  test('gate on: an outdoor add-on keeps its stop; a stop with no key and an inspection name leaves', async () => {
+  test('gate on + rain reason: an outdoor add-on keeps its stop; a stop with no key and an inspection name leaves', async () => {
     process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
     wireOptions(
       [OK_STOP, stopRow('svc-8', 'WDO Inspection', null)],
-      { addOns: [{ scheduled_service_id: 'svc-2', service_name: 'Perimeter Spray', service_key_snapshot: 'pest_control_quarterly' }] },
+      { filtered: true, addOns: [{ scheduled_service_id: 'svc-2', service_name: 'Perimeter Spray', service_key_snapshot: 'pest_control_quarterly' }] },
     );
-    const options = await RainOut.getOptions('svc-1', { caller });
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
     expect(options.remainingRouteCount).toBe(1);
   });
 
-  test('gate on: rows of the tapped stop\'s own visit group are never filtered', async () => {
+  test('gate on + rain reason: rows of the tapped stop\'s own visit group are never filtered', async () => {
     process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
     const routeChain = chain({ rows: [stopRow('svc-9', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-anchor' })] });
     wireDb({
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR, visit_id: 'visit-anchor' }) }), routeChain],
       scheduled_service_addons: [chain({ rows: [] })],
     });
-    const options = await RainOut.getOptions('svc-1', { caller });
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
     expect(options.remainingRouteCount).toBe(1);
   });
 
-  test('commit, route scope, gate on: the rain-OK stop is not moved or texted', async () => {
+  test('checkTarget reads the same list: filtered on a rain reason, full otherwise', async () => {
     process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    const target = { date: '2026-06-12', window: { start: '09:00', end: '10:00' } };
+    for (const [reasonCode, filtered] of [[RAIN, true], ['running_late', false], [undefined, false]]) {
+      jest.clearAllMocks();
+      const routeChain = chain({ rows: [OK_STOP, OUTDOOR_STOP] });
+      const queues = {
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR }) }), routeChain],
+      };
+      if (filtered) queues.scheduled_service_addons = [chain({ rows: [] })];
+      wireDb(queues);
+      const result = await RainOut.checkTarget({ serviceId: 'svc-1', target, reasonCode });
+      expect(result.ok).toBe(true);
+      expect(routeChain.select.mock.calls.some((call) => call.includes('service_key_snapshot'))).toBe(filtered);
+    }
+  });
+
+  // Preview (getOptions count) and commit move the same stops for the same reason.
+  test.each([
+    [RAIN, 2, ['svc-1', 'svc-3']],
+    ['running_late', 3, ['svc-1', 'svc-2', 'svc-3']],
+    ['equipment_issue', 3, ['svc-1', 'svc-2', 'svc-3']],
+    ['tech_emergency', 3, ['svc-1', 'svc-2', 'svc-3']],
+  ])('route-scope commit, gate on, %s: moves and texts %i stops, matching the options count', async (reasonCode, movedCount, ids) => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    const filtered = reasonCode === RAIN;
+    const queues = (rows) => ({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR }) }), chain({ rows })],
+      ...(filtered ? { scheduled_service_addons: [chain({ rows: [] })] } : {}),
+    });
+    wireDb(queues([OK_STOP, OUTDOOR_STOP]));
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode });
+    expect(options.remainingRouteCount + 1).toBe(movedCount);
+
+    jest.clearAllMocks();
     wireDb({
-      scheduled_services: [
-        chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR }) }),
-        chain({ rows: [OK_STOP, OUTDOOR_STOP] }),
+      ...queues([OK_STOP, OUTDOOR_STOP]),
+      customers: [
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-svc-2', phone: '+19415550002', first_name: 'Pat', zip: '34203' }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-svc-3', phone: '+19415550003', first_name: 'Sam', zip: '34203' }) }),
       ],
-      scheduled_service_addons: [chain({ rows: [] })],
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-svc-3', phone: '+19415550003', first_name: 'Sam', zip: '34203' }) })],
-      reschedule_log: [chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) }), chain()],
+      reschedule_log: [chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) }), chain(), chain()],
     });
     const result = await RainOut.commit({
-      serviceId: 'svc-1', technicianId: 'tech-1', reasonCode: 'weather_rain', scope: 'route',
+      serviceId: 'svc-1', technicianId: 'tech-1', reasonCode, scope: 'route',
       target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } }, notifyCustomer: true,
     });
     expect(result.ok).toBe(true);
-    expect(result.movedCount).toBe(2);
-    const movedIds = SmartRebooker.reschedule.mock.calls.map((c) => c[0]);
-    expect(movedIds).toEqual(expect.arrayContaining(['svc-1', 'svc-3']));
-    expect(movedIds).not.toContain('svc-2');
+    expect(result.movedCount).toBe(movedCount);
+    expect(SmartRebooker.reschedule.mock.calls.map((c) => c[0]).sort()).toEqual(ids);
+    // Every other stop's customer is texted: one moved text per moved stop.
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(ids.length);
   });
 
   describe('efficacy clause', () => {
