@@ -14,11 +14,15 @@ vi.mock('../components/brand', async (importOriginal) => ({
   WavesShell: ({ children }) => <div>{children}</div>,
   CustomerColumn: ({ children, ...props }) => <div {...props}>{children}</div>,
 }));
-// Google Places stays out of jsdom: a plain input with the same props.
+// Google Places stays out of jsdom: a plain input with the same props. The
+// box's own state filter has its own suite (AddressAutocomplete.any-state).
+const autocompleteProps = vi.hoisted(() => ({ last: null }));
 vi.mock('../components/AddressAutocomplete', () => ({
-  default: ({ id, value, onChange, disabled, placeholder }) => (
-    <input id={id} value={value} disabled={disabled} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
-  ),
+  default: (props) => {
+    autocompleteProps.last = props;
+    const { id, value, onChange, disabled, placeholder } = props;
+    return <input id={id} value={value} disabled={disabled} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />;
+  },
 }));
 
 import MovingPage from './MovingPage';
@@ -65,6 +69,8 @@ describe('MovingPage', () => {
     expect(document.body.textContent).toContain('there is no setup fee at the new home');
     expect(document.body.textContent).not.toMatch(/\$\d/);
     expect(screen.getByRole('button', { name: 'Send my move' })).toBeDisabled();
+    // A customer may move out of Florida: the address box takes any state.
+    expect(autocompleteProps.last).toMatchObject({ anyState: true, geocodeOnBlur: false });
   });
 
   it('checks the address, asks to confirm, and submits only the confirmed check id with the dates', async () => {

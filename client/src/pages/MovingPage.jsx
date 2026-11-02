@@ -200,6 +200,7 @@ function AddressField({ f, busy, canCheck, onCheck }) {
           placeholder="123 Main St, City"
           maxLength={200}
           geocodeOnBlur={false}
+          anyState
           style={{ ...INPUT, opacity: f.noAddress ? 0.5 : 1 }}
         />
       )}
