@@ -9828,6 +9828,13 @@ function payerPacketAutosendLive() {
 function recapGlassesClipsLive() {
   return process.env.GATE_RECAP_GLASSES_CLIPS === 'true';
 }
+// GATE_TECH_INSTANT_ANSWERS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the tech Intelligence Bar
+// shows three one-tap answers (next stop, access notes, last treatment) served by GET /api/tech/answers from the
+// technician's own visits today (services/tech-instant-answers.js). No model call, no write, no cost. Off = the routes
+// answer 404 and the bar shows no chips. Kill = unset.
+function techInstantAnswersLive() {
+  return process.env.GATE_TECH_INSTANT_ANSWERS === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -10013,3 +10020,5 @@ module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
 // GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
 module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
+// GATE_TECH_INSTANT_ANSWERS reader, on its own line so gate PRs never conflict.
+module.exports.techInstantAnswersLive = techInstantAnswersLive;

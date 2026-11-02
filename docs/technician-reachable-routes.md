@@ -589,3 +589,5 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/knowledge/queries/:id/file-back` | knowledge |
 | POST | `/api/knowledge/queries/:id/rate` | knowledge |
 | POST | `/api/knowledge/query` | knowledge |
+| GET | `/api/tech/answers` | tech-answers |
+| GET | `/api/tech/answers/:kind` | tech-answers |
