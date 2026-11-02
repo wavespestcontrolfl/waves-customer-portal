@@ -16828,8 +16828,10 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
           }}>
             <a data-glass-accent="" href="tel:+19412975749" onClick={onClose} style={supportActionStyle}>Call</a>
             <a data-glass-accent="" href="sms:+19412975749" onClick={onClose} style={supportActionStyle}>Text</a>
-            {/* Request + Chat create work / need an active plan — a cancelled
-                account (C4) passes neither, so only Call / Text remain. */}
+            {/* Request + Ask Waves AI create work / need an active plan — a
+                cancelled account (C4) passes neither, so only Call / Text
+                remain. "Ask Waves AI", not "Chat", beside "Text": owner pick
+                1A (UI audit 2026-11-02, UI-07). */}
             {onRequest && (
               <button data-glass-accent="" type="button" onClick={() => { onRequest(); onClose(); }} style={supportActionStyle}>
                 Request
@@ -16837,7 +16839,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
             )}
             {onChat && (
               <button data-glass-accent="" type="button" onClick={() => { onChat(); onClose(); }} style={supportActionStyle}>
-                Chat
+                Ask Waves AI
               </button>
             )}
           </div>
