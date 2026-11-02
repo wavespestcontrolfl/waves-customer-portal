@@ -418,6 +418,29 @@ test('reschedule_appointment: pinned visit identity/state becomes a before/after
   expect(contractHash(moved)).not.toBe(contractHash(c));
 });
 
+test('reschedule_appointment plan move (gap #22): every visit of the plan is a before/after line and binds the hash', () => {
+  const pinned = { id: 'ap1', status: 'confirmed', scheduled_date: '2099-03-02', service_type: 'Quarterly Pest Control Service', customer_name: 'acct-3001' };
+  const visit = (id, from, to) => ({ id, from_date: from, status: 'confirmed', customer_confirmed: null, from_start: '09:00:00', from_end: '10:00:00',
+    duration: 60, property_id: null, date_exception: false, cadence_date: null, to_date: to, to_start: '09:00:00', to_end: '10:00:00' });
+  const plan = (laterTo) => ({ anchor_id: 'ap1', new_date: '2099-03-04', window: null, occurrence_ids: ['ap1', 'ap2'],
+    occurrences: [visit('ap1', '2099-03-02', '2099-03-04'), visit('ap2', '2099-06-01', laterTo)], skipped_count: 0, conflict_dates: [], rewound_ids: [] });
+  const card = (p) => buildContract({
+    toolName: 'reschedule_appointment',
+    params: { appointment_id: 'ap1', new_date: '2099-03-04', _appointment_fingerprint: 'x', _series_move: p },
+    displayParams: { appointment_id: 'ap1', new_date: '2099-03-04' },
+    preview: { pinned_appointment: pinned, series_move: p },
+  });
+  const c = card(plan('2099-06-03'));
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContain('Recurring plan: 1 later visit moves with this one (through 2099-06-03), as on the Dispatch board');
+  expect(c.effects).toContainEqual({ kind: 'operational', label: 'Visit 2099-06-01 09:00-10:00 → 2099-06-03 09:00-10:00', before: '2099-06-01 09:00-10:00', after: '2099-06-03 09:00-10:00' });
+  expect(labels).toContain('No customer text is sent. Each visit\'s reminders move to its new date and time');
+  // The single move's best-effort audit line is replaced by the plan move's in-transaction record.
+  expect(labels.some((l) => /appended to the visit's history after the move/.test(l))).toBe(false);
+  expect(c.notifies_customer).toBe(false);
+  expect(contractHash(card(plan('2099-06-04')))).not.toBe(contractHash(c));
+});
+
 test('bulk_update_leads: full name list under more_effects and a fingerprint of every pinned id', () => {
   const ids = ['l3', 'l1', 'l2'];
   const c = buildContract({

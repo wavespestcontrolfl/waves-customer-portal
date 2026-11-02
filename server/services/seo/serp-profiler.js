@@ -291,10 +291,26 @@ function resolveLocation(city) {
   return 'Bradenton,Florida,United States';
 }
 
+// DataForSEO reports a task it could not run inside an HTTP 200 body
+// (tasks[0].status_code). 40101 "Internal SE Server Error" is its own
+// transient search failure: 344 in a week across our callers (read
+// 2026-11-02 from its free /v3/serp/errors log), and the cause of every
+// brief that week built with no search data. A caller that asks for it
+// (`transientRetries`; the brief builder, owner 2026-11-02 "retry") runs
+// that search again. A failed task is not charged; a search that works
+// costs the usual price.
+const TRANSIENT_SE_ERROR = 40101;
+const TRANSIENT_RETRY_DELAY_MS = 2000;
+const taskStatus = (raw) => raw?.tasks?.[0]?.status_code ?? null;
+
 // ── main class ───────────────────────────────────────────────────────
 
 class SerpProfiler {
-  async profile({ query, city = null, device = DEFAULT_DEVICE, force = false, persist = true } = {}) {
+  constructor({ transientRetryDelayMs = TRANSIENT_RETRY_DELAY_MS } = {}) {
+    this.transientRetryDelayMs = transientRetryDelayMs;
+  }
+
+  async profile({ query, city = null, device = DEFAULT_DEVICE, force = false, persist = true, transientRetries = 0 } = {}) {
     if (!query) throw new Error('serp-profiler: query required');
 
     if (!force) {
@@ -307,20 +323,38 @@ class SerpProfiler {
     }
 
     const locationUsed = resolveLocation(city);
-    const raw = await dataforseo.serpOrganic(query, locationUsed, device);
+    const raw = await this._fetchSerp({ query, locationUsed, device, transientRetries });
     const result = raw?.tasks?.[0]?.result?.[0];
     if (!result) {
-      // Digest, never the raw query: GSC/brief keywords are arbitrary
-      // external text and non-card PII must not reach the logs (same
-      // sha256-12 convention as the miner's queryDigest).
-      const qDigest = crypto.createHash('sha256').update(String(query)).digest('hex').slice(0, 12);
-      logger.warn(`[serp-profiler] no SERP data for query#${qDigest} in ${locationUsed}`);
+      this._logNoData({ query, locationUsed, raw });
       return null;
     }
 
     const profile = this._buildProfile({ query, city, device, locationUsed, result });
     if (persist) await this._persist(profile);
     return profile;
+  }
+
+  // The live SERP call, run again (up to `transientRetries` times) while
+  // DataForSEO answers its transient 40101.
+  async _fetchSerp({ query, locationUsed, device, transientRetries }) {
+    let raw = await dataforseo.serpOrganic(query, locationUsed, device);
+    for (let left = transientRetries; left > 0 && taskStatus(raw) === TRANSIENT_SE_ERROR; left -= 1) {
+      await new Promise((resolve) => setTimeout(resolve, this.transientRetryDelayMs));
+      raw = await dataforseo.serpOrganic(query, locationUsed, device);
+    }
+    return raw;
+  }
+
+  // Digest, never the raw query: GSC/brief keywords are arbitrary external
+  // text and non-card PII must not reach the logs (same sha256-12
+  // convention as the miner's queryDigest). DataForSEO's own status code and
+  // message say why (no customer text in them).
+  _logNoData({ query, locationUsed, raw }) {
+    const qDigest = crypto.createHash('sha256').update(String(query)).digest('hex').slice(0, 12);
+    const task = raw?.tasks?.[0];
+    const why = task?.status_code ? `: DataForSEO ${task.status_code} ${String(task.status_message || '').slice(0, 80)}`.trimEnd() : '';
+    logger.warn(`[serp-profiler] no SERP data for query#${qDigest} in ${locationUsed}${why}`);
   }
 
   _buildProfile({ query, city, device, locationUsed, result }) {

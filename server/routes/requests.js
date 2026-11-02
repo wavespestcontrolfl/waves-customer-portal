@@ -849,6 +849,21 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             `but may be unsurfaced in the admin feed.`
         );
       }
+      // GATE_PORTAL_ASK_PUSH: a customer's own submission (this route is customer-authenticated; the office makes
+      // its requests through the admin routes) rings the admin phones once its bell row exists. A withheld bell
+      // (demo account, policy) or a failed write rings nothing. The service-request insert is committed long before
+      // this point. Not awaited: a slow push provider must not hold the customer's submission, and pushPortalAsk
+      // never throws.
+      if (notif?.id && !notif.suppressed) {
+        const { pushPortalAsk, shortName } = require('../services/portal-ask-push');
+        void pushPortalAsk({
+          itemKey: `request:${request.id}`,
+          title: isCancellation ? 'Review a cancellation request' : `Answer ${validUrgency === 'urgent' ? 'an urgent' : 'a'} portal request`,
+          body: `${shortName(req.customer.first_name, req.customer.last_name)} ${isCancellation ? 'asked to cancel service' : `sent a ${categoryLabel} request`}`,
+          link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,
+          customerId: req.customer.id,
+        });
+      }
     } catch (notifErr) {
       logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);
     }

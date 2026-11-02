@@ -535,6 +535,14 @@ describe('bellAllowed decision order', () => {
     }
   });
 
+  // GATE_PORTAL_ASK_PUSH: the app-ask page rings by its trigger key even over a silenced service category.
+  test('portal_ask rings by its trigger key even when the owner silenced its category', async () => {
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:service', bell_enabled: false }]) });
+    bellPolicy.clearOverrideCache();
+    await expect(bellPolicy.bellAllowed({ category: 'service', triggerKey: 'portal_ask' })).resolves.toBe(true);
+    bellPolicy.clearOverrideCache();
+  });
+
   // Sweep #7303 B1: the voice agent's two pages rode the denylisted
   // internal_admin_alert redirect. Their own trigger keys ring, and the
   // re-service push rings over a silenced service category like the

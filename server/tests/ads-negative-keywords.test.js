@@ -82,3 +82,34 @@ describe('competitorName', () => {
     expect(COMPETITOR_NAMES).toContain('lawn doctor');
   });
 });
+
+describe('phraseMatches (PR 2): would a Google phrase negative block this search term?', () => {
+  const { phraseMatches } = require('../services/ads/negative-keywords');
+
+  test.each([
+    ['squirrel', 'squirrel', true],
+    ['Squirrel removal near me', 'squirrel', true],
+    ['how to trap a squirrel', 'squirrel', true],
+    ['bat removal cost', 'bat removal', true],
+    ['best bat-removal company', 'bat removal', true],
+    ['squirrel, raccoon & bat removal!', 'bat removal', true],
+    ["bob's snake", "bob's snake", true],
+  ])('%s contains %s -> %s', (term, phrase, expected) => {
+    expect(phraseMatches(term, phrase)).toBe(expected);
+  });
+
+  test.each([
+    ['squirrels in my attic', 'squirrel'], // no plurals or close variants
+    ['squirrel', 'squirrels'],
+    ['combat removal', 'bat removal'], // whole tokens only
+    ['bat and removal', 'bat removal'], // contiguous
+    ['removal bat', 'bat removal'], // in order
+    ['anything', ''],
+    ['anything', '   '],
+    ['', 'squirrel'],
+    [null, 'squirrel'],
+    ['squirrel', null],
+  ])('%s does not contain %s', (term, phrase) => {
+    expect(phraseMatches(term, phrase)).toBe(false);
+  });
+});

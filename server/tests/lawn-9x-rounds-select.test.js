@@ -1,9 +1,9 @@
 /**
- * GATE_LAWN_9X_ROUNDS (owner 2026-10-28): a NEW residential lawn 9x series is
+ * Lawn 9x rounds (owner 2026-10-28; live since 2026-11-02): a NEW residential lawn 9x series is
  * written as recurring_pattern 'lawn_rounds_9' with no interval. One shared
  * helper (lawnRoundsSeriesPattern) decides; every writer that stores a
  * series' pattern calls it, and the parent and every child of one series
- * carry the same value. Off, every series is written exactly as before.
+ * carry the same value.
  *
  * This file covers the helper, the seeder's own follow-up rows (which the
  * online booking wizard and the estimate converter write through), the
@@ -27,8 +27,6 @@ const { parseETDateTime } = require('../utils/datetime-et');
 
 const { lawnRoundsSeriesPattern, seedFollowUpsForParent, planFollowUpSeedDates, LAWN_ROUNDS_9 } = seeder;
 
-afterEach(() => { delete process.env.GATE_LAWN_9X_ROUNDS; });
-const gateOn = () => { process.env.GATE_LAWN_9X_ROUNDS = 'true'; };
 
 describe('lawnRoundsSeriesPattern', () => {
   const cases = [
@@ -54,12 +52,7 @@ describe('lawnRoundsSeriesPattern', () => {
     ['no identity at all', { pattern: 'every_6_weeks' }, false],
   ];
 
-  test.each(cases)('gate off returns the input unchanged: %s', (_name, input) => {
-    expect(lawnRoundsSeriesPattern(input)).toEqual({ pattern: input.pattern, intervalDays: input.intervalDays ?? null });
-  });
-
-  test.each(cases)('gate on: %s', (_name, input, translates) => {
-    gateOn();
+  test.each(cases)('%s', (_name, input, translates) => {
     const out = lawnRoundsSeriesPattern(input);
     if (translates) {
       expect(out).toEqual({ pattern: LAWN_ROUNDS_9, intervalDays: null });
@@ -68,14 +61,6 @@ describe('lawnRoundsSeriesPattern', () => {
     }
   });
 
-  test('the gate is read live, not at load', () => {
-    const input = { pattern: 'every_6_weeks', service_type: 'Lawn Care' };
-    expect(lawnRoundsSeriesPattern(input).pattern).toBe('every_6_weeks');
-    gateOn();
-    expect(lawnRoundsSeriesPattern(input).pattern).toBe(LAWN_ROUNDS_9);
-    delete process.env.GATE_LAWN_9X_ROUNDS;
-    expect(lawnRoundsSeriesPattern(input).pattern).toBe('every_6_weeks');
-  });
 });
 
 // A scripted connection: every insert and every parent update is recorded.
@@ -139,17 +124,8 @@ const lawnParent = (extra = {}) => ({
 const gapDays = (a, b) => Math.round((parseETDateTime(`${b}T12:00`) - parseETDateTime(`${a}T12:00`)) / 86400000);
 
 describe('seedFollowUpsForParent — the seeder\'s own follow-up rows (booking wizard, accept, office hand-off)', () => {
-  test('gate off: the parent mark and every child keep every_6_weeks, 42 days apart', async () => {
-    const { conn, inserted, parentUpdates } = makeConn();
-    await seedFollowUpsForParent(conn, lawnParent(), { pattern: 'every_6_weeks', plannedCount: 9, skipWeekends: true });
-    expect(parentUpdates[0]).toMatchObject({ is_recurring: true, recurring_pattern: 'every_6_weeks' });
-    expect(inserted.length).toBeGreaterThan(0);
-    expect(inserted.every((r) => r.recurring_pattern === 'every_6_weeks')).toBe(true);
-    expect(gapDays('2099-03-17', inserted[0].scheduled_date)).toBeGreaterThanOrEqual(42);
-  });
 
-  test('gate on: the parent mark and every child carry lawn_rounds_9 and no interval', async () => {
-    gateOn();
+  test('the parent mark and every child carry lawn_rounds_9 and no interval', async () => {
     const { conn, inserted, parentUpdates } = makeConn();
     const res = await seedFollowUpsForParent(conn, lawnParent(), { pattern: 'every_6_weeks', plannedCount: 9, skipWeekends: true });
     expect(res.pattern).toBe(LAWN_ROUNDS_9);
@@ -164,8 +140,7 @@ describe('seedFollowUpsForParent — the seeder\'s own follow-up rows (booking w
     expect(inserted[0].scheduled_date >= '2099-04-24').toBe(true);
   });
 
-  test('gate on, a parent that already carries custom/42: the interval is dropped on the parent and the children', async () => {
-    gateOn();
+  test('a parent that already carries custom/42: the interval is dropped on the parent and the children', async () => {
     const { conn, inserted, parentUpdates } = makeConn();
     await seedFollowUpsForParent(
       conn,
@@ -177,7 +152,6 @@ describe('seedFollowUpsForParent — the seeder\'s own follow-up rows (booking w
   });
 
   test('the wizard plans its occupancy locks with the same dates the seed writes', async () => {
-    gateOn();
     const { conn, inserted } = makeConn();
     const parent = lawnParent();
     const planned = await planFollowUpSeedDates(conn, parent, { pattern: 'every_6_weeks', plannedCount: 9, skipWeekends: true, weekendShift: 'forward' });
@@ -189,16 +163,14 @@ describe('seedFollowUpsForParent — the seeder\'s own follow-up rows (booking w
     ['tree and shrub', 'Tree & Shrub Care', 'every_6_weeks'],
     ['mosquito', 'Mosquito Control', 'every_6_weeks'],
     ['commercial lawn', 'Commercial Lawn Care', 'every_6_weeks'],
-  ])('gate on, %s keeps its pattern', async (_name, serviceType, pattern) => {
-    gateOn();
+  ])('%s keeps its pattern', async (_name, serviceType, pattern) => {
     const { conn, inserted, parentUpdates } = makeConn();
     await seedFollowUpsForParent(conn, lawnParent({ service_type: serviceType }), { pattern, plannedCount: 4, skipWeekends: true });
     expect(parentUpdates[0].recurring_pattern).toBe(pattern);
     expect(inserted.every((r) => r.recurring_pattern === pattern)).toBe(true);
   });
 
-  test('gate on, lawn monthly and bimonthly keep their patterns', async () => {
-    gateOn();
+  test('lawn monthly and bimonthly keep their patterns', async () => {
     for (const pattern of ['monthly', 'bimonthly']) {
       const { conn, inserted, parentUpdates } = makeConn();
       await seedFollowUpsForParent(conn, lawnParent(), { pattern, plannedCount: 3, skipWeekends: true });
@@ -213,24 +185,12 @@ describe('estimate converter series write (seedRecurringFollowUpsForParent)', ()
     service: 'lawn_care', name: 'Lawn Care', serviceName: 'Lawn Care', frequency: 'every_6_weeks', visitsPerYear: 9,
   });
 
-  test('the cadence vocabulary stays every_6_weeks on both sides of the gate (quote line, seeding gate, catalog link)', () => {
-    for (const on of [false, true]) {
-      if (on) gateOn();
-      expect(converter.converterFollowUpSeedingPattern(lawnLine(), { service_type: 'Lawn Care' }, 'every_6_weeks')).toBe('every_6_weeks');
-      expect(converter.supportsConverterFollowUpSeeding(lawnLine(), { service_type: 'Lawn Care' }, 'every_6_weeks')).toBe(true);
-    }
+  test('the cadence vocabulary stays every_6_weeks (quote line, seeding gate, catalog link)', () => {
+    expect(converter.converterFollowUpSeedingPattern(lawnLine(), { service_type: 'Lawn Care' }, 'every_6_weeks')).toBe('every_6_weeks');
+    expect(converter.supportsConverterFollowUpSeeding(lawnLine(), { service_type: 'Lawn Care' }, 'every_6_weeks')).toBe(true);
   });
 
-  test('gate off: parent and children are written every_6_weeks', async () => {
-    const { conn, inserted, parentUpdates } = makeConn();
-    await converter.seedRecurringFollowUpsForParent(conn, lawnParent(), lawnLine(), { registerReminders: false });
-    expect(parentUpdates[0].recurring_pattern).toBe('every_6_weeks');
-    expect(inserted.length).toBeGreaterThan(0);
-    expect(inserted.every((r) => r.recurring_pattern === 'every_6_weeks')).toBe(true);
-  });
-
-  test('gate on: parent and children are written lawn_rounds_9 with no interval', async () => {
-    gateOn();
+  test('parent and children are written lawn_rounds_9 with no interval', async () => {
     const { conn, inserted, parentUpdates } = makeConn();
     await converter.seedRecurringFollowUpsForParent(conn, lawnParent(), lawnLine(), { registerReminders: false });
     expect(parentUpdates[0].recurring_pattern).toBe(LAWN_ROUNDS_9);
@@ -240,8 +200,7 @@ describe('estimate converter series write (seedRecurringFollowUpsForParent)', ()
     expect(inserted.every((r) => r.recurring_pattern === LAWN_ROUNDS_9 && r.recurring_interval_days === undefined)).toBe(true);
   });
 
-  test('gate on + annual-prepay accept: parent and children are written lawn_rounds_9 too (no prepay exception)', async () => {
-    gateOn();
+  test('annual-prepay accept: parent and children are written lawn_rounds_9 too (no prepay exception)', async () => {
     const { conn, inserted, parentUpdates } = makeConn();
     await converter.seedRecurringFollowUpsForParent(conn, lawnParent(), lawnLine(), { registerReminders: false, annualPrepay: true });
     expect(parentUpdates[0].recurring_pattern).toBe(LAWN_ROUNDS_9);
@@ -254,9 +213,8 @@ describe('estimate converter series write (seedRecurringFollowUpsForParent)', ()
   });
 
   test.each(['2099-03-16', '2099-03-17', '2099-03-18', '2099-03-19', '2099-03-20', '2099-08-24', '2099-12-28'])(
-    'gate on + annual-prepay accept: the term coverage dates equal the seeded rounds rows (anchor %s)',
+    'annual-prepay accept: the term coverage dates equal the seeded rounds rows (anchor %s)',
     async (anchor) => {
-      gateOn();
       const { conn, inserted } = makeConn();
       await converter.seedRecurringFollowUpsForParent(conn, lawnParent({ scheduled_date: anchor }), lawnLine(), { registerReminders: false, annualPrepay: true });
       const { coverageScheduleDates } = require('../services/annual-prepay-renewals')._private;
@@ -270,8 +228,7 @@ describe('estimate converter series write (seedRecurringFollowUpsForParent)', ()
     },
   );
 
-  test('gate on: a tree and shrub 9x line still writes every_6_weeks', async () => {
-    gateOn();
+  test('a tree and shrub 9x line still writes every_6_weeks', async () => {
     const { conn, inserted, parentUpdates } = makeConn();
     const ts = { service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'every_6_weeks', visitsPerYear: 9 };
     await converter.seedRecurringFollowUpsForParent(conn, lawnParent({ service_type: 'Tree & Shrub Care' }), ts, { registerReminders: false });
@@ -279,8 +236,7 @@ describe('estimate converter series write (seedRecurringFollowUpsForParent)', ()
     expect(inserted.every((r) => r.recurring_pattern === 'every_6_weeks')).toBe(true);
   });
 
-  test('gate on: a commercial lawn line is never seeded, so never translated', async () => {
-    gateOn();
+  test('a commercial lawn line is never seeded, so never translated', async () => {
     const { conn, inserted } = makeConn();
     const commercial = { ...lawnLine(), name: 'Commercial Lawn Care', serviceName: 'Commercial Lawn Care' };
     const res = await converter.seedRecurringFollowUpsForParent(conn, lawnParent({ service_type: 'Commercial Lawn Care' }), commercial, { registerReminders: false });
@@ -292,12 +248,7 @@ describe('estimate converter series write (seedRecurringFollowUpsForParent)', ()
 describe('estimate converter quote prepay decision', () => {
   const lawnLine = () => ({ service: 'lawn_care', name: 'Lawn Care', frequency: 'every_6_weeks', visitsPerYear: 9 });
 
-  test('gate off: the prepay term records every_6_weeks, as before', () => {
-    expect(converter.annualPrepayCoverageCadence(lawnLine(), 'every_6_weeks')).toBe('every_6_weeks');
-  });
-
-  test('gate on: the prepay term records lawn_rounds_9, the pattern the series is written with', () => {
-    gateOn();
+  test('the prepay term records lawn_rounds_9, the pattern the series is written with', () => {
     expect(converter.annualPrepayCoverageCadence(lawnLine(), 'every_6_weeks')).toBe('lawn_rounds_9');
     // A count-only lawn row (no frequency field) is the same plan.
     expect(converter.annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }, 'every_6_weeks')).toBe('lawn_rounds_9');
@@ -306,20 +257,17 @@ describe('estimate converter quote prepay decision', () => {
     expect(src).not.toMatch(/lawnRounds: false/);
   });
 
-  test('gate on: a commercial lawn 9x line and a tree and shrub 9x line keep every_6_weeks', () => {
-    gateOn();
+  test('a commercial lawn 9x line and a tree and shrub 9x line keep every_6_weeks', () => {
     expect(converter.annualPrepayCoverageCadence({ ...lawnLine(), name: 'Commercial Lawn Care' }, 'every_6_weeks')).not.toBe('lawn_rounds_9');
     expect(converter.annualPrepayCoverageCadence({ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'every_6_weeks', visitsPerYear: 9 }, 'every_6_weeks')).toBe('every_6_weeks');
   });
 
-  test('gate on: the seasonal mosquito prepay refusal is unchanged (cadence seasonal_feb_oct)', () => {
-    gateOn();
+  test('the seasonal mosquito prepay refusal is unchanged (cadence seasonal_feb_oct)', () => {
     const mosquito = { service: 'mosquito', name: 'Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9 };
     expect(converter.annualPrepayCoverageCadence(mosquito, 'every_6_weeks')).toBe('seasonal_feb_oct');
   });
 
-  test('gate on: 6x and 12x lawn and 9x tree and shrub keep their prepay cadences', () => {
-    gateOn();
+  test('6x and 12x lawn and 9x tree and shrub keep their prepay cadences', () => {
     expect(converter.annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', frequency: 'bimonthly', visitsPerYear: 6 }, 'bimonthly')).toBe('bimonthly');
     expect(converter.annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly', visitsPerYear: 12 }, 'monthly')).toBe('monthly');
     expect(converter.annualPrepayCoverageCadence({ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'every_6_weeks', visitsPerYear: 9 }, 'every_6_weeks')).toBe('every_6_weeks');
@@ -332,14 +280,11 @@ describe('online booking wizard series', () => {
     estimate_data: { engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 75, annual: 900, perApp: 100, visitsPerYear: 9, frequency: 'every_6_weeks' }] } },
   });
 
-  test('the wizard plan keeps the quote vocabulary on both sides of the gate (the quote authorizes 9 visits)', () => {
-    expect(resolveWizardSeriesPlan(lawnEstimate(), 'lawn_care')).toEqual({ pattern: 'every_6_weeks', visits: 9 });
-    gateOn();
+  test('the wizard plan keeps the quote vocabulary (the quote authorizes 9 visits)', () => {
     expect(resolveWizardSeriesPlan(lawnEstimate(), 'lawn_care')).toEqual({ pattern: 'every_6_weeks', visits: 9 });
   });
 
-  test('gate on: the wizard\'s seeder call writes rounds on the parent and the 8 children it seeds', async () => {
-    gateOn();
+  test('the wizard\'s seeder call writes rounds on the parent and the 8 children it seeds', async () => {
     const plan = resolveWizardSeriesPlan(lawnEstimate(), 'lawn_care');
     const { conn, inserted, parentUpdates } = makeConn();
     // The wizard inserts the parent with no recurring_pattern and hands the seeder the plan's pattern.

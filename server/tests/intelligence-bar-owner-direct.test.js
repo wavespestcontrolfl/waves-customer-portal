@@ -131,6 +131,8 @@ describe('which writes skip the card', () => {
     expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input, { pinned_appointment: { id: A, visit_id: 'visit-1' } })).toBe(false);
     expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input, {})).toBe(false);
     expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input)).toBe(false);
+    // A recurring-plan move (GATE_IB_SERIES_MOVE) moves every later visit too: a bulk change keeps its card.
+    expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input, { pinned_appointment: { id: A, visit_id: null }, series_move: { occurrence_ids: [A, 'later-1'] } })).toBe(false);
   });
 
   test('assign_technician is direct for one ungrouped stop; several stops, a grouped stop, or no preview keep the card', () => {

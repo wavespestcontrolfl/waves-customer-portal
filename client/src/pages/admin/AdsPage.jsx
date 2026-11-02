@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AdsGapRulePanel from "../../components/admin/AdsGapRulePanel";
+import AdsNegativeKeywordsCard from "../../components/admin/AdsNegativeKeywordsCard";
 import {
   Badge as UiBadge,
   Button,
@@ -1590,6 +1591,7 @@ export function AdvisorTab() {
         generating={generating}
         errors={[generateError || loadError, historyError]}
       />
+      <AdsNegativeKeywordsCard />
       {!report ? (
         <AdvisorNoReports />
       ) : (

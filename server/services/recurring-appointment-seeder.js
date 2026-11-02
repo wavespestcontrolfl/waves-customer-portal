@@ -13,7 +13,6 @@ const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
 const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
 const { newSeriesAreaAnchor } = require('./lawn-area-days');
-const { lawn9xRoundsLive } = require('../config/feature-gates');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -307,9 +306,8 @@ function serviceKeyFor(value = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'service';
 }
 
-// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS, owner 2026-10-28). The pattern a NEW
-// series is WRITTEN with: lawn_rounds_9 and no interval when the gate is on
-// and the series is a RESIDENTIAL LAWN 9x plan (lawn family; every_6_weeks, or
+// Lawn 9x rounds (owner 2026-10-28; live since 2026-11-02). The pattern a NEW
+// series is WRITTEN with: lawn_rounds_9 and no interval when the series is a RESIDENTIAL LAWN 9x plan (lawn family; every_6_weeks, or
 // custom with a 42-day interval), else the input unchanged. Quotes and every
 // upstream cadence word stay every_6_weeks / custom-42; only a writer of
 // recurring_pattern / recurring_interval_days calls this, and it writes the
@@ -327,7 +325,7 @@ function serviceKeyFor(value = {}) {
 function lawnRoundsSeriesPattern(input = {}) {
   const { pattern, intervalDays = null } = input;
   try {
-    if (lawn9xRoundsLive() && isLawn9xRoundsSeries(input)) return { pattern: LAWN_ROUNDS_9, intervalDays: null };
+    if (isLawn9xRoundsSeries(input)) return { pattern: LAWN_ROUNDS_9, intervalDays: null };
   } catch (err) {
     require('./logger').warn(`[recurring-seeder] lawn rounds identity unreadable (series left unchanged): ${err.message}`);
   }

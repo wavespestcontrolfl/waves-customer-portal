@@ -152,6 +152,27 @@ describe('NotificationBell panel', () => {
     expect(band).toHaveStyle({ fontSize: '14px', backgroundColor: '#F1F5F9' });
   });
 
+  it('shows an SMS review bell\'s source text in quotes on the office panel, and never on the customer bell', async () => {
+    const noteBell = {
+      id: 7, category: 'alert', title: "Comms — check Synthetic Fixture's text note",
+      body: 'Wanted to save as special instructions; it is not clear if this is lasting or just for one visit.',
+      source_text: 'Skip the shed please', created_at: new Date().toISOString(), read_at: null, link: null,
+    };
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/push/status')) return jsonResponse({ available: true });
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+      return jsonResponse({ notifications: [noteBell] });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    expect(await screen.findByText('\u201cSkip the shed please\u201d')).toHaveStyle({ fontSize: '14px' });
+    cleanup();
+    render(<NotificationBell type="customer" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText(noteBell.title);
+    expect(screen.queryByText(/Skip the shed please/)).toBeNull();
+  });
+
   it('refetches the authoritative badge after marking one notification read', async () => {
     native.enabled = true;
     let count = 2;
@@ -796,6 +817,177 @@ describe('NotificationBell admin "Show full text" (brevity guard detail)', () =>
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
       Object.defineProperty(window, 'location', { configurable: true, value: previousLocation });
     }
+  });
+});
+
+describe('NotificationBell admin "What to do" and the customer line (GATE_ALERT_EXPLAINER)', () => {
+  const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
+  const DETAIL = 'The accepted pest control plan calls for quarterly service (4 applications). The linked schedule has 5 working/completed applications.';
+  const SUMMARY = {
+    happened: 'Jane Doe accepted a quarterly pest plan, but her schedule has 5 visits instead of 4.',
+    steps: ['Open Jane Doe\'s schedule.', 'Remove the extra visit.'],
+    fixer: 'you',
+  };
+  const rows = () => ([
+    { id: 'w1', category: 'alert', title: 'Accepted recurring plan needs schedule review', body: 'The accepted pest control plan calls for…',
+      detail: DETAIL, explainable: true, customer: { id: CUSTOMER_ID, name: 'Jane Doe' }, version: 'a'.repeat(32),
+      created_at: new Date().toISOString(), read_at: null, link: `/admin/customers?customerId=${CUSTOMER_ID}` },
+    { id: 'w2', category: 'schedule', title: 'Schedule — book Diane Dizon\'s wasp removal', body: 'She confirmed Sat Oct 4 at 11:00.',
+      explainable: true, customer: { id: null, name: 'Diane Dizon' }, version: 'b'.repeat(32),
+      created_at: new Date().toISOString(), read_at: null, link: '/admin/dispatch' },
+    { id: 'w3', category: 'follow_up', title: 'Follow-ups overdue', body: 'Follow-up promises overdue…', detail: 'Full follow-up list',
+      created_at: new Date().toISOString(), read_at: null, link: '/admin/communications' },
+  ]);
+  const setup = ({ list = rows(), explain = () => jsonResponse({ explainer: SUMMARY, customer: { id: CUSTOMER_ID, name: 'Jane Doe' }, version: 'a'.repeat(32) }) } = {}) => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 3 });
+      if (String(url).includes('/explain')) return explain();
+      if (String(url).includes('/read')) return jsonResponse({ success: true });
+      return jsonResponse({ notifications: list });
+    });
+  };
+  const withWidth = async (width, fn) => {
+    const previousWidth = window.innerWidth;
+    const previousLocation = window.location;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    const hrefSpy = vi.fn();
+    Object.defineProperty(window, 'location', { configurable: true, value: { ...window.location, set href(v) { hrefSpy(v); } } });
+    try {
+      await fn(hrefSpy);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+      Object.defineProperty(window, 'location', { configurable: true, value: previousLocation });
+    }
+  };
+  const open = () => fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+  const explainCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/explain'));
+
+  it('names the customer unless the title already does, and only on an admin row', () => {
+    const { customerNameFor } = _test;
+    const [plan, booking, plain] = rows();
+    expect(customerNameFor(plan, 'admin')).toBe('Jane Doe');
+    expect(customerNameFor(booking, 'admin')).toBeNull();
+    expect(customerNameFor(plain, 'admin')).toBeNull();
+    expect(customerNameFor(plan, 'customer')).toBeNull();
+  });
+
+  it.each([['desktop', 1280], ['phone', 390]])('shows the customer, then the summary from the server, without navigating or marking read (%s)', async (_label, width) => {
+    await withWidth(width, async (hrefSpy) => {
+      setup();
+      render(<NotificationBell type="admin" />);
+      open();
+      // One customer line: Jane Doe's row (her name links to her page); Diane Dizon's title already names her.
+      const customerLink = await screen.findByRole('link', { name: 'Jane Doe' });
+      expect(customerLink).toHaveAttribute('href', `/admin/customers?customerId=${CUSTOMER_ID}`);
+      const lines = screen.queryAllByText((_c, el) => el?.tagName === 'DIV' && /^Customer:/.test(el.textContent));
+      expect(lines.map((el) => el.textContent)).toEqual(['Customer: Jane Doe']);
+      // The name's own click never reaches the row (no row navigation, no mark-read).
+      const keepPage = (e) => e.preventDefault();
+      document.addEventListener('click', keepPage, true);
+      fireEvent.click(customerLink);
+      document.removeEventListener('click', keepPage, true);
+      // Explainable rows get "What to do"; a row the server did not mark keeps "Show full text".
+      expect(screen.getAllByRole('button', { name: 'What to do' })).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Show full text' })).toBeInTheDocument();
+
+      fireEvent.click(screen.getAllByRole('button', { name: 'What to do' })[0]);
+      expect(await screen.findByText(SUMMARY.happened)).toBeInTheDocument();
+      expect(explainCalls()).toHaveLength(1);
+      expect(explainCalls()[0][0]).toContain('/admin/notifications/w1/explain');
+      expect(explainCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST' }));
+      expect(screen.getByText('What you need to do')).toBeInTheDocument();
+      expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual(SUMMARY.steps);
+      // The panel does not repeat the customer: the row's own line already names them.
+      expect(screen.getAllByRole('link', { name: 'Jane Doe' })).toHaveLength(1);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Show original text' }));
+      expect(screen.getByText(DETAIL)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Hide what to do' }));
+      expect(screen.queryByText(SUMMARY.happened)).toBeNull();
+      // Opening it again reads the kept summary, not the server.
+      fireEvent.click(screen.getAllByRole('button', { name: 'What to do' })[0]);
+      expect(await screen.findByText(SUMMARY.happened)).toBeInTheDocument();
+      expect(explainCalls()).toHaveLength(1);
+      expect(hrefSpy).not.toHaveBeenCalled();
+      expect(global.fetch.mock.calls.some(([url]) => /\/read$/.test(String(url)))).toBe(false);
+    });
+  });
+
+  it('shows a summary the list already carried without asking the server, and Claude\'s work as Claude\'s', async () => {
+    await withWidth(1280, async () => {
+      const list = rows();
+      list[0] = { ...list[0], explainer: { happened: 'Two estimates point at the wrong property.', steps: ['Nothing for you: Claude can fix this.'], fixer: 'claude' } };
+      setup({ list });
+      render(<NotificationBell type="admin" />);
+      open();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'What to do' }))[0]);
+      expect(screen.getByText('Two estimates point at the wrong property.')).toBeInTheDocument();
+      expect(screen.getByText('What to do (Claude can fix this)')).toBeInTheDocument();
+      expect(explainCalls()).toHaveLength(0);
+    });
+  });
+
+  it('a failed summary says so and can be asked again; a fallback says it is the alert\'s own text', async () => {
+    await withWidth(1280, async () => {
+      let attempt = 0;
+      setup({
+        explain: () => {
+          attempt += 1;
+          if (attempt === 1) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+          return jsonResponse({ explainer: { happened: 'The accepted pest control plan calls for…', steps: ['Tap the alert to open the record it is about.'], fixer: 'you', fallback: true }, customer: null, version: 'a'.repeat(32) });
+        },
+      });
+      render(<NotificationBell type="admin" />);
+      open();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'What to do' }))[0]);
+      expect(await screen.findByText(/Couldn.t write a summary/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      expect(await screen.findByText(/this is the alert.s own text/)).toBeInTheDocument();
+      expect(screen.getByText('Tap the alert to open the record it is about.')).toBeInTheDocument();
+      expect(explainCalls()).toHaveLength(2);
+      // A fallback is not kept: closing and opening the panel asks again.
+      fireEvent.click(screen.getByRole('button', { name: 'Hide what to do' }));
+      fireEvent.click(screen.getAllByRole('button', { name: 'What to do' })[0]);
+      await waitFor(() => expect(explainCalls()).toHaveLength(3));
+    });
+  });
+
+  it('a list refresh that changes an alert\'s text clears the summary of its old text', async () => {
+    await withWidth(1280, async () => {
+      let listReads = 0;
+      global.fetch = vi.fn(async (url, options = {}) => {
+        if (String(url).includes('/unread-count')) return jsonResponse({ count: 3 });
+        if (String(url).includes('/done')) return { ok: false, status: 409, json: async () => ({ error: 'changed' }) };
+        if (String(url).includes('/explain')) return jsonResponse({ explainer: SUMMARY, customer: null, version: 'a'.repeat(32) });
+        listReads += 1;
+        const list = rows();
+        list[0] = listReads === 1
+          ? { ...list[0], explainer: SUMMARY }
+          : { ...list[0], body: 'The accepted lawn plan calls for…', version: 'c'.repeat(32) };
+        return jsonResponse({ notifications: list });
+      });
+      render(<NotificationBell type="admin" />);
+      open();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'What to do' }))[0]);
+      expect(screen.getByText(SUMMARY.happened)).toBeInTheDocument();
+      // A Done refused on another row re-reads the list; this row comes back with new text.
+      fireEvent.click(screen.getAllByRole('button', { name: 'Done' })[1]);
+      expect(await screen.findByText('The accepted lawn plan calls for…')).toBeInTheDocument();
+      expect(screen.queryByText(SUMMARY.happened)).toBeNull();
+    });
+  });
+
+  it('a summary written for other text (the alert changed meanwhile) is never shown on this row; the list is read again', async () => {
+    await withWidth(1280, async () => {
+      setup({ explain: () => jsonResponse({ explainer: SUMMARY, customer: null, version: 'f'.repeat(32) }) });
+      render(<NotificationBell type="admin" />);
+      open();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'What to do' }))[0]);
+      expect(await screen.findByText('That alert changed \u2014 the list was refreshed.')).toBeInTheDocument();
+      expect(screen.queryByText(SUMMARY.happened)).toBeNull();
+      const listReads = global.fetch.mock.calls.filter(([url]) => /\/admin\/notifications\?limit=/.test(String(url)));
+      expect(listReads).toHaveLength(2);
+    });
   });
 });
 
