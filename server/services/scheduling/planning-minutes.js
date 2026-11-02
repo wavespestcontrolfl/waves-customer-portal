@@ -4,7 +4,10 @@
  * the technician on site, for every route simulation — the booking picker,
  * the nightly reorder pass and the route-quality measurements all read it
  * through route-reorder-window-fit.js's workDuration, so the two sides of
- * scheduling plan the same day. Live only with GATE_SCHEDULING_CAPACITY.
+ * scheduling plan the same day. Live with GATE_SCHEDULING_CAPACITY=true
+ * (capacity mode) and with GATE_SCHEDULING_CAPACITY=plan (plan-only mode,
+ * owner 2026-11-01: these minutes alone, with the one-hour slots, the 8 PM
+ * day end and every other hour-mode rule kept; planningTableLive below).
  *
  * "The full hour is wrong": a one-hour arrival window is a promise about when
  * the truck arrives, not how long the work takes. Rows this table does not
@@ -33,6 +36,7 @@
  * this (Codex r1 P0).
  */
 const { capacityEnabled } = require('./policy');
+const { schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 
 const PLANNING_MINUTES = Object.freeze({
   oneTimePest: 45,
@@ -44,6 +48,16 @@ const PLANNING_MINUTES = Object.freeze({
   assessment: 30,
   rodentTermite: 30,
 });
+
+// Capacity mode plans the table, and so does plan-only mode
+// (GATE_SCHEDULING_CAPACITY=plan): the 2026-11-01 back-test of Adam's
+// 30 days against truck GPS arrivals put the table's arrival error at p50
+// 26.5 / p90 63.8 min against 41.0 / 127.6 for the whole hour, which called
+// 48 on-time stops late. Plan-only mode changes the minutes and nothing
+// else: capacityEnabled() stays false for it.
+function planningTableLive() {
+  return capacityEnabled() || schedulingPlanMinutesOnly();
+}
 
 // The legacy default charge. A stored estimate above it is a real long job
 // (e.g. pest + termite bait at 120) and is never planned shorter.
@@ -86,7 +100,7 @@ function deliberateEstimate(stop) {
  *  planned minutes; its window span must not inflate that back to an hour. */
 function plannedWorkMinutes(stop) {
   if (!stop || stop.planning_exempt) return null;
-  if (!capacityEnabled() && !stop.preserveCapacity) return null;
+  if (!planningTableLive() && !stop.preserveCapacity) return null;
   if (stop.memberIds) return Number(stop.estimated_duration_minutes) || null;
   const planned = tableMinutes(stop);
   return planned == null ? null : Math.max(planned, deliberateEstimate(stop));
@@ -100,13 +114,14 @@ function plannedWorkMinutes(stop) {
  *  minutes, dead-rodent attic 90, pest + termite 120) and never shrinks.
  *  `combined_services` (find-time.js) marks a prospective visit that holds
  *  several services under one joined label, which names no single table row.
- *  Live only in capacity mode, or on the persisted `preserveCapacity` path. */
+ *  Live in capacity or plan-only mode (planningTableLive), or on the
+ *  persisted `preserveCapacity` path. */
 function placedVisitMinutes(target, allowanceMinutes, { preserveCapacity = false } = {}) {
   if (!target || target.combined_services === true) return null;
-  if (!capacityEnabled() && !preserveCapacity) return null;
+  if (!planningTableLive() && !preserveCapacity) return null;
   const allowance = Number(allowanceMinutes);
   if (!(allowance > 0) || allowance > LEGACY_DEFAULT_MINUTES) return null;
   return tableMinutes(target);
 }
 
-module.exports = { PLANNING_MINUTES, plannedWorkMinutes, placedVisitMinutes };
+module.exports = { PLANNING_MINUTES, plannedWorkMinutes, placedVisitMinutes, planningTableLive };

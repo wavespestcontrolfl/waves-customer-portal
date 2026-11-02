@@ -22,7 +22,7 @@ const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
-const { zoneRouteDaysLive, gateEnvValue } = require('../../config/feature-gates');
+const { zoneRouteDaysLive, gateEnvValue, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
@@ -342,9 +342,12 @@ async function findCapacitySlots(opts) {
         // and the schedule screen plan the same day the same way), and the
         // day starting at the tech's start point like the shared model it
         // is scored on (GATE_TECH_START_POINTS; off = the office). Every
-        // other caller keeps the defaults.
+        // other caller keeps the defaults. Plan-only mode
+        // (GATE_SCHEDULING_CAPACITY=plan) plans the 04:20 pass and the
+        // schedule screen from the planning table, so the night search
+        // plans the stops on the route from it too, for the same reason.
         preserveCapacity: opts.arrivalSearch === true,
-        planningMinutes: opts.arrivalSearch !== true,
+        planningMinutes: opts.arrivalSearch !== true || schedulingPlanMinutesOnly(),
         startPoints: opts.arrivalSearch === true,
         // The van's departure (GATE_AUTO_DISPATCH_DAY_RULES): the night tool
         // passes the Settings time; every other caller keeps 08:00.

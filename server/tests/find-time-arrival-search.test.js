@@ -112,6 +112,25 @@ describe('findAvailableSlots — the night arrival search', () => {
     expect(createSchedulingTravel).not.toHaveBeenCalled();
   });
 
+  // Plan-only mode (GATE_SCHEDULING_CAPACITY=plan, owner 2026-11-01): the 04:20 route pass and the
+  // schedule screen plan the route's stops from the planning table, so the night search does too.
+  test('plan-only mode: the night request plans the route stops from the table, with the same per-call switch', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    await findAvailableSlots(NIGHT);
+    expect(routeAsks().length).toBeGreaterThan(0);
+    for (const ask of routeAsks()) {
+      expect(ask).toMatchObject({ technicianId: 'tech-1', preserveCapacity: true, planningMinutes: true, startPoints: true });
+    }
+    expect(createSchedulingTravel).toHaveBeenCalledWith({ maxRequests: 0 });
+  });
+
+  test('a booking request in plan-only mode keeps today\'s hour search: the arrival engine is never asked', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    expect(await findAvailableSlots({ ...BASE, lat: null })).toEqual({ error: 'lat/lng required', slots: [] });
+    expect(loadArrivalRouteContext).not.toHaveBeenCalled();
+    expect(createSchedulingTravel).not.toHaveBeenCalled();
+  });
+
   test('a booking request under the old gate asks the route exactly as before: no per-call switch, planning minutes, the office', async () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     await findAvailableSlots(BASE);
