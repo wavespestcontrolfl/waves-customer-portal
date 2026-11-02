@@ -24,9 +24,11 @@ import './glass-theme.css';
 /**
  * Mounts the one scene: html attribute, mesh background, the parallax orbs
  * + film grain. Returns the orb container for pointer FX
- * plus a cleanup that restores everything it changed.
+ * plus a cleanup that restores everything it changed. `motion: false` skips
+ * the entrance engine (motion audit 2026-11-02, owner pick 3A: the customer
+ * portal renders routine content at once); the static scene is identical.
  */
-export function applyGlassScene() {
+export function applyGlassScene({ motion = true } = {}) {
   const html = document.documentElement;
   const prevHtmlBg = html.style.background;
   const prevBodyBg = document.body.style.background;
@@ -74,7 +76,7 @@ export function applyGlassScene() {
     document.body.appendChild(grain);
   }
 
-  const detachMotion = attachGlassMotion();
+  const detachMotion = motion ? attachGlassMotion() : () => {};
   const cleanup = () => {
     detachMotion();
     if (orbs) orbs.remove();
@@ -203,16 +205,22 @@ export function fireGlassConfetti(cx, cy) {
  * the browser paints the first frame, or every glass surface flashes its
  * un-themed (legacy-token) styling for a frame before the scene mounts.
  */
-export function useGlassSurface(active) {
+export function useGlassSurface(active, { motion = true } = {}) {
   useLayoutEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const { orbs, cleanup } = applyGlassScene();
-    const detachFx = attachGlassPointerFx(html, orbs, reduced);
+    const { orbs, cleanup } = applyGlassScene({ motion });
+    // `motion: false` (customer portal, motion audit 2026-11-02, owner pick
+    // 3A): no entrance engine, no orb parallax or cursor specular, and
+    // data-glass-still on <html> so the CSS drops the hover lift. The static
+    // scene stays exactly as it is for every other surface.
+    const detachFx = motion ? attachGlassPointerFx(html, orbs, reduced) : () => {};
+    if (!motion) html.setAttribute('data-glass-still', '');
     return () => {
       detachFx();
+      html.removeAttribute('data-glass-still');
       cleanup();
     };
-  }, [active]);
+  }, [active, motion]);
 }

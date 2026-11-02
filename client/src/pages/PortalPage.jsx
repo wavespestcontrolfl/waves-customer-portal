@@ -892,14 +892,10 @@ function BeforeAfterSlider({ beforeAfter }) {
 function ScoreRing({ score, size = 90, stroke = 7, label }) {
   const radius = (size - stroke) / 2;
   const circumference = radius * 2 * Math.PI;
-  const [anim, setAnim] = useState(0);
-
-  useEffect(() => {
-    const t = setTimeout(() => setAnim(score || 0), 100);
-    return () => clearTimeout(t);
-  }, [score]);
-
-  const offset = circumference - (anim / 100) * circumference;
+  // Draws the real score on the first render. The old 0 -> score sweep
+  // (100 ms timer + 1.2 s transition) replayed on every mount and ignored
+  // Reduce Motion (motion audit 2026-11-02, owner pick 3A).
+  const offset = circumference - ((score || 0) / 100) * circumference;
   const color = score >= 75 ? B.green : score >= 50 ? B.orange : B.red;
 
   return (
@@ -910,8 +906,7 @@ function ScoreRing({ score, size = 90, stroke = 7, label }) {
         <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
           stroke={color} strokeWidth={stroke}
           strokeDasharray={circumference} strokeDashoffset={offset}
-          strokeLinecap="round"
-          style={{ transition: 'stroke-dashoffset 1.2s ease-out' }} />
+          strokeLinecap="round" />
       </svg>
       <div style={{
         position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
@@ -2093,13 +2088,7 @@ function PortalMowingHeight({ mowing }) {
 }
 
 function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, mowingHeight, embedded = false }) {
-  const [animated, setAnimated] = useState(false);
   const [showTrend, setShowTrend] = useState(false);
-
-  useEffect(() => {
-    const timer = requestAnimationFrame(() => setAnimated(true));
-    return () => cancelAnimationFrame(timer);
-  }, []);
 
   const metrics = [
     { label: 'Density / Coverage', key: 'turfDensity', initialKey: 'turfDensity' },
@@ -2174,7 +2163,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
 
       {/* Progress Bars */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {metrics.map((m, i) => {
+        {metrics.map((m) => {
           const current = scores[m.key] || 0;
           // The server flags the first-visit color as hidden when the first and latest
           // photos were not taken in known, compatible light (GATE_LAWN_LIGHTING):
@@ -2210,8 +2199,9 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
                 <div style={{
                   position: 'absolute', height: '100%', borderRadius: 4,
                   background: `linear-gradient(90deg, ${B.teal}, ${B.green})`,
-                  width: animated ? `${current}%` : '0%',
-                  transition: `width 1s ease-out ${i * 0.12}s`,
+                  // Real width on the first render, no 0 -> score sweep
+                  // (motion audit 2026-11-02, owner pick 3A).
+                  width: `${current}%`,
                 }} />
               </div>
             </div>
@@ -5354,11 +5344,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     .slice(0, 2);
   const upcomingOnly = enriched.filter(s => s.diffHrs > -24 && s.status !== 'completed');
 
-  // Pulsing dot animation
-  const pulsingDotCss = `@keyframes schedPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
-@media (prefers-reduced-motion: reduce) {
-  [data-sched-pulse] { animation: none !important; }
-}
+  // The Service Today tile used to pulse forever; it is a static tile now
+  // (motion audit 2026-11-02, owner pick 3A).
+  const scheduleGlassCss = `
   /* GlassTile inside a gold accent chip: the theme's [data-glass-accent] *
      rule fills every svg shape navy — keep the lucide strokes as strokes. */
   [data-glass-accent] .glass-tile svg * { fill: none !important; }
@@ -5445,11 +5433,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           borderBottom: `1px solid ${toneBorder}`,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span data-sched-pulse="" style={{
+            <span style={{
               width: 34, height: 34, borderRadius: 8, background: '#fff',
               border: `1px solid ${toneBorder}`,
               color: toneColor, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              animation: isGreen ? 'schedPulse 2s ease-in-out infinite' : 'none',
               flexShrink: 0,
             }}>
               <Icon name={isGreen ? 'truck' : isOrange ? 'clock' : 'calendar'} size={18} strokeWidth={1.9} />
@@ -5599,7 +5586,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <style>{pulsingDotCss}</style>
+      <style>{scheduleGlassCss}</style>
 
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
@@ -16674,7 +16661,9 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef,
   );
 }
 
-function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhotoId, tabs = MORE_TABS }) {
+// `slide` is true only when a pointer or touch opened the sheet; a sheet opened
+// from the keyboard appears at once (motion audit 2026-11-02, owner pick 3A).
+function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhotoId, tabs = MORE_TABS, slide = true }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
@@ -16731,7 +16720,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
         position: 'relative',
         padding: '12px calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))',
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
-        animation: 'moreSheetUp 0.25s ease',
+        animation: slide ? 'moreSheetUp 0.25s ease' : 'none',
         borderTop: `1px solid ${PORTAL_SHELL.border}`,
         // dvh: 100vh over-measures behind the iOS Safari toolbar.
         maxHeight: `calc(100${DVH} - 16px - env(safe-area-inset-top, 0px))`,
@@ -17567,6 +17556,9 @@ export default function PortalPage() {
   // Question handed from the Waves AI bar into the assistant on open.
   const [chatPrompt, setChatPrompt] = useState(null);
   const [showMoreSheet, setShowMoreSheet] = useState(false);
+  // How More was opened. A keyboard-activated click has event.detail 0; the
+  // sheet then skips its 0.25 s slide (motion audit 2026-11-02, owner pick 3A).
+  const [moreByKeyboard, setMoreByKeyboard] = useState(false);
   // Photo ID (GATE_CUSTOMER_PHOTO_ID) — one gate read shared by the floating
   // button and the More-sheet row so they can never disagree about whether
   // the feature is live (404 hides both). reportIssuePrefill carries the
@@ -17636,7 +17628,10 @@ export default function PortalPage() {
   useLockBodyScroll(showMenu, { preserveSticky: true });
   // Home is the hero surface (full scene with orbs). Glass is the unconditional
   // portal theme now, so the scene always mounts.
-  useGlassSurface(true);
+  // Still glass: the customer app renders routine content at once, with no
+  // tab-change entrances, orb parallax or hover lift (motion audit
+  // 2026-11-02, owner pick 3A). Other glass pages keep their motion.
+  useGlassSurface(true, { motion: false });
 
   // Close menu on outside click
   useEffect(() => {
@@ -18342,7 +18337,7 @@ export default function PortalPage() {
         <BottomNav
           activeTab={activeTab}
           onSelect={switchTab}
-          onOpenMore={() => setShowMoreSheet(true)}
+          onOpenMore={(e) => { setMoreByKeyboard(e?.detail === 0); setShowMoreSheet(true); }}
           moreActive={showMoreSheet}
           moreButtonRef={moreButtonRef}
           tabs={narrowedPrimaryTabs}
@@ -18354,6 +18349,7 @@ export default function PortalPage() {
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
           onClose={() => setShowMoreSheet(false)}
+          slide={!moreByKeyboard}
           onRequest={cancelledAccount || contactSession ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowReportIssue(true); }}
           onChat={cancelledAccount || contactSession ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowChat(true); }}
           onOpenPhotoId={photoIdAvailable ? () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowMoreSheet(false); } : null}
@@ -18407,4 +18403,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { buildArticles, useLearnArticles, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
