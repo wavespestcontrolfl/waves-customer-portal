@@ -33,7 +33,9 @@ const featureGates = require('../../config/feature-gates');
 const { customerCopyViolations } = require('./technician-report-copy');
 const { officeOnlyReason } = require('../reservice-office-only');
 const { pestsOf } = require('../reservice-fixed-recap');
-const { productRows, lawnWhereOf, stillSeeingTopic } = require('./reservice-report-card');
+const {
+  productRows, lawnWhereOf, stillSeeingTopic, KEY_LOCATION_RE, SAFETY_CLAIM_RE, readsAsAddressedToCustomer,
+} = require('./reservice-report-card');
 
 const VERSION = 1;
 const TITLE = 'Your re-service';
@@ -155,11 +157,24 @@ function labelOf(item) {
   return [name, date].filter(Boolean).join(' · ');
 }
 
+// Today's card's egress screens, one sentence at a time (reservice-report-card.js): a sentence that says where a key,
+// lockbox, remote or fob is, or that makes any pesticide-safety claim, never prints on this permanent, forwardable page.
+function withoutAccessOrClaims(text) {
+  return text.split(/(?<=[.!?])\s+/)
+    .filter((sentence) => !KEY_LOCATION_RE.test(sentence) && !SAFETY_CLAIM_RE.test(sentence))
+    .join(' ').trim();
+}
+
 // The customer's words as the card prints them, or '' (label only).
 function wordsOf(item) {
-  const text = String(item.text || '').replace(/\s+/g, ' ').trim();
-  if (!text || item.printable === false) return '';
+  const raw = String(item.text || '').replace(/\s+/g, ' ').trim();
+  if (!raw || item.printable === false) return '';
+  const text = withoutAccessOrClaims(raw);
+  if (!text) return '';
   const lead = typeof item.lead === 'string' ? item.lead.trim() : '';
+  // A paraphrase written about the customer ("Customer says the ants are back") cannot sit under a lead addressed to
+  // them; the customer's own quoted words are theirs to phrase (the card's rule).
+  if (item.quoted !== true && lead && !readsAsAddressedToCustomer(text)) return '';
   const words = item.quoted === true ? `“${text}”` : (lead ? `${lead} ${text}` : text);
   return customerCopyViolations(words).length ? '' : words;
 }
@@ -225,7 +240,8 @@ function didRow(item, answer, rows, lane) {
   if (answer.answer === 'treated') return { chip: 'Treated', subject, line: treatedLine(answer, rows, lane) };
   if (answer.answer === 'answered') {
     const text = typeof answer.text === 'string' ? answer.text.replace(/\s+/g, ' ').trim() : '';
-    if (!text || customerCopyViolations(text).length) return null;
+    // The tech's own sentence prints whole or not at all: a sentence the egress screens would drop drops the row.
+    if (!text || withoutAccessOrClaims(text) !== text || customerCopyViolations(text).length) return null;
     return { chip: 'Answered', subject, line: text };
   }
   const fixed = FIXED_LINES[answer.answer];

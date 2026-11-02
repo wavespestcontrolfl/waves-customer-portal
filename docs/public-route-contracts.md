@@ -269,15 +269,17 @@ words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
   are exposed.
 - `told`: `label` is `<Source> · <Mon D>` (Eastern date; a question reads
   `Your question · <Mon D>`); `words` are quoted words in curly quotes, or a
-  call / office lead plus the words, re-screened with `customerCopyViolations`
-  at render; `null` (label only) when the frozen item is not `printable` or
-  fails the screen.
+  call / office lead plus the words. At render they pass the card's own
+  egress screens (a sentence saying where a key, lockbox, remote or fob is, or
+  making any pesticide-safety claim, is dropped; a third-person paraphrase
+  never sits under a lead) and then `customerCopyViolations`; `null` (label
+  only) when the frozen item is not `printable` or nothing passes.
 - `did`: fixed wording from the technician's tap: `Treated` (`We treated it
   with <products>.` from the record's product rows the answer names, plus
   `Where: …` on lawn reports only, since pest reports name no treated areas,
   owner 2026-10-05), `Checked`, `Noted`, `Follow-up` (`We will follow up on
-  this one.`) or `Answered` (the technician's sentence, re-screened at render;
-  a failing one drops the row).
+  this one.`) or `Answered` (the technician's sentence, re-screened at render
+  with the same egress screens; it prints whole or its row is dropped).
 - `products`: the visit's product rows once each (termite and rodent
   monitoring stations and bait left out), `where` on lawn reports only, and `how` = the approved
   `how_it_works` line (`report-product-copy.js`) only while

@@ -108,6 +108,37 @@ describe('reserviceAsksReport builder', () => {
     expect(reserviceAsksReportApplies(service(flagged), BLOCK)).toBe(false);
   });
 
+  test('the card\'s egress screens: a key, remote or fob location and any safety claim never print; a third-person paraphrase never sits under a lead', () => {
+    on();
+    const asks = frozen([
+      item({ id: 'k', text: 'The spare key is under the flower pot beside the ants.' }),
+      item({ id: 'r', text: 'Ants by the back door. The garage remote is in the mailbox.' }),
+      item({ id: 'p', text: 'Is the bait pet friendly?', kind: 'question' }),
+      item({ id: 'o', source: 'office', quoted: false, lead: 'As reported to our office:', text: 'Customer says the ants are back' }),
+      item({ id: 'c', source: 'call', quoted: false, lead: 'On your call on Oct 30, you mentioned', text: 'ants in the pantry' }),
+    ], {
+      k: { answer: 'noted' }, r: { answer: 'noted' }, p: { answer: 'answered', text: 'It is a gel bait placed in cracks out of reach.' },
+      o: { answer: 'noted' }, c: { answer: 'noted' },
+    });
+    const block = buildReserviceAsksReport(service(asks), { block: BLOCK, products: PRODUCTS });
+    expect(block.told.map((row) => row.words)).toEqual([
+      null,
+      '“Ants by the back door.”',
+      null,
+      null,
+      'On your call on Oct 30, you mentioned ants in the pantry',
+    ]);
+    expect(JSON.stringify(block)).not.toMatch(/flower pot|remote|mailbox|pet friendly|Customer says/);
+  });
+
+  test('a typed answer the egress screens would cut drops its row whole', () => {
+    on();
+    const asks = frozen([item()], { 'text:1': { answer: 'answered', text: 'We baited the kitchen. I left the key under the mat.' } });
+    const block = buildReserviceAsksReport(service(asks), { block: BLOCK, products: PRODUCTS });
+    expect(block.did).toEqual([]);
+    expect(JSON.stringify(block)).not.toMatch(/key|mat\b/);
+  });
+
   test('summary line: singulars, and a clause with a zero count is dropped', () => {
     on();
     const make = (items) => {

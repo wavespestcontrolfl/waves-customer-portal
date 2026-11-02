@@ -430,4 +430,7 @@ module.exports = {
   productRows,
   lawnWhereOf,
   stillSeeingTopic,
+  KEY_LOCATION_RE,
+  SAFETY_CLAIM_RE,
+  readsAsAddressedToCustomer,
 };
