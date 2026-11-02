@@ -120,6 +120,17 @@ async function assertDestinationClear(trx, service, dateStr, refuse, serviceType
   if (blocksDay(dateStr, rule)) throw refuse(service.id, `would land on ${dateStr}, on or next to the customer's mowing day`);
 }
 
+// Shadow only: the mowing_day conflict mode 'true' would read for a visit on
+// `dateStr` (current-conflict.js): conflict moves on, no other conflict
+// (`existing`), an arrival window, and the date blocked. Null otherwise. Both
+// shadow paths run under it, as live does: the legacy model's pool
+// (candidate-slots.js mowingShadowCandidates, whose grouped-window checks and
+// own-date retention read it, Codex #7472 r3 P2) and the ranking (shadowBest).
+function simulatedConflict(rule, { service, dateStr, conflictMoves, existing }) {
+  if (existing || conflictMoves !== true || !service.window_start || !blocksDay(dateStr, rule)) return null;
+  return { kind: 'mowing_day', date: dateStr, mowing_days: rule.days };
+}
+
 const startOf = (p) => (p ? { date: p.date, start: p.start_time || null } : null);
 const sameSlot = (a, b) => !!a && !!b && a.date === b.date && a.start === b.start;
 
@@ -134,13 +145,15 @@ function shadowBest(rule, {
   service, current, scored, shadowCandidates, scoreOf, currentScore, threshold, config, conflictMoves,
 }) {
   if (!current || !currentScore) return null;
-  const inConflict = conflictMoves === true && !current.conflict && !!service.window_start && blocksDay(current.date, rule);
+  const simulated = simulatedConflict(rule, {
+    service, dateStr: current.date, conflictMoves, existing: current.conflict,
+  });
   const pool = shadowCandidates
     ? shadowCandidates.map((cand) => ({ cand, sc: scoreOf(cand) }))
     : (scored || []).filter(({ cand }) => !blocksDay(cand.date, rule));
   const ranked = rankCandidates({
     service,
-    current: inConflict ? { ...current, conflict: { kind: 'mowing_day', date: current.date } } : current,
+    current: simulated ? { ...current, conflict: simulated } : current,
     currentScore,
     scored: pool,
     threshold,
@@ -171,5 +184,5 @@ function auditNote(rule, args) {
 }
 
 module.exports = {
-  mowingDaysMode, isLawnCareService, blockedWeekdays, ruleFor, withMowingRule, unitRule, blocksLive, withoutBlockedDays, assertDestinationClear, auditNote, DAY_INDEX,
+  mowingDaysMode, isLawnCareService, blockedWeekdays, ruleFor, withMowingRule, unitRule, blocksLive, withoutBlockedDays, assertDestinationClear, simulatedConflict, auditNote, DAY_INDEX,
 };

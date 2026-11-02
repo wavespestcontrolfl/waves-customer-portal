@@ -1273,12 +1273,18 @@ async function unitMowingRule(service, prefs, ctx) {
 // 'true' would rank, i.e. these candidates without the blocked weekdays, put
 // through the same ranking and its SCORE_CAP. Filtering the live list after
 // that cap reads "no move" when every capped slot is blocked (Codex #7472 r2
-// P2). The shared model caps only after scoring, so its scored list is
-// filtered as it is (mowing-days.js shadowBest). Live decisions never read
-// this pool, and its drops are not counted.
+// P2). It runs under the conflict 'true' would read for this visit (the
+// simulated mowing_day one when no other applies), so the grouped-window
+// checks and the own-date retention match live (r3 P2). The shared model caps
+// only after scoring, so its scored list is filtered as it is
+// (mowing-days.js shadowBest). Live decisions never read this pool, and its
+// drops are not counted.
 async function mowingShadowCandidates(service, geo, candidates, ctx, mowing) {
   if (!mowing || mowing.mode !== 'shadow' || autoDispatchSharedModelLive()) return null;
-  return rankSurvivorsForSharedModel(service, geo, mowingDays.withoutBlockedDays(candidates, mowing), ctx, null);
+  const evalConflict = ctx.evalConflict || mowingDays.simulatedConflict(mowing, {
+    service, dateStr: toDateStr(service.scheduled_date), conflictMoves: ctx.conflictMoves, existing: null,
+  });
+  return rankSurvivorsForSharedModel(service, geo, mowingDays.withoutBlockedDays(candidates, mowing), { ...ctx, evalConflict }, null);
 }
 
 // The evaluation result's `mowing` (index.js audits it), with the legacy

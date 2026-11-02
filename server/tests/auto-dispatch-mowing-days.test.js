@@ -369,6 +369,30 @@ describe('evaluation and audit (index.js evaluatePlacement)', () => {
     });
   });
 
+  test('shadow on the legacy model: a grouped visit\'s pool runs the unit checks under the simulated mowing conflict', async () => {
+    process.env[GATE] = 'shadow';
+    // A lawn visit grouped with a pest visit an hour later; moving the unit to 08:00 puts the pest member at 09:00-10:00.
+    const sibling = { id: 's2', scheduled_date: TUE, window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control Service' };
+    const groupContext = { excludeIds: new Set(['s1', 's2']), siblings: [sibling], visitWindowStart: '09:00' };
+    findAvailableSlots.mockResolvedValue({ slots: [slot(WED), slot(THU)] });
+    // Another customer's stop holds Wednesday 09:00-10:00, so true would refuse Wednesday for this unit.
+    rebooker.probeMoveConflicts.mockImplementation(async ({ target }) => ({
+      rows: target.date === WED ? [{ id: 'x9', scheduled_date: WED, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, status: 'confirmed' }] : [],
+    }));
+    const result = await evaluatePlacement({ ...SERVICE, visit_id: 'v1' }, prefsFor('shadow'), { ...evalCtx(), groupContext }, CONFIG, '2026-07-03');
+    expect(result.audit.constraints.mowing_days).toMatchObject({ current_blocked: true, shadow_best: { date: THU, start: '08:00' }, would_move: true });
+  });
+
+  test('simulatedConflict: only with conflict moves on, an arrival window, a blocked date and no other conflict', () => {
+    const rule = mowingDays.ruleFor({ mowing_days: ['Mon'] }, [], 'shadow');
+    const args = { service: SERVICE, dateStr: TUE, conflictMoves: true, existing: null };
+    expect(mowingDays.simulatedConflict(rule, args)).toEqual({ kind: 'mowing_day', date: TUE, mowing_days: ['Mon'] });
+    expect(mowingDays.simulatedConflict(rule, { ...args, dateStr: THU })).toBeNull();
+    expect(mowingDays.simulatedConflict(rule, { ...args, conflictMoves: false })).toBeNull();
+    expect(mowingDays.simulatedConflict(rule, { ...args, service: { ...SERVICE, window_start: null } })).toBeNull();
+    expect(mowingDays.simulatedConflict(rule, { ...args, existing: { kind: 'overlap', date: TUE } })).toBeNull();
+  });
+
   test('true: no open day -> the visit stays, and the row says why', async () => {
     process.env[GATE] = 'true';
     findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00')] });
