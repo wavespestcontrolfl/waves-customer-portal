@@ -44,7 +44,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, validCalendarDate } = require('../utils/datetime-et');
+const { etDateString, validCalendarDate, etCalendarDaysUntil, parseETDateTime } = require('../utils/datetime-et');
+const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { INTERNAL_TEST_CUSTOMERS, isInternalTestCustomerId } = require('./internal-test-customers');
 const { FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 const { MAX_HEADLINE_CHARS, MAX_WHY_CHARS, breaksAlertRules, composeAdminAlert } = require('./admin-alert-compose');
@@ -60,7 +61,6 @@ const OWN_ALERT_WINDOW_DAYS = 3;
 // A visit this many days after the due date still counts as the follow-up.
 const BOOKED_GRACE_DAYS = 7;
 const DETAIL_MAX_LINES = 25;
-const ITEM_KEYS_MAX = 200;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const RESOLUTION = Object.freeze({
@@ -72,13 +72,14 @@ const RESOLUTION = Object.freeze({
 
 // ---------------------------------------------------------------- dates (pure)
 
-function dayNumber(day) {
-  const [y, m, d] = day.split('-').map(Number);
-  return Math.round(Date.UTC(y, m - 1, d) / 86400000);
+// Calendar arithmetic goes through the shared Eastern-date helpers (AGENTS.md: one mechanism), never a local copy.
+function addDays(day, count) {
+  return addStaffWorkDays(day, count);
 }
 
-function addDays(day, count) {
-  return new Date((dayNumber(day) + count) * 86400000).toISOString().slice(0, 10);
+// Calendar days from `from` to `to`, both Eastern YYYY-MM-DD days (positive when `to` is later).
+function daysBetween(from, to) {
+  return etCalendarDaysUntil(to, parseETDateTime(`${from}T12:00`));
 }
 
 // 'Nov 5' from a YYYY-MM-DD string (no time zone is involved).
@@ -147,7 +148,7 @@ function classify(cards, visits, today) {
     const due = dueDay(card);
     if (due > today) continue;
     const item = { card, due };
-    if (dayNumber(today) - dayNumber(due) <= OWN_ALERT_WINDOW_DAYS) fresh.push(item);
+    if (daysBetween(due, today) <= OWN_ALERT_WINDOW_DAYS) fresh.push(item);
     else older.push(item);
   }
   const byDue = (a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : String(a.card.id).localeCompare(String(b.card.id)));
@@ -209,7 +210,7 @@ function ownSpec(item) {
 
 function detailLine(item, today) {
   const { card, due } = item;
-  const daysAgo = dayNumber(today) - dayNumber(due);
+  const daysAgo = daysBetween(due, today);
   const who = shortName(card) || 'Unknown customer';
   const service = serviceWords(card) || 'Follow-up';
   return `${who} · ${service} · due ${shortDay(due)} (${daysAgo} day${daysAgo === 1 ? '' : 's'} ago)`;
@@ -237,7 +238,9 @@ function composeCatchUp(items, today) {
     link: count === 1 ? customerLink(oldest.card) : '/admin/dispatch',
     promise: true,
   };
-  const itemKeys = items.map((item) => String(item.card.id)).sort().slice(0, ITEM_KEYS_MAX);
+  // The FULL membership: ringOnNewCard compares it with the stored list, so a cap here would miss a joining card or
+  // ring on a promoted one (Codex r1). Only the detail lines are capped.
+  const itemKeys = items.map((item) => String(item.card.id)).sort();
   return { spec, detail, itemKeys, count };
 }
 
@@ -445,7 +448,7 @@ module.exports = {
   CATCHUP_KEY,
   OWN_PREFIX,
   _private: {
-    dueDay, coverageOf, classify, actionFor, whyFor, ownSpec, composeCatchUp, ringOnNewCard, shortName, shortDay, addDays, splitOlder,
+    dueDay, coverageOf, classify, actionFor, whyFor, ownSpec, composeCatchUp, ringOnNewCard, shortName, shortDay, addDays, daysBetween, splitOlder,
     loadCards, loadVisits, OWN_ALERT_WINDOW_DAYS, BOOKED_GRACE_DAYS, DEFAULT_DUE_DAYS,
   },
 };

@@ -22,7 +22,7 @@ const FollowupDue = require('../services/followup-due-alerts');
 
 const { runFollowupDueAlerts } = FollowupDue;
 const {
-  dueDay, coverageOf, classify, actionFor, whyFor, ownSpec, composeCatchUp, ringOnNewCard, shortName, addDays,
+  dueDay, coverageOf, classify, actionFor, whyFor, ownSpec, composeCatchUp, ringOnNewCard, shortName, addDays, daysBetween,
 } = FollowupDue._private;
 
 // 8:20 AM Eastern on Monday 2026-11-02 (Eastern time is UTC-5 after the clock change).
@@ -93,6 +93,10 @@ describe('due date', () => {
     // 02:00Z on Nov 1 is still Oct 31 in Eastern time: the day comes from the Eastern calendar, not UTC.
     expect(dueDay(card({ payload: {}, card_day: undefined, created_at: '2026-11-01T02:00:00Z' }))).toBe('2026-11-14');
     expect(addDays('2026-12-25', 14)).toBe('2027-01-08');
+    // Through the shared Eastern helpers: the Nov 1 clock change does not shift a day count.
+    expect(addDays('2026-10-31', 2)).toBe('2026-11-02');
+    expect(daysBetween('2026-10-31', '2026-11-02')).toBe(2);
+    expect(daysBetween('2026-11-02', '2026-10-30')).toBe(-3);
   });
 
   test('a string payload is read as JSON', () => {
@@ -221,6 +225,18 @@ describe('alert copy', () => {
     expect(ring(null, { itemKeys: ['a', 'b'] })).toBe(true);
     expect(ring(null, {})).toBe(true);
     expect(ring(null, null)).toBe(true);
+  });
+});
+
+describe('catch-up membership', () => {
+  test('the ring decision keeps every card id; only the detail lines are capped', () => {
+    const items = Array.from({ length: 250 }, (_v, i) => ({ card: card({ id: `m-${String(i).padStart(3, '0')}` }), due: '2026-10-01' }));
+    const composed = composeCatchUp(items, TODAY);
+    expect(composed.itemKeys).toHaveLength(250);
+    expect(composed.detail.split('\n').filter((line) => line.startsWith('Pat S.'))).toHaveLength(25);
+    const ring = ringOnNewCard(composed.itemKeys);
+    expect(ring(null, { itemKeys: composed.itemKeys })).toBe(false);
+    expect(ring(null, { itemKeys: composed.itemKeys.filter((id) => id !== 'm-249') })).toBe(true);
   });
 });
 
