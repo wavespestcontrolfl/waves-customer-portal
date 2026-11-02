@@ -47,17 +47,23 @@ const MAX_PAGES = 10;
 // Bells a day from this module, per tier (Codex #7489 security review). Nothing proves a booking-page visitor owns
 // the phone they typed (the page links a customer by that phone alone), so a scripted burst must neither ring a
 // bell per start nor use up the room real drop-offs need:
-// - established: an estimate the office made, or a customer we have served. Their own room, a safety cap only.
-// - unverified: everything else (a typed phone, a website estimate). A small room; past it a drop-off is held and
-//   listed on the day's one summary bell, and a later day's room can still raise it.
+// - established: the card step of an estimate our office sent (made by staff, or drafted by the call and text
+//   estimator): its link went only to the contact we chose, or to the number that called or texted us. Their own
+//   room, a safety cap only. 99 of 105 card-step drop-offs, Jun-Nov 2026.
+// - unverified: every booking-page start and every website estimate, whatever customer they link to: the page and
+//   the website forms match a customer by the phone or email typed, which proves nothing (Codex #7489 r4). A small
+//   room; past it a drop-off is held and listed on the day's one summary bell, and a later day's room can still
+//   raise it.
 // Real days had at most three drop-offs of any kind (Jul-Nov 2026), so neither cap binds in normal use.
 const ESTABLISHED = 'established';
 const UNVERIFIED = 'unverified';
 const MAX_BELLS_PER_DAY = { [ESTABLISHED]: 10, [UNVERIFIED]: 3 };
 const BURST_KEY_PREFIX = 'portal-booking-burst:';
 const MAX_HELD_LINES = 10;
-// A customer we have served: a completed visit on file. The column is this module's own.
-const SERVED_SQL = (customerColumn) => `EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = ${customerColumn} AND s.status = 'completed')`;
+// An estimate our office sent: made by staff (its maker is on the row), or drafted by the call and text estimator
+// (estimate-learning.js AI_DRAFT_SOURCES), never a website or self-served source. Not source 'manual': it is the
+// column's default, so a path that sets no source would pass as the office's.
+const OFFICE_ESTIMATE_SQL = "(e.created_by_technician_id IS NOT NULL OR e.source IN ('estimator_engine', 'ai_agent'))";
 const tierOf = (item) => (item.established ? ESTABLISHED : UNVERIFIED);
 const TIER_SQL = `COALESCE(metadata->>'trust', '${UNVERIFIED}')`;
 const KEY_PREFIX = 'portal-unfinished-';
@@ -116,7 +122,6 @@ function bookingPageQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = {
     .limit(pageSize)
     .select('bi.id', 'bi.customer_id', 'bi.phone', 'bi.service_type', 'bi.slot_date', 'bi.slot_start', 'bi.slot_end',
       'bi.last_activity_at as drop_off_at', 'bi.pricing_estimate_id', conn.raw('bi.last_activity_at::text AS cursor_at'),
-      conn.raw(`${SERVED_SQL('bi.customer_id')} AS established`),
       conn.raw("COALESCE(NULLIF(trim(concat_ws(' ', c.first_name, c.last_name)), ''), NULLIF(trim(concat_ws(' ', bi.first_name, bi.last_name)), '')) AS name"));
 }
 
@@ -141,7 +146,7 @@ function estimateCardQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = 
     .limit(pageSize)
     .select('e.id', 'e.customer_id', 'e.customer_name', 'e.customer_phone', 'e.estimate_data', 'e.service_interest',
       'ce.last_at as drop_off_at', conn.raw('ce.last_at::text AS cursor_at'),
-      conn.raw(`(e.created_by_technician_id IS NOT NULL OR ${SERVED_SQL('e.customer_id')}) AS established`));
+      conn.raw(`${OFFICE_ESTIMATE_SQL} AS established`));
 }
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -158,7 +163,8 @@ function bookingItem(row) {
     service: text(row.service_type),
     slot: row.slot_date ? { date: String(row.slot_date).slice(0, 10), start: text(row.slot_start), end: text(row.slot_end) } : null,
     estimateId: row.pricing_estimate_id ? String(row.pricing_estimate_id) : null,
-    established: row.established === true,
+    // A typed phone links the customer; nothing proves the visitor owns it.
+    established: false,
   };
 }
 

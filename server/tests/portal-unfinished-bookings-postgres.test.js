@@ -8,7 +8,8 @@
  *     Done accepts.
  *   - admin-alert-relevance.js: the bell closes on a person's text after it, and when the booking was finished.
  *   - the day's cap per tier: an unverified drop-off past its room is held and listed on one summary bell a day; an
- *     established one (an estimate the office made, a customer we have served) still rings with that room full.
+ *     established one (the card step of an estimate our office sent) still rings with that room full. A typed phone
+ *     that matches a customer we have served is still unverified.
  * Each test removes everything it made and every bell its sweeps raised, so the next test starts with no drop-off
  * and the day's count at zero (Codex #7489 r2). Every row is synthetic. It refuses any database but a private QA
  * one or CI's.
@@ -202,14 +203,31 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     expect(await bellsFor(burstKey(now))).toHaveLength(1);
   });
 
-  test('an established drop-off still rings when the unverified room is full; its bell says so', async () => {
+  test('an office estimate still rings after the day\'s unverified room is full; its bell says so', async () => {
     for (let k = 0; k <= mod.MAX_BELLS_PER_DAY[mod.UNVERIFIED]; k += 1) await intent(await customer(), { last_activity_at: ago(90 + k) });
-    const served = await intent(await servedCustomer(), { last_activity_at: ago(200) });
-    const out = await run();
-    expect(out.held).toBeGreaterThanOrEqual(1);
-    const rows = await bellsFor(intentKey(served));
+    expect((await run()).held).toBeGreaterThanOrEqual(1);
+    const tech = await insert('technicians', { name: `Synthetic Tech ${RUN}` });
+    const e = await estimate(await customer(), { created_by_technician_id: tech.id });
+    await cardStep(e, ago(90));
+    await run();
+    const rows = await bellsFor(estimateKey(e));
     expect(rows).toHaveLength(1);
     expect(meta(rows[0]).trust).toBe(mod.ESTABLISHED);
+  });
+
+  test('only an estimate our office sent is established; a typed phone that matches a served customer is not', async () => {
+    const tech = await insert('technicians', { name: `Synthetic Tech ${RUN}` });
+    const staffMade = await estimate(await customer(), { created_by_technician_id: tech.id });
+    const drafted = await estimate(await customer(), { source: 'estimator_engine' });
+    const website = await estimate(await servedCustomer(), { source: 'quote_wizard' });
+    for (const e of [staffMade, drafted, website]) await cardStep(e, ago(90));
+    const typed = await intent(await servedCustomer());
+    await run();
+    const trust = async (key) => meta((await bellsFor(key))[0]).trust;
+    expect(await trust(estimateKey(staffMade))).toBe(mod.ESTABLISHED);
+    expect(await trust(estimateKey(drafted))).toBe(mod.ESTABLISHED);
+    expect(await trust(estimateKey(website))).toBe(mod.UNVERIFIED);
+    expect(await trust(intentKey(typed))).toBe(mod.UNVERIFIED);
   });
 
   test('a visit booked before the latest attempt does not hide it (the intent was reused)', async () => {
@@ -242,15 +260,7 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     expect(await bellsFor(estimateKey(accepted))).toHaveLength(0);
   });
 
-  test('an estimate the office made is established', async () => {
-    const tech = await insert('technicians', { name: `Synthetic Tech ${RUN}` });
-    const e = await estimate(await customer(), { created_by_technician_id: tech.id });
-    await cardStep(e, ago(90));
-    await run();
-    const rows = await bellsFor(estimateKey(e));
-    expect(rows).toHaveLength(1);
-    expect(meta(rows[0]).trust).toBe(mod.ESTABLISHED);
-  });
+
 
   test('an estimate with no customer still rings, linked to the estimate, with the visitor\'s name and phone', async () => {
     const e = await estimate(null);
