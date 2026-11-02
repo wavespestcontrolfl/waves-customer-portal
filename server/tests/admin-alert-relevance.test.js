@@ -1987,10 +1987,53 @@ describe('customer-contact classes', () => {
 
       test('an add-service request bell closes on an estimate handed to its customer, not on contact alone; the estimate lookup is made for it only under the gate', async () => {
         gate('true'); pi('true');
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'mosquito' }];
         expect(await judged(bundleBell(), { backAt: at(20), textAt: at(20) })).toMatchObject({ cls: 'portal_add_service_request', reason: null });
-        mockTables.estimates = [{ id: uid(534), customer_id: CUST }];
+        mockTables.estimates = [{ id: uid(534), customer_id: CUST, estimate_data: { inputs: { svcMosquito: true } } }];
         expect(await judged(bundleBell(), null)).toMatchObject({ cls: 'portal_add_service_request', reason: 'Estimate was sent' });
         mockTables.estimates = [];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
+      });
+
+      // Outside review 2026-11-02: an estimate for another service must not close the request it does not answer.
+      test('an add-service request bell closes only on an estimate pricing its own service (or its own minted estimate); a request naming no service never closes on an estimate', async () => {
+        gate('true'); pi('true');
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'mosquito' }];
+        mockTables.estimates = [{ id: uid(536), customer_id: CUST, estimate_data: { inputs: { svcPest: true } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ cls: 'portal_add_service_request', reason: null });
+        // A variant spelling of the requested service still normalizes ('lawn' -> lawn_care) and matches its line.
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'lawn' }];
+        mockTables.estimates = [{ id: uid(537), customer_id: CUST, estimate_data: { inputs: { svcLawn: true } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        for (const unnamed of ['not_stated', 'estimate_callback_request', null]) {
+          mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: unnamed }];
+          mockTables.estimates = [{ id: uid(538), customer_id: CUST, estimate_data: { inputs: { svcMosquito: true, svcPest: true, svcLawn: true } } }];
+          expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
+        }
+        // The request's own minted estimate answers it although its lines name no service.
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'lawn_care', minted_estimate_id: uid(539) }];
+        mockTables.estimates = [{ id: uid(539), customer_id: CUST, estimate_data: {} }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        // Termite: a bait request is answered by bait monitoring, never by trenching or other termite work.
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'termite_bait' }];
+        mockTables.estimates = [{ id: uid(541), customer_id: CUST, estimate_data: { inputs: { svcTrenching: true } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
+        mockTables.estimates = [{ id: uid(542), customer_id: CUST, estimate_data: { inputs: { svcTermiteBait: true } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        mockTables.estimates = [{ id: uid(543), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Termite Bait Monitoring', mo: 35 }] } } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        // The shared classifier reads a plan with one-time rows beside it as unknown (call-estimate-service-match.js):
+        // unknown never answers a request (fail closed). A recurring plan for another service is a clear no.
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'mosquito' }];
+        mockTables.estimates = [{ id: uid(544), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Lawn Care', mo: 55 }] }, oneTime: { items: [{ service: 'Mosquito', name: 'One-time mosquito treatment', price: 120 }] } } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
+        mockTables.estimates = [{ id: uid(545), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Lawn Care', mo: 55 }] } } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
+        mockTables.estimates = [{ id: uid(546), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Mosquito', mo: 45 }, { service: 'Lawn Care', mo: 55 }] } } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        // No request row for the bell's customer: nothing to match, no close.
+        mockTables.service_requests = [];
+        mockTables.estimates = [{ id: uid(540), customer_id: CUST, estimate_data: { inputs: { svcMosquito: true } } }];
         expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
       });
 
@@ -2001,7 +2044,8 @@ describe('customer-contact classes', () => {
         const nested = bundleBell({ requestId: undefined });
         const answeredOnly = requestBell({ requestId: uid(62) });
         mockTables.notifications = [request, cancel, bundle1, nested, answeredOnly];
-        mockTables.estimates = [{ id: uid(535), customer_id: CUST }];
+        mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'mosquito' }];
+        mockTables.estimates = [{ id: uid(535), customer_id: CUST, estimate_data: { inputs: { svcMosquito: true } } }];
         mockBundles = new Map([[String(request.id), bundle({ textAt: at(20) })], [String(cancel.id), bundle({ textAt: at(20) })], [String(answeredOnly.id), bundle()]]);
         gate('true');
         // Gate off: nothing closes, nothing resolves.
