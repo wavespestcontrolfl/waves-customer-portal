@@ -155,7 +155,11 @@ const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
 // is still the live pest lane (reServiceLanes) — with no live pest lane the
 // paid row books as before.
 const PLAN_COVERED_PEST_ONE_TIME_KEYS = new Set(['cockroach_control', 'one_time_pest_control']);
-const GERMAN_ROACH_RE = /\bgerman\s+(?:cock)?roach(?:es)?\b/i;
+// "German" within a few words of a roach word, in either order and across
+// punctuation ("German-roach", "German, roaches", "German type roaches",
+// "roaches, the German kind"), inside one sentence (codex #7480 r2). Wider is
+// the safe direction: a match keeps the paid row.
+const GERMAN_ROACH_RE = /\bgerman\b[^.!?\n]{0,30}?\b(?:cock)?roach(?:es)?\b|\b(?:cock)?roach(?:es)?\b[^.!?\n]{0,30}?\bgerman\b/i;
 
 function isPlanCoveredPestRow(row) {
   return !!row && PLAN_COVERED_PEST_ONE_TIME_KEYS.has(row.service_key);

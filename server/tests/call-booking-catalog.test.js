@@ -2052,6 +2052,11 @@ describe('plan-covered pest one-time rows → free Pest Control Re-Service (owne
   test('german roach stays a paid cleanout even for a plan customer', () => {
     expect(resolve({ specific_service_name: 'Cockroach Treatment Service', requested_service: 'german roach re-service' }, ['pest'])).toBe('cockroach_control');
     expect(resolve({ requested_service: 'german roach re-treatment' }, ['pest'])).toBe('cockroach_control');
+    // codex #7480 r2: separators and modifiers between the words still read as German roach.
+    for (const words of ['German-roach re-service', 'German, roaches - re-service please', 'German type roaches, need a re-service', 'roaches again, the German kind, re-service']) {
+      expect(resolve({ requested_service: words }, ['pest'])).toBe('cockroach_control');
+      expect(resolve({ specific_service_name: 'Cockroach Treatment Service', requested_service: words }, ['pest'])).toBe('cockroach_control');
+    }
   });
 
   test('dual-lane customer (pest + lawn) on a roach pick: the pick pins the pest lane', () => {
