@@ -32,10 +32,14 @@
  * (services/review-name-match.js). A customer who reviewed under another spelling of their name is
  * not asked again. An "I left a review" text is not read here: one misread text would stop asks for
  * good, so it only counts inside the matcher, next to a real review with a related name.
+ *
+ * Tap pause (GATE_REVIEW_TAP_PAUSE, owner 2026-11-02): tapPauseActive says a tap in the last 180 days
+ * pauses AUTOMATIC asks whatever visit it answered; review-request.js reads it only where a visit
+ * enrolls a cadence and where an automatic cadence sends, so staff sends by hand are untouched.
  */
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
-const { reviewProbableReviewerGuardLive } = require('../config/feature-gates');
+const { reviewProbableReviewerGuardLive, reviewTapPauseLive } = require('../config/feature-gates');
 
 // A date-only visit column is that ET calendar day, so the fallback anchor is
 // ET midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
@@ -101,6 +105,14 @@ async function reviewLinkClickedSince(customerId, since, database = db) {
     .where((b) => b.where('redirected_at', '>=', since).orWhere('last_redirected_at', '>=', since))
     .first('id');
   return Boolean(row);
+}
+
+// GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, D3): a tracked review-link tap in the last
+// REVIEW_TAP_PAUSE_DAYS pauses automatic review asks, whatever visit the tap answered.
+const REVIEW_TAP_PAUSE_DAYS = 180;
+async function tapPauseActive(customerId, database = db) {
+  if (!customerId || !reviewTapPauseLive()) return false;
+  return reviewLinkClickedSince(customerId, new Date(Date.now() - REVIEW_TAP_PAUSE_DAYS * 24 * 60 * 60 * 1000), database);
 }
 
 // Review-matcher decisions that say this customer probably wrote an unlinked live review.
@@ -188,4 +200,4 @@ async function touchSuppressedByClick(customerId, { serviceRecordId = null, sche
 
 const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, or probably already left a review, so no further review request is sent.';
 
-module.exports = { reviewLinkClickedSince, probableReviewer, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };
+module.exports = { reviewLinkClickedSince, probableReviewer, tapPauseActive, REVIEW_TAP_PAUSE_DAYS, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };

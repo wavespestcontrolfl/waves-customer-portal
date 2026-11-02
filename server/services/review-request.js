@@ -1840,6 +1840,23 @@ const ReviewService = {
     // ({ status: 'sent'|'paid', at }). Gate off: ignored.
     reportTextAnchor = null,
   }) {
+    // GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, reviews audit D3): a customer who tapped a tracked
+    // review link in the last 180 days gets no automatic ask, in either mode. A failed lookup asks
+    // nothing now and reads as a passing failure, so a recovery path (the payment, the packet
+    // sweep) can try again.
+    if (triggeredBy === "auto") {
+      let tapPaused;
+      try {
+        tapPaused = await ClickGuard.tapPauseActive(customerId);
+      } catch (err) {
+        logger.warn(`[review] tap-pause lookup failed (customerId=${customerId}): ${err.message}`);
+        return { started: false, reason: "error" };
+      }
+      if (tapPaused) {
+        logger.info(`[review] Post-service cadence skipped (customerId=${customerId} reason=tap_pause)`);
+        return { started: false, reason: "tap_pause" };
+      }
+    }
     const { isEnabled } = require("../config/feature-gates");
     if (!isEnabled("reviewSequences")) {
       // GATE_REVIEW_ASK_AFTER_REPORT is cadence mode only: this legacy path
@@ -7198,6 +7215,20 @@ const ReviewService = {
     }
 
     if (manualAskRecent) return stop("manual_ask_recent");
+
+    // GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, D3): an automatic cadence stands down when the customer
+    // tapped a tracked review link in the last 180 days (a tap on this cadence stopped it above). A
+    // cadence a person started keeps going. A failed lookup defers an ask step (below).
+    if (seq.started_by === "post_service") {
+      let tapPaused = false;
+      try {
+        tapPaused = await ClickGuard.tapPauseActive(seq.customer_id);
+      } catch (err) {
+        askLookupFailed = true;
+        logger.warn(`[review] tap-pause lookup failed (sequenceId=${seq.id}): ${err.message}`);
+      }
+      if (tapPaused) return stop("tap_pause");
+    }
 
     // The 3-day rule, re-checked at the dispatch boundary (owner ruling
     // 2026-09-07): the schedule computed at the last send can be overtaken —
