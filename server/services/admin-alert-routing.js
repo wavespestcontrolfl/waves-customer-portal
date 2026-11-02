@@ -5,8 +5,9 @@
 //   1. A reminder bell from a Claude job on the owner's Mac (~/ops-oneshots/lib/bell.js stamps
 //      metadata.opsJob). The job marks an owner ask with metadata.opsWho = 'person'; that one stays
 //      in the bell (a gate flip for the owner's gates, a money ask). Every other opsJob row is Claude's.
-//   2. An engineering fault of ours: a table of named classes below, matched by category plus the
-//      emitter's dedupeKey prefix (or a metadata field when the emitter writes no dedupeKey).
+//   2. An engineering fault of ours, or work a job on the owner's Mac already does (the list of website
+//      posts that wait for a terminal draft): a table of named classes below, matched by category plus
+//      the emitter's dedupeKey prefix (or a metadata field when the emitter writes no dedupeKey).
 //
 // A routed row is written Activity-only (metadata.feed = 'activity', the marker
 // NotificationService.excludeActivityOnlyFromBell reads), so it never rings or counts in the bell, and
@@ -24,7 +25,8 @@ const CUSTOMER_CONTACT_CATEGORIES = new Set([
 
 // Engineering-fault classes. Small and named on purpose: the seed of a later alert catalog.
 // A class matches when the row's category equals `category` and either its dedupeKey starts with
-// `dedupeKeyPrefix` or every `meta` field equals the row's metadata field.
+// `dedupeKeyPrefix` or every `meta` field equals the row's metadata field. A class is `broken`
+// unless it names its own `severity`.
 const CLAUDE_QUEUE_CLASSES = Object.freeze([
   {
     name: 'sms-draft-canary',
@@ -51,6 +53,16 @@ const CLAUDE_QUEUE_CLASSES = Object.freeze([
     // Its ops_digest twin (category ops_digest) is NOT matched: ops_digest rows stay where they are.
     category: 'review',
     meta: { opsKey: 'gbp-sync-health' },
+  },
+  {
+    name: 'content-terminal-due',
+    // content/terminal-writer.js raiseTerminalDue: "Content — write N website posts in the terminal". Not a
+    // fault: the 9:15 AM blog-run job on the owner's Mac writes these drafts (owner 2026-11-02, "A"), so the
+    // row is fyi (no Claude tab is opened for it). The emitter stamps metadata.terminalDue only while its
+    // quiet switch is on; the owner's bell gets its own row when the terminal stops handling the list.
+    category: 'content',
+    meta: { terminalDue: 'claude' },
+    severity: 'fyi',
   },
 ]);
 
@@ -85,7 +97,7 @@ function classifyClaudeQueue({ category, metadata, dedupeKey } = {}) {
     (c.dedupeKeyPrefix && key.startsWith(c.dedupeKeyPrefix))
     || (c.meta && Object.entries(c.meta).every(([k, v]) => meta[k] === v))
   ));
-  return hit ? { className: hit.name, severity: 'broken' } : null;
+  return hit ? { className: hit.name, severity: hit.severity || 'broken' } : null;
 }
 
 // GATE_ALERT_CLAUDE_QUEUE, read defensively: a test that mocks feature-gates without this reader,

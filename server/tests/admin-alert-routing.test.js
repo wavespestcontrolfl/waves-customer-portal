@@ -25,14 +25,24 @@ const CLASS_ROWS = {
   'ops-reminder-broken': { category: 'system', metadata: { dedupeKey: 'ops-reminder-broken:tech-tips:2026-10-26', opsJob: null, opsKind: 'ask' } },
   'gbp-sync-degraded': { category: 'review', metadata: { locationId: 'venice', reason: 'gbp_sync_degraded', cause: 'no_client' } },
   'gbp-sync-health-escalation': { category: 'review', metadata: { opsKey: 'gbp-sync-health', observedAt: '2026-10-26T10:00:00Z' } },
+  'content-terminal-due': { category: 'content', metadata: { dedupeKey: 'content-terminal-due:2026-11-02', terminalDue: 'claude', area: 'Content', severity: 'needs-you', who: 'claude' } },
 };
 
 describe('routing table', () => {
-  test('every fault class matches its emitter row and is broken', () => {
+  test('every class matches its emitter row; a fault is broken, the Mac-handled website drafts list is fyi', () => {
     expect(Object.keys(CLASS_ROWS).sort()).toEqual(CLAUDE_QUEUE_CLASSES.map((c) => c.name).sort());
     for (const [name, row] of Object.entries(CLASS_ROWS)) {
-      expect(classifyClaudeQueue(row)).toEqual({ className: name, severity: 'broken' });
+      expect(classifyClaudeQueue(row)).toEqual({ className: name, severity: name === 'content-terminal-due' ? 'fyi' : 'broken' });
     }
+  });
+
+  test('the website drafts list is Claude\'s only while its emitter stamps it; the stalled-list item stays in the bell', () => {
+    // The emitter's quiet switch off: the same daily item, unstamped, rings the owner as before.
+    expect(classifyClaudeQueue({ category: 'content', metadata: { dedupeKey: 'content-terminal-due:2026-11-02', area: 'Content' } })).toBeNull();
+    // The owner's item for a list the terminal stopped handling.
+    expect(classifyClaudeQueue({ category: 'content', metadata: { dedupeKey: 'content-terminal-stalled:2026-11-02', who: 'person' } })).toBeNull();
+    // The stamp on another category is not the emitter's row.
+    expect(classifyClaudeQueue({ category: 'system', metadata: { terminalDue: 'claude' } })).toBeNull();
   });
 
   test('a Mac reminder job row is Claude\'s; ask is needs-you, fyi is fyi, no kind is needs-you', () => {
