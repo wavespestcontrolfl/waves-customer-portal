@@ -84,7 +84,7 @@ function parseMeta(metadata) {
 // List 1. A needs-you row (needs-me's reading) that is not done, was never
 // read, and has shown no sign of life for UNREAD_DAYS (created_at or a later
 // ring stamp, the way the retention sweep computes it).
-async function loadUnreadAlerts({ now = new Date(), database = db, pageSize = ALERT_PAGE } = {}) {
+async function loadUnreadAlerts({ now = new Date(), database = db, pageSize = ALERT_PAGE, maxPages = ALERT_MAX_PAGES } = {}) {
   const { mapAlertRow } = require('./needs-me');
   const { lastActivityMs } = require('./admin-alert-retention');
   const nowMs = now.getTime();
@@ -93,7 +93,7 @@ async function loadUnreadAlerts({ now = new Date(), database = db, pageSize = AL
   let after = null;
   let capped = false;
   for (let page = 0; ; page += 1) {
-    if (page >= ALERT_MAX_PAGES) { capped = true; break; }
+    if (page >= maxPages) { capped = true; break; }
     const query = database('notifications')
       .where({ recipient_type: 'admin' }).whereNull('done_at').whereNull('read_at')
       .where('created_at', '<', cutoff)
@@ -103,9 +103,11 @@ async function loadUnreadAlerts({ now = new Date(), database = db, pageSize = AL
       .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
       .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
       .whereRaw("COALESCE(metadata->>'dedupeKey', '') NOT LIKE 'monday-review:%'");
-    if (after) query.whereRaw('(created_at, id) > (?, ?)', [after.created_at, after.id]);
+    // The cursor carries the database's own text timestamp: a JS Date drops the microseconds Postgres keeps, which
+    // would move the cursor back and re-read the boundary row (Codex r2).
+    if (after) query.whereRaw('(created_at, id) > (?::timestamptz, ?)', [after.cursorAt, after.id]);
     const rows = await query.orderByRaw('created_at ASC, id ASC').limit(pageSize)
-      .select('id', 'category', 'title', 'link', 'metadata', 'created_at', 'read_at');
+      .select('id', 'category', 'title', 'link', 'metadata', 'created_at', 'read_at', database.raw('created_at::text AS cursor_at'));
     for (const row of rows) {
       const item = mapAlertRow(row);
       if (item.severity !== 'needs-you' || item.unsorted || item.activityOnly || item.who === 'claude') continue;
@@ -113,9 +115,10 @@ async function loadUnreadAlerts({ now = new Date(), database = db, pageSize = AL
       if (idleSince < cutoff.getTime()) kept.push({ headline: String(row.title || '').trim(), idleSince });
     }
     if (rows.length < pageSize) break;
-    after = rows[rows.length - 1];
+    const last = rows[rows.length - 1];
+    after = { cursorAt: last.cursor_at, id: last.id };
   }
-  if (capped) logger.warn(`[monday-review] unread alert scan stopped after ${ALERT_MAX_PAGES} pages; the count is a floor`);
+  if (capped) logger.warn(`[monday-review] unread alert scan stopped after ${maxPages} pages; the count is a floor`);
   kept.sort((a, b) => a.idleSince - b.idleSince);
   return {
     count: kept.length,

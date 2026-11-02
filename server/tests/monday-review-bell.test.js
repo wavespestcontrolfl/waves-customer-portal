@@ -209,6 +209,8 @@ function fakeKnex(rows) {
     },
   });
   const database = jest.fn(() => chain);
+  // The cursor column is a raw select (created_at::text); the fake hands the SQL back as the column marker.
+  database.raw = jest.fn((sql) => sql);
   database.calls = calls;
   return database;
 }

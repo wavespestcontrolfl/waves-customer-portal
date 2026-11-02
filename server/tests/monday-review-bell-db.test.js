@@ -70,11 +70,22 @@ maybeDescribe('monday review bell (live Postgres)', () => {
     });
 
     test('pages past older rows that do not qualify (a 2-row page proves the keyset walk)', async () => {
-      const before = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 2 });
+      const before = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 2, maxPages: 100000 });
       for (let i = 0; i < 3; i += 1) await addNotification({ created_at: ago(60 + i), metadata: { severity: undefined } }); // unsorted, older
       await addNotification({ title: `Paged ${RUN.slice(0, 8)}`, created_at: ago(30) });
-      const after = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 2 });
+      const after = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 2, maxPages: 100000 });
       expect(after.count - before.count).toBe(1);
+      expect(after.capped).toBe(false);
+    });
+
+    test('a page edge inside one microsecond-precise timestamp neither repeats nor skips a row', async () => {
+      const before = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 1, maxPages: 100000 });
+      // Three qualifying rows that share a millisecond but differ in microseconds: a millisecond cursor would re-read them.
+      for (const micros of ['123401', '123402', '123403']) {
+        await addNotification({ title: `Micro ${micros} ${RUN.slice(0, 8)}`, created_at: db.raw(`'2026-09-01 12:00:00.${micros}+00'::timestamptz`) });
+      }
+      const after = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 1, maxPages: 100000 });
+      expect(after.count - before.count).toBe(3);
       expect(after.capped).toBe(false);
     });
   });
