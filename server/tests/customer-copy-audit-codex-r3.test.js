@@ -9,8 +9,10 @@ test('the service-request text keeps the time on the review, not the follow-up',
   expect(after).not.toMatch(/get back to you within/);
   expect([...after.matchAll(/\{\w+\}/g)].map((m) => m[0]).sort())
     .toEqual([...before.matchAll(/\{\w+\}/g)].map((m) => m[0]).sort());
-  const rendered = after.replace('{first_name}', 'Longtestname').replace('{category}', 'service')
-    .replace('{response_time}', '24 hours');
+  // The reply time is the one business hour every portal request gets (account-membership-email.js
+  // REQUEST_RESPONSE_TIME, owner 2026-11-02 "match"), with the longest request category.
+  const rendered = after.replace('{first_name}', 'Longtestname').replace('{category}', 'schedule change')
+    .replace('{response_time}', 'one business hour (8 AM to 8 PM)');
   expect(countSegments(rendered)).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
 });
 

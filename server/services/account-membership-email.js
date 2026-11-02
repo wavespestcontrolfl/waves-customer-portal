@@ -413,6 +413,11 @@ async function sendAccountUpdated({
   });
 }
 
+// The reply time a portal request's confirmation text and email give (owner 2026-11-02, "match"): the same one
+// business hour between 8 AM and 8 PM the portal chat gives, urgent or routine. The text reads "We'll review it
+// within {response_time}, then follow up."; the email shows it as "Expected response".
+const REQUEST_RESPONSE_TIME = 'one business hour (8 AM to 8 PM)';
+
 async function sendRequestReceived({
   customerId,
   request,
@@ -435,7 +440,7 @@ async function sendRequestReceived({
       request_summary: clean(request.description),
       request_status: clean(request.status) || 'new',
       submitted_at: displayDate(submittedAt),
-      response_time: responseTime || (request.urgency === 'urgent' ? '2 hours' : '24 hours'),
+      response_time: responseTime || REQUEST_RESPONSE_TIME,
       customer_portal_url: portalTabUrl('dashboard'),
       portal_requests_url: portalTabUrl('request'),
     },
@@ -1332,6 +1337,7 @@ async function sendMembershipReactivated({
 module.exports = {
   sendAccountUpdated,
   sendRequestReceived,
+  REQUEST_RESPONSE_TIME,
   sendCancellationReceived,
   sendResolutionAccepted,
   sendRequestUpdated,

@@ -864,7 +864,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // helper the admin Cancel plan path (C3) also uses; the customer's
     // portal submit is a customer-action entry point, so no quiet-hours
     // hold applies (owner ruling 2026-08-29).
-    const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
+    const responseTime = AccountMembershipEmail.REQUEST_RESPONSE_TIME;
     let confirmationSmsSent = false;
     let confirmationEmailSent = false;
     if (isCancellation) {
