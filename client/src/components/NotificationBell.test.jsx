@@ -924,6 +924,35 @@ describe('NotificationBell admin "What to do" and the customer line (GATE_ALERT_
       expect(await screen.findByText(/this is the alert.s own text/)).toBeInTheDocument();
       expect(screen.getByText('Tap the alert to open the record it is about.')).toBeInTheDocument();
       expect(explainCalls()).toHaveLength(2);
+      // A fallback is not kept: closing and opening the panel asks again.
+      fireEvent.click(screen.getByRole('button', { name: 'Hide what to do' }));
+      fireEvent.click(screen.getAllByRole('button', { name: 'What to do' })[0]);
+      await waitFor(() => expect(explainCalls()).toHaveLength(3));
+    });
+  });
+
+  it('a list refresh that changes an alert\'s text clears the summary of its old text', async () => {
+    await withWidth(1280, async () => {
+      let listReads = 0;
+      global.fetch = vi.fn(async (url, options = {}) => {
+        if (String(url).includes('/unread-count')) return jsonResponse({ count: 3 });
+        if (String(url).includes('/done')) return { ok: false, status: 409, json: async () => ({ error: 'changed' }) };
+        if (String(url).includes('/explain')) return jsonResponse({ explainer: SUMMARY, customer: null, version: 'a'.repeat(32) });
+        listReads += 1;
+        const list = rows();
+        list[0] = listReads === 1
+          ? { ...list[0], explainer: SUMMARY }
+          : { ...list[0], body: 'The accepted lawn plan calls for…', version: 'c'.repeat(32) };
+        return jsonResponse({ notifications: list });
+      });
+      render(<NotificationBell type="admin" />);
+      open();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'What to do' }))[0]);
+      expect(screen.getByText(SUMMARY.happened)).toBeInTheDocument();
+      // A Done refused on another row re-reads the list; this row comes back with new text.
+      fireEvent.click(screen.getAllByRole('button', { name: 'Done' })[1]);
+      expect(await screen.findByText('The accepted lawn plan calls for…')).toBeInTheDocument();
+      expect(screen.queryByText(SUMMARY.happened)).toBeNull();
     });
   });
 

@@ -286,9 +286,10 @@ function WhatToDo({ n, color, marginTop, onExplain }) {
     setSummary(next);
     setStatus(next ? null : 'failed');
   };
+  // Opening asks the server when there is no summary yet, or only the fallback built from the alert's own words.
   const toggle = () => {
     setShown(!shown);
-    if (!shown && !summary && status !== 'loading') load();
+    if (!shown && (!summary || summary.fallback) && status !== 'loading') load();
   };
   const linkStyle = { padding: 0, border: 0, background: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 600, textDecoration: 'underline', color };
   const text = { fontSize: 14, lineHeight: 1.4, color };
@@ -354,8 +355,10 @@ function CustomerLine({ n, type, color, marginTop }) {
 
 // A row's longer text: "What to do" on a row the server marked explainable, else "Show full text" when the row has a
 // detail (fullTextFor), else nothing.
+// The panel is keyed on the row's content version: an alert whose text changed (a refreshed list) starts a fresh panel,
+// so a summary of the old text never stays on screen.
 function MoreText({ n, type, color, marginTop, onExplain }) {
-  if (type === 'admin' && n.explainable) return <WhatToDo n={n} marginTop={marginTop} color={color} onExplain={onExplain} />;
+  if (type === 'admin' && n.explainable) return <WhatToDo key={n.version} n={n} marginTop={marginTop} color={color} onExplain={onExplain} />;
   const fullText = fullTextFor(n, type);
   return fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null;
 }
