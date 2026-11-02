@@ -1245,11 +1245,12 @@ async function sendSmsHandler(req, res, next) {
         })(),
       // a translation card's reply: the same boundary checks, from the trial's stored snapshot
       } : translationProviderPreSendCheck ? { providerPreSendCheck: translationProviderPreSendCheck }
-        // the office's like (POST /messages/:id/like): a customer text that came in after the click stops it
+        // the office's like (POST /messages/:id/like): under the phone lock, any newer text in either
+        // direction stops it; only this send's own reservation row is left out
         : likeTarget ? {
           providerPreSendCheck: async ({ dbi } = {}) => (await require('../services/sms-office-like')
-            .newerThreadMessageExists(dbi || db, likeTarget, { inboundOnly: true })
-            ? { ok: false, code: 'like_target_changed', reason: 'The customer sent a new text, so the like was not sent.' }
+            .newerThreadMessageExists(dbi || db, likeTarget, { excludeLogIds: manualReservationId ? [manualReservationId] : [] })
+            ? { ok: false, code: 'like_target_changed', reason: 'A newer text is in this thread, so the like was not sent.' }
             : { ok: true }),
         } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer

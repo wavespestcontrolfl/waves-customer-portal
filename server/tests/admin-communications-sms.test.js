@@ -4345,12 +4345,32 @@ describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
     expect(officeLike.claimOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, { technicianId: 'admin-1', name: undefined });
     expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'sent');
 
-    // The provider-boundary check: a customer text since the click stops the send.
+    // The provider-boundary check: any newer text since the click stops the send
+    // (no reservation row here: the reply lanes are dark in this suite).
     expect(typeof sent.providerPreSendCheck).toBe('function');
     officeLike.newerThreadMessageExists.mockResolvedValueOnce(true);
     await expect(sent.providerPreSendCheck({ dbi: 'held-trx' })).resolves.toMatchObject({ ok: false, code: 'like_target_changed' });
-    expect(officeLike.newerThreadMessageExists).toHaveBeenLastCalledWith('held-trx', expect.objectContaining({ id: MESSAGE_ID }), { inboundOnly: true });
+    expect(officeLike.newerThreadMessageExists).toHaveBeenLastCalledWith('held-trx', expect.objectContaining({ id: MESSAGE_ID }), { excludeLogIds: [] });
     await expect(sent.providerPreSendCheck({ dbi: 'held-trx' })).resolves.toEqual({ ok: true });
+  });
+
+  test('with a reply lane armed, the boundary check leaves out exactly this send\'s reservation row', async () => {
+    mockGates.gratitudeActivatedAt = new Date('2026-09-24T12:00:00Z');
+    try {
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        await opts.providerPreSendCheck({ dbi: 'held-trx' });
+        return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-like' };
+      });
+      await withServer(async (baseUrl) => {
+        expect((await like(baseUrl)).status).toBe(200);
+      });
+      expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledTimes(1);
+      expect(officeLike.newerThreadMessageExists).toHaveBeenLastCalledWith(
+        'held-trx', expect.objectContaining({ id: MESSAGE_ID }), { excludeLogIds: ['44444444-4444-4444-8444-444444444444'] },
+      );
+    } finally {
+      mockGates.gratitudeActivatedAt = null;
+    }
   });
 
   test('a newer text in the thread refuses the like before any claim or send', async () => {
