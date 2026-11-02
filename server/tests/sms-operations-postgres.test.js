@@ -1001,7 +1001,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('owner ruling 2026-10-21: a durable pet report held back by temporary wording still rings, in plain words', async () => {
+  test('owner ruling 2026-10-21: a durable pet report held back by temporary wording still rings, in plain words, quoting the text (owner 2026-11-02)', async () => {
     message.message_body = 'The millipedes are bad during the day. Our cat gets sick if we let her out on the lanai';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
     const pet = { field: 'pet_details', value: message.message_body, quote: message.message_body, duration: 'durable',
@@ -1009,8 +1009,8 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, { ...result, facts: [pet] }, context);
     const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toBe("Comms — check Synthetic Fixture's text note");
-    expect(body).toBe('Wanted to save as pet note; the text sounds like a one-time instruction.');
-    expect(opts.detail).toBe('Wanted to save as pet note; the text sounds like a one-time instruction.\nOpen the conversation to check.');
+    expect(body).toBe('Wanted to save “The millipedes are bad during the…” as pet note; the text sounds like a one-time instruction.');
+    expect(opts.detail).toBe(`Text: “${message.message_body}”\nWanted to save as pet note; the text sounds like a one-time instruction.\nOpen the conversation to check.`);
     expect(opts.metadata).toMatchObject({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'text_note_checked',
       subject: { type: 'customer', id: message.customer_id } });
     expect(opts.dedupeKey).toBe(`sms-property-instructions:${message.id}`);
@@ -1020,7 +1020,7 @@ postgres('SMS operations on PostgreSQL', () => {
   test.each([
     ['access_notes', 'Use BLUE at the keypad. The house is at 8 US 41, also 9 PO Box 42. My lockbox code is 4821.'],
     ['pet_details', 'Not sure whether the cat will be out. Use BLUE at the keypad, 8 US 41.'],
-  ])('Codex #6414 r2: the bell never quotes the customer text (%s)', async (field, text) => {
+  ])('Codex #6414 r2: the bell never quotes a customer text that holds a code or an address (%s)', async (field, text) => {
     message.message_body = text;
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: text });
     const property_id = context.properties[0].id;
@@ -1036,7 +1036,7 @@ postgres('SMS operations on PostgreSQL', () => {
   test('Codex #6414 r3: an uncertain-duration fact says the length is unclear, not "one-time"', async () => {
     await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration: 'uncertain' }] }, context);
     const [, , body] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(body).toBe('Wanted to save as irrigation controller location; it is not clear if this is lasting or just for one visit.');
+    expect(body).toBe('Wanted to save as irrigation controller location; it is not clear if this is lasting.');
     expect(body).not.toContain('one-time');
   });
 
