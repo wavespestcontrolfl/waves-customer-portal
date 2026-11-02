@@ -103,6 +103,7 @@ function chain({ rows = [], ...terminal } = {}) {
     where: jest.fn(function where(arg) { if (typeof arg === 'function') arg.call(builder, builder); return builder; }),
     whereIn: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
+    orWhereNotIn: jest.fn().mockReturnThis(),
     whereNot: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
@@ -4699,12 +4700,19 @@ describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
   });
 
   // `filtered`: the add-on lookup runs (gate on AND a rain reason).
-  function wireOptions(rows, { addOns = [], filtered = false } = {}) {
+  // A filtered read of grouped rows also loads every live member of their visits
+  // (`outside`: members the route list did not carry), then the add-ons.
+  function wireOptions(rows, { addOns = [], filtered = false, outside = [], membersError = null } = {}) {
     const routeChain = chain({ rows });
     const queues = {
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR }) }), routeChain],
     };
-    if (filtered) queues.scheduled_service_addons = [chain({ rows: addOns })];
+    if (filtered && rows.some((r) => r.visit_id)) {
+      queues.scheduled_services.push(membersError
+        ? chain({ then: (_, reject) => Promise.reject(membersError).catch(reject) })
+        : chain({ rows: [...rows.filter((r) => r.visit_id), ...outside] }));
+    }
+    if (filtered && !membersError) queues.scheduled_service_addons = [chain({ rows: addOns })];
     wireDb(queues);
     return routeChain;
   }
@@ -4760,6 +4768,36 @@ describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
     expect(options.remainingRouteCount).toBe(1); // only the lone skip-only stop (unknown work) stays
   });
 
+  test('gate on + rain reason: an outdoor member OUTSIDE the route list (other tech, earlier stop) keeps its rain-OK sibling', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    wireOptions(
+      [stopRow('svc-4', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-d' })],
+      { filtered: true, outside: [stopRow('svc-20', 'Quarterly Pest Control', 'pest_control_quarterly', { visit_id: 'visit-d' })] },
+    );
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
+    expect(options.remainingRouteCount).toBe(1);
+  });
+
+  test('gate on + rain reason: a rain-OK visit with a rain-OK member outside the route list still leaves', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    wireOptions(
+      [stopRow('svc-4', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-e' })],
+      { filtered: true, outside: [stopRow('svc-21', 'WDO Inspection', 'wdo_inspection', { visit_id: 'visit-e' })] },
+    );
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
+    expect(options.remainingRouteCount).toBe(0);
+  });
+
+  test('gate on + rain reason: a failed member read keeps every stop', async () => {
+    process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
+    wireOptions(
+      [stopRow('svc-4', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-f' }), OK_STOP],
+      { filtered: true, membersError: new Error('boom') },
+    );
+    const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });
+    expect(options.remainingRouteCount).toBe(2);
+  });
+
   test('gate on + rain reason: an outdoor add-on keeps its stop; a stop with no key and an inspection name leaves', async () => {
     process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
     wireOptions(
@@ -4774,7 +4812,11 @@ describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
     process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
     const routeChain = chain({ rows: [stopRow('svc-9', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-anchor' })] });
     wireDb({
-      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR, visit_id: 'visit-anchor' }) }), routeChain],
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...ANCHOR, visit_id: 'visit-anchor' }) }),
+        routeChain,
+        chain({ rows: [stopRow('svc-9', 'Rodent Trapping', 'rodent_trapping', { visit_id: 'visit-anchor' })] }),
+      ],
       scheduled_service_addons: [chain({ rows: [] })],
     });
     const options = await RainOut.getOptions('svc-1', { caller, reasonCode: RAIN });

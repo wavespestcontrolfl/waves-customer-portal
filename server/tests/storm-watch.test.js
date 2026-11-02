@@ -37,18 +37,26 @@ function hourlyAt(chance, when = NOON_ET) {
 // tech_notifications dedupe lookup + insert. `alertedTechIds` simulates
 // which technicians already received an alert today — the dedupe lookup
 // resolves a row only when the queried technician_id is in the set.
-function wireDb({ stops = [], alertedTechIds = [], addOns = [] } = {}) {
+// A second scheduled_services read is the visit-member lookup (rain-fit outdoorStopRows):
+// the grouped stops themselves plus `outside` members the list did not carry, or an error.
+function wireDb({ stops = [], alertedTechIds = [], addOns = [], outside = [], membersError = null } = {}) {
   const notifInsert = jest.fn().mockResolvedValue();
   const dedupeWhere = jest.fn();
   const whereIn = jest.fn().mockReturnThis();
+  let stopReads = 0;
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
+      stopReads += 1;
+      const isMemberRead = stopReads > 1;
       const builder = {
         where: jest.fn().mockReturnThis(),
         whereIn,
         whereNotNull: jest.fn().mockReturnThis(),
         leftJoin: jest.fn().mockReturnThis(),
-        select: jest.fn().mockResolvedValue(stops),
+        select: jest.fn(() => {
+          if (!isMemberRead) return Promise.resolve(stops);
+          return membersError ? Promise.reject(membersError) : Promise.resolve([...stops.filter((r) => r.visit_id), ...outside]);
+        }),
       };
       return builder;
     }
@@ -214,6 +222,31 @@ describe('storm-watch sweep', () => {
       const result = await StormWatch.sweep(NOON_ET);
 
       expect(result).toEqual({ checked: 3, alerted: 3 });
+    });
+
+    test('a rain-OK stop whose visit has an outdoor member outside the list keeps its nudge; an all-rain-OK visit does not', async () => {
+      const { notifInsert } = wireDb({
+        stops: [okStop({ id: 'svc-a', visit_id: 'v1' }), okStop({ id: 'svc-b', visit_id: 'v2' })],
+        outside: [
+          stop({ id: 'svc-x', service_key_snapshot: 'pest_control_quarterly', visit_id: 'v1' }),
+          okStop({ id: 'svc-y', visit_id: 'v2', service_key_snapshot: 'wdo_inspection' }),
+        ],
+      });
+      getHourlyRainOutlook.mockResolvedValue(hourlyAt(90));
+
+      const result = await StormWatch.sweep(NOON_ET);
+
+      expect(result).toEqual({ checked: 1, alerted: 1 });
+      expect(JSON.parse(notifInsert.mock.calls[0][0].payload).job_id).toBe('svc-a');
+    });
+
+    test('a failed visit-member read keeps every nudge', async () => {
+      wireDb({ stops: [okStop({ id: 'svc-a', visit_id: 'v1' })], membersError: new Error('boom') });
+      getHourlyRainOutlook.mockResolvedValue(hourlyAt(90));
+
+      const result = await StormWatch.sweep(NOON_ET);
+
+      expect(result).toEqual({ checked: 1, alerted: 1 });
     });
 
     test('a customer reschedule request (status rescheduled, stale window) is not nudged', async () => {
