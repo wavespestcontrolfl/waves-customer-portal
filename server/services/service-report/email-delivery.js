@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const sendgrid = require('../sendgrid-mail');
-const { wrapEmail, formatDate, plainText } = require('../email-template');
+const { wrapEmail, formatDate, plainText, followUsLine } = require('../email-template');
 const EmailTemplateLibrary = require('../email-template-library');
 const { buildReportV1Data } = require('./report-data');
 const { reportGreetingFirstToken } = require('../../utils/greeting-first-name');
@@ -20,6 +20,7 @@ const { inspectionCreditReportNote } = require('../inspection-credit');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
+const { reportEmailFollowLinkLive } = require('../../config/feature-gates');
 const { isFirstServiceVisit } = require('../customer-visit-history');
 const { stampedLine2Sql } = require('../stamped-address');
 
@@ -96,6 +97,11 @@ function customerActionFindings(findings = []) {
 
 function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+// One "Follow Waves" line (owner 2026-11-01), only while the gate is on.
+function reportFollowLine() {
+  return reportEmailFollowLinkLive() ? followUsLine() : null;
 }
 
 function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '', firstReport = false }) {
@@ -437,6 +443,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
       : exteriorReadyAt
         ? `Your Waves report is ready — exterior ready at ${exteriorReadyAt}`
         : `Your Waves service report — ${serviceLine}${serviceDate ? ` ${serviceDate}` : ''}`;
+  const followLine = reportFollowLine();
   const html = wrapEmail({
     preheader: `Your Waves service report is ready${serviceDate ? ` for ${serviceDate}` : ''}.`,
     heading: 'Your Waves service report is ready',
@@ -444,9 +451,10 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
     lines,
     ctaHref: reportUrl,
     ctaLabel: 'View full report',
-    footerNote: pdfAttached
+    footerNote: (pdfAttached
       ? `Your PDF service report is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
-      : `Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`,
+      : `Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`)
+      + (followLine ? `<br/><br/>${followLine.html}` : ''),
   });
   const text = plainText([
     `Hi ${first},`,
@@ -471,6 +479,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
     pdfAttached ? 'The PDF service report is attached.' : 'A downloadable PDF will be available shortly.',
     '',
     `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+    ...(followLine ? ['', followLine.text] : []),
     'Waves Pest Control',
   ]);
 
@@ -797,6 +806,7 @@ async function sendServiceReportV1Email(recordId, {
   }
 
   const serviceLabel = serviceDisplayName(data);
+  const followLine = reportFollowLine();
   const templateOutcomes = await Promise.allSettled(
     recipients.map((recipient) => EmailTemplateLibrary.sendTemplate({
         templateKey: 'service.report_ready',
@@ -810,6 +820,7 @@ async function sendServiceReportV1Email(recordId, {
           inspectionCreditNote,
           firstReport,
         }),
+        ...(followLine ? { bodyAppend: followLine } : {}),
         recipientType: 'customer',
         recipientId: service.customer_id || null,
         triggerEventId: `service_report_ready:${recordId}:${recipient.role || 'recipient'}`,
