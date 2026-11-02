@@ -801,10 +801,11 @@ const SEE_ALL_BUTTON = {
 };
 const BUSY = { opacity: 0.6, cursor: 'default' };
 
-// "8 PM": the pick-by instant's ET hour (the hand-off sets 8 PM).
+// "8 PM" / "11:15 AM": the pick-by instant's ET clock (the hand-off sets it 24
+// hours after its text, on a quarter hour). Null when the instant is unreadable.
 function pickByHourLabel(pickBy) {
   const at = new Date(pickBy);
-  if (Number.isNaN(at.getTime())) return '8 PM';
+  if (Number.isNaN(at.getTime())) return null;
   const { hour, minute } = etParts(at);
   return `${hour % 12 || 12}${minute ? `:${String(minute).padStart(2, '0')}` : ''} ${hour >= 12 ? 'PM' : 'AM'}`;
 }
@@ -824,7 +825,7 @@ function PickByNote({ pick }) {
     return (
       <div data-glass="soft" data-testid="pick-by-note" style={{ ...LATE_NOTE, ...NOTE_ROW }}>
         <Icon name="clock" size={16} style={{ marginTop: 2 }} />
-        <span>The pick-by time passed at {pickByHourLabel(pick.pickBy)}. Overnight we’ll book the best open time for you and text you 3 days before.</span>
+        <span>The pick-by time passed at {pickByHourLabel(pick.pickBy) || pick.pickByLabel}. Overnight we’ll book the best open time for you and text you 3 days before.</span>
       </div>
     );
   }
