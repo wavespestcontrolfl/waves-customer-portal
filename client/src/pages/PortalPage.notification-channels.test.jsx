@@ -324,6 +324,15 @@ it('requires a fresh connected app before selecting App for reminders', async ()
   expect(screen.getByRole('button', { name: 'Use app for visit updates' })).toBeDisabled();
 });
 
+it('keeps an all-devices off control under Delivery details', async () => {
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  await screen.findByText('Connected to your Waves app.');
+  fireEvent.click(screen.getByRole('button', { name: 'Manage app notification settings' }));
+  fireEvent.click(screen.getByText('Delivery details'));
+  fireEvent.click(screen.getByRole('button', { name: 'Turn off app notifications on all devices' }));
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledWith({ pushEnabled: false }));
+});
+
 it('offers a way back on when app notifications were turned off for the account', async () => {
   prefs.pushEnabled = false;
   render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);

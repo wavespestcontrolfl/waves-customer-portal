@@ -4303,7 +4303,14 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
           <p style={{ margin: '0 0 12px' }}>
             Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
           </p>
-          <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
+            {prefs.pushEnabled !== false && (
+              <button type="button" data-glass="chip" disabled={saving} onClick={() => onSave({ pushEnabled: false })} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+                Turn off app notifications on all devices
+              </button>
+            )}
+          </div>
         </details>
       </div>
     </div>
