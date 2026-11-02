@@ -8409,6 +8409,27 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     expect(running.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
   });
 
+  test('switch on, a combined visit: the visit record says the customer asked, so enrollment and its cadence go on', async () => {
+    mockGates.reviewSequences = true;
+    mockGates.reviewTapPause = true;
+    const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    const record = (id, customerId) => ({ id, customer_id: customerId, service_date: new Date().toISOString().slice(0, 10),
+      structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', customerRequestedReview: asked }) });
+    const mock = makeMock({ customers: [{ id: 'tp-11', first_name: 'Hal', last_name: 'T', phone: '+19410000101', nearest_location_id: 'bradenton' }],
+      service_records: [record('rec-tp11', 'tp-11')], review_requests: [tapRow('tp-11', 39)] });
+    db.mockImplementation(mock);
+    // The packet enrollment passes no customerRequested (visit-completion-packets.js); the record carries it.
+    expect((await ReviewService.enrollPostService({ customerId: 'tp-11', serviceRecordId: 'rec-tp11', completedAt: new Date() })).started).toBe(true);
+    mockSendCustomerMessage.mockClear();
+    const running = makeMock({ customers: [{ id: 'tp-12', first_name: 'Ida', last_name: 'T', phone: '+19410000102', nearest_location_id: 'bradenton' }],
+      service_records: [record('rec-tp12', 'tp-12')],
+      review_sequences: [{ ...cadence('tp-12', 'post_service'), service_record_id: 'rec-tp12' }], review_requests: [tapRow('tp-12', 39)] });
+    db.mockImplementation(running);
+    await ReviewService.processReviewSequences();
+    expect(running.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test.each([
     ['an automatic queued ask stands down', 'auto', 0, 'suppressed'],
     ['a staff ask still goes', 'admin', 1, undefined],
@@ -8422,6 +8443,32 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     await ReviewService.sendSMS('rr-queued-tp');
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(sends);
     if (status) expect(mock.__state.rows.review_requests.find((r) => r.id === 'rr-queued-tp').status).toBe(status);
+  });
+
+  test('switch on, legacy mode: a link the customer asked for is queued as auto and still delivered', async () => {
+    mockGates.reviewTapPause = true;
+    // The legacy queued row has no template_key: sendSMS renders the stored review_request SMS template.
+    jest.doMock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(async (_key, vars) => `Hi ${vars.first_name}, ${vars.review_url}`) }));
+    const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion' };
+    const customer = { id: 'tp-10', first_name: 'Synthetic', phone: '+12025550110', nearest_location_id: 'venice' };
+    const mock = makeMock({ customers: [customer], review_requests: [tapRow('tp-10', 39)],
+      service_records: [{ id: 'rec-tp10', customer_id: customer.id, service_date: new Date().toISOString().slice(0, 10),
+        structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', customerRequestedReview: asked }) }] });
+    db.mockImplementation(mock);
+    await ReviewService.enrollPostService({ customerId: customer.id, serviceRecordId: 'rec-tp10', completedAt: new Date(), delayMinutes: 0, customerRequested: asked });
+    const queued = mock.__state.rows.review_requests.find((r) => r.service_record_id === 'rec-tp10');
+    expect(queued).toMatchObject({ triggered_by: 'auto' });
+    if (queued.status === 'pending') {
+      queued.channel = queued.channel || 'sms'; // the column default the fake does not apply
+      queued.scheduled_for = new Date(Date.now() - 1000);
+      try {
+        await ReviewService.processScheduled();
+      } finally {
+        jest.dontMock('../routes/admin-sms-templates');
+      }
+    }
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mock.__state.rows.review_requests.find((r) => r.id === queued.id).status).not.toBe('suppressed');
   });
 
   test.each([

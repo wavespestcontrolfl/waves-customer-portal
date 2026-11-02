@@ -120,7 +120,25 @@ async function tapPauseActive(customerId, database = db) {
 const AUTOMATIC_ASK_TRIGGERS = new Set(['auto', 'auto_inline', 'sequence']);
 async function tapPauseForRequest(request, database = db) {
   if (!request?.customer_id || !AUTOMATIC_ASK_TRIGGERS.has(request.triggered_by || 'auto')) return false;
-  return tapPauseActive(request.customer_id, database);
+  if (!await tapPauseActive(request.customer_id, database)) return false;
+  return !await customerAskedForLink({ serviceRecordId: request.service_record_id, sequenceId: request.sequence_id }, database);
+}
+// A link the customer asked for (completion panel "Customer asked for the link") is not an
+// automatic ask, so the pause never holds it. The visit record keeps that request (every member
+// of a combined visit too, whose enrollment carries no customerRequested), and so does a cadence
+// started for it.
+async function customerAskedForLink({ serviceRecordId = null, sequenceId = null } = {}, database = db) {
+  if (serviceRecordId) {
+    const record = await database('service_records').where({ id: serviceRecordId }).first('structured_notes');
+    let notes = record?.structured_notes || {};
+    if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = {}; } }
+    if (notes?.customerRequestedReview && typeof notes.customerRequestedReview === 'object') return true;
+  }
+  if (sequenceId) {
+    const seq = await database('review_sequences').where({ id: sequenceId }).first('customer_requested');
+    if (seq?.customer_requested) return true;
+  }
+  return false;
 }
 
 // Review-matcher decisions that say this customer probably wrote an unlinked live review.
@@ -208,4 +226,4 @@ async function touchSuppressedByClick(customerId, { serviceRecordId = null, sche
 
 const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, or probably already left a review, so no further review request is sent.';
 
-module.exports = { reviewLinkClickedSince, probableReviewer, tapPauseActive, tapPauseForRequest, REVIEW_TAP_PAUSE_DAYS, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };
+module.exports = { reviewLinkClickedSince, probableReviewer, tapPauseActive, tapPauseForRequest, customerAskedForLink, REVIEW_TAP_PAUSE_DAYS, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };
