@@ -1185,15 +1185,54 @@ function lastTenDigits(value) {
  * Render an SMS body from sms_templates. If the template is missing/disabled,
  * callers skip the SMS rather than sending hardcoded customer copy.
  */
-async function renderTemplate(templateKey, vars, context = {}) {
+async function renderTemplate(templateKey, vars, context = {}, opts = undefined) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
+      const body = opts
+        ? await smsTemplatesRouter.getTemplate(templateKey, vars, context, opts)
+        : await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch { /* fall through */ }
   logger.warn(`[appt-remind] SMS template ${templateKey} is missing or inactive`);
   return null;
+}
+
+// Quick Move "let the customer pick a day": the customer did not pick, so
+// Auto-Dispatch booked the visit. The 72-hour reminder then says so. The
+// hand-off stamps customer_pick_by (8 PM ET the next day) and the booking
+// keeps it; Auto-Dispatch stamps last_auto_dispatch_at when it places the
+// visit. A customer or staff move clears customer_pick_by, so only a visit
+// Auto-Dispatch booked AFTER the deadline still matches. The visit needs a
+// window: the text names the arrival window. Dark until a hand-off creates
+// such a row.
+const NO_PICK_REMINDER_KEY = 'reminder_72h_no_reply_v1';
+// Goes in front of the reschedule link only, so a visit with no link never
+// reads "Want a different time?" followed by nothing.
+const NO_PICK_RESCHEDULE_ASK = 'Want a different time? ';
+
+function isBookedAfterNoPick(svc) {
+  if (!svc || !svc.customer_pick_by || !svc.last_auto_dispatch_at || !svc.window_start) return false;
+  const pickBy = new Date(svc.customer_pick_by).getTime();
+  const placedAt = new Date(svc.last_auto_dispatch_at).getTime();
+  return Number.isFinite(pickBy) && Number.isFinite(placedAt) && placedAt > pickBy;
+}
+
+// Renders the 72h reminder body. The "we booked it" row is used only when
+// noPick is true; a missing, disabled or unrenderable row falls back to the
+// base reminder_72h row (same vars), so the customer always gets a text.
+// Returns { body, templateKey } - body is null when even the base row fails.
+async function render72hReminder({ noPick = false, vars, rescheduleUrl = null, context = {} }) {
+  if (noPick) {
+    const noPickVars = rescheduleUrl
+      ? { ...vars, reschedule_line: `${NO_PICK_RESCHEDULE_ASK}${vars.reschedule_line}` }
+      : vars;
+    const required = smsTemplatesRouter.REQUIRED_TEMPLATE_PLACEHOLDERS?.[NO_PICK_REMINDER_KEY];
+    const body = await renderTemplate(NO_PICK_REMINDER_KEY, noPickVars, context, required ? { requiredVars: required } : {});
+    if (body) return { body, templateKey: NO_PICK_REMINDER_KEY };
+    logger.warn(`[appt-remind] ${NO_PICK_REMINDER_KEY} is missing, disabled or did not render - sending the base 72h reminder`);
+  }
+  return { body: await renderTemplate('reminder_72h', vars, context), templateKey: 'reminder_72h' };
 }
 
 // Appointment-page copy ladder (GATE_APPOINTMENT_PAGE). The _v2 rows are
@@ -4322,6 +4361,11 @@ const AppointmentReminders = {
         // additional queries (gate on or off — lifecycle seams are
         // gate-independent).
         let svcVisitId = null;
+        // Quick Move "let the customer pick a day": set below from the same
+        // live-status read; true only when Auto-Dispatch booked the visit
+        // after the customer's pick-by deadline passed (the 72h text then
+        // says so). false for every other visit.
+        let bookedAfterNoPick = false;
         // callback_number_needed reminder hold (P1-C + owner ruling
         // 2026-09-25, codex round-2 finding #7): the actual hold check now
         // lives at the single send boundary, safeSendAppointment — it
@@ -4332,8 +4376,10 @@ const AppointmentReminders = {
         if (r.scheduled_service_id) {
           const svc = await db('scheduled_services')
             .where({ id: r.scheduled_service_id })
-            .first('status', 'visit_id', 'customer_confirmed', 'source_action');
+            .first('status', 'visit_id', 'customer_confirmed', 'source_action',
+              'customer_pick_by', 'last_auto_dispatch_at', 'window_start');
           svcVisitId = svc?.visit_id || null;
+          bookedAfterNoPick = isBookedAfterNoPick(svc);
           const svcStatus = String(svc?.status || '').toLowerCase();
           // Owner ruling 2026-09-30: no 72h/24h reminder for a street-level
           // address hold until the office confirms — even if a reminder row
@@ -4518,6 +4564,8 @@ const AppointmentReminders = {
               continue;
             }
             const smsOutcome72 = {};
+            // Filled at the render below; defaults to the base row's key.
+            const reminder72Meta = { templateKey: 'reminder_72h' };
             const reached72 = await withReminderSendFence(r, '72h', () => deliverAppointmentNotice({
               channel: channel72,
               kind: '72h',
@@ -4549,12 +4597,17 @@ const AppointmentReminders = {
               // just this one scheduled_service_id.
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-                return renderTemplate(
-                  'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
-                  { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
-                );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined, templateKey: 'reminder_72h' }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
+                const rendered72 = await render72hReminder({
+                  noPick: bookedAfterNoPick,
+                  vars: { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
+                  rescheduleUrl: reschedule.url,
+                  context: { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
+                });
+                // Read by safeSendAppointment after this render (24h twin):
+                // the row that actually rendered, base or no-pick.
+                reminder72Meta.templateKey = rendered72.templateKey;
+                return rendered72.body;
+              }, 'reminder_72h', 'appointment_reminder_72h', Object.assign(reminder72Meta, { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined }), { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
             }));
             if (reached72 === null) smsOutcome72.blockedCode = 'MOVE_HOLD';
 
@@ -6635,6 +6688,9 @@ AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 AppointmentReminders.deliverMoveNoticeEmail = deliverMoveNoticeEmail;
 
 AppointmentReminders._test = {
+  isBookedAfterNoPick,
+  render72hReminder,
+  NO_PICK_REMINDER_KEY,
   safeSend,
   maskPhone,
   sanitizeLookupError,
